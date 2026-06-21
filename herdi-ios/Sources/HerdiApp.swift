@@ -9,6 +9,10 @@ struct HerdiApp: App {
             AgentListView()
                 .environment(relay)
                 .preferredColorScheme(.dark)
+                .onAppear {
+                    NotificationManager.shared.requestPermission()
+                    LiveActivityManager.shared.start()
+                }
         }
     }
 }

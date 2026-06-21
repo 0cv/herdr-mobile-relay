@@ -10,6 +10,8 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+        excludes:
+          - Widget/**
     settings:
       base:
         INFOPLIST_FILE: Sources/Info.plist
@@ -26,3 +28,32 @@ targets:
         NSLocalNetworkUsageDescription: "Herdi discovers the relay daemon on your local network."
         NSBonjourServices:
           - _herdi._tcp
+        NSSupportsLiveActivities: true
+    entitlements:
+      path: Sources/Herdi.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.dcolinmorgan.herdi
+    dependencies:
+      - target: HerdiWidget
+        embed: true
+
+  HerdiWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/Widget
+      - path: Sources/LiveActivity/HerdiWidgetAttributes.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.dcolinmorgan.herdi.widget
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        DEVELOPMENT_TEAM: ""
+        INFOPLIST_KEY_NSExtension_NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Sources/HerdiWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.dcolinmorgan.herdi

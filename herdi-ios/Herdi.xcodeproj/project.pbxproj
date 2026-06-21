@@ -8,21 +8,64 @@
 
 /* Begin PBXBuildFile section */
 		07630383A478BF458A31EEE0 /* Agent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 806A2F8B6718157A1FF4222F /* Agent.swift */; };
+		2A8939670013BFA3E2EB39B7 /* HerdiWidgetAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD7C5183B1653B42B1C77AD8 /* HerdiWidgetAttributes.swift */; };
 		34CA53FC8671EC7414E35EFC /* AgentListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20F4AAE03EEC4793F461CD4B /* AgentListView.swift */; };
 		3A5C1B5F2EECEA55EE84142D /* ApprovalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D88EEA6CC5261ED7B72B8F1 /* ApprovalView.swift */; };
+		47597ABF9CD8F7DEFE061679 /* HerdiWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = EC93D9A3E27B0771C137F83D /* HerdiWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		4F3F29A665D53D56C66BB40A /* RelayConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E062C421D2DDCF2FE7FCCA13 /* RelayConnection.swift */; };
+		6E7C3DA9191E67FE14B3DCF0 /* HapticManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83DB56BDBD9553A3E184E194 /* HapticManager.swift */; };
 		6E9EEC03296AC35411AACEB6 /* HerdiApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABA323EA8BE5472CB088D16A /* HerdiApp.swift */; };
+		7143B1689672771C44B0A7EC /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D8E1DF39476827259AA5464 /* NotificationManager.swift */; };
+		7B1119E3FE301FC928744C26 /* HerdiLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3798DD38209CA6F91010393F /* HerdiLiveActivity.swift */; };
 		857377E27CD6FB90586BDA37 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 152ED78024B1B235CFEDC2F4 /* SettingsView.swift */; };
+		B5CAF3FC4E537F972693187F /* HerdiWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56124C88E546EE7E002F4A46 /* HerdiWidget.swift */; };
+		CFD59A5BDA46637812BBC737 /* AgentDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3863952C4295371E1B46B8EA /* AgentDetailView.swift */; };
+		E2A2F5F8D52402DFE3C854D2 /* LiveActivityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAD592FB8D34B8D2388ED0A6 /* LiveActivityManager.swift */; };
+		E79A34B670080789F3612876 /* HerdiWidgetAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD7C5183B1653B42B1C77AD8 /* HerdiWidgetAttributes.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		3B45B72AD2BB7F435E50D66E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 09153EE9F2F50234B35FCF73 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B3FADACFEBCCBBB796C8B02C;
+			remoteInfo = HerdiWidget;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		EA0CB9729D6998B220642C3A /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				47597ABF9CD8F7DEFE061679 /* HerdiWidget.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		152ED78024B1B235CFEDC2F4 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		1D88EEA6CC5261ED7B72B8F1 /* ApprovalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApprovalView.swift; sourceTree = "<group>"; };
 		20F4AAE03EEC4793F461CD4B /* AgentListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentListView.swift; sourceTree = "<group>"; };
+		3798DD38209CA6F91010393F /* HerdiLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdiLiveActivity.swift; sourceTree = "<group>"; };
+		3863952C4295371E1B46B8EA /* AgentDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentDetailView.swift; sourceTree = "<group>"; };
+		3D8E1DF39476827259AA5464 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
+		56124C88E546EE7E002F4A46 /* HerdiWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdiWidget.swift; sourceTree = "<group>"; };
 		806A2F8B6718157A1FF4222F /* Agent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Agent.swift; sourceTree = "<group>"; };
+		83DB56BDBD9553A3E184E194 /* HapticManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HapticManager.swift; sourceTree = "<group>"; };
+		844E00E2F37305856F5D3421 /* Herdi.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Herdi.entitlements; sourceTree = "<group>"; };
 		ABA323EA8BE5472CB088D16A /* HerdiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdiApp.swift; sourceTree = "<group>"; };
+		AD7C5183B1653B42B1C77AD8 /* HerdiWidgetAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HerdiWidgetAttributes.swift; sourceTree = "<group>"; };
 		D014A68D6F9C98ED18139A7D /* Herdi.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Herdi.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D2BDCFB91186CD15A970E21F /* HerdiWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HerdiWidget.entitlements; sourceTree = "<group>"; };
 		E062C421D2DDCF2FE7FCCA13 /* RelayConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayConnection.swift; sourceTree = "<group>"; };
+		EAD592FB8D34B8D2388ED0A6 /* LiveActivityManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityManager.swift; sourceTree = "<group>"; };
+		EC93D9A3E27B0771C137F83D /* HerdiWidget.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HerdiWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		FDCAF4F9B7C580C2B742FF53 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -30,6 +73,7 @@
 		090D1C7627505F39CF27970D /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				3863952C4295371E1B46B8EA /* AgentDetailView.swift */,
 				20F4AAE03EEC4793F461CD4B /* AgentListView.swift */,
 				1D88EEA6CC5261ED7B72B8F1 /* ApprovalView.swift */,
 				152ED78024B1B235CFEDC2F4 /* SettingsView.swift */,
@@ -41,6 +85,7 @@
 			isa = PBXGroup;
 			children = (
 				D014A68D6F9C98ED18139A7D /* Herdi.app */,
+				EC93D9A3E27B0771C137F83D /* HerdiWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,9 +93,21 @@
 		5B4BB80A3427F437E06F8551 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				83DB56BDBD9553A3E184E194 /* HapticManager.swift */,
+				EAD592FB8D34B8D2388ED0A6 /* LiveActivityManager.swift */,
+				3D8E1DF39476827259AA5464 /* NotificationManager.swift */,
 				E062C421D2DDCF2FE7FCCA13 /* RelayConnection.swift */,
 			);
 			path = Services;
+			sourceTree = "<group>";
+		};
+		60B64B4AA14798CC40D6D489 /* LiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				3798DD38209CA6F91010393F /* HerdiLiveActivity.swift */,
+				AD7C5183B1653B42B1C77AD8 /* HerdiWidgetAttributes.swift */,
+			);
+			path = LiveActivity;
 			sourceTree = "<group>";
 		};
 		7792E9A4B3FC5F0D0A22FEC4 /* Models */ = {
@@ -64,8 +121,11 @@
 		7882C44117558D138D2EDEFD /* Sources */ = {
 			isa = PBXGroup;
 			children = (
+				844E00E2F37305856F5D3421 /* Herdi.entitlements */,
 				ABA323EA8BE5472CB088D16A /* HerdiApp.swift */,
+				D2BDCFB91186CD15A970E21F /* HerdiWidget.entitlements */,
 				FDCAF4F9B7C580C2B742FF53 /* Info.plist */,
+				60B64B4AA14798CC40D6D489 /* LiveActivity */,
 				7792E9A4B3FC5F0D0A22FEC4 /* Models */,
 				5B4BB80A3427F437E06F8551 /* Services */,
 				090D1C7627505F39CF27970D /* Views */,
@@ -73,10 +133,20 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		F0437CD911CA8368512C86CB /* Widget */ = {
+			isa = PBXGroup;
+			children = (
+				56124C88E546EE7E002F4A46 /* HerdiWidget.swift */,
+			);
+			name = Widget;
+			path = Sources/Widget;
+			sourceTree = "<group>";
+		};
 		F7FBDAF5F69A3615D3E175FA = {
 			isa = PBXGroup;
 			children = (
 				7882C44117558D138D2EDEFD /* Sources */,
+				F0437CD911CA8368512C86CB /* Widget */,
 				48188E7315A33686B68DA8E0 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -89,10 +159,12 @@
 			buildConfigurationList = AB5A6798762BB5AC51772127 /* Build configuration list for PBXNativeTarget "Herdi" */;
 			buildPhases = (
 				AA5D9B5CACD21791EA1DBDEA /* Sources */,
+				EA0CB9729D6998B220642C3A /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				0F91E314E9CC1B7C69F4B061 /* PBXTargetDependency */,
 			);
 			name = Herdi;
 			packageProductDependencies = (
@@ -100,6 +172,23 @@
 			productName = Herdi;
 			productReference = D014A68D6F9C98ED18139A7D /* Herdi.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B3FADACFEBCCBBB796C8B02C /* HerdiWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F3072E631CB490EE156E10B1 /* Build configuration list for PBXNativeTarget "HerdiWidget" */;
+			buildPhases = (
+				458A4334212D0108C2FF5B42 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HerdiWidget;
+			packageProductDependencies = (
+			);
+			productName = HerdiWidget;
+			productReference = EC93D9A3E27B0771C137F83D /* HerdiWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -111,6 +200,9 @@
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					7DC55FAFD463FA6AEF13E6A2 = {
+						DevelopmentTeam = "";
+					};
+					B3FADACFEBCCBBB796C8B02C = {
 						DevelopmentTeam = "";
 					};
 				};
@@ -130,25 +222,49 @@
 			projectRoot = "";
 			targets = (
 				7DC55FAFD463FA6AEF13E6A2 /* Herdi */,
+				B3FADACFEBCCBBB796C8B02C /* HerdiWidget */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
+		458A4334212D0108C2FF5B42 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B5CAF3FC4E537F972693187F /* HerdiWidget.swift in Sources */,
+				E79A34B670080789F3612876 /* HerdiWidgetAttributes.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AA5D9B5CACD21791EA1DBDEA /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				07630383A478BF458A31EEE0 /* Agent.swift in Sources */,
+				CFD59A5BDA46637812BBC737 /* AgentDetailView.swift in Sources */,
 				34CA53FC8671EC7414E35EFC /* AgentListView.swift in Sources */,
 				3A5C1B5F2EECEA55EE84142D /* ApprovalView.swift in Sources */,
+				6E7C3DA9191E67FE14B3DCF0 /* HapticManager.swift in Sources */,
 				6E9EEC03296AC35411AACEB6 /* HerdiApp.swift in Sources */,
+				7B1119E3FE301FC928744C26 /* HerdiLiveActivity.swift in Sources */,
+				2A8939670013BFA3E2EB39B7 /* HerdiWidgetAttributes.swift in Sources */,
+				E2A2F5F8D52402DFE3C854D2 /* LiveActivityManager.swift in Sources */,
+				7143B1689672771C44B0A7EC /* NotificationManager.swift in Sources */,
 				4F3F29A665D53D56C66BB40A /* RelayConnection.swift in Sources */,
 				857377E27CD6FB90586BDA37 /* SettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		0F91E314E9CC1B7C69F4B061 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B3FADACFEBCCBBB796C8B02C /* HerdiWidget */;
+			targetProxy = 3B45B72AD2BB7F435E50D66E /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		23AB4CA2F0D9EB1A4248AF06 /* Debug */ = {
@@ -214,10 +330,31 @@
 			};
 			name = Debug;
 		};
+		5266967D19DE00FF9A531DA6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Sources/HerdiWidget.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				INFOPLIST_KEY_NSExtension_NSExtensionPointIdentifier = "com.apple.widgetkit-extension";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dcolinmorgan.herdi.widget;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 		65994080AF7CB9671DAD277D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Sources/Herdi.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -238,6 +375,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Sources/Herdi.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -310,6 +448,26 @@
 			};
 			name = Release;
 		};
+		DAFD0DA56546271E9C235A15 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Sources/HerdiWidget.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				INFOPLIST_KEY_NSExtension_NSExtensionPointIdentifier = "com.apple.widgetkit-extension";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.dcolinmorgan.herdi.widget;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -318,6 +476,15 @@
 			buildConfigurations = (
 				65994080AF7CB9671DAD277D /* Debug */,
 				6D81702BC2C7A5CCC6B4DC03 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F3072E631CB490EE156E10B1 /* Build configuration list for PBXNativeTarget "HerdiWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DAFD0DA56546271E9C235A15 /* Debug */,
+				5266967D19DE00FF9A531DA6 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

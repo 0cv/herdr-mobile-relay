@@ -1,2 +1,4 @@
-websockets==14.1
-zeroconf==0.131.0
+websockets>=14.0
+zeroconf>=0.80.0
+python-telegram-bot>=21.0
+textual>=3.0.0

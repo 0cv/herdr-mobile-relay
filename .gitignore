@@ -1,20 +1,7 @@
-# Python
+.build/
+dist/
+*.dmg
 __pycache__/
 *.pyc
-.venv/
-*.egg-info/
-
-# iOS / Xcode
-DerivedData/
-.build/
-xcuserdata/
-*.xcworkspace/xcuserdata/
-
-# General
 .DS_Store
-.env
-*.log
-
-# Xcode
-herdi-ios/Herdi.xcodeproj/xcuserdata/
-herdi-ios/Herdi.xcodeproj/project.xcworkspace/xcuserdata/
+.swiftpm/

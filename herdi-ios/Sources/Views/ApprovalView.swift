@@ -4,11 +4,11 @@ struct ApprovalView: View {
     @Environment(RelayConnection.self) private var relay
     @Environment(\.dismiss) private var dismiss
     let agent: Agent
+    @State private var customResponse = ""
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                // Prompt
                 ScrollView {
                     Text(agent.prompt ?? "Waiting for approval…")
                         .font(.system(.body, design: .monospaced))
@@ -17,7 +17,6 @@ struct ApprovalView: View {
                 }
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
 
-                // Option buttons
                 if let options = agent.options {
                     VStack(spacing: 10) {
                         ForEach(options, id: \.self) { option in
@@ -34,12 +33,12 @@ struct ApprovalView: View {
                     }
                 }
 
-                // Free text input
                 HStack {
-                    TextField("Custom response…", text: .constant(""))
+                    TextField("Custom response…", text: $customResponse)
                         .textFieldStyle(.roundedBorder)
-                    Button("Send") { }
-                        .disabled(true)
+                        .onSubmit { if !customResponse.isEmpty { respond(customResponse) } }
+                    Button("Send") { respond(customResponse) }
+                        .disabled(customResponse.isEmpty)
                 }
             }
             .padding()
@@ -55,6 +54,7 @@ struct ApprovalView: View {
     }
 
     private func respond(_ text: String) {
+        HapticManager.shared.sent()
         relay.send(response: ResponseMessage(pane_id: agent.id, text: text))
         agent.status = .working
         agent.prompt = nil
