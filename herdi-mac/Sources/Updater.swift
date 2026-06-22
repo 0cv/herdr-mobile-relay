@@ -6,7 +6,7 @@ import Observation
 final class Updater {
     static let shared = Updater()
 
-    let currentVersion = "0.3.2"
+    let currentVersion = "0.3.3"
     let repo = "dcolinmorgan/herdi"
 
     var latestVersion: String?
@@ -28,24 +28,25 @@ final class Updater {
         Task {
             defer { DispatchQueue.main.async { self.isChecking = false } }
 
-            // Try gh CLI for auth (works for private repos)
+            // Public API (works now that repo is public)
+            guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return }
+            var request = URLRequest(url: url)
+            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+            if let (data, response) = try? await URLSession.shared.data(for: request),
+               let http = response as? HTTPURLResponse, http.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                DispatchQueue.main.async { self.handleRelease(json) }
+                return
+            }
+
+            // Fallback: gh CLI for private repos
             if let result = try? await ghRelease() {
                 DispatchQueue.main.async { self.handleRelease(result) }
                 return
             }
 
-            // Fallback: unauthenticated API (public repos only)
-            guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return }
-            var request = URLRequest(url: url)
-            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse, http.statusCode == 200,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                DispatchQueue.main.async { self.status = "v\(self.currentVersion) (can't check updates)" }
-                return
-            }
-            DispatchQueue.main.async { self.handleRelease(json) }
+            DispatchQueue.main.async { self.status = "v\(self.currentVersion) (check failed)" }
         }
     }
 
