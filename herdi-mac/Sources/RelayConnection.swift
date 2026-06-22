@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import Observation
+import UserNotifications
 
 @Observable
 final class RelayConnection {
@@ -12,8 +13,11 @@ final class RelayConnection {
     private var browser: NWBrowser?
     private let session = URLSession(configuration: .default)
     private var reconnectAttempt = 0
+    private var reconnecting = false
 
     init() {
+        // Connect to localhost immediately — don't wait for Bonjour
+        connect(to: hostAddress)
         startBrowsing()
     }
 
@@ -22,9 +26,10 @@ final class RelayConnection {
         params.includePeerToPeer = true
         browser = NWBrowser(for: .bonjour(type: "_herdi._tcp", domain: nil), using: params)
         browser?.browseResultsChangedHandler = { [weak self] results, _ in
+            guard let self, !self.isConnected else { return }
             guard let result = results.first else { return }
             if case let .service(name, type, domain, _) = result.endpoint {
-                self?.resolve(name: name, type: type, domain: domain)
+                self.resolve(name: name, type: type, domain: domain)
             }
         }
         browser?.start(queue: .main)
@@ -38,7 +43,8 @@ final class RelayConnection {
                case let .hostPort(host, port) = endpoint {
                 let addr = "\(host)".replacingOccurrences(of: "%.*", with: "", options: .regularExpression)
                 DispatchQueue.main.async {
-                    self?.connect(to: "ws://\(addr):\(port)")
+                    guard let self, !self.isConnected else { return }
+                    self.connect(to: "ws://\(addr):\(port)")
                 }
                 connection.cancel()
             }
@@ -49,7 +55,8 @@ final class RelayConnection {
     func connect(to urlString: String) {
         guard let url = URL(string: urlString) else { return }
         hostAddress = urlString
-        task?.cancel()
+        reconnecting = false
+        task?.cancel(with: .normalClosure, reason: nil)
         task = session.webSocketTask(with: url)
         task?.resume()
         isConnected = true
@@ -69,28 +76,32 @@ final class RelayConnection {
 
     private func listen() {
         task?.receive { [weak self] result in
+            guard let self else { return }
             switch result {
             case .success(let message):
                 switch message {
-                case .string(let text): self?.handle(text)
-                case .data(let data): self?.handle(String(data: data, encoding: .utf8) ?? "")
+                case .string(let text): self.handle(text)
+                case .data(let data): self.handle(String(data: data, encoding: .utf8) ?? "")
                 @unknown default: break
                 }
-                self?.listen()
+                self.listen()
             case .failure:
                 DispatchQueue.main.async {
-                    self?.isConnected = false
-                    self?.scheduleReconnect()
+                    self.isConnected = false
+                    self.scheduleReconnect()
                 }
             }
         }
     }
 
     private func scheduleReconnect() {
+        guard !reconnecting else { return }
+        reconnecting = true
         reconnectAttempt += 1
         let delay = min(Double(1 << min(reconnectAttempt, 5)), 30.0)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.isConnected else { return }
+            self.reconnecting = false
             self.connect(to: self.hostAddress)
         }
     }
@@ -102,11 +113,15 @@ final class RelayConnection {
             switch msg.type {
             case "agents":
                 guard let list = msg.agents else { return }
+                // Update in-place to avoid view thrashing
+                var seen = Set<String>()
                 for a in list {
+                    seen.insert(a.pane_id)
                     if let existing = agents.first(where: { $0.id == a.pane_id }) {
-                        existing.status = AgentStatus(rawValue: a.status) ?? .unknown
-                        existing.project = a.project
-                        existing.host = a.host ?? "local"
+                        let newStatus = AgentStatus(rawValue: a.status) ?? .unknown
+                        if existing.status != newStatus { existing.status = newStatus }
+                        if existing.project != a.project { existing.project = a.project }
+                        if existing.host != (a.host ?? "local") { existing.host = a.host ?? "local" }
                     } else {
                         agents.append(Agent(
                             id: a.pane_id, name: a.agent,
@@ -115,8 +130,8 @@ final class RelayConnection {
                         ))
                     }
                 }
-                let activeIds = Set(list.map(\.pane_id))
-                agents.removeAll { !activeIds.contains($0.id) }
+                agents.removeAll { !seen.contains($0.id) }
+
             case "blocked":
                 if let pid = msg.pane_id, let agent = agents.first(where: { $0.id == pid }) {
                     agent.prompt = msg.prompt
@@ -138,5 +153,3 @@ final class RelayConnection {
         center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 }
-
-import UserNotifications

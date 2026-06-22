@@ -6,7 +6,7 @@
     <string>com.herdi.relay</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/Users/apple/Developer/dcolinmorgan/herdi/relay/.venv/bin/python3</string>
         <string>/Users/apple/Developer/dcolinmorgan/herdi/relay/herdi_relay.py</string>
     </array>
     <key>RunAtLoad</key>

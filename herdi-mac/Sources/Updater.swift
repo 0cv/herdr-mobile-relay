@@ -16,11 +16,15 @@ final class Updater {
     var status: String?
 
     private var downloadURL: URL?
+    private var lastCheck: Date?
 
     func checkForUpdates() {
+        // Don't check more than once per 10 minutes
+        if let last = lastCheck, Date().timeIntervalSince(last) < 600 { return }
         guard !isChecking else { return }
         isChecking = true
         status = "Checking…"
+        lastCheck = Date()
 
         Task {
             defer { DispatchQueue.main.async { self.isChecking = false } }
