@@ -100,7 +100,7 @@ body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg);
   .term-content { min-height: 400px; max-height: 60vh; }
 }
 @media (pointer: fine) {
-  .term-keys { display: none; }
+  .term-keys .arrow-toggle, .term-keys button[onclick*="blur"] { display: none; }
   .quick-actions button { flex: none; min-width: auto; padding: 8px 18px; }
 }
 </style>
