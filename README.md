@@ -4,6 +4,12 @@ Approve [Herdr](https://herdr.dev) agents from your phone across multiple comput
 
 Herdr Mobile Relay runs a small local relay on each computer, exposes each relay through its own Cloudflare Tunnel hostname, and lets one static web app connect to all of them. The phone UI merges agents from every configured relay, so you can approve or inspect agents running on a Mac, a Fedora workstation, or any other supported machine without making those computers connect to each other.
 
+## Screenshots
+
+| Agents | Terminal | Settings |
+| --- | --- | --- |
+| <img src="images/home.jpeg" alt="Mobile home page showing Mac and Fedora agents merged into one list" width="240"> | <img src="images/terminal.jpeg" alt="Mobile terminal view for a Fedora agent with multiline input controls" width="240"> | <img src="images/settings.jpeg" alt="Mobile settings page with Mac and Fedora relay configuration" width="240"> |
+
 ## Attribution
 
 This project is forked from and inspired by [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-remote). Herdr Mobile Relay keeps the original idea of approving Herdr agents remotely, but has been substantially reworked around a static phone web app, per-computer local relays, Cloudflare Tunnel hostnames, and no SSH or Telegram fan-out.
