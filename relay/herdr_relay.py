@@ -55,20 +55,37 @@ def run_herdr(*args):
         return ""
 
 
+def get_tabs():
+    raw = run_herdr("tab", "list")
+    try:
+        data = json.loads(raw)
+        tabs = data.get("result", {}).get("tabs", [])
+        return {t.get("tab_id"): t for t in tabs if t.get("tab_id")}
+    except (json.JSONDecodeError, KeyError):
+        return {}
+
+
 def get_agents():
     raw = run_herdr("pane", "list")
     try:
         data = json.loads(raw)
         panes = data.get("result", {}).get("panes", [])
+        tabs = get_tabs()
         agents = []
         for p in panes:
             if not p.get("agent"):
                 continue
             raw_pane_id = p["pane_id"]
+            tab_id = p.get("tab_id", "")
+            tab = tabs.get(tab_id, {})
             agents.append(
                 {
                     "pane_id": raw_pane_id,
                     "raw_pane_id": raw_pane_id,
+                    "tab_id": tab_id,
+                    "tab_label": tab.get("label", ""),
+                    "tab_number": tab.get("number"),
+                    "workspace_id": p.get("workspace_id", ""),
                     "agent": p.get("agent", ""),
                     "status": p.get("agent_status", "unknown"),
                     "cwd": p.get("cwd", ""),
@@ -121,6 +138,10 @@ async def poll_loop():
                         "type": "blocked", "pane_id": pid,
                         "agent": a["agent"], "project": a["project"],
                         "host": a.get("host", LOCAL_HOST),
+                        "tab_id": a.get("tab_id", ""),
+                        "tab_label": a.get("tab_label", ""),
+                        "tab_number": a.get("tab_number"),
+                        "workspace_id": a.get("workspace_id", ""),
                         "prompt": content[:500],
                         "options": options or TOOL_OPTIONS
                     })
@@ -143,6 +164,10 @@ async def event_push():
                 "agent": event.get("agent", ""),
                 "project": event.get("project", ""),
                 "host": host,
+                "tab_id": event.get("tab_id", ""),
+                "tab_label": event.get("tab_label", ""),
+                "tab_number": event.get("tab_number"),
+                "workspace_id": event.get("workspace_id", ""),
                 "prompt": content[:500],
                 "options": options or TOOL_OPTIONS
             })
@@ -152,6 +177,10 @@ async def event_push():
                 "type": "agents", "agents": [{
                     "pane_id": raw_pane_id,
                     "raw_pane_id": raw_pane_id,
+                    "tab_id": event.get("tab_id", ""),
+                    "tab_label": event.get("tab_label", ""),
+                    "tab_number": event.get("tab_number"),
+                    "workspace_id": event.get("workspace_id", ""),
                     "agent": event.get("agent", ""),
                     "status": status,
                     "cwd": event.get("cwd", ""),

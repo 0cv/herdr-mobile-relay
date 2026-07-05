@@ -830,7 +830,7 @@ function handleMessage(relayId, msg) {
   else if (msg.type === 'blocked') {
     const next = normalizeAgent(relayId, {...msg, status: 'blocked'});
     const a = agents.find(x => x.pane_id === next.pane_id);
-    if (a) { a.status='blocked'; a.prompt=msg.prompt; a.options=msg.options; }
+    if (a) Object.assign(a, mergeAgentDetails(a, {...next, prompt: msg.prompt, options: msg.options}));
     else agents.push(next);
     lastAgentsSignature = agentsSignature(agents);
     render();
@@ -860,10 +860,24 @@ function mergeAgentList(relayId, nextAgents) {
   const retained = agents.filter(a => a.relay_id !== relayId);
   const merged = nextAgents.map(next => {
     const previous = previousById.get(next.pane_id);
-    if (!previous || next.status !== 'blocked') return next;
-    return {...next, prompt: previous.prompt, options: previous.options};
+    return mergeAgentDetails(previous, next);
   });
   return retained.concat(merged);
+}
+
+function mergeAgentDetails(previous, next) {
+  if (!previous) return next;
+  const keepBlockedDetails = next.status === 'blocked';
+  return {
+    ...previous,
+    ...next,
+    tab_id: next.tab_id || previous.tab_id || '',
+    tab_label: next.tab_label || previous.tab_label || '',
+    tab_number: next.tab_number ?? previous.tab_number,
+    workspace_id: next.workspace_id || previous.workspace_id || '',
+    prompt: keepBlockedDetails ? (next.prompt ?? previous.prompt) : next.prompt,
+    options: keepBlockedDetails ? (next.options ?? previous.options) : next.options,
+  };
 }
 
 function removeAgentsForRelay(relayId) {
@@ -876,8 +890,8 @@ function removeAgentsForRelay(relayId) {
 
 function agentsSignature(list) {
   return JSON.stringify(list.map(a => [
-    a.relay_id, a.pane_id, a.raw_pane_id, a.agent, a.status, a.project, a.cwd, a.host,
-    a.prompt, a.options
+    a.relay_id, a.pane_id, a.raw_pane_id, a.tab_id, a.tab_label, a.tab_number,
+    a.agent, a.status, a.project, a.cwd, a.host, a.prompt, a.options
   ]));
 }
 
@@ -971,9 +985,22 @@ function hostLabel(agent) {
   return agent.relay_label || relayLabel(agent.relay_id);
 }
 
+function tabLabel(agent) {
+  const label = String(agent.tab_label || '').trim();
+  if (label) return label;
+  return agent.tab_number ? `tab ${agent.tab_number}` : '';
+}
+
+function displayName(agent) {
+  const name = agent.project || agent.agent || 'agent';
+  const tab = tabLabel(agent);
+  return tab ? `${name} · ${tab}` : name;
+}
+
 function sortedAgents(list) {
   return [...list].sort((a, b) =>
     hostLabel(a).localeCompare(hostLabel(b)) ||
+    tabLabel(a).localeCompare(tabLabel(b)) ||
     (a.project || a.agent || '').localeCompare(b.project || b.agent || '') ||
     (a.agent || '').localeCompare(b.agent || '')
   );
@@ -1005,7 +1032,7 @@ function render() {
 function section(title, color, list) {
   return `<div class="section-header"><span class="dot" style="background:${color}"></span>${title}</div>` +
     sortedAgents(list).map(a => {
-      const project = escapeHtml(a.project || a.agent || '');
+      const project = escapeHtml(displayName(a));
       const agent = escapeHtml(a.agent || 'agent');
       const status = escapeHtml(a.status || 'unknown');
       const host = escapeHtml(hostLabel(a));
@@ -1057,7 +1084,7 @@ function closeTerminal() {
 }
 
 function terminalTitle(agent) {
-  const name = agent.project || agent.agent || 'agent';
+  const name = displayName(agent);
   return `${name} @${hostLabel(agent)}`;
 }
 
