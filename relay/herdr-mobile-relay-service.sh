@@ -12,6 +12,7 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export HERDR_RELAY_HOST="${HERDR_RELAY_HOST:-127.0.0.1}"
 export HERDR_RELAY_PORT="${HERDR_RELAY_PORT:-8375}"
 
 UV_BIN="${UV_BIN:-$(command -v uv || true)}"
@@ -50,7 +51,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting herdr relay on :$HERDR_RELAY_PORT"
+echo "Starting herdr relay on $HERDR_RELAY_HOST:$HERDR_RELAY_PORT"
 "$UV_BIN" run "$SCRIPT_DIR/herdr_relay.py" &
 RELAY_PID=$!
 

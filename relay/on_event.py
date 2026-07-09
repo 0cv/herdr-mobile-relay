@@ -1,6 +1,25 @@
 #!/usr/bin/env python3
 """Local plugin hook for Herdr Mobile Relay."""
 import json, os, socket
+from pathlib import Path
+
+
+def load_env_file():
+    env_file = Path(__file__).with_name(".env")
+    if not env_file.exists():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_env_file()
 
 event = json.loads(os.environ.get("HERDR_PLUGIN_EVENT_JSON", "{}"))
 data = event.get("data", {})
@@ -20,5 +39,5 @@ payload = json.dumps({
 }).encode()
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.sendto(payload, ("127.0.0.1", 8376))
+sock.sendto(payload, ("127.0.0.1", int(os.environ.get("HERDR_RELAY_PLUGIN_PORT", "8376"))))
 sock.close()

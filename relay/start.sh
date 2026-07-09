@@ -1,15 +1,68 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 echo "🐑 Herdr Mobile Relay setup"
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PORT="${HERDR_RELAY_PORT:-8375}"
+ENV_FILE="$SCRIPT_DIR/.env"
 RELAY_PID=""
 TUNNEL_PID=""
 LOG_FILE=""
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+generate_token() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 16
+    else
+        uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-'
+    fi
+}
+
+ensure_env() {
+    if [ ! -f "$ENV_FILE" ]; then
+        umask 077
+        cat > "$ENV_FILE" <<EOF
+HERDR_RELAY_HOST=127.0.0.1
+HERDR_RELAY_PORT=8375
+HERDR_RELAY_PLUGIN_PORT=8376
+HERDR_RELAY_POLL_INTERVAL=2
+HERDR_ALLOWED_ORIGINS=
+HERDR_RELAY_TOKEN=$(generate_token)
+EOF
+        echo "Created $ENV_FILE"
+    else
+        chmod 600 "$ENV_FILE"
+        if ! grep -q '^HERDR_RELAY_HOST=' "$ENV_FILE"; then
+            printf '\nHERDR_RELAY_HOST=127.0.0.1\n' >> "$ENV_FILE"
+        fi
+        if ! grep -q '^HERDR_RELAY_PORT=' "$ENV_FILE"; then
+            printf '\nHERDR_RELAY_PORT=8375\n' >> "$ENV_FILE"
+        fi
+        if ! grep -q '^HERDR_RELAY_PLUGIN_PORT=' "$ENV_FILE"; then
+            printf '\nHERDR_RELAY_PLUGIN_PORT=8376\n' >> "$ENV_FILE"
+        fi
+        if ! grep -q '^HERDR_RELAY_POLL_INTERVAL=' "$ENV_FILE"; then
+            printf '\nHERDR_RELAY_POLL_INTERVAL=2\n' >> "$ENV_FILE"
+        fi
+        if ! grep -q '^HERDR_ALLOWED_ORIGINS=' "$ENV_FILE"; then
+            printf '\nHERDR_ALLOWED_ORIGINS=\n' >> "$ENV_FILE"
+        fi
+    fi
+
+    set -a
+    # shellcheck source=/dev/null
+    . "$ENV_FILE"
+    set +a
+
+    if [ -z "${HERDR_RELAY_TOKEN:-}" ]; then
+        printf '\nHERDR_RELAY_TOKEN=%s\n' "$(generate_token)" >> "$ENV_FILE"
+        set -a
+        # shellcheck source=/dev/null
+        . "$ENV_FILE"
+        set +a
+    fi
+}
 
 cleanup() {
     if [ -n "$TUNNEL_PID" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
@@ -25,8 +78,16 @@ cleanup() {
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 
+ensure_env
+PORT="${HERDR_RELAY_PORT:-8375}"
+HOST="${HERDR_RELAY_HOST:-127.0.0.1}"
+TUNNEL_TARGET_HOST="$HOST"
+if [ "$TUNNEL_TARGET_HOST" = "0.0.0.0" ]; then
+    TUNNEL_TARGET_HOST="127.0.0.1"
+fi
+
 # 1. Start relay (uv auto-installs deps)
-echo "▸ Starting relay on :$PORT..."
+echo "▸ Starting relay on $HOST:$PORT..."
 uv run "$SCRIPT_DIR/herdr_relay.py" &
 RELAY_PID=$!
 sleep 2
@@ -40,7 +101,7 @@ fi
 if command -v cloudflared >/dev/null 2>&1; then
     echo "▸ Starting Cloudflare tunnel..."
     LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/herdr-cloudflared.XXXXXX")"
-    cloudflared tunnel --url "http://localhost:$PORT" >"$LOG_FILE" 2>&1 &
+    cloudflared tunnel --url "http://$TUNNEL_TARGET_HOST:$PORT" >"$LOG_FILE" 2>&1 &
     TUNNEL_PID=$!
 
     URL=""
@@ -68,9 +129,10 @@ if command -v cloudflared >/dev/null 2>&1; then
     echo ""
     echo "  Tunnel URL: $URL"
     echo "  WebSocket:  wss://$(echo $URL | sed 's|https://||')"
+    echo "  Token:      $HERDR_RELAY_TOKEN"
     echo ""
     echo "  → Open your deployed web app on your phone"
-    echo "  → Paste the WebSocket URL in Settings"
+    echo "  → Paste the WebSocket URL and Token in Settings"
     echo ""
 
     if ! wait "$TUNNEL_PID"; then
@@ -82,7 +144,8 @@ if command -v cloudflared >/dev/null 2>&1; then
     fi
 else
     echo ""
-    echo "✓ Relay running on ws://localhost:$PORT"
+    echo "✓ Relay running on ws://$HOST:$PORT"
+    echo "  Token: $HERDR_RELAY_TOKEN"
     echo ""
     echo "  Install cloudflared for remote access:"
     if [ "$(uname -s)" = "Darwin" ]; then

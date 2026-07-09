@@ -65,9 +65,10 @@ The script prints:
 ```text
 Tunnel URL: https://example.trycloudflare.com
 WebSocket:  wss://example.trycloudflare.com
+Token:      0123456789abcdef0123456789abcdef
 ```
 
-Open your deployed web app on your phone and add that `wss://...trycloudflare.com` URL in Settings. Quick tunnels are temporary; the hostname changes when the tunnel restarts.
+Open your deployed web app on your phone and add both the `wss://...trycloudflare.com` URL and token in Settings. Quick tunnels are temporary; the hostname changes when the tunnel restarts. The token is generated in `relay/.env` and reused on later quick-start runs.
 
 ## Web App
 
@@ -180,7 +181,11 @@ make linux-service-uninstall
 The service uses `relay/.env` for:
 
 ```env
+HERDR_RELAY_HOST=127.0.0.1
 HERDR_RELAY_PORT=8375
+HERDR_RELAY_PLUGIN_PORT=8376
+HERDR_RELAY_POLL_INTERVAL=2
+HERDR_ALLOWED_ORIGINS=
 HERDR_RELAY_TOKEN=<shared-secret>
 CLOUDFLARED_CONFIG=$HOME/.cloudflared/config-herdr-mobile-relay.yml
 ```
@@ -212,12 +217,14 @@ The relay polls local `herdr` every few seconds. For faster blocked-agent update
 make relay-plugin
 ```
 
-The plugin sends local agent-status events to the local relay over UDP on `127.0.0.1:8376`. It does not expose another network service and does not connect to other computers.
+The plugin sends local agent-status events to the local relay over UDP on `127.0.0.1:8376`. It does not expose another network service and does not connect to other computers. If you change `HERDR_RELAY_PLUGIN_PORT`, the plugin hook reads the same `relay/.env` file so the relay and hook stay aligned.
 
 ## Security Model
 
-- Relay access can be protected with `HERDR_RELAY_TOKEN`.
-- Cloudflare Tunnel provides the public TLS endpoint; the relay itself listens locally on port `8375`.
+- Relay access is protected with `HERDR_RELAY_TOKEN` for quick-start and service installs.
+- Cloudflare Tunnel provides the public TLS endpoint; the relay itself listens locally on `127.0.0.1:8375` by default.
+- Set `HERDR_RELAY_HOST` only if you intentionally need a non-loopback bind address. The relay refuses a non-loopback bind without `HERDR_RELAY_TOKEN`.
+- Tokenless browser connections are rejected unless their `Origin` is listed in `HERDR_ALLOWED_ORIGINS` as a comma-separated list, such as `https://your-pages-site.pages.dev`.
 - The web app stores relay URLs and tokens in browser local storage on the device where you configure it.
 - A connected web client can send text and key input to Herdr panes exposed by that relay. Treat relay URLs and tokens as sensitive.
 - The relay executes only local `herdr pane ...` commands; it does not shell into other machines.

@@ -852,6 +852,14 @@ function handleMessage(relayId, msg) {
     lastAgentsSignature = agentsSignature(agents);
     render();
     syncActiveTerminal();
+  } else if (msg.type === 'agent_update' && msg.pane_id) {
+    const next = normalizeAgent(relayId, msg);
+    const a = agents.find(x => x.pane_id === next.pane_id);
+    if (a) Object.assign(a, mergeAgentDetails(a, next));
+    else agents.push(next);
+    lastAgentsSignature = agentsSignature(agents);
+    render();
+    syncActiveTerminal();
   } else if (msg.type === 'pane_content' && clientPaneId(relayId, msg.pane_id) === activePane) {
     updateTerminalContent(msg.content || '(empty)', msg.format);
   }

@@ -22,7 +22,11 @@ ensure_env() {
     if [ ! -f "$ENV_FILE" ]; then
         umask 077
         cat > "$ENV_FILE" <<EOF
+HERDR_RELAY_HOST=127.0.0.1
 HERDR_RELAY_PORT=8375
+HERDR_RELAY_PLUGIN_PORT=8376
+HERDR_RELAY_POLL_INTERVAL=2
+HERDR_ALLOWED_ORIGINS=
 HERDR_RELAY_TOKEN=$(generate_token)
 CLOUDFLARED_CONFIG=$CLOUDFLARED_CONFIG
 EOF
@@ -31,10 +35,22 @@ EOF
     fi
 
     chmod 600 "$ENV_FILE"
+    if ! grep -q '^HERDR_RELAY_HOST=' "$ENV_FILE"; then
+        printf '\nHERDR_RELAY_HOST=127.0.0.1\n' >> "$ENV_FILE"
+    fi
     if ! grep -q '^HERDR_RELAY_PORT=' "$ENV_FILE"; then
         printf '\nHERDR_RELAY_PORT=8375\n' >> "$ENV_FILE"
     fi
-    if ! grep -q '^HERDR_RELAY_TOKEN=' "$ENV_FILE"; then
+    if ! grep -q '^HERDR_RELAY_PLUGIN_PORT=' "$ENV_FILE"; then
+        printf '\nHERDR_RELAY_PLUGIN_PORT=8376\n' >> "$ENV_FILE"
+    fi
+    if ! grep -q '^HERDR_RELAY_POLL_INTERVAL=' "$ENV_FILE"; then
+        printf '\nHERDR_RELAY_POLL_INTERVAL=2\n' >> "$ENV_FILE"
+    fi
+    if ! grep -q '^HERDR_ALLOWED_ORIGINS=' "$ENV_FILE"; then
+        printf '\nHERDR_ALLOWED_ORIGINS=\n' >> "$ENV_FILE"
+    fi
+    if ! grep -q '^HERDR_RELAY_TOKEN=' "$ENV_FILE" || [ -z "$(sed -n 's/^HERDR_RELAY_TOKEN=//p' "$ENV_FILE" | tail -1)" ]; then
         printf '\nHERDR_RELAY_TOKEN=%s\n' "$(generate_token)" >> "$ENV_FILE"
     fi
     if ! grep -q '^CLOUDFLARED_CONFIG=' "$ENV_FILE"; then

@@ -4,7 +4,7 @@
 # dependencies = ["websockets>=14.0"]
 # ///
 """Herdr Mobile Relay server — polls local herdr and broadcasts to clients."""
-import asyncio, json, os, re, shutil, signal, socket, subprocess
+import asyncio, hmac, json, os, re, shutil, signal, socket, subprocess, urllib.parse
 
 try:
     from websockets.asyncio.server import serve
@@ -26,9 +26,16 @@ def default_herdr_bin():
 
 
 HERDR = os.environ.get("HERDR_BIN") or default_herdr_bin()
+WS_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1")
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
-POLL_INTERVAL = 2
+POLL_INTERVAL = float(os.environ.get("HERDR_RELAY_POLL_INTERVAL", "2"))
+PLUGIN_PORT = int(os.environ.get("HERDR_RELAY_PLUGIN_PORT", "8376"))
 AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Optional: shared secret for relay auth
+ALLOWED_ORIGINS = {
+    origin.strip().rstrip("/")
+    for origin in os.environ.get("HERDR_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+}
 LOCAL_HOST = socket.gethostname().split(".")[0] or "local"
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
@@ -58,13 +65,21 @@ def run_herdr(*args):
     try:
         cmd = [HERDR, *args]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return None
         return r.stdout.strip()
     except Exception:
-        return ""
+        return None
+
+
+async def run_herdr_async(*args):
+    return await asyncio.to_thread(run_herdr, *args)
 
 
 def get_tabs():
     raw = run_herdr("tab", "list")
+    if raw is None:
+        return {}
     try:
         data = json.loads(raw)
         tabs = data.get("result", {}).get("tabs", [])
@@ -75,6 +90,8 @@ def get_tabs():
 
 def get_agents():
     raw = run_herdr("pane", "list")
+    if raw is None:
+        return None
     try:
         data = json.loads(raw)
         panes = data.get("result", {}).get("panes", [])
@@ -103,11 +120,13 @@ def get_agents():
             )
         return agents
     except (json.JSONDecodeError, KeyError):
-        return []
+        return None
 
 
 def read_pane(pane_id):
     raw = run_herdr("pane", "read", pane_id, "--lines", "20", "--source", "recent")
+    if raw is None:
+        return ""
     lines = [l for l in raw.splitlines() if l.strip() and not CHROME_RE.search(l)]
     return "\n".join(lines[-6:])
 
@@ -133,7 +152,7 @@ def response_key(value):
 async def broadcast(msg):
     data = json.dumps(msg)
     dead = set()
-    for ws in clients:
+    for ws in list(clients):
         try:
             await ws.send(data)
         except Exception:
@@ -143,13 +162,19 @@ async def broadcast(msg):
 
 async def poll_loop():
     while True:
-        agents = get_agents()
+        agents = await asyncio.to_thread(get_agents)
+        if agents is None:
+            await asyncio.sleep(POLL_INTERVAL)
+            continue
         await broadcast({"type": "agents", "agents": agents})
+        live_pane_ids = {a["pane_id"] for a in agents}
+        for pane_id in set(last_statuses) - live_pane_ids:
+            del last_statuses[pane_id]
         if agents:
             for a in agents:
                 pid, status = a["pane_id"], a["status"]
                 if status == "blocked" and last_statuses.get(pid) != "blocked":
-                    content = read_pane(pid)
+                    content = await asyncio.to_thread(read_pane, pid)
                     options = detect_options(content)
                     await broadcast({
                         "type": "blocked", "pane_id": pid,
@@ -172,9 +197,11 @@ async def event_push():
         raw_pane_id = event.get("pane_id", "")
         status = event.get("status", "")
         host = event.get("host", LOCAL_HOST)
+        if raw_pane_id and status:
+            last_statuses[raw_pane_id] = status
 
         if status == "blocked" and raw_pane_id:
-            content = read_pane(raw_pane_id) or event.get("prompt", "Agent is blocked")
+            content = await asyncio.to_thread(read_pane, raw_pane_id) or event.get("prompt", "Agent is blocked")
             options = detect_options(content)
             await broadcast({
                 "type": "blocked", "pane_id": raw_pane_id,
@@ -191,20 +218,63 @@ async def event_push():
 
         if raw_pane_id and event.get("type") == "agent_event":
             await broadcast({
-                "type": "agents", "agents": [{
-                    "pane_id": raw_pane_id,
-                    "raw_pane_id": raw_pane_id,
-                    "tab_id": event.get("tab_id", ""),
-                    "tab_label": event.get("tab_label", ""),
-                    "tab_number": event.get("tab_number"),
-                    "workspace_id": event.get("workspace_id", ""),
-                    "agent": event.get("agent", ""),
-                    "status": status,
-                    "cwd": event.get("cwd", ""),
-                    "project": event.get("project", ""),
-                    "host": host,
-                }]
+                "type": "agent_update",
+                "pane_id": raw_pane_id,
+                "raw_pane_id": raw_pane_id,
+                "tab_id": event.get("tab_id", ""),
+                "tab_label": event.get("tab_label", ""),
+                "tab_number": event.get("tab_number"),
+                "workspace_id": event.get("workspace_id", ""),
+                "agent": event.get("agent", ""),
+                "status": status,
+                "cwd": event.get("cwd", ""),
+                "project": event.get("project", ""),
+                "host": host,
             })
+
+
+def header_value(request, name):
+    for key, value in request.headers.raw_items():
+        if key.lower() == name.lower():
+            return value
+    return None
+
+
+def query_value(path, name):
+    if "?" not in (path or ""):
+        return None
+    _, qs = path.split("?", 1)
+    params = urllib.parse.parse_qs(qs)
+    return params.get(name, [None])[0]
+
+
+def request_token(request):
+    authorization = header_value(request, "authorization")
+    if authorization:
+        if authorization.lower().startswith("bearer "):
+            return authorization[7:]
+        return authorization
+    return query_value(request.path, "token")
+
+
+def origin_allowed(request):
+    origin = header_value(request, "origin")
+    if not origin:
+        return True
+    normalized = origin.rstrip("/")
+    if "*" in ALLOWED_ORIGINS or normalized in ALLOWED_ORIGINS:
+        return True
+    return bool(AUTH_TOKEN)
+
+
+def token_matches(token):
+    if not token:
+        return False
+    return hmac.compare_digest(token.encode(), AUTH_TOKEN.encode())
+
+
+def is_loopback_host(host):
+    return host in {"127.0.0.1", "localhost", "::1"}
 
 
 async def process_request(connection, request):
@@ -212,19 +282,13 @@ async def process_request(connection, request):
     from websockets.http11 import Response
     from websockets.datastructures import Headers
 
-    # Token auth (if configured)
+    if not origin_allowed(request):
+        headers = Headers([("Content-Type", "text/plain")])
+        return Response(403, "Forbidden", headers, b"Origin not allowed\n")
+
     if AUTH_TOKEN:
-        token = None
-        for key, value in request.headers.raw_items():
-            if key.lower() == "authorization":
-                token = value.replace("Bearer ", "")
-        # Also check query param ?token=
-        if not token and "token=" in (request.path or ""):
-            import urllib.parse
-            _, qs = request.path.split("?", 1) if "?" in request.path else (request.path, "")
-            params = urllib.parse.parse_qs(qs)
-            token = params.get("token", [None])[0]
-        if token != AUTH_TOKEN:
+        token = request_token(request)
+        if not token_matches(token):
             headers = Headers([("Content-Type", "text/plain")])
             return Response(401, "Unauthorized", headers, b"Invalid token\n")
 
@@ -236,19 +300,9 @@ async def process_request(connection, request):
     if upgrade == "websocket":
         return None  # proceed with WebSocket handshake
 
-    # For CORS preflight
-    if request.path and "OPTIONS" in str(request.headers):
-        headers = Headers([
-            ("Access-Control-Allow-Origin", "*"),
-            ("Access-Control-Allow-Methods", "GET, OPTIONS"),
-            ("Access-Control-Allow-Headers", "Content-Type"),
-        ])
-        return Response(204, "No Content", headers, b"")
-
     # HTTP GET — parse event from URL query params.
     # (since we can't read request body in websockets 16)
     # Plugins should encode payload in the URL path: /push?d=...
-    import urllib.parse
     if "?" in (request.path or ""):
         _, qs = request.path.split("?", 1)
         params = urllib.parse.parse_qs(qs)
@@ -259,7 +313,7 @@ async def process_request(connection, request):
             except Exception:
                 pass
 
-    headers = Headers([("Access-Control-Allow-Origin", "*")])
+    headers = Headers()
     return Response(200, "OK", headers, b"ok\n")
 
 
@@ -271,33 +325,43 @@ async def handle_client(ws):
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(msg, dict):
+                continue
             msg_type = msg.get("type")
             if msg_type == "respond":
-                pane_id = msg["pane_id"]
+                pane_id = msg.get("pane_id")
                 key = response_key(msg.get("key") or msg.get("text"))
-                if key:
-                    run_herdr("pane", "send-text", pane_id, key)
+                if pane_id and key:
+                    await run_herdr_async("pane", "send-text", pane_id, key)
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
             elif msg_type == "read_pane":
-                pane_id = msg["pane_id"]
+                pane_id = msg.get("pane_id")
+                if not pane_id:
+                    continue
                 lines = msg.get("lines", "30")
                 fmt = "ansi" if msg.get("format") == "ansi" else "text"
-                content = run_herdr(
+                content = await run_herdr_async(
                     "pane", "read", pane_id,
                     "--lines", str(lines),
                     "--source", "recent",
                     "--format", fmt,
                 )
-                await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content, "format": fmt}))
+                await ws.send(json.dumps({"type": "pane_content", "pane_id": pane_id, "content": content or "", "format": fmt}))
             elif msg_type == "send_keys":
-                pane_id = msg["pane_id"]
+                pane_id = msg.get("pane_id")
+                if not pane_id:
+                    continue
                 keys = msg.get("keys", [])
-                run_herdr("pane", "send-keys", pane_id, *keys)
+                if isinstance(keys, list) and all(isinstance(k, str) for k in keys):
+                    await run_herdr_async("pane", "send-keys", pane_id, *keys)
             elif msg_type == "send_text":
-                pane_id = msg["pane_id"]
+                pane_id = msg.get("pane_id")
+                if not pane_id:
+                    continue
                 text = msg.get("text", "")
-                run_herdr("pane", "send-text", pane_id, text)
+                if isinstance(text, str):
+                    await run_herdr_async("pane", "send-text", pane_id, text)
     finally:
         clients.discard(ws)
 
@@ -311,15 +375,19 @@ class UDPPlugin(asyncio.DatagramProtocol):
 
 
 async def main():
+    if not AUTH_TOKEN and not is_loopback_host(WS_HOST):
+        raise SystemExit("Refusing to bind a tokenless relay outside loopback. Set HERDR_RELAY_TOKEN or HERDR_RELAY_HOST=127.0.0.1.")
+    if not AUTH_TOKEN:
+        print("WARNING: HERDR_RELAY_TOKEN is empty. Browser requests with an Origin header will be rejected unless HERDR_ALLOWED_ORIGINS allows them.")
     loop = asyncio.get_running_loop()
     try:
-        await loop.create_datagram_endpoint(UDPPlugin, local_addr=("127.0.0.1", 8376))
+        await loop.create_datagram_endpoint(UDPPlugin, local_addr=("127.0.0.1", PLUGIN_PORT))
     except OSError:
-        print("UDP 8376 in use, plugin push disabled")
+        print(f"UDP {PLUGIN_PORT} in use, plugin push disabled")
     asyncio.create_task(poll_loop())
     asyncio.create_task(event_push())
-    server = await serve(handle_client, "0.0.0.0", WS_PORT, process_request=process_request)
-    print(f"Herdr Mobile Relay on :{WS_PORT} (WebSocket + HTTP GET push)")
+    server = await serve(handle_client, WS_HOST, WS_PORT, process_request=process_request)
+    print(f"Herdr Mobile Relay on {WS_HOST}:{WS_PORT} (WebSocket + HTTP GET push)")
     print(f"  polling: {LOCAL_HOST}")
     stop = loop.create_future()
     def request_stop():

@@ -13,13 +13,14 @@ The script prints:
 ```text
 Tunnel URL: https://example.trycloudflare.com
 WebSocket:  wss://example.trycloudflare.com
+Token:      0123456789abcdef0123456789abcdef
 ```
 
-Quick tunnel hostnames are temporary and change when the tunnel restarts.
+Quick tunnel hostnames are temporary and change when the tunnel restarts. The token is stored in `relay/.env` and reused on later quick-start runs.
 
 ## 2. Open the web app
 
-Open your deployed copy of `web/` on your phone. In Settings, add the printed `wss://...trycloudflare.com` URL.
+Open your deployed copy of `web/` on your phone. In Settings, add the printed `wss://...trycloudflare.com` URL and token.
 
 To deploy the web app:
 
