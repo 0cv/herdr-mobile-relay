@@ -110,6 +110,8 @@ In the app Settings, add one relay entry per computer:
 
 Then tap **Enable Notifications** in Settings. The relay generates Web Push VAPID keys in `relay/push/` and stores this device's push subscription there, so installed PWAs can be notified even when the app is closed or suspended.
 
+For multiple relays, the app creates one scoped service-worker push subscription per relay. Each relay can keep its own VAPID keypair under its own `relay/push/` directory. Set `HERDR_RELAY_PUSH_DIR` or `HERDR_VAPID_PRIVATE_KEY` only if you want to move that runtime state or intentionally share one keypair across machines.
+
 ## Stable Hostnames
 
 For day-to-day use, create one named Cloudflare Tunnel and one DNS hostname per computer:

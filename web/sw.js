@@ -15,13 +15,14 @@ self.addEventListener('push', event => {
   }
 
   const title = payload.title || 'Herdr agent blocked';
-  const iconUrl = new URL('icons/icon-192.png', self.location.origin + '/').href;
+  const iconUrl = new URL('icons/icon-512.png', self.location.origin + '/').href;
+  const badgeUrl = new URL('icons/notification-badge.png', self.location.origin + '/').href;
   const options = {
     body: payload.body || 'An agent needs approval.',
     tag: payload.tag || 'herdr-blocked',
     renotify: true,
     icon: iconUrl,
-    badge: iconUrl,
+    badge: badgeUrl,
     data: {
       url: payload.url || './',
     },

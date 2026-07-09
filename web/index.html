@@ -206,7 +206,7 @@ body[data-view="terminal"] #statusDot, body[data-view="terminal"] #agentCount { 
   </div>
   <div class="setting-group">
     <label>Notifications</label>
-    <button id="notificationButton" onclick="enableNotifications()">Enable Notifications</button>
+    <button id="notificationButton" onclick="toggleNotifications()">Enable Notifications</button>
     <div class="hint" id="notificationHint"></div>
   </div>
   <div class="setting-group">
@@ -266,6 +266,7 @@ const PROMPT_SKIP_RE = /^(?:bash command|do you want to proceed\??|would you lik
 const CODEX_STATUS_LINE_KEY = 'herdr_show_codex_status_line';
 const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
 const DEVICE_CREDENTIAL_KEY = 'herdr_device_unlock_credential';
+const PUSH_ENABLED_KEY = 'herdr_push_enabled';
 const PUSH_CLIENT_KEY = 'herdr_push_client_id';
 const PUSH_VAPID_KEY_PREFIX = 'herdr_push_vapid_key_';
 const ANSI_COLORS = {
@@ -281,6 +282,8 @@ let respondingPaneIds = new Set();
 let serviceWorkerRegistration = null;
 let pushServiceWorkerRegistrations = new Map();
 let notificationSyncing = false;
+let notificationStopping = false;
+let pendingNotificationTarget = null;
 
 // Settings
 const savedTheme = localStorage.getItem('herdr_theme') || 'nord';
@@ -352,6 +355,11 @@ function pushSupported() {
 
 function notificationsEnabled() {
   return notificationsSupported() && Notification.permission === 'granted';
+}
+
+function pushOptedIn() {
+  if (!notificationsEnabled()) return false;
+  return localStorage.getItem(PUSH_ENABLED_KEY) !== 'false';
 }
 
 async function registerServiceWorker() {
@@ -433,17 +441,20 @@ function renderNotificationSetting() {
 
     const relays = [...connections.values()];
     const connectedRelays = relays.filter(conn => conn.status === 'connected');
+    const optedIn = pushOptedIn();
     const synced = relays.filter(conn => conn.pushStatus === 'subscribed').length;
     const browserSubscribed = relays.filter(conn => conn.pushStatus === 'browser-subscribed').length;
     const waiting = relays.some(conn => conn.pushStatus === 'sent');
     const failed = relays.some(conn => conn.pushStatus === 'failed');
     const missingConfig = relays.some(conn => conn.pushStatus === 'missing-config');
     const keyMismatch = relays.some(conn => conn.pushStatus === 'key-mismatch');
-    const allSynced = connectedRelays.length > 0 && synced === connectedRelays.length;
-    button.disabled = notificationSyncing || connectedRelays.length === 0;
-    button.textContent = notificationSyncing ? 'Syncing Push...' : allSynced ? 'Push Synced' : 'Sync Push Subscription';
-    if (notificationSyncing) hint.textContent = 'Sending this browser push subscription to connected relays.';
+    const allSynced = optedIn && connectedRelays.length > 0 && synced === connectedRelays.length;
+    button.disabled = notificationSyncing || notificationStopping || connectedRelays.length === 0;
+    button.textContent = notificationStopping ? 'Stopping Push...' : notificationSyncing ? 'Syncing Push...' : allSynced ? 'Stop Push Notifications' : optedIn ? 'Sync Push Subscription' : 'Enable Push Notifications';
+    if (notificationStopping) hint.textContent = 'Removing this browser push subscription from connected relays.';
+    else if (notificationSyncing) hint.textContent = 'Sending this browser push subscription to connected relays.';
     else if (connectedRelays.length === 0) hint.textContent = 'Connect a relay before syncing push notifications.';
+    else if (!optedIn) hint.textContent = 'Push notifications are stopped for this browser. Notification permission is still allowed in browser settings.';
     else if (missingConfig) hint.textContent = 'Waiting for the relay push key. Reconnect the relay if this stays here.';
     else if (keyMismatch) hint.textContent = 'This app has a subscription for another relay key. Share one VAPID key across relays or clear this site data.';
     else if (failed) hint.textContent = 'Push subscription sync failed. Reconnect the relay and try again.';
@@ -469,6 +480,16 @@ function renderNotificationSetting() {
     : 'Required before background tabs can notify.';
 }
 
+async function toggleNotifications() {
+  if (allConnectedRelaysPushSynced()) await stopPushNotifications();
+  else await enableNotifications();
+}
+
+function allConnectedRelaysPushSynced() {
+  const connectedRelays = [...connections.values()].filter(conn => conn.status === 'connected');
+  return connectedRelays.length > 0 && connectedRelays.every(conn => conn.pushStatus === 'subscribed');
+}
+
 async function enableNotifications() {
   if (!notificationsSupported()) {
     renderNotificationSetting();
@@ -480,6 +501,7 @@ async function enableNotifications() {
   try {
     await Notification.requestPermission();
     if (notificationsEnabled()) {
+      localStorage.setItem(PUSH_ENABLED_KEY, 'true');
       await readyServiceWorker();
       await registerAllPushSubscriptions();
     }
@@ -487,6 +509,20 @@ async function enableNotifications() {
   finally {
     notificationSyncing = false;
     renderNotificationSetting();
+  }
+}
+
+async function stopPushNotifications() {
+  if (!pushSupported() || notificationStopping) return;
+  notificationStopping = true;
+  renderNotificationSetting();
+  try {
+    localStorage.setItem(PUSH_ENABLED_KEY, 'false');
+    await unsubscribeAllPushSubscriptions();
+  } finally {
+    notificationStopping = false;
+    renderNotificationSetting();
+    renderRelayList();
   }
 }
 
@@ -499,9 +535,71 @@ function urlBase64ToUint8Array(value) {
   return output;
 }
 
+function uint8ArrayToUrlBase64(bytes) {
+  let raw = '';
+  for (const byte of bytes) raw += String.fromCharCode(byte);
+  return btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function subscriptionApplicationServerKey(subscription) {
+  const key = subscription && subscription.options && subscription.options.applicationServerKey;
+  return key ? uint8ArrayToUrlBase64(new Uint8Array(key)) : '';
+}
+
+function subscriptionMatchesRelayKey(subscription, relayKey) {
+  const actualKey = subscriptionApplicationServerKey(subscription);
+  return Boolean(actualKey && relayKey && actualKey === relayKey);
+}
+
 async function registerAllPushSubscriptions() {
   const results = await Promise.all([...connections.keys()].map(id => registerPushSubscription(id)));
   return results.some(Boolean);
+}
+
+async function unsubscribeAllPushSubscriptions() {
+  const results = await Promise.all([...connections.keys()].map(id => unsubscribePushSubscription(id)));
+  const legacyEndpoint = await legacyPushEndpoint();
+  if (legacyEndpoint) {
+    const legacyRegistration = await readyServiceWorker();
+    try {
+      const legacySubscription = await legacyRegistration.pushManager.getSubscription();
+      if (legacySubscription) await legacySubscription.unsubscribe();
+    } catch (_err) {}
+    for (const conn of connections.values()) {
+      sendPushUnsubscribe(conn, [legacyEndpoint]);
+    }
+  }
+  return results.some(Boolean) || Boolean(legacyEndpoint);
+}
+
+async function unsubscribePushSubscription(relayId) {
+  const conn = connections.get(relayId);
+  if (!conn) return false;
+  const registration = await readyServiceWorker(relayId);
+  const endpoints = [];
+  try {
+    const subscription = registration && registration.pushManager
+      ? await registration.pushManager.getSubscription()
+      : null;
+    if (subscription) {
+      endpoints.push(subscription.endpoint);
+      await subscription.unsubscribe();
+    }
+  } catch (_err) {}
+  sendPushUnsubscribe(conn, endpoints);
+  localStorage.removeItem(relayVapidStorageKey(relayId));
+  setPushStatus(conn, '');
+  return Boolean(endpoints.length);
+}
+
+function sendPushUnsubscribe(conn, endpoints) {
+  if (!conn || !conn.ws || conn.ws.readyState !== 1) return false;
+  conn.ws.send(JSON.stringify({
+    type: 'push_unsubscribe',
+    client_id: `${pushClientId()}:${conn.relay.id}`,
+    endpoints: [...new Set(endpoints.filter(Boolean))],
+  }));
+  return true;
 }
 
 function setPushStatus(conn, status) {
@@ -526,7 +624,9 @@ async function refreshPushSubscriptionState(relayId = null) {
         continue;
       }
       foundSubscription = true;
-      if (conn.vapidPublicKey && savedKey && savedKey !== conn.vapidPublicKey) setPushStatus(conn, 'key-mismatch');
+      const actualKey = subscriptionApplicationServerKey(subscription);
+      if (conn.vapidPublicKey && actualKey && actualKey !== conn.vapidPublicKey) setPushStatus(conn, 'key-mismatch');
+      else if (conn.vapidPublicKey && savedKey && savedKey !== conn.vapidPublicKey) setPushStatus(conn, 'key-mismatch');
       else if (!conn.pushStatus || conn.pushStatus === 'missing-config' || conn.pushStatus === 'failed') setPushStatus(conn, 'browser-subscribed');
     } catch (_err) {
       continue;
@@ -555,7 +655,12 @@ async function registerPushSubscription(relayId) {
     let subscription = await registration.pushManager.getSubscription();
     const savedKey = localStorage.getItem(relayVapidStorageKey(relayId)) || '';
     const replaceEndpoints = [];
-    if (subscription && savedKey && savedKey !== conn.vapidPublicKey) {
+    const actualKey = subscriptionApplicationServerKey(subscription);
+    if (subscription && actualKey && !subscriptionMatchesRelayKey(subscription, conn.vapidPublicKey)) {
+      replaceEndpoints.push(subscription.endpoint);
+      await subscription.unsubscribe();
+      subscription = null;
+    } else if (subscription && !actualKey && savedKey && savedKey !== conn.vapidPublicKey) {
       replaceEndpoints.push(subscription.endpoint);
       await subscription.unsubscribe();
       subscription = null;
@@ -930,6 +1035,7 @@ function renderRelayList() {
 function pushStatusMeta(conn) {
   if (!pushSupported()) return {label: 'Push unsupported', color: 'var(--muted)', title: 'This browser cannot use Web Push.'};
   if (!notificationsEnabled()) return {label: 'Push off', color: 'var(--muted)', title: 'Notifications are not enabled for this site.'};
+  if (!pushOptedIn()) return {label: 'Push stopped', color: 'var(--muted)', title: 'Push notifications are stopped for this browser.'};
   if (!conn || conn.status !== 'connected') return {label: 'Push offline', color: 'var(--muted)', title: 'Connect the relay to sync push notifications.'};
   if (conn.pushStatus === 'subscribed') return {label: 'Push synced', color: 'var(--green)', title: 'This relay confirmed the current browser push subscription.'};
   if (conn.pushStatus === 'browser-subscribed') return {label: 'Push enabled', color: 'var(--yellow)', title: 'This browser has a push subscription; sync it with the relay.'};
@@ -957,6 +1063,7 @@ function updateSettingsStatus() {
 function viewUrl(state) {
   if (state.view === 'settings') return '#settings';
   if (state.view === 'terminal') return `#pane=${encodeURIComponent(state.paneId)}`;
+  if (state.view === 'notification' && state.target) return `#notify=${encodeURIComponent(JSON.stringify(state.target))}`;
   return location.pathname + location.search;
 }
 
@@ -983,6 +1090,7 @@ function closeCurrentView() {
 function applyView(state) {
   if (state.view === 'settings') showSettingsView();
   else if (state.view === 'terminal' && state.paneId) showTerminalView(state.paneId);
+  else if (state.view === 'notification' && state.target) openNotificationTarget(state.target);
   else showAgentListView();
 }
 
@@ -1015,7 +1123,60 @@ function stateFromLocation() {
   if (location.hash === '#settings') return {view: 'settings'};
   const paneMatch = location.hash.match(/^#pane=(.+)$/);
   if (paneMatch) return {view: 'terminal', paneId: decodeURIComponent(paneMatch[1])};
+  const notifyMatch = location.hash.match(/^#notify=(.+)$/);
+  if (notifyMatch) {
+    const target = parseNotificationTarget(notifyMatch[1]);
+    if (target) return {view: 'notification', target};
+  }
   return {view: 'agents'};
+}
+
+function parseNotificationTarget(value) {
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value));
+    const paneId = String(parsed && parsed.pane_id || '').trim();
+    const host = String(parsed && parsed.host || '').trim();
+    if (!paneId) return null;
+    return {pane_id: paneId, host};
+  } catch (_err) {
+    return null;
+  }
+}
+
+function openNotificationTarget(target) {
+  const agent = resolveNotificationTarget(target);
+  if (agent) {
+    pendingNotificationTarget = null;
+    replaceView({view: 'terminal', paneId: agent.pane_id});
+    return;
+  }
+  pendingNotificationTarget = target;
+  showAgentListView();
+}
+
+function resolveNotificationTarget(target) {
+  if (!target || !target.pane_id) return null;
+  const matches = agents.filter(agent => agent.raw_pane_id === target.pane_id);
+  if (!matches.length) return null;
+  const host = String(target.host || '').toLowerCase();
+  if (host) {
+    const exact = matches.find(agent => [
+      agent.host,
+      hostLabel(agent),
+      agent.relay_label,
+    ].some(value => String(value || '').toLowerCase() === host));
+    if (exact) return exact;
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function resolvePendingNotificationTarget() {
+  if (!pendingNotificationTarget) return;
+  const agent = resolveNotificationTarget(pendingNotificationTarget);
+  if (agent) {
+    pendingNotificationTarget = null;
+    replaceView({view: 'terminal', paneId: agent.pane_id});
+  }
 }
 
 // Connection
@@ -1122,7 +1283,7 @@ function handleMessage(relayId, msg) {
     const conn = connections.get(relayId);
     if (conn) {
       conn.vapidPublicKey = msg.vapid_public_key || '';
-      if (notificationsEnabled()) registerPushSubscription(relayId);
+      if (pushOptedIn()) registerPushSubscription(relayId);
       else refreshPushSubscriptionState(relayId);
       renderNotificationSetting();
       renderRelayList();
@@ -1133,6 +1294,10 @@ function handleMessage(relayId, msg) {
     if (conn) {
       setPushStatus(conn, msg.ok ? 'subscribed' : 'failed');
     }
+  }
+  else if (msg.type === 'push_unsubscribed') {
+    const conn = connections.get(relayId);
+    if (conn && msg.ok) setPushStatus(conn, '');
   }
   else if (msg.type === 'agents') {
     const nextAgents = mergeAgentList(relayId, (msg.agents || []).map(a => normalizeAgent(relayId, a)));
@@ -1145,6 +1310,7 @@ function handleMessage(relayId, msg) {
       render();
     }
     syncActiveTerminal(wasActivePaneMissing);
+    resolvePendingNotificationTarget();
   }
   else if (msg.type === 'blocked') {
     const next = normalizeAgent(relayId, {...msg, status: 'blocked'});
@@ -1155,6 +1321,7 @@ function handleMessage(relayId, msg) {
     lastAgentsSignature = agentsSignature(agents);
     render();
     syncActiveTerminal();
+    resolvePendingNotificationTarget();
   } else if (msg.type === 'agent_update' && msg.pane_id) {
     const next = normalizeAgent(relayId, msg);
     const a = agents.find(x => x.pane_id === next.pane_id);
@@ -1164,6 +1331,7 @@ function handleMessage(relayId, msg) {
     lastAgentsSignature = agentsSignature(agents);
     render();
     syncActiveTerminal();
+    resolvePendingNotificationTarget();
   } else if (msg.type === 'pane_content' && clientPaneId(relayId, msg.pane_id) === activePane) {
     updateTerminalContent(msg.content || '(empty)', msg.format);
   }
@@ -1385,19 +1553,32 @@ function updateAppBadge(count) {
 function notifyBlockedAgent(agent) {
   if (!notificationsEnabled()) return;
   if (document.visibilityState === 'visible' && document.hasFocus()) return;
+  if (pushDeliveryActiveForRelay(agent.relay_id)) return;
   const title = `${displayName(agent)} blocked`;
   const body = approvalPromptPreview(agent) || `${agent.agent || 'Agent'} needs approval`;
   showHerdrNotification(title, {
     body,
-    tag: `herdr-${agent.pane_id}`,
+    tag: notificationTag(agent),
     renotify: true,
-    icon: 'icons/icon-192.png',
-    badge: 'icons/icon-192.png',
+    icon: new URL('icons/icon-512.png', location.origin + '/').href,
+    badge: new URL('icons/notification-badge.png', location.origin + '/').href,
     data: {
       url: viewUrl({view: 'terminal', paneId: agent.pane_id}),
       paneId: agent.pane_id,
     },
   });
+}
+
+function pushDeliveryActiveForRelay(relayId) {
+  if (!pushOptedIn()) return false;
+  const conn = connections.get(relayId);
+  return Boolean(conn && ['browser-subscribed', 'sent', 'subscribed'].includes(conn.pushStatus));
+}
+
+function notificationTag(agent) {
+  const host = agent.host || hostLabel(agent);
+  const paneId = agent.raw_pane_id || agent.pane_id;
+  return `herdr-${host}-${paneId}`;
 }
 
 async function showHerdrNotification(title, options) {
@@ -1738,6 +1919,10 @@ window.addEventListener('popstate', event => {
   const state = event.state && event.state.herdrView ? event.state : {view: 'agents', index: 0};
   viewIndex = Number.isInteger(state.index) ? state.index : 0;
   applyView(state);
+});
+
+window.addEventListener('hashchange', () => {
+  applyView(stateFromLocation());
 });
 
 function initializeView() {

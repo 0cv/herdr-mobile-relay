@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["websockets>=14.0", "pywebpush>=2.0.0"]
+# dependencies = ["websockets>=14.0", "pywebpush>=2.0.0", "py-vapid>=1.9.2", "cryptography>=42.0.0"]
 # ///
 """Herdr Mobile Relay server — polls local herdr and broadcasts to clients."""
-import asyncio, base64, hmac, json, os, re, shutil, signal, socket, subprocess, urllib.parse
+import asyncio, base64, hmac, json, os, re, shutil, signal, socket, subprocess, threading, urllib.parse
 from pathlib import Path
 
 try:
@@ -47,6 +47,7 @@ PUSH_SUBSCRIPTIONS_FILE = PUSH_DIR / "subscriptions.json"
 VAPID_PRIVATE_KEY_FILE = Path(os.environ.get("HERDR_VAPID_PRIVATE_KEY", PUSH_DIR / "vapid_private.pem"))
 VAPID_SUBJECT = os.environ.get("HERDR_VAPID_SUBJECT", f"mailto:herdr-mobile-relay@{LOCAL_HOST}.local")
 VAPID_PUBLIC_KEY = None
+PUSH_LOCK = threading.RLock()
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
@@ -236,38 +237,43 @@ def ensure_vapid_public_key():
     global VAPID_PUBLIC_KEY
     if VAPID_PUBLIC_KEY:
         return VAPID_PUBLIC_KEY
-    ensure_private_dir(PUSH_DIR)
-    ensure_private_dir(VAPID_PRIVATE_KEY_FILE.parent)
-    vapid = Vapid.from_file(str(VAPID_PRIVATE_KEY_FILE))
-    try:
-        os.chmod(VAPID_PRIVATE_KEY_FILE, 0o600)
-    except OSError:
-        pass
-    public_bytes = vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-    VAPID_PUBLIC_KEY = base64.urlsafe_b64encode(public_bytes).rstrip(b"=").decode()
-    return VAPID_PUBLIC_KEY
+    with PUSH_LOCK:
+        if VAPID_PUBLIC_KEY:
+            return VAPID_PUBLIC_KEY
+        ensure_private_dir(PUSH_DIR)
+        ensure_private_dir(VAPID_PRIVATE_KEY_FILE.parent)
+        vapid = Vapid.from_file(str(VAPID_PRIVATE_KEY_FILE))
+        try:
+            os.chmod(VAPID_PRIVATE_KEY_FILE, 0o600)
+        except OSError:
+            pass
+        public_bytes = vapid.public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+        VAPID_PUBLIC_KEY = base64.urlsafe_b64encode(public_bytes).rstrip(b"=").decode()
+        return VAPID_PUBLIC_KEY
 
 
 def load_push_subscriptions():
-    try:
-        data = json.loads(PUSH_SUBSCRIPTIONS_FILE.read_text())
-        if isinstance(data, dict) and isinstance(data.get("subscriptions"), list):
-            return data["subscriptions"]
-    except (OSError, json.JSONDecodeError):
-        pass
-    return []
+    with PUSH_LOCK:
+        try:
+            data = json.loads(PUSH_SUBSCRIPTIONS_FILE.read_text())
+            if isinstance(data, dict) and isinstance(data.get("subscriptions"), list):
+                return data["subscriptions"]
+        except (OSError, json.JSONDecodeError):
+            pass
+        return []
 
 
 def save_push_subscriptions(subscriptions):
-    ensure_private_dir(PUSH_DIR)
-    payload = {"subscriptions": subscriptions}
-    tmp = PUSH_SUBSCRIPTIONS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    tmp.replace(PUSH_SUBSCRIPTIONS_FILE)
+    with PUSH_LOCK:
+        ensure_private_dir(PUSH_DIR)
+        payload = {"subscriptions": subscriptions}
+        tmp = PUSH_SUBSCRIPTIONS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(PUSH_SUBSCRIPTIONS_FILE)
 
 
 def push_subscription_endpoint(subscription):
@@ -293,19 +299,20 @@ def store_push_subscription(subscription, user_agent="", client_id="", replace_e
         if isinstance(e, str) and e
     }
     stale_endpoints.add(endpoint)
-    subscriptions = [
-        s for s in load_push_subscriptions()
-        if (
-            push_subscription_endpoint(s.get("subscription", {})) not in stale_endpoints
-            and not (client_id and s.get("client_id") == client_id)
-        )
-    ]
-    subscriptions.append({
-        "subscription": subscription,
-        "client_id": client_id,
-        "user_agent": user_agent[:240] if isinstance(user_agent, str) else "",
-    })
-    save_push_subscriptions(subscriptions)
+    with PUSH_LOCK:
+        subscriptions = [
+            s for s in load_push_subscriptions()
+            if (
+                push_subscription_endpoint(s.get("subscription", {})) not in stale_endpoints
+                and not (client_id and s.get("client_id") == client_id)
+            )
+        ]
+        subscriptions.append({
+            "subscription": subscription,
+            "client_id": client_id,
+            "user_agent": user_agent[:240] if isinstance(user_agent, str) else "",
+        })
+        save_push_subscriptions(subscriptions)
     return True
 
 
@@ -313,22 +320,57 @@ def remove_push_subscriptions(endpoints):
     if not endpoints:
         return
     stale = set(endpoints)
-    subscriptions = [
-        s for s in load_push_subscriptions()
-        if push_subscription_endpoint(s.get("subscription", {})) not in stale
-    ]
-    save_push_subscriptions(subscriptions)
+    with PUSH_LOCK:
+        subscriptions = [
+            s for s in load_push_subscriptions()
+            if push_subscription_endpoint(s.get("subscription", {})) not in stale
+        ]
+        save_push_subscriptions(subscriptions)
+
+
+def remove_push_subscription_records(endpoints=None, client_id=""):
+    endpoints = {
+        e for e in (endpoints or [])
+        if isinstance(e, str) and e
+    }
+    client_id = client_id[:120] if isinstance(client_id, str) else ""
+    if not endpoints and not client_id:
+        return False
+    with PUSH_LOCK:
+        subscriptions = [
+            s for s in load_push_subscriptions()
+            if (
+                push_subscription_endpoint(s.get("subscription", {})) not in endpoints
+                and not (client_id and s.get("client_id") == client_id)
+            )
+        ]
+        save_push_subscriptions(subscriptions)
+    return True
+
+
+def push_subscription_label(subscription):
+    endpoint = push_subscription_endpoint(subscription)
+    try:
+        parsed = urllib.parse.urlparse(endpoint)
+        return parsed.netloc or "unknown endpoint"
+    except Exception:
+        return "unknown endpoint"
 
 
 def push_payload(blocked_msg):
     project = blocked_msg.get("project") or blocked_msg.get("agent") or "agent"
     host = blocked_msg.get("host") or LOCAL_HOST
+    pane_id = blocked_msg.get("pane_id", "")
     command = blocked_msg.get("command") or "Agent needs approval"
+    target = urllib.parse.quote(json.dumps({
+        "host": host,
+        "pane_id": pane_id,
+    }, separators=(",", ":")))
     return {
         "title": f"{project} blocked",
         "body": f"{command} · {host}",
-        "tag": f"herdr-{host}-{blocked_msg.get('pane_id', '')}",
-        "url": "./",
+        "tag": f"herdr-{host}-{pane_id}",
+        "url": f"./#notify={target}",
     }
 
 
@@ -351,10 +393,15 @@ def send_webpush_notifications(blocked_msg):
             )
         except WebPushException as exc:
             response = getattr(exc, "response", None)
-            if response is not None and response.status_code in {404, 410}:
+            if response is not None and response.status_code in {401, 403, 404, 410}:
+                print(f"Pruning stale Web Push subscription for {push_subscription_label(subscription)}: HTTP {response.status_code}")
                 stale.append(push_subscription_endpoint(subscription))
+            elif response is not None:
+                print(f"Web Push failed for {push_subscription_label(subscription)}: HTTP {response.status_code}")
+            else:
+                print(f"Web Push failed for {push_subscription_label(subscription)}: {exc}")
         except Exception:
-            pass
+            print(f"Web Push failed for {push_subscription_label(subscription)}")
     remove_push_subscriptions(stale)
 
 
@@ -582,13 +629,21 @@ async def handle_client(ws):
             elif msg_type == "agent_event":
                 event_queue.put_nowait(msg)
             elif msg_type == "push_subscribe":
-                ok = store_push_subscription(
+                ok = await asyncio.to_thread(
+                    store_push_subscription,
                     msg.get("subscription"),
                     msg.get("user_agent", ""),
                     msg.get("client_id", ""),
                     msg.get("replace_endpoints", []),
                 )
                 await ws.send(json.dumps({"type": "push_subscribed", "ok": ok}))
+            elif msg_type == "push_unsubscribe":
+                ok = await asyncio.to_thread(
+                    remove_push_subscription_records,
+                    msg.get("endpoints", []),
+                    msg.get("client_id", ""),
+                )
+                await ws.send(json.dumps({"type": "push_unsubscribed", "ok": ok}))
             elif msg_type == "read_pane":
                 pane_id = msg.get("pane_id")
                 if not pane_id:
@@ -635,6 +690,7 @@ async def main():
         raise SystemExit("Refusing to bind a tokenless relay outside loopback. Set HERDR_RELAY_TOKEN or HERDR_RELAY_HOST=127.0.0.1.")
     if not AUTH_TOKEN:
         print("WARNING: HERDR_RELAY_TOKEN is empty. Browser requests with an Origin header will be rejected unless HERDR_ALLOWED_ORIGINS allows them.")
+    ensure_vapid_public_key()
     loop = asyncio.get_running_loop()
     try:
         await loop.create_datagram_endpoint(UDPPlugin, local_addr=("127.0.0.1", PLUGIN_PORT))
