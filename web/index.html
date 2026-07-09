@@ -226,7 +226,6 @@ body[data-view="terminal"] #statusDot, body[data-view="terminal"] #agentCount { 
   <div class="quick-actions" id="quickActions"></div>
   <div class="term-input">
     <textarea id="termInput" rows="2" placeholder="Type…" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="resizeComposer()"></textarea>
-    <button onclick="sendText()" aria-label="Insert into terminal">Insert</button>
   </div>
   <div class="term-keys">
     <button class="key-send" onclick="submitPrompt()" aria-label="Submit prompt">Send</button>
@@ -267,7 +266,7 @@ const ANSI_COLORS = {
   90: '#777', 91: '#ff8080', 92: '#80ff80', 93: '#ffff80',
   94: '#80bfff', 95: '#ff80ff', 96: '#80ffff', 97: '#fff'
 };
-let relayConfigs = loadRelayConfigs(), connections = new Map(), agents = [], activePane = null, refreshInterval = null, lastAgentsSignature = '', currentView = 'agents', viewIndex = 0, lastInsertedBackspaces = 0;
+let relayConfigs = loadRelayConfigs(), connections = new Map(), agents = [], activePane = null, activePaneSnapshot = null, refreshInterval = null, lastAgentsSignature = '', currentView = 'agents', viewIndex = 0, lastInsertedBackspaces = 0;
 let securityLocked = false, unlockInProgress = false, pendingConnectAll = false;
 
 // Settings
@@ -706,6 +705,7 @@ function applyView(state) {
 function showAgentListView() {
   currentView = 'agents';
   activePane = null;
+  activePaneSnapshot = null;
   clearInterval(refreshInterval);
   updateAppChrome();
   document.getElementById('settingsView').style.display = 'none';
@@ -716,6 +716,7 @@ function showAgentListView() {
 function showSettingsView() {
   currentView = 'settings';
   activePane = null;
+  activePaneSnapshot = null;
   clearInterval(refreshInterval);
   updateAppChrome('Settings');
   document.getElementById('terminalView').classList.remove('active');
@@ -772,7 +773,8 @@ function connectRelay(relay) {
     conn.status = 'connected';
     updateStatusDot();
     renderRelayList();
-    if (activeAgent() && activeAgent().relay_id === relay.id) refreshPane();
+    const target = activePaneTarget();
+    if (target && target.relay_id === relay.id) refreshPane();
   };
   ws.onclose = () => {
     conn.status = 'disconnected';
@@ -833,11 +835,13 @@ function handleMessage(relayId, msg) {
   if (msg.type === 'agents') {
     const nextAgents = mergeAgentList(relayId, (msg.agents || []).map(a => normalizeAgent(relayId, a)));
     const nextSignature = agentsSignature(nextAgents);
+    const wasActivePaneMissing = currentView === 'terminal' && activePane && !activeAgent();
     agents = nextAgents;
     if (nextSignature !== lastAgentsSignature) {
       lastAgentsSignature = nextSignature;
       render();
     }
+    syncActiveTerminal(wasActivePaneMissing);
   }
   else if (msg.type === 'blocked') {
     const next = normalizeAgent(relayId, {...msg, status: 'blocked'});
@@ -846,6 +850,7 @@ function handleMessage(relayId, msg) {
     else agents.push(next);
     lastAgentsSignature = agentsSignature(agents);
     render();
+    syncActiveTerminal();
   } else if (msg.type === 'pane_content' && clientPaneId(relayId, msg.pane_id) === activePane) {
     updateTerminalContent(msg.content || '(empty)', msg.format);
   }
@@ -893,11 +898,11 @@ function mergeAgentDetails(previous, next) {
 }
 
 function removeAgentsForRelay(relayId) {
-  const active = activeAgent();
+  const active = activePaneTarget();
   agents = agents.filter(a => a.relay_id !== relayId);
   lastAgentsSignature = agentsSignature(agents);
-  if (active && active.relay_id === relayId) showAgentListView();
   render();
+  if (currentView === 'terminal' && active && active.relay_id === relayId) syncTerminalChrome(null);
 }
 
 function agentsSignature(list) {
@@ -1025,17 +1030,35 @@ function agentCountLabel() {
   return agents.length ? `${relayText} · ${agents.length}` : relayText;
 }
 
+function agentStatusGroup(agent) {
+  const status = String(agent && agent.status || 'unknown').trim().toLowerCase().replace(/[_-]+/g, ' ');
+  if (status.includes('blocked')) return 'blocked';
+  if (status.includes('working') || status.includes('running') || status.includes('progress') || status.includes('busy')) return 'working';
+  if (
+    status === 'idle' ||
+    status === 'ready' ||
+    status.includes('done') ||
+    status.includes('complete') ||
+    status.includes('finish') ||
+    status.includes('success') ||
+    status.includes('unread')
+  ) return 'ready';
+  return 'other';
+}
+
 function render() {
   const listView = document.getElementById('agentListView');
   const previousScrollTop = listView.scrollTop;
-  const blocked = agents.filter(a => a.status==='blocked');
-  const working = agents.filter(a => a.status==='working');
-  const idle = agents.filter(a => a.status==='idle'||a.status==='unknown');
+  const blocked = agents.filter(a => agentStatusGroup(a)==='blocked');
+  const working = agents.filter(a => agentStatusGroup(a)==='working');
+  const ready = agents.filter(a => agentStatusGroup(a)==='ready');
+  const other = agents.filter(a => agentStatusGroup(a)==='other');
   document.getElementById('agentCount').textContent = agentCountLabel();
   let html = '';
   if (blocked.length) html += section('Blocked', 'var(--red)', blocked);
-  if (working.length) html += section('Working', 'var(--green)', working);
-  if (idle.length) html += section('Idle', 'var(--muted)', idle);
+  if (working.length) html += section('Working', 'var(--orange)', working);
+  if (ready.length) html += section('Ready', 'var(--green)', ready);
+  if (other.length) html += section('Other', 'var(--muted)', other);
   if (!agents.length) html = relayConfigs.length ? '<div class="empty">Waiting for agents…</div>' : '';
   document.getElementById('agents').innerHTML = html;
   listView.scrollTop = previousScrollTop;
@@ -1066,16 +1089,20 @@ function showTerminalView(paneId) {
   currentView = 'terminal';
   clearInterval(refreshInterval);
   const a = agents.find(x => x.pane_id===paneId);
-  const title = a ? terminalTitle(a) : paneId;
-  updateAppChrome(title);
-  document.getElementById('termTitle').textContent = title;
+  activePaneSnapshot = a ? paneSnapshotFromAgent(a) : paneSnapshotFromId(paneId);
+  syncTerminalChrome(a || null);
   document.getElementById('settingsView').style.display = 'none';
   document.getElementById('agentListView').style.display = 'none';
   document.getElementById('terminalView').classList.add('active');
+  refreshPane();
+  refreshInterval = setInterval(refreshPane, 3000);
+}
+
+function renderTerminalActions(agent) {
   const qa = document.getElementById('quickActions');
   const ak = document.getElementById('actionKeys');
-  if (a&&a.status==='blocked') {
-    const opts = a.options||['yes, single permission','trust, always allow','no (tab to edit)'];
+  if (agent&&agent.status==='blocked') {
+    const opts = agent.options||['yes, single permission','trust, always allow','no (tab to edit)'];
     qa.innerHTML = opts.map(o => {
       const cls = o.includes('yes')||o.includes('approve')?'btn-yes':o.includes('trust')?'btn-trust':'btn-no';
       const key = responseKey(o);
@@ -1094,8 +1121,6 @@ function showTerminalView(paneId) {
     qa.innerHTML='';
     ak.innerHTML='';
   }
-  refreshPane();
-  refreshInterval = setInterval(refreshPane, 3000);
 }
 
 function closeTerminal() {
@@ -1105,6 +1130,57 @@ function closeTerminal() {
 function terminalTitle(agent) {
   const name = displayName(agent);
   return `${name} @${hostLabel(agent)}`;
+}
+
+function paneSnapshotFromAgent(agent) {
+  return {
+    pane_id: agent.pane_id,
+    relay_id: agent.relay_id,
+    raw_pane_id: agent.raw_pane_id,
+    title: terminalTitle(agent),
+  };
+}
+
+function paneSnapshotFromId(paneId) {
+  if (!paneId) return null;
+  const relay = relayConfigs.find(r => paneId.startsWith(`${r.id}::`));
+  if (!relay) return null;
+  const rawPaneId = paneId.slice(relay.id.length + 2);
+  if (!rawPaneId) return null;
+  return {
+    pane_id: paneId,
+    relay_id: relay.id,
+    raw_pane_id: rawPaneId,
+    title: paneId,
+  };
+}
+
+function activePaneTarget() {
+  if (!activePane) return null;
+  const agent = activeAgent();
+  if (agent) {
+    activePaneSnapshot = paneSnapshotFromAgent(agent);
+    return activePaneSnapshot;
+  }
+  if (activePaneSnapshot && activePaneSnapshot.pane_id === activePane) return activePaneSnapshot;
+  activePaneSnapshot = paneSnapshotFromId(activePane);
+  return activePaneSnapshot;
+}
+
+function syncTerminalChrome(agent) {
+  const title = agent ? terminalTitle(agent) : (activePaneSnapshot && activePaneSnapshot.title) || activePane || 'Terminal';
+  updateAppChrome(title);
+  document.getElementById('termTitle').textContent = title;
+  renderTerminalActions(agent);
+}
+
+function syncActiveTerminal(refreshWhenRestored = false) {
+  if (currentView !== 'terminal' || !activePane) return;
+  const agent = activeAgent();
+  if (!agent) return;
+  activePaneSnapshot = paneSnapshotFromAgent(agent);
+  syncTerminalChrome(agent);
+  if (refreshWhenRestored) refreshPane();
 }
 
 function updateAppChrome(title = '🐑 herdr') {
@@ -1117,11 +1193,11 @@ function activeAgent() {
 }
 
 function sendToActive(payload) {
-  const agent = activeAgent();
-  if (!agent) return false;
-  const conn = connections.get(agent.relay_id);
+  const target = activePaneTarget();
+  if (!target) return false;
+  const conn = connections.get(target.relay_id);
   if (!conn || !conn.ws || conn.ws.readyState !== 1) return false;
-  conn.ws.send(JSON.stringify({...payload, pane_id: agent.raw_pane_id}));
+  conn.ws.send(JSON.stringify({...payload, pane_id: target.raw_pane_id}));
   return true;
 }
 
@@ -1143,7 +1219,11 @@ function resizeComposer(){
 }
 function sendKey(k){if(!activePane)return;sendToActive({type:'send_keys',keys:[k]});setTimeout(refreshPane,300);}
 function sendKeys(k){if(!activePane)return;sendToActive({type:'send_keys',keys:k});setTimeout(refreshPane,300);}
-function submitPrompt(){lastInsertedBackspaces=0;sendKey('Tab');}
+function submitPrompt(){
+  const i=document.getElementById('termInput');
+  if(i&&i.value){sendText();return;}
+  lastInsertedBackspaces=0;sendKey('Tab');
+}
 function cancelPrompt(){lastInsertedBackspaces=0;sendKey('Escape');}
 function interruptPrompt(){lastInsertedBackspaces=0;sendKeys(['Ctrl+c']);}
 function clearPromptText(){
