@@ -456,7 +456,7 @@ function renderNotificationSetting() {
     else if (connectedRelays.length === 0) hint.textContent = 'Connect a relay before syncing push notifications.';
     else if (!optedIn) hint.textContent = 'Push notifications are stopped for this browser. Notification permission is still allowed in browser settings.';
     else if (missingConfig) hint.textContent = 'Waiting for the relay push key. Reconnect the relay if this stays here.';
-    else if (keyMismatch) hint.textContent = 'This app has a subscription for another relay key. Share one VAPID key across relays or clear this site data.';
+    else if (keyMismatch) hint.textContent = 'This relay changed its push key. Tap Sync Push Subscription to refresh this device.';
     else if (failed) hint.textContent = 'Push subscription sync failed. Reconnect the relay and try again.';
     else if (waiting) hint.textContent = 'Push subscription sent; waiting for relay confirmation.';
     else if (allSynced) hint.textContent = `Push subscription synced with ${synced} relay${synced === 1 ? '' : 's'}.`;
@@ -574,7 +574,8 @@ async function unsubscribeAllPushSubscriptions() {
 
 async function unsubscribePushSubscription(relayId) {
   const conn = connections.get(relayId);
-  if (!conn) return false;
+  const relay = conn ? conn.relay : relayConfig(relayId);
+  if (!relay) return false;
   const registration = await readyServiceWorker(relayId);
   const endpoints = [];
   try {
@@ -588,8 +589,20 @@ async function unsubscribePushSubscription(relayId) {
   } catch (_err) {}
   sendPushUnsubscribe(conn, endpoints);
   localStorage.removeItem(relayVapidStorageKey(relayId));
-  setPushStatus(conn, '');
+  if (conn) setPushStatus(conn, '');
   return Boolean(endpoints.length);
+}
+
+async function unregisterRelayServiceWorker(relayId) {
+  if (!('serviceWorker' in navigator)) return false;
+  try {
+    const registration = pushServiceWorkerRegistrations.get(relayId)
+      || await navigator.serviceWorker.getRegistration(relayPushScope(relayId));
+    pushServiceWorkerRegistrations.delete(relayId);
+    return registration ? registration.unregister() : false;
+  } catch (_err) {
+    return false;
+  }
 }
 
 function sendPushUnsubscribe(conn, endpoints) {
@@ -995,7 +1008,9 @@ function addRelay() {
   connectAll();
 }
 
-function removeRelay(id) {
+async function removeRelay(id) {
+  await unsubscribePushSubscription(id);
+  await unregisterRelayServiceWorker(id);
   disconnectRelay(id);
   relayConfigs = relayConfigs.filter(r => r.id !== id);
   saveRelayConfigs();
@@ -1041,7 +1056,7 @@ function pushStatusMeta(conn) {
   if (conn.pushStatus === 'browser-subscribed') return {label: 'Push enabled', color: 'var(--yellow)', title: 'This browser has a push subscription; sync it with the relay.'};
   if (conn.pushStatus === 'sent') return {label: 'Push syncing', color: 'var(--blue)', title: 'Subscription sent; waiting for relay confirmation.'};
   if (conn.pushStatus === 'missing-config') return {label: 'Push waiting', color: 'var(--yellow)', title: 'Waiting for the relay VAPID public key.'};
-  if (conn.pushStatus === 'key-mismatch') return {label: 'Push key mismatch', color: 'var(--orange)', title: 'This browser subscription belongs to another relay VAPID key.'};
+  if (conn.pushStatus === 'key-mismatch') return {label: 'Push key mismatch', color: 'var(--orange)', title: 'This relay changed its push key; sync again to refresh this device.'};
   if (conn.pushStatus === 'failed') return {label: 'Push failed', color: 'var(--red)', title: 'The last push subscription sync failed.'};
   return {label: 'Push not synced', color: 'var(--muted)', title: 'Tap Sync Push Subscription to register this device with the relay.'};
 }
@@ -1129,6 +1144,18 @@ function stateFromLocation() {
     if (target) return {view: 'notification', target};
   }
   return {view: 'agents'};
+}
+
+function routeNotificationUrl(url) {
+  try {
+    const target = new URL(url, location.href);
+    if (target.origin !== location.origin || !target.hash) return;
+    if (location.hash !== target.hash) {
+      location.hash = target.hash;
+      return;
+    }
+    applyView(stateFromLocation());
+  } catch (_err) {}
 }
 
 function parseNotificationTarget(value) {
@@ -1572,7 +1599,7 @@ function notifyBlockedAgent(agent) {
 function pushDeliveryActiveForRelay(relayId) {
   if (!pushOptedIn()) return false;
   const conn = connections.get(relayId);
-  return Boolean(conn && ['browser-subscribed', 'sent', 'subscribed'].includes(conn.pushStatus));
+  return Boolean(conn && ['sent', 'subscribed'].includes(conn.pushStatus));
 }
 
 function notificationTag(agent) {
@@ -1924,6 +1951,13 @@ window.addEventListener('popstate', event => {
 window.addEventListener('hashchange', () => {
   applyView(stateFromLocation());
 });
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', event => {
+    const data = event.data || {};
+    if (data.type === 'herdr_notification_click' && data.url) routeNotificationUrl(data.url);
+  });
+}
 
 function initializeView() {
   const initialState = relayConfigs.length ? stateFromLocation() : {view: 'agents'};

@@ -39,8 +39,18 @@ self.addEventListener('notificationclick', event => {
     const windows = await self.clients.matchAll({type: 'window', includeUncontrolled: true});
     for (const client of windows) {
       if (client.url.startsWith(self.location.origin)) {
-        if ('navigate' in client) await client.navigate(url);
-        return client.focus();
+        let targetClient = client;
+        if ('navigate' in client && client.url !== url) {
+          try {
+            targetClient = await client.navigate(url) || client;
+          } catch (_err) {
+            targetClient = client;
+          }
+        }
+        try {
+          targetClient.postMessage({type: 'herdr_notification_click', url});
+        } catch (_err) {}
+        return targetClient.focus();
       }
     }
     return self.clients.openWindow(url);
