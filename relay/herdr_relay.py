@@ -4,7 +4,7 @@
 # dependencies = ["websockets>=14.0", "pywebpush>=2.0.0", "py-vapid>=1.9.2", "cryptography>=42.0.0"]
 # ///
 """Herdr Mobile Relay server — polls local herdr and broadcasts to clients."""
-import asyncio, base64, hmac, json, os, re, shutil, signal, socket, subprocess, threading, urllib.parse
+import asyncio, base64, hmac, json, os, re, secrets, shutil, signal, socket, subprocess, threading, time, urllib.parse
 from pathlib import Path
 
 try:
@@ -48,6 +48,17 @@ VAPID_PRIVATE_KEY_FILE = Path(os.environ.get("HERDR_VAPID_PRIVATE_KEY", PUSH_DIR
 VAPID_SUBJECT = os.environ.get("HERDR_VAPID_SUBJECT", f"mailto:herdr-mobile-relay@{LOCAL_HOST}.local")
 VAPID_PUBLIC_KEY = None
 PUSH_LOCK = threading.RLock()
+UPLOAD_DIR = Path(os.environ.get("HERDR_UPLOAD_DIR", Path.home() / ".cache" / "herdr-mobile-relay" / "uploads"))
+UPLOAD_MAX_BYTES = int(os.environ.get("HERDR_UPLOAD_MAX_BYTES", str(10 * 1024 * 1024)))
+WS_MAX_SIZE = int(os.environ.get("HERDR_WS_MAX_SIZE", str(max(16 * 1024 * 1024, UPLOAD_MAX_BYTES * 2 + 1024 * 1024))))
+IMAGE_MIME_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+}
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
@@ -223,6 +234,58 @@ def detect_command_context(text):
             continue
         fallback = clean
     return (command or fallback)[:240]
+
+
+def upload_extension(filename, mime):
+    mime = (mime or "").split(";", 1)[0].strip().lower()
+    if mime in IMAGE_MIME_EXTENSIONS:
+        return IMAGE_MIME_EXTENSIONS[mime]
+    suffix = Path(filename or "").suffix.lower()
+    return suffix if suffix in set(IMAGE_MIME_EXTENSIONS.values()) else ".img"
+
+
+def safe_upload_stem(filename):
+    stem = Path(filename or "image").stem
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip(".-")
+    return stem[:60] or "image"
+
+
+def store_uploaded_image(filename, mime, data):
+    if not isinstance(data, str) or not data:
+        return False, "Missing image data", None
+    mime = (mime or "").split(";", 1)[0].strip().lower()
+    if mime and not mime.startswith("image/"):
+        return False, "Only image uploads are supported", None
+
+    payload = data
+    if data.startswith("data:"):
+        header, sep, payload = data.partition(",")
+        if not sep or ";base64" not in header:
+            return False, "Image data must be base64 encoded", None
+        header_mime = header[5:].split(";", 1)[0].strip().lower()
+        if header_mime:
+            mime = header_mime
+    if mime and not mime.startswith("image/"):
+        return False, "Only image uploads are supported", None
+
+    try:
+        content = base64.b64decode(payload, validate=True)
+    except Exception:
+        return False, "Invalid image encoding", None
+    if len(content) > UPLOAD_MAX_BYTES:
+        mb = UPLOAD_MAX_BYTES // (1024 * 1024)
+        return False, f"Image is larger than {mb} MB", None
+
+    ensure_private_dir(UPLOAD_DIR)
+    ext = upload_extension(filename, mime)
+    stem = safe_upload_stem(filename)
+    path = UPLOAD_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(4)}-{stem}{ext}"
+    path.write_bytes(content)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return True, "", str(path)
 
 
 def ensure_private_dir(path):
@@ -671,6 +734,23 @@ async def handle_client(ws):
                 text = msg.get("text", "")
                 if isinstance(text, str):
                     await run_herdr_async("pane", "send-text", pane_id, text)
+            elif msg_type == "upload_image":
+                pane_id = msg.get("pane_id", "")
+                request_id = msg.get("request_id", "")
+                ok, error, path = await asyncio.to_thread(
+                    store_uploaded_image,
+                    msg.get("filename", ""),
+                    msg.get("mime", ""),
+                    msg.get("data", ""),
+                )
+                await ws.send(json.dumps({
+                    "type": "upload_result",
+                    "ok": ok,
+                    "error": error,
+                    "path": path or "",
+                    "pane_id": pane_id,
+                    "request_id": request_id,
+                }))
     except ConnectionClosed:
         pass
     finally:
@@ -698,7 +778,7 @@ async def main():
         print(f"UDP {PLUGIN_PORT} in use, plugin push disabled")
     asyncio.create_task(poll_loop())
     asyncio.create_task(event_push())
-    server = await serve(handle_client, WS_HOST, WS_PORT, process_request=process_request)
+    server = await serve(handle_client, WS_HOST, WS_PORT, process_request=process_request, max_size=WS_MAX_SIZE)
     print(f"Herdr Mobile Relay on {WS_HOST}:{WS_PORT} (WebSocket + HTTP GET push)")
     print(f"  polling: {LOCAL_HOST}")
     stop = loop.create_future()

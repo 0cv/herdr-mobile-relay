@@ -6,13 +6,31 @@ Herdr Mobile Relay runs a small local relay on each computer, exposes each relay
 
 ## Screenshots
 
-| Agents                                                                                                             | Terminal                                                                                                                 | Settings                                                                                                        |
-| ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| <img src="images/home.jpeg" alt="Mobile home page showing Mac and Fedora agents merged into one list" width="240"> | <img src="images/terminal.jpeg" alt="Mobile terminal view for a Fedora agent with multiline input controls" width="240"> | <img src="images/settings.jpeg" alt="Mobile settings page with Mac and Fedora relay configuration" width="240"> |
+| Agents                                                                                                             | Terminal                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| <img src="images/home.jpeg" alt="Mobile home page showing Mac and Fedora agents merged into one list" width="260"> | <img src="images/terminal.jpeg" alt="Mobile terminal view for a Fedora agent with multiline input controls" width="260"> |
+
+| Settings                                                                                                        | Notifications                                                                                                     |
+| --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| <img src="images/settings.jpeg" alt="Mobile settings page with Mac and Fedora relay configuration" width="260"> | <img src="images/notifications.jpg" alt="Mobile notification for a blocked Herdr agent approval" width="260"> |
 
 ## Attribution
 
 This project is forked from and inspired by [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-remote). Herdr Mobile Relay keeps the original idea of approving Herdr agents remotely, but has been substantially reworked around a static phone web app, per-computer local relays, Cloudflare Tunnel hostnames, and no SSH or Telegram fan-out.
+
+## What This Fork Adds
+
+The upstream project established the core idea: control Herdr approval prompts from another device. This fork turns that idea into an installable mobile web app for multiple machines, with no central broker and no machine-to-machine trust.
+
+- **Multi-computer phone UI:** one static web app connects to multiple independent relays and merges Mac, Fedora, or other hosts into one agent list.
+- **Per-machine isolation:** each computer runs only its own local relay and `herdr` CLI calls; relays do not SSH into each other or share state.
+- **PWA notifications:** installed phones can receive Web Push notifications when an agent blocks, including per-relay push subscriptions and notification click-through back to the right terminal.
+- **Mobile terminal composer:** terminal view has a compact phone-first composer, quick terminal keys, inline approval actions, themes, font sizing, and a jump-to-bottom affordance.
+- **Real approval handling:** blocked cards parse prompt text and approval options, then map visible choices back to the correct Herdr key actions for Codex and Claude Code.
+- **Screenshot/photo upload:** attach an image from the phone, store it on the target computer, and insert the local path into the agent prompt.
+- **Optional device unlock:** require the phone's platform authenticator before reconnecting relays after open, reload, or resume.
+- **Service installers:** macOS launchd and Linux/Fedora user systemd installers set up the relay, tunnel, token, and cleanup of older service names.
+- **Security hardening:** token generation, loopback binding by default, Origin checks for browser clients, constant-time token comparison, and safer behavior for public tunnels.
 
 ## Marketplace Listing
 
@@ -24,7 +42,7 @@ This project is forked from and inspired by [dcolinmorgan/herdr-remote](https://
 
 **Short description:** Approve Herdr agents from your phone across multiple computers.
 
-**Long description:** Run one local relay per computer, expose each relay through Cloudflare Tunnel, and manage all agents from one static mobile web app. Herdr Mobile Relay keeps machines independent: there is no SSH fan-out, central broker, Telegram bot, or native mobile app to install.
+**Long description:** Run one local relay per computer, expose each relay through Cloudflare Tunnel, and manage all agents from one installable mobile web app. Herdr Mobile Relay keeps machines independent: there is no SSH fan-out, central broker, Telegram bot, or native mobile app to install. It adds multi-relay agent merging, Web Push notifications for blocked agents, phone-side terminal controls, inline approvals, screenshot/photo upload, optional device unlock, and service installers for macOS and Linux/Fedora.
 
 **Tags:** mobile, relay, cloudflare, multi-machine, approvals
 
@@ -35,6 +53,12 @@ This project is forked from and inspired by [dcolinmorgan/herdr-remote](https://
 - Exposes the relay through a `wss://` URL, usually via Cloudflare Tunnel.
 - Lets the static web app connect to multiple relays and merge their agent lists client-side.
 - Uses relay labels from the web app, such as `Mac` or `Fedora`, as the visible host badges.
+- Shows blocked prompts with inline approval buttons on the agent list and in the terminal view.
+- Sends Web Push notifications for blocked agents to installed phones, even when the app is closed or suspended.
+- Routes notification taps back to the matching relay and pane when the app can resolve it.
+- Uploads screenshots and photos from the phone to the connected relay's local filesystem.
+- Provides a compact mobile terminal UI with send, attach, terminal keys, themes, and font-size controls.
+- Can require fingerprint, face unlock, or passcode verification before reconnecting relays.
 - Supports an optional local Herdr plugin hook for faster blocked-agent updates.
 
 ## What It Does Not Do
@@ -111,6 +135,8 @@ In the app Settings, add one relay entry per computer:
 Then tap **Enable Notifications** in Settings. The relay generates Web Push VAPID keys in `relay/push/` and stores this device's push subscription there, so installed PWAs can be notified even when the app is closed or suspended.
 
 For multiple relays, the app creates one scoped service-worker push subscription per relay. Each relay can keep its own VAPID keypair under its own `relay/push/` directory. Set `HERDR_RELAY_PUSH_DIR` or `HERDR_VAPID_PRIVATE_KEY` only if you want to move that runtime state or intentionally share one keypair across machines.
+
+In the terminal view, tap the image icon to attach a screenshot or photo. The web app uploads the image to the connected relay, the relay saves it on that computer under `~/.cache/herdr-mobile-relay/uploads` by default, and the app inserts the local file path into the prompt. Set `HERDR_UPLOAD_DIR` or `HERDR_UPLOAD_MAX_BYTES` to change the upload directory or size limit.
 
 ## Stable Hostnames
 
