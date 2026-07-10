@@ -14,6 +14,28 @@ ${html.slice(start, end)}
 this.suggestedLaunchName = suggestedLaunchName;
 `, sandbox);
 
+const setupStart = html.indexOf('function quickSetupConfig');
+const setupEnd = html.indexOf('function importQuickSetup', setupStart);
+assert.ok(setupStart >= 0 && setupEnd > setupStart, 'Quick-setup helper not found');
+const setupSandbox = {URLSearchParams};
+vm.runInNewContext(`
+${html.slice(setupStart, setupEnd)}
+this.quickSetupConfig = quickSetupConfig;
+`, setupSandbox);
+
+const quickSetup = setupSandbox.quickSetupConfig({
+  hash: '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation',
+  protocol: 'https:',
+  host: 'relay.example.com',
+});
+assert.equal(quickSetup.label, 'Fedora Workstation');
+assert.equal(quickSetup.url, 'wss://relay.example.com');
+assert.equal(quickSetup.token, '0123456789abcdef0123456789abcdef');
+assert.equal(setupSandbox.quickSetupConfig({hash: '', protocol: 'https:', host: 'relay.example.com'}), null);
+assert.equal(setupSandbox.quickSetupConfig({hash: '#setup=too-short', protocol: 'https:', host: 'relay.example.com'}), null);
+assert.match(html, /let relayConfigs = loadRelayConfigs\(\).*\nimportQuickSetup\(\);/);
+assert.match(html, /history\.replaceState\(history\.state, '', location\.pathname \+ location\.search\)/);
+
 assert.equal(
   sandbox.suggestedLaunchName('/home/me/Development/herdr-mobile-relay', 'codex'),
   'herdr-mobile-relay-codex'

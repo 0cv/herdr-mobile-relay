@@ -27,4 +27,21 @@ assert.equal(sandbox.activityMatchesSearch(activity, 'herdr-mobile'), true);
 assert.equal(sandbox.activityMatchesSearch(activity, 'approve once'), true);
 assert.equal(sandbox.activityMatchesSearch(activity, 'missing'), false);
 
-console.log('Activity search tests passed');
+const sortStart = html.indexOf('function agentUpdatedAt');
+const sortEnd = html.indexOf('function sortedAgents', sortStart);
+assert.ok(sortStart >= 0 && sortEnd > sortStart, 'Agent activity sort helpers not found');
+const sortSandbox = {};
+vm.runInNewContext(`
+${html.slice(sortStart, sortEnd)}
+this.agentUpdatedAt = agentUpdatedAt;
+this.compareAgentUpdatedAt = compareAgentUpdatedAt;
+`, sortSandbox);
+
+assert.equal(sortSandbox.agentUpdatedAt({updated_at: '2000'}), 2000);
+assert.equal(sortSandbox.agentUpdatedAt({updated_at: 'invalid'}), 0);
+assert.ok(sortSandbox.compareAgentUpdatedAt({updated_at: 3000}, {updated_at: 1000}) < 0);
+assert.ok(sortSandbox.compareAgentUpdatedAt({updated_at: 1000}, {updated_at: 3000}) > 0);
+assert.match(html, /compareAgentUpdatedAt\(a, b\) \|\|/);
+assert.match(html, /a\.host, a\.updated_at, a\.prompt/);
+
+console.log('Activity search and agent sorting tests passed');

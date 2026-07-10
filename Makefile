@@ -11,8 +11,8 @@ export PATH
 
 help:
 	@echo "Common targets:"
-	@echo "  make setup                      Prepare config and check Linux/macOS prerequisites"
-	@echo "  make quick-start                Start a temporary relay and Cloudflare quick tunnel"
+	@echo "  make quick-start                First run: install missing tools and start the phone app"
+	@echo "  make setup                      Prepare config and check prerequisites without installing"
 	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages (WEB_PROJECT=$(WEB_PROJECT))"
 	@echo "  make service-install            Install/start the relay service for this platform"
 	@echo "  make service-status             Show relay service status"
@@ -25,6 +25,7 @@ setup:
 	relay/setup.sh
 
 quick-start:
+	relay/setup.sh --install-missing
 	relay/start.sh
 
 check: test

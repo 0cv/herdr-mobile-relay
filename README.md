@@ -7,19 +7,36 @@ Herdr Mobile Relay runs a small local relay on each computer, exposes each relay
 > [!IMPORTANT]
 > Herdr Mobile Relay currently supports only Linux and macOS. Windows is not supported.
 
+## [Quick Start: One Command](QUICKSTART.md)
+
+New here? Paste this into a terminal on a Linux or macOS computer:
+
+```bash
+git clone https://github.com/0cv/herdr-mobile-relay.git && cd herdr-mobile-relay && make quick-start
+```
+
+That command prepares the local configuration, offers to install missing Herdr, `uv`, and `cloudflared` tools for your user account, starts the relay, serves the phone app, and opens a free temporary Cloudflare tunnel. **A Cloudflare account, domain, Node.js, Python installation, and separate web deployment are not required for this first trial.**
+
+When it is ready, the terminal prints one private **Phone setup** link. Open that exact link on your phone; it loads the app and adds the relay automatically. Keep the terminal open while using the quick tunnel, and press Ctrl-C when finished.
+
+> [!CAUTION]
+> The setup link contains the relay token in its URL fragment. The fragment is not sent to the web server and the app removes it after importing, but you should still avoid sharing the original link.
+
+See the **[beginner-friendly QUICKSTART](QUICKSTART.md)** for screenshots-level steps, what the command installs, and troubleshooting. Once the trial works, move to a [stable hostname and background service](#stable-hostnames) for everyday use.
+
 ## Screenshots
 
 | Agents                                                                                                             | Terminal                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| <img src="images/home.jpeg" alt="Mobile home page showing Mac and Fedora agents merged into one list" width="260"> | <img src="images/terminal.jpeg" alt="Mobile terminal view for a Fedora agent with multiline input controls" width="260"> |
+| <img src="images/home.jpeg" alt="Mobile home page showing Mac and Fedora agents merged into one list" width="392"> | <img src="images/terminal.jpeg" alt="Mobile terminal view for a Fedora agent with multiline input controls" width="392"> |
 
-| Start Agent                                                                                                                                                   | Activity                                                                                                                        |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| <img src="images/new%20agent.jpeg" alt="Mobile Start Agent form with computer, agent, working directory, generated name, and optional initial task" width="260"> | <img src="images/activities.jpeg" alt="Searchable mobile activity history merged across Mac and Fedora relays" width="260"> |
+| Start Agent                                                                                                                                                      | Activity                                                                                                                    |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| <img src="images/new%20agent.jpeg" alt="Mobile Start Agent form with computer, agent, working directory, generated name, and optional initial task" width="392"> | <img src="images/activities.jpeg" alt="Searchable mobile activity history merged across Mac and Fedora relays" width="392"> |
 
-| Settings                                                                                                        | Notifications                                                                                                     |
-| --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| <img src="images/settings.jpeg" alt="Mobile settings page with Mac and Fedora relay configuration" width="260"> | <img src="images/notifications.jpg" alt="Mobile notification for a blocked Herdr agent approval" width="260"> |
+| Settings                                                                                                        | Notifications                                                                                                 |
+| --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| <img src="images/settings.jpeg" alt="Mobile settings page with Mac and Fedora relay configuration" width="392"> | <img src="images/notifications.jpg" alt="Mobile notification for a blocked Herdr agent approval" width="392"> |
 
 ## Attribution
 
@@ -35,10 +52,12 @@ The upstream project established the core idea: control Herdr approval prompts f
 - **Mobile terminal composer:** terminal view has a compact phone-first composer, quick terminal keys, inline approval actions, themes, font sizing, and a jump-to-bottom affordance.
 - **Real approval handling:** blocked cards parse prompt text and approval options, then map visible choices back to the correct Herdr key actions for Codex and Claude Code.
 - **Confirmed controls and activity:** command acknowledgements report failures explicitly, approvals wait for an observed state change, and a bounded per-relay activity history is merged on the phone.
+- **Activity-aware home ordering:** agents most recently changed on their computer appear first within each status section, including activity initiated outside the phone app.
 - **Remote agent management:** start automatically detected installed agents, then rename, clear, or stop them from the phone.
 - **Screenshot/photo upload:** attach an image from the phone, store it on the target computer, and insert the local path into the agent prompt.
 - **Optional device unlock:** require the phone's platform authenticator before reconnecting relays after open, reload, or resume.
 - **Service installers:** macOS launchd and Linux/Fedora user systemd installers set up the relay, tunnel, token, and cleanup of older service names.
+- **One-command trial:** the relay can serve the phone app itself, install missing user-level prerequisites with confirmation, and provide an auto-configuring TryCloudflare link.
 - **Security hardening:** token generation, loopback binding by default, Origin checks for browser clients, constant-time token comparison, and safer behavior for public tunnels.
 
 ## Marketplace Listing
@@ -82,7 +101,7 @@ The upstream project established the core idea: control Herdr approval prompts f
 
 ## Components
 
-- **Relay:** Python WebSocket service with an HTTP health response on port `8375`.
+- **Relay:** Python WebSocket service that also serves the phone app and an HTTP health response on port `8375`.
 - **Web app:** static mobile UI in `web/`; stores relay configs in browser local storage.
 - **Cloudflare Tunnel:** optional but recommended public access layer for each relay.
 - **Background services:** launchd on macOS and user systemd on Linux/Fedora start the relay and `cloudflared`.
@@ -90,61 +109,32 @@ The upstream project established the core idea: control Herdr approval prompts f
 
 ## Requirements
 
+The one-command quick start needs only:
+
 - Linux or macOS; Windows is not currently supported
-- Git and Make
-- Python 3.10+ and [uv](https://docs.astral.sh/uv/)
-- [Herdr](https://herdr.dev) 0.7+
-- `cloudflared` for phone access through a tunnel
-- Node.js/npm for the included Cloudflare Pages deployment command and JavaScript checks
+- Git, Make, and `curl`
 
-## Quick Start
+With your confirmation, `make quick-start` installs missing [Herdr](https://herdr.dev/docs/install/), [uv](https://docs.astral.sh/uv/getting-started/installation/), and [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) tools for your user account. `uv` also supplies Python when necessary.
 
-Clone the repository, prepare the local configuration, and check prerequisites:
+Optional later requirements:
 
-```bash
-git clone https://github.com/0cv/herdr-mobile-relay.git
-cd herdr-mobile-relay
-make setup
-```
-
-Deploy the static phone app once. `make setup` creates `.env` with the default Pages project name; edit `WEB_PROJECT` there first if needed.
-
-```bash
-make web-deploy
-```
-
-Then start a temporary relay and Cloudflare quick tunnel:
-
-```bash
-make quick-start
-```
-
-The script prints:
-
-```text
-Tunnel URL: https://example.trycloudflare.com
-WebSocket:  wss://example.trycloudflare.com
-Token:      0123456789abcdef0123456789abcdef
-```
-
-Open your deployed web app on your phone and add both the `wss://...trycloudflare.com` URL and token in Settings. Quick tunnels are temporary; the hostname changes when the tunnel restarts. The generated token is stored in `relay/.env` and reused on later runs.
-
-If you already have a hosted copy of `web/`, skip `make web-deploy`. See [QUICKSTART.md](QUICKSTART.md) for the condensed flow.
+- A Cloudflare account and domain for a permanent named tunnel
+- Node.js/npm only for deploying a separate Cloudflare Pages copy or running the frontend checks
 
 ## Web App
 
-The web app is static and lives in `web/`.
+The web app is static and lives in `web/`. The one-command quick start serves it directly from the relay, so beginners do not need to deploy it separately.
 
-Deploy it anywhere that can host static files over HTTPS. With Cloudflare Pages direct upload:
+For an independent, always-available app origin—especially useful with multiple computers—you can still deploy `web/` anywhere that hosts static files over HTTPS. With Cloudflare Pages direct upload:
 
 ```bash
-# make setup creates .env; edit WEB_PROJECT there if needed
+# edit WEB_PROJECT in .env first if needed
 make web-deploy
 ```
 
 ### Install on Your Phone
 
-Install the deployed web app URL, not a `wss://` relay URL. The installed app keeps your relay settings in browser local storage.
+For the first trial, simply open the printed Phone setup link. Quick-tunnel hostnames change, so wait until you have a stable hostname or independently hosted app before treating the installation as permanent. Install the HTTPS app URL, not a `wss://` relay URL; the installed app keeps relay settings in browser local storage.
 
 On iPhone or iPad:
 
@@ -162,7 +152,7 @@ On Android:
 
 The app includes a web manifest and Apple touch icon, so it installs with the Herdr Relay icon.
 
-In the app Settings, add one relay entry per computer:
+The Phone setup link adds the first relay automatically. To add another relay manually, use Settings:
 
 - **Relay Name:** display label such as `Mac` or `Fedora`
 - **Relay URL:** `wss://...`
@@ -174,9 +164,13 @@ For multiple relays, the app creates one scoped service-worker push subscription
 
 In the terminal view, tap the image icon to attach a screenshot or photo. The web app uploads images up to 10 MB to `~/.cache/herdr-mobile-relay/uploads` on that computer and inserts the local file path into the prompt.
 
+Claude Code's alternate-screen interface exposes only its current visible rows through Herdr. While the relay is running, it therefore builds a stable, bounded 500-line in-memory history from advancing Claude snapshots. Known older viewports are ignored, so scrolling the laptop while Claude is idle does not rewrite the phone history. The relay still cannot recover text discarded before it started, and the accumulated history resets with the relay.
+
 Use **＋** in the app header to start an agent on a connected computer. The relay exposes detected `codex`, `claude`, and `opencode` executables as safe launch profiles. Select a working directory reported by that relay; the suggested name updates to `<directory>-<agent>`. The optional initial task is sent as the agent's first literal prompt after Herdr creates it and is never interpreted by a shell. Each launched agent is moved into its own named tab so it cannot inherit another agent's tab label. Use **•••** from a terminal to rename, clear, or stop that agent. Clear starts a fresh replacement with the same detected profile and working directory, moves it to a dedicated tab, and then closes the old pane.
 
 Use **◷** to view and search the merged activity history from all connected relays. Each relay keeps the latest 500 entries in `~/.cache/herdr-mobile-relay/activity.jsonl`. Prompt activity stores only a short preview, not full terminal output.
+
+Within each home-page status section, agents are ordered by the most recent change observed by their relay. Herdr does not currently expose a historical activity timestamp, so the relay infers this from status changes, terminal-output growth, metadata changes, phone actions, and agent events while it is running. Ordering falls back to the existing host/name order after a relay restart until new activity is observed.
 
 The relay automatically exposes installed Codex, Claude Code, and OpenCode executables in the Start Agent form. Its working-directory browser starts at the relay user's home directory and retrieves only the current folder's immediate non-hidden subdirectories as you navigate. It does not recursively scan or preload the filesystem. There is no profile configuration, and the browser cannot submit an executable or arbitrary shell command. Navigation and agent launches stay inside the current user's home directory.
 
@@ -279,6 +273,8 @@ The plugin sends local agent-status events to the local relay over UDP on `127.0
 
 ## Security Model
 
+- The relay-served phone app is public static content; status and control WebSockets still require the relay token.
+- Quick-start setup links carry the token only in the URL fragment, which is not included in HTTP requests, and the app removes it from the address bar after import.
 - Relay access is protected with `HERDR_RELAY_TOKEN` for quick-start and service installs.
 - Cloudflare Tunnel provides the public TLS endpoint; the relay itself listens locally on `127.0.0.1:8375` by default.
 - Set `HERDR_RELAY_HOST` only if you intentionally need a non-loopback bind address. The relay refuses a non-loopback bind without `HERDR_RELAY_TOKEN`.

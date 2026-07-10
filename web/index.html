@@ -431,6 +431,7 @@ const ANSI_COLORS = {
   94: '#80bfff', 95: '#ff80ff', 96: '#80ffff', 97: '#fff'
 };
 let relayConfigs = loadRelayConfigs(), connections = new Map(), agents = [], activePane = null, activePaneSnapshot = null, refreshInterval = null, lastAgentsSignature = '', currentView = 'agents', viewIndex = 0, lastInsertedBackspaces = 0;
+importQuickSetup();
 let securityLocked = false, unlockInProgress = false, pendingConnectAll = false;
 let lastBlockedPaneIds = new Set();
 let respondingPaneIds = new Set();
@@ -1098,6 +1099,33 @@ function unlockSucceeded() {
   }
 }
 
+function quickSetupConfig(locationValue = location) {
+  const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
+  const token = params.get('setup') || '';
+  if (token.length < 16 || token.length > 512) return null;
+  if (!['http:', 'https:'].includes(locationValue.protocol)) return null;
+  const protocol = locationValue.protocol === 'https:' ? 'wss:' : 'ws:';
+  const label = (params.get('label') || 'This computer').trim().slice(0, 48) || 'This computer';
+  return {label, url: `${protocol}//${locationValue.host}`, token};
+}
+
+function importQuickSetup() {
+  const setup = quickSetupConfig();
+  if (!setup) return false;
+  const existing = relayConfigs.find(relay => relay.url === setup.url);
+  const next = normalizeRelayConfig({
+    id: existing && existing.id,
+    label: existing && existing.label ? existing.label : setup.label,
+    url: setup.url,
+    token: setup.token,
+  });
+  if (existing) relayConfigs = relayConfigs.map(relay => relay.id === existing.id ? next : relay);
+  else relayConfigs = [...relayConfigs, next];
+  saveRelayConfigs();
+  history.replaceState(history.state, '', location.pathname + location.search);
+  return true;
+}
+
 function loadRelayConfigs() {
   const raw = localStorage.getItem('herdr_relays');
   if (raw) {
@@ -1686,6 +1714,7 @@ function mergeAgentDetails(previous, next) {
     tab_label: next.tab_label || previous.tab_label || '',
     tab_number: next.tab_number ?? previous.tab_number,
     workspace_id: next.workspace_id || previous.workspace_id || '',
+    updated_at: Math.max(agentUpdatedAt(previous), agentUpdatedAt(next)),
     prompt: keepBlockedDetails ? (next.prompt ?? previous.prompt) : next.prompt,
     command: keepBlockedDetails ? (next.command ?? previous.command) : next.command,
     options: keepBlockedDetails ? (next.options ?? previous.options) : next.options,
@@ -1703,7 +1732,7 @@ function removeAgentsForRelay(relayId) {
 function agentsSignature(list) {
   return JSON.stringify(list.map(a => [
     a.relay_id, a.pane_id, a.raw_pane_id, a.tab_id, a.tab_label, a.tab_number,
-    a.agent, a.name, a.status, a.project, a.cwd, a.host, a.prompt, a.command, a.options
+    a.agent, a.name, a.status, a.project, a.cwd, a.host, a.updated_at, a.prompt, a.command, a.options
   ]));
 }
 
@@ -1714,8 +1743,10 @@ function updateTerminalContent(content, format) {
   const shouldStickToBottom = distanceFromBottom < 48;
   const previousScrollTop = term.scrollTop;
   const contentChanged = displayContent !== lastTerminalDisplayContent;
-  const normalizeCodexLightRows = /\bcodex\b/i.test(String(activeAgent()?.agent || ''));
-  if (format === 'ansi') term.innerHTML = terminalHtml(displayContent, normalizeCodexLightRows);
+  const activeAgentType = String(activeAgent()?.agent || '');
+  const normalizeCodexLightRows = /\bcodex\b/i.test(activeAgentType);
+  const restoreClaudeHeadings = /\bclaude\b/i.test(activeAgentType);
+  if (format === 'ansi') term.innerHTML = terminalHtml(displayContent, normalizeCodexLightRows, restoreClaudeHeadings);
   else term.textContent = displayContent.replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
   if (shouldStickToBottom) {
     term.scrollTop = term.scrollHeight;
@@ -1931,19 +1962,50 @@ function restoreAgentActivityColors(text) {
   );
 }
 
+function restoreClaudeHeadingColors(text) {
+  // Herdr currently exposes Claude's semantic section headings as bold-only.
+  // Claude uses both colon-ended labels and short standalone bold lines as blue
+  // headings; sentence-like and inline bold emphasis stay white.
+  let restored = String(text ?? '').replace(
+    /(^|\n)([ \t]*(?:\x1b\[0m)*)\x1b\[1m([^\x1b\n]{1,160}:)\x1b\[0m/g,
+    `$1$2\x1b[1;38;2;56;162;223m$3\x1b[0m`
+  );
+  restored = restored.replace(
+    /(^|\n)([ \t]*(?:\x1b\[0m)*)\x1b\[1m([^\x1b\n]{1,160})\x1b\[0m:(?=[ \t]|\n|$)/g,
+    `$1$2\x1b[1;38;2;56;162;223m$3:\x1b[0m`
+  );
+  restored = restored.replace(
+    /(^|\n)([ \t]*-[ \t]+(?:\x1b\[0m)*)\x1b\[1m([^\x1b\n]{1,160})\x1b\[0m/g,
+    `$1$2\x1b[1;38;2;56;162;223m$3\x1b[0m`
+  );
+  restored = restored.replace(
+    /(^|\n)([ \t]*(?:\x1b\[0m)*)\x1b\[1m([^\x1b\n]{1,80})\x1b\[0m([ \t]*)(?=\n|$)/g,
+    (match, lineStart, indentation, label, trailingSpace) => {
+      const trimmedLabel = label.trimEnd();
+      if (!trimmedLabel || /[.!?;:]$/.test(trimmedLabel)) return match;
+      return `${lineStart}${indentation}\x1b[1;38;2;56;162;223m${trimmedLabel}\x1b[0m${trailingSpace}`;
+    }
+  );
+  return restored;
+}
+
 function ansiLineBackground(line) {
   let backgroundColor = '';
   const parts = String(line ?? '').split(/\x1b\[([0-9;]*)m/g);
   for (let i = 0; i < parts.length; i++) {
     if (i % 2 === 0) {
-      if (parts[i].replaceAll('\r', '').length) return backgroundColor;
+      if (parts[i].replaceAll('\r', '').trim().length) return backgroundColor;
       continue;
     }
     const codes = parts[i] ? parts[i].split(';').map(Number) : [0];
     if (codes.includes(0)) backgroundColor = '';
     for (let j = 0; j < codes.length; j++) {
       const code = codes[j];
-      if (code === 49) backgroundColor = '';
+      if (code === 38) {
+        if (codes[j + 1] === 2 && codes.length > j + 4) j += 4;
+        else if (codes[j + 1] === 5 && codes.length > j + 2) j += 2;
+      }
+      else if (code === 49) backgroundColor = '';
       else if (code === 48) {
         if (codes[j + 1] === 2 && codes.length > j + 4) {
           backgroundColor = `rgb(${codes[j + 2]},${codes[j + 3]},${codes[j + 4]})`;
@@ -1957,6 +2019,38 @@ function ansiLineBackground(line) {
     }
   }
   return backgroundColor;
+}
+
+function ansiLineBackgroundIndent(line) {
+  let visiblePrefix = '';
+  const parts = String(line ?? '').split(/\x1b\[([0-9;]*)m/g);
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) {
+      visiblePrefix += parts[i].replaceAll('\r', '');
+      continue;
+    }
+    const codes = parts[i] ? parts[i].split(';').map(Number) : [0];
+    for (let j = 0; j < codes.length; j++) {
+      const code = codes[j];
+      if (code === 38) {
+        if (codes[j + 1] === 2 && codes.length > j + 4) j += 4;
+        else if (codes[j + 1] === 5 && codes.length > j + 2) j += 2;
+        continue;
+      }
+      if (code === 48 || ANSI_COLORS[code - 10]) {
+        if (visiblePrefix.trim()) return 0;
+        return visiblePrefix.replaceAll('\t', '    ').length;
+      }
+    }
+  }
+  return 0;
+}
+
+function ansiLineBackgroundStyle(line, backgroundColor) {
+  const indent = ansiLineBackgroundIndent(line);
+  if (!indent) return `background-color:${backgroundColor}`;
+  const edge = `${indent}ch`;
+  return `background-image:linear-gradient(to right,transparent 0 ${edge},${backgroundColor} ${edge});padding-left:${edge};text-indent:-${edge}`;
 }
 
 function ansiLineBackgrounds(lines) {
@@ -1973,8 +2067,10 @@ function ansiLineBackgrounds(lines) {
   return backgrounds;
 }
 
-function terminalHtml(text, normalizeCodexLightRows = false) {
-  const lines = restoreAgentActivityColors(text).split('\n');
+function terminalHtml(text, normalizeCodexLightRows = false, restoreClaudeHeadings = false) {
+  let coloredText = restoreAgentActivityColors(text);
+  if (restoreClaudeHeadings) coloredText = restoreClaudeHeadingColors(coloredText);
+  const lines = coloredText.split('\n');
   const backgrounds = ansiLineBackgrounds(lines);
   return lines.map((line, index) => {
     if (line === TERMINAL_SEPARATOR_TOKEN) {
@@ -1984,7 +2080,7 @@ function terminalHtml(text, normalizeCodexLightRows = false) {
     const normalizeRow = normalizeCodexLightRows && isNearWhiteAnsiColor(sourceBackground);
     const backgroundColor = normalizedAnsiBackground(sourceBackground, normalizeRow);
     const backgroundClass = backgroundColor ? ' ansi-line-background' : '';
-    const backgroundStyle = backgroundColor ? ` style="background-color:${backgroundColor}"` : '';
+    const backgroundStyle = backgroundColor ? ` style="${ansiLineBackgroundStyle(line, backgroundColor)}"` : '';
     return `<span class="ansi-line${backgroundClass}"${backgroundStyle}>${ansiToHtml(trimAnsiLineEnd(line), normalizeRow)}</span>`;
   }).join('');
 }
@@ -2029,8 +2125,18 @@ function displayName(agent) {
   return context ? `${name} · ${context}` : name;
 }
 
+function agentUpdatedAt(agent) {
+  const value = Number(agent && agent.updated_at);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function compareAgentUpdatedAt(a, b) {
+  return agentUpdatedAt(b) - agentUpdatedAt(a);
+}
+
 function sortedAgents(list) {
   return [...list].sort((a, b) =>
+    compareAgentUpdatedAt(a, b) ||
     hostLabel(a).localeCompare(hostLabel(b)) ||
     agentContextLabel(a).localeCompare(agentContextLabel(b)) ||
     (a.project || a.agent || '').localeCompare(b.project || b.agent || '') ||

@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-echo "🐑 Herdr Mobile Relay setup"
+echo "🐑 Herdr Mobile Relay quick start"
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -33,11 +33,11 @@ ensure_relay_env "$ENV_FILE"
 load_relay_env "$ENV_FILE"
 
 if ! command -v uv >/dev/null 2>&1; then
-    echo "✗ uv is required. Run make setup for installation guidance."
+    echo "✗ uv is required. Run make quick-start to install missing tools."
     exit 1
 fi
 if ! command -v herdr >/dev/null 2>&1 && [ -z "${HERDR_BIN:-}" ]; then
-    echo "✗ herdr is required. Run make setup for installation guidance."
+    echo "✗ herdr is required. Run make quick-start to install missing tools."
     exit 1
 fi
 PORT="${HERDR_RELAY_PORT:-8375}"
@@ -62,7 +62,7 @@ fi
 if command -v cloudflared >/dev/null 2>&1; then
     echo "▸ Starting Cloudflare tunnel..."
     LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/herdr-cloudflared.XXXXXX")"
-    cloudflared tunnel --url "http://$TUNNEL_TARGET_HOST:$PORT" >"$LOG_FILE" 2>&1 &
+    cloudflared tunnel --config /dev/null --url "http://$TUNNEL_TARGET_HOST:$PORT" >"$LOG_FILE" 2>&1 &
     TUNNEL_PID=$!
 
     URL=""
@@ -85,15 +85,64 @@ if command -v cloudflared >/dev/null 2>&1; then
         exit 1
     fi
 
+    # Quick-tunnel DNS takes a few seconds to go live after cloudflared prints
+    # the URL. Opening the link too early makes some home routers cache the
+    # miss for up to 30 minutes, so wait until the name resolves publicly
+    # before showing it. DNS-over-HTTPS keeps the local resolver untouched
+    # until then.
+    TUNNEL_HOST="${URL#https://}"
+    echo "▸ Waiting for the tunnel hostname to go live..."
+    DNS_READY=""
+    for _ in $(seq 1 30); do
+        if curl -fsS --max-time 5 -H 'accept: application/dns-json' \
+                "https://cloudflare-dns.com/dns-query?name=$TUNNEL_HOST&type=A" 2>/dev/null \
+                | grep -q '"Answer"'; then
+            DNS_READY=1
+            break
+        fi
+        sleep 2
+    done
+    if [ -z "$DNS_READY" ]; then
+        echo "  Warning: the tunnel hostname does not resolve yet. If the link"
+        echo "  does not open on your phone, wait a minute and scan again."
+    fi
+
+    HOST_LABEL="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo relay)"
+    SETUP_FRAGMENT="$(uv run python -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"setup": sys.argv[1], "label": sys.argv[2]}))' "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
+    PHONE_URL="$URL/#$SETUP_FRAGMENT"
+
+    # QR code of the setup link, so phones can scan instead of typing. Empty on
+    # failure (e.g. offline before segno is cached); the link below still works.
+    QR_CODE="$(uv run --quiet --with segno python -c '
+import io, sys
+import segno
+buf = io.StringIO()
+segno.make(sys.argv[1]).terminal(out=buf, compact=True, border=2)
+sys.stdout.write("\n".join("  " + line for line in buf.getvalue().splitlines()))
+' "$PHONE_URL" 2>/dev/null || true)"
+
     echo ""
     echo "✓ Relay ready!"
     echo ""
-    echo "  Tunnel URL: $URL"
-    echo "  WebSocket:  wss://$(echo $URL | sed 's|https://||')"
-    echo "  Token:      $HERDR_RELAY_TOKEN"
+    if [ -n "$QR_CODE" ]; then
+        echo "  Scan this QR code with your phone camera:"
+        echo ""
+        printf '%s\n' "$QR_CODE"
+        echo ""
+        echo "  Or open this private setup link on your phone:"
+    else
+        echo "  Open this private setup link on your phone:"
+    fi
+    echo "  $PHONE_URL"
     echo ""
-    echo "  → Open your deployed web app on your phone"
-    echo "  → Paste the WebSocket URL and Token in Settings"
+    echo "  The phone app and relay are both served by this tunnel."
+    echo "  The link configures this relay automatically and removes the token from the address bar."
+    echo "  Keep this terminal open; press Ctrl-C here to stop the quick start."
+    echo ""
+    echo "  Manual setup details:"
+    echo "  Tunnel URL: $URL"
+    echo "  WebSocket:  wss://${URL#https://}"
+    echo "  Token:      $HERDR_RELAY_TOKEN"
     echo ""
 
     if ! wait "$TUNNEL_PID"; then
@@ -105,7 +154,7 @@ if command -v cloudflared >/dev/null 2>&1; then
     fi
 else
     echo ""
-    echo "✓ Relay running on ws://$HOST:$PORT"
+    echo "✓ Relay and phone app running on http://$HOST:$PORT"
     echo "  Token: $HERDR_RELAY_TOKEN"
     echo ""
     echo "  Install cloudflared for remote access:"

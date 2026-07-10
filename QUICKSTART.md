@@ -1,53 +1,101 @@
 # Herdr Mobile Relay Quick Start
 
-Get mobile approval for local Herdr agents with a temporary Cloudflare quick tunnel.
+This is the beginner path. It gets one Linux or macOS computer connected to one phone before asking you to configure permanent domains or background services.
 
 > [!IMPORTANT]
-> Herdr Mobile Relay currently supports only Linux and macOS. Windows is not supported.
+> Windows is not currently supported.
 
-## 1. Prepare the repository
+## Before You Start
+
+You need Git, Make, and `curl`. Most developer-oriented Linux and macOS computers already have them. Check with:
 
 ```bash
-git clone https://github.com/0cv/herdr-mobile-relay.git
-cd herdr-mobile-relay
+git --version && make --version && curl --version
+```
+
+You do **not** need a Cloudflare account, domain, existing Python installation, Node.js, or separately hosted web app for this trial. Cloudflare describes [TryCloudflare quick tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) as free testing tunnels that create temporary random hostnames without moving a domain to Cloudflare.
+
+## 1. Paste One Command
+
+```bash
+git clone https://github.com/0cv/herdr-mobile-relay.git && cd herdr-mobile-relay && make quick-start
+```
+
+The command:
+
+1. Creates a private relay token and minimal local configuration.
+2. Detects Herdr, `uv`, and `cloudflared`.
+3. Offers to install anything missing using the tools' official installers or release binaries.
+4. Starts the relay and serves the phone app from it.
+5. Starts a temporary Cloudflare quick tunnel.
+
+If it asks to install missing tools, type `y` and press Enter. Installation is for your user account; the script does not need `sudo`.
+
+## 2. Scan the QR Code (or Open the Phone Setup Link)
+
+After startup, the terminal shows something like:
+
+```text
+✓ Relay ready!
+
+  Scan this QR code with your phone camera:
+
+  [QR code]
+
+  Or open this private setup link on your phone:
+  https://example.trycloudflare.com/#setup=...&label=...
+```
+
+Point your phone camera at the QR code and open the link it offers—that is the whole setup. (If the QR code does not appear or does not scan, open the printed HTTPS link on your phone instead; it is the same link.) The app saves the relay URL and token in that browser and connects automatically—there is nothing to paste into Settings. The token is carried in the URL fragment, which browsers do not send to the server, and the app removes the fragment from the address bar immediately after importing it.
+
+Do not share the setup link or a photo of the QR code: anyone who has both the tunnel URL and token can control agents exposed by that relay.
+
+## 3. Use It
+
+Keep the quick-start terminal open. In another terminal, run Herdr and your normal coding agent, or tap **＋** in the phone app to start an installed Codex, Claude Code, or OpenCode agent in a selected project directory.
+
+The quick tunnel stops when you press Ctrl-C or close its terminal. The next `make quick-start` keeps the same relay token but creates a new random tunnel URL, so open the newly printed Phone setup link.
+
+## If It Does Not Work
+
+Run the non-installing prerequisite check:
+
+```bash
 make setup
 ```
 
-`make setup` creates the local web and relay config files, generates the relay token, and reports any missing prerequisites. See the [README requirements](README.md#requirements) for details.
+Common issues:
 
-## 2. Deploy the phone app
+- **`git`, `make`, or `curl` is missing:** install it with your operating system's package manager, then rerun the one-command quick start.
+- **Port 8375 is already in use:** stop the existing relay or service, then rerun the command.
+- **The phone link times out:** keep the terminal open and check whether `cloudflared` printed a connectivity error.
+- **The link or QR code never loads (site cannot be reached):** some home routers cache a failed DNS lookup for up to 30 minutes if the tunnel hostname is opened before its DNS record goes live. The quick start now waits for the hostname to resolve before printing the QR code, but if you still hit this: press Ctrl-C and rerun `make quick-start` (each run gets a fresh hostname), or switch the phone to mobile data for the first open.
+- **The app opens but does not connect:** reopen the complete newly printed link, including the `#setup=...` fragment.
+- **macOS blocks a project folder:** choose a non-protected project folder or grant the Herdr relay process the appropriate Files and Folders permission.
 
-Host `web/` on any HTTPS static host, or deploy it to Cloudflare Pages:
+## Make It Permanent
 
-```bash
-# edit WEB_PROJECT in .env first if needed
-make web-deploy
-```
+TryCloudflare quick tunnels are intended for testing, have no uptime guarantee, and change hostname when restarted. For everyday use:
 
-## 3. Start the relay and tunnel
+1. Create a Cloudflare account and put a domain on Cloudflare.
 
-```bash
-make quick-start
-```
+   > [!TIP]
+   > An available all-numeric `.xyz` domain with 6–9 digits typically costs about $1 per year through Cloudflare Registrar. The `.xyz` registry lists this numeric class at $0.99/year, and Cloudflare sells domains at registry cost without markup. Verify the current price at checkout.
 
-The command prints:
-
-```text
-Tunnel URL: https://example.trycloudflare.com
-WebSocket:  wss://example.trycloudflare.com
-Token:      0123456789abcdef0123456789abcdef
-```
-
-Quick tunnel hostnames are temporary and change when the tunnel restarts. The token is stored in `relay/.env` and reused on later quick-start runs.
-
-## 4. Connect the phone app
-
-Open the deployed web app on your phone. In Settings, add the printed `wss://...trycloudflare.com` URL and token. Install the app from Safari's Share menu on iPhone/iPad or Chrome's install menu on Android.
-
-For permanent hostnames and background startup, follow [Stable Hostnames](README.md#stable-hostnames) and then run the platform-detecting service installer:
+2. Follow the README's [Stable Hostnames](README.md#stable-hostnames) section once per computer.
+3. Install the platform background service:
 
 ```bash
 make service-install
 ```
 
-Repeat the relay setup on each Linux or macOS computer and add every relay URL in Settings; the browser merges their agents client-side.
+Repeat the relay setup on each Linux or macOS computer. You can add every stable relay URL in the same phone app; agents are merged client-side.
+
+## Optional: Host the App Separately
+
+The relay-served app is sufficient for the quick start and stable single-relay setup. For an app origin that remains available independently of any relay—especially with multiple computers—host `web/` on any HTTPS static host. Cloudflare Pages deployment requires a Cloudflare account plus Node.js/npm:
+
+```bash
+# Edit WEB_PROJECT in .env first if needed.
+make web-deploy
+```

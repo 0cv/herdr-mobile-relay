@@ -22,6 +22,8 @@ this.ansi256Color = ansi256Color;
 this.ansiToHtml = ansiToHtml;
 this.isNearWhiteAnsiColor = isNearWhiteAnsiColor;
 this.ansiLineBackground = ansiLineBackground;
+this.ansiLineBackgroundIndent = ansiLineBackgroundIndent;
+this.ansiLineBackgroundStyle = ansiLineBackgroundStyle;
 this.ansiLineBackgrounds = ansiLineBackgrounds;
 this.terminalHtml = terminalHtml;
 `, sandbox);
@@ -41,6 +43,35 @@ assert.match(background, /background-color:rgb\(255,0,0\)/);
 const explored = sandbox.terminalHtml('\x1b[1mExplored\x1b[0m');
 assert.match(explored, /font-weight:700;color:#5fafff[^>]*>Explored/);
 
+const claudeHeading = sandbox.terminalHtml(
+  '  \x1b[0m\x1b[1mWhat happened:\x1b[0m normal explanation',
+  false,
+  true
+);
+assert.match(claudeHeading, /font-weight:700;color:rgb\(56,162,223\)[^>]*>What happened:/);
+const claudeSplitColonHeading = sandbox.terminalHtml(
+  '  \x1b[0m\x1b[1mThe fix in start.sh\x1b[0m: normal explanation',
+  false,
+  true
+);
+assert.match(claudeSplitColonHeading, /font-weight:700;color:rgb\(56,162,223\)[^>]*>The fix in start\.sh:/);
+const claudeEmphasis = sandbox.terminalHtml('\x1b[1mRoot cause found and fixed.\x1b[0m', false, true);
+assert.match(claudeEmphasis, /font-weight:700[^>]*>Root cause found and fixed/);
+assert.doesNotMatch(claudeEmphasis, /color:rgb\(56,162,223\)/);
+const claudeStandaloneHeading = sandbox.terminalHtml('  \x1b[0m\x1b[1mCode style\x1b[0m\n', false, true);
+assert.match(claudeStandaloneHeading, /font-weight:700;color:rgb\(56,162,223\)[^>]*>Code style/);
+const claudeListLeadIn = sandbox.terminalHtml(
+  '  - \x1b[0m\x1b[1mReconnect is a fixed 3-second loop forever.\x1b[0m Normal explanation',
+  false,
+  true
+);
+assert.match(
+  claudeListLeadIn,
+  /font-weight:700;color:rgb\(56,162,223\)[^>]*>Reconnect is a fixed 3-second loop forever\./
+);
+const claudeBulletEmphasis = sandbox.terminalHtml('• \x1b[1mImportant emphasis.\x1b[0m\n', false, true);
+assert.doesNotMatch(claudeBulletEmphasis, /color:rgb\(56,162,223\)/);
+
 const prompt = sandbox.terminalHtml([
   '\x1b[48;2;61;64;64m› First prompt paragraph   \x1b[0m',
   '\r',
@@ -50,6 +81,26 @@ assert.equal(sandbox.ansiLineBackground('\x1b[48;2;61;64;64m› Prompt\x1b[0m'),
 assert.match(prompt, /class="ansi-line ansi-line-background" style="background-color:rgb\(61,64,64\)"/);
 assert.equal((prompt.match(/class="ansi-line ansi-line-background"/g) || []).length, 3);
 assert.doesNotMatch(prompt, /paragraph {3}/);
+
+const claudeToolHeader = sandbox.terminalHtml(
+  '\x1b[0m\x1b[38;2;78;186;101m● \x1b[0m\x1b[1mUpdate\x1b[0m(relay/start.sh)',
+  false,
+  true
+);
+assert.doesNotMatch(claudeToolHeader, /background-color|background-image/);
+assert.match(claudeToolHeader, /color:rgb\(78,186,101\)[^>]*>●/);
+
+const claudeDiff = sandbox.terminalHtml(
+  '     \x1b[38;2;80;200;80m\x1b[48;2;2;40;0m  88 +\x1b[0m\x1b[48;2;2;40;0m changed code\x1b[0m',
+  false,
+  true
+);
+assert.equal(
+  sandbox.ansiLineBackground('     \x1b[38;2;80;200;80m\x1b[48;2;2;40;0m  88 +\x1b[0m'),
+  'rgb(2,40,0)'
+);
+assert.match(claudeDiff, /background-image:linear-gradient\(to right,transparent 0 5ch,rgb\(2,40,0\) 5ch\)/);
+assert.match(claudeDiff, /padding-left:5ch;text-indent:-5ch/);
 
 const separateBlocks = sandbox.ansiLineBackgrounds([
   '\x1b[48;5;1mFirst block\x1b[0m',

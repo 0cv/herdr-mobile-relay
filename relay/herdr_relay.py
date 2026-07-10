@@ -6,6 +6,7 @@
 """Herdr Mobile Relay server — polls local herdr and broadcasts to clients."""
 import asyncio
 import base64
+import difflib
 import hmac
 import json
 import os
@@ -66,9 +67,21 @@ PUSH_LOCK = threading.RLock()
 ACTIVITY_FILE = Path.home() / ".cache" / "herdr-mobile-relay" / "activity.jsonl"
 ACTIVITY_MAX_ITEMS = 500
 ACTIVITY_LOCK = threading.RLock()
+CLAUDE_HISTORY_MAX_LINES = 500
+CLAUDE_HISTORY_FOOTER_LINES = 6
+CLAUDE_HISTORY_CAPTURE_INTERVAL = 4.0
 UPLOAD_DIR = Path.home() / ".cache" / "herdr-mobile-relay" / "uploads"
 UPLOAD_MAX_BYTES = 10 * 1024 * 1024
 WS_MAX_SIZE = max(16 * 1024 * 1024, UPLOAD_MAX_BYTES * 2 + 1024 * 1024)
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+WEB_ASSET_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".webmanifest": "application/manifest+json; charset=utf-8",
+}
 IMAGE_MIME_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -112,6 +125,12 @@ COMMAND_RE = re.compile(r"^\s*(?:[$>]|\u276f|\u203a)\s+(.+?)\s*$")
 
 clients = set()
 last_statuses = {}
+agent_activity_state = {}
+agent_activity_initialized = False
+agent_types = {}
+claude_history_state = {}
+claude_history_capture_times = {}
+claude_history_inflight = set()
 event_queue = asyncio.Queue()
 
 
@@ -169,6 +188,7 @@ def get_agents():
             raw_pane_id = p["pane_id"]
             tab_id = p.get("tab_id", "")
             tab = tabs.get(tab_id, {})
+            scroll = p.get("scroll") if isinstance(p.get("scroll"), dict) else {}
             agents.append(
                 {
                     "pane_id": raw_pane_id,
@@ -184,11 +204,168 @@ def get_agents():
                     "cwd": p.get("cwd", ""),
                     "project": os.path.basename(p.get("cwd", "")),
                     "host": LOCAL_HOST,
+                    "_activity_fingerprint": (
+                        p.get("agent_status", "unknown"),
+                        p.get("revision"),
+                        scroll.get("max_offset_from_bottom"),
+                        p.get("foreground_cwd", ""),
+                        p.get("cwd", ""),
+                        p.get("name") or p.get("label") or "",
+                    ),
                 }
             )
         return agents
     except (json.JSONDecodeError, KeyError):
         return None
+
+
+def now_millis():
+    return int(time.time() * 1000)
+
+
+def touch_agent_activity(pane_id, timestamp=None):
+    if not pane_id:
+        return int(now_millis() if timestamp is None else timestamp)
+    updated_at = int(now_millis() if timestamp is None else timestamp)
+    state = agent_activity_state.get(pane_id)
+    if state:
+        state["updated_at"] = updated_at
+    else:
+        agent_activity_state[pane_id] = {"fingerprint": None, "updated_at": updated_at}
+    return updated_at
+
+
+def stamp_agent_activity(agents, timestamp=None):
+    global agent_activity_initialized
+    updated_at = int(now_millis() if timestamp is None else timestamp)
+    initial_snapshot = not agent_activity_initialized
+    live_pane_ids = set()
+    for agent in agents:
+        pane_id = agent.get("pane_id", "")
+        fingerprint = agent.pop("_activity_fingerprint", None)
+        if not pane_id:
+            agent["updated_at"] = updated_at
+            continue
+        live_pane_ids.add(pane_id)
+        state = agent_activity_state.get(pane_id)
+        if state is None:
+            state = {
+                "fingerprint": fingerprint,
+                "updated_at": 0 if initial_snapshot else updated_at,
+            }
+            agent_activity_state[pane_id] = state
+        elif state["fingerprint"] is None:
+            state["fingerprint"] = fingerprint
+        elif state["fingerprint"] != fingerprint:
+            state["fingerprint"] = fingerprint
+            state["updated_at"] = updated_at
+        agent["updated_at"] = state["updated_at"]
+
+    for pane_id in set(agent_activity_state) - live_pane_ids:
+        del agent_activity_state[pane_id]
+    agent_activity_initialized = True
+    return agents
+
+
+def normalized_history_line(line):
+    return ANSI_RE.sub("", str(line or "")).replace("\r", "").rstrip()
+
+
+def claude_sequence_match(previous, current):
+    previous_keys = [normalized_history_line(line) for line in previous]
+    current_keys = [normalized_history_line(line) for line in current]
+    matcher = difflib.SequenceMatcher(None, previous_keys, current_keys, autojunk=False)
+    candidates = []
+    for match in matcher.get_matching_blocks():
+        if match.size < 2:
+            continue
+        nonempty = sum(bool(value.strip()) for value in previous_keys[match.a:match.a + match.size])
+        if nonempty >= 2:
+            candidates.append(match)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda match: (match.size, -abs(match.a - match.b)))
+
+
+def split_claude_snapshot(snapshot):
+    if len(snapshot) <= CLAUDE_HISTORY_FOOTER_LINES * 2:
+        return snapshot, []
+    return snapshot[:-CLAUDE_HISTORY_FOOTER_LINES], snapshot[-CLAUDE_HISTORY_FOOTER_LINES:]
+
+
+def claude_history_content(state, limit=CLAUDE_HISTORY_MAX_LINES):
+    try:
+        limit = min(max(int(limit), 1), CLAUDE_HISTORY_MAX_LINES)
+    except (TypeError, ValueError):
+        limit = CLAUDE_HISTORY_MAX_LINES
+    combined = state.get("history", []) + state.get("footer", [])
+    return "\n".join(combined[-limit:])
+
+
+def merge_claude_history(pane_id, content, limit=CLAUDE_HISTORY_MAX_LINES):
+    try:
+        limit = min(max(int(limit), 1), CLAUDE_HISTORY_MAX_LINES)
+    except (TypeError, ValueError):
+        limit = CLAUDE_HISTORY_MAX_LINES
+    current = str(content or "").splitlines()
+    if not current:
+        return ""
+    current_body, current_footer = split_claude_snapshot(current)
+
+    state = claude_history_state.get(pane_id)
+    if state is None:
+        state = {
+            "history": current_body,
+            "footer": current_footer,
+            "snapshot": current,
+        }
+        claude_history_state[pane_id] = state
+    else:
+        history = state["history"]
+        if state["snapshot"] != current:
+            match = claude_sequence_match(history, current_body)
+            if match:
+                history_end = match.a + match.size
+                current_end = match.b + match.size
+                current_suffix = current_body[current_end:]
+                history_tail = len(history) - history_end
+                if current_suffix and history_tail <= 3:
+                    state["history"] = history[:history_end] + current_suffix
+            elif current_body:
+                state["history"].extend(current_body)
+            state["footer"] = current_footer
+            state["snapshot"] = current
+
+    history_capacity = max(0, CLAUDE_HISTORY_MAX_LINES - len(state["footer"]))
+    state["history"] = state["history"][-history_capacity:] if history_capacity else []
+    return claude_history_content(state, limit)
+
+
+async def capture_claude_history(pane_id):
+    claude_history_inflight.add(pane_id)
+    try:
+        content = await run_herdr_async(
+            "pane", "read", pane_id,
+            "--lines", str(CLAUDE_HISTORY_MAX_LINES),
+            "--source", "recent-unwrapped",
+            "--format", "ansi",
+        )
+        if content and "claude" in agent_types.get(pane_id, ""):
+            merge_claude_history(pane_id, content)
+    finally:
+        claude_history_inflight.discard(pane_id)
+
+
+def schedule_claude_history_capture(agent, timestamp=None):
+    pane_id = agent.get("pane_id", "")
+    if not pane_id or "claude" not in str(agent.get("agent") or "").lower():
+        return
+    now = time.monotonic() if timestamp is None else float(timestamp)
+    last_capture = claude_history_capture_times.get(pane_id, 0.0)
+    if pane_id in claude_history_inflight or now - last_capture < CLAUDE_HISTORY_CAPTURE_INTERVAL:
+        return
+    claude_history_capture_times[pane_id] = now
+    asyncio.create_task(capture_claude_history(pane_id))
 
 
 def read_pane(pane_id):
@@ -471,7 +648,7 @@ def trim_activity_file():
 def record_activity(kind, status, summary, pane_id="", agent="", project="", request_id="", details=None):
     entry = {
         "id": secrets.token_urlsafe(12),
-        "timestamp": int(time.time() * 1000),
+        "timestamp": now_millis(),
         "kind": compact_text(kind, 40),
         "status": compact_text(status, 24),
         "summary": compact_text(summary, 240),
@@ -504,6 +681,8 @@ def record_activity(kind, status, summary, pane_id="", agent="", project="", req
 
 async def publish_activity(*args, **kwargs):
     entry = await asyncio.to_thread(record_activity, *args, **kwargs)
+    if entry.get("pane_id"):
+        touch_agent_activity(entry["pane_id"], entry["timestamp"])
     await broadcast({"type": "activity", "activity": entry})
     return entry
 
@@ -702,7 +881,7 @@ async def push_blocked(blocked_msg):
 async def publish_blocked(blocked_msg):
     blocked_msg = dict(blocked_msg)
     blocked_msg.setdefault("event_id", secrets.token_urlsafe(12))
-    await publish_activity(
+    activity = await publish_activity(
         "blocked",
         "attention",
         blocked_msg.get("command") or "Agent needs approval",
@@ -711,6 +890,7 @@ async def publish_blocked(blocked_msg):
         project=blocked_msg.get("project", ""),
         details={"event_id": blocked_msg["event_id"]},
     )
+    blocked_msg["updated_at"] = activity["timestamp"]
     await broadcast(blocked_msg)
     asyncio.create_task(push_blocked(blocked_msg))
 
@@ -777,14 +957,23 @@ async def poll_loop():
         if agents is None:
             await asyncio.sleep(POLL_INTERVAL)
             continue
-        await broadcast({"type": "agents", "agents": agents})
+        stamp_agent_activity(agents)
         live_pane_ids = {a["pane_id"] for a in agents}
+        agent_types.clear()
+        agent_types.update({a["pane_id"]: str(a.get("agent") or "").lower() for a in agents})
+        for pane_id in set(claude_history_state) - live_pane_ids:
+            del claude_history_state[pane_id]
+        for pane_id in set(claude_history_capture_times) - live_pane_ids:
+            claude_history_capture_times.pop(pane_id, None)
+        await broadcast({"type": "agents", "agents": agents})
         for pane_id in set(last_statuses) - live_pane_ids:
             del last_statuses[pane_id]
         if agents:
             for a in agents:
                 pid, status = a["pane_id"], a["status"]
                 previous_status = last_statuses.get(pid)
+                if status in {"working", "blocked"} or previous_status != status:
+                    schedule_claude_history_capture(a)
                 if status == "blocked" and previous_status != "blocked":
                     await publish_agent_blocked(a)
                 elif previous_status == "blocked" and status != "blocked":
@@ -810,6 +999,12 @@ async def event_push():
             await publish_agent_status({**event, "pane_id": raw_pane_id}, status)
 
         if raw_pane_id and event.get("type") == "agent_event":
+            updated_at = touch_agent_activity(raw_pane_id)
+            schedule_claude_history_capture({
+                "pane_id": raw_pane_id,
+                "agent": event.get("agent", ""),
+                "status": status,
+            })
             await broadcast({
                 "type": "agent_update",
                 "pane_id": raw_pane_id,
@@ -823,6 +1018,7 @@ async def event_push():
                 "cwd": event.get("cwd", ""),
                 "project": event.get("project", ""),
                 "host": host,
+                "updated_at": updated_at,
             })
 
 
@@ -870,31 +1066,64 @@ def is_loopback_host(host):
     return host in {"127.0.0.1", "localhost", "::1"}
 
 
+def is_websocket_upgrade(request):
+    return any(
+        key.lower() == "upgrade" and value.lower() == "websocket"
+        for key, value in request.headers.raw_items()
+    )
+
+
+def web_asset_path(request_path):
+    path = urllib.parse.urlsplit(request_path or "/").path
+    relative = "index.html" if path in {"", "/"} else path.lstrip("/")
+    root_assets = {"index.html", "manifest.webmanifest", "notification-icons.js", "sw.js"}
+    if relative not in root_assets and not relative.startswith("icons/"):
+        return None
+    try:
+        asset = (WEB_DIR / relative).resolve()
+        web_root = WEB_DIR.resolve()
+    except OSError:
+        return None
+    if not asset.is_relative_to(web_root) or not asset.is_file():
+        return None
+    return asset
+
+
 async def process_request(connection, request):
-    """Authenticate WebSocket upgrades and answer HTTP health checks."""
+    """Serve the phone app over HTTP and authenticate WebSocket upgrades."""
     from websockets.http11 import Response
     from websockets.datastructures import Headers
 
-    if not origin_allowed(request):
-        headers = Headers([("Content-Type", "text/plain")])
-        return Response(403, "Forbidden", headers, b"Origin not allowed\n")
-
-    if AUTH_TOKEN:
-        token = request_token(request)
-        if not token_matches(token):
+    if is_websocket_upgrade(request):
+        if not origin_allowed(request):
+            headers = Headers([("Content-Type", "text/plain")])
+            return Response(403, "Forbidden", headers, b"Origin not allowed\n")
+        if AUTH_TOKEN and not token_matches(request_token(request)):
             headers = Headers([("Content-Type", "text/plain")])
             return Response(401, "Unauthorized", headers, b"Invalid token\n")
+        return None
 
-    # Check if this is a WebSocket upgrade
-    upgrade = None
-    for key, value in request.headers.raw_items():
-        if key.lower() == "upgrade":
-            upgrade = value.lower()
-    if upgrade == "websocket":
-        return None  # proceed with WebSocket handshake
+    path = urllib.parse.urlsplit(request.path or "/").path
+    if path == "/health":
+        headers = Headers([("Content-Type", "text/plain; charset=utf-8")])
+        return Response(200, "OK", headers, b"ok\n")
 
-    headers = Headers()
-    return Response(200, "OK", headers, b"ok\n")
+    asset = web_asset_path(request.path)
+    if not asset:
+        headers = Headers([("Content-Type", "text/plain; charset=utf-8")])
+        return Response(404, "Not Found", headers, b"Not found\n")
+    try:
+        body = asset.read_bytes()
+    except OSError:
+        headers = Headers([("Content-Type", "text/plain; charset=utf-8")])
+        return Response(404, "Not Found", headers, b"Not found\n")
+    content_type = WEB_ASSET_CONTENT_TYPES.get(asset.suffix.lower(), "application/octet-stream")
+    headers = Headers([
+        ("Content-Type", content_type),
+        ("Cache-Control", "no-cache"),
+        ("X-Content-Type-Options", "nosniff"),
+    ])
+    return Response(200, "OK", headers, body)
 
 
 def request_id_for(msg):
@@ -1370,7 +1599,10 @@ async def handle_client(ws):
                 pane_id = msg.get("pane_id")
                 if not pane_id:
                     continue
-                lines = msg.get("lines", "30")
+                try:
+                    lines = min(max(int(msg.get("lines", 30)), 1), CLAUDE_HISTORY_MAX_LINES)
+                except (TypeError, ValueError):
+                    lines = 30
                 fmt = "ansi" if msg.get("format") == "ansi" else "text"
                 content = await run_herdr_async(
                     "pane", "read", pane_id,
@@ -1378,6 +1610,12 @@ async def handle_client(ws):
                     "--source", "recent-unwrapped",
                     "--format", fmt,
                 )
+                if fmt == "ansi" and "claude" in agent_types.get(pane_id, ""):
+                    state = claude_history_state.get(pane_id)
+                    if state is not None and last_statuses.get(pane_id) not in {"working", "blocked"}:
+                        content = claude_history_content(state, lines)
+                    else:
+                        content = merge_claude_history(pane_id, content, lines)
                 await safe_send_json(ws, {"type": "pane_content", "pane_id": pane_id, "content": content or "", "format": fmt})
             elif msg_type == "submit_prompt":
                 await handle_submit_prompt_command(ws, msg)
@@ -1455,7 +1693,7 @@ async def main():
     asyncio.create_task(poll_loop())
     asyncio.create_task(event_push())
     server = await serve(handle_client, WS_HOST, WS_PORT, process_request=process_request, max_size=WS_MAX_SIZE)
-    print(f"Herdr Mobile Relay on {WS_HOST}:{WS_PORT} (WebSocket + HTTP health check)")
+    print(f"Herdr Mobile Relay on {WS_HOST}:{WS_PORT} (WebSocket + phone app)")
     print(f"  polling: {LOCAL_HOST}")
     stop = loop.create_future()
     def request_stop():
