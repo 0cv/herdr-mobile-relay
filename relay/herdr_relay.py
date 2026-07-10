@@ -15,6 +15,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -351,6 +352,15 @@ def load_agent_profiles():
     return profiles
 
 
+def directory_is_browsable(path):
+    try:
+        with os.scandir(path) as entries:
+            next(entries, None)
+        return True
+    except OSError:
+        return False
+
+
 def list_project_directory(value=""):
     try:
         home = Path.home().resolve()
@@ -364,6 +374,10 @@ def list_project_directory(value=""):
     directories = []
     try:
         children = list(current.iterdir())
+    except PermissionError:
+        if sys.platform == "darwin":
+            return None, "macOS denied access to this directory"
+        return None, "Permission denied while reading this directory"
     except OSError:
         return None, "Working directory could not be read"
 
@@ -377,6 +391,8 @@ def list_project_directory(value=""):
         if not resolved.is_dir() or not resolved.is_relative_to(home):
             continue
         if not os.access(resolved, os.R_OK | os.X_OK):
+            continue
+        if not directory_is_browsable(resolved):
             continue
         directories.append({"name": child.name, "path": str(resolved)})
 

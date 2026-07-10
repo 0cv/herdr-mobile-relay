@@ -81,13 +81,24 @@ class RelayHelpersTest(unittest.TestCase):
             home = Path(temp_dir)
             development = home / "Development"
             project = development / "relay"
+            downloads = home / "Downloads"
             hidden = home / ".private"
             outside_link = home / "outside"
-            for path in (project, hidden):
+            for path in (project, downloads, hidden):
                 path.mkdir(parents=True, exist_ok=True)
             outside_link.symlink_to(outside_dir, target_is_directory=True)
 
-            with patch.object(relay.Path, "home", return_value=home):
+            real_scandir = relay.os.scandir
+
+            def macos_scandir(path):
+                if Path(path) == downloads:
+                    raise PermissionError("Operation not permitted")
+                return real_scandir(path)
+
+            with (
+                patch.object(relay.Path, "home", return_value=home),
+                patch.object(relay.os, "scandir", side_effect=macos_scandir),
+            ):
                 root, root_error = relay.list_project_directory()
                 child, child_error = relay.list_project_directory(str(development))
                 outside, outside_error = relay.list_project_directory(outside_dir)
@@ -101,6 +112,19 @@ class RelayHelpersTest(unittest.TestCase):
         self.assertEqual(child["directories"], [{"name": "relay", "path": str(project)}])
         self.assertIsNone(outside)
         self.assertIn("home directory", outside_error)
+
+    def test_project_directory_navigation_reports_macos_privacy_denial(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            with (
+                patch.object(relay.Path, "home", return_value=home),
+                patch.object(relay.Path, "iterdir", side_effect=PermissionError("Operation not permitted")),
+                patch.object(relay.sys, "platform", "darwin"),
+            ):
+                listing, error = relay.list_project_directory()
+
+        self.assertIsNone(listing)
+        self.assertEqual(error, "macOS denied access to this directory")
 
     def test_project_directory_navigation_has_no_flat_catalog_limit(self):
         with tempfile.TemporaryDirectory() as temp_dir:
