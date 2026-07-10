@@ -54,6 +54,59 @@ load_relay_env() {
     set +a
 }
 
+host_label() {
+    hostname -s 2>/dev/null || hostname 2>/dev/null || echo relay
+}
+
+# Must never fail once uv is present: callers embed the result in the setup
+# link. The token passes through argv, briefly visible in ps; this matches the
+# pre-existing pattern and lasts only for the interpreter startup.
+build_setup_fragment() {
+    uv run python -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"setup": sys.argv[1], "label": sys.argv[2]}))' "$1" "$2"
+}
+
+# Prints an indented terminal QR code for the URL, or nothing when it cannot
+# be drawn: segno unavailable (e.g. offline before it is cached), or the
+# terminal is too narrow — a wrapped QR is worse than the plain link.
+# Callers must keep working with empty output. Kept separate from
+# build_setup_fragment on purpose: this call is allowed to fail, that one
+# is not.
+render_setup_qr() {
+    local url="$1"
+    local cols
+    cols="$(tput cols 2>/dev/null || true)"
+    uv run --quiet --with segno python -c '
+import io, sys
+import segno
+buf = io.StringIO()
+segno.make(sys.argv[1]).terminal(out=buf, compact=True, border=2)
+lines = ["  " + line for line in buf.getvalue().splitlines()]
+if max(map(len, lines)) > int(sys.argv[2]):
+    sys.exit(1)
+sys.stdout.write("\n".join(lines))
+' "$url" "${cols:-80}" 2>/dev/null || true
+}
+
+# Shared tail of quick-start and setup-link output: QR code when possible,
+# always the link.
+print_phone_setup() {
+    local phone_url="$1"
+    local qr_code
+    qr_code="$(render_setup_qr "$phone_url")"
+    if [ -n "$qr_code" ]; then
+        echo "  Scan this QR code with your phone camera:"
+        echo ""
+        printf '%s\n' "$qr_code"
+        echo ""
+        echo "  This code contains your relay token; do not share screenshots of it."
+        echo ""
+        echo "  Or open this private setup link on your phone:"
+    else
+        echo "  Open this private setup link on your phone:"
+    fi
+    echo "  $phone_url"
+}
+
 require_supported_platform() {
     case "$(uname -s)" in
         Darwin|Linux)

@@ -17,10 +17,10 @@ git clone https://github.com/0cv/herdr-mobile-relay.git && cd herdr-mobile-relay
 
 That command prepares the local configuration, offers to install missing Herdr, `uv`, and `cloudflared` tools for your user account, starts the relay, serves the phone app, and opens a free temporary Cloudflare tunnel. **A Cloudflare account, domain, Node.js, Python installation, and separate web deployment are not required for this first trial.**
 
-When it is ready, the terminal prints one private **Phone setup** link. Open that exact link on your phone; it loads the app and adds the relay automatically. Keep the terminal open while using the quick tunnel, and press Ctrl-C when finished.
+When it is ready, the terminal prints a **QR code** and the matching private **Phone setup** link. Scan the QR code with your phone camera, or open the exact link on your phone; either way the app loads and adds the relay automatically. Keep the terminal open while using the quick tunnel, and press Ctrl-C when finished.
 
 > [!CAUTION]
-> The setup link contains the relay token in its URL fragment. The fragment is not sent to the web server and the app removes it after importing, but you should still avoid sharing the original link.
+> The setup link — and therefore the QR code — contains the relay token in its URL fragment. The fragment is not sent to the web server and the app removes it after importing, but you should still avoid sharing the original link or a screenshot of the QR code.
 
 See the **[beginner-friendly QUICKSTART](QUICKSTART.md)** for screenshots-level steps, what the command installs, and troubleshooting. Once the trial works, move to a [stable hostname and background service](#stable-hostnames) for everyday use.
 
@@ -134,7 +134,7 @@ make web-deploy
 
 ### Install on Your Phone
 
-For the first trial, simply open the printed Phone setup link. Quick-tunnel hostnames change, so wait until you have a stable hostname or independently hosted app before treating the installation as permanent. Install the HTTPS app URL, not a `wss://` relay URL; the installed app keeps relay settings in browser local storage.
+For the first trial, simply scan the printed QR code or open the printed Phone setup link. Quick-tunnel hostnames change, so wait until you have a stable hostname or independently hosted app before treating the installation as permanent. Install the HTTPS app URL, not a `wss://` relay URL; the installed app keeps relay settings in browser local storage.
 
 On iPhone or iPad:
 
@@ -213,7 +213,15 @@ ingress:
   - service: http_status:404
 ```
 
-Use both relay URLs in the web app:
+Then add each relay to the phone the same way as the quick start — print its setup link and QR code on that computer:
+
+```bash
+make setup-link
+```
+
+It reads the token from `relay/.env` and the hostname from the cloudflared config, so scanning the QR code (or opening the link) adds the relay to the app automatically. The relay and tunnel must be running. If the hostname cannot be detected, pass it explicitly with `make setup-link HOST=relay-mac.yourdomain.com`.
+
+The setup link configures the app served at the relay's own hostname. If you installed the app from a separately hosted origin instead, add the relay in that app's Settings using the relay URLs:
 
 ```text
 wss://relay-mac.yourdomain.com

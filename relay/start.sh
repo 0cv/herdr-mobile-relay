@@ -91,49 +91,35 @@ if command -v cloudflared >/dev/null 2>&1; then
     # before showing it. DNS-over-HTTPS keeps the local resolver untouched
     # until then.
     TUNNEL_HOST="${URL#https://}"
-    echo "▸ Waiting for the tunnel hostname to go live..."
+    printf '▸ Waiting for the tunnel hostname to go live..'
     DNS_READY=""
-    for _ in $(seq 1 30); do
+    DNS_DEADLINE=$((SECONDS + 45))
+    while [ "$SECONDS" -lt "$DNS_DEADLINE" ]; do
         if curl -fsS --max-time 5 -H 'accept: application/dns-json' \
                 "https://cloudflare-dns.com/dns-query?name=$TUNNEL_HOST&type=A" 2>/dev/null \
                 | grep -q '"Answer"'; then
             DNS_READY=1
             break
         fi
+        printf '.'
         sleep 2
     done
-    if [ -z "$DNS_READY" ]; then
+    if [ -n "$DNS_READY" ]; then
+        echo " ✓"
+    else
+        echo ""
         echo "  Warning: the tunnel hostname does not resolve yet. If the link"
         echo "  does not open on your phone, wait a minute and scan again."
     fi
 
-    HOST_LABEL="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo relay)"
-    SETUP_FRAGMENT="$(uv run python -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"setup": sys.argv[1], "label": sys.argv[2]}))' "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
+    HOST_LABEL="$(host_label)"
+    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
     PHONE_URL="$URL/#$SETUP_FRAGMENT"
-
-    # QR code of the setup link, so phones can scan instead of typing. Empty on
-    # failure (e.g. offline before segno is cached); the link below still works.
-    QR_CODE="$(uv run --quiet --with segno python -c '
-import io, sys
-import segno
-buf = io.StringIO()
-segno.make(sys.argv[1]).terminal(out=buf, compact=True, border=2)
-sys.stdout.write("\n".join("  " + line for line in buf.getvalue().splitlines()))
-' "$PHONE_URL" 2>/dev/null || true)"
 
     echo ""
     echo "✓ Relay ready!"
     echo ""
-    if [ -n "$QR_CODE" ]; then
-        echo "  Scan this QR code with your phone camera:"
-        echo ""
-        printf '%s\n' "$QR_CODE"
-        echo ""
-        echo "  Or open this private setup link on your phone:"
-    else
-        echo "  Open this private setup link on your phone:"
-    fi
-    echo "  $PHONE_URL"
+    print_phone_setup "$PHONE_URL"
     echo ""
     echo "  The phone app and relay are both served by this tunnel."
     echo "  The link configures this relay automatically and removes the token from the address bar."

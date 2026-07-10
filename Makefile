@@ -7,7 +7,7 @@ WEB_PROJECT ?= herdr-mobile-relay
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup quick-start check test relay-run relay-plugin service-install service-uninstall service-status service-logs macos-service-install macos-service-uninstall macos-service-status macos-service-logs linux-service-install linux-service-uninstall linux-service-status linux-service-logs web-deploy web-preview
+.PHONY: help setup setup-link quick-start check test relay-run relay-plugin service-install service-uninstall service-status service-logs macos-service-install macos-service-uninstall macos-service-status macos-service-logs linux-service-install linux-service-uninstall linux-service-status linux-service-logs web-deploy web-preview
 
 help:
 	@echo "Common targets:"
@@ -15,6 +15,7 @@ help:
 	@echo "  make setup                      Prepare config and check prerequisites without installing"
 	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages (WEB_PROJECT=$(WEB_PROJECT))"
 	@echo "  make service-install            Install/start the relay service for this platform"
+	@echo "  make setup-link                 Print the phone setup link and QR code for a stable relay"
 	@echo "  make service-status             Show relay service status"
 	@echo "  make service-logs               Tail relay service logs"
 	@echo "  make service-uninstall          Stop/remove the relay service"
@@ -23,6 +24,9 @@ help:
 
 setup:
 	relay/setup.sh
+
+setup-link:
+	relay/setup-link.sh $(HOST)
 
 quick-start:
 	relay/setup.sh --install-missing

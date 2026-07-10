@@ -47,7 +47,7 @@ Do not share the setup link or a photo of the QR code: anyone who has both the t
 
 Keep the quick-start terminal open. In another terminal, run Herdr and your normal coding agent, or tap **＋** in the phone app to start an installed Codex, Claude Code, or OpenCode agent in a selected project directory.
 
-The quick tunnel stops when you press Ctrl-C or close its terminal. The next `make quick-start` keeps the same relay token but creates a new random tunnel URL, so open the newly printed Phone setup link.
+The quick tunnel stops when you press Ctrl-C or close its terminal. The next `make quick-start` keeps the same relay token but creates a new random tunnel URL, so scan the newly printed QR code (or open the new link).
 
 ## If It Does Not Work
 
@@ -62,7 +62,7 @@ Common issues:
 - **`git`, `make`, or `curl` is missing:** install it with your operating system's package manager, then rerun the one-command quick start.
 - **Port 8375 is already in use:** stop the existing relay or service, then rerun the command.
 - **The phone link times out:** keep the terminal open and check whether `cloudflared` printed a connectivity error.
-- **The link or QR code never loads (site cannot be reached):** some home routers cache a failed DNS lookup for up to 30 minutes if the tunnel hostname is opened before its DNS record goes live. The quick start now waits for the hostname to resolve before printing the QR code, but if you still hit this: press Ctrl-C and rerun `make quick-start` (each run gets a fresh hostname), or switch the phone to mobile data for the first open.
+- **The link or QR code never loads (site cannot be reached):** some home routers cache a failed DNS lookup for up to 30 minutes if the tunnel hostname is opened before its DNS record goes live. The quick start waits for the hostname to resolve before printing the QR code, so this should be rare. If it still happens, press Ctrl-C and rerun `make quick-start`; each run gets a fresh hostname. Switching the phone to mobile data for the first open also bypasses the router's cache.
 - **The app opens but does not connect:** reopen the complete newly printed link, including the `#setup=...` fragment.
 - **macOS blocks a project folder:** choose a non-protected project folder or grant the Herdr relay process the appropriate Files and Folders permission.
 
@@ -82,7 +82,15 @@ TryCloudflare quick tunnels are intended for testing, have no uptime guarantee, 
 make service-install
 ```
 
-Repeat the relay setup on each Linux or macOS computer. You can add every stable relay URL in the same phone app; agents are merged client-side.
+4. Add the stable relay to your phone the same way as the quick start:
+
+```bash
+make setup-link
+```
+
+This prints a QR code and setup link for the stable hostname; scanning it adds the relay to the app automatically.
+
+Repeat the relay setup on each Linux or macOS computer. You can add every stable relay to the same phone app; agents are merged client-side.
 
 ## Optional: Host the App Separately
 
