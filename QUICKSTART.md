@@ -33,20 +33,13 @@ If it asks to install missing tools, type `y` and press Enter. Installation is f
 
 ## 2. Scan the QR Code (or Open the Phone Setup Link)
 
-After startup, the terminal shows something like:
+After startup, the terminal shows a QR code and the matching Phone setup link:
 
-```text
-✓ Relay ready!
+<img src="images/quickstart.png" alt="Terminal output of make quick-start showing a QR code, the private phone setup link, and manual setup details" width="640">
 
-  Scan this QR code with your phone camera:
+Point your phone camera at the QR code and open the link it offers—that is the whole setup. The app opens, saves the relay URL and token, and connects automatically; there is nothing to type or paste into Settings. If the QR code does not appear or does not scan, open the printed HTTPS link on your phone instead—it is the same link.
 
-  [QR code]
-
-  Or open this private setup link on your phone:
-  https://example.trycloudflare.com/#setup=...&label=...
-```
-
-Point your phone camera at the QR code and open the link it offers—that is the whole setup. (If the QR code does not appear or does not scan, open the printed HTTPS link on your phone instead; it is the same link.) The app saves the relay URL and token in that browser and connects automatically—there is nothing to paste into Settings. The token is carried in the URL fragment, which browsers do not send to the server, and the app removes the fragment from the address bar immediately after importing it.
+The token is carried in the URL fragment, which browsers do not send to the server, and the app removes the fragment from the address bar immediately after importing it.
 
 Do not share the setup link or a photo of the QR code: anyone who has both the tunnel URL and token can control agents exposed by that relay.
 
