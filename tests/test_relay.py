@@ -1,9 +1,12 @@
 import importlib.util
 import json
+import os
 import tempfile
+import time
 import unittest
 import urllib.parse
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
@@ -36,6 +39,21 @@ class FakeRequest:
 
 
 class RelayHelpersTest(unittest.TestCase):
+    def test_protocol_v1_is_the_unversioned_positional_baseline(self):
+        self.assertEqual(relay.PROTOCOL_VERSION, 1)
+        self.assertEqual(relay.client_protocol_version({}), 1)
+        self.assertTrue(relay.client_protocol_matches({}))
+        self.assertFalse(relay.client_protocol_matches({"protocol": 2}))
+        self.assertFalse(relay.client_protocol_matches({"protocol": True}))
+
+    def test_relay_version_marks_a_modified_checkout_dirty(self):
+        results = [
+            SimpleNamespace(returncode=0, stdout="abc1234\n"),
+            SimpleNamespace(returncode=0, stdout=" M relay/herdr_relay.py\n"),
+        ]
+        with patch.object(relay.subprocess, "run", side_effect=results):
+            self.assertEqual(relay.detect_relay_version(), "abc1234-dirty")
+
     def test_relay_env_example_stays_minimal(self):
         env_example = RELAY_PATH.with_name(".env.example")
         keys = {
@@ -80,6 +98,27 @@ class RelayHelpersTest(unittest.TestCase):
 
             self.assertEqual([entry["summary"] for entry in entries], ["Second", "Third"])
             self.assertEqual(activity_file.stat().st_mode & 0o777, 0o600)
+
+    def test_prune_uploads_removes_only_stale_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            upload_dir = Path(temp_dir)
+            stale = upload_dir / "old.png"
+            fresh = upload_dir / "new.png"
+            stale.write_bytes(b"stale")
+            fresh.write_bytes(b"fresh")
+            stale_mtime = time.time() - (relay.UPLOAD_MAX_AGE_DAYS + 1) * 86400
+            os.utime(stale, (stale_mtime, stale_mtime))
+
+            with patch.object(relay, "UPLOAD_DIR", upload_dir):
+                removed = relay.prune_uploads()
+
+            self.assertEqual(removed, 1)
+            self.assertFalse(stale.exists())
+            self.assertTrue(fresh.exists())
+
+    def test_prune_uploads_tolerates_missing_directory(self):
+        with patch.object(relay, "UPLOAD_DIR", Path("/nonexistent/herdr-test-uploads")):
+            self.assertEqual(relay.prune_uploads(), 0)
 
     def test_agent_profiles_are_detected_from_installed_executables(self):
         def find_executable(name):
@@ -293,6 +332,32 @@ class RelayCommandsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(unauthorized.status_code, 401)
         self.assertIsNone(authorized)
+
+    async def test_health_preserves_plain_response_and_healthz_reports_details(self):
+        health = await relay.process_request(None, FakeRequest("/health"))
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.headers["Content-Type"], "text/plain; charset=utf-8")
+        self.assertEqual(health.body, b"ok\n")
+
+        healthz = await relay.process_request(None, FakeRequest("/healthz"))
+        self.assertEqual(healthz.status_code, 200)
+        self.assertEqual(healthz.headers["Content-Type"], "application/json; charset=utf-8")
+        payload = json.loads(healthz.body)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["protocol"], relay.PROTOCOL_VERSION)
+        self.assertEqual(payload["version"], relay.RELAY_VERSION)
+
+    async def test_incompatible_client_protocol_rejects_mutation(self):
+        ws = FakeWebSocket()
+        await relay.reject_incompatible_client_protocol(ws, {
+            "type": "submit_prompt",
+            "protocol": relay.PROTOCOL_VERSION + 1,
+            "request_id": "request-1",
+        })
+        self.assertEqual(ws.messages[0]["type"], "command_result")
+        self.assertEqual(ws.messages[0]["request_id"], "request-1")
+        self.assertFalse(ws.messages[0]["ok"])
+        self.assertIn("Incompatible app protocol", ws.messages[0]["error"])
 
     async def test_approval_reports_accepted_then_confirmed(self):
         ws = FakeWebSocket()

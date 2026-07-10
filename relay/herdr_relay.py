@@ -72,6 +72,7 @@ CLAUDE_HISTORY_FOOTER_LINES = 6
 CLAUDE_HISTORY_CAPTURE_INTERVAL = 4.0
 UPLOAD_DIR = Path.home() / ".cache" / "herdr-mobile-relay" / "uploads"
 UPLOAD_MAX_BYTES = 10 * 1024 * 1024
+UPLOAD_MAX_AGE_DAYS = 7
 WS_MAX_SIZE = max(16 * 1024 * 1024, UPLOAD_MAX_BYTES * 2 + 1024 * 1024)
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 WEB_ASSET_CONTENT_TYPES = {
@@ -97,6 +98,63 @@ AGENT_PROFILE_CANDIDATES = {
 }
 MACOS_PROTECTED_HOME_DIRECTORIES = {"Desktop", "Documents", "Downloads"}
 RELAY_CAPABILITIES = ["directory_browser"]
+# Version 1 is the existing positional approval protocol. Bump only when a
+# WebSocket message changes incompatibly, together with APP_PROTOCOL_VERSION
+# in web/index.html.
+PROTOCOL_VERSION = 1
+MUTATING_MESSAGE_TYPES = frozenset({
+    "respond",
+    "push_subscribe",
+    "push_unsubscribe",
+    "submit_prompt",
+    "send_keys",
+    "send_text",
+    "agent_start",
+    "agent_rename",
+    "agent_stop",
+    "agent_clear",
+    "agent_restart",
+    "upload_image",
+})
+
+
+def detect_relay_version():
+    repo_dir = str(Path(__file__).resolve().parent)
+    try:
+        result = subprocess.run(
+            ["git", "-C", repo_dir, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if result.returncode != 0 or not result.stdout.strip():
+        return "unknown"
+
+    version = result.stdout.strip()
+    try:
+        status = subprocess.run(
+            ["git", "-C", repo_dir, "status", "--porcelain", "--untracked-files=normal"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return version
+    if status.returncode == 0 and status.stdout.strip():
+        return f"{version}-dirty"
+    return version
+
+
+def client_protocol_version(msg):
+    value = msg.get("protocol", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return 0
+    return value
+
+
+def client_protocol_matches(msg):
+    return client_protocol_version(msg) == PROTOCOL_VERSION
+
+
+RELAY_VERSION = detect_relay_version()
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
@@ -510,6 +568,33 @@ def ensure_private_dir(path):
         os.chmod(path, 0o700)
     except OSError:
         pass
+
+
+def prune_uploads():
+    """Delete uploaded images past UPLOAD_MAX_AGE_DAYS; they only need to live
+    long enough for the agent to read them."""
+    cutoff = time.time() - UPLOAD_MAX_AGE_DAYS * 86400
+    removed = 0
+    try:
+        entries = list(UPLOAD_DIR.iterdir())
+    except OSError:
+        return removed
+    for entry in entries:
+        try:
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        print(f"Pruned {removed} upload(s) older than {UPLOAD_MAX_AGE_DAYS} days")
+    return removed
+
+
+async def prune_uploads_loop():
+    while True:
+        await asyncio.to_thread(prune_uploads)
+        await asyncio.sleep(86400)
 
 
 def compact_text(value, limit=240):
@@ -1107,6 +1192,10 @@ async def process_request(connection, request):
     if path == "/health":
         headers = Headers([("Content-Type", "text/plain; charset=utf-8")])
         return Response(200, "OK", headers, b"ok\n")
+    if path == "/healthz":
+        body = json.dumps({"status": "ok", "version": RELAY_VERSION, "protocol": PROTOCOL_VERSION}).encode() + b"\n"
+        headers = Headers([("Content-Type", "application/json; charset=utf-8")])
+        return Response(200, "OK", headers, body)
 
     asset = web_asset_path(request.path)
     if not asset:
@@ -1546,6 +1635,39 @@ async def handle_agent_clear_command(ws, msg):
     )
 
 
+async def reject_incompatible_client_protocol(ws, msg):
+    msg_type = msg.get("type", "command")
+    error = (
+        f"Incompatible app protocol v{client_protocol_version(msg) or 'invalid'}; "
+        f"relay requires v{PROTOCOL_VERSION}"
+    )
+    if msg_type == "upload_image":
+        response = {
+            "type": "upload_result",
+            "ok": False,
+            "error": error,
+            "path": "",
+            "pane_id": msg.get("pane_id", ""),
+            "request_id": msg.get("request_id", ""),
+        }
+    elif msg_type in {"push_subscribe", "push_unsubscribe"}:
+        response = {
+            "type": "push_subscribed" if msg_type == "push_subscribe" else "push_unsubscribed",
+            "ok": False,
+            "error": error,
+        }
+    else:
+        response = {
+            "type": "command_result",
+            "request_id": msg.get("request_id", ""),
+            "action": msg_type,
+            "ok": False,
+            "phase": "failed",
+            "error": error,
+        }
+    await safe_send_json(ws, response)
+
+
 async def handle_client(ws):
     clients.add(ws)
     try:
@@ -1554,6 +1676,8 @@ async def handle_client(ws):
             "type": "push_config",
             "vapid_public_key": ensure_vapid_public_key(),
             "host": LOCAL_HOST,
+            "protocol": PROTOCOL_VERSION,
+            "version": RELAY_VERSION,
             "capabilities": RELAY_CAPABILITIES,
             "agent_profiles": [
                 {"id": profile["id"], "label": profile["label"]}
@@ -1572,6 +1696,9 @@ async def handle_client(ws):
             if not isinstance(msg, dict):
                 continue
             msg_type = msg.get("type")
+            if msg_type in MUTATING_MESSAGE_TYPES and not client_protocol_matches(msg):
+                await reject_incompatible_client_protocol(ws, msg)
+                continue
             if msg_type == "respond":
                 await handle_respond_command(ws, msg)
             elif msg_type == "push_subscribe":
@@ -1692,8 +1819,9 @@ async def main():
         print(f"UDP {PLUGIN_PORT} in use, plugin push disabled")
     asyncio.create_task(poll_loop())
     asyncio.create_task(event_push())
+    asyncio.create_task(prune_uploads_loop())
     server = await serve(handle_client, WS_HOST, WS_PORT, process_request=process_request, max_size=WS_MAX_SIZE)
-    print(f"Herdr Mobile Relay on {WS_HOST}:{WS_PORT} (WebSocket + phone app)")
+    print(f"Herdr Mobile Relay {RELAY_VERSION} on {WS_HOST}:{WS_PORT} (WebSocket + phone app)")
     print(f"  polling: {LOCAL_HOST}")
     stop = loop.create_future()
     def request_stop():

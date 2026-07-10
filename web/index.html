@@ -424,6 +424,10 @@ const COMMAND_TIMEOUT_MS = 15000;
 const SW_SCRIPT_URL = 'sw.js?v=5';
 const PUSH_CLIENT_KEY = 'herdr_push_client_id';
 const PUSH_VAPID_KEY_PREFIX = 'herdr_push_vapid_key_';
+// Version 1 is the existing positional approval protocol. Bump only when a
+// WebSocket message changes incompatibly, together with PROTOCOL_VERSION in
+// relay/herdr_relay.py. Unversioned relays implement this v1 baseline.
+const APP_PROTOCOL_VERSION = 1;
 const ANSI_COLORS = {
   30: '#555', 31: '#ff5f5f', 32: '#5fd75f', 33: '#ffd75f',
   34: '#5fafff', 35: '#d75fff', 36: '#1abc9c', 37: '#e5e5e5',
@@ -781,8 +785,10 @@ async function unregisterRelayServiceWorker(relayId) {
 
 function sendPushUnsubscribe(conn, endpoints) {
   if (!conn || !conn.ws || conn.ws.readyState !== 1) return false;
+  if (relayProtocolError(conn)) return false;
   conn.ws.send(JSON.stringify({
     type: 'push_unsubscribe',
+    protocol: APP_PROTOCOL_VERSION,
     client_id: `${pushClientId()}:${conn.relay.id}`,
     endpoints: [...new Set(endpoints.filter(Boolean))],
   }));
@@ -825,6 +831,7 @@ async function refreshPushSubscriptionState(relayId = null) {
 async function registerPushSubscription(relayId) {
   const conn = connections.get(relayId);
   if (!conn) return false;
+  if (relayProtocolError(conn)) return false;
   if (!conn.vapidPublicKey) {
     setPushStatus(conn, 'missing-config');
     return false;
@@ -863,6 +870,7 @@ async function registerPushSubscription(relayId) {
     localStorage.setItem(relayVapidStorageKey(relayId), conn.vapidPublicKey);
     conn.ws.send(JSON.stringify({
       type: 'push_subscribe',
+      protocol: APP_PROTOCOL_VERSION,
       subscription: subscription.toJSON(),
       client_id: `${pushClientId()}:${relayId}`,
       replace_endpoints: [...new Set(replaceEndpoints)],
@@ -1234,6 +1242,10 @@ function renderRelayList() {
     const status = conn ? conn.status : 'disconnected';
     const color = status === 'connected' ? 'var(--green)' : status === 'connecting' ? 'var(--orange)' : 'var(--red)';
     const push = pushStatusMeta(conn);
+    const version = relayVersionMeta(conn);
+    const versionLine = version
+      ? `<div class="push-state" style="color:${version.color}" title="${escapeHtml(version.title)}">${escapeHtml(version.label)}</div>`
+      : '';
     const idArg = escapeHtml(JSON.stringify(relay.id));
     return `<div class="relay-row">
       <span class="dot" style="background:${color}"></span>
@@ -1241,11 +1253,38 @@ function renderRelayList() {
         <div class="name">${escapeHtml(relay.label)}</div>
         <div class="url">${escapeHtml(relay.url)}</div>
         <div class="push-state" title="${escapeHtml(push.title)}"><span class="mini-dot" style="background:${push.color}"></span>${escapeHtml(push.label)}</div>
+        ${versionLine}
       </div>
       <button class="danger" onclick='removeRelay(${idArg})'>Remove</button>
     </div>`;
   }).join('');
   updateSettingsStatus();
+}
+
+function relayVersionMeta(conn) {
+  if (!conn || conn.status !== 'connected' || !conn.protocol) return null;
+  if (conn.protocol < APP_PROTOCOL_VERSION) {
+    return {
+      label: '⚠ Relay outdated — update this computer',
+      color: 'var(--orange)',
+      title: `This relay speaks protocol v${conn.protocol} but the app expects v${APP_PROTOCOL_VERSION}. On that computer: git pull, then restart the relay.`,
+    };
+  }
+  if (conn.protocol > APP_PROTOCOL_VERSION) {
+    return {
+      label: '⚠ App outdated — update the app',
+      color: 'var(--orange)',
+      title: `This relay speaks protocol v${conn.protocol} but the app only knows v${APP_PROTOCOL_VERSION}. Reload the app, or redeploy it if separately hosted.`,
+    };
+  }
+  if (!conn.version || conn.version === 'unknown') return null;
+  return {label: `relay ${conn.version}`, color: 'var(--muted)', title: 'Relay git revision.'};
+}
+
+function relayProtocolError(conn) {
+  if (!conn || !conn.protocol) return 'Waiting for the relay protocol handshake.';
+  if (conn.protocol === APP_PROTOCOL_VERSION) return '';
+  return `Incompatible relay protocol v${conn.protocol}; this app requires v${APP_PROTOCOL_VERSION}.`;
 }
 
 function pushStatusMeta(conn) {
@@ -1529,7 +1568,7 @@ function connectRelay(relay) {
     return;
   }
   disconnectRelay(relay.id);
-  const conn = { relay, ws: null, status: 'connecting', reconnectTimer: null, closed: false, agentProfiles: [], capabilities: [], directoryBrowser: null, directoryLoading: false, directoryError: '', host: '' };
+  const conn = { relay, ws: null, status: 'connecting', reconnectTimer: null, closed: false, agentProfiles: [], capabilities: [], directoryBrowser: null, directoryLoading: false, directoryError: '', host: '', protocol: 0, version: '' };
   connections.set(relay.id, conn);
   updateStatusDot();
   renderRelayList();
@@ -1609,6 +1648,8 @@ function handleMessage(relayId, msg) {
     if (conn) {
       conn.vapidPublicKey = msg.vapid_public_key || '';
       conn.host = msg.host || '';
+      conn.protocol = Number.isInteger(msg.protocol) && msg.protocol > 0 ? msg.protocol : 1;
+      conn.version = typeof msg.version === 'string' ? msg.version.slice(0, 40) : '';
       conn.capabilities = Array.isArray(msg.capabilities) ? msg.capabilities.filter(Boolean) : [];
       conn.agentProfiles = Array.isArray(msg.agent_profiles) ? msg.agent_profiles.filter(profile => profile && profile.id) : [];
       if (pushOptedIn()) registerPushSubscription(relayId);
@@ -2591,6 +2632,11 @@ async function uploadImageFile(file) {
     setUploadStatus('Relay is not connected.', true);
     return false;
   }
+  const protocolError = relayProtocolError(conn);
+  if (protocolError) {
+    setUploadStatus(protocolError, true);
+    return false;
+  }
   if (file.size > IMAGE_UPLOAD_MAX_BYTES) {
     setUploadStatus('Image is larger than 10 MB.', true);
     return false;
@@ -2603,6 +2649,7 @@ async function uploadImageFile(file) {
     const data = await readFileAsDataURL(file);
     conn.ws.send(JSON.stringify({
       type: 'upload_image',
+      protocol: APP_PROTOCOL_VERSION,
       request_id: requestId,
       client_id: pushClientId(),
       pane_id: target.raw_pane_id,
@@ -2700,6 +2747,8 @@ function sendCommand(relayId, payload, timeoutMs = COMMAND_TIMEOUT_MS) {
   if (!conn || !conn.ws || conn.ws.readyState !== WebSocket.OPEN) {
     return Promise.reject(new Error('Relay is not connected'));
   }
+  const protocolError = relayProtocolError(conn);
+  if (protocolError) return Promise.reject(new Error(protocolError));
   const requestId = commandRequestId();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -2714,7 +2763,7 @@ function sendCommand(relayId, payload, timeoutMs = COMMAND_TIMEOUT_MS) {
       timer,
     });
     try {
-      conn.ws.send(JSON.stringify({...payload, request_id: requestId, client_id: pushClientId()}));
+      conn.ws.send(JSON.stringify({...payload, request_id: requestId, client_id: pushClientId(), protocol: APP_PROTOCOL_VERSION}));
     } catch (_err) {
       clearTimeout(timer);
       pendingRequests.delete(requestId);

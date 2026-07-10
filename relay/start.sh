@@ -54,7 +54,7 @@ RELAY_PID=$!
 sleep 2
 
 if ! kill -0 $RELAY_PID 2>/dev/null; then
-    echo "✗ Relay failed to start. Check if port 8375 is in use."
+    echo "✗ Relay failed to start. Check if port $PORT is in use."
     exit 1
 fi
 
@@ -131,13 +131,21 @@ if command -v cloudflared >/dev/null 2>&1; then
     echo "  Token:      $HERDR_RELAY_TOKEN"
     echo ""
 
-    if ! wait "$TUNNEL_PID"; then
-        echo "✗ Cloudflare tunnel stopped. Recent cloudflared output:"
-        if [ -f "$LOG_FILE" ]; then
-            tail -40 "$LOG_FILE"
-        fi
+    # Watch both processes; macOS ships bash 3.2, which lacks wait -n, so poll.
+    # Without this, a dead relay would leave the tunnel serving 502s silently.
+    while kill -0 "$RELAY_PID" 2>/dev/null && kill -0 "$TUNNEL_PID" 2>/dev/null; do
+        sleep 2
+    done
+    if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+        echo "✗ The relay process stopped. The tunnel cannot serve the app without it."
+        echo "  Rerun make quick-start; check port $PORT if it fails again."
         exit 1
     fi
+    echo "✗ Cloudflare tunnel stopped. Recent cloudflared output:"
+    if [ -f "$LOG_FILE" ]; then
+        tail -40 "$LOG_FILE"
+    fi
+    exit 1
 else
     echo ""
     echo "✓ Relay and phone app running on http://$HOST:$PORT"

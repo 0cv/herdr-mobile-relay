@@ -7,7 +7,7 @@ WEB_PROJECT ?= herdr-mobile-relay
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link quick-start check test relay-run relay-plugin service-install service-uninstall service-status service-logs macos-service-install macos-service-uninstall macos-service-status macos-service-logs linux-service-install linux-service-uninstall linux-service-status linux-service-logs web-deploy web-preview
+.PHONY: help setup setup-link rotate-token quick-start check test relay-run relay-plugin service-install service-uninstall service-status service-logs macos-service-install macos-service-uninstall macos-service-status macos-service-logs linux-service-install linux-service-uninstall linux-service-status linux-service-logs web-deploy web-preview
 
 help:
 	@echo "Common targets:"
@@ -16,6 +16,7 @@ help:
 	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages (WEB_PROJECT=$(WEB_PROJECT))"
 	@echo "  make service-install            Install/start the relay service for this platform"
 	@echo "  make setup-link                 Print the phone setup link and QR code for a stable relay"
+	@echo "  make rotate-token               Replace the relay token and print a new setup link"
 	@echo "  make service-status             Show relay service status"
 	@echo "  make service-logs               Tail relay service logs"
 	@echo "  make service-uninstall          Stop/remove the relay service"
@@ -27,6 +28,9 @@ setup:
 
 setup-link:
 	relay/setup-link.sh $(HOST)
+
+rotate-token:
+	relay/rotate-token.sh
 
 quick-start:
 	relay/setup.sh --install-missing
@@ -42,6 +46,7 @@ check: test
 	node tests/test_web_terminal.js
 	node tests/test_web_activity.js
 	node tests/test_web_launch.js
+	node tests/test_web_protocol.js
 
 test:
 	uv run --with 'websockets>=14.0' --with 'pywebpush>=2.0.0' --with 'py-vapid>=1.9.2' --with 'cryptography>=42.0.0' python -m unittest discover -s tests -v

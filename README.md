@@ -1,5 +1,7 @@
 # Herdr Mobile Relay
 
+[![check](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml)
+
 Approve [Herdr](https://herdr.dev) agents from your phone across multiple computers.
 
 Herdr Mobile Relay runs a small local relay on each computer, exposes each relay through its own Cloudflare Tunnel hostname, and lets one static web app connect to all of them. The phone UI merges agents from every configured relay, so you can approve or inspect agents running on a Mac, a Fedora workstation, or any other supported machine without making those computers connect to each other.
@@ -38,13 +40,9 @@ See the **[beginner-friendly QUICKSTART](QUICKSTART.md)** for screenshots-level 
 | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | <img src="images/settings.jpeg" alt="Mobile settings page with Mac and Fedora relay configuration" width="392"> | <img src="images/notifications.jpg" alt="Mobile notification for a blocked Herdr agent approval" width="392"> |
 
-## Attribution
-
-This project is forked from and inspired by [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-remote). Herdr Mobile Relay keeps the original idea of approving Herdr agents remotely, but has been substantially reworked around a static phone web app, per-computer local relays, Cloudflare Tunnel hostnames, and no SSH or Telegram fan-out.
-
 ## What This Fork Adds
 
-The upstream project established the core idea: control Herdr approval prompts from another device. This fork turns that idea into an installable mobile web app for multiple machines, with no central broker and no machine-to-machine trust.
+Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-remote), which established the core idea: control Herdr approval prompts from another device. This fork turns that idea into an installable mobile web app for multiple machines, with no central broker and no machine-to-machine trust.
 
 - **Multi-computer phone UI:** one static web app connects to multiple independent relays and merges Mac, Fedora, or other hosts into one agent list.
 - **Per-machine isolation:** each computer runs only its own local relay and `herdr` CLI calls; relays do not SSH into each other or share state.
@@ -269,6 +267,14 @@ make relay-run
 
 Use the same `HERDR_RELAY_TOKEN` on multiple relays if you want one shared phone-side secret.
 
+If a token leaks — for example a shared screenshot of a setup QR code — rotate it:
+
+```bash
+make rotate-token
+```
+
+This writes a new token to `relay/.env`, restarts the background service when one is installed, and prints a fresh setup link and QR code to re-add the relay on each phone. Configurations using the old token stop working as soon as the relay restarts.
+
 ## Herdr Plugin Hook
 
 The relay polls local `herdr` every few seconds. For faster blocked-agent updates, link the local plugin hook on each computer:
@@ -293,3 +299,13 @@ The plugin sends local agent-status events to the local relay over UDP on `127.0
 - Notification action payloads contain only relay/pane routing metadata. The PWA reconnects with its locally stored relay credential and performs device verification when enabled before sending the action.
 - Agent launch requests select only from supported executables automatically found by the relay; the browser cannot submit an executable or shell command.
 - The relay executes only fixed local `herdr pane ...` and supported `herdr agent ...` operations; it does not shell into other machines.
+
+## Health and Versions
+
+`GET /health` keeps the original plain-text `ok` response for existing uptime checks. `GET /healthz` returns `{"status": "ok", "version": "<git-hash>[-dirty]", "protocol": <n>}` without authentication for detailed monitoring. The relay also prints its version at startup and reports it to the app, which shows it per relay in Settings. When a relay and the app speak different protocol versions, Settings shows an update warning and blocks incompatible control commands.
+
+Uploaded images in `~/.cache/herdr-mobile-relay/uploads` are pruned automatically after 7 days.
+
+## License
+
+Herdr Mobile Relay is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).
