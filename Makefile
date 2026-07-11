@@ -55,7 +55,7 @@ relay-run:
 	uv run relay/herdr_relay.py
 
 relay-plugin:
-	herdr plugin link relay/
+	herdr plugin link .
 
 service-install:
 	relay/service.sh install

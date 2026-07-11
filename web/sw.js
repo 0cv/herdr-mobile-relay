@@ -18,16 +18,19 @@ self.addEventListener('push', event => {
 
   const title = payload.title || 'Herdr agent blocked';
   const actionUrls = payload.action_urls || {};
+  const actions = Array.isArray(payload.actions)
+    ? payload.actions
+    : [
+        {action: 'approve', title: 'Approve once'},
+        {action: 'deny', title: 'Deny'},
+      ];
   const options = {
     body: payload.body || 'An agent needs approval.',
     tag: payload.tag || 'herdr-blocked',
     renotify: true,
     icon: HERDR_NOTIFICATION_ICON,
     badge: HERDR_NOTIFICATION_BADGE,
-    actions: [
-      {action: 'approve', title: 'Approve once'},
-      {action: 'deny', title: 'Deny'},
-    ],
+    actions,
     data: {
       url: payload.url || './',
       actionUrls,

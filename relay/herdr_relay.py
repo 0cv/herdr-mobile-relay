@@ -32,6 +32,16 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from py_vapid import Vapid
 from pywebpush import WebPushException, webpush
 
+
+def default_runtime_dir():
+    relay_env = os.environ.get("HERDR_RELAY_ENV", "")
+    if relay_env:
+        return Path(relay_env).expanduser().parent
+    plugin_config = os.environ.get("HERDR_PLUGIN_CONFIG_DIR", "")
+    if plugin_config:
+        return Path(plugin_config).expanduser()
+    return Path(__file__).resolve().parent
+
 def default_herdr_bin():
     for candidate in (
         shutil.which("herdr"),
@@ -58,7 +68,7 @@ ALLOWED_ORIGINS = {
     if origin.strip()
 }
 LOCAL_HOST = socket.gethostname().split(".")[0] or "local"
-PUSH_DIR = Path(__file__).with_name("push")
+PUSH_DIR = default_runtime_dir() / "push"
 PUSH_SUBSCRIPTIONS_FILE = PUSH_DIR / "subscriptions.json"
 VAPID_PRIVATE_KEY_FILE = PUSH_DIR / "vapid_private.pem"
 VAPID_SUBJECT = f"mailto:herdr-mobile-relay@{LOCAL_HOST}.local"
@@ -70,6 +80,9 @@ ACTIVITY_LOCK = threading.RLock()
 CLAUDE_HISTORY_MAX_LINES = 500
 CLAUDE_HISTORY_FOOTER_LINES = 6
 CLAUDE_HISTORY_CAPTURE_INTERVAL = 4.0
+CLAUDE_HISTORY_DIR = Path.home() / ".cache" / "herdr-mobile-relay" / "claude-history"
+CLAUDE_HISTORY_SAVE_INTERVAL = 10.0
+CLAUDE_HISTORY_MAX_AGE_DAYS = 7
 UPLOAD_DIR = Path.home() / ".cache" / "herdr-mobile-relay" / "uploads"
 UPLOAD_MAX_BYTES = 10 * 1024 * 1024
 UPLOAD_MAX_AGE_DAYS = 7
@@ -186,12 +199,15 @@ clients = set()
 last_statuses = {}
 unseen_done_panes = set()
 acknowledged_done_panes = set()
+finished_notification_panes = set()
 agent_activity_state = {}
 agent_activity_initialized = False
 agent_types = {}
 claude_history_state = {}
 claude_history_capture_times = {}
+claude_history_save_times = {}
 claude_history_inflight = set()
+claude_history_pending_captures = set()
 event_queue = asyncio.Queue()
 
 
@@ -318,6 +334,20 @@ def displayed_status(pane_id, status):
     return status
 
 
+def register_finished_notification(pane_id, status, previous):
+    if status in ATTENTION_STATUSES:
+        finished_notification_panes.discard(pane_id)
+        return False
+    if previous not in ATTENTION_STATUSES:
+        return False
+    if status != "idle" and not is_done_status(status):
+        return False
+    if pane_id in finished_notification_panes:
+        return False
+    finished_notification_panes.add(pane_id)
+    return True
+
+
 async def acknowledge_pane_viewed(pane_id):
     if pane_id not in agent_types:
         return False
@@ -400,7 +430,27 @@ def claude_sequence_match(previous, current):
             candidates.append(match)
     if not candidates:
         return None
-    return max(candidates, key=lambda match: (match.size, -abs(match.a - match.b)))
+    # Tie-break on the latest history anchor: the frame is the terminal's most
+    # recent content, so among equal matches the one nearest the history tail
+    # is the true alignment; repeated session content otherwise pulls the
+    # anchor toward stale early occurrences.
+    return max(candidates, key=lambda match: (match.size, match.a))
+
+
+def claude_tail_overlap(previous, current):
+    """Largest k where the last k history lines equal the first k lines of the
+    new frame — the invariant of scrolling terminal output. Anchoring at the
+    tail is immune to content that repeats earlier in history, which misleads
+    the fuzzy matcher (its ranking prefers early anchors, truncating or
+    freezing long histories on repetitive sessions)."""
+    previous_keys = [normalized_history_line(line) for line in previous]
+    current_keys = [normalized_history_line(line) for line in current]
+    for k in range(min(len(previous_keys), len(current_keys)), 1, -1):
+        if previous_keys[-k:] != current_keys[:k]:
+            continue
+        if sum(bool(key.strip()) for key in current_keys[:k]) >= 2:
+            return k
+    return 0
 
 
 def split_claude_snapshot(snapshot):
@@ -418,6 +468,69 @@ def claude_history_content(state, limit=CLAUDE_HISTORY_MAX_LINES):
     return "\n".join(combined[-limit:])
 
 
+def claude_history_file(pane_id):
+    return CLAUDE_HISTORY_DIR / (re.sub(r"[^A-Za-z0-9-]", "_", str(pane_id)) + ".json")
+
+
+def load_claude_history_state(pane_id):
+    """In-memory state, lazily restored from disk so relay restarts keep the
+    stitched history instead of starting over from one viewport."""
+    state = claude_history_state.get(pane_id)
+    if state is not None:
+        return state
+    try:
+        raw = json.loads(claude_history_file(pane_id).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("history"), list):
+        return None
+
+    def line_list(key):
+        value = raw.get(key)
+        return [str(line) for line in value] if isinstance(value, list) else []
+
+    state = {
+        "history": line_list("history"),
+        "footer": line_list("footer"),
+        "snapshot": line_list("snapshot"),
+        "stale_refusals": 0,
+    }
+    claude_history_state[pane_id] = state
+    return state
+
+
+def save_claude_history_state(pane_id, force=False):
+    state = claude_history_state.get(pane_id)
+    if state is None:
+        return
+    now = time.monotonic()
+    if not force and now - claude_history_save_times.get(pane_id, 0.0) < CLAUDE_HISTORY_SAVE_INTERVAL:
+        return
+    claude_history_save_times[pane_id] = now
+    path = claude_history_file(pane_id)
+    tmp_path = path.with_suffix(".tmp")
+    try:
+        ensure_private_dir(CLAUDE_HISTORY_DIR)
+        tmp_path.write_text(json.dumps({
+            "history": state["history"],
+            "footer": state["footer"],
+            "snapshot": state["snapshot"],
+        }))
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except OSError:
+        pass
+
+
+def discard_claude_history_state(pane_id):
+    claude_history_state.pop(pane_id, None)
+    claude_history_save_times.pop(pane_id, None)
+    try:
+        claude_history_file(pane_id).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def merge_claude_history(pane_id, content, limit=CLAUDE_HISTORY_MAX_LINES):
     try:
         limit = min(max(int(limit), 1), CLAUDE_HISTORY_MAX_LINES)
@@ -428,32 +541,65 @@ def merge_claude_history(pane_id, content, limit=CLAUDE_HISTORY_MAX_LINES):
         return ""
     current_body, current_footer = split_claude_snapshot(current)
 
-    state = claude_history_state.get(pane_id)
+    state = load_claude_history_state(pane_id)
     if state is None:
         state = {
             "history": current_body,
             "footer": current_footer,
             "snapshot": current,
+            "stale_refusals": 0,
         }
         claude_history_state[pane_id] = state
     else:
         history = state["history"]
-        if state["snapshot"] != current:
-            match = claude_sequence_match(history, current_body)
-            if match:
+        if state["snapshot"] != current or state.get("stale_refusals"):
+            overlap = claude_tail_overlap(history, current_body)
+            match = None if overlap else claude_sequence_match(history, current_body)
+            if overlap:
+                if len(current_body) > overlap:
+                    state["history"] = history + current_body[overlap:]
+                state["stale_refusals"] = 0
+            elif match:
                 history_end = match.a + match.size
                 current_end = match.b + match.size
                 current_suffix = current_body[current_end:]
                 history_tail = len(history) - history_end
-                if current_suffix and history_tail <= 3:
+                if not current_suffix:
+                    # Nothing beyond the match: a scrolled-up viewport
+                    # re-showing known content. Leave history untouched.
+                    state["stale_refusals"] = 0
+                elif history_tail >= len(current_body):
+                    # A terminal rewrite can only touch lines that fit on one
+                    # screen. A match this deep in history means repeated
+                    # session content misled the matcher and this frame is
+                    # genuinely new output that repeats old lines: append it
+                    # whole rather than rebasing real history away.
+                    state["history"].extend(current_body)
+                    state["stale_refusals"] = 0
+                elif history_tail <= 3:
                     state["history"] = history[:history_end] + current_suffix
-            elif current_body:
+                    state["stale_refusals"] = 0
+                else:
+                    # A divergent tail bounded by one screen is either a
+                    # scrolled-up viewport (transient) or the terminal
+                    # rewriting recent lines — e.g. Claude Code collapsing an
+                    # approval box once answered (permanent). Refuse once to
+                    # shield scrolls, then rebase so history follows the
+                    # rewrite instead of freezing at a stale tail.
+                    refusals = state.get("stale_refusals", 0) + 1
+                    if refusals >= 2:
+                        state["history"] = history[:history_end] + current_suffix
+                        refusals = 0
+                    state["stale_refusals"] = refusals
+            elif current_body and state["snapshot"] != current:
                 state["history"].extend(current_body)
+                state["stale_refusals"] = 0
             state["footer"] = current_footer
             state["snapshot"] = current
 
     history_capacity = max(0, CLAUDE_HISTORY_MAX_LINES - len(state["footer"]))
     state["history"] = state["history"][-history_capacity:] if history_capacity else []
+    save_claude_history_state(pane_id)
     return claude_history_content(state, limit)
 
 
@@ -472,14 +618,26 @@ async def capture_claude_history(pane_id):
         claude_history_inflight.discard(pane_id)
 
 
-def schedule_claude_history_capture(agent, timestamp=None):
+def schedule_claude_history_capture(agent, timestamp=None, force=False):
+    """force marks the capture as must-run (end of a work cycle: the final
+    frame would otherwise be lost forever once the pane sits idle). Forced
+    captures bypass the interval gate, and survive an in-flight capture as a
+    pending retry instead of being dropped."""
     pane_id = agent.get("pane_id", "")
     if not pane_id or "claude" not in str(agent.get("agent") or "").lower():
         return
+    if force:
+        claude_history_pending_captures.add(pane_id)
+    if pane_id in claude_history_inflight:
+        return
     now = time.monotonic() if timestamp is None else float(timestamp)
     last_capture = claude_history_capture_times.get(pane_id, 0.0)
-    if pane_id in claude_history_inflight or now - last_capture < CLAUDE_HISTORY_CAPTURE_INTERVAL:
+    if (
+        pane_id not in claude_history_pending_captures
+        and now - last_capture < CLAUDE_HISTORY_CAPTURE_INTERVAL
+    ):
         return
+    claude_history_pending_captures.discard(pane_id)
     claude_history_capture_times[pane_id] = now
     asyncio.create_task(capture_claude_history(pane_id))
 
@@ -649,9 +807,39 @@ def prune_uploads():
     return removed
 
 
+def prune_claude_history_files():
+    """Remove history files for panes that are gone. Files of live panes are
+    always exempt — idle panes are not recaptured, so their files age without
+    being stale — and nothing is pruned before the first pane inventory, so a
+    slow start cannot delete files lazy restoration has not read yet."""
+    if not agent_activity_initialized:
+        return
+    live_files = {claude_history_file(pane_id).name for pane_id in agent_types}
+    cutoff = time.time() - CLAUDE_HISTORY_MAX_AGE_DAYS * 86400
+    try:
+        entries = list(CLAUDE_HISTORY_DIR.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.name in live_files:
+                continue
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
+
+
 async def prune_uploads_loop():
     while True:
         await asyncio.to_thread(prune_uploads)
+        # Give the first pane inventory a chance to finish so the history
+        # prune knows which panes are live; it refuses to run before that.
+        for _ in range(30):
+            if agent_activity_initialized:
+                break
+            await asyncio.sleep(POLL_INTERVAL)
+        await asyncio.to_thread(prune_claude_history_files)
         await asyncio.sleep(86400)
 
 
@@ -886,7 +1074,13 @@ def valid_push_subscription(subscription):
     return bool(endpoint and isinstance(keys, dict) and keys.get("p256dh") and keys.get("auth"))
 
 
-def store_push_subscription(subscription, user_agent="", client_id="", replace_endpoints=None):
+def store_push_subscription(
+    subscription,
+    user_agent="",
+    client_id="",
+    replace_endpoints=None,
+    notify_finished=False,
+):
     if not valid_push_subscription(subscription):
         return False
     endpoint = push_subscription_endpoint(subscription)
@@ -908,6 +1102,7 @@ def store_push_subscription(subscription, user_agent="", client_id="", replace_e
             "subscription": subscription,
             "client_id": client_id,
             "user_agent": user_agent[:240] if isinstance(user_agent, str) else "",
+            "notify_finished": notify_finished is True,
         })
         save_push_subscriptions(subscriptions)
     return True
@@ -954,50 +1149,69 @@ def push_subscription_label(subscription):
         return "unknown endpoint"
 
 
+def notification_target_url(host, pane_id, notification_id="", action="", index=None, total=None):
+    base_target = {
+        "host": host,
+        "pane_id": pane_id,
+        "notification_id": notification_id,
+    }
+    if action:
+        base_target.update({"action": action, "index": index, "total": total})
+    encoded = urllib.parse.quote(json.dumps(base_target, separators=(",", ":")))
+    return f"./#notify={encoded}"
+
+
 def push_payload(blocked_msg):
     project = blocked_msg.get("project") or blocked_msg.get("agent") or "agent"
     host = blocked_msg.get("host") or LOCAL_HOST
     pane_id = blocked_msg.get("pane_id", "")
+    event_id = blocked_msg.get("event_id", "")
     command = blocked_msg.get("command") or "Agent needs approval"
     options = blocked_msg.get("options") if isinstance(blocked_msg.get("options"), list) else TOOL_OPTIONS
     total = max(2, len(options))
-    base_target = {
-        "host": host,
-        "pane_id": pane_id,
-        "notification_id": blocked_msg.get("event_id", ""),
-    }
-
-    def action_url(action="", index=None):
-        target = dict(base_target)
-        if action:
-            target.update({"action": action, "index": index, "total": total})
-        encoded = urllib.parse.quote(json.dumps(target, separators=(",", ":")))
-        return f"./#notify={encoded}"
 
     return {
         "title": f"{project} blocked",
         "body": f"{command} · {host}",
         "tag": f"herdr-{host}-{pane_id}",
-        "url": action_url(),
+        "url": notification_target_url(host, pane_id, event_id),
         "action_urls": {
-            "approve": action_url("approve", 0),
-            "deny": action_url("deny", total - 1),
+            "approve": notification_target_url(host, pane_id, event_id, "approve", 0, total),
+            "deny": notification_target_url(host, pane_id, event_id, "deny", total - 1, total),
         },
     }
 
 
-def send_webpush_notifications(blocked_msg):
+def finished_push_payload(agent):
+    project = agent.get("project") or agent.get("agent") or "Agent"
+    agent_name = agent.get("agent") or "Agent"
+    host = agent.get("host") or LOCAL_HOST
+    pane_id = agent.get("pane_id", "")
+    event_id = f"finished-{secrets.token_urlsafe(8)}"
+    return {
+        "title": f"{project} finished",
+        "body": f"{agent_name} completed · {host}",
+        "tag": f"herdr-finished-{host}-{pane_id}",
+        "url": notification_target_url(host, pane_id, event_id),
+        "action_urls": {},
+        "actions": [],
+    }
+
+
+def send_webpush_payload(payload, include_subscription=None):
     subscriptions = load_push_subscriptions()
     if not subscriptions:
         return
-    payload = json.dumps(push_payload(blocked_msg))
+    data = json.dumps(payload)
     stale = []
     for item in subscriptions:
+        if include_subscription and not include_subscription(item):
+            continue
         subscription = item.get("subscription", {})
         try:
             webpush(
                 subscription_info=subscription,
-                data=payload,
+                data=data,
                 vapid_private_key=str(VAPID_PRIVATE_KEY_FILE),
                 vapid_claims={"sub": VAPID_SUBJECT},
                 ttl=300,
@@ -1017,8 +1231,23 @@ def send_webpush_notifications(blocked_msg):
     remove_push_subscriptions(stale)
 
 
+def send_webpush_notifications(blocked_msg):
+    send_webpush_payload(push_payload(blocked_msg))
+
+
+def send_finished_webpush_notifications(agent):
+    send_webpush_payload(
+        finished_push_payload(agent),
+        lambda item: item.get("notify_finished") is True,
+    )
+
+
 async def push_blocked(blocked_msg):
     await asyncio.to_thread(send_webpush_notifications, blocked_msg)
+
+
+async def push_finished(agent):
+    await asyncio.to_thread(send_finished_webpush_notifications, agent)
 
 
 async def publish_blocked(blocked_msg):
@@ -1103,21 +1332,29 @@ async def poll_loop():
         stamp_agent_activity(agents)
         live_pane_ids = {a["pane_id"] for a in agents}
         raw_statuses = {}
+        finished_agents = []
         for a in agents:
             pid = a["pane_id"]
             raw_status = a["status"]
             raw_statuses[pid] = raw_status
-            register_status_transition(pid, raw_status, last_statuses.get(pid), a.pop("_focused", False))
+            previous_status = last_statuses.get(pid)
+            if register_finished_notification(pid, raw_status, previous_status):
+                finished_agents.append(dict(a))
+            register_status_transition(pid, raw_status, previous_status, a.pop("_focused", False))
             a["status"] = displayed_status(pid, raw_status)
         unseen_done_panes.intersection_update(live_pane_ids)
         acknowledged_done_panes.intersection_update(live_pane_ids)
+        finished_notification_panes.intersection_update(live_pane_ids)
         agent_types.clear()
         agent_types.update({a["pane_id"]: str(a.get("agent") or "").lower() for a in agents})
         for pane_id in set(claude_history_state) - live_pane_ids:
-            del claude_history_state[pane_id]
+            discard_claude_history_state(pane_id)
         for pane_id in set(claude_history_capture_times) - live_pane_ids:
             claude_history_capture_times.pop(pane_id, None)
+        claude_history_pending_captures.intersection_update(live_pane_ids)
         await broadcast({"type": "agents", "agents": agents})
+        for agent in finished_agents:
+            asyncio.create_task(push_finished(agent))
         for pane_id in set(last_statuses) - live_pane_ids:
             del last_statuses[pane_id]
         if agents:
@@ -1125,8 +1362,14 @@ async def poll_loop():
                 pid = a["pane_id"]
                 status = raw_statuses[pid]
                 previous_status = last_statuses.get(pid)
-                if status in {"working", "blocked"} or previous_status != status:
-                    schedule_claude_history_capture(a)
+                finished_now = previous_status in ATTENTION_STATUSES and status not in ATTENTION_STATUSES
+                if (
+                    finished_now
+                    or status in {"working", "blocked"}
+                    or previous_status != status
+                    or pid in claude_history_pending_captures
+                ):
+                    schedule_claude_history_capture(a, force=finished_now)
                 if status == "blocked" and previous_status != "blocked":
                     await publish_agent_blocked(a)
                 elif previous_status == "blocked" and status != "blocked":
@@ -1143,7 +1386,9 @@ async def event_push():
         host = event.get("host", LOCAL_HOST)
         previous_status = last_statuses.get(raw_pane_id) if raw_pane_id else None
         was_blocked = previous_status == "blocked"
+        notify_finished = False
         if raw_pane_id and status:
+            notify_finished = register_finished_notification(raw_pane_id, status, previous_status)
             register_status_transition(raw_pane_id, status, previous_status)
             last_statuses[raw_pane_id] = status
             status = displayed_status(raw_pane_id, status)
@@ -1159,7 +1404,7 @@ async def event_push():
                 "pane_id": raw_pane_id,
                 "agent": event.get("agent", ""),
                 "status": status,
-            })
+            }, force=previous_status in ATTENTION_STATUSES and status not in ATTENTION_STATUSES)
             await broadcast({
                 "type": "agent_update",
                 "pane_id": raw_pane_id,
@@ -1175,6 +1420,8 @@ async def event_push():
                 "host": host,
                 "updated_at": updated_at,
             })
+        if notify_finished:
+            asyncio.create_task(push_finished({**event, "pane_id": raw_pane_id, "host": host}))
 
 
 def header_value(request, name):
@@ -1778,6 +2025,7 @@ async def handle_client(ws):
                     msg.get("user_agent", ""),
                     msg.get("client_id", ""),
                     msg.get("replace_endpoints", []),
+                    msg.get("notify_finished") is True,
                 )
                 await safe_send_json(ws, {"type": "push_subscribed", "ok": ok})
             elif msg_type == "push_unsubscribe":
@@ -1810,7 +2058,7 @@ async def handle_client(ws):
                     "--format", fmt,
                 )
                 if fmt == "ansi" and "claude" in agent_types.get(pane_id, ""):
-                    state = claude_history_state.get(pane_id)
+                    state = load_claude_history_state(pane_id)
                     if state is not None and last_statuses.get(pane_id) not in {"working", "blocked"}:
                         content = claude_history_content(state, lines)
                     else:
@@ -1922,6 +2170,12 @@ async def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, request_stop)
     await stop
+    # In-flight captures are deliberately not awaited here: cancellation lands
+    # at their herdr-read await, before any merge, so state stays consistent,
+    # and the next start recovers the missed frame from the still-visible
+    # viewport via tail overlap.
+    for pane_id in list(claude_history_state):
+        save_claude_history_state(pane_id, force=True)
     server.close()
 
 

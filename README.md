@@ -9,22 +9,22 @@ Herdr Mobile Relay runs a small local relay on each computer, exposes each relay
 > [!IMPORTANT]
 > Herdr Mobile Relay currently supports Linux and macOS. Native Windows is not supported. It may work inside WSL2 because that provides a Linux environment, but WSL2 has not been tested and is not currently an officially supported setup.
 
-## [Quick Start: One Command](QUICKSTART.md)
+## [Quick Start: One Command + One Click](QUICKSTART.md)
 
-New here? Paste this into a terminal on a Linux or macOS computer:
+With Herdr already installed, install the relay as a Herdr plugin:
 
 ```bash
-git clone https://github.com/0cv/herdr-mobile-relay.git && cd herdr-mobile-relay && make quick-start
+herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-That command prepares the local configuration, offers to install missing Herdr, `uv`, and `cloudflared` tools for your user account, starts the relay, serves the phone app, and opens a free temporary Cloudflare tunnel. **A Cloudflare account, domain, Node.js, Python installation, and separate web deployment are not required for this first trial.**
+Then open Herdr's plugin action menu and choose **Herdr Mobile Relay: Quick Start**. Herdr opens a managed setup pane that creates private persistent plugin configuration, offers to install missing `uv` and `cloudflared` tools for your user account, starts the relay, serves the phone app, and opens a free temporary Cloudflare tunnel. **A Cloudflare account, domain, Make, Node.js, Python installation, and separate web deployment are not required for this first trial.**
 
 When it is ready, the terminal prints a **QR code** and the matching private **Phone setup** link. Scan the QR code with your phone camera, or open the exact link on your phone; either way the app loads and adds the relay automatically. Keep the terminal open while using the quick tunnel, and press Ctrl-C when finished.
 
 > [!CAUTION]
 > The setup link — and therefore the QR code — contains the relay token in its URL fragment. The fragment is not sent to the web server and the app removes it after importing, but you should still avoid sharing the original link or a screenshot of the QR code.
 
-See the **[beginner-friendly QUICKSTART](QUICKSTART.md)** for screenshots-level steps, what the command installs, and troubleshooting. Once the trial works, move to a [stable hostname and background service](#stable-hostnames) for everyday use.
+See the **[beginner-friendly QUICKSTART](QUICKSTART.md)** for screenshots-level steps, the local-checkout fallback, and troubleshooting. Once the trial works, move to a [stable hostname and background service](#stable-hostnames) for everyday use.
 
 ## Screenshots
 
@@ -46,7 +46,7 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 
 - **Multi-computer phone UI:** one static web app connects to multiple independent relays and merges Mac, Fedora, or other hosts into one agent list.
 - **Per-machine isolation:** each computer runs only its own local relay and `herdr` CLI calls; relays do not SSH into each other or share state.
-- **PWA notifications:** installed phones can receive Web Push notifications when an agent blocks, including Approve once and Deny actions that route through the configured relay and device unlock.
+- **PWA notifications:** installed phones receive Web Push notifications when an agent blocks, including Approve once and Deny actions; optional completion alerts can also open the finished agent directly.
 - **Mobile terminal composer:** terminal view has a compact phone-first composer, quick terminal keys, inline approval actions, themes, font sizing, and a jump-to-bottom affordance.
 - **Real approval handling:** blocked cards parse prompt text and approval options, then map visible choices back to the correct Herdr key actions for Codex and Claude Code.
 - **Confirmed controls and activity:** command acknowledgements report failures explicitly, approvals wait for an observed state change, and a bounded per-relay activity history is merged on the phone.
@@ -55,7 +55,7 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 - **Screenshot/photo upload:** attach an image from the phone, store it on the target computer, and insert the local path into the agent prompt.
 - **Optional device unlock:** require the phone's platform authenticator before reconnecting relays after open, reload, or resume.
 - **Service installers:** macOS launchd and Linux/Fedora user systemd installers set up the relay, tunnel, token, and cleanup of older service names.
-- **One-command trial:** the relay can serve the phone app itself, install missing user-level prerequisites with confirmation, and provide an auto-configuring TryCloudflare link.
+- **Plugin-first trial:** one Herdr plugin install plus one action-menu click opens a managed setup pane, installs missing user-level prerequisites with confirmation, and provides an auto-configuring TryCloudflare link.
 - **Security hardening:** token generation, loopback binding by default, Origin checks for browser clients, constant-time token comparison, and safer behavior for public tunnels.
 
 ## Marketplace Listing
@@ -80,7 +80,7 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 - Lets the static web app connect to multiple relays and merge their agent lists client-side.
 - Uses relay labels from the web app, such as `Mac` or `Fedora`, as the visible host badges.
 - Shows blocked prompts with inline approval buttons on the agent list and in the terminal view.
-- Sends Web Push notifications for blocked agents to installed phones, even when the app is closed or suspended.
+- Sends Web Push notifications for blocked agents to installed phones, even when the app is closed or suspended, with optional notifications when agents finish.
 - Routes notification taps and Approve once/Deny actions back to the matching relay and pane when the app can resolve it.
 - Confirms remote commands and records blocked, resolved, approval, prompt, upload, and lifecycle activity locally on each relay.
 - Starts automatically detected installed agents and supports rename, clear, and stop controls.
@@ -107,12 +107,12 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 
 ## Requirements
 
-The one-command quick start needs only:
+The plugin-first quick start needs only:
 
 - Linux or macOS; native Windows is not supported, and WSL2 remains untested
-- Git, Make, and `curl`
+- Herdr 0.7.0 or newer, Git, and `curl`
 
-With your confirmation, `make quick-start` installs missing [Herdr](https://herdr.dev/docs/install/), [uv](https://docs.astral.sh/uv/getting-started/installation/), and [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) tools for your user account. `uv` also supplies Python when necessary.
+Herdr uses Git to install the plugin. With your confirmation, the **Herdr Mobile Relay: Quick Start** action installs missing [uv](https://docs.astral.sh/uv/getting-started/installation/) and [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) tools for your user account. `uv` also supplies Python when necessary.
 
 Optional later requirements:
 
@@ -156,13 +156,13 @@ The Phone setup link adds the first relay automatically. To add another relay ma
 - **Relay URL:** `wss://...`
 - **Token:** value of `HERDR_RELAY_TOKEN`
 
-Then tap **Enable Notifications** in Settings. The relay generates Web Push VAPID keys in `relay/push/` and stores this device's push subscription there, so installed PWAs can be notified even when the app is closed or suspended.
+Then tap **Enable Notifications** in Settings. The relay generates Web Push VAPID keys in `relay/push/` and stores this device's push subscription there, so installed PWAs can be notified even when the app is closed or suspended. Blocked-agent alerts are always included while push is active; enable **Notify When Agents Finish** if you also want an alert that opens a newly completed agent. Completion alerts are off by default and saved separately for each phone browser.
 
 For multiple relays, the app creates one scoped service-worker push subscription per relay. Each relay keeps its standard VAPID keypair and subscriptions privately under `relay/push/`; no push configuration is required.
 
 In the terminal view, tap the image icon to attach a screenshot or photo. The web app uploads images up to 10 MB to `~/.cache/herdr-mobile-relay/uploads` on that computer and inserts the local file path into the prompt.
 
-Claude Code's alternate-screen interface exposes only its current visible rows through Herdr. While the relay is running, it therefore builds a stable, bounded 500-line in-memory history from advancing Claude snapshots. Known older viewports are ignored, so scrolling the laptop while Claude is idle does not rewrite the phone history. The relay still cannot recover text discarded before it started, and the accumulated history resets with the relay.
+Claude Code's alternate-screen interface exposes only its current visible rows through Herdr. The relay therefore builds a stable, bounded 500-line history per Claude pane from advancing snapshots. Known older viewports are ignored, so scrolling the laptop while Claude is idle does not rewrite the phone history. The accumulated history — up to 500 lines of terminal content per pane — is persisted in `~/.cache/herdr-mobile-relay/claude-history/` (one file per pane, `0600` permissions) so it survives relay restarts. A pane's file is deleted when the pane closes, and files for panes that no longer exist are removed after 7 days. The relay still cannot recover text discarded before it first saw the pane.
 
 Use **＋** in the app header to start an agent on a connected computer. The relay exposes detected `codex`, `claude`, and `opencode` executables as safe launch profiles. Select a working directory reported by that relay; the suggested name updates to `<directory>-<agent>`. The optional initial task is sent as the agent's first literal prompt after Herdr creates it and is never interpreted by a shell. Each launched agent is moved into its own named tab so it cannot inherit another agent's tab label. Use **•••** from a terminal to rename, clear, or stop that agent. Clear starts a fresh replacement with the same detected profile and working directory, moves it to a dedicated tab, and then closes the old pane.
 
@@ -217,7 +217,7 @@ Then add each relay to the phone the same way as the quick start — print its s
 make setup-link
 ```
 
-It reads the token from `relay/.env` and the hostname from the cloudflared config, so scanning the QR code (or opening the link) adds the relay to the app automatically. The relay and tunnel must be running. If the hostname cannot be detected, pass it explicitly with `make setup-link HOST=relay-mac.yourdomain.com`.
+For a local checkout, this reads the token from `relay/.env`. A marketplace install instead keeps `relay.env` in the stable directory printed by `herdr plugin config-dir herdr-mobile-relay.events`, so reinstalling the plugin does not erase its token. The hostname comes from the cloudflared config. Scanning the QR code (or opening the link) adds the relay to the app automatically. The relay and tunnel must be running. If the hostname cannot be detected, pass it explicitly with `make setup-link HOST=relay-mac.yourdomain.com`.
 
 The setup link configures the app served at the relay's own hostname. If you installed the app from a separately hosted origin instead, add the relay in that app's Settings using the relay URLs:
 
@@ -241,7 +241,11 @@ make service-uninstall
 
 The older `make macos-service-*` and `make linux-service-*` targets remain available for explicit platform-specific use.
 
-Normal installs need only two values in `relay/.env`. `make setup` generates the token, and the stable service installer adds the tunnel path:
+Marketplace users do not need to find the managed checkout or run Make. After creating the named Cloudflare tunnel configuration, choose **Herdr Mobile Relay: Install Background Service** from Herdr's plugin action menu. Its managed pane runs the same platform installer and prints the stable phone QR link.
+
+Checkout `make setup-link` and `make rotate-token` commands manage checkout configuration only. They fail before reading or changing a token if the installed service is pinned to a different plugin-managed `relay.env`; use the matching Herdr plugin action or set `HERDR_RELAY_ENV` explicitly to that service configuration.
+
+Normal installs need only two values. Local checkouts store them in `relay/.env`; marketplace installs store them in `relay.env` under `herdr plugin config-dir herdr-mobile-relay.events`. Setup generates the token, and the stable service installer adds the tunnel path:
 
 ```env
 HERDR_RELAY_TOKEN=<shared-secret>
@@ -273,17 +277,25 @@ If a token leaks — for example a shared screenshot of a setup QR code — rota
 make rotate-token
 ```
 
-This writes a new token to `relay/.env`, restarts the background service when one is installed, and prints a fresh setup link and QR code to re-add the relay on each phone. Configurations using the old token stop working as soon as the relay restarts.
+This writes a new token to the active relay configuration (`relay/.env` for a checkout or the stable Herdr plugin config directory), restarts the background service when one is installed, and prints a fresh setup link and QR code to re-add the relay on each phone. Configurations using the old token stop working as soon as the relay restarts.
 
 ## Herdr Plugin Hook
 
-The relay polls local `herdr` every few seconds. For faster blocked-agent updates, link the local plugin hook on each computer:
+The marketplace plugin provides both the Quick Start action and faster local agent-status events:
+
+```bash
+herdr plugin install 0cv/herdr-mobile-relay
+```
+
+For local development, link the checkout instead:
 
 ```bash
 make relay-plugin
 ```
 
 The plugin sends local agent-status events to the local relay over UDP on `127.0.0.1:8376`. It does not expose another network service and does not connect to other computers.
+
+The repository-root `herdr-plugin.toml` declares Quick Start and background-service actions, their managed setup panes, and the event hook. Marketplace configuration lives outside Herdr's replaceable managed checkout; `make relay-plugin` remains the convenient local-development command.
 
 ## Security Model
 
@@ -294,7 +306,7 @@ The plugin sends local agent-status events to the local relay over UDP on `127.0
 - Set `HERDR_RELAY_HOST` only if you intentionally need a non-loopback bind address. The relay refuses a non-loopback bind without `HERDR_RELAY_TOKEN`.
 - Tokenless browser connections are rejected unless their `Origin` is listed in `HERDR_ALLOWED_ORIGINS` as a comma-separated list, such as `https://your-pages-site.pages.dev`.
 - The web app stores relay URLs and tokens in browser local storage on the device where you configure it.
-- Web Push VAPID private keys and push subscriptions are local runtime state in `relay/push/`; keep that directory private and do not commit it.
+- Web Push VAPID private keys and push subscriptions are private local runtime state. Checkouts keep them in ignored `relay/push/`; marketplace installs keep them beside `relay.env` in Herdr's stable plugin config directory so reinstalling the managed checkout does not remove phone subscriptions.
 - A connected web client can send text and key input to Herdr panes exposed by that relay. Treat relay URLs and tokens as sensitive.
 - Notification action payloads contain only relay/pane routing metadata. The PWA reconnects with its locally stored relay credential and performs device verification when enabled before sending the action.
 - Agent launch requests select only from supported executables automatically found by the relay; the browser cannot submit an executable or shell command.

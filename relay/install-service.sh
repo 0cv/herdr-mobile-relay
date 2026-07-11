@@ -4,13 +4,14 @@ set -euo pipefail
 LABEL="com.herdr-mobile-relay.service"
 LEGACY_LABEL="com.herdr-remote.service"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/.env"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/herdr-mobile-relay"
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+
+ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 load_relay_env "$ENV_FILE"
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
@@ -49,6 +50,11 @@ cat > "$PLIST" <<EOF
     <integer>10</integer>
     <key>WorkingDirectory</key>
     <string>$(cd "$SCRIPT_DIR/.." && pwd)</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HERDR_RELAY_ENV</key>
+        <string>$ENV_FILE</string>
+    </dict>
     <key>StandardOutPath</key>
     <string>$LOG_DIR/service.log</string>
     <key>StandardErrorPath</key>

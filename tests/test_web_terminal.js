@@ -133,4 +133,122 @@ const inlineWhite = sandbox.terminalHtml('Normal text \x1b[107mwhite highlight\x
 assert.match(inlineWhite, /background-color:#fff/);
 assert.doesNotMatch(inlineWhite, /ansi-line-background/);
 
+// DOM writes in the terminal view must be skipped when nothing changed:
+// unconditional rebuilds at polling frequency flicker the approval buttons
+// and cancel Android's keyboard suggestion session while it initialises.
+assert.match(html, /function updateTerminalContent[\s\S]*?if \(displayContent === lastTerminalDisplayContent && format === lastTerminalFormat\) return;/);
+assert.match(html, /function syncTerminalChrome[\s\S]*?if \(signature !== lastTerminalChrome\)/);
+
+// --- Behavioral: the quick-actions guard must keep identical button DOM
+// untouched, yet restore has-quick-actions after terminal navigation strips
+// it (leaving keeps the cached buttons but removes the class).
+const qaStart = html.indexOf('function renderTerminalActions');
+const qaEnd = html.indexOf('function nextBlockedAgent', qaStart);
+assert.ok(qaStart >= 0 && qaEnd > qaStart, 'quick actions functions not found');
+
+function fakeElement() {
+  const el = {
+    _html: '',
+    htmlWrites: 0,
+    dataset: {},
+    classes: new Set(),
+    get innerHTML() { return this._html; },
+    set innerHTML(value) { this._html = value; this.htmlWrites += 1; },
+  };
+  el.classList = {
+    add: (...names) => names.forEach(name => el.classes.add(name)),
+    remove: (...names) => names.forEach(name => el.classes.delete(name)),
+    toggle: (name, force) => { if (force) el.classes.add(name); else el.classes.delete(name); },
+    contains: (name) => el.classes.has(name),
+  };
+  return el;
+}
+
+const qaEl = fakeElement();
+const viewEl = fakeElement();
+let heightCalls = 0;
+const qaSandbox = {
+  document: {getElementById: (id) => (id === 'quickActions' ? qaEl : viewEl)},
+  nextBlockedAgent: () => null,
+  agentStatusGroup: () => 'blocked',
+  respondingPaneIds: new Set(),
+  approvalOptions: () => ['yes', 'always', 'no'],
+  approvalButtonClass: () => 'btn',
+  approvalButtonLabel: (option) => option,
+  escapeHtml: (value) => String(value),
+  updateBottomChromeHeight: () => { heightCalls += 1; },
+};
+vm.runInNewContext(`
+${html.slice(qaStart, qaEnd)}
+this.renderTerminalActions = renderTerminalActions;
+this.clearQuickActions = clearQuickActions;
+`, qaSandbox);
+
+const blockedAgent = {pane_id: 'r::w1:p1'};
+qaSandbox.renderTerminalActions(blockedAgent);
+assert.equal(qaEl.htmlWrites, 1);
+assert.ok(qaEl.innerHTML.includes('respond(0, 3)'));
+assert.ok(viewEl.classes.has('has-quick-actions'));
+const renderedButtons = qaEl.innerHTML;
+
+// Identical update: no rewrite, no height recalculation.
+const heightAfterFirst = heightCalls;
+qaSandbox.renderTerminalActions(blockedAgent);
+assert.equal(qaEl.htmlWrites, 1, 'identical update must not rebuild buttons');
+assert.equal(heightCalls, heightAfterFirst);
+
+// Leaving the terminal strips the class but keeps the cached buttons;
+// re-entering the same blocked agent must restore the class without a rebuild.
+viewEl.classList.remove('active', 'has-quick-actions');
+qaSandbox.renderTerminalActions(blockedAgent);
+assert.ok(viewEl.classes.has('has-quick-actions'), 're-entry must restore has-quick-actions');
+assert.equal(qaEl.htmlWrites, 1, 're-entry must not rebuild identical buttons');
+assert.equal(qaEl.innerHTML, renderedButtons);
+
+// Clearing resets everything and the next render rebuilds from scratch.
+qaSandbox.clearQuickActions();
+assert.equal(qaEl.innerHTML, '');
+assert.ok(!viewEl.classes.has('has-quick-actions'));
+qaSandbox.renderTerminalActions(blockedAgent);
+assert.equal(qaEl.htmlWrites, 3);
+assert.ok(viewEl.classes.has('has-quick-actions'));
+
+// --- Behavioral: the composer must lock while the active agent waits for
+// approval (free text is meaningless against an approval menu) and unlock
+// once the agent moves on.
+const composerStart = html.indexOf('function updateComposerState');
+const composerEnd = html.indexOf('function sendKey', composerStart);
+assert.ok(composerStart >= 0 && composerEnd > composerStart, 'updateComposerState not found');
+
+const inputEl = {disabled: false, placeholder: 'Type…', value: ''};
+const sendEl = {disabled: true};
+const attachEl = {disabled: false};
+const fieldEl = {classes: new Set()};
+fieldEl.classList = {toggle: (name, force) => { if (force) fieldEl.classes.add(name); else fieldEl.classes.delete(name); }};
+let composerAgent = {pane_id: 'r::w1:p1', status: 'blocked'};
+const composerSandbox = {
+  document: {getElementById: (id) => ({termInput: inputEl, sendButton: sendEl, attachButton: attachEl, composerField: fieldEl}[id])},
+  activeAgent: () => composerAgent,
+  agentStatusGroup: (agent) => agent.status,
+  composerPromptText: (input) => input.value,
+};
+vm.runInNewContext(`
+${html.slice(composerStart, composerEnd)}
+this.updateComposerState = updateComposerState;
+`, composerSandbox);
+
+composerSandbox.updateComposerState();
+assert.equal(inputEl.disabled, true, 'composer must lock while blocked');
+assert.equal(attachEl.disabled, true);
+assert.equal(sendEl.disabled, true);
+assert.match(inputEl.placeholder, /approval/i);
+
+composerAgent = {pane_id: 'r::w1:p1', status: 'working'};
+inputEl.value = 'hello';
+composerSandbox.updateComposerState();
+assert.equal(inputEl.disabled, false, 'composer must unlock when no longer blocked');
+assert.equal(attachEl.disabled, false);
+assert.equal(sendEl.disabled, false);
+assert.equal(inputEl.placeholder, 'Type…');
+
 console.log('ANSI terminal renderer tests passed');

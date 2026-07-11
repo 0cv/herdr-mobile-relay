@@ -7,35 +7,53 @@ This is the beginner path. It gets one Linux or macOS computer connected to one 
 
 ## Before You Start
 
-You need Git, Make, and `curl`. Most developer-oriented Linux and macOS computers already have them. Check with:
+You need Herdr 0.7.0 or newer, Git, and `curl`. Check with:
 
 ```bash
-git --version && make --version && curl --version
+herdr --version && git --version && curl --version
 ```
 
 You do **not** need a Cloudflare account, domain, existing Python installation, Node.js, or separately hosted web app for this trial. Cloudflare describes [TryCloudflare quick tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) as free testing tunnels that create temporary random hostnames without moving a domain to Cloudflare.
 
-## 1. Paste One Command
+## 1. Install the Plugin
 
 ```bash
-git clone https://github.com/0cv/herdr-mobile-relay.git && cd herdr-mobile-relay && make quick-start
+herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-The command:
+Herdr previews the plugin commands before you confirm the installation. Then open Herdr's plugin action menu and choose **Herdr Mobile Relay: Quick Start**. A managed setup pane opens inside Herdr and:
 
 1. Creates a private relay token and minimal local configuration.
-2. Detects Herdr, `uv`, and `cloudflared`.
+2. Detects `uv` and `cloudflared`.
 3. Offers to install anything missing using the tools' official installers or release binaries.
 4. Starts the relay and serves the phone app from it.
 5. Starts a temporary Cloudflare quick tunnel.
 
 If it asks to install missing tools, type `y` and press Enter. Installation is for your user account; the script does not need `sudo`.
 
+Plugin configuration is stored under Herdr's persistent config directory, not its replaceable managed checkout. Print the directory at any time with:
+
+```bash
+herdr plugin config-dir herdr-mobile-relay.events
+```
+
+### Local Checkout Fallback
+
+To develop the relay or run it without installing the marketplace plugin:
+
+```bash
+git clone https://github.com/0cv/herdr-mobile-relay.git && cd herdr-mobile-relay && make quick-start
+```
+
+The checkout path stores its configuration in `relay/.env`; the rest of the experience is the same.
+
+Checkout `make setup-link` and `make rotate-token` commands refuse to run when an installed service points at a different plugin-managed configuration. This prevents printing a QR token that the running relay never loaded.
+
 ## 2. Scan the QR Code (or Open the Phone Setup Link)
 
-After startup, the terminal shows a QR code and the matching Phone setup link:
+After startup, the Quick Start pane shows a QR code and the matching Phone setup link:
 
-<img src="images/quickstart.png" alt="Terminal output of make quick-start showing a QR code, the private phone setup link, and manual setup details" width="640">
+<img src="images/quickstart.png" alt="Quick Start output showing a QR code, the private phone setup link, and manual setup details" width="640">
 
 Point your phone camera at the QR code and open the link it offers—that is the whole setup. The app opens, saves the relay URL and token, and connects automatically; there is nothing to type or paste into Settings. If the QR code does not appear or does not scan, open the printed HTTPS link on your phone instead—it is the same link.
 
@@ -45,13 +63,13 @@ Do not share the setup link or a photo of the QR code: anyone who has both the t
 
 ## 3. Use It
 
-Keep the quick-start terminal open. In another terminal, run Herdr and your normal coding agent, or tap **＋** in the phone app to start an installed Codex, Claude Code, or OpenCode agent in a selected project directory.
+Keep the Quick Start pane open. Run your normal coding agent in another Herdr pane, or tap **＋** in the phone app to start an installed Codex, Claude Code, or OpenCode agent in a selected project directory.
 
-The quick tunnel stops when you press Ctrl-C or close its terminal. The next `make quick-start` keeps the same relay token but creates a new random tunnel URL, so scan the newly printed QR code (or open the new link).
+The quick tunnel stops when you press Ctrl-C or close its pane. The next **Herdr Mobile Relay: Quick Start** action keeps the same relay token but creates a new random tunnel URL, so scan the newly printed QR code (or open the new link).
 
 ## If It Does Not Work
 
-Run the non-installing prerequisite check:
+For a local checkout, run the non-installing prerequisite check:
 
 ```bash
 make setup
@@ -59,10 +77,10 @@ make setup
 
 Common issues:
 
-- **`git`, `make`, or `curl` is missing:** install it with your operating system's package manager, then rerun the one-command quick start.
-- **Port 8375 is already in use:** stop the existing relay or service, then rerun the command.
-- **The phone link times out:** keep the terminal open and check whether `cloudflared` printed a connectivity error.
-- **The link or QR code never loads (site cannot be reached):** some home routers cache a failed DNS lookup for up to 30 minutes if the tunnel hostname is opened before its DNS record goes live. The quick start waits for the hostname to resolve before printing the QR code, so this should be rare. If it still happens, press Ctrl-C and rerun `make quick-start`; each run gets a fresh hostname. Switching the phone to mobile data for the first open also bypasses the router's cache.
+- **`herdr`, `git`, or `curl` is missing:** install it, then rerun the plugin installation. Make is needed only for the local-checkout fallback.
+- **Port 8375 is already in use:** stop the existing relay or service, then run the Quick Start action again.
+- **The phone link times out:** keep the Quick Start pane open and check whether `cloudflared` printed a connectivity error.
+- **The link or QR code never loads (site cannot be reached):** some home routers cache a failed DNS lookup for up to 30 minutes if the tunnel hostname is opened before its DNS record goes live. The quick start waits for the hostname to resolve before printing the QR code, so this should be rare. If it still happens, press Ctrl-C and run the Quick Start action again; each run gets a fresh hostname. Switching the phone to mobile data for the first open also bypasses the router's cache.
 - **The app opens but does not connect:** reopen the complete newly printed link, including the `#setup=...` fragment.
 - **macOS blocks a project folder:** choose a non-protected project folder or grant the Herdr relay process the appropriate Files and Folders permission.
 
@@ -76,15 +94,12 @@ TryCloudflare quick tunnels are intended for testing, have no uptime guarantee, 
    > An available all-numeric `.xyz` domain with 6–9 digits typically costs about $1 per year through Cloudflare Registrar. The `.xyz` registry lists this numeric class at $0.99/year, and Cloudflare sells domains at registry cost without markup. Verify the current price at checkout.
 
 2. Follow the README's [Stable Hostnames](README.md#stable-hostnames) section once per computer.
-3. Install the platform background service:
+3. Open Herdr's plugin action menu and choose **Herdr Mobile Relay: Install Background Service**. The managed pane installs the platform user service and prints the stable QR code.
+
+For a local checkout, the equivalent commands are:
 
 ```bash
 make service-install
-```
-
-4. Add the stable relay to your phone the same way as the quick start:
-
-```bash
 make setup-link
 ```
 

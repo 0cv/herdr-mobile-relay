@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const html = fs.readFileSync('web/index.html', 'utf8');
+const serviceWorker = fs.readFileSync('web/sw.js', 'utf8');
 const versionMatch = html.match(/const APP_PROTOCOL_VERSION = (\d+);/);
 const start = html.indexOf('function relayVersionMeta');
 const end = html.indexOf('function pushStatusMeta', start);
@@ -32,5 +33,9 @@ assert.match(
 );
 assert.match(html, /type: 'upload_image',[\s\S]*?protocol: APP_PROTOCOL_VERSION/);
 assert.match(html, /type: 'push_subscribe',[\s\S]*?protocol: APP_PROTOCOL_VERSION/);
+assert.match(html, /type: 'push_subscribe',[\s\S]*?notify_finished: finishedNotificationsEnabled\(\)/);
+assert.match(html, /id="finishedNotificationToggle"[\s\S]*?onchange="setFinishedNotificationsEnabled\(this\.checked\)"/);
+assert.match(serviceWorker, /const actions = Array\.isArray\(payload\.actions\)/);
+assert.match(serviceWorker, /actions,/);
 
 console.log('Relay protocol compatibility tests passed');

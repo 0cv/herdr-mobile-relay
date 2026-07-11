@@ -1,13 +1,14 @@
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
 import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 
 RELAY_PATH = Path(__file__).parents[1] / "relay" / "herdr_relay.py"
@@ -38,7 +39,24 @@ class FakeRequest:
         self.headers = FakeHeaders(headers)
 
 
-class RelayHelpersTest(unittest.TestCase):
+class ClaudeHistoryIsolationMixin:
+    """Point history persistence at a per-test directory so tests never touch
+    the real cache and never leak state into each other."""
+
+    def setUp(self):
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        patcher = patch.object(relay, "CLAUDE_HISTORY_DIR", Path(temp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        relay.claude_history_state.clear()
+        relay.claude_history_save_times.clear()
+        self.addCleanup(relay.claude_history_state.clear)
+        self.addCleanup(relay.claude_history_save_times.clear)
+
+
+class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
     def test_protocol_v1_is_the_unversioned_positional_baseline(self):
         self.assertEqual(relay.PROTOCOL_VERSION, 1)
         self.assertEqual(relay.client_protocol_version({}), 1)
@@ -86,6 +104,250 @@ class RelayHelpersTest(unittest.TestCase):
         self.assertEqual(target(payload["action_urls"]["approve"])["index"], 0)
         self.assertEqual(target(payload["action_urls"]["deny"])["index"], 2)
         self.assertEqual(target(payload["action_urls"]["deny"])["notification_id"], "event-1")
+
+    def test_finished_push_payload_opens_agent_without_approval_actions(self):
+        payload = relay.finished_push_payload({
+            "host": "fedora",
+            "pane_id": "w1:p2",
+            "project": "relay",
+            "agent": "codex",
+        })
+        target = json.loads(urllib.parse.unquote(payload["url"].split("#notify=", 1)[1]))
+
+        self.assertEqual(payload["title"], "relay finished")
+        self.assertEqual(payload["actions"], [])
+        self.assertEqual(payload["action_urls"], {})
+        self.assertEqual(target["pane_id"], "w1:p2")
+
+    def test_finished_notification_is_emitted_once_per_work_cycle(self):
+        pane = "w1:p1"
+        relay.finished_notification_panes.clear()
+        try:
+            self.assertFalse(relay.register_finished_notification(pane, "working", "idle"))
+            self.assertTrue(relay.register_finished_notification(pane, "idle", "working"))
+            self.assertFalse(relay.register_finished_notification(pane, "idle", "working"))
+            self.assertFalse(relay.register_finished_notification(pane, "working", "idle"))
+            self.assertTrue(relay.register_finished_notification(pane, "done", "working"))
+        finally:
+            relay.finished_notification_panes.clear()
+
+    def test_push_subscription_stores_finished_preference(self):
+        subscription = {
+            "endpoint": "https://push.example.test/one",
+            "keys": {"p256dh": "key", "auth": "auth"},
+        }
+        with (
+            patch.object(relay, "load_push_subscriptions", return_value=[]),
+            patch.object(relay, "save_push_subscriptions") as save,
+        ):
+            stored = relay.store_push_subscription(
+                subscription,
+                client_id="phone",
+                notify_finished=True,
+            )
+
+        self.assertTrue(stored)
+        self.assertTrue(save.call_args.args[0][0]["notify_finished"])
+
+    def test_finished_push_only_targets_opted_in_subscriptions(self):
+        subscriptions = [
+            {"subscription": {"endpoint": "https://push.example.test/one"}, "notify_finished": True},
+            {"subscription": {"endpoint": "https://push.example.test/two"}},
+        ]
+        with (
+            patch.object(relay, "load_push_subscriptions", return_value=subscriptions),
+            patch.object(relay, "webpush") as webpush,
+            patch.object(relay, "remove_push_subscriptions"),
+        ):
+            relay.send_finished_webpush_notifications({"pane_id": "w1:p1"})
+
+        self.assertEqual(webpush.call_count, 1)
+        self.assertEqual(
+            webpush.call_args.kwargs["subscription_info"]["endpoint"],
+            "https://push.example.test/one",
+        )
+
+    def test_plugin_manifest_is_marketplace_ready_at_repository_root(self):
+        root = RELAY_PATH.parents[1]
+        manifest = (root / "herdr-plugin.toml").read_text()
+
+        self.assertFalse((root / "relay" / "herdr-plugin.toml").exists())
+        self.assertIn('id = "herdr-mobile-relay.events"', manifest)
+        self.assertIn('id = "quick-start"', manifest)
+        self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "quick-start"]', manifest)
+        self.assertIn('command = ["bash", "relay/plugin-quick-start.sh"]', manifest)
+        self.assertIn('id = "install-service"', manifest)
+        self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "install-service"]', manifest)
+        self.assertIn('command = ["bash", "relay/plugin-install-service.sh"]', manifest)
+        self.assertIn('command = ["python3", "relay/on_event.py"]', manifest)
+
+    def test_plugin_config_is_stable_and_migrates_checkout_env(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            script_dir = temp / "relay"
+            config_dir = temp / "plugin-config"
+            script_dir.mkdir()
+            (script_dir / ".env").write_text("HERDR_RELAY_TOKEN=legacy-token\n")
+            (script_dir / "push").mkdir()
+            (script_dir / "push" / "subscriptions.json").write_text("{}\n")
+            env = os.environ.copy()
+            env.pop("HERDR_RELAY_ENV", None)
+            env["HERDR_PLUGIN_CONFIG_DIR"] = str(config_dir)
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    '. "$1"; relay_env_file "$2"',
+                    "bash",
+                    str(root / "relay" / "common.sh"),
+                    str(script_dir),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            plugin_env = config_dir / "relay.env"
+            self.assertEqual(result.stdout.strip(), str(plugin_env))
+            self.assertEqual(plugin_env.read_text(), "HERDR_RELAY_TOKEN=legacy-token\n")
+            self.assertEqual(plugin_env.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(config_dir.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((config_dir / "push" / "subscriptions.json").read_text(), "{}\n")
+
+    def test_plugin_runtime_data_uses_the_stable_config_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir) / "plugin-config"
+            with patch.dict(
+                relay.os.environ,
+                {"HERDR_PLUGIN_CONFIG_DIR": str(config_dir)},
+                clear=False,
+            ):
+                relay.os.environ.pop("HERDR_RELAY_ENV", None)
+                self.assertEqual(relay.default_runtime_dir(), config_dir)
+
+    def test_checkout_config_remains_the_default_without_plugin_context(self):
+        root = RELAY_PATH.parents[1]
+        env = os.environ.copy()
+        env.pop("HERDR_RELAY_ENV", None)
+        env.pop("HERDR_PLUGIN_CONFIG_DIR", None)
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; relay_env_file "$2"',
+                "bash",
+                str(root / "relay" / "common.sh"),
+                str(root / "relay"),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(result.stdout.strip(), str(root / "relay" / ".env"))
+
+    def test_plugin_action_opens_requested_managed_pane(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            fake_herdr = temp / "herdr"
+            args_file = temp / "args.txt"
+            fake_herdr.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            fake_herdr.chmod(0o700)
+            env = os.environ.copy()
+            env.update({
+                "ARGS_FILE": str(args_file),
+                "HERDR_BIN_PATH": str(fake_herdr),
+                "HERDR_PLUGIN_ID": "herdr-mobile-relay.events",
+                "HERDR_PANE_ID": "w1:p2",
+            })
+
+            subprocess.run(
+                [str(root / "relay" / "open-plugin-pane.sh"), "quick-start"],
+                check=True,
+                env=env,
+            )
+
+            self.assertEqual(args_file.read_text().splitlines(), [
+                "plugin", "pane", "open",
+                "--plugin", "herdr-mobile-relay.events",
+                "--entrypoint", "quick-start",
+                "--placement", "zoomed",
+                "--focus",
+                "--target-pane", "w1:p2",
+            ])
+
+    def test_macos_service_passes_the_stable_env_path(self):
+        installer = (RELAY_PATH.parent / "install-service.sh").read_text()
+        self.assertIn("<key>EnvironmentVariables</key>", installer)
+        self.assertIn("<key>HERDR_RELAY_ENV</key>", installer)
+
+    def test_checkout_command_rejects_plugin_service_config(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            checkout_env = home / "checkout" / "relay" / ".env"
+            plugin_env = home / "plugin-config" / "relay.env"
+            service_file = home / ".config" / "systemd" / "user" / "herdr-mobile-relay.service"
+            checkout_env.parent.mkdir(parents=True)
+            plugin_env.parent.mkdir(parents=True)
+            service_file.parent.mkdir(parents=True)
+            checkout_env.touch()
+            plugin_env.touch()
+            service_file.write_text(f"Environment=HERDR_RELAY_ENV={plugin_env}\n")
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    '. "$1"; assert_service_env_matches "$2"',
+                    "bash",
+                    str(root / "relay" / "common.sh"),
+                    str(checkout_env),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(f"This command resolved: {checkout_env}", result.stderr)
+            self.assertIn(f"Installed service uses: {plugin_env}", result.stderr)
+
+    def test_command_accepts_the_service_config_it_resolved(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            relay_env = home / "plugin-config" / "relay.env"
+            service_file = home / ".config" / "systemd" / "user" / "herdr-mobile-relay.service"
+            relay_env.parent.mkdir(parents=True)
+            service_file.parent.mkdir(parents=True)
+            relay_env.touch()
+            service_file.write_text(f"Environment=HERDR_RELAY_ENV={relay_env}\n")
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    '. "$1"; assert_service_env_matches "$2"',
+                    "bash",
+                    str(root / "relay" / "common.sh"),
+                    str(relay_env),
+                ],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_activity_round_trip_is_bounded_and_private(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -263,6 +525,176 @@ class RelayHelpersTest(unittest.TestCase):
             ["A", "B", *third],
         )
 
+    def test_claude_history_recovers_after_terminal_rewrites_recent_lines(self):
+        footer = ["prompt", "separator", "model", "context", "mode", "status"]
+        output = [f"output {i}" for i in range(1, 6)]
+        box = ["┌ This command requires approval", "│ Yes", "│ No", "│ hint", "└ esc to cancel"]
+        collapsed = output + ["⏺ Bash(command ran)", "answer 1", "answer 2"]
+
+        relay.claude_history_state.clear()
+        try:
+            relay.merge_claude_history("w1:p1", "\n".join(output + box + footer), 100)
+            first = relay.merge_claude_history("w1:p1", "\n".join(collapsed + footer), 100)
+            second = relay.merge_claude_history("w1:p1", "\n".join(collapsed + ["FINAL"] + footer), 100)
+        finally:
+            relay.claude_history_state.clear()
+
+        self.assertIn("requires approval", first)
+        self.assertNotIn("answer 1", first)
+        self.assertNotIn("requires approval", second)
+        self.assertIn("answer 2", second)
+        self.assertIn("FINAL", second)
+
+    def test_claude_history_rebases_when_divergence_persists_unchanged(self):
+        footer = ["prompt", "separator", "model", "context", "mode", "status"]
+        output = [f"output {i}" for i in range(1, 6)]
+        box = ["┌ This command requires approval", "│ Yes", "│ No", "│ hint", "└ esc to cancel"]
+        collapsed = output + ["⏺ Bash(command ran)", "answer 1", "answer 2"]
+
+        relay.claude_history_state.clear()
+        try:
+            relay.merge_claude_history("w1:p1", "\n".join(output + box + footer), 100)
+            relay.merge_claude_history("w1:p1", "\n".join(collapsed + footer), 100)
+            healed = relay.merge_claude_history("w1:p1", "\n".join(collapsed + footer), 100)
+        finally:
+            relay.claude_history_state.clear()
+
+        self.assertNotIn("requires approval", healed)
+        self.assertIn("answer 2", healed)
+
+    def test_final_history_capture_bypasses_gate_and_survives_inflight(self):
+        agent = {"pane_id": "w1:p1", "agent": "claude"}
+
+        def reset():
+            relay.claude_history_pending_captures.clear()
+            relay.claude_history_capture_times.clear()
+            relay.claude_history_inflight.clear()
+
+        reset()
+        try:
+            with (
+                # A plain Mock: auto-speccing would install an AsyncMock whose
+                # call result is an unawaited coroutine.
+                patch.object(relay, "capture_claude_history", Mock()),
+                patch.object(relay.asyncio, "create_task") as create_task,
+            ):
+                relay.schedule_claude_history_capture(agent, timestamp=100.0)
+                relay.schedule_claude_history_capture(agent, timestamp=101.0)
+                self.assertEqual(create_task.call_count, 1)
+
+                relay.schedule_claude_history_capture(agent, timestamp=102.0, force=True)
+                self.assertEqual(create_task.call_count, 2)
+
+                relay.claude_history_inflight.add("w1:p1")
+                relay.schedule_claude_history_capture(agent, timestamp=103.0, force=True)
+                self.assertEqual(create_task.call_count, 2)
+                self.assertIn("w1:p1", relay.claude_history_pending_captures)
+
+                relay.claude_history_inflight.clear()
+                relay.schedule_claude_history_capture(agent, timestamp=104.0)
+                self.assertEqual(create_task.call_count, 3)
+                self.assertNotIn("w1:p1", relay.claude_history_pending_captures)
+        finally:
+            reset()
+
+    def test_claude_history_grows_past_repeated_content(self):
+        footer = ["prompt", "separator", "model", "context", "mode", "status"]
+        block = ["$ make check", "Ran 40 tests", "OK"]
+        seed = ["start", *block, "middle", *block, "u1", "u2", "u3", "u4"]
+        frame = [*block, "u1", "u2", "u3", "u4", "new 1", "new 2"]
+
+        relay.claude_history_state.clear()
+        try:
+            relay.merge_claude_history("w1:p1", "\n".join(seed + footer), 100)
+            merged = relay.merge_claude_history("w1:p1", "\n".join(frame + footer), 100)
+        finally:
+            relay.claude_history_state.clear()
+
+        self.assertEqual(
+            [relay.normalized_history_line(line) for line in merged.splitlines()],
+            [*seed, "new 1", "new 2", *footer],
+        )
+
+    def test_claude_history_appends_when_match_is_deeper_than_one_screen(self):
+        footer = ["prompt", "separator", "model", "context", "mode", "status"]
+        block = ["$ make check", "Ran 40 tests", "OK"]
+        seed = ["start", *block, "m1", "m2", "m3", "m4", "m5", "m6", *block, "u1", "u2"]
+        # No tail overlap (more than one viewport scrolled past between
+        # captures) and the frame repeats an old block: the fuzzy match
+        # anchors deeper in history than one screen, which must append,
+        # never rebase.
+        frame = [*block, "n1", "n2", "n3", "n4", "n5", "n6", "n7"]
+
+        relay.claude_history_state.clear()
+        try:
+            relay.merge_claude_history("w1:p1", "\n".join(seed + footer), 100)
+            merged = relay.merge_claude_history("w1:p1", "\n".join(frame + footer), 100)
+        finally:
+            relay.claude_history_state.clear()
+
+        self.assertEqual(
+            [relay.normalized_history_line(line) for line in merged.splitlines()],
+            [*seed, *frame, *footer],
+        )
+
+    def test_claude_history_survives_relay_restart(self):
+        footer = ["prompt", "separator", "model", "context", "mode", "status"]
+        first = ["A", "B", "C", "D", "E", "F", "G", "H", *footer]
+        after_restart = ["C", "D", "E", "F", "G", "H", "I", "J", *footer]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_dir = Path(temp_dir)
+            relay.claude_history_state.clear()
+            relay.claude_history_save_times.clear()
+            try:
+                with patch.object(relay, "CLAUDE_HISTORY_DIR", history_dir):
+                    relay.merge_claude_history("w1:p1", "\n".join(first), 30)
+                    relay.save_claude_history_state("w1:p1", force=True)
+
+                    # Simulate a relay restart: memory gone, files remain.
+                    relay.claude_history_state.clear()
+                    relay.claude_history_save_times.clear()
+
+                    merged = relay.merge_claude_history("w1:p1", "\n".join(after_restart), 30)
+                    history_file = relay.claude_history_file("w1:p1")
+                    self.assertTrue(history_file.exists())
+                    self.assertEqual(history_file.stat().st_mode & 0o777, 0o600)
+            finally:
+                relay.claude_history_state.clear()
+                relay.claude_history_save_times.clear()
+
+        self.assertEqual(
+            [relay.normalized_history_line(line) for line in merged.splitlines()],
+            ["A", "B", *after_restart],
+        )
+
+    def test_claude_history_prune_spares_live_panes_and_waits_for_inventory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_dir = Path(temp_dir)
+            stale_orphan = history_dir / "w1_p1.json"
+            fresh_orphan = history_dir / "w2_p1.json"
+            stale_live = history_dir / "w3_p1.json"
+            for path in (stale_orphan, fresh_orphan, stale_live):
+                path.write_text("{}")
+            old = time.time() - (relay.CLAUDE_HISTORY_MAX_AGE_DAYS + 1) * 86400
+            os.utime(stale_orphan, (old, old))
+            os.utime(stale_live, (old, old))
+
+            with (
+                patch.object(relay, "CLAUDE_HISTORY_DIR", history_dir),
+                patch.object(relay, "agent_types", {"w3:p1": "claude"}),
+            ):
+                with patch.object(relay, "agent_activity_initialized", False):
+                    relay.prune_claude_history_files()
+                self.assertTrue(stale_orphan.exists())
+
+                with patch.object(relay, "agent_activity_initialized", True):
+                    relay.prune_claude_history_files()
+
+            self.assertFalse(stale_orphan.exists())
+            self.assertTrue(fresh_orphan.exists())
+            self.assertTrue(stale_live.exists())
+
     def test_claude_history_ignores_laptop_viewport_navigation(self):
         footer = ["prompt", "separator", "model", "context", "mode", "status"]
         first = ["A", "B", "C", "D", "E", "F", "G", "H", *footer]
@@ -349,7 +781,7 @@ class RelayHelpersTest(unittest.TestCase):
         self.assertIn("home directory", error)
 
 
-class RelayCommandsTest(unittest.IsolatedAsyncioTestCase):
+class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTestCase):
     async def test_viewing_done_pane_broadcasts_idle_immediately(self):
         pane = "w1:p1"
         relay.unseen_done_panes.add(pane)

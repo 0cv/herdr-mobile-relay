@@ -4,7 +4,6 @@ echo "🐑 Herdr Mobile Relay quick start"
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/.env"
 RELAY_PID=""
 TUNNEL_PID=""
 LOG_FILE=""
@@ -13,6 +12,9 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+
+ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+export HERDR_RELAY_ENV="$ENV_FILE"
 
 cleanup() {
     if [ -n "$TUNNEL_PID" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
@@ -33,11 +35,15 @@ ensure_relay_env "$ENV_FILE"
 load_relay_env "$ENV_FILE"
 
 if ! command -v uv >/dev/null 2>&1; then
-    echo "✗ uv is required. Run make quick-start to install missing tools."
+    if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+        echo "✗ uv is required. Run Herdr Mobile Relay: Quick Start to install missing tools."
+    else
+        echo "✗ uv is required. Run make quick-start to install missing tools."
+    fi
     exit 1
 fi
 if ! command -v herdr >/dev/null 2>&1 && [ -z "${HERDR_BIN:-}" ]; then
-    echo "✗ herdr is required. Run make quick-start to install missing tools."
+    echo "✗ herdr is required. Install Herdr, then run Quick Start again."
     exit 1
 fi
 PORT="${HERDR_RELAY_PORT:-8375}"
@@ -138,7 +144,11 @@ if command -v cloudflared >/dev/null 2>&1; then
     done
     if ! kill -0 "$RELAY_PID" 2>/dev/null; then
         echo "✗ The relay process stopped. The tunnel cannot serve the app without it."
-        echo "  Rerun make quick-start; check port $PORT if it fails again."
+        if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+            echo "  Run Herdr Mobile Relay: Quick Start again; check port $PORT if it fails again."
+        else
+            echo "  Rerun make quick-start; check port $PORT if it fails again."
+        fi
         exit 1
     fi
     echo "✗ Cloudflare tunnel stopped. Recent cloudflared output:"

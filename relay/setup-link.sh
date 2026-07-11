@@ -2,13 +2,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/.env"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
+ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+
+assert_service_env_matches "$ENV_FILE"
 load_relay_env "$ENV_FILE"
 
 if ! command -v uv >/dev/null 2>&1; then

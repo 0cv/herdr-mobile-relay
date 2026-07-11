@@ -7,7 +7,10 @@ from pathlib import Path
 
 
 def load_env_file():
-    env_file = Path(__file__).with_name(".env")
+    env_file = os.environ.get("HERDR_RELAY_ENV", "")
+    if not env_file and os.environ.get("HERDR_PLUGIN_CONFIG_DIR"):
+        env_file = str(Path(os.environ["HERDR_PLUGIN_CONFIG_DIR"]) / "relay.env")
+    env_file = Path(env_file) if env_file else Path(__file__).with_name(".env")
     if not env_file.exists():
         return
     for line in env_file.read_text().splitlines():

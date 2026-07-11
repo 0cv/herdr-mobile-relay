@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-ENV_FILE="$SCRIPT_DIR/.env"
 WEB_ENV_FILE="$REPO_DIR/.env"
 INSTALL_MISSING=0
 CLOUDFLARED_TEMP_DIR=""
@@ -12,6 +11,8 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
+
+ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 require_supported_platform
 
@@ -86,6 +87,9 @@ find_missing_tools() {
     missing_tools=()
     local command
     for command in herdr uv cloudflared; do
+        if [ "$command" = "herdr" ] && [ -x "${HERDR_BIN:-}" ]; then
+            continue
+        fi
         if ! command -v "$command" >/dev/null 2>&1; then
             missing_tools+=("$command")
         fi
@@ -127,14 +131,18 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
     printf 'Missing required commands:'
     printf ' %s' "${missing_tools[@]}"
     echo ""
-    echo "Run make quick-start to install them interactively, or install them yourself:"
+    if [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+        echo "Run Herdr Mobile Relay: Quick Start again to install them interactively, or install them yourself:"
+    else
+        echo "Run make quick-start to install them interactively, or install them yourself:"
+    fi
     echo "  Herdr:       https://herdr.dev"
     echo "  uv:          https://docs.astral.sh/uv/getting-started/installation/"
     echo "  cloudflared: https://developers.cloudflare.com/tunnel/downloads/"
     exit 1
 fi
 
-if [ ! -f "$WEB_ENV_FILE" ]; then
+if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ ! -f "$WEB_ENV_FILE" ]; then
     cp "$REPO_DIR/.env.example" "$WEB_ENV_FILE"
     echo "Created $WEB_ENV_FILE"
 fi
@@ -147,8 +155,10 @@ fi
 echo ""
 echo "Prerequisites and local configuration are ready."
 echo "  Relay config: $ENV_FILE"
-echo "  Web config:   $WEB_ENV_FILE"
-if [ "$INSTALL_MISSING" -eq 0 ]; then
+if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+    echo "  Web config:   $WEB_ENV_FILE"
+fi
+if [ "$INSTALL_MISSING" -eq 0 ] && [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
     echo ""
     echo "Next: run make quick-start"
 fi

@@ -1,0 +1,33 @@
+id = "herdr-mobile-relay.events"
+name = "Herdr Mobile Relay"
+version = "0.2.0"
+# Herdr 0.7.0 introduced manifest actions, managed panes, and plugin config dirs.
+min_herdr_version = "0.7.0"
+description = "Set up and run the phone relay, with fast local agent-status events"
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "quick-start"
+title = "Herdr Mobile Relay: Quick Start"
+command = ["bash", "relay/open-plugin-pane.sh", "quick-start"]
+
+[[actions]]
+id = "install-service"
+title = "Herdr Mobile Relay: Install Background Service"
+command = ["bash", "relay/open-plugin-pane.sh", "install-service"]
+
+[[panes]]
+id = "quick-start"
+title = "Herdr Mobile Relay: Quick Start"
+placement = "zoomed"
+command = ["bash", "relay/plugin-quick-start.sh"]
+
+[[panes]]
+id = "install-service"
+title = "Herdr Mobile Relay: Install Background Service"
+placement = "zoomed"
+command = ["bash", "relay/plugin-install-service.sh"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["python3", "relay/on_event.py"]

@@ -2,7 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="${HERDR_RELAY_ENV:-$SCRIPT_DIR/.env}"
+
+# shellcheck source=common.sh
+. "$SCRIPT_DIR/common.sh"
+
+ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 if [ -f "$ENV_FILE" ]; then
     set -a

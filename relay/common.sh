@@ -1,5 +1,98 @@
 #!/bin/bash
 
+relay_env_file() {
+    local script_dir="$1"
+    local config_dir
+    local plugin_env
+
+    if [ -n "${HERDR_RELAY_ENV:-}" ]; then
+        printf '%s\n' "$HERDR_RELAY_ENV"
+        return
+    fi
+    if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
+        printf '%s/.env\n' "$script_dir"
+        return
+    fi
+
+    config_dir="$HERDR_PLUGIN_CONFIG_DIR"
+    plugin_env="$config_dir/relay.env"
+    mkdir -p "$config_dir"
+    chmod 700 "$config_dir"
+    if [ ! -f "$plugin_env" ] && [ -f "$script_dir/.env" ]; then
+        umask 077
+        cp "$script_dir/.env" "$plugin_env"
+        chmod 600 "$plugin_env"
+    fi
+    if [ ! -d "$config_dir/push" ] && [ -d "$script_dir/push" ]; then
+        umask 077
+        cp -R "$script_dir/push" "$config_dir/push"
+        chmod -R go-rwx "$config_dir/push"
+    fi
+    printf '%s\n' "$plugin_env"
+}
+
+canonical_file_path() {
+    local path="$1"
+    local directory
+    local filename
+
+    directory="$(dirname "$path")"
+    filename="$(basename "$path")"
+    if [ -d "$directory" ]; then
+        directory="$(cd "$directory" && pwd -P)"
+    fi
+    printf '%s/%s\n' "${directory%/}" "$filename"
+}
+
+installed_service_env_file() {
+    local service_file
+
+    case "$(uname -s)" in
+        Linux)
+            service_file="$HOME/.config/systemd/user/herdr-mobile-relay.service"
+            if [ -r "$service_file" ]; then
+                sed -n 's/^Environment=HERDR_RELAY_ENV=//p' "$service_file" | tail -1
+            fi
+            ;;
+        Darwin)
+            service_file="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
+            if [ -r "$service_file" ]; then
+                awk '
+                    /<key>HERDR_RELAY_ENV<\/key>/ { found = 1; next }
+                    found && /<string>/ {
+                        sub(/^.*<string>/, "")
+                        sub(/<\/string>.*$/, "")
+                        print
+                        exit
+                    }
+                ' "$service_file"
+            fi
+            ;;
+    esac
+}
+
+assert_service_env_matches() {
+    local resolved_env
+    local service_env
+
+    resolved_env="$(canonical_file_path "$1")"
+    service_env="$(installed_service_env_file)"
+    if [ -z "$service_env" ]; then
+        return
+    fi
+    service_env="$(canonical_file_path "$service_env")"
+    if [ "$resolved_env" = "$service_env" ]; then
+        return
+    fi
+
+    echo "✗ Refusing to use a different relay configuration than the installed service." >&2
+    echo "  This command resolved: $resolved_env" >&2
+    echo "  Installed service uses: $service_env" >&2
+    echo "  Run the matching Herdr plugin action, or explicitly set:" >&2
+    echo "  HERDR_RELAY_ENV=$service_env" >&2
+    return 1
+}
+
 generate_token() {
     if command -v openssl >/dev/null 2>&1; then
         openssl rand -hex 16
