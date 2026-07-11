@@ -93,6 +93,13 @@ assert_service_env_matches() {
     return 1
 }
 
+pause_before_close() {
+    if [ -t 0 ]; then
+        echo ""
+        read -r -p "Press Enter to close this pane." _answer
+    fi
+}
+
 generate_token() {
     if command -v openssl >/dev/null 2>&1; then
         openssl rand -hex 16

@@ -6,17 +6,14 @@ if [ -n "${HERDR_BIN_PATH:-}" ]; then
     export HERDR_BIN="$HERDR_BIN_PATH"
 fi
 
-pause_before_close() {
-    if [ -t 0 ]; then
-        echo ""
-        read -r -p "Press Enter to close this pane." _answer
-    fi
-}
+# shellcheck source=common.sh
+. "$SCRIPT_DIR/common.sh"
 
 echo "🐑 Herdr Mobile Relay background service setup"
 echo ""
 echo "This requires a named Cloudflare tunnel configuration. If you only want"
-echo "to try the relay, use Herdr Mobile Relay: Quick Start instead."
+echo "to try the relay, run the Quick Start action instead:"
+echo "  herdr plugin action invoke quick-start --plugin herdr-mobile-relay.events"
 echo ""
 
 if ! "$SCRIPT_DIR/setup.sh" --install-missing; then

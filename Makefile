@@ -40,6 +40,7 @@ check: test
 	uv run --with ruff ruff check relay tests
 	uv run python -m compileall -q relay tests
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
+	@for script in relay/plugin-build.sh relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
 	node --check web/sw.js
 	node --check web/notification-icons.js
 	node -e 'const fs=require("fs");const html=fs.readFileSync("web/index.html","utf8");const start=html.lastIndexOf("<script>");const end=html.indexOf("</script>",start);if(start<0||end<0)throw new Error("inline script not found");new Function(html.slice(start+8,end));'

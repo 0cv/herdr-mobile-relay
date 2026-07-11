@@ -179,7 +179,82 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
         self.assertIn('id = "install-service"', manifest)
         self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "install-service"]', manifest)
         self.assertIn('command = ["bash", "relay/plugin-install-service.sh"]', manifest)
-        self.assertIn('command = ["python3", "relay/on_event.py"]', manifest)
+        self.assertIn('command = ["sh", "relay/plugin-on-event.sh"]', manifest)
+        self.assertIn('[[build]]', manifest)
+        self.assertIn('command = ["sh", "relay/plugin-build.sh"]', manifest)
+        self.assertIn('id = "status"', manifest)
+        self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "status"]', manifest)
+        self.assertIn('command = ["bash", "relay/plugin-status.sh"]', manifest)
+        plugin_installer = (root / "relay" / "plugin-install-service.sh").read_text()
+        self.assertIn('. "$SCRIPT_DIR/common.sh"', plugin_installer)
+
+    def test_plugin_build_soft_fails_without_uv_or_network(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            fake_curl = temp / "curl"
+            fake_curl.write_text("#!/bin/sh\nexit 1\n")
+            fake_curl.chmod(0o700)
+            (temp / "env").symlink_to("/usr/bin/env")
+            (temp / "sh").symlink_to("/bin/sh")
+            env = os.environ.copy()
+            env["PATH"] = str(temp)
+            env["HOME"] = str(temp)
+
+            result = subprocess.run(
+                ["/bin/sh", str(root / "relay" / "plugin-build.sh")],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Quick Start offers interactive installation", result.stderr)
+
+    def test_plugin_build_soft_fails_when_uv_pre_warm_fails(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            fake_uv = temp / "uv"
+            fake_uv.write_text("#!/bin/sh\nexit 42\n")
+            fake_uv.chmod(0o700)
+            env = os.environ.copy()
+            env["PATH"] = str(temp)
+            env["HOME"] = str(temp)
+
+            result = subprocess.run(
+                ["/bin/sh", str(root / "relay" / "plugin-build.sh")],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("dependency pre-warm failed", result.stderr)
+
+    def test_plugin_event_uses_uv_when_python3_is_unavailable(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            fake_uv = temp / "uv"
+            fake_uv.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n")
+            fake_uv.chmod(0o700)
+            env = os.environ.copy()
+            env["PATH"] = str(temp)
+            env["HOME"] = str(temp)
+
+            result = subprocess.run(
+                ["/bin/sh", str(root / "relay" / "plugin-on-event.sh")],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            f"run --quiet python {root / 'relay' / 'on_event.py'}",
+        )
 
     def test_plugin_config_is_stable_and_migrates_checkout_env(self):
         root = RELAY_PATH.parents[1]
@@ -280,6 +355,47 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
                 "--focus",
                 "--target-pane", "w1:p2",
             ])
+
+            subprocess.run(
+                [str(root / "relay" / "open-plugin-pane.sh"), "status"],
+                check=True,
+                env=env,
+            )
+
+            self.assertEqual(args_file.read_text().splitlines(), [
+                "plugin", "pane", "open",
+                "--plugin", "herdr-mobile-relay.events",
+                "--entrypoint", "status",
+                "--placement", "overlay",
+                "--focus",
+                "--target-pane", "w1:p2",
+            ])
+
+    def test_plugin_status_recognizes_installed_service_without_systemd_bus(self):
+        if os.uname().sysname != "Linux":
+            self.skipTest("systemd service status applies only to Linux")
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            service_dir = home / ".config" / "systemd" / "user"
+            service_dir.mkdir(parents=True)
+            (service_dir / "herdr-mobile-relay.service").write_text("[Service]\n")
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(home),
+                "HERDR_PLUGIN_CONFIG_DIR": str(home / "plugin-config"),
+                "HERDR_RELAY_PORT": "1",
+            })
+
+            result = subprocess.run(
+                ["bash", str(root / "relay" / "plugin-status.sh")],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertIn("Service:      installed (", result.stdout)
 
     def test_macos_service_passes_the_stable_env_path(self):
         installer = (RELAY_PATH.parent / "install-service.sh").read_text()

@@ -1976,6 +1976,12 @@ function ansiStyleName(name) {
   })[name] || name;
 }
 
+// Herdr's built-in theme renders colorless bold+italic text in this accent
+// (Codex emits e.g. markdown headings that way and relies on the terminal
+// theme to tint them).
+// Mirror it so the phone matches the laptop.
+const ANSI_HEADING_ACCENT = '#3daee9';
+
 function ansiToHtml(text, normalizeNearWhiteBackground = false) {
   let html = '', open = false, styles = {};
   const parts = text.split(/\x1b\[([0-9;]*)m/g);
@@ -2025,7 +2031,10 @@ function ansiToHtml(text, normalizeNearWhiteBackground = false) {
         styles.backgroundColor = normalizedAnsiBackground(ANSI_COLORS[code - 10], normalizeNearWhiteBackground);
       }
     }
-    const style = Object.entries(styles).map(([k,v]) => `${ansiStyleName(k)}:${v}`).join(';');
+    const effectiveStyles = styles.fontStyle === 'italic' && styles.fontWeight === '700' && !styles.color
+      ? {...styles, color: ANSI_HEADING_ACCENT}
+      : styles;
+    const style = Object.entries(effectiveStyles).map(([k,v]) => `${ansiStyleName(k)}:${v}`).join(';');
     if (style) {
       html += `<span style="${style}">`;
       open = true;

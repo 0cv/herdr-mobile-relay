@@ -10,11 +10,16 @@ if [ -z "$ENTRYPOINT" ]; then
     exit 2
 fi
 
+case "$ENTRYPOINT" in
+    status) PLACEMENT="overlay" ;;
+    *) PLACEMENT="zoomed" ;;
+esac
+
 args=(
     plugin pane open
     --plugin "$PLUGIN_ID"
     --entrypoint "$ENTRYPOINT"
-    --placement zoomed
+    --placement "$PLACEMENT"
     --focus
 )
 if [ -n "${HERDR_PANE_ID:-}" ]; then

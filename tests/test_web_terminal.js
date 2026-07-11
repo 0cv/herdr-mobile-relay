@@ -126,6 +126,18 @@ for (const lightBackground of [
   assert.doesNotMatch(normalized, /background-color:(?:#fff|rgb\(242,242,242\))/);
 }
 
+// Colorless bold+italic mirrors herdr's theme accent (Codex markdown
+// headings); plain italic and explicitly colored italic retain their styles.
+const italicHeading = sandbox.ansiToHtml('\x1b[0m\x1b[1m\x1b[3m### Heading\x1b[0m');
+assert.match(italicHeading, /font-style:italic/);
+assert.match(italicHeading, /color:#3daee9/);
+const plainItalic = sandbox.ansiToHtml('\x1b[3memphasized text\x1b[0m');
+assert.match(plainItalic, /font-style:italic/);
+assert.doesNotMatch(plainItalic, /#3daee9/);
+const italicColored = sandbox.ansiToHtml('\x1b[3;38;2;148;226;213mteal italic\x1b[0m');
+assert.match(italicColored, /color:rgb\(148,226,213\)/);
+assert.doesNotMatch(italicColored, /#3daee9/);
+
 const nonCodexWhite = sandbox.terminalHtml('\x1b[107mWhite row\x1b[0m');
 assert.match(nonCodexWhite, /background-color:#fff/);
 

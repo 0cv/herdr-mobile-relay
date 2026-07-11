@@ -15,13 +15,16 @@ herdr --version && git --version && curl --version
 
 You do **not** need a Cloudflare account, domain, existing Python installation, Node.js, or separately hosted web app for this trial. Cloudflare describes [TryCloudflare quick tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) as free testing tunnels that create temporary random hostnames without moving a domain to Cloudflare.
 
-## 1. Install the Plugin
+## 1. Install and Start the Plugin
 
 ```bash
-herdr plugin install 0cv/herdr-mobile-relay
+herdr plugin install 0cv/herdr-mobile-relay &&
+  herdr plugin action invoke quick-start --plugin herdr-mobile-relay.events
 ```
 
-Herdr previews the plugin commands before you confirm the installation. Then open Herdr's plugin action menu and choose **Herdr Mobile Relay: Quick Start**. A managed setup pane opens inside Herdr and:
+This is one paste with two consent points. Herdr previews the plugin commands before you confirm the installation, including a one-time build step that installs `uv` (user-level) if missing and prepares the relay's Python environment. A failed download does not block plugin registration; Quick Start retries missing setup interactively. After installation succeeds, the chained action opens the Quick Start pane.
+
+A managed setup pane opens inside Herdr and:
 
 1. Creates a private relay token and minimal local configuration.
 2. Detects `uv` and `cloudflared`.
@@ -30,6 +33,16 @@ Herdr previews the plugin commands before you confirm the installation. Then ope
 5. Starts a temporary Cloudflare quick tunnel.
 
 If it asks to install missing tools, type `y` and press Enter. Installation is for your user account; the script does not need `sudo`.
+
+Prefer a keystroke over the command? Bind the action in Herdr's `config.toml`, then run `herdr server reload-config`:
+
+```toml
+[[keys.command]]
+key = "prefix+m"
+type = "plugin_action"
+command = "herdr-mobile-relay.events.quick-start"
+description = "Herdr Mobile Relay: Quick Start"
+```
 
 Plugin configuration is stored under Herdr's persistent config directory, not its replaceable managed checkout. Print the directory at any time with:
 
@@ -94,7 +107,11 @@ TryCloudflare quick tunnels are intended for testing, have no uptime guarantee, 
    > An available all-numeric `.xyz` domain with 6–9 digits typically costs about $1 per year through Cloudflare Registrar. The `.xyz` registry lists this numeric class at $0.99/year, and Cloudflare sells domains at registry cost without markup. Verify the current price at checkout.
 
 2. Follow the README's [Stable Hostnames](README.md#stable-hostnames) section once per computer.
-3. Open Herdr's plugin action menu and choose **Herdr Mobile Relay: Install Background Service**. The managed pane installs the platform user service and prints the stable QR code.
+3. Invoke the service installer action; its managed pane installs the platform user service and prints the stable QR code:
+
+```bash
+herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
+```
 
 For a local checkout, the equivalent commands are:
 

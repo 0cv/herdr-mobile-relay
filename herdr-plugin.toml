@@ -1,21 +1,60 @@
+# herdr-plugin.toml registers Herdr Mobile Relay with herdr as a plugin.
+# Install it with `herdr plugin install 0cv/herdr-mobile-relay` (herdr clones
+# this repo, runs the [[build]] pre-warm below after confirmation, and
+# registers the entry points), or `herdr plugin link .` from a local checkout.
+#
+# Plugin actions have no menu of their own in herdr. Invoke them from a shell:
+#   herdr plugin action invoke quick-start --plugin herdr-mobile-relay.events
+# or bind keys in herdr's config.toml and `herdr server reload-config`:
+#   [[keys.command]]
+#   key = "prefix+m"
+#   type = "plugin_action"
+#   command = "herdr-mobile-relay.events.quick-start"
+#   description = "Herdr Mobile Relay: Quick Start"
+
 id = "herdr-mobile-relay.events"
 name = "Herdr Mobile Relay"
-version = "0.2.0"
+version = "0.3.0"
 # Herdr 0.7.0 introduced manifest actions, managed panes, and plugin config dirs.
 min_herdr_version = "0.7.0"
 description = "Set up and run the phone relay, with fast local agent-status events"
 platforms = ["macos", "linux"]
 
+# Make the relay runnable at install time: installs uv (user-level, official
+# standalone installer) when missing and syncs the relay's inline-script
+# environment so the first Quick Start does not pause on downloads. herdr
+# previews and confirms this command as part of `plugin install`; it
+# soft-fails rather than block registration. cloudflared remains an
+# interactive Quick Start choice because it opens a public tunnel.
+[[build]]
+command = ["sh", "relay/plugin-build.sh"]
+
+# quick-start — the trial path: creates private plugin config, offers to
+# install missing user-level tools, starts the relay plus a temporary
+# Cloudflare tunnel, and prints the phone setup QR code. Actions run headless,
+# so this wrapper immediately reopens itself as the managed pane below.
 [[actions]]
 id = "quick-start"
 title = "Herdr Mobile Relay: Quick Start"
 command = ["bash", "relay/open-plugin-pane.sh", "quick-start"]
 
+# install-service — the permanent path: installs the platform background
+# service (requires a named Cloudflare tunnel, see the README's Stable
+# Hostnames section) and prints the stable setup QR code.
 [[actions]]
 id = "install-service"
 title = "Herdr Mobile Relay: Install Background Service"
 command = ["bash", "relay/open-plugin-pane.sh", "install-service"]
 
+# status — a smoke test for support: shows the resolved config, background
+# service state, and the local relay health endpoint, then waits for Enter.
+[[actions]]
+id = "status"
+title = "Herdr Mobile Relay: Status"
+command = ["bash", "relay/open-plugin-pane.sh", "status"]
+
+# The interactive halves of the actions above. herdr opens each in a managed
+# pane, runs the script, and tears the pane down when it exits.
 [[panes]]
 id = "quick-start"
 title = "Herdr Mobile Relay: Quick Start"
@@ -28,6 +67,17 @@ title = "Herdr Mobile Relay: Install Background Service"
 placement = "zoomed"
 command = ["bash", "relay/plugin-install-service.sh"]
 
+[[panes]]
+id = "status"
+title = "Herdr Mobile Relay: Status"
+placement = "overlay"
+command = ["bash", "relay/plugin-status.sh"]
+
+# herdr fires pane.agent_status_changed whenever a local agent's status
+# changes; the hook forwards it over UDP to the local relay so phones see
+# blocked/finished transitions instantly instead of on the next poll. herdr
+# runs this for you — never invoke it by hand. Output is captured in
+# `herdr plugin log list --plugin herdr-mobile-relay.events`.
 [[events]]
 on = "pane.agent_status_changed"
-command = ["python3", "relay/on_event.py"]
+command = ["sh", "relay/plugin-on-event.sh"]

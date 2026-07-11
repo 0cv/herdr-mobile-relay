@@ -9,15 +9,18 @@ Herdr Mobile Relay runs a small local relay on each computer, exposes each relay
 > [!IMPORTANT]
 > Herdr Mobile Relay currently supports Linux and macOS. Native Windows is not supported. It may work inside WSL2 because that provides a Linux environment, but WSL2 has not been tested and is not currently an officially supported setup.
 
-## [Quick Start: One Command + One Click](QUICKSTART.md)
+## [Quick Start: One Paste](QUICKSTART.md)
 
 With Herdr already installed, install the relay as a Herdr plugin:
 
 ```bash
-herdr plugin install 0cv/herdr-mobile-relay
+herdr plugin install 0cv/herdr-mobile-relay &&
+  herdr plugin action invoke quick-start --plugin herdr-mobile-relay.events
 ```
 
-Then open Herdr's plugin action menu and choose **Herdr Mobile Relay: Quick Start**. Herdr opens a managed setup pane that creates private persistent plugin configuration, offers to install missing `uv` and `cloudflared` tools for your user account, starts the relay, serves the phone app, and opens a free temporary Cloudflare tunnel. **A Cloudflare account, domain, Make, Node.js, Python installation, and separate web deployment are not required for this first trial.**
+One paste, two consents: the install previews the plugin's commands and asks for confirmation, then the Quick Start action opens the managed setup pane. (Plugin actions are run from a shell, or a [key you bind in Herdr](QUICKSTART.md#1-install-and-start-the-plugin).)
+
+The confirmed plugin installation prepares `uv` and the relay's Python environment. Herdr then opens a managed setup pane that creates private persistent plugin configuration, offers to install `cloudflared` (and retries `uv` if preparation was unavailable), starts the relay, serves the phone app, and opens a free temporary Cloudflare tunnel. **A Cloudflare account, domain, Make, Node.js, Python installation, and separate web deployment are not required for this first trial.**
 
 When it is ready, the terminal prints a **QR code** and the matching private **Phone setup** link. Scan the QR code with your phone camera, or open the exact link on your phone; either way the app loads and adds the relay automatically. Keep the terminal open while using the quick tunnel, and press Ctrl-C when finished.
 
@@ -55,7 +58,7 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 - **Screenshot/photo upload:** attach an image from the phone, store it on the target computer, and insert the local path into the agent prompt.
 - **Optional device unlock:** require the phone's platform authenticator before reconnecting relays after open, reload, or resume.
 - **Service installers:** macOS launchd and Linux/Fedora user systemd installers set up the relay, tunnel, token, and cleanup of older service names.
-- **Plugin-first trial:** one Herdr plugin install plus one action-menu click opens a managed setup pane, installs missing user-level prerequisites with confirmation, and provides an auto-configuring TryCloudflare link.
+- **Plugin-first trial:** one Herdr plugin install plus one action invocation opens a managed setup pane, installs missing user-level prerequisites with confirmation, and provides an auto-configuring TryCloudflare link.
 - **Security hardening:** token generation, loopback binding by default, Origin checks for browser clients, constant-time token comparison, and safer behavior for public tunnels.
 
 ## Marketplace Listing
@@ -112,7 +115,7 @@ The plugin-first quick start needs only:
 - Linux or macOS; native Windows is not supported, and WSL2 remains untested
 - Herdr 0.7.0 or newer, Git, and `curl`
 
-Herdr uses Git to install the plugin. With your confirmation, the **Herdr Mobile Relay: Quick Start** action installs missing [uv](https://docs.astral.sh/uv/getting-started/installation/) and [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) tools for your user account. `uv` also supplies Python when necessary.
+Herdr uses Git to install the plugin. With your confirmation, the plugin build installs missing [uv](https://docs.astral.sh/uv/getting-started/installation/) and prepares the relay environment; Quick Start retries `uv` if needed and offers to install [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) interactively. Both tools are installed for your user account, and `uv` supplies Python when necessary.
 
 Optional later requirements:
 
@@ -241,7 +244,11 @@ make service-uninstall
 
 The older `make macos-service-*` and `make linux-service-*` targets remain available for explicit platform-specific use.
 
-Marketplace users do not need to find the managed checkout or run Make. After creating the named Cloudflare tunnel configuration, choose **Herdr Mobile Relay: Install Background Service** from Herdr's plugin action menu. Its managed pane runs the same platform installer and prints the stable phone QR link.
+Marketplace users do not need to find the managed checkout or run Make. After creating the named Cloudflare tunnel configuration, invoke the service installer action — its managed pane runs the same platform installer and prints the stable phone QR link:
+
+```bash
+herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
+```
 
 Checkout `make setup-link` and `make rotate-token` commands manage checkout configuration only. They fail before reading or changing a token if the installed service is pinned to a different plugin-managed `relay.env`; use the matching Herdr plugin action or set `HERDR_RELAY_ENV` explicitly to that service configuration.
 
@@ -295,7 +302,13 @@ make relay-plugin
 
 The plugin sends local agent-status events to the local relay over UDP on `127.0.0.1:8376`. It does not expose another network service and does not connect to other computers.
 
-The repository-root `herdr-plugin.toml` declares Quick Start and background-service actions, their managed setup panes, and the event hook. Marketplace configuration lives outside Herdr's replaceable managed checkout; `make relay-plugin` remains the convenient local-development command.
+For a support-friendly summary of the resolved configuration, background-service state, and local relay health, invoke the Status action:
+
+```bash
+herdr plugin action invoke status --plugin herdr-mobile-relay.events
+```
+
+The repository-root `herdr-plugin.toml` declares Quick Start, background-service, and Status actions, their managed setup panes, and the event hook. Marketplace configuration lives outside Herdr's replaceable managed checkout; `make relay-plugin` remains the convenient local-development command.
 
 ## Security Model
 
