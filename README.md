@@ -9,18 +9,23 @@ Herdr Mobile Relay runs a small local relay on each computer, exposes each relay
 > [!IMPORTANT]
 > Herdr Mobile Relay currently supports Linux and macOS. Native Windows is not supported. It may work inside WSL2 because that provides a Linux environment, but WSL2 has not been tested and is not currently an officially supported setup.
 
-## [Quick Start: One Paste](QUICKSTART.md)
+## [Quick Start: One Command](QUICKSTART.md)
 
 With Herdr already installed, install the relay as a Herdr plugin:
 
 ```bash
-herdr plugin install 0cv/herdr-mobile-relay &&
-  herdr plugin action invoke quick-start --plugin herdr-mobile-relay.events
+herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-One paste, two consents: the install previews the plugin's commands and asks for confirmation, then the Quick Start action opens the managed setup pane. (Plugin actions are run from a shell, or a [key you bind in Herdr](QUICKSTART.md#1-install-and-start-the-plugin).)
+The install previews the plugin's commands and asks for confirmation. After Herdr registers the plugin, an interactive setup menu opens automatically in a managed Herdr pane, an Apple Terminal window/tab, Konsole, or GNOME Terminal—only when that destination can be identified reliably.
 
-The confirmed plugin installation prepares `uv` and the relay's Python environment. Herdr then opens a managed setup pane that creates private persistent plugin configuration, offers to install `cloudflared` (and retries `uv` if preparation was unavailable), starts the relay, serves the phone app, and opens a free temporary Cloudflare tunnel. **A Cloudflare account, domain, Make, Node.js, Python installation, and separate web deployment are not required for this first trial.**
+Choose **Quick Start** for a temporary tunnel with no account or domain, or **Stable Tunnel** for the advanced background-service path. Quick Start creates private persistent plugin configuration, offers to install `cloudflared` (and retries `uv` if preparation was unavailable), starts the relay, serves the phone app, and opens a free temporary Cloudflare tunnel. **A Cloudflare account, domain, Make, Node.js, Python installation, and separate web deployment are not required for this first trial.**
+
+If no safe terminal destination is detected, installation still succeeds and prints the fallback command:
+
+```bash
+herdr plugin action invoke setup --plugin herdr-mobile-relay.events
+```
 
 When it is ready, the terminal prints a **QR code** and the matching private **Phone setup** link. Scan the QR code with your phone camera, or open the exact link on your phone; either way the app loads and adds the relay automatically. Keep the terminal open while using the quick tunnel, and press Ctrl-C when finished.
 
@@ -58,7 +63,7 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 - **Screenshot/photo upload:** attach an image from the phone, store it on the target computer, and insert the local path into the agent prompt.
 - **Optional device unlock:** require the phone's platform authenticator before reconnecting relays after open, reload, or resume.
 - **Service installers:** macOS launchd and Linux/Fedora user systemd installers set up the relay, tunnel, token, and cleanup of older service names.
-- **Plugin-first trial:** one Herdr plugin install plus one action invocation opens a managed setup pane, installs missing user-level prerequisites with confirmation, and provides an auto-configuring TryCloudflare link.
+- **Plugin-first trial:** one Herdr plugin install opens a conservative interactive setup menu, installs missing user-level prerequisites with confirmation, and provides an auto-configuring TryCloudflare link.
 - **Security hardening:** token generation, loopback binding by default, Origin checks for browser clients, constant-time token comparison, and safer behavior for public tunnels.
 
 ## Marketplace Listing
@@ -115,7 +120,7 @@ The plugin-first quick start needs only:
 - Linux or macOS; native Windows is not supported, and WSL2 remains untested
 - Herdr 0.7.0 or newer, Git, and `curl`
 
-Herdr uses Git to install the plugin. With your confirmation, the plugin build installs missing [uv](https://docs.astral.sh/uv/getting-started/installation/) and prepares the relay environment; Quick Start retries `uv` if needed and offers to install [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) interactively. Both tools are installed for your user account, and `uv` supplies Python when necessary.
+Herdr uses Git to install the plugin. With your confirmation, the plugin build installs missing [uv](https://docs.astral.sh/uv/getting-started/installation/) and prepares the relay environment; the setup menu opens after registration, and Quick Start retries `uv` if needed and offers to install [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) interactively. Both tools are installed for your user account, and `uv` supplies Python when necessary. Set `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1` when an automated install must not open a pane or terminal.
 
 Optional later requirements:
 

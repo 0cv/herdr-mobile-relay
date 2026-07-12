@@ -18,13 +18,20 @@ You do **not** need a Cloudflare account, domain, existing Python installation, 
 ## 1. Install and Start the Plugin
 
 ```bash
-herdr plugin install 0cv/herdr-mobile-relay &&
-  herdr plugin action invoke quick-start --plugin herdr-mobile-relay.events
+herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-This is one paste with two consent points. Herdr previews the plugin commands before you confirm the installation, including a one-time build step that installs `uv` (user-level) if missing and prepares the relay's Python environment. A failed download does not block plugin registration; Quick Start retries missing setup interactively. After installation succeeds, the chained action opens the Quick Start pane.
+Herdr previews the plugin commands before you confirm the installation, including a one-time build step that installs `uv` (user-level) if missing and prepares the relay's Python environment. A failed download does not block plugin registration; Quick Start retries missing setup interactively.
 
-A managed setup pane opens inside Herdr and:
+After registration, a setup menu opens automatically when the installer can identify an active Herdr session, Apple Terminal, Konsole, or GNOME Terminal reliably. Choose **Quick Start** for the beginner path, or **Stable Tunnel** for an existing named Cloudflare tunnel and background service.
+
+If no menu opens, invoke it explicitly:
+
+```bash
+herdr plugin action invoke setup --plugin herdr-mobile-relay.events
+```
+
+Quick Start opens a managed setup pane and:
 
 1. Creates a private relay token and minimal local configuration.
 2. Detects `uv` and `cloudflared`.
@@ -34,14 +41,16 @@ A managed setup pane opens inside Herdr and:
 
 If it asks to install missing tools, type `y` and press Enter. Installation is for your user account; the script does not need `sudo`.
 
+For unattended installation, set `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1` to suppress automatic pane or terminal launching.
+
 Prefer a keystroke over the command? Bind the action in Herdr's `config.toml`, then run `herdr server reload-config`:
 
 ```toml
 [[keys.command]]
 key = "prefix+m"
 type = "plugin_action"
-command = "herdr-mobile-relay.events.quick-start"
-description = "Herdr Mobile Relay: Quick Start"
+command = "herdr-mobile-relay.events.setup"
+description = "Herdr Mobile Relay: Setup"
 ```
 
 Plugin configuration is stored under Herdr's persistent config directory, not its replaceable managed checkout. Print the directory at any time with:

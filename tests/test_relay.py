@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import socket
 import subprocess
 import tempfile
 import time
@@ -15,6 +16,13 @@ RELAY_PATH = Path(__file__).parents[1] / "relay" / "herdr_relay.py"
 SPEC = importlib.util.spec_from_file_location("herdr_relay_under_test", RELAY_PATH)
 relay = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(relay)
+
+
+def inherited_socket_path(sock):
+    descriptor_dir = Path("/proc/self/fd")
+    if not descriptor_dir.is_dir():
+        descriptor_dir = Path("/dev/fd")
+    return str(descriptor_dir / str(sock.fileno()))
 
 
 class FakeWebSocket:
@@ -173,6 +181,11 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
 
         self.assertFalse((root / "relay" / "herdr-plugin.toml").exists())
         self.assertIn('id = "herdr-mobile-relay.events"', manifest)
+        self.assertIn('version = "0.4.0"', manifest)
+        self.assertIn('id = "setup"', manifest)
+        self.assertIn('command = "herdr-mobile-relay.events.setup"', manifest)
+        self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "setup"]', manifest)
+        self.assertIn('command = ["bash", "relay/plugin-setup-menu.sh"]', manifest)
         self.assertIn('id = "quick-start"', manifest)
         self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "quick-start"]', manifest)
         self.assertIn('command = ["bash", "relay/plugin-quick-start.sh"]', manifest)
@@ -200,6 +213,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = str(temp)
             env["HOME"] = str(temp)
+            env["HERDR_MOBILE_RELAY_NO_AUTO_SETUP"] = "1"
 
             result = subprocess.run(
                 ["/bin/sh", str(root / "relay" / "plugin-build.sh")],
@@ -221,6 +235,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = str(temp)
             env["HOME"] = str(temp)
+            env["HERDR_MOBILE_RELAY_NO_AUTO_SETUP"] = "1"
 
             result = subprocess.run(
                 ["/bin/sh", str(root / "relay" / "plugin-build.sh")],
@@ -255,6 +270,290 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             result.stdout.strip(),
             f"run --quiet python {root / 'relay' / 'on_event.py'}",
         )
+
+    def test_plugin_build_detaches_post_install_waiter_inside_herdr(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            args_file = temp / "nohup-args.txt"
+            fake_uv = temp / "uv"
+            fake_uv.write_text("#!/bin/sh\nexit 0\n")
+            fake_uv.chmod(0o700)
+            fake_nohup = temp / "nohup"
+            fake_nohup.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$NOHUP_ARGS"\n')
+            fake_nohup.chmod(0o700)
+            env = os.environ.copy()
+            env.update({
+                "PATH": f"{temp}:/usr/bin:/bin",
+                "HOME": str(temp),
+                "NOHUP_ARGS": str(args_file),
+            })
+
+            socket_reader, socket_writer = socket.socketpair()
+            with socket_reader, socket_writer:
+                env["HERDR_SOCKET_PATH"] = inherited_socket_path(socket_reader)
+                result = subprocess.run(
+                    ["/bin/sh", str(root / "relay" / "plugin-build.sh")],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    pass_fds=(socket_reader.fileno(),),
+                )
+                for _attempt in range(20):
+                    if args_file.exists():
+                        break
+                    time.sleep(0.01)
+                nohup_args = args_file.read_text()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("setup will open automatically", result.stderr)
+        self.assertIn("plugin-post-install.sh", nohup_args)
+        self.assertIn("0.4.0", nohup_args)
+
+    def test_post_install_opens_already_matching_registered_version(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            registry = temp / "plugins.json"
+            registry.write_text(json.dumps([{
+                "plugin_id": "herdr-mobile-relay.events",
+                "version": "0.4.0",
+                "enabled": True,
+                "plugin_root": str(root),
+                "actions": [{"id": "setup"}],
+            }]))
+            args_file = temp / "herdr-args.txt"
+            fake_herdr = temp / "herdr"
+            fake_herdr.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            fake_herdr.chmod(0o700)
+            env = os.environ.copy()
+            env.update({
+                "ARGS_FILE": str(args_file),
+                "HERDR_BIN_PATH": str(fake_herdr),
+                "HERDR_ENV": "1",
+                "HERDR_PANE_ID": "w1:p1",
+                "HERDR_PLUGIN_REGISTRY": str(registry),
+                "HERDR_POST_INSTALL_ATTEMPTS": "1",
+                "HERDR_POST_INSTALL_DELAY": "0",
+                "HERDR_POST_INSTALL_LOCK_DIR": str(temp / "lock"),
+            })
+
+            socket_reader, socket_writer = socket.socketpair()
+            with socket_reader, socket_writer:
+                env["HERDR_SOCKET_PATH"] = inherited_socket_path(socket_reader)
+                result = subprocess.run(
+                    ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.4.0", "0"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    pass_fds=(socket_reader.fileno(),),
+                )
+                invoked_args = args_file.read_text().splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(invoked_args, [
+            "plugin", "pane", "open",
+            "--plugin", "herdr-mobile-relay.events",
+            "--entrypoint", "setup",
+            "--placement", "zoomed",
+            "--focus",
+            "--target-pane", "w1:p1",
+        ])
+
+    def test_post_install_uses_live_socket_without_runtime_context(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            registry = temp / "plugins.json"
+            registry.write_text(json.dumps([{
+                "plugin_id": "herdr-mobile-relay.events",
+                "version": "0.4.0",
+                "enabled": True,
+                "plugin_root": str(root),
+                "actions": [{"id": "setup"}],
+            }]))
+            args_file = temp / "herdr-args.txt"
+            fake_herdr = temp / "herdr"
+            fake_herdr.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            fake_herdr.chmod(0o700)
+            env = os.environ.copy()
+            env.update({
+                "ARGS_FILE": str(args_file),
+                "HERDR_BIN_PATH": str(fake_herdr),
+                "HERDR_PLUGIN_REGISTRY": str(registry),
+                "HERDR_POST_INSTALL_ATTEMPTS": "1",
+                "HERDR_POST_INSTALL_DELAY": "0",
+                "HERDR_POST_INSTALL_LOCK_DIR": str(temp / "lock"),
+            })
+            env.pop("HERDR_ENV", None)
+            env.pop("HERDR_PANE_ID", None)
+
+            socket_reader, socket_writer = socket.socketpair()
+            with socket_reader, socket_writer:
+                env["HERDR_SOCKET_PATH"] = inherited_socket_path(socket_reader)
+                result = subprocess.run(
+                    ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.4.0", "0"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    pass_fds=(socket_reader.fileno(),),
+                )
+                invoked_args = args_file.read_text().splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(invoked_args, [
+            "plugin", "pane", "open",
+            "--plugin", "herdr-mobile-relay.events",
+            "--entrypoint", "setup",
+            "--placement", "overlay",
+            "--focus",
+        ])
+
+    def test_post_install_ignores_stale_registered_version(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            registry = temp / "plugins.json"
+            registry.write_text(json.dumps([{
+                "plugin_id": "herdr-mobile-relay.events",
+                "version": "0.3.0",
+                "enabled": True,
+                "plugin_root": str(root),
+                "actions": [{"id": "setup"}],
+            }]))
+            args_file = temp / "herdr-args.txt"
+            fake_herdr = temp / "herdr"
+            fake_herdr.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            fake_herdr.chmod(0o700)
+            env = os.environ.copy()
+            env.update({
+                "ARGS_FILE": str(args_file),
+                "HERDR_BIN_PATH": str(fake_herdr),
+                "HERDR_ENV": "1",
+                "HERDR_SOCKET_PATH": str(temp / "herdr.sock"),
+                "HERDR_PANE_ID": "w1:p1",
+                "HERDR_PLUGIN_REGISTRY": str(registry),
+                "HERDR_POST_INSTALL_ATTEMPTS": "1",
+                "HERDR_POST_INSTALL_DELAY": "0",
+                "HERDR_POST_INSTALL_LOCK_DIR": str(temp / "lock"),
+                "XDG_CURRENT_DESKTOP": "unknown",
+                "KONSOLE_VERSION": "",
+                "GNOME_TERMINAL_SERVICE": "",
+            })
+
+            result = subprocess.run(
+                ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.4.0", "0"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            invoked = args_file.exists()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(invoked)
+
+    def test_post_install_does_not_replace_lock_before_pid_is_written(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            lock_dir = temp / "lock"
+            lock_dir.mkdir()
+            env = os.environ.copy()
+            env.update({
+                "HERDR_POST_INSTALL_LOCK_DIR": str(lock_dir),
+                "HERDR_POST_INSTALL_ATTEMPTS": "1",
+                "HERDR_POST_INSTALL_DELAY": "0",
+            })
+
+            result = subprocess.run(
+                ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.4.0", "0"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(lock_dir.is_dir())
+            self.assertFalse((lock_dir / "pid").exists())
+
+    def test_plugin_setup_menu_routes_both_start_modes(self):
+        root = RELAY_PATH.parents[1]
+        menu_source = root / "relay" / "plugin-setup-menu.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            menu = temp / menu_source.name
+            menu.write_text(menu_source.read_text())
+            menu.chmod(0o700)
+            for name, output in (
+                ("plugin-quick-start.sh", "quick"),
+                ("plugin-install-service.sh", "stable"),
+            ):
+                script = temp / name
+                script.write_text(f"#!/bin/sh\necho {output}\n")
+                script.chmod(0o700)
+
+            quick = subprocess.run(
+                ["bash", str(menu)], input="1\n", capture_output=True, text=True, check=True,
+            )
+            stable = subprocess.run(
+                ["bash", str(menu)], input="2\n", capture_output=True, text=True, check=True,
+            )
+
+        self.assertTrue(quick.stdout.rstrip().endswith("quick"))
+        self.assertTrue(stable.stdout.rstrip().endswith("stable"))
+
+    def test_terminal_launcher_uses_only_recognized_terminals(self):
+        root = RELAY_PATH.parents[1]
+        launcher = root / "relay" / "plugin-open-terminal.sh"
+        setup_command = root / "relay" / "plugin-setup-terminal.command"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            args_file = temp / "terminal-args.txt"
+            fake_uname = temp / "uname"
+            fake_uname.write_text("#!/bin/sh\necho Linux\n")
+            fake_uname.chmod(0o700)
+            fake_konsole = temp / "konsole"
+            fake_konsole.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            fake_konsole.chmod(0o700)
+            env = os.environ.copy()
+            env.update({
+                "ARGS_FILE": str(args_file),
+                "PATH": f"{temp}:/usr/bin:/bin",
+                "XDG_CURRENT_DESKTOP": "KDE",
+                "KONSOLE_VERSION": "260403",
+            })
+
+            subprocess.run(["bash", str(launcher), str(root)], check=True, env=env)
+            known_args = args_file.read_text().splitlines()
+
+            fake_konsole.unlink()
+            env.pop("KONSOLE_VERSION")
+            env["XDG_CURRENT_DESKTOP"] = "XFCE"
+            unknown = subprocess.run(
+                ["bash", str(launcher), str(root)], capture_output=True, text=True, env=env,
+            )
+
+            fake_uname.write_text("#!/bin/sh\necho Darwin\n")
+            fake_open = temp / "open"
+            fake_open.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            fake_open.chmod(0o700)
+            env["TERM_PROGRAM"] = "Apple_Terminal"
+            subprocess.run(["bash", str(launcher), str(root)], check=True, env=env)
+            apple_args = args_file.read_text().splitlines()
+
+            fake_uname.write_text("#!/bin/sh\necho Linux\n")
+            fake_gnome_terminal = temp / "gnome-terminal"
+            fake_gnome_terminal.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGS_FILE"\n')
+            fake_gnome_terminal.chmod(0o700)
+            env.pop("TERM_PROGRAM")
+            env["XDG_CURRENT_DESKTOP"] = "GNOME"
+            subprocess.run(["bash", str(launcher), str(root)], check=True, env=env)
+            gnome_args = args_file.read_text().splitlines()
+
+        self.assertEqual(known_args, ["--new-tab", "-e", str(setup_command)])
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertEqual(apple_args, ["-a", "Terminal", str(setup_command)])
+        self.assertEqual(gnome_args, ["--", str(setup_command)])
 
     def test_plugin_config_is_stable_and_migrates_checkout_env(self):
         root = RELAY_PATH.parents[1]
@@ -351,6 +650,21 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
                 "plugin", "pane", "open",
                 "--plugin", "herdr-mobile-relay.events",
                 "--entrypoint", "quick-start",
+                "--placement", "zoomed",
+                "--focus",
+                "--target-pane", "w1:p2",
+            ])
+
+            subprocess.run(
+                [str(root / "relay" / "open-plugin-pane.sh"), "setup"],
+                check=True,
+                env=env,
+            )
+
+            self.assertEqual(args_file.read_text().splitlines(), [
+                "plugin", "pane", "open",
+                "--plugin", "herdr-mobile-relay.events",
+                "--entrypoint", "setup",
                 "--placement", "zoomed",
                 "--focus",
                 "--target-pane", "w1:p2",
@@ -998,6 +1312,11 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
 
         with (
             patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
             patch.object(relay, "run_herdr_async_result", AsyncMock(return_value=(True, "", ""))) as run_command,
             patch.object(relay, "wait_for_approval_result", AsyncMock(return_value=(True, "working"))),
             patch.object(relay, "publish_activity", AsyncMock()),
@@ -1014,6 +1333,11 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
 
         with (
             patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
             patch.object(relay, "run_herdr_async_result", AsyncMock()) as run_command,
             patch.object(relay, "publish_activity", AsyncMock()),
         ):
@@ -1063,6 +1387,11 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
             with (
                 patch.object(relay.Path, "home", return_value=Path(cwd)),
                 patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+                patch.object(
+                    relay.asyncio,
+                    "to_thread",
+                    AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+                ),
                 patch.object(relay, "load_agent_profiles", return_value={"codex": {"id": "codex", "label": "Codex", "argv": ["codex"]}}),
                 patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=[
                     (True, json.dumps({"result": {"pane_id": "w1:p2", "workspace_id": "w1"}}), ""),

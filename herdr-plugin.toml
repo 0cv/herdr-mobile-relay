@@ -3,18 +3,19 @@
 # this repo, runs the [[build]] pre-warm below after confirmation, and
 # registers the entry points), or `herdr plugin link .` from a local checkout.
 #
-# Plugin actions have no menu of their own in herdr. Invoke them from a shell:
-#   herdr plugin action invoke quick-start --plugin herdr-mobile-relay.events
+# The build schedules the Setup action after registration when a safe terminal
+# destination is identifiable. Invoke it explicitly as a universal fallback:
+#   herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 # or bind keys in herdr's config.toml and `herdr server reload-config`:
 #   [[keys.command]]
 #   key = "prefix+m"
 #   type = "plugin_action"
-#   command = "herdr-mobile-relay.events.quick-start"
-#   description = "Herdr Mobile Relay: Quick Start"
+#   command = "herdr-mobile-relay.events.setup"
+#   description = "Herdr Mobile Relay: Setup"
 
 id = "herdr-mobile-relay.events"
 name = "Herdr Mobile Relay"
-version = "0.3.0"
+version = "0.4.0"
 # Herdr 0.7.0 introduced manifest actions, managed panes, and plugin config dirs.
 min_herdr_version = "0.7.0"
 description = "Set up and run the phone relay, with fast local agent-status events"
@@ -28,6 +29,14 @@ platforms = ["macos", "linux"]
 # interactive Quick Start choice because it opens a public tunnel.
 [[build]]
 command = ["sh", "relay/plugin-build.sh"]
+
+# setup — the post-install chooser. The build schedules this automatically
+# after Herdr registers the new manifest when it can identify a safe terminal
+# destination; users can always invoke it directly as a fallback.
+[[actions]]
+id = "setup"
+title = "Herdr Mobile Relay: Setup"
+command = ["bash", "relay/open-plugin-pane.sh", "setup"]
 
 # quick-start — the trial path: creates private plugin config, offers to
 # install missing user-level tools, starts the relay plus a temporary
@@ -55,6 +64,12 @@ command = ["bash", "relay/open-plugin-pane.sh", "status"]
 
 # The interactive halves of the actions above. herdr opens each in a managed
 # pane, runs the script, and tears the pane down when it exits.
+[[panes]]
+id = "setup"
+title = "Herdr Mobile Relay: Setup"
+placement = "zoomed"
+command = ["bash", "relay/plugin-setup-menu.sh"]
+
 [[panes]]
 id = "quick-start"
 title = "Herdr Mobile Relay: Quick Start"
