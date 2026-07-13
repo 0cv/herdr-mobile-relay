@@ -60,6 +60,7 @@ HERDR = os.environ.get("HERDR_BIN") or default_herdr_bin()
 WS_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1")
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
 POLL_INTERVAL = float(os.environ.get("HERDR_RELAY_POLL_INTERVAL", "2"))
+IDLE_POLL_INTERVAL = max(POLL_INTERVAL, 15.0)
 PLUGIN_PORT = int(os.environ.get("HERDR_RELAY_PLUGIN_PORT", "8376"))
 AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Shared secret for public/browser relay auth
 ALLOWED_ORIGINS = {
@@ -130,6 +131,18 @@ MUTATING_MESSAGE_TYPES = frozenset({
     "acknowledge_pane",
     "upload_image",
 })
+POLL_WAKE_ACTIONS = frozenset({
+    "acknowledge_pane",
+    "agent_clear",
+    "agent_rename",
+    "agent_restart",
+    "agent_start",
+    "agent_stop",
+    "approval",
+    "keys",
+    "prompt",
+    "text",
+})
 
 
 def detect_relay_version():
@@ -196,6 +209,12 @@ MENU_OPTION_RE = re.compile(r"^\s*[❯›]?\s*(\d+)\.\s+(.+?)\s*$")
 COMMAND_RE = re.compile(r"^\s*(?:[$>]|\u276f|\u203a)\s+(.+?)\s*$")
 
 clients = set()
+latest_agents_message = json.dumps(
+    {"type": "agents", "agents": []},
+    sort_keys=True,
+    separators=(",", ":"),
+)
+last_broadcast_agents_message = None
 last_statuses = {}
 unseen_done_panes = set()
 acknowledged_done_panes = set()
@@ -209,6 +228,7 @@ claude_history_save_times = {}
 claude_history_inflight = set()
 claude_history_pending_captures = set()
 event_queue = asyncio.Queue()
+poll_wakeup = asyncio.Event()
 
 
 def run_herdr_result(*args):
@@ -356,6 +376,7 @@ async def acknowledge_pane_viewed(pane_id):
     acknowledged_done_panes.add(pane_id)
     if not changed:
         return False
+    wake_poll_loop()
     await broadcast({
         "type": "agent_update",
         "pane_id": pane_id,
@@ -1313,7 +1334,10 @@ def respond_keys(index, total=None):
 
 
 async def broadcast(msg):
-    data = json.dumps(msg)
+    await broadcast_serialized(json.dumps(msg))
+
+
+async def broadcast_serialized(data):
     dead = set()
     for ws in list(clients):
         try:
@@ -1323,11 +1347,74 @@ async def broadcast(msg):
     clients.difference_update(dead)
 
 
+def agents_message(agents):
+    """Serialize the exact authoritative payload sent to phone clients.
+
+    Herdr's pane ordering is not part of the phone UI contract, so sort by the
+    stable pane id before comparing snapshots. Dict keys and separators are
+    canonical too, making equality independent of construction order.
+    """
+    ordered = sorted(agents, key=lambda agent: str(agent.get("pane_id", "")))
+    return json.dumps(
+        {"type": "agents", "agents": ordered},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+async def broadcast_agents_if_changed(agents):
+    """Cache every current snapshot but send it only when clients would see a change."""
+    global latest_agents_message, last_broadcast_agents_message
+    message = agents_message(agents)
+    latest_agents_message = message
+    if message == last_broadcast_agents_message:
+        return False
+    last_broadcast_agents_message = message
+    await broadcast_serialized(message)
+    return True
+
+
+async def send_latest_agents(ws):
+    """Give a new client the latest full state, including a concurrent update."""
+    while True:
+        message = latest_agents_message
+        try:
+            await ws.send(message)
+        except Exception:
+            return False
+        if message == latest_agents_message:
+            return True
+
+
+def wake_poll_loop():
+    poll_wakeup.set()
+
+
+def poll_interval_for(agents):
+    if not agents:
+        return POLL_INTERVAL
+    for agent in agents:
+        status = str(agent.get("status") or "unknown").strip().lower()
+        if status != "idle" and not is_done_status(status):
+            return POLL_INTERVAL
+    return IDLE_POLL_INTERVAL
+
+
+async def wait_for_next_poll(agents):
+    try:
+        await asyncio.wait_for(poll_wakeup.wait(), timeout=poll_interval_for(agents))
+    except asyncio.TimeoutError:
+        pass
+
+
 async def poll_loop():
     while True:
+        # Clear before reading so a hook or command arriving during the refresh
+        # remains set and makes the next wait return immediately.
+        poll_wakeup.clear()
         agents = await asyncio.to_thread(get_agents)
         if agents is None:
-            await asyncio.sleep(POLL_INTERVAL)
+            await wait_for_next_poll(None)
             continue
         stamp_agent_activity(agents)
         live_pane_ids = {a["pane_id"] for a in agents}
@@ -1352,7 +1439,7 @@ async def poll_loop():
         for pane_id in set(claude_history_capture_times) - live_pane_ids:
             claude_history_capture_times.pop(pane_id, None)
         claude_history_pending_captures.intersection_update(live_pane_ids)
-        await broadcast({"type": "agents", "agents": agents})
+        await broadcast_agents_if_changed(agents)
         for agent in finished_agents:
             asyncio.create_task(push_finished(agent))
         for pane_id in set(last_statuses) - live_pane_ids:
@@ -1375,7 +1462,7 @@ async def poll_loop():
                 elif previous_status == "blocked" and status != "blocked":
                     await publish_agent_status(a, status)
                 last_statuses[pid] = status
-        await asyncio.sleep(POLL_INTERVAL)
+        await wait_for_next_poll(agents)
 
 
 async def event_push():
@@ -1646,6 +1733,8 @@ async def safe_send_json(ws, payload):
 
 
 async def send_command_result(ws, request_id, action, ok, phase="completed", error="", pane_id="", data=None):
+    if ok and action in POLL_WAKE_ACTIONS:
+        wake_poll_loop()
     payload = {
         "type": "command_result",
         "request_id": request_id,
@@ -1986,7 +2075,6 @@ async def reject_incompatible_client_protocol(ws, msg):
 
 
 async def handle_client(ws):
-    clients.add(ws)
     try:
         profiles = load_agent_profiles()
         await safe_send_json(ws, {
@@ -2001,6 +2089,8 @@ async def handle_client(ws):
                 for profile in profiles.values()
             ],
         })
+        clients.add(ws)
+        await send_latest_agents(ws)
         await safe_send_json(ws, {
             "type": "activity_history",
             "activities": await asyncio.to_thread(load_activity),
@@ -2141,7 +2231,11 @@ async def handle_client(ws):
 class UDPPlugin(asyncio.DatagramProtocol):
     def datagram_received(self, data, addr):
         try:
-            event_queue.put_nowait(json.loads(data.decode()))
+            event = json.loads(data.decode())
+            if not isinstance(event, dict):
+                return
+            event_queue.put_nowait(event)
+            wake_poll_loop()
         except Exception:
             pass
 

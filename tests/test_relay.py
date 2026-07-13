@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 import os
@@ -31,6 +32,12 @@ class FakeWebSocket:
 
     async def send(self, payload):
         self.messages.append(json.loads(payload))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
 
 
 class FakeHeaders:
@@ -93,6 +100,42 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
         self.assertEqual(relay.respond_keys(0, 3), ["Enter"])
         self.assertEqual(relay.respond_keys(1, 3), ["Down", "Enter"])
         self.assertEqual(relay.respond_keys(2, 3), ["Escape"])
+
+    def test_agent_message_is_canonical_and_pane_sorted(self):
+        first = relay.agents_message([
+            {"pane_id": "w1:p2", "status": "idle", "agent": "codex"},
+            {"agent": "claude", "status": "working", "pane_id": "w1:p1"},
+        ])
+        second = relay.agents_message([
+            {"pane_id": "w1:p1", "status": "working", "agent": "claude"},
+            {"status": "idle", "agent": "codex", "pane_id": "w1:p2"},
+        ])
+
+        self.assertEqual(first, second)
+        self.assertEqual(
+            [agent["pane_id"] for agent in json.loads(first)["agents"]],
+            ["w1:p1", "w1:p2"],
+        )
+
+    def test_poll_interval_stays_fast_for_empty_or_active_agent_lists(self):
+        self.assertEqual(relay.poll_interval_for(None), relay.POLL_INTERVAL)
+        self.assertEqual(relay.poll_interval_for([]), relay.POLL_INTERVAL)
+        for status in ("working", "blocked", "unknown"):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    relay.poll_interval_for([{"status": status}]),
+                    relay.POLL_INTERVAL,
+                )
+
+    def test_poll_interval_slows_only_when_every_agent_is_inactive(self):
+        self.assertEqual(
+            relay.poll_interval_for([{"status": "idle"}, {"status": "done"}]),
+            relay.IDLE_POLL_INTERVAL,
+        )
+        self.assertEqual(
+            relay.poll_interval_for([{"status": "idle"}, {"status": "working"}]),
+            relay.POLL_INTERVAL,
+        )
 
     def test_push_payload_contains_only_the_safe_approve_action(self):
         payload = relay.push_payload({
@@ -1265,13 +1308,141 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
 
 
 class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTestCase):
+    async def test_poll_gate_does_not_skip_status_or_history_bookkeeping(self):
+        def agent_snapshot():
+            return [{
+                "pane_id": "w1:p1",
+                "status": "working",
+                "agent": "claude",
+                "_focused": False,
+                "_activity_fingerprint": ("working", 10),
+            }]
+
+        wakeup = asyncio.Event()
+        with (
+            patch.object(relay, "poll_wakeup", wakeup),
+            patch.object(relay, "get_agents", side_effect=[agent_snapshot(), agent_snapshot()]),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(
+                relay,
+                "wait_for_next_poll",
+                AsyncMock(side_effect=[None, asyncio.CancelledError()]),
+            ),
+            patch.object(relay, "broadcast_serialized", AsyncMock()) as broadcast,
+            patch.object(relay, "schedule_claude_history_capture") as capture,
+            patch.object(relay, "last_broadcast_agents_message", None),
+            patch.object(relay, "latest_agents_message", relay.agents_message([])),
+            patch.object(relay, "last_statuses", {}),
+            patch.object(relay, "agent_types", {}),
+            patch.object(relay, "agent_activity_state", {}),
+            patch.object(relay, "agent_activity_initialized", False),
+            patch.object(relay, "unseen_done_panes", set()),
+            patch.object(relay, "acknowledged_done_panes", set()),
+            patch.object(relay, "finished_notification_panes", set()),
+            patch.object(relay, "claude_history_state", {}),
+            patch.object(relay, "claude_history_capture_times", {}),
+            patch.object(relay, "claude_history_pending_captures", set()),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await relay.poll_loop()
+
+            self.assertEqual(relay.last_statuses, {"w1:p1": "working"})
+
+        broadcast.assert_awaited_once()
+        self.assertEqual(capture.call_count, 2)
+
+    async def test_poll_wait_returns_immediately_when_woken(self):
+        wakeup = asyncio.Event()
+        with patch.object(relay, "poll_wakeup", wakeup):
+            waiter = asyncio.create_task(relay.wait_for_next_poll([{"status": "idle"}]))
+            await asyncio.sleep(0)
+            relay.wake_poll_loop()
+            await asyncio.wait_for(waiter, timeout=0.2)
+
+    async def test_agent_broadcast_caches_latest_and_skips_identical_payloads(self):
+        idle = [{"pane_id": "w1:p1", "status": "idle", "agent": "codex"}]
+        working = [{"pane_id": "w1:p1", "status": "working", "agent": "codex"}]
+        with (
+            patch.object(relay, "latest_agents_message", relay.agents_message([])),
+            patch.object(relay, "last_broadcast_agents_message", None),
+            patch.object(relay, "broadcast_serialized", AsyncMock()) as broadcast,
+        ):
+            first = await relay.broadcast_agents_if_changed(idle)
+            duplicate = await relay.broadcast_agents_if_changed(list(reversed(idle)))
+            changed = await relay.broadcast_agents_if_changed(working)
+            latest = relay.latest_agents_message
+
+        self.assertTrue(first)
+        self.assertFalse(duplicate)
+        self.assertTrue(changed)
+        self.assertEqual(broadcast.await_count, 2)
+        self.assertEqual(json.loads(latest)["agents"][0]["status"], "working")
+
+    async def test_new_client_receives_cached_agents_immediately_after_config(self):
+        ws = FakeWebSocket()
+        cached = relay.agents_message([
+            {"pane_id": "w1:p1", "status": "idle", "agent": "codex"},
+        ])
+        with (
+            patch.object(relay, "latest_agents_message", cached),
+            patch.object(relay, "load_agent_profiles", return_value={}),
+            patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+            patch.object(relay, "load_activity", return_value=[]),
+        ):
+            await relay.handle_client(ws)
+
+        self.assertEqual(
+            [message["type"] for message in ws.messages],
+            ["push_config", "agents", "activity_history"],
+        )
+        self.assertEqual(ws.messages[1]["agents"][0]["pane_id"], "w1:p1")
+        self.assertNotIn(ws, relay.clients)
+
+    async def test_only_successful_state_commands_wake_adaptive_polling(self):
+        ws = FakeWebSocket()
+        with patch.object(relay, "wake_poll_loop") as wake:
+            await relay.send_command_result(ws, "request-1", "prompt", True)
+            await relay.send_command_result(ws, "request-2", "prompt", False)
+            await relay.send_command_result(ws, "request-3", "list_directories", True)
+
+        wake.assert_called_once_with()
+
+    async def test_udp_plugin_event_queues_payload_and_wakes_polling(self):
+        queue = Mock()
+        with (
+            patch.object(relay, "event_queue", queue),
+            patch.object(relay, "wake_poll_loop") as wake,
+        ):
+            relay.UDPPlugin().datagram_received(b'{"pane_id":"w1:p1"}', None)
+
+        queue.put_nowait.assert_called_once_with({"pane_id": "w1:p1"})
+        wake.assert_called_once_with()
+
+    async def test_udp_plugin_ignores_non_object_json(self):
+        queue = Mock()
+        with (
+            patch.object(relay, "event_queue", queue),
+            patch.object(relay, "wake_poll_loop") as wake,
+        ):
+            relay.UDPPlugin().datagram_received(b'[]', None)
+
+        queue.put_nowait.assert_not_called()
+        wake.assert_not_called()
+
     async def test_viewing_done_pane_broadcasts_idle_immediately(self):
         pane = "w1:p1"
         relay.unseen_done_panes.add(pane)
         relay.acknowledged_done_panes.discard(pane)
         relay.agent_types[pane] = "codex"
         try:
-            with patch.object(relay, "broadcast", AsyncMock()) as broadcast:
+            with (
+                patch.object(relay, "broadcast", AsyncMock()) as broadcast,
+                patch.object(relay, "wake_poll_loop") as wake,
+            ):
                 acknowledged = await relay.acknowledge_pane_viewed(pane)
                 repeated = await relay.acknowledge_pane_viewed(pane)
                 unknown = await relay.acknowledge_pane_viewed("missing:pane")
@@ -1283,6 +1454,7 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertTrue(acknowledged)
         self.assertFalse(repeated)
         self.assertFalse(unknown)
+        wake.assert_called_once_with()
         broadcast.assert_awaited_once_with({
             "type": "agent_update",
             "pane_id": pane,
