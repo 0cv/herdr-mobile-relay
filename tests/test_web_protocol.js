@@ -37,5 +37,53 @@ assert.match(html, /type: 'push_subscribe',[\s\S]*?notify_finished: finishedNoti
 assert.match(html, /id="finishedNotificationToggle"[\s\S]*?onchange="setFinishedNotificationsEnabled\(this\.checked\)"/);
 assert.match(serviceWorker, /const actions = Array\.isArray\(payload\.actions\)/);
 assert.match(serviceWorker, /actions,/);
+assert.match(serviceWorker, /notificationActions\.length === 1 && notificationActions\[0\]\.action === 'approve'/);
+assert.doesNotMatch(serviceWorker, /\{action: 'deny', title: 'Deny'\}/);
+assert.match(html, /const SW_SCRIPT_URL = 'sw\.js\?v=7'/);
 
-console.log('Relay protocol compatibility tests passed');
+const handlers = {};
+let routedNotificationUrl = '';
+const visibleClient = {
+  url: 'https://relay.example/app',
+  visibilityState: 'visible',
+  postMessage: message => { routedNotificationUrl = message.url; },
+  focus: async () => {},
+};
+const workerSandbox = {
+  URL,
+  importScripts: () => {},
+  self: {
+    location: {origin: 'https://relay.example'},
+    addEventListener: (name, handler) => { handlers[name] = handler; },
+    clients: {
+      matchAll: async () => [visibleClient],
+      openWindow: async url => { routedNotificationUrl = url; },
+      claim: async () => {},
+    },
+    registration: {showNotification: async () => {}},
+    skipWaiting: async () => {},
+  },
+};
+vm.runInNewContext(serviceWorker, workerSandbox);
+
+(async () => {
+  let clickPromise;
+  handlers.notificationclick({
+    action: 'deny',
+    notification: {
+      actions: [{action: 'approve', title: 'Approve once'}],
+      data: {
+        url: './#open',
+        actionUrls: {approve: './#approve', deny: './#deny'},
+      },
+      close: () => {},
+    },
+    waitUntil: promise => { clickPromise = promise; },
+  });
+  await clickPromise;
+  assert.match(routedNotificationUrl, /#approve$/);
+  console.log('Relay protocol compatibility tests passed');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

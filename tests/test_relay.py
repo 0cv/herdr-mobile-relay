@@ -94,7 +94,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
         self.assertEqual(relay.respond_keys(1, 3), ["Down", "Enter"])
         self.assertEqual(relay.respond_keys(2, 3), ["Escape"])
 
-    def test_push_payload_contains_open_approve_and_deny_targets(self):
+    def test_push_payload_contains_only_the_safe_approve_action(self):
         payload = relay.push_payload({
             "event_id": "event-1",
             "host": "fedora",
@@ -110,8 +110,13 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
 
         self.assertEqual(target(payload["url"])["pane_id"], "w1:p2")
         self.assertEqual(target(payload["action_urls"]["approve"])["index"], 0)
-        self.assertEqual(target(payload["action_urls"]["deny"])["index"], 2)
-        self.assertEqual(target(payload["action_urls"]["deny"])["notification_id"], "event-1")
+        self.assertEqual(
+            target(payload["action_urls"]["approve"])["notification_id"], "event-1"
+        )
+        self.assertEqual(
+            payload["actions"], [{"action": "approve", "title": "Approve once"}]
+        )
+        self.assertNotIn("deny", payload["action_urls"])
 
     def test_finished_push_payload_opens_agent_without_approval_actions(self):
         payload = relay.finished_push_payload({

@@ -1175,9 +1175,9 @@ def push_payload(blocked_msg):
         "body": f"{command} · {host}",
         "tag": f"herdr-{host}-{pane_id}",
         "url": notification_target_url(host, pane_id, event_id),
+        "actions": [{"action": "approve", "title": "Approve once"}],
         "action_urls": {
             "approve": notification_target_url(host, pane_id, event_id, "approve", 0, total),
-            "deny": notification_target_url(host, pane_id, event_id, "deny", total - 1, total),
         },
     }
 

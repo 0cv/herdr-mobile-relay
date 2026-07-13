@@ -54,7 +54,7 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 
 - **Multi-computer phone UI:** one static web app connects to multiple independent relays and merges Mac, Fedora, or other hosts into one agent list.
 - **Per-machine isolation:** each computer runs only its own local relay and `herdr` CLI calls; relays do not SSH into each other or share state.
-- **PWA notifications:** installed phones receive Web Push notifications when an agent blocks, including Approve once and Deny actions; optional completion alerts can also open the finished agent directly.
+- **PWA notifications:** installed phones receive Web Push notifications when an agent blocks, including a safe Approve once action; denial remains available after opening the app, and optional completion alerts can open the finished agent directly.
 - **Mobile terminal composer:** terminal view has a compact phone-first composer, quick terminal keys, a phone-local Copy response button, inline approval actions, themes, font sizing, and a jump-to-bottom affordance.
 - **Real approval handling:** blocked cards parse prompt text and approval options, then map visible choices back to the correct Herdr key actions for Codex and Claude Code.
 - **Confirmed controls and activity:** command acknowledgements report failures explicitly, approvals wait for an observed state change, and a bounded per-relay activity history is merged on the phone.
@@ -89,7 +89,7 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 - Uses relay labels from the web app, such as `Mac` or `Fedora`, as the visible host badges.
 - Shows blocked prompts with inline approval buttons on the agent list and in the terminal view.
 - Sends Web Push notifications for blocked agents to installed phones, even when the app is closed or suspended, with optional notifications when agents finish.
-- Routes notification taps and Approve once/Deny actions back to the matching relay and pane when the app can resolve it.
+- Routes notification taps and the Approve once action back to the matching relay and pane when the app can resolve it.
 - Confirms remote commands and records blocked, resolved, approval, prompt, upload, and lifecycle activity locally on each relay.
 - Starts automatically detected installed agents and supports rename, clear, and stop controls.
 - Uploads screenshots and photos from the phone to the connected relay's local filesystem.

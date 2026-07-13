@@ -431,7 +431,7 @@ const COMMAND_TIMEOUT_MS = 15000;
 // Version query defeats CDN edge caching of the worker script: a changed URL is
 // a guaranteed cache miss, so update checks always see the latest code. Bump
 // whenever sw.js changes.
-const SW_SCRIPT_URL = 'sw.js?v=6';
+const SW_SCRIPT_URL = 'sw.js?v=7';
 const PUSH_CLIENT_KEY = 'herdr_push_client_id';
 const PUSH_VAPID_KEY_PREFIX = 'herdr_push_vapid_key_';
 // Version 1 is the existing positional approval protocol. Bump only when a
@@ -2377,14 +2377,12 @@ function notifyBlockedAgent(agent) {
     badge: HERDR_NOTIFICATION_BADGE,
     actions: [
       {action: 'approve', title: 'Approve once'},
-      {action: 'deny', title: 'Deny'},
     ],
     data: {
       url: viewUrl({view: 'terminal', paneId: agent.pane_id}),
       paneId: agent.pane_id,
       action_urls: {
         approve: viewUrl({view: 'notification', target: {...target, action: 'approve', index: 0, total}}),
-        deny: viewUrl({view: 'notification', target: {...target, action: 'deny', index: total - 1, total}}),
       },
     },
   });

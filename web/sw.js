@@ -22,7 +22,6 @@ self.addEventListener('push', event => {
     ? payload.actions
     : [
         {action: 'approve', title: 'Approve once'},
-        {action: 'deny', title: 'Deny'},
       ];
   const options = {
     body: payload.body || 'An agent needs approval.',
@@ -44,7 +43,11 @@ self.addEventListener('notificationclick', event => {
   event.notification.close();
   const data = event.notification.data || {};
   const actionUrls = data.actionUrls || data.action_urls || {};
-  const actionUrl = event.action && actionUrls[event.action];
+  const notificationActions = Array.from(event.notification.actions || []);
+  const action = notificationActions.length === 1 && notificationActions[0].action === 'approve'
+    ? 'approve'
+    : event.action;
+  const actionUrl = action && actionUrls[action];
   const url = new URL(actionUrl || data.url || './', self.location.origin + '/').href;
 
   // One action per click: the click's user activation only reliably funds a
