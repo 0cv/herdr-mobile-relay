@@ -13,6 +13,9 @@ echo ""
 echo "  2. Stable Tunnel"
 echo "     Guided permanent hostname, dedicated tunnel, and background service."
 echo ""
+echo "  3. Remove Stable Tunnel"
+echo "     Tear down only resources recorded as wizard-owned."
+echo ""
 echo "  q. Exit"
 echo ""
 
@@ -25,11 +28,14 @@ while true; do
         2)
             exec "$SCRIPT_DIR/plugin-install-service.sh"
             ;;
+        3)
+            exec "$SCRIPT_DIR/plugin-stable-teardown.sh"
+            ;;
         q|Q)
             exit 0
             ;;
         *)
-            echo "Enter 1, 2, or q."
+            echo "Enter 1, 2, 3, or q."
             ;;
     esac
 done

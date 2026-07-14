@@ -260,7 +260,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
 
         self.assertFalse((root / "relay" / "herdr-plugin.toml").exists())
         self.assertIn('id = "herdr-mobile-relay.events"', manifest)
-        self.assertIn('version = "0.5.0"', manifest)
+        self.assertIn('version = "0.5.1"', manifest)
         self.assertIn('id = "setup"', manifest)
         self.assertIn('command = "herdr-mobile-relay.events.setup"', manifest)
         self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "setup"]', manifest)
@@ -271,6 +271,9 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
         self.assertIn('id = "install-service"', manifest)
         self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "install-service"]', manifest)
         self.assertIn('command = ["bash", "relay/plugin-install-service.sh"]', manifest)
+        self.assertIn('id = "stable-teardown"', manifest)
+        self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "stable-teardown"]', manifest)
+        self.assertIn('command = ["bash", "relay/plugin-stable-teardown.sh"]', manifest)
         self.assertIn('command = ["sh", "relay/plugin-on-event.sh"]', manifest)
         self.assertIn('[[build]]', manifest)
         self.assertIn('command = ["sh", "relay/plugin-build.sh"]', manifest)
@@ -394,7 +397,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
         self.assertIn(".cache/herdr-mobile-relay/post-install.sh", nohup_args)
         self.assertNotIn(str(root), nohup_args)
         self.assertTrue(waiter_copy_exists)
-        self.assertIn("0.5.0", nohup_args)
+        self.assertIn("0.5.1", nohup_args)
 
     def test_plugin_build_releases_captured_pipes_before_waiter_exits(self):
         # Regression: herdr registers the plugin only after the install
@@ -445,7 +448,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             registry = temp / "plugins.json"
             registry.write_text(json.dumps([{
                 "plugin_id": "herdr-mobile-relay.events",
-                "version": "0.5.0",
+                "version": "0.5.1",
                 "enabled": True,
                 "plugin_root": str(root),
                 "actions": [{"id": "setup"}],
@@ -470,7 +473,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             with socket_reader, socket_writer:
                 env["HERDR_SOCKET_PATH"] = inherited_socket_path(socket_reader)
                 result = subprocess.run(
-                    ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.5.0", "0"],
+                    ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.5.1", "0"],
                     capture_output=True,
                     text=True,
                     env=env,
@@ -495,7 +498,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             registry = temp / "plugins.json"
             registry.write_text(json.dumps([{
                 "plugin_id": "herdr-mobile-relay.events",
-                "version": "0.5.0",
+                "version": "0.5.1",
                 "enabled": True,
                 "plugin_root": str(root),
                 "actions": [{"id": "setup"}],
@@ -520,7 +523,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             with socket_reader, socket_writer:
                 env["HERDR_SOCKET_PATH"] = inherited_socket_path(socket_reader)
                 result = subprocess.run(
-                    ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.5.0", "0"],
+                    ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.5.1", "0"],
                     capture_output=True,
                     text=True,
                     env=env,
@@ -570,7 +573,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             })
 
             result = subprocess.run(
-                ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.5.0", "0"],
+                ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.5.1", "0"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -594,7 +597,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             })
 
             result = subprocess.run(
-                ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.5.0", "0"],
+                ["/bin/sh", str(root / "relay" / "plugin-post-install.sh"), "0.5.1", "0"],
                 capture_output=True,
                 text=True,
                 env=env,
@@ -604,7 +607,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             self.assertTrue(lock_dir.is_dir())
             self.assertFalse((lock_dir / "pid").exists())
 
-    def test_plugin_setup_menu_routes_both_start_modes(self):
+    def test_plugin_setup_menu_routes_setup_and_teardown_modes(self):
         root = RELAY_PATH.parents[1]
         menu_source = root / "relay" / "plugin-setup-menu.sh"
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -615,6 +618,7 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             for name, output in (
                 ("plugin-quick-start.sh", "quick"),
                 ("plugin-install-service.sh", "stable"),
+                ("plugin-stable-teardown.sh", "teardown"),
             ):
                 script = temp / name
                 script.write_text(f"#!/bin/sh\necho {output}\n")
@@ -626,9 +630,13 @@ class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
             stable = subprocess.run(
                 ["bash", str(menu)], input="2\n", capture_output=True, text=True, check=True,
             )
+            teardown = subprocess.run(
+                ["bash", str(menu)], input="3\n", capture_output=True, text=True, check=True,
+            )
 
         self.assertTrue(quick.stdout.rstrip().endswith("quick"))
         self.assertTrue(stable.stdout.rstrip().endswith("stable"))
+        self.assertTrue(teardown.stdout.rstrip().endswith("teardown"))
 
     def test_relay_health_check_retries_until_detailed_health_is_ready(self):
         root = RELAY_PATH.parents[1]

@@ -129,7 +129,7 @@ make stable-setup
 
 The stable wizard performs Cloudflare login when necessary, offers an editable `relay-<computer>.<domain>` hostname, creates or resumes the dedicated tunnel, installs the service, and verifies public DNS and HTTPS independently. It prints a QR only after the public relay identity matches the local service. If interrupted, rerun the exact command it prints; progress is resumable.
 
-Quick Start is not automatically promoted. Its random TryCloudflare hostname remains disposable until you explicitly run Stable Tunnel. To remove only resources recorded as wizard-owned, use `make stable-teardown`; see the README's [Stable Hostnames](README.md#stable-hostnames) section for login, conflict, timeout, custom-config, and teardown details.
+Quick Start is not automatically promoted. Its random TryCloudflare hostname remains disposable until you explicitly run Stable Tunnel. To remove only resources recorded as wizard-owned before uninstalling a marketplace plugin, run `herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events`; checkout users can run `make stable-teardown`. Herdr plugin uninstall keeps the separate plugin configuration directory and does not tear down external resources automatically. See the README's [Stable Hostnames](README.md#stable-hostnames) section for login, conflict, timeout, custom-config, and teardown details.
 
 Repeat the relay setup on each Linux or macOS computer. You can add every stable relay to the same phone app; agents are merged client-side.
 

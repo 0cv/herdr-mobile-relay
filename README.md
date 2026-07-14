@@ -74,7 +74,7 @@ Forked from [dcolinmorgan/herdr-remote](https://github.com/dcolinmorgan/herdr-re
 
 **Plugin ID:** `herdr-mobile-relay.events`
 
-**Current version:** `0.5.0`
+**Current version:** `0.5.1`
 
 **Short description:** Approve and monitor Herdr agents remotely from your phone — a mobile web app for Android/iOS smartphones with push notifications, QR setup, and multi-computer relays.
 
@@ -223,9 +223,24 @@ For wizard-created resources, run:
 make stable-teardown
 ```
 
+Marketplace users can run the same confirmed teardown without locating the managed checkout:
+
+```bash
+herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
+```
+
 Teardown requires the Herdr ownership marker and a `herdr-mobile-relay-` tunnel name. It shows the exact service, tunnel, hostname, config, and credentials before confirmation. It stops only a service installed by the wizard, deletes only its recorded tunnel and generated files, and never changes a custom Cloudflare config.
 
 `cloudflared` has no dependable DNS-route deletion command. After deleting the tunnel, teardown checks the hostname. If the record still resolves—or removal cannot be verified—it retains diagnostic state and prints the exact hostname plus Cloudflare dashboard DNS cleanup instructions instead of claiming success.
+
+Herdr's `plugin uninstall` unregisters the plugin and removes its managed checkout, but deliberately keeps the separate plugin configuration directory and does not run a manifest teardown hook. If you want both the wizard-owned infrastructure and the plugin removed, invoke `stable-teardown` first and uninstall only after teardown completes:
+
+```bash
+herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
+herdr plugin uninstall herdr-mobile-relay.events
+```
+
+If the plugin was already uninstalled, reinstall it to recover the teardown action; the retained config and ownership state let teardown resume safely.
 
 ### Existing or Custom Cloudflare Configuration
 
