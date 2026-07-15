@@ -25,6 +25,8 @@ import type {
   QuestionInteraction,
   RelayConfig,
   RelayConnectionView,
+  SlashCommand,
+  SlashCommandCatalog,
   TerminalFrame,
   ToastMessage,
 } from './types';
@@ -60,6 +62,16 @@ interface PendingUpload {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface SlashCommandCacheEntry {
+  identity: string;
+  catalog: SlashCommandCatalog;
+}
+
+interface PendingSlashCommands {
+  identity: string;
+  promise: Promise<SlashCommandCatalog>;
+}
+
 export class CommandError extends Error {
   data?: Record<string, unknown>;
 }
@@ -82,6 +94,8 @@ class RelayStore {
   private blockedSnapshotMisses = new Map<string, number>();
   private pendingRequests = new Map<string, PendingRequest>();
   private pendingUploads = new Map<string, PendingUpload>();
+  private slashCommandCache = new Map<string, SlashCommandCacheEntry>();
+  private pendingSlashCommands = new Map<string, PendingSlashCommands>();
   private respondingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconnectAttempts = new Map<string, number>();
   private reconnectEnabled = true;
@@ -108,6 +122,8 @@ class RelayStore {
     this.respondingTimers.clear();
     this.respondingValue.clear();
     this.responding.set(new Set());
+    this.slashCommandCache.clear();
+    this.pendingSlashCommands.clear();
   }
 
   setPushConfigHandler(handler: ((relayId: string) => void) | null): void {
@@ -219,6 +235,7 @@ class RelayStore {
   }
 
   disconnectRelay(id: string): void {
+    this.clearSlashCommandCacheForRelay(id);
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
     connection.closed = true;
@@ -409,6 +426,16 @@ class RelayStore {
       if (paneId.startsWith(`${relayId}::`)) this.blockedSnapshotMisses.delete(paneId);
     }
     this.agents.set(this.agentsValue);
+  }
+
+  private clearSlashCommandCacheForRelay(relayId: string): void {
+    const prefix = `${relayId}::`;
+    for (const paneId of this.slashCommandCache.keys()) {
+      if (paneId.startsWith(prefix)) this.slashCommandCache.delete(paneId);
+    }
+    for (const paneId of this.pendingSlashCommands.keys()) {
+      if (paneId.startsWith(prefix)) this.pendingSlashCommands.delete(paneId);
+    }
   }
 
   private reconcileResponding(): void {
@@ -717,6 +744,50 @@ class RelayStore {
       if (this.isCurrentConnection(relayId, connection)) {
         connection.directoryLoading = false;
         this.emitConnections();
+      }
+    }
+  }
+
+  async loadSlashCommands(agent: Agent): Promise<SlashCommandCatalog> {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    if (!connection?.capabilities.includes('slash_commands')) {
+      throw new CommandError('This relay does not provide slash-command suggestions.');
+    }
+    const identity = `${String(agent.agent || '')}\u0000${String(agent.cwd || '')}`;
+    const cached = this.slashCommandCache.get(agent.pane_id);
+    if (cached?.identity === identity) return cached.catalog;
+    const pending = this.pendingSlashCommands.get(agent.pane_id);
+    if (pending?.identity === identity) return pending.promise;
+
+    const promise = this.sendToAgent(agent, { type: 'list_slash_commands' }, 10_000)
+      .then((result) => {
+        if (!Array.isArray(result.data?.commands)) {
+          throw new CommandError('Relay returned an invalid slash-command catalog.');
+        }
+        const sources = new Set(['builtin', 'personal', 'project']);
+        const commands = result.data.commands
+          .filter((entry: Record<string, unknown>) => typeof entry?.command === 'string'
+            && /^\/[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(entry.command))
+          .slice(0, 300)
+          .map((entry: Record<string, unknown>): SlashCommand => ({
+            command: String(entry.command),
+            description: String(entry.description || entry.command).slice(0, 240),
+            ...(entry.argument_hint ? { argument_hint: String(entry.argument_hint).slice(0, 120) } : {}),
+            source: sources.has(String(entry.source))
+              ? entry.source as SlashCommand['source']
+              : 'builtin',
+          }))
+          .sort((left, right) => left.command.localeCompare(right.command, undefined, { sensitivity: 'base' }));
+        const catalog = { commands, truncated: Boolean(result.data.truncated) };
+        this.slashCommandCache.set(agent.pane_id, { identity, catalog });
+        return catalog;
+      });
+    this.pendingSlashCommands.set(agent.pane_id, { identity, promise });
+    try {
+      return await promise;
+    } finally {
+      if (this.pendingSlashCommands.get(agent.pane_id)?.promise === promise) {
+        this.pendingSlashCommands.delete(agent.pane_id);
       }
     }
   }

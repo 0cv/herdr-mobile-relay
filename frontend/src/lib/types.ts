@@ -23,6 +23,18 @@ export interface DirectoryListing {
   directories: DirectoryEntry[];
 }
 
+export interface SlashCommand {
+  command: string;
+  description: string;
+  argument_hint?: string;
+  source: 'builtin' | 'personal' | 'project';
+}
+
+export interface SlashCommandCatalog {
+  commands: SlashCommand[];
+  truncated: boolean;
+}
+
 export interface QuestionOption {
   index: number;
   label: string;

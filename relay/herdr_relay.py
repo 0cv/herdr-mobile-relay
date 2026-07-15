@@ -116,7 +116,7 @@ AGENT_PROFILE_CANDIDATES = {
     "opencode": "OpenCode",
 }
 MACOS_PROTECTED_HOME_DIRECTORIES = {"Desktop", "Documents", "Downloads"}
-RELAY_CAPABILITIES = ["directory_browser", "structured_questions"]
+RELAY_CAPABILITIES = ["directory_browser", "structured_questions", "slash_commands"]
 # Version 2 adds staged Claude Code question answers. Bump together with
 # APP_PROTOCOL_VERSION in frontend/src/lib/protocol.ts whenever mutations change incompatibly.
 PROTOCOL_VERSION = 2
@@ -151,6 +151,114 @@ POLL_WAKE_ACTIONS = frozenset({
     "prompt",
     "text",
 })
+SLASH_COMMAND_MAX_ENTRIES = 300
+SLASH_COMMAND_MAX_CUSTOM_FILES = 250
+SLASH_COMMAND_METADATA_MAX_BYTES = 64 * 1024
+SLASH_COMMAND_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$")
+CODEX_SLASH_COMMANDS = {
+    "permissions": ("Change approval and sandbox permissions", ""),
+    "ide": ("Include available IDE context in the next prompt", "[instructions]"),
+    "keymap": ("View or change terminal keyboard shortcuts", ""),
+    "vim": ("Toggle Vim editing mode", ""),
+    "agent": ("Switch to another agent thread", ""),
+    "subagents": ("Switch to another agent thread", ""),
+    "apps": ("Browse available apps and connectors", ""),
+    "plugins": ("Browse and manage plugins", ""),
+    "hooks": ("View and manage lifecycle hooks", ""),
+    "clear": ("Clear the terminal and start a new task", ""),
+    "rename": ("Rename the current task", "[name]"),
+    "archive": ("Archive the current session and exit", ""),
+    "delete": ("Permanently delete the current session and exit", ""),
+    "compact": ("Summarize the conversation to free context", ""),
+    "copy": ("Copy the latest completed response", ""),
+    "diff": ("Show the current Git diff", ""),
+    "exit": ("Exit Codex", ""),
+    "quit": ("Exit Codex", ""),
+    "experimental": ("Configure experimental features", ""),
+    "approve": ("Retry a recent automatic-review denial", ""),
+    "memories": ("Configure memory use and generation", ""),
+    "skills": ("Browse and use available skills", ""),
+    "import": ("Import supported Claude Code configuration", ""),
+    "feedback": ("Send feedback and optional diagnostics", ""),
+    "init": ("Create an AGENTS.md scaffold", ""),
+    "logout": ("Sign out of Codex", ""),
+    "mcp": ("Show configured MCP servers and tools", "[verbose]"),
+    "mention": ("Attach a file or folder", "[path]"),
+    "model": ("Choose the active model and reasoning effort", ""),
+    "fast": ("Toggle the Fast service tier when available", ""),
+    "plan": ("Switch to plan mode", "[planning prompt]"),
+    "goal": ("Set or manage a persistent task goal", "[objective|edit|pause|resume|clear]"),
+    "personality": ("Choose the response style", ""),
+    "ps": ("Show background terminals", ""),
+    "stop": ("Stop all background terminals", ""),
+    "fork": ("Fork the current task", ""),
+    "side": ("Start a temporary side conversation", "[question]"),
+    "btw": ("Start a temporary side conversation", "[question]"),
+    "raw": ("Toggle raw scrollback mode", "[on|off]"),
+    "resume": ("Resume a saved conversation", "[session]"),
+    "new": ("Start a new task", ""),
+    "review": ("Review the working tree", "[instructions]"),
+    "status": ("Show session configuration and context usage", ""),
+    "usage": ("Show account token usage", "[daily|weekly|cumulative]"),
+    "debug-config": ("Show configuration layer diagnostics", ""),
+    "statusline": ("Configure terminal status-line fields", ""),
+    "title": ("Configure the terminal title", ""),
+    "theme": ("Choose a syntax-highlighting theme", ""),
+    "pets": ("Choose or hide a terminal pet", ""),
+    "pet": ("Choose or hide a terminal pet", ""),
+}
+CLAUDE_SLASH_COMMANDS = {
+    "add-dir": ("Add another working directory", "<path>"),
+    "agents": ("Manage agent configurations", ""),
+    "batch": ("Run independent work in parallel worktrees", "[task]"),
+    "background": ("Move the current session to the background", ""),
+    "branch": ("Fork an earlier conversation", "[session]"),
+    "clear": ("Start a fresh conversation", ""),
+    "compact": ("Summarize the conversation to free context", "[instructions]"),
+    "config": ("Open Claude Code settings", ""),
+    "context": ("Show context-window usage", ""),
+    "debug": ("Troubleshoot the current Claude Code session", "[description]"),
+    "diff": ("Show changes in the working tree", ""),
+    "doctor": ("Check the Claude Code installation", ""),
+    "effort": ("Change the reasoning effort", ""),
+    "exit": ("Exit Claude Code", ""),
+    "export": ("Export the current conversation", "[path]"),
+    "extra-usage": ("Configure extra usage", ""),
+    "feedback": ("Report an issue with session context", ""),
+    "fork": ("Fork the current conversation", ""),
+    "goal": ("Set or clear a persistent goal", "[condition|clear]"),
+    "help": ("Show help and available commands", ""),
+    "hooks": ("View hook configuration", ""),
+    "ide": ("Manage IDE integrations", ""),
+    "init": ("Create a CLAUDE.md project guide", ""),
+    "insights": ("Analyze Claude Code session patterns", ""),
+    "login": ("Sign in to Claude Code", ""),
+    "logout": ("Sign out of Claude Code", ""),
+    "mcp": ("Manage MCP servers", ""),
+    "memory": ("View or edit project memory", ""),
+    "mobile": ("Show the Claude mobile app QR code", ""),
+    "model": ("Choose the active Claude model", ""),
+    "permissions": ("View or change permission rules", ""),
+    "plan": ("Enter plan mode", "[planning prompt]"),
+    "plugin": ("Browse and manage plugins", ""),
+    "reload-plugins": ("Reload installed plugins", ""),
+    "remote-control": ("Continue this session from another device", "[name]"),
+    "rename": ("Rename the current session", "[name]"),
+    "resume": ("Resume a saved conversation", "[session]"),
+    "review": ("Review a pull request", "[PR]"),
+    "rewind": ("Return to an earlier checkpoint", ""),
+    "security-review": ("Review the current branch for security issues", ""),
+    "simplify": ("Review recent changes for reusable improvements", ""),
+    "skills": ("Browse available skills", ""),
+    "stats": ("Show account usage statistics", ""),
+    "status": ("Show version, model, account, and connectivity", ""),
+    "tasks": ("Show background tasks", ""),
+    "teleport": ("Pull a web session into this terminal", "[session]"),
+    "theme": ("Choose the terminal theme", ""),
+    "usage": ("Show plan and usage information", ""),
+    "verify": ("Build and observe the application to verify changes", "[instructions]"),
+    "voice": ("Configure voice dictation", "[hold|tap|off]"),
+}
 
 
 def detect_relay_version():
@@ -1483,6 +1591,209 @@ async def prune_uploads_loop():
 
 def compact_text(value, limit=240):
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def slash_command_entry(name, description, argument_hint="", source="builtin"):
+    entry = {
+        "command": f"/{name}",
+        "description": compact_text(description, 240),
+        "source": source,
+    }
+    hint = compact_text(argument_hint, 120)
+    if hint:
+        entry["argument_hint"] = hint
+    return entry
+
+
+def read_bounded_text(path):
+    try:
+        with path.open("rb") as handle:
+            content = handle.read(SLASH_COMMAND_METADATA_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(content) > SLASH_COMMAND_METADATA_MAX_BYTES:
+        return None
+    return content.decode("utf-8", errors="replace")
+
+
+def markdown_frontmatter(path):
+    text = read_bounded_text(path)
+    if text is None:
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    metadata = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        match = re.match(r"^([A-Za-z0-9_-]+):\s*(.*?)\s*$", line)
+        if not match:
+            continue
+        key, value = match.groups()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        metadata[key.lower()] = value
+    return metadata
+
+
+def user_invocable(metadata):
+    return str(metadata.get("user-invocable", "true")).strip().lower() not in {
+        "false", "no", "off", "0",
+    }
+
+
+def claude_project_config_dirs(cwd):
+    try:
+        current = Path(cwd).expanduser().resolve()
+    except OSError:
+        return []
+    if not current.is_dir():
+        return []
+    nearest_first = []
+    for candidate in (current, *current.parents):
+        nearest_first.append(candidate)
+        if (candidate / ".git").exists():
+            break
+    else:
+        return [current]
+    return list(reversed(nearest_first))
+
+
+def claude_skill_overrides(home, project_dirs):
+    overrides = {}
+    settings_files = [home / ".claude" / "settings.json"]
+    for directory in project_dirs:
+        settings_files.extend((
+            directory / ".claude" / "settings.json",
+            directory / ".claude" / "settings.local.json",
+        ))
+    for path in settings_files:
+        text = read_bounded_text(path)
+        if text is None:
+            continue
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        values = payload.get("skillOverrides") if isinstance(payload, dict) else None
+        if not isinstance(values, dict):
+            continue
+        for name, value in values.items():
+            if isinstance(name, str) and isinstance(value, str):
+                overrides[name] = value
+    return overrides
+
+
+def claude_command_files(directory):
+    if not directory.is_dir():
+        return
+    try:
+        walker = os.walk(directory, followlinks=False)
+        for root, directories, files in walker:
+            directories[:] = sorted(name for name in directories if not name.startswith("."))
+            for filename in sorted(files):
+                if filename.endswith(".md") and not filename.startswith("."):
+                    yield Path(root) / filename
+    except OSError:
+        return
+
+
+def claude_skill_files(directory):
+    if not directory.is_dir():
+        return
+    try:
+        entries = sorted(directory.iterdir(), key=lambda path: (path.name.casefold(), path.name))
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        candidate = entry / "SKILL.md"
+        if candidate.is_file():
+            yield entry.name, candidate
+
+
+def discover_claude_commands(cwd):
+    try:
+        home = Path.home().resolve()
+    except OSError:
+        return [], False, set()
+    project_dirs = claude_project_config_dirs(cwd)
+    overrides = claude_skill_overrides(home, project_dirs)
+    discovered = {}
+    hidden = set()
+    scanned = 0
+    truncated = False
+
+    def add(name, path, source):
+        nonlocal scanned, truncated
+        if scanned >= SLASH_COMMAND_MAX_CUSTOM_FILES:
+            truncated = True
+            return
+        scanned += 1
+        if not SLASH_COMMAND_NAME_RE.fullmatch(name):
+            return
+        metadata = markdown_frontmatter(path)
+        if metadata is None:
+            return
+        if not user_invocable(metadata):
+            discovered.pop(name, None)
+            hidden.add(name)
+            return
+        if str(overrides.get(name, "")).lower() == "off":
+            discovered.pop(name, None)
+            hidden.add(name)
+            return
+        hidden.discard(name)
+        description = metadata.get("description") or f"{source.capitalize()} Claude command"
+        discovered[name] = slash_command_entry(
+            name,
+            description,
+            metadata.get("argument-hint", ""),
+            source,
+        )
+
+    # Later scopes override earlier ones: the nearest project directory wins,
+    # skills win over legacy commands, and personal configuration wins over project.
+    for directory in project_dirs:
+        command_dir = directory / ".claude" / "commands"
+        for path in claude_command_files(command_dir) or ():
+            add(path.stem, path, "project")
+        skill_dir = directory / ".claude" / "skills"
+        for name, path in claude_skill_files(skill_dir) or ():
+            add(name, path, "project")
+    for path in claude_command_files(home / ".claude" / "commands") or ():
+        add(path.stem, path, "personal")
+    for name, path in claude_skill_files(home / ".claude" / "skills") or ():
+        add(name, path, "personal")
+    hidden.update(name for name, value in overrides.items() if str(value).lower() == "off")
+    return list(discovered.values()), truncated, hidden
+
+
+def slash_command_catalog(agent):
+    agent_type = str(agent.get("agent") or "").casefold()
+    if "claude" in agent_type:
+        builtins = CLAUDE_SLASH_COMMANDS
+        custom, truncated, hidden = discover_claude_commands(agent.get("cwd") or "")
+    elif "codex" in agent_type:
+        builtins = CODEX_SLASH_COMMANDS
+        custom, truncated, hidden = [], False, set()
+    else:
+        return {"commands": [], "truncated": False}
+
+    commands = {
+        name: slash_command_entry(name, description, argument_hint)
+        for name, (description, argument_hint) in builtins.items()
+        if name not in hidden
+    }
+    for entry in custom:
+        commands[entry["command"][1:]] = entry
+    values = list(commands.values())
+    if len(values) > SLASH_COMMAND_MAX_ENTRIES:
+        values = values[:SLASH_COMMAND_MAX_ENTRIES]
+        truncated = True
+    return {"commands": values, "truncated": truncated}
 
 
 def load_agent_profiles():
@@ -3365,6 +3676,42 @@ async def handle_list_directories_command(ws, msg):
     )
 
 
+async def handle_list_slash_commands_command(ws, msg):
+    request_id = request_id_for(msg)
+    pane_id = msg.get("pane_id", "")
+    if not pane_id:
+        await send_command_result(
+            ws,
+            request_id,
+            "list_slash_commands",
+            False,
+            phase="failed",
+            error="Agent is required",
+        )
+        return
+    agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
+    if error:
+        await send_command_result(
+            ws,
+            request_id,
+            "list_slash_commands",
+            False,
+            phase="failed",
+            error=error,
+            pane_id=pane_id,
+        )
+        return
+    data = await asyncio.to_thread(slash_command_catalog, agent)
+    await send_command_result(
+        ws,
+        request_id,
+        "list_slash_commands",
+        True,
+        pane_id=pane_id,
+        data=data,
+    )
+
+
 async def handle_agent_start_command(ws, msg):
     request_id = request_id_for(msg)
     profiles = load_agent_profiles()
@@ -3693,6 +4040,8 @@ async def handle_client(ws):
                 await handle_send_keys_command(ws, msg)
             elif msg_type == "list_directories":
                 await handle_list_directories_command(ws, msg)
+            elif msg_type == "list_slash_commands":
+                await handle_list_slash_commands_command(ws, msg)
             elif msg_type == "send_text":
                 request_id = request_id_for(msg)
                 pane_id = msg.get("pane_id", "")

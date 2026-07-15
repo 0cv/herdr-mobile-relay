@@ -278,13 +278,32 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .ansi-line-background { border-radius: .12rem; }
 .term-separator { border-top: 1px solid color-mix(in srgb, var(--terminal-text) 22%, transparent); display: block; margin: .65rem 0; }
 .jump-bottom { background: var(--primary); border: 0; border-radius: 50%; bottom: 9.5rem; color: var(--primary-foreground); height: 2.5rem; position: absolute; right: 1rem; width: 2.5rem; z-index: 4; }
-.terminal-bottom { background: var(--background); border-top: 1px solid var(--border); flex: 0 0 auto; padding-bottom: env(safe-area-inset-bottom); }
+.terminal-bottom { background: var(--background); border-top: 1px solid var(--border); flex: 0 0 auto; padding-bottom: env(safe-area-inset-bottom); position: relative; }
 .term-input { align-items: flex-end; display: flex; gap: .45rem; padding: .55rem; }
 .composer-field { background: var(--input); border: 1px solid var(--border); border-radius: .68rem; display: flex; flex: 1; min-width: 0; position: relative; }
 .composer-field:focus-within { border-color: var(--primary); }
 .composer-field textarea { background: transparent; border: 0; max-height: 7rem; min-height: 2.6rem; padding: .62rem 2.2rem .62rem .68rem; resize: none; }
 .composer-field.awaiting-approval textarea { line-height: 2.6rem; padding: 0 .6rem; text-align: center; }
 .input-clear { background: transparent; border: 0; color: var(--muted); font-size: 1.2rem; height: 2.5rem; position: absolute; right: 0; top: 0; width: 2rem; }
+.slash-command-popover { background: var(--card); border: 1px solid var(--border); border-radius: .72rem; bottom: calc(100% + .42rem); box-shadow: 0 .8rem 2.4rem rgb(0 0 0 / .42); contain: layout paint; display: flex; flex-direction: column; left: .55rem; max-height: min(48dvh, 22rem); overflow: hidden; position: absolute; right: .55rem; z-index: 15; }
+.slash-command-header { align-items: center; border-bottom: 1px solid var(--border); display: flex; flex: 0 0 auto; justify-content: space-between; min-height: 2rem; padding: .35rem .65rem; }
+.slash-command-header strong { font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; }
+.slash-command-header span { color: var(--muted); font-size: .62rem; }
+.slash-command-menu { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .25rem; scrollbar-width: thin; }
+.slash-command-menu:empty { display: none; }
+.slash-command-menu > button { align-items: start; appearance: none; background: transparent; border: 0; border-radius: .48rem; color: var(--foreground); cursor: pointer; display: grid; gap: .55rem; grid-template-columns: minmax(6.8rem, .9fr) minmax(0, 1.35fr) auto; min-height: 2.45rem; padding: .48rem .5rem; text-align: left; width: 100%; }
+.slash-command-menu > button + button { border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent); }
+.slash-command-menu > button.active { background: var(--secondary); box-shadow: inset 2px 0 var(--primary); }
+.slash-command-name { align-items: baseline; display: flex; gap: .3rem; min-width: 0; }
+.slash-command-name strong { color: var(--primary); flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .74rem; white-space: nowrap; }
+.slash-command-name small { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-command-description { color: var(--muted); font-size: .66rem; line-height: 1.35; white-space: normal; }
+.slash-command-source { border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .56rem; font-style: normal; padding: .08rem .28rem; text-transform: capitalize; }
+.slash-command-status, .slash-command-limit { color: var(--muted); font-size: .68rem; line-height: 1.4; margin: 0; padding: .7rem; }
+.slash-command-limit { border-top: 1px solid var(--border); font-size: .6rem; padding: .35rem .65rem; }
+/* Keep the version-41 menu safe while an already-open client loads newer CSS. */
+.composer-field > .slash-command-menu { background: var(--card); border: 1px solid var(--border); border-radius: .72rem; bottom: calc(100% + .42rem); box-shadow: 0 .8rem 2.4rem rgb(0 0 0 / .42); left: 0; max-height: min(48dvh, 22rem); overflow-y: auto; position: absolute; right: 0; z-index: 15; }
+.composer-field > .slash-command-menu .slash-command-name em { border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .56rem; font-style: normal; margin-left: auto; padding: .08rem .28rem; text-transform: capitalize; }
 .upload-status { color: var(--success); font-size: .7rem; margin: -.2rem .75rem .45rem; }
 .quick-actions { border-top: 1px solid var(--border); padding: .55rem; }
 .quick-actions .button { flex: 1; }

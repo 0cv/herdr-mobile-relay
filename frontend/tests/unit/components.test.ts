@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
 import QuestionForm from '$components/QuestionForm.svelte';
+import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
 import type { Agent, QuestionInteraction } from '$lib/types';
 
@@ -12,6 +13,47 @@ const blockedAgent: Agent = {
 };
 
 describe('accessible Svelte interactions', () => {
+  it('filters slash commands and fills the composer without submitting', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p2', pane_id: 'fedora::w1:p2',
+      project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
+    };
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({
+      commands: [
+        { command: '/model', description: 'Choose the active model', source: 'builtin' },
+        { command: '/plan', description: 'Enter plan mode', argument_hint: '[prompt]', source: 'builtin' },
+      ],
+      truncated: false,
+    });
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'prompt-1', ok: true,
+    });
+    render(TerminalView, {
+      agent,
+      allAgents: [agent],
+      frame: { paneId: agent.pane_id, content: 'ready', format: 'plain' },
+      responding: new Set<string>(),
+    });
+
+    const composer = screen.getByRole('combobox', { name: 'Prompt' });
+    await user.type(composer, '/pl');
+    expect(screen.getByRole('listbox', { name: 'Slash commands' })).toBeVisible();
+    expect(screen.getByRole('option', { name: /\/plan/ })).toBeVisible();
+    expect(screen.queryByRole('option', { name: /\/model/ })).not.toBeInTheDocument();
+    await user.keyboard('{Enter}');
+    expect(composer).toHaveValue('/plan ');
+    expect(send).not.toHaveBeenCalled();
+
+    await user.type(composer, 'Review the migration');
+    await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+    expect(send).toHaveBeenCalledWith(agent, {
+      type: 'submit_prompt', text: '/plan Review the migration',
+    });
+    vi.restoreAllMocks();
+  });
+
   it('opens agents and submits approval buttons by role', async () => {
     const user = userEvent.setup();
     const onopen = vi.fn();

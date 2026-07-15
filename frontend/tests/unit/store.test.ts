@@ -225,6 +225,88 @@ describe('relay command store', () => {
     expect(get(relayStore.connections).get(relayId)?.directoryBrowser).toBeNull();
   });
 
+  it('loads and caches slash commands for one agent identity', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora',
+      capabilities: ['slash_commands'], agent_profiles: [],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'codex', cwd: '/home/test/project',
+    };
+
+    const first = relayStore.loadSlashCommands(agent);
+    const duplicate = relayStore.loadSlashCommands(agent);
+    const requests = socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands');
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ pane_id: 'w1:p1', protocol: 2 });
+    socket.message({
+      type: 'command_result', request_id: requests[0].request_id, ok: true, phase: 'completed',
+      data: {
+        commands: [
+          { command: '/zeta', description: 'Last command', source: 'builtin' },
+          { command: '/Alpha', description: 'First command', source: 'builtin' },
+          { command: '/model', description: 'Choose model', source: 'builtin' },
+        ],
+        truncated: false,
+      },
+    });
+
+    const alphabeticalCommands = [{ command: '/Alpha' }, { command: '/model' }, { command: '/zeta' }];
+    await expect(first).resolves.toMatchObject({ commands: alphabeticalCommands });
+    await expect(duplicate).resolves.toMatchObject({ commands: alphabeticalCommands });
+    await expect(relayStore.loadSlashCommands(agent)).resolves.toMatchObject({ commands: alphabeticalCommands });
+    expect(socket.sent.map((payload) => JSON.parse(payload))
+      .filter((message) => message.type === 'list_slash_commands')).toHaveLength(1);
+
+    const changed = relayStore.loadSlashCommands({ ...agent, cwd: '/home/test/other' });
+    const changedRequest = socket.sent.map((payload) => JSON.parse(payload)).at(-1)!;
+    expect(changedRequest.type).toBe('list_slash_commands');
+    socket.message({
+      type: 'command_result', request_id: changedRequest.request_id, ok: true, phase: 'completed',
+      data: { commands: [], truncated: false },
+    });
+    await expect(changed).resolves.toEqual({ commands: [], truncated: false });
+  });
+
+  it('invalidates slash-command caches on reconnect and rejects unsupported relays', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, capabilities: [], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'claude', cwd: '/home/test/project',
+    };
+    await expect(relayStore.loadSlashCommands(agent)).rejects.toThrow(/does not provide/);
+
+    socket.message({ type: 'push_config', protocol: 2, capabilities: ['slash_commands'], agent_profiles: [] });
+    const pending = relayStore.loadSlashCommands(agent);
+    const request = socket.sent.map((payload) => JSON.parse(payload)).at(-1)!;
+    socket.message({
+      type: 'command_result', request_id: request.request_id, ok: true,
+      data: { commands: [{ command: '/help', description: 'Help', source: 'builtin' }], truncated: false },
+    });
+    await pending;
+
+    relayStore.connectAll();
+    const replacement = MockWebSocket.instances.at(-1)!;
+    replacement.open();
+    replacement.message({ type: 'push_config', protocol: 2, capabilities: ['slash_commands'], agent_profiles: [] });
+    const refreshed = relayStore.loadSlashCommands(agent);
+    const refreshedRequest = JSON.parse(replacement.sent.at(-1)!);
+    expect(refreshedRequest.type).toBe('list_slash_commands');
+    replacement.message({
+      type: 'command_result', request_id: refreshedRequest.request_id, ok: true,
+      data: { commands: [], truncated: false },
+    });
+    await refreshed;
+  });
+
   it('keeps a newer responding window when an older timer is cleared', async () => {
     vi.useFakeTimers();
     relayStore.markResponding('fedora::w1:p1');

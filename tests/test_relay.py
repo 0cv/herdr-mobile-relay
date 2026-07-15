@@ -144,6 +144,7 @@ class ClaudeHistoryIsolationMixin:
 class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
     def test_protocol_v2_keeps_v1_as_the_unversioned_baseline(self):
         self.assertEqual(relay.PROTOCOL_VERSION, 2)
+        self.assertIn("slash_commands", relay.RELAY_CAPABILITIES)
         self.assertEqual(relay.client_protocol_version({}), 1)
         self.assertFalse(relay.client_protocol_matches({}))
         self.assertTrue(relay.client_protocol_matches({"protocol": 2}))
@@ -1909,6 +1910,83 @@ Production-like verification.
         self.assertIsNone(resolved)
         self.assertIn("home directory", error)
 
+    def test_slash_command_catalog_uses_agent_specific_builtins(self):
+        codex = relay.slash_command_catalog({"agent": "codex", "cwd": "/tmp"})
+        opencode = relay.slash_command_catalog({"agent": "opencode", "cwd": "/tmp"})
+
+        commands = {entry["command"] for entry in codex["commands"]}
+        self.assertIn("/permissions", commands)
+        self.assertIn("/skills", commands)
+        self.assertNotIn("/add-dir", commands)
+        self.assertFalse(codex["truncated"])
+        self.assertEqual(opencode, {"commands": [], "truncated": False})
+
+    def test_claude_slash_commands_merge_project_and_personal_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            project = home / "Development" / "relay"
+            cwd = project / "frontend"
+            (project / ".git").mkdir(parents=True)
+            cwd.mkdir()
+            project_commands = project / ".claude" / "commands"
+            project_commands.mkdir(parents=True)
+            (project_commands / "deploy.md").write_text(
+                "---\ndescription: Deploy from the project\nargument-hint: [environment]\n---\n"
+            )
+            project_skills = project / ".claude" / "skills"
+            (project_skills / "hidden").mkdir(parents=True)
+            (project_skills / "hidden" / "SKILL.md").write_text(
+                "---\ndescription: Background context\nuser-invocable: false\n---\n"
+            )
+            (project_skills / "disabled").mkdir()
+            (project_skills / "disabled" / "SKILL.md").write_text(
+                "---\ndescription: Disabled from settings\n---\n"
+            )
+            settings_dir = project / ".claude"
+            (settings_dir / "settings.local.json").write_text(json.dumps({
+                "skillOverrides": {"disabled": "off", "verify": "off"},
+            }))
+            personal_skills = home / ".claude" / "skills" / "deploy"
+            personal_skills.mkdir(parents=True)
+            (personal_skills / "SKILL.md").write_text(
+                "---\ndescription: Deploy using personal policy\nargument-hint: [target]\n---\n"
+            )
+
+            with patch.object(relay.Path, "home", return_value=home):
+                catalog = relay.slash_command_catalog({"agent": "claude-code", "cwd": str(cwd)})
+
+        commands = {entry["command"]: entry for entry in catalog["commands"]}
+        self.assertEqual(commands["/deploy"], {
+            "command": "/deploy",
+            "description": "Deploy using personal policy",
+            "argument_hint": "[target]",
+            "source": "personal",
+        })
+        self.assertNotIn("/hidden", commands)
+        self.assertNotIn("/disabled", commands)
+        self.assertNotIn("/verify", commands)
+        self.assertEqual(commands["/help"]["source"], "builtin")
+
+    def test_claude_slash_command_discovery_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir)
+            cwd = home / "project"
+            command_dir = cwd / ".claude" / "commands"
+            command_dir.mkdir(parents=True)
+            (cwd / ".git").mkdir()
+            (command_dir / "first.md").write_text("---\ndescription: First\n---\n")
+            (command_dir / "second.md").write_text("---\ndescription: Second\n---\n")
+            with (
+                patch.object(relay.Path, "home", return_value=home),
+                patch.object(relay, "SLASH_COMMAND_MAX_CUSTOM_FILES", 1),
+            ):
+                catalog = relay.slash_command_catalog({"agent": "claude", "cwd": str(cwd)})
+
+        self.assertTrue(catalog["truncated"])
+        commands = {entry["command"] for entry in catalog["commands"]}
+        self.assertIn("/first", commands)
+        self.assertNotIn("/second", commands)
+
     def test_workspace_selection_prefers_the_space_owned_by_the_working_directory(self):
         cwd = Path("/home/test/Development/project")
         panes = {
@@ -1957,6 +2035,56 @@ Production-like verification.
 
 
 class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTestCase):
+    async def test_slash_command_request_resolves_agent_from_pane(self):
+        ws = FakeWebSocket()
+        agent = {"pane_id": "w1:p1", "agent": "claude", "cwd": "/home/test/project"}
+        catalog = {
+            "commands": [{
+                "command": "/help",
+                "description": "Show help",
+                "source": "builtin",
+            }],
+            "truncated": False,
+        }
+        with (
+            patch.object(relay, "agent_for_pane", return_value=(agent, "")) as find_agent,
+            patch.object(relay, "slash_command_catalog", return_value=catalog) as build_catalog,
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+        ):
+            await relay.handle_list_slash_commands_command(ws, {
+                "type": "list_slash_commands",
+                "request_id": "request-slash",
+                "pane_id": "w1:p1",
+            })
+
+        find_agent.assert_called_once_with("w1:p1")
+        build_catalog.assert_called_once_with(agent)
+        self.assertEqual(ws.messages, [{
+            "type": "command_result",
+            "request_id": "request-slash",
+            "action": "list_slash_commands",
+            "ok": True,
+            "phase": "completed",
+            "error": "",
+            "pane_id": "w1:p1",
+            "data": catalog,
+        }])
+
+    async def test_slash_command_request_rejects_missing_agent(self):
+        ws = FakeWebSocket()
+        await relay.handle_list_slash_commands_command(ws, {
+            "type": "list_slash_commands",
+            "request_id": "request-slash",
+        })
+
+        self.assertFalse(ws.messages[0]["ok"])
+        self.assertEqual(ws.messages[0]["action"], "list_slash_commands")
+        self.assertEqual(ws.messages[0]["error"], "Agent is required")
+
     async def test_codex_choice_moves_focus_and_submits_current_answer(self):
         interaction = relay.parse_codex_question(CODEX_QUESTION_VIEW)
         at_choice = copy.deepcopy(interaction)

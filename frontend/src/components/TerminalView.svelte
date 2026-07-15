@@ -13,7 +13,7 @@
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
   import { lastCompletedResponse, renderTerminalContent } from '$lib/terminal';
-  import type { Agent, TerminalFrame } from '$lib/types';
+  import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
   let {
     agent,
@@ -29,6 +29,7 @@
 
   let terminalElement = $state<HTMLDivElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
+  let composerElement = $state<HTMLTextAreaElement>(null!);
   let composer = $state('');
   let composerFocused = $state(false);
   let deferredFrame: TerminalFrame | undefined;
@@ -40,12 +41,30 @@
   let uploadStatus = $state('');
   let uploadError = $state(false);
   let requestedPaneId = '';
+  let slashCatalog = $state<SlashCommandCatalog>({ commands: [], truncated: false });
+  let slashCatalogLoading = $state(true);
+  let slashCatalogUnavailable = $state(false);
+  let activeSlashIndex = $state(0);
+  let dismissedSlashQuery = $state<string | null>(null);
 
   const blocked = $derived(agentStatusGroup(agent) === 'blocked');
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(blocked && interaction));
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentStatusGroup(item) === 'blocked' && item.pane_id !== agent.pane_id))[0]);
+  const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
+  const filteredSlashCommands = $derived.by(() => {
+    if (slashQuery === null) return [];
+    if (!slashQuery) return slashCatalog.commands;
+    return slashCatalog.commands.filter((entry) => entry.command.slice(1).toLocaleLowerCase().startsWith(slashQuery));
+  });
+  const effectiveSlashIndex = $derived(filteredSlashCommands.length
+    ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
+    : -1);
+  const slashMenuOpen = $derived(!blocked
+    && !questionMode
+    && slashQuery !== null
+    && dismissedSlashQuery !== composer);
 
   $effect(() => {
     const next = frame;
@@ -69,9 +88,28 @@
     relayStore.readPane(agent);
   });
 
+  $effect(() => {
+    if (!slashMenuOpen || effectiveSlashIndex < 0) return;
+    const optionId = `slash-command-option-${effectiveSlashIndex}`;
+    void tick().then(() => document.getElementById(optionId)?.scrollIntoView?.({ block: 'nearest' }));
+  });
+
   onMount(() => {
+    let mounted = true;
+    void relayStore.loadSlashCommands(agent).then((catalog) => {
+      if (!mounted) return;
+      slashCatalog = catalog;
+      slashCatalogUnavailable = false;
+    }).catch(() => {
+      if (mounted) slashCatalogUnavailable = true;
+    }).finally(() => {
+      if (mounted) slashCatalogLoading = false;
+    });
     const refresh = setInterval(() => relayStore.readPane(agent), 3_000);
-    return () => clearInterval(refresh);
+    return () => {
+      mounted = false;
+      clearInterval(refresh);
+    };
   });
 
   async function applyFrame(next: TerminalFrame, statusLine = $showAgentStatusLine) {
@@ -129,10 +167,47 @@
     setTimeout(() => relayStore.readPane(agent), 500);
   }
 
+  function composerInput() {
+    if (dismissedSlashQuery !== composer) dismissedSlashQuery = null;
+    activeSlashIndex = 0;
+  }
+
+  async function selectSlashCommand(command: SlashCommand) {
+    composer = `${command.command}${command.argument_hint ? ' ' : ''}`;
+    dismissedSlashQuery = composer;
+    activeSlashIndex = 0;
+    await tick();
+    composerElement.focus();
+    composerElement.setSelectionRange(composer.length, composer.length);
+  }
+
   function keydown(event: KeyboardEvent) {
-    if (event.key !== 'Enter' || (!event.ctrlKey && !event.metaKey) || event.isComposing) return;
-    event.preventDefault();
-    void sendPrompt();
+    if (event.isComposing) return;
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void sendPrompt();
+      return;
+    }
+    if (!slashMenuOpen) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      dismissedSlashQuery = composer;
+      return;
+    }
+    if (event.key === 'ArrowDown' && filteredSlashCommands.length) {
+      event.preventDefault();
+      activeSlashIndex = effectiveSlashIndex >= filteredSlashCommands.length - 1 ? 0 : effectiveSlashIndex + 1;
+      return;
+    }
+    if (event.key === 'ArrowUp' && filteredSlashCommands.length) {
+      event.preventDefault();
+      activeSlashIndex = effectiveSlashIndex <= 0 ? filteredSlashCommands.length - 1 : effectiveSlashIndex - 1;
+      return;
+    }
+    if ((event.key === 'Enter' || event.key === 'Tab') && effectiveSlashIndex >= 0) {
+      event.preventDefault();
+      void selectSlashCommand(filteredSlashCommands[effectiveSlashIndex]);
+    }
   }
 
   async function sendKeys(keys: string[], activityLabel = '') {
@@ -235,6 +310,56 @@
   {/if}
 
   <div class="terminal-bottom" onfocusin={focusComposer} onfocusout={blurComposer}>
+    {#if slashMenuOpen}
+      <section class="slash-command-popover" aria-label="Command suggestions">
+        <header class="slash-command-header" aria-hidden="true">
+          <strong>Commands</strong>
+          {#if !slashCatalogLoading && !slashCatalogUnavailable}
+            <span>{filteredSlashCommands.length} matching</span>
+          {:else}
+            <span>Type to filter</span>
+          {/if}
+        </header>
+        {#if slashCatalogLoading}
+          <p class="slash-command-status" role="status">Loading commands…</p>
+        {:else if slashCatalogUnavailable}
+          <p class="slash-command-status">Suggestions unavailable — you can still send this command.</p>
+        {:else if !filteredSlashCommands.length}
+          <p class="slash-command-status">No matching command — you can still send it.</p>
+        {/if}
+        <div
+          id="slash-command-options"
+          class="slash-command-menu"
+          role="listbox"
+          aria-label="Slash commands"
+          aria-busy={slashCatalogLoading}
+        >
+          {#each filteredSlashCommands as entry, index (entry.command)}
+            <button
+              id={`slash-command-option-${index}`}
+              type="button"
+              role="option"
+              tabindex="-1"
+              class:active={index === effectiveSlashIndex}
+              aria-selected={index === effectiveSlashIndex}
+              onpointerdown={(event) => event.preventDefault()}
+              onpointerenter={() => { activeSlashIndex = index; }}
+              onclick={() => selectSlashCommand(entry)}
+            >
+              <span class="slash-command-name">
+                <strong>{entry.command}</strong>
+                {#if entry.argument_hint}<small>{entry.argument_hint}</small>{/if}
+              </span>
+              <span class="slash-command-description">{entry.description}</span>
+              {#if entry.source !== 'builtin'}<em class="slash-command-source">{entry.source}</em>{/if}
+            </button>
+          {/each}
+        </div>
+        {#if !slashCatalogLoading && slashCatalog.truncated}
+          <p class="slash-command-limit">More commands are available; keep typing to narrow the list.</p>
+        {/if}
+      </section>
+    {/if}
     <div class="term-input">
       <Button variant="ghost" size="icon" disabled={blocked} aria-label="Attach image" onclick={() => fileInput.click()}>
         <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -245,19 +370,28 @@
       </Button>
       <div class:awaiting-approval={blocked && !composerFocused} class:has-text={Boolean(composer)} class="composer-field">
         <textarea
+          bind:this={composerElement}
           bind:value={composer}
           rows="1"
           disabled={blocked && !composerFocused}
           placeholder={blocked ? 'Approval pending — use buttons' : 'Type…'}
-          autocomplete="on"
+          role="combobox"
+          aria-label="Prompt"
+          aria-autocomplete="list"
+          aria-haspopup="listbox"
+          aria-expanded={slashMenuOpen}
+          aria-controls={slashMenuOpen ? 'slash-command-options' : undefined}
+          aria-activedescendant={slashMenuOpen && effectiveSlashIndex >= 0 ? `slash-command-option-${effectiveSlashIndex}` : undefined}
+          autocomplete="off"
           autocorrect="on"
           autocapitalize="sentences"
           spellcheck="true"
           enterkeyhint="enter"
+          oninput={composerInput}
           onkeydown={keydown}
           onpaste={paste}
         ></textarea>
-        {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={() => { composer = ''; }}>×</button>{/if}
+        {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={() => { composer = ''; dismissedSlashQuery = null; activeSlashIndex = 0; }}>×</button>{/if}
       </div>
       <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || blocked} aria-label="Send prompt" onclick={sendPrompt}>➤</Button>
       <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
@@ -293,11 +427,12 @@
         {#if arrowsOpen}
           <div class="arrow-popup">
             <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
-            <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><button aria-label="Enter" onclick={() => sendKeys(['Enter'])}>⏎</button><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
+            <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
             <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
           </div>
         {/if}
       </div>
+      <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
     </div>
   </div>
   {/if}

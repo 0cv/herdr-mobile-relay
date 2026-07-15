@@ -48,6 +48,25 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/') {
           }));
           return;
         }
+        if (message.type === 'list_slash_commands') {
+          queueMicrotask(() => this.server({
+            type: 'command_result', request_id: message.request_id, ok: true, phase: 'completed',
+            data: {
+              commands: [
+                { command: '/help', description: 'Show the full command reference and explain every available action', source: 'builtin' },
+                { command: '/model', description: 'Choose the active model', source: 'builtin' },
+                { command: '/plan', description: 'Enter plan mode', argument_hint: '[prompt]', source: 'builtin' },
+                ...Array.from({ length: 18 }, (_, index) => ({
+                  command: `/sample-${index + 1}`,
+                  description: `Example command ${index + 1}`,
+                  source: 'builtin',
+                })),
+              ],
+              truncated: false,
+            },
+          }));
+          return;
+        }
         if (message.type === 'push_subscribe' || message.type === 'push_unsubscribe') return;
         const phase = message.type === 'answer_question' && nextInteraction
           ? 'advanced'
@@ -94,7 +113,7 @@ async function commands(page: Page) {
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
   await server(page, index, {
     type: 'push_config', protocol: 2, version: 'abc1234', host: index ? 'mac' : 'fedora',
-    capabilities: ['directory_browser', 'structured_questions'],
+    capabilities: ['directory_browser', 'structured_questions', 'slash_commands'],
     agent_profiles: [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
     ...overrides,
   });
@@ -192,13 +211,80 @@ test('resets drafts and terminal output when moving to another agent', async ({ 
   await page.getByRole('button', { name: 'Open Working A on Fedora' }).click();
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'private output from agent A' });
   await expect(page.getByRole('log')).toContainText('private output from agent A');
-  await page.getByRole('textbox').fill('draft intended only for A');
+  await page.getByRole('combobox', { name: 'Prompt' }).fill('draft intended only for A');
 
   await page.getByRole('button', { name: 'Next blocked' }).click();
 
   await expect(page.getByRole('main', { name: 'Terminal for Blocked B' })).toBeVisible();
-  await expect(page.getByRole('textbox')).toHaveValue('');
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveValue('');
   await expect(page.getByRole('log')).not.toContainText('private output from agent A');
+});
+
+test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      { pane_id: 'w1:p1', status: 'working', project: 'Codex app', agent: 'codex', cwd: '/home/test/codex' },
+      { pane_id: 'w1:p2', status: 'idle', project: 'Claude app', agent: 'claude', cwd: '/home/test/claude' },
+    ],
+  });
+
+  await page.getByRole('button', { name: 'Open Codex app on Fedora' }).click();
+  const codexComposer = page.getByRole('combobox', { name: 'Prompt' });
+  const restingComposerBox = await codexComposer.boundingBox();
+  await codexComposer.fill('/');
+  const popover = page.getByRole('region', { name: 'Command suggestions' });
+  await expect(popover).toBeVisible();
+  const [popoverBox, composerBox, viewport] = await Promise.all([
+    popover.boundingBox(),
+    codexComposer.boundingBox(),
+    page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
+  ]);
+  expect(restingComposerBox).not.toBeNull();
+  expect(popoverBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(composerBox!.y).toBeCloseTo(restingComposerBox!.y, 0);
+  expect(composerBox!.height).toBeCloseTo(restingComposerBox!.height, 0);
+  expect(popoverBox!.y + popoverBox!.height).toBeLessThan(composerBox!.y);
+  expect(popoverBox!.height).toBeLessThanOrEqual(viewport.height * 0.5);
+  await expect(popover.getByRole('option')).toHaveCount(21);
+  const description = popover.getByText('Show the full command reference and explain every available action');
+  await expect(description).toBeVisible();
+  expect(await description.evaluate((element) => ({
+    overflow: getComputedStyle(element).overflow,
+    textOverflow: getComputedStyle(element).textOverflow,
+    whiteSpace: getComputedStyle(element).whiteSpace,
+  }))).toEqual({ overflow: 'visible', textOverflow: 'clip', whiteSpace: 'normal' });
+  expect(await page.getByRole('listbox', { name: 'Slash commands' }).evaluate((element) => (
+    element.scrollHeight > element.clientHeight && getComputedStyle(element).overflowY === 'auto'
+  ))).toBe(true);
+
+  await codexComposer.fill('/pl');
+  const menu = page.getByRole('listbox', { name: 'Slash commands' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('option', { name: /\/plan/ })).toBeVisible();
+  await expect(menu.getByRole('option', { name: /\/model/ })).toBeHidden();
+  await menu.getByRole('option', { name: /\/plan/ }).click();
+  await expect(codexComposer).toHaveValue('/plan ');
+  expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(0);
+  await codexComposer.pressSequentially('Review the release');
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  expect((await commands(page)).find((command) => command.type === 'submit_prompt')).toMatchObject({
+    pane_id: 'w1:p1', text: '/plan Review the release',
+  });
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open Claude app on Fedora' }).click();
+  const claudeComposer = page.getByRole('combobox', { name: 'Prompt' });
+  await claudeComposer.fill('/he');
+  await expect(page.getByRole('option', { name: /\/help/ })).toBeVisible();
+  await claudeComposer.press('Enter');
+  await expect(claudeComposer).toHaveValue('/help');
+  expect((await commands(page)).filter((command) => command.type === 'list_slash_commands')).toHaveLength(2);
+  expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(1);
 });
 
 test('scales the whole interface from accessible settings', async ({ page }) => {
@@ -259,7 +345,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   });
   await expect(page.getByRole('group', { name: 'Choose device coverage' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Proceed with plan' })).toBeVisible();
-  const composer = page.getByRole('textbox');
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
   await expect(composer).toBeDisabled();
 
   const working = { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Approvals', agent: 'claude' }] };
@@ -457,10 +543,19 @@ test('refreshes agents on return home and preserves terminal behavior', async ({
   await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
   const attachImage = page.getByRole('button', { name: 'Attach image' });
   const arrowKeys = page.getByRole('button', { name: 'Arrow keys' });
+  const enterKey = page.getByRole('button', { name: 'Enter' });
   await expect(attachImage.locator('svg')).toBeVisible();
   await expect(arrowKeys.locator('svg')).toBeVisible();
+  await expect(enterKey).toBeVisible();
   await expect(attachImage).not.toContainText('▧');
   await expect(arrowKeys).not.toContainText('⌨');
+  await arrowKeys.click();
+  await expect(page.getByRole('button', { name: 'Up' })).toBeVisible();
+  await expect(page.locator('.arrow-popup').getByRole('button', { name: 'Enter' })).toHaveCount(0);
+  await enterKey.click();
+  expect((await commands(page)).find((command) => command.type === 'send_keys')).toMatchObject({
+    pane_id: 'w1:p1', keys: ['Enter'],
+  });
   const refreshesBeforeBack = (await commands(page)).filter((command) => command.type === 'refresh_agents').length;
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
@@ -472,7 +567,7 @@ test('refreshes agents on return home and preserves terminal behavior', async ({
   await expect(page.getByRole('log')).toContainText('Safe <img src=x onerror=alert(1)>');
   expect(await page.getByRole('log').locator('img').count()).toBe(0);
 
-  const composer = page.getByRole('textbox');
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
   await composer.focus();
   await composer.fill('draft prompt');
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'newest live frame' });

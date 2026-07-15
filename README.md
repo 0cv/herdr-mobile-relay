@@ -87,7 +87,7 @@ Teardown is explicit and confirmed. It removes only resources recorded as owned 
 
 - Merge agents from several computers into one mobile view.
 - Approve ordinary permission prompts and answer Claude Code or Codex structured questions.
-- View terminal output and send prompts, terminal keys, screenshots, or photos.
+- View terminal output and send prompts, slash commands with suggestions, terminal keys, screenshots, or photos.
 - Start, rename, clear, and stop detected Codex, Claude Code, and OpenCode agents.
 - Search relay activity and receive blocked-agent or optional completion notifications.
 - Require device verification before reconnecting relays.
