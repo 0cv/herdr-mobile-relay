@@ -148,7 +148,7 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
   if (!deviceVerificationEnabled()) {
     automaticUnlockPending = false;
     securityState.update((state) => ({ ...state, locked: false, busy: false, status: '' }));
-    relayStore.connectAll();
+    relayStore.connectAll(reason === 'resume');
     return true;
   }
   if (!get(securityState).locked) {
@@ -184,7 +184,7 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
     });
     if (!assertion) throw new Error('No assertion returned');
     securityState.update((state) => ({ ...state, locked: false, busy: false, status: '' }));
-    relayStore.connectAll();
+    relayStore.connectAll(reason === 'resume');
     return true;
   } catch {
     securityState.update((state) => ({

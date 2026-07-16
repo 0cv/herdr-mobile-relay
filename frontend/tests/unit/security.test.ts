@@ -75,6 +75,15 @@ describe('device verification lifecycle', () => {
     stopSecurity();
   });
 
+  it('preserves the current agent snapshot after successful resume verification', async () => {
+    getCredential.mockResolvedValue({});
+    securityState.update((state) => ({ ...state, locked: true, reason: 'resume' }));
+
+    await expect(unlockWithDevice('resume')).resolves.toBe(true);
+
+    expect(relayStore.connectAll).toHaveBeenCalledWith(true);
+  });
+
   it('revalidates relay connections on foreground and online events without device verification', () => {
     localStorage.removeItem(DEVICE_LOCK_KEY);
     localStorage.removeItem(DEVICE_CREDENTIAL_KEY);

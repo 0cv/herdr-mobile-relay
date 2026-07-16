@@ -49,6 +49,7 @@
   const activeAgent = $derived($currentView.view === 'terminal'
     ? $agents.find((agent) => agent.pane_id === $currentView.paneId) || null
     : null);
+  const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
   const connected = $derived([...$connections.values()].filter((connection) => connection.status === 'connected').length);
   const connecting = $derived([...$connections.values()].some((connection) => connection.status === 'connecting'));
   const headerTitle = $derived.by(() => {
@@ -65,6 +66,11 @@
       tone: connected ? 'success' : connecting ? 'warning' : 'danger',
       hollow: false,
       label: `${connected}/${$relays.length} relays connected`,
+    };
+    if (activeConnection?.status !== 'connected') return {
+      tone: 'warning' as const,
+      hollow: false,
+      label: 'Relay reconnecting',
     };
     const group = agentStatusGroup(activeAgent);
     return {

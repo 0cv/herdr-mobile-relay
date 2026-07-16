@@ -267,16 +267,17 @@ textarea { min-height: 6.5rem; resize: vertical; }
   line-height: 1.45;
   min-height: 0;
   overflow: auto;
+  overflow-wrap: anywhere;
   overscroll-behavior: contain;
   padding: 10px 16px;
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: normal;
 }
 :root[data-interface-size='regular'] .term-content { font-size: .82rem; }
 :root[data-interface-size='large'] .term-content { font-size: .94rem; }
 .ansi-line { display: block; min-height: 1.45em; overflow: hidden; }
 .ansi-line-background { border-radius: .12rem; }
-.term-separator { border-top: 1px solid color-mix(in srgb, var(--terminal-text) 22%, transparent); display: block; margin: .65rem 0; }
+.term-separator { border-top: 1px solid color-mix(in srgb, var(--terminal-text) 22%, transparent); display: block; margin: .65rem 0; width: 100%; }
 .jump-bottom { background: var(--primary); border: 0; border-radius: 50%; bottom: 9.5rem; color: var(--primary-foreground); height: 2.5rem; position: absolute; right: 1rem; width: 2.5rem; z-index: 4; }
 .terminal-bottom { background: var(--background); border-top: 1px solid var(--border); flex: 0 0 auto; padding-bottom: env(safe-area-inset-bottom); position: relative; }
 .term-input { align-items: flex-end; display: flex; gap: .45rem; padding: .55rem; }

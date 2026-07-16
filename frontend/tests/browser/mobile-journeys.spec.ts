@@ -220,6 +220,43 @@ test('resets drafts and terminal output when moving to another agent', async ({ 
   await expect(page.getByRole('log')).not.toContainText('private output from agent A');
 });
 
+test('keeps the active terminal open while a sleeping phone reconnects', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Resume app on Fedora' }).click();
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'cached terminal output' });
+  await expect(page.getByRole('log')).toContainText('cached terminal output');
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    (window as any).__relayClose(0);
+  });
+  await expect(page.getByRole('img', { name: 'Relay reconnecting' })).toBeVisible();
+  await page.waitForTimeout(5_100);
+  await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
+  await expect(page.getByRole('main', { name: 'Agent unavailable' })).toBeHidden();
+  await expect(page.getByRole('log')).toContainText('cached terminal output');
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 1);
+  await server(page, 1, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
+  });
+  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
+  await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
+});
+
 test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -535,6 +572,7 @@ test('keeps normal single-select answers across repeated question navigation', a
 });
 
 test('refreshes agents on return home and preserves terminal behavior', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_show_codex_status_line', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
@@ -564,8 +602,61 @@ test('refreshes agents on return home and preserves terminal behavior', async ({
   await expect(page.getByRole('heading', { name: 'Working' })).toBeVisible();
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '\u001b[38;5;6mSafe\u001b[0m <img src=x onerror=alert(1)>' });
-  await expect(page.getByRole('log')).toContainText('Safe <img src=x onerror=alert(1)>');
-  expect(await page.getByRole('log').locator('img').count()).toBe(0);
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('Safe <img src=x onerror=alert(1)>');
+  expect(await terminal.locator('img').count()).toBe(0);
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: ['Before', '', '', '', '', '----------------', '', '————————', '', '________________', '', '', '', 'After'].join('\n'),
+  });
+  expect(await terminal.evaluate((element) => {
+    let blankRun = 0;
+    let maximumBlankRun = 0;
+    for (const row of element.children) {
+      if (row.classList.contains('ansi-line') && !row.textContent?.trim()) {
+        blankRun += 1;
+        maximumBlankRun = Math.max(maximumBlankRun, blankRun);
+      } else blankRun = 0;
+    }
+    return {
+      maximumBlankRun,
+      separators: element.querySelectorAll('.term-separator').length,
+    };
+  })).toEqual({ maximumBlankRun: 2, separators: 1 });
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: `─ Worked for 1m 46s ${'─'.repeat(120)}`,
+  });
+  await expect(terminal.locator('.ansi-line')).toHaveText('─ Worked for 1m 46s');
+
+  const claudeRule = '─'.repeat(120);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'claude' }],
+  });
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: [
+      `\u001b[36m│\u001b[0m  Claude result${' '.repeat(80)}\u001b[36m│\u001b[0m`,
+      '\u001b[36m│\u001b[0m',
+      `\u001b[36m╰${claudeRule}╯\u001b[0m`,
+      `\u001b[36m${claudeRule}\u001b[0m`,
+      `\u001b[36m╭${claudeRule}╮\u001b[0m`,
+      `\u001b[38;5;147m${'▔'.repeat(150)}\u001b[0m`,
+      `\u001b[2m${claudeRule} Opus 4.8 | ctx: 20%\u001b[0m`,
+    ].join('\n'),
+  });
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Claude result' })).toHaveText('Claude result');
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Opus 4.8' })).toHaveText('Opus 4.8 | ctx: 20%');
+  await expect(terminal.locator('.term-separator')).toHaveCount(1);
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: `${'.'.repeat(120)} [29%]`,
+  });
+  await expect(terminal.locator('.ansi-line')).toHaveText(`${'.'.repeat(24)} [29%]`);
 
   const composer = page.getByRole('combobox', { name: 'Prompt' });
   await composer.focus();
@@ -577,7 +668,6 @@ test('refreshes agents on return home and preserves terminal behavior', async ({
 
   const longFrame = Array.from({ length: 120 }, (_, index) => `terminal line ${index}`).join('\n');
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: longFrame });
-  const terminal = page.getByRole('log');
   await terminal.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));

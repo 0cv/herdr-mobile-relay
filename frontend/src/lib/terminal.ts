@@ -6,6 +6,8 @@ const ANSI_COLORS: Record<number, string> = {
 };
 
 export const TERMINAL_SEPARATOR_TOKEN = '\uE000HERDR_SEPARATOR\uE000';
+export const TERMINAL_REPEATED_RUN_LIMIT = 24;
+const TERMINAL_REPEATED_RUN_TRIGGER = 32;
 const CODEX_DARK_ROW_BACKGROUND = 'rgb(61,64,64)';
 const ANSI_HEADING_ACCENT = '#3daee9';
 
@@ -38,7 +40,12 @@ export function reflowTerminalLines(content: unknown): string {
     const previousTrimmed = previous.trim();
     const previousIndent = (previous.match(/^ */) || [''])[0].length;
     const continuation = Boolean(
-      trimmed && previousTrimmed && indent === 2 && previousIndent <= 2 && !structural.test(trimmed),
+      trimmed
+      && previousTrimmed
+      && indent === 2
+      && previousIndent <= 2
+      && !structural.test(trimmed)
+      && !isSeparatorOnlyLine(line),
     );
     if (!continuation) {
       output.push(line);
@@ -59,32 +66,110 @@ export function isClaudeStatusLine(line: string): boolean {
   const clean = stripAnsi(line).replace(/\s+/g, ' ').trim();
   const model = /\b(claude|sonnet|opus|haiku|fable|mythos)\b/i.test(clean);
   const statusBar = /[·|•]/.test(clean) || /(^|\s)[.~]?\//.test(clean);
-  return /\bctx\s+\d+%\b/i.test(clean) && (model || statusBar);
+  return /\bctx\s*:?\s*\d+%/i.test(clean) && (model || statusBar);
 }
 
-export function terminalDisplayContent(content: unknown, showStatusLine: boolean): string {
-  const reflowed = reflowTerminalLines(content);
+export function terminalDisplayContent(content: unknown, showStatusLine: boolean, trimFrameEdges = false): string {
+  const normalized = String(content ?? '').split('\n').map((line) => trimTerminalChrome(line, trimFrameEdges)).join('\n');
+  const reflowed = reflowTerminalLines(normalized);
   if (showStatusLine) return reflowed;
   return reflowed.split('\n').filter((line) => !isCodexStatusLine(line) && !isClaudeStatusLine(line)).join('\n');
 }
 
 export function isSeparatorOnlyLine(line: string): boolean {
-  const clean = stripAnsi(line).replace(/\s+/g, '');
-  return clean.length >= 8 && /^[=*_─━-]+$/.test(clean);
+  const characters = [...stripAnsi(line).replace(/\s+/g, '')];
+  const isRepeatedSymbol = (run: string[]) => Boolean(
+    run.length >= 8
+    && !/[\p{L}\p{N}]/u.test(run[0])
+    && run.every((character) => character === run[0]),
+  );
+  if (isRepeatedSymbol(characters)) return true;
+  return characters.length >= 10
+    && !/[\p{L}\p{N}]/u.test(characters[0])
+    && !/[\p{L}\p{N}]/u.test(characters.at(-1) || '')
+    && isRepeatedSymbol(characters.slice(1, -1));
 }
 
-export function compactSeparatorLines(content: unknown): string {
-  const output: string[] = [];
-  let inRun = false;
-  for (const line of String(content ?? '').split('\n')) {
-    if (isSeparatorOnlyLine(line)) {
-      if (!inRun) output.push(TERMINAL_SEPARATOR_TOKEN);
-      inRun = true;
+function rawIndexAtVisibleOffset(line: string, target: number): number {
+  let rawIndex = 0;
+  let visibleIndex = 0;
+  while (rawIndex < line.length && visibleIndex < target) {
+    const ansi = line.slice(rawIndex).match(/^\x1b\[[0-9;?]*[ -/]*[@-~]/);
+    if (ansi) {
+      rawIndex += ansi[0].length;
       continue;
     }
-    output.push(line);
-    inRun = false;
+    const width = (line.codePointAt(rawIndex) || 0) > 0xFFFF ? 2 : 1;
+    rawIndex += width;
+    visibleIndex += width;
   }
+  return rawIndex;
+}
+
+export function trimTrailingDecoration(line: string): string {
+  const clean = stripAnsi(line);
+  const decoration = clean.match(/[ \t]+([^\p{L}\p{N}\s])\1{7,}(?:[^\p{L}\p{N}\s])?[ \t]*\r?$/u);
+  if (decoration?.index === undefined) return line;
+  return trimAnsiLineEnd(line.slice(0, rawIndexAtVisibleOffset(line, decoration.index)));
+}
+
+function trimLeadingDecoration(line: string): string {
+  const clean = stripAnsi(line);
+  const decoration = clean.match(/^[ \t]*(?:[^\p{L}\p{N}\s])?([^\p{L}\p{N}\s])\1{7,}(?:[^\p{L}\p{N}\s])?[ \t]+/u);
+  if (!decoration) return line;
+  const remainder = line.slice(rawIndexAtVisibleOffset(line, decoration[0].length));
+  if (!isClaudeStatusLine(remainder) && !isAgentTurnDurationLine(remainder)) return line;
+  return remainder;
+}
+
+export function compactRepeatedCharacterRuns(line: string): string {
+  const repeated = new RegExp(`([^\\p{L}\\p{N}\\s])\\1{${TERMINAL_REPEATED_RUN_TRIGGER},}`, 'gu');
+  return line.replace(repeated, (_run, character: string) => character.repeat(TERMINAL_REPEATED_RUN_LIMIT));
+}
+
+export function trimTerminalChrome(line: string, trimFrameEdges = true): string {
+  let trimmed = trimLeadingDecoration(trimTrailingDecoration(line));
+  if (!trimFrameEdges) return trimAnsiLineEnd(trimmed);
+  const vertical = '[│┃┆┇┊┋╎╏║]';
+  const leading = stripAnsi(trimmed).match(new RegExp(`^[ \\t]*${vertical}[ \\t]{0,2}`, 'u'));
+  if (leading) trimmed = trimmed.slice(rawIndexAtVisibleOffset(trimmed, leading[0].length));
+  const clean = stripAnsi(trimmed);
+  const trailing = clean.match(new RegExp(`[ \\t]*${vertical}[ \\t]*\\r?$`, 'u'));
+  if (trailing?.index !== undefined) {
+    trimmed = trimmed.slice(0, rawIndexAtVisibleOffset(trimmed, trailing.index));
+  }
+  return trimAnsiLineEnd(trimmed);
+}
+
+export function compactSeparatorLines(content: unknown, trimFrameEdges = false): string {
+  const output: string[] = [];
+  let pendingBlankLines = 0;
+  let previousContentWasSeparator = false;
+  const flushBlankLines = () => {
+    for (let index = 0; index < Math.min(pendingBlankLines, 2); index += 1) output.push('');
+    pendingBlankLines = 0;
+  };
+  for (const rawLine of String(content ?? '').split('\n')) {
+    const line = trimTerminalChrome(rawLine, trimFrameEdges);
+    if (!stripAnsi(line).trim()) {
+      pendingBlankLines += 1;
+      continue;
+    }
+    if (isSeparatorOnlyLine(line)) {
+      if (previousContentWasSeparator) {
+        pendingBlankLines = 0;
+        continue;
+      }
+      flushBlankLines();
+      output.push(TERMINAL_SEPARATOR_TOKEN);
+      previousContentWasSeparator = true;
+      continue;
+    }
+    flushBlankLines();
+    output.push(compactRepeatedCharacterRuns(trimTrailingDecoration(line)));
+    previousContentWasSeparator = false;
+  }
+  flushBlankLines();
   return output.join('\n');
 }
 
@@ -373,7 +458,11 @@ export function renderTerminalContent(
   agentType: string,
   showStatusLine: boolean,
 ): { display: string; html: string } {
-  const display = compactSeparatorLines(terminalDisplayContent(content, showStatusLine));
+  const claudeChrome = /\bclaude\b/i.test(agentType);
+  const display = compactSeparatorLines(
+    terminalDisplayContent(content, showStatusLine, claudeChrome),
+    claudeChrome,
+  );
   if (format !== 'ansi') {
     return { display, html: escapeHtml(display.replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────')) };
   }

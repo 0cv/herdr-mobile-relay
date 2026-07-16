@@ -149,20 +149,21 @@ class RelayStore {
     const relays = get(this.relayConfigs).filter((relay) => relay.id !== id);
     this.relayConfigs.set(relays);
     saveRelayConfigs(relays);
-    this.agentsValue = this.agentsValue.filter((agent) => agent.relay_id !== id);
-    this.agents.set(this.agentsValue);
+    this.removeAgentsForRelay(id);
     this.activitiesValue = this.activitiesValue.filter((activity) => activity.relay_id !== id);
     this.activities.set(this.activitiesValue);
   }
 
-  connectAll(): void {
+  connectAll(preserveAgents = false): void {
     this.reconnectEnabled = true;
     this.reconnectAttempts.clear();
     for (const id of [...this.connectionsValue.keys()]) this.disconnectRelay(id);
     this.connectionsValue.clear();
     this.connections.set(new Map());
-    this.agentsValue = [];
-    this.agents.set([]);
+    if (!preserveAgents) {
+      this.agentsValue = [];
+      this.agents.set([]);
+    }
     this.blockedSnapshotMisses.clear();
     for (const relay of get(this.relayConfigs)) this.connectRelay(relay);
   }
@@ -211,7 +212,6 @@ class RelayStore {
       this.clearHealthTimer(connection);
       connection.status = 'disconnected';
       this.rejectPendingOperations(relay.id, 'Relay disconnected');
-      this.removeAgentsForRelay(relay.id);
       this.emitConnections();
       this.scheduleReconnect(relay, connection);
     };

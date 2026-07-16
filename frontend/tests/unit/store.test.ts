@@ -107,6 +107,26 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true });
   });
 
+  it('keeps the last agent snapshot until a reconnected relay sends a fresh one', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, version: 'old', host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume safely' }] });
+
+    socket.serverClose();
+    expect(get(relayStore.agents).map((agent) => agent.project)).toEqual(['Resume safely']);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    const replacement = MockWebSocket.instances.at(-1)!;
+    replacement.open();
+    replacement.message({ type: 'push_config', protocol: 2, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
+    expect(get(relayStore.agents).map((agent) => agent.project)).toEqual(['Resume safely']);
+
+    replacement.message({ type: 'agents', agents: [] });
+    expect(get(relayStore.agents)).toEqual([]);
+  });
+
   it('replaces a half-open socket when its foreground health probe receives no traffic', async () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;

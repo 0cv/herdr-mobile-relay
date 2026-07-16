@@ -23,9 +23,16 @@ import {
 import {
   ansi256Color,
   ansiToHtml,
+  compactRepeatedCharacterRuns,
+  isSeparatorOnlyLine,
   lastCompletedResponse,
   renderTerminalContent,
+  stripAnsi,
+  TERMINAL_REPEATED_RUN_LIMIT,
+  TERMINAL_SEPARATOR_TOKEN,
   terminalHtml,
+  trimTerminalChrome,
+  trimTrailingDecoration,
 } from '$lib/terminal';
 import type { Agent, QuestionInteraction, RelayConnectionView } from '$lib/types';
 
@@ -75,6 +82,74 @@ describe('terminal rendering', () => {
     expect(html).not.toContain('<img');
     expect(html).toContain('font-weight:700');
     expect(renderTerminalContent('<script>alert(1)</script>', 'plain', 'codex', true).html).toBe('&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
+  it('limits blank gaps and merges separator fragments across whitespace', () => {
+    expect(isSeparatorOnlyLine('----------------')).toBe(true);
+    expect(isSeparatorOnlyLine('————————')).toBe(true);
+    expect(isSeparatorOnlyLine('________________')).toBe(true);
+    expect(isSeparatorOnlyLine('▔'.repeat(120))).toBe(true);
+    expect(isSeparatorOnlyLine('▁'.repeat(120))).toBe(true);
+    expect(isSeparatorOnlyLine('§'.repeat(120))).toBe(true);
+    expect(isSeparatorOnlyLine(`╰${'§'.repeat(120)}╯`)).toBe(true);
+    expect(isSeparatorOnlyLine('---')).toBe(false);
+    expect(isSeparatorOnlyLine('- meaningful item')).toBe(false);
+
+    const rendered = renderTerminalContent([
+      'Before', '', '', '', '', '',
+      '----------------', '', '————————', '', '  ________________', '', `  ${'▔'.repeat(120)}`,
+      '', '', '', '', 'After',
+    ].join('\n'), 'ansi', 'codex', true);
+    expect(rendered.display).toBe([
+      'Before', '', '', TERMINAL_SEPARATOR_TOKEN, '', '', 'After',
+    ].join('\n'));
+    expect(rendered.html.match(/class="term-separator"/g)).toHaveLength(1);
+    expect(rendered.html.match(/class="ansi-line"/g)).toHaveLength(6);
+  });
+
+  it('caps arbitrary repeated symbols embedded in terminal output', () => {
+    const progress = `${'.'.repeat(120)} [29%]`;
+    expect(compactRepeatedCharacterRuns(progress))
+      .toBe(`${'.'.repeat(TERMINAL_REPEATED_RUN_LIMIT)} [29%]`);
+    expect(compactRepeatedCharacterRuns('a'.repeat(120))).toBe('a'.repeat(120));
+
+    const rendered = renderTerminalContent(progress, 'ansi', 'codex', true);
+    expect(stripAnsi(rendered.display))
+      .toBe(`${'.'.repeat(TERMINAL_REPEATED_RUN_LIMIT)} [29%]`);
+  });
+
+  it('removes desktop-width decoration after terminal status text', () => {
+    const decorated = `\x1b[2m─ Worked for 1m 46s ${'─'.repeat(120)}\x1b[0m`;
+    expect(stripAnsi(trimTrailingDecoration(decorated))).toBe('─ Worked for 1m 46s');
+
+    const rendered = renderTerminalContent(decorated, 'ansi', 'codex', true);
+    expect(stripAnsi(rendered.display)).toBe('─ Worked for 1m 46s');
+    expect(rendered.html).toContain('Worked for 1m 46s');
+    expect(rendered.html).not.toContain('────────');
+  });
+
+  it('removes Claude box chrome and leading status decoration', () => {
+    const rule = '─'.repeat(120);
+    expect(isSeparatorOnlyLine(`╰${rule}╯`)).toBe(true);
+    expect(stripAnsi(trimTerminalChrome(`\x1b[36m│\x1b[0m  Result text${' '.repeat(20)}\x1b[36m│\x1b[0m`)))
+      .toBe('Result text');
+    expect(stripAnsi(trimTerminalChrome(`\x1b[2m${rule} Opus 4.8 | ctx: 20%\x1b[0m`)))
+      .toBe('Opus 4.8 | ctx: 20%');
+    expect(stripAnsi(trimTerminalChrome(`\x1b[2m${'§'.repeat(120)} Opus 4.8 | ctx: 20%\x1b[0m`)))
+      .toBe('Opus 4.8 | ctx: 20%');
+
+    const rendered = renderTerminalContent([
+      `\x1b[36m│\x1b[0m  Result text${' '.repeat(20)}\x1b[36m│\x1b[0m`,
+      '\x1b[36m│\x1b[0m',
+      `\x1b[36m╰${rule}╯\x1b[0m`,
+      `\x1b[36m${rule}\x1b[0m`,
+      `\x1b[36m╭${rule}╮\x1b[0m`,
+      `\x1b[2m${rule} Opus 4.8 | ctx: 20%\x1b[0m`,
+    ].join('\n'), 'ansi', 'claude', true);
+    expect(stripAnsi(rendered.display)).toBe([
+      'Result text', '', TERMINAL_SEPARATOR_TOKEN, 'Opus 4.8 | ctx: 20%',
+    ].join('\n'));
+    expect(rendered.html.match(/class="term-separator"/g)).toHaveLength(1);
   });
 
   it('extracts the latest completed Codex and Claude responses', () => {
