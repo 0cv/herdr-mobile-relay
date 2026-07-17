@@ -15,5 +15,9 @@ relay/.dev/
 relay/push/
 relay/cloudflared/
 relay/stable-setup.json
+relay/update-state.json
+relay/update-job-*.json
+relay/phone-app-origin
+relay/phone-app-origin.*
 .wrangler/
 .claude/

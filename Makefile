@@ -20,6 +20,7 @@ help:
 	@echo "  make web-release                Replace ./web with a verified frontend release build"
 	@echo "  make service-install            Install/start the relay service for this platform"
 	@echo "  make setup-link                 Print the phone setup link and QR code for a stable relay"
+	@echo "    APP_URL=app.example.com       One-time installed-PWA origin override"
 	@echo "  make rotate-token               Replace the relay token and print a new setup link"
 	@echo "  make service-status             Show relay service status"
 	@echo "  make service-logs               Tail relay service logs"
@@ -31,7 +32,7 @@ setup:
 	relay/setup.sh
 
 setup-link:
-	relay/setup-link.sh $(HOST)
+	HERDR_PHONE_APP_URL="$(APP_URL)" relay/setup-link.sh $(HOST)
 
 rotate-token:
 	relay/rotate-token.sh

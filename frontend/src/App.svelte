@@ -30,8 +30,16 @@
     routeNotificationUrl,
     viewUrl,
   } from '$lib/router';
-  import { initializeDeviceSecurity } from '$lib/security';
+  import { initializeDeviceSecurity, securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
+  import {
+    appUpdateStatus,
+    clearPendingRelayUpdate,
+    initializeAppUpdates,
+    pendingRelayUpdate,
+    relayServesCurrentOrigin,
+    reloadUpdatedSameOriginApp,
+  } from '$lib/updates';
   import type { Agent, NotificationTarget } from '$lib/types';
 
   const relays = relayStore.relayConfigs;
@@ -39,6 +47,7 @@
   const agents = relayStore.agents;
   const frames = relayStore.terminalFrames;
   const responding = relayStore.responding;
+  const appUpdates = appUpdateStatus;
 
   let manageOpen = $state(false);
   let lastBlocked = new Set<string>();
@@ -52,6 +61,10 @@
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
   const connected = $derived([...$connections.values()].filter((connection) => connection.status === 'connected').length);
   const connecting = $derived([...$connections.values()].some((connection) => connection.status === 'connecting'));
+  const updateAvailable = $derived(
+    $appUpdates.state === 'available'
+      || [...$connections.values()].some((connection) => ['available', 'blocked'].includes(connection.update.state)),
+  );
   const headerTitle = $derived.by(() => {
     if ($currentView.view === 'settings') return 'Settings';
     if ($currentView.view === 'launch') return 'Start Agent';
@@ -116,18 +129,40 @@
     if (target.action) void executeNotificationAction(agent, target);
   });
 
+  $effect(() => {
+    for (const [relayId, connection] of $connections) {
+      if (connection.status !== 'connected') continue;
+      const pending = pendingRelayUpdate(relayId);
+      if (!pending || connection.releaseVersion !== pending.version) continue;
+      const revision = connection.revision.replace(/-dirty$/, '');
+      if (!revision || !pending.revision.startsWith(revision)) continue;
+      clearPendingRelayUpdate(relayId);
+      relayStore.showToast(`${connection.relay.label} updated to v${pending.version}.`);
+      if (relayServesCurrentOrigin(connection.relay.url)) {
+        void reloadUpdatedSameOriginApp(pending.version);
+      }
+    }
+  });
+
   onMount(() => {
     initializePreferences();
     initializePush();
+    const stopUpdates = initializeAppUpdates();
     const stopSecurity = initializeDeviceSecurity();
     const stopRouter = initializeRouter();
+    const setupLinkNavigation = () => {
+      relayStore.importSetupLink(location, !$securityState.locked);
+    };
     const serviceWorkerMessage = (event: MessageEvent) => {
       if (event.data?.type === 'herdr_notification_click' && event.data.url) routeNotificationUrl(event.data.url);
     };
+    window.addEventListener('hashchange', setupLinkNavigation);
     navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
     return () => {
       stopRouter();
       stopSecurity();
+      stopUpdates();
+      window.removeEventListener('hashchange', setupLinkNavigation);
       navigator.serviceWorker?.removeEventListener('message', serviceWorkerMessage);
       relayStore.destroy();
     };
@@ -273,7 +308,15 @@
           </svg>
         </Button>
       {/if}
-      <Button variant="ghost" size="icon" aria-label="Settings" onclick={() => toggle('settings')}>⚙</Button>
+      <span class="nav-button-shell">
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={updateAvailable ? 'Settings, update available' : 'Settings'}
+          onclick={() => toggle('settings')}
+        >⚙</Button>
+        {#if updateAvailable}<span class="nav-update-badge" aria-hidden="true"></span>{/if}
+      </span>
     </nav>
   </header>
 

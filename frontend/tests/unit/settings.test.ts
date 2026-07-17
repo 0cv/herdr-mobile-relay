@@ -13,12 +13,13 @@ class MockWebSocket {
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
+  sent: string[] = [];
 
   constructor(readonly url: string) {
     MockWebSocket.instances.push(this);
   }
 
-  send() {}
+  send(payload: string) { this.sent.push(payload); }
   close() { this.readyState = 3; }
   open() {
     this.readyState = MockWebSocket.OPEN;
@@ -64,6 +65,46 @@ describe('settings relay status', () => {
 
     socket.server({ type: 'push_subscribed', ok: true });
     await waitFor(() => expect(screen.getByText('Push: synced')).toBeInTheDocument());
+  });
+
+  it('shows the complete one-time update command for an older relay', async () => {
+    const user = userEvent.setup();
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config',
+      protocol: 2,
+      release_version: '0.6.0',
+      capabilities: [],
+      agent_profiles: [],
+    });
+
+    await user.click(await screen.findByRole('button', { name: 'How to update Fedora' }));
+    const dialog = screen.getByRole('dialog', { name: 'Update Fedora' });
+    expect(dialog).toHaveTextContent('Version 0.7.0 is a one-time manual update.');
+    expect(within(dialog).getByText(/HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install/)).toHaveTextContent(
+      'herdr plugin action invoke install-service --plugin herdr-mobile-relay.events',
+    );
+    expect(screen.queryByText(/assets \d+/i)).not.toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 3 }).at(-1)).toHaveTextContent('About');
+  });
+
+  it('requires confirmation before removing a relay', async () => {
+    const user = userEvent.setup();
+    render(SettingsView);
+
+    await user.click(screen.getByRole('button', { name: 'Remove Fedora' }));
+    const dialog = screen.getByRole('dialog', { name: 'Remove Fedora?' });
+    expect(dialog).toHaveTextContent('You will need its setup link or connection details to add it again.');
+    expect(screen.getByText('Fedora')).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.getByText('Fedora')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Remove Fedora' }));
+    await user.click(within(screen.getByRole('dialog', { name: 'Remove Fedora?' })).getByRole('button', { name: 'Remove Relay' }));
+    await waitFor(() => expect(screen.queryByText('Fedora')).not.toBeInTheDocument());
   });
 
   it('applies interface size from the accessible settings group', async () => {
@@ -113,5 +154,48 @@ describe('settings relay status', () => {
     await user.click(await screen.findByRole('button', { name: 'Enable Push Notifications' }));
 
     await waitFor(() => expect(finished).toBeEnabled());
+  });
+
+  it('confirms an available relay update before sending the exact target', async () => {
+    const user = userEvent.setup();
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config',
+      protocol: 2,
+      release_version: '0.7.0',
+      revision: 'abc123',
+      capabilities: ['self_update'],
+      agent_profiles: [],
+      update: {
+        state: 'available',
+        current_version: '0.7.0',
+        current_revision: 'abc123',
+        available_version: '0.8.0',
+        available_revision: 'f'.repeat(12),
+        target_revision: 'f'.repeat(40),
+        can_install: true,
+        mode: 'local',
+      },
+    });
+
+    await user.click(await screen.findByRole('button', { name: 'Update Fedora to version 0.8.0' }));
+    expect(screen.getByRole('dialog', { name: 'Update Relay' })).toBeInTheDocument();
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Update Relay' }));
+    const command = socket.sent.map((payload) => JSON.parse(payload))
+      .find((message) => message.type === 'install_update');
+
+    expect(command).toMatchObject({
+      expected_version: '0.8.0',
+      expected_revision: 'f'.repeat(40),
+    });
+    socket.server({
+      type: 'command_result',
+      request_id: command.request_id,
+      ok: true,
+      phase: 'scheduled',
+      data: { update: { state: 'scheduled', target_revision: 'f'.repeat(40) } },
+    });
   });
 });

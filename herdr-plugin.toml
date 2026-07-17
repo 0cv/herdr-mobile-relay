@@ -15,7 +15,7 @@
 
 id = "herdr-mobile-relay.events"
 name = "Herdr Mobile Relay"
-version = "0.6.0"
+version = "0.7.0"
 # Herdr 0.7.0 introduced manifest actions, managed panes, and plugin config dirs.
 min_herdr_version = "0.7.0"
 description = "Remote mobile control for Herdr: approve and monitor agents from your smartphone (Android/iOS) with an installable web app, push notifications, QR pairing, and per-computer Cloudflare tunnels"
@@ -55,6 +55,14 @@ id = "install-service"
 title = "Herdr Mobile Relay: Stable Tunnel Setup"
 command = ["bash", "relay/open-plugin-pane.sh", "install-service"]
 
+# setup-link — reprints the private phone link and QR for the installed stable
+# service. The wrapper follows the service's recorded relay environment so it
+# also works when a Marketplace action manages a checkout-installed service.
+[[actions]]
+id = "setup-link"
+title = "Herdr Mobile Relay: Show Phone Setup QR"
+command = ["bash", "relay/open-plugin-pane.sh", "setup-link"]
+
 # stable-teardown — explicit confirmed cleanup before plugin uninstall. Herdr
 # keeps plugin config/state on uninstall and has no manifest uninstall hook.
 [[actions]]
@@ -88,6 +96,12 @@ id = "install-service"
 title = "Herdr Mobile Relay: Stable Tunnel Setup"
 placement = "zoomed"
 command = ["bash", "relay/plugin-install-service.sh"]
+
+[[panes]]
+id = "setup-link"
+title = "Herdr Mobile Relay: Show Phone Setup QR"
+placement = "zoomed"
+command = ["bash", "relay/plugin-setup-link.sh"]
 
 [[panes]]
 id = "stable-teardown"

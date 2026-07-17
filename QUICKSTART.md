@@ -23,7 +23,7 @@ You do not need Python, Node.js, npm, a separately hosted web app, or `sudo` for
 
 ## 2. Open the Phone Link
 
-Wait for **Relay ready**, then scan the printed QR code or open the complete HTTPS setup link on your phone.
+Wait for the temporary tunnel, then choose **This temporary relay** for a simple one-relay trial or **An existing installed Herdr app** to add this computer to an app that already contains other relays. Scan the printed QR code or open the complete HTTPS setup link on your phone.
 
 The app imports the relay URL, label, and token automatically. Do not share the link or QR code: either can grant control of agents on this relay.
 
@@ -43,16 +43,25 @@ herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
 
 The wizard confirms the tunnel and hostname, creates or resumes the DNS route, installs the background service, and prints a QR code only after the public relay identity is verified.
 
+On the first stable setup, choose **This relay** to let it host the phone app. If Herdr is already installed on the phone from another HTTPS address, choose **An existing installed Herdr app** and enter the domain or URL shown in that app's Site settings. Entering `app.example.com` is enough; the wizard adds `https://` automatically and checks for the Herdr app manifest. The saved selection is shown on later interactive runs and stored only in the relay's private configuration.
+
 If it stops, rerun the exact command it prints. Setup resumes its recorded state rather than creating a duplicate tunnel.
 
 Repeat stable setup on each computer with a different hostname. Add each QR link to the same phone app.
 
+After the stable service is running on version 0.7.0 or newer, Settings can check and install later versioned relay updates one computer at a time. An older relay shows **Update Help** with the one-time command to update and restart it. A separately hosted phone app remains a separate deployment.
+
 Useful actions:
 
 ```bash
+herdr plugin action invoke setup-link --plugin herdr-mobile-relay.events
 herdr plugin action invoke status --plugin herdr-mobile-relay.events
 herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
 ```
+
+Use `setup-link` whenever you need to reprint the private link and QR for an existing stable relay.
+
+An installed PWA privately tells connected relays which app origin to use for later QR codes; no public app hostname is built in. If a relay was removed before that registration happened, a source checkout can bootstrap it once with `make setup-link APP_URL=app.example.com`, using the domain from the installed app's site settings.
 
 Teardown removes only stable resources recorded as wizard-owned. Run it before uninstalling the plugin if those Cloudflare resources should also be removed.
 
@@ -75,6 +84,7 @@ Use `make stable-setup` for the checkout's permanent setup. Checkout commands us
 - **The temporary URL times out:** keep the setup pane open and check its `cloudflared` error. Rerun Quick Start for a fresh hostname.
 - **The app opens but remains disconnected:** reopen the complete link, including `#setup=...`.
 - **Stable setup fails or times out:** keep its state file and rerun the exact command shown.
+- **Need the stable QR again:** choose **Show Phone Setup QR** or invoke the `setup-link` plugin action.
 - **Stable DNS name already exists:** choose another hostname; the wizard never overwrites an existing record.
 - **macOS cannot browse a project folder:** grant the relay process access under Files and Folders, or choose an unprotected directory.
 

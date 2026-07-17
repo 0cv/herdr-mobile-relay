@@ -4,7 +4,7 @@
 
 A remote control for [Herdr](https://herdr.dev) agents on Linux and macOS: use your smartphone to monitor status, answer prompts, build plans, and manage their lifecycle.
 
-**Current version:** `0.6.0`
+**Current version:** `0.7.0`
 
 Each computer runs its own local relay. The phone app connects to those relays directly and merges their agents; there is no central broker and the computers do not connect to each other.
 
@@ -45,7 +45,12 @@ herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 
 Choose **Quick Start**. It installs missing user-level tools with confirmation, starts the relay and phone app, then opens a temporary TryCloudflare tunnel. No Cloudflare account, domain, Python installation, Node.js, or separate web deployment is required.
 
-Scan the printed QR code or open its complete HTTPS setup link on your phone. Keep the setup pane open; Ctrl-C stops both the relay and the temporary tunnel. A later Quick Start gets a new hostname, so use its new setup link.
+When the temporary tunnel is ready, choose where its QR should open:
+
+1. **This temporary relay** is the default and simplest option for trying one relay.
+2. **An existing installed Herdr app** adds the temporary computer to the same app as other relays.
+
+Then scan the printed QR code or open its complete HTTPS setup link on your phone. Keep the setup pane open; Ctrl-C stops both the relay and the temporary tunnel. A later Quick Start gets a new hostname, so use its new setup link.
 
 The setup link contains the relay token in its URL fragment. The fragment is not sent to the server and is removed after import, but the link and QR code must still be kept private.
 
@@ -66,6 +71,7 @@ The stable wizard:
 3. Creates or resumes the tunnel and DNS route without overwriting an existing record.
 4. Installs a launchd service on macOS or a user-systemd service on Linux.
 5. Verifies public DNS, HTTPS, and the relay identity before printing the stable QR code.
+6. On the first run, offers this relay as the app origin for a one-relay setup or an existing installed-app address for multi-relay use.
 
 If setup is interrupted or times out, run the exact command it prints. Its private state is resumable and prevents duplicate tunnels.
 
@@ -74,9 +80,12 @@ Run the wizard separately on every computer, with a distinct hostname for each r
 Useful plugin actions:
 
 ```bash
+herdr plugin action invoke setup-link --plugin herdr-mobile-relay.events
 herdr plugin action invoke status --plugin herdr-mobile-relay.events
 herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
 ```
+
+The `setup-link` action safely reprints the private link and QR for the installed stable relay. It follows the configuration recorded in the background service, including services installed from a source checkout.
 
 Teardown is explicit and confirmed. It removes only resources recorded as owned by the wizard. Run it before uninstalling the plugin if you also want the Cloudflare resources removed.
 
@@ -104,6 +113,33 @@ The QR code adds the relay URL, label, and token automatically. To add one manua
 Enable notifications from Settings. Blocked-agent notifications are included while push is enabled; completion notifications are optional per device.
 
 To install the PWA, open the HTTPS app in Safari and use **Share → Add to Home Screen**, or use Chrome's **Install app** action. A temporary TryCloudflare hostname is unsuitable for a permanent installation because it changes when restarted.
+
+During guided Stable Tunnel setup, choose **This relay** to use its verified hostname as the phone app, or choose **An existing installed Herdr app** and enter its Site settings domain or URL. You can enter a domain such as `app.example.com`; the wizard adds `https://` automatically and checks for the Herdr app manifest. A temporary reachability failure can be explicitly overridden. The selected origin is shown on later interactive runs and recorded privately beside the relay environment. Later QR codes can then target the same installed app while carrying the selected computer's relay URL in the fragment. There is no shared or built-in app hostname.
+
+An installed PWA also refreshes the private record whenever it connects. If an older relay was removed before either mechanism recorded the installed app origin, provide that origin once when reprinting its checkout QR:
+
+```bash
+make setup-link APP_URL=app.example.com
+```
+
+Use the HTTPS address shown in the installed app's site settings. After the app reconnects, later `make setup-link` and **Show Phone Setup QR** runs reuse the private record without the override. Android can hand an in-scope link to the installed PWA when supported-link handling is enabled. iOS and iPadOS do not currently capture external links into Safari-installed PWAs; open the installed app and add the relay manually there.
+
+## Updates from the Phone
+
+Version 0.7.0 is the one-time manual bootstrap for phone-driven updates. For a Marketplace installation, run this on each relay computer:
+
+```bash
+HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes && \
+  herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
+```
+
+The stable setup reuses the computer's saved tunnel configuration and restarts the relay. For a source checkout, run `git pull --ff-only && make service-install` from its directory. Later versioned releases are checked at relay startup, once per day, and whenever you tap **Settings → Check** for that relay. The same commands are available under **Settings → Update Help** when a connected relay still needs the bootstrap.
+
+An update is offered only when the `main` branch publishes a higher semantic version. The relay pins the advertised Git revision, asks for confirmation, installs that exact revision outside its own service process, restarts, and verifies `/healthz`. A failed verification triggers an automatic rollback.
+
+Marketplace-managed plugins and clean local checkouts on the canonical `main` branch can update automatically. A local checkout with uncommitted changes, another origin, another branch, or no matching stable background service is reported as blocked instead of being modified. Each relay is updated separately.
+
+The **About** card checks the `version.json` deployed by the app’s current web origin. If the relay also serves that origin, a verified relay update reloads the app automatically. A separately hosted app, such as Cloudflare Pages, remains a separate deployment and must be reloaded only after that origin publishes the new bundle.
 
 ## How It Works
 
@@ -183,10 +219,11 @@ make web-release-check
 - **Temporary link does not open:** keep the Quick Start pane open and rerun it if `cloudflared` exited; every run creates a new hostname.
 - **App opens but does not connect:** reopen the complete setup link, including its `#setup=...` fragment.
 - **Stable setup stops:** preserve its state and rerun the exact command printed in the error.
+- **Need to add the relay to another phone:** choose **Show Phone Setup QR** or invoke the `setup-link` plugin action.
 - **Stable hostname already exists:** choose another hostname or remove the unrelated DNS record yourself; the wizard never overwrites it.
 - **Need a support snapshot:** run the plugin `status` action.
 
-`GET /health` returns `ok`. `GET /healthz` returns the relay instance, version, and protocol used by the stable wizard and Settings diagnostics.
+`GET /health` returns `ok`. `GET /healthz` returns the relay instance, product version, Git revision, and protocol used by the stable wizard, updater, and Settings diagnostics.
 
 ## License
 

@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AppDialog from '$components/ui/AppDialog.svelte';
   import AppSwitch from '$components/ui/AppSwitch.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import {
+    APP_VERSION,
     INTERFACE_SIZES,
     TERMINAL_HISTORY_OPTIONS,
     THEMES,
@@ -39,12 +41,21 @@
     setDeviceVerificationRequired,
   } from '$lib/security';
   import { relayStore } from '$lib/store';
+  import {
+    appUpdateStatus,
+    checkAppUpdate,
+    reloadApp,
+  } from '$lib/updates';
   import type { RelayConnectionView } from '$lib/types';
+
+  const MANAGED_UPDATE_COMMAND = 'HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes && herdr plugin action invoke install-service --plugin herdr-mobile-relay.events';
+  const CHECKOUT_UPDATE_COMMAND = 'git pull --ff-only && make service-install';
 
   const relays = relayStore.relayConfigs;
   const connections = relayStore.connections;
   const agents = relayStore.agents;
   const notificationBusy = relayStore.notificationBusy;
+  const appUpdate = appUpdateStatus;
 
   onMount(refreshPushPreferences);
 
@@ -53,12 +64,22 @@
   let relayToken = $state('');
   let finished = $state(finishedNotificationsEnabled());
   let deviceLock = $state(deviceVerificationEnabled());
+  let confirmRelayId = $state('');
+  let confirmOpen = $state(false);
+  let manualRelayId = $state('');
+  let manualOpen = $state(false);
+  let removalRelayId = $state('');
+  let removalOpen = $state(false);
+  let busyRelayId = $state('');
 
   const relayRows = $derived($relays.map((relay) => ({
     relay,
     connection: $connections.get(relay.id),
   })));
   const connectedCount = $derived([...$connections.values()].filter((connection) => connection.status === 'connected').length);
+  const confirmRow = $derived(relayRows.find(({ relay }) => relay.id === confirmRelayId));
+  const manualRow = $derived(relayRows.find(({ relay }) => relay.id === manualRelayId));
+  const removalRow = $derived(relayRows.find(({ relay }) => relay.id === removalRelayId));
   const notification = $derived.by(() => notificationMeta(
     [...$connections.values()],
     $notificationBusy,
@@ -73,9 +94,18 @@
     relayToken = '';
   }
 
-  async function removeRelay(id: string) {
-    await removeRelayPushSubscription(id);
-    relayStore.removeRelay(id);
+  function requestRelayRemoval(id: string) {
+    removalRelayId = id;
+    removalOpen = true;
+  }
+
+  async function confirmRelayRemoval() {
+    if (!removalRelayId) return;
+    const relayId = removalRelayId;
+    removalOpen = false;
+    await removeRelayPushSubscription(relayId);
+    relayStore.removeRelay(relayId);
+    removalRelayId = '';
   }
 
   async function changeFinished(value: boolean) {
@@ -86,6 +116,107 @@
   async function changeDeviceLock(value: boolean) {
     const changed = await setDeviceVerificationRequired(value);
     deviceLock = value && changed;
+  }
+
+  function relayUpdateMeta(connection?: RelayConnectionView) {
+    if (!connection || connection.status !== 'connected') {
+      return {
+        label: 'Update status unavailable',
+        detail: 'Connect this relay to check its version.',
+        warning: false,
+      };
+    }
+    if (!connection?.capabilities.includes('self_update')) {
+      return {
+        label: 'Manual update required',
+        detail: 'Open Update Help for the one-time setup.',
+        warning: true,
+      };
+    }
+    const update = connection.update;
+    if (update.state === 'checking') return { label: 'Checking for updates…', detail: '', warning: false };
+    if (update.state === 'available') {
+      return {
+        label: `Update v${update.available_version} available`,
+        detail: `Revision ${update.available_revision}`,
+        warning: true,
+      };
+    }
+    if (update.state === 'blocked') {
+      return {
+        label: `Update v${update.available_version} needs attention`,
+        detail: update.reason,
+        warning: true,
+      };
+    }
+    if (['scheduled', 'installing', 'restarting'].includes(update.state)) {
+      const label = update.state === 'scheduled'
+        ? 'Update scheduled…'
+        : update.state === 'installing' ? 'Installing update…' : 'Restarting relay…';
+      return { label, detail: 'The phone connection may briefly disconnect.', warning: true };
+    }
+    if (update.state === 'succeeded') {
+      return { label: 'Update installed', detail: `Running v${update.current_version}`, warning: false };
+    }
+    if (update.state === 'rolled_back') {
+      return { label: 'Update rolled back', detail: update.error, warning: true };
+    }
+    if (update.state === 'failed') {
+      return { label: 'Update operation failed', detail: update.error, warning: true };
+    }
+    const checked = update.checked_at
+      ? `Checked ${new Date(update.checked_at * 1_000).toLocaleString()}`
+      : 'Update check pending';
+    return { label: 'Up to date', detail: checked, warning: false };
+  }
+
+  async function checkRelayUpdate(relayId: string) {
+    busyRelayId = relayId;
+    try {
+      await relayStore.checkRelayUpdate(relayId);
+    } catch (error) {
+      relayStore.showToast((error as Error).message, true);
+    } finally {
+      busyRelayId = '';
+    }
+  }
+
+  function requestRelayUpdate(relayId: string) {
+    confirmRelayId = relayId;
+    confirmOpen = true;
+  }
+
+  function showManualUpdate(relayId: string) {
+    manualRelayId = relayId;
+    manualOpen = true;
+  }
+
+  async function copyUpdateCommand(command: string, installation: string) {
+    if (!navigator.clipboard?.writeText) {
+      relayStore.showToast('Clipboard access is unavailable. Select the command manually.', true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(command);
+      relayStore.showToast(`${installation} update command copied.`);
+    } catch {
+      relayStore.showToast('Could not copy the command. Select it manually.', true);
+    }
+  }
+
+  async function installRelayUpdate() {
+    if (!confirmRelayId) return;
+    const relayId = confirmRelayId;
+    confirmOpen = false;
+    busyRelayId = relayId;
+    try {
+      await relayStore.installRelayUpdate(relayId);
+      relayStore.showToast('Update scheduled. The relay will reconnect after verification.');
+    } catch (error) {
+      relayStore.showToast((error as Error).message, true);
+    } finally {
+      busyRelayId = '';
+    }
   }
 
   function notificationMeta(all: RelayConnectionView[], busy: boolean, preferences: { notificationsEnabled: boolean; optedIn: boolean }) {
@@ -142,6 +273,7 @@
       {#each relayRows as { relay, connection } (relay.id)}
         {@const connectionStatus = connection?.status || 'disconnected'}
         {@const version = relayVersionMeta(connection)}
+        {@const update = relayUpdateMeta(connection)}
         <article class="relay-row">
           <span
             class={`status-dot status-${connectionStatus === 'connected' ? 'success' : connectionStatus === 'connecting' ? 'warning' : 'danger'}`}
@@ -153,8 +285,36 @@
             <span>{relay.url}</span>
             <small>Push: {pushStatusLabel(connection)}</small>
             {#if version}<small class:warning={version.tone === 'warning'} title={version.title}>{version.label}</small>{/if}
+            <small class:warning={update.warning} role="status">{update.label}</small>
+            {#if update.detail}<small class:warning={update.warning} title={update.detail}>{update.detail}</small>{/if}
           </div>
-          <Button variant="danger" size="sm" aria-label={`Remove ${relay.label}`} onclick={() => removeRelay(relay.id)}>Remove</Button>
+          <div class="relay-actions">
+            {#if connection?.capabilities.includes('self_update')}
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={connectionStatus !== 'connected' || busyRelayId === relay.id || ['scheduled', 'installing', 'restarting'].includes(connection.update.state)}
+                aria-label={`Check ${relay.label} for updates`}
+                onclick={() => checkRelayUpdate(relay.id)}
+              >Check</Button>
+              {#if connection.update.state === 'available'}
+                <Button
+                  size="sm"
+                  disabled={!connection.update.can_install || busyRelayId === relay.id}
+                  aria-label={`Update ${relay.label} to version ${connection.update.available_version}`}
+                  onclick={() => requestRelayUpdate(relay.id)}
+                >Update</Button>
+              {/if}
+            {:else if connectionStatus === 'connected'}
+              <Button
+                variant="secondary"
+                size="sm"
+                aria-label={`How to update ${relay.label}`}
+                onclick={() => showManualUpdate(relay.id)}
+              >Update Help</Button>
+            {/if}
+            <Button variant="danger" size="sm" aria-label={`Remove ${relay.label}`} onclick={() => requestRelayRemoval(relay.id)}>Remove</Button>
+          </div>
         </article>
       {/each}
     </div>
@@ -214,4 +374,75 @@
     <h3>Status</h3>
     <p><span class={`status-dot status-${connectedCount ? 'success' : 'danger'}`}></span> {connectedCount}/{$relays.length} relays connected · {$agents.length} agents</p>
   </Card>
+
+  <Card>
+    <h3>About</h3>
+    <p>Phone app version {APP_VERSION}</p>
+    {#if $appUpdate.state === 'available'}
+      <p class="warning" role="status">Version {$appUpdate.availableVersion} is deployed to this app origin.</p>
+    {:else if $appUpdate.state === 'checking'}
+      <p class="hint" role="status">Checking this app origin for updates…</p>
+    {:else if $appUpdate.state === 'failed'}
+      <p class="hint" role="status">Could not check this app origin: {$appUpdate.error}</p>
+    {:else}
+      <p class="hint" role="status">This app bundle is up to date.</p>
+    {/if}
+    <div class="form-actions">
+      <Button variant="secondary" disabled={$appUpdate.state === 'checking'} onclick={() => checkAppUpdate()}>Check App</Button>
+      <Button disabled={$appUpdate.state !== 'available'} onclick={reloadApp}>Reload App</Button>
+    </div>
+    <p class="hint">A separately hosted app updates only after its own deployment; updating a relay never deploys Cloudflare Pages.</p>
+  </Card>
 </main>
+
+<AppDialog
+  id="manual-relay-update-dialog"
+  bind:open={manualOpen}
+  title={manualRow ? `Update ${manualRow.relay.label}` : 'Update Relay'}
+  description="Version 0.7.0 is a one-time manual update. Later relay updates can be installed from this screen."
+>
+  <p>On the computer running this relay, open Terminal and run:</p>
+  <pre class="update-command"><code>{MANAGED_UPDATE_COMMAND}</code></pre>
+  <p class="hint">This updates the Marketplace plugin, reuses the stable tunnel configuration, and restarts the relay.</p>
+  <div class="dialog-actions">
+    <Button onclick={() => copyUpdateCommand(MANAGED_UPDATE_COMMAND, 'Marketplace')}>Copy Command</Button>
+    <Button variant="ghost" onclick={() => { manualOpen = false; }}>Close</Button>
+  </div>
+  <details class="checkout-update">
+    <summary>Installed from a source checkout?</summary>
+    <p class="hint">Run this from the checkout directory:</p>
+    <pre class="update-command"><code>{CHECKOUT_UPDATE_COMMAND}</code></pre>
+    <Button variant="secondary" size="sm" onclick={() => copyUpdateCommand(CHECKOUT_UPDATE_COMMAND, 'Source checkout')}>Copy Checkout Command</Button>
+  </details>
+</AppDialog>
+
+<AppDialog
+  id="remove-relay-dialog"
+  bind:open={removalOpen}
+  title={removalRow ? `Remove ${removalRow.relay.label}?` : 'Remove Relay?'}
+  description="This removes the saved relay connection and its push subscription from this phone."
+>
+  {#if removalRow}
+    <p class="hint">{removalRow.relay.url}</p>
+  {/if}
+  <p>Agents on the computer keep running. You will need its setup link or connection details to add it again.</p>
+  <div class="dialog-actions">
+    <Button variant="danger" disabled={!removalRow} onclick={confirmRelayRemoval}>Remove Relay</Button>
+    <Button variant="ghost" onclick={() => { removalOpen = false; }}>Cancel</Button>
+  </div>
+</AppDialog>
+
+<AppDialog
+  id="relay-update-dialog"
+  bind:open={confirmOpen}
+  title="Update Relay"
+  description={confirmRow
+    ? `Update ${confirmRow.relay.label} from v${confirmRow.connection?.update.current_version || 'unknown'} to v${confirmRow.connection?.update.available_version || 'unknown'}?`
+    : 'The selected relay is unavailable.'}
+>
+  <p class="hint">The phone will disconnect briefly. Running agents and saved relay configuration remain intact.</p>
+  <div class="dialog-actions">
+    <Button disabled={!confirmRow} onclick={installRelayUpdate}>Update Relay</Button>
+    <Button variant="ghost" onclick={() => { confirmOpen = false; }}>Cancel</Button>
+  </div>
+</AppDialog>

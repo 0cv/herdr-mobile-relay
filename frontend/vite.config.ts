@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
@@ -5,11 +6,41 @@ import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 import versions from './build-versions.json';
 
+const manifest = readFileSync(fileURLToPath(new URL('../herdr-plugin.toml', import.meta.url)), 'utf8');
+const productVersion = manifest.match(/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
+if (!productVersion) throw new Error('herdr-plugin.toml must declare a MAJOR.MINOR.PATCH version');
+const versionMetadata = `${JSON.stringify({ version: productVersion, assets: versions.assets })}\n`;
+
 function stableReleaseAssets(): Plugin {
+  const serveVersionMetadata = (
+    request: { url?: string },
+    response: { setHeader(name: string, value: string): void; end(body: string): void },
+    next: () => void,
+  ) => {
+    const pathname = new URL(request.url || '/', 'http://vite.local').pathname;
+    if (pathname !== '/version.json') {
+      next();
+      return;
+    }
+    response.setHeader('Content-Type', 'application/json; charset=utf-8');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.end(versionMetadata);
+  };
   return {
     name: 'stable-release-assets',
     enforce: 'post',
+    configureServer(server) {
+      server.middlewares.use(serveVersionMetadata);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(serveVersionMetadata);
+    },
     generateBundle(_options, bundle) {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: versionMetadata,
+      });
       const javascript = Object.values(bundle).filter(
         (item) => item.type === 'chunk' && item.fileName.endsWith('.js'),
       );
@@ -68,6 +99,8 @@ export default defineConfig({
   },
   define: {
     __APP_PROTOCOL_VERSION__: '2',
+    __APP_VERSION__: JSON.stringify(productVersion),
+    __APP_ASSET_VERSION__: JSON.stringify(versions.assets),
     __SERVICE_WORKER_URL__: JSON.stringify(`sw.js?v=${versions.serviceWorker}`),
   },
   test: {

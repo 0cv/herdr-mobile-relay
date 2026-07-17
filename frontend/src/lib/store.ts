@@ -17,6 +17,11 @@ import {
 } from './agents';
 import { relayProtocolError } from './protocol';
 import { terminalHistoryLines } from './preferences';
+import {
+  clearPendingRelayUpdate,
+  normalizeRelayUpdate,
+  rememberPendingRelayUpdate,
+} from './updates';
 import type {
   Activity,
   Agent,
@@ -114,6 +119,17 @@ class RelayStore {
     if (connect) this.connectAll();
   }
 
+  importSetupLink(locationValue: Pick<Location, 'hash' | 'protocol' | 'host' | 'pathname' | 'search'> = location, connect = true): boolean {
+    const imported = importQuickSetup(get(this.relayConfigs), locationValue);
+    if (!imported) return false;
+    this.relayConfigs.set(imported);
+    saveRelayConfigs(imported);
+    history.replaceState(history.state, '', locationValue.pathname + locationValue.search);
+    if (connect) this.connectAll(true);
+    this.showToast('Relay added from the setup link.');
+    return true;
+  }
+
   destroy(): void {
     this.reconnectEnabled = false;
     for (const id of [...this.connectionsValue.keys()]) this.disconnectRelay(id);
@@ -185,6 +201,9 @@ class RelayStore {
       host: '',
       protocol: 0,
       version: '',
+      releaseVersion: '',
+      revision: '',
+      update: normalizeRelayUpdate(null),
       pushStatus: '',
       vapidPublicKey: '',
     };
@@ -205,6 +224,13 @@ class RelayStore {
       if (!this.isCurrentConnection(relay.id, connection)) return;
       connection.status = 'connected';
       this.emitConnections();
+      if (runningAsInstalledApp()) {
+        this.sendRaw(relay.id, {
+          type: 'register_app_origin',
+          origin: location.origin,
+          protocol: APP_PROTOCOL_VERSION,
+        });
+      }
       this.sendRaw(relay.id, { type: 'refresh_agents' });
     };
     connection.ws.onclose = () => {
@@ -308,12 +334,31 @@ class RelayStore {
       connection.host = String(message.host || '');
       connection.protocol = Number.isInteger(message.protocol) && message.protocol > 0 ? message.protocol : 1;
       connection.version = typeof message.version === 'string' ? message.version.slice(0, 40) : '';
+      connection.releaseVersion = String(message.release_version || '').slice(0, 32);
+      connection.revision = String(message.revision || message.version || '').slice(0, 40);
+      connection.update = normalizeRelayUpdate(
+        message.update,
+        connection.releaseVersion,
+        connection.revision,
+      );
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
       connection.agentProfiles = Array.isArray(message.agent_profiles)
         ? message.agent_profiles.filter((profile: any) => profile?.id)
         : [];
       this.emitConnections();
       this.pushConfigHandler?.(relayId);
+      return;
+    }
+    if (message.type === 'update_status' && connection) {
+      connection.update = normalizeRelayUpdate(
+        message.update,
+        connection.releaseVersion,
+        connection.revision,
+      );
+      if (['failed', 'rolled_back'].includes(connection.update.state)) {
+        clearPendingRelayUpdate(relayId);
+      }
+      this.emitConnections();
       return;
     }
     if (message.type === 'push_subscribed' && connection) {
@@ -490,13 +535,18 @@ class RelayStore {
     return true;
   }
 
-  sendCommand(relayId: string, payload: Record<string, any>, timeoutMs = COMMAND_TIMEOUT_MS): Promise<CommandResult> {
+  sendCommand(
+    relayId: string,
+    payload: Record<string, any>,
+    timeoutMs = COMMAND_TIMEOUT_MS,
+    allowProtocolMismatch = false,
+  ): Promise<CommandResult> {
     const connection = this.connectionsValue.get(relayId);
     if (!connection?.ws || connection.ws.readyState !== 1) {
       return Promise.reject(new CommandError('Relay is not connected'));
     }
     const protocolError = relayProtocolError(connection);
-    if (protocolError) return Promise.reject(new CommandError(protocolError));
+    if (protocolError && !allowProtocolMismatch) return Promise.reject(new CommandError(protocolError));
     const requestId = commandRequestId();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -521,6 +571,65 @@ class RelayStore {
 
   sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number): Promise<CommandResult> {
     return this.sendCommand(agent.relay_id, { ...payload, pane_id: agent.raw_pane_id }, timeoutMs);
+  }
+
+  async checkRelayUpdate(relayId: string): Promise<void> {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection?.capabilities.includes('self_update')) {
+      throw new CommandError('This relay does not support phone-driven updates yet');
+    }
+    const result = await this.sendCommand(relayId, { type: 'check_update' }, 30_000, true);
+    if (result.data?.update && connection === this.connectionsValue.get(relayId)) {
+      connection.update = normalizeRelayUpdate(
+        result.data.update,
+        connection.releaseVersion,
+        connection.revision,
+      );
+      this.emitConnections();
+    }
+  }
+
+  async installRelayUpdate(relayId: string): Promise<void> {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection?.capabilities.includes('self_update')) {
+      throw new CommandError('This relay does not support phone-driven updates yet');
+    }
+    const update = connection.update;
+    if (update.state !== 'available' || !update.can_install || !update.target_revision) {
+      throw new CommandError(update.reason || 'No installable update is available');
+    }
+    rememberPendingRelayUpdate(relayId, {
+      version: update.available_version,
+      revision: update.target_revision,
+    });
+    try {
+      const result = await this.sendCommand(relayId, {
+        type: 'install_update',
+        expected_version: update.available_version,
+        expected_revision: update.target_revision,
+      }, 30_000, true);
+      if (result.data?.update && connection === this.connectionsValue.get(relayId)) {
+        connection.update = normalizeRelayUpdate(
+          result.data.update,
+          connection.releaseVersion,
+          connection.revision,
+        );
+        this.emitConnections();
+      }
+    } catch (error) {
+      if (error instanceof CommandError && error.data?.update) {
+        clearPendingRelayUpdate(relayId);
+        if (connection === this.connectionsValue.get(relayId)) {
+          connection.update = normalizeRelayUpdate(
+            error.data.update,
+            connection.releaseVersion,
+            connection.revision,
+          );
+          this.emitConnections();
+        }
+      }
+      throw error;
+    }
   }
 
   private handleCommandResult(relayId: string, result: CommandResult): void {
@@ -881,6 +990,13 @@ function commandRequestId(): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
   return [...bytes].map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+function runningAsInstalledApp(): boolean {
+  return Boolean(
+    window.matchMedia?.('(display-mode: standalone)').matches
+    || (navigator as Navigator & { standalone?: boolean }).standalone,
+  );
 }
 
 export function pushClientId(): string {

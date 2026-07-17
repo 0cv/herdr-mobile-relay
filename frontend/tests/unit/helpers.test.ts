@@ -62,8 +62,25 @@ describe('protocol and setup parsing', () => {
     } as Location)).toEqual({
       label: 'Fedora Workstation', url: 'wss://relay.example.com', token: '0123456789abcdef0123456789abcdef',
     });
+    expect(quickSetupConfig({
+      hash: '#setup=0123456789abcdef0123456789abcdef&label=Mac&relay=wss%3A%2F%2Frelay-mac.example.com',
+      protocol: 'https:',
+      host: 'app.example.com',
+    } as Location)).toEqual({
+      label: 'Mac', url: 'wss://relay-mac.example.com', token: '0123456789abcdef0123456789abcdef',
+    });
     expect(quickSetupConfig({ hash: '#setup=short', protocol: 'https:', host: 'relay.example.com' } as Location)).toBeNull();
     expect(quickSetupConfig({ hash: '#setup=0123456789abcdef', protocol: 'javascript:', host: 'bad' } as Location)).toBeNull();
+    expect(quickSetupConfig({
+      hash: '#setup=0123456789abcdef&relay=javascript%3Aalert(1)',
+      protocol: 'https:',
+      host: 'app.example.com',
+    } as Location)).toBeNull();
+    expect(quickSetupConfig({
+      hash: '#setup=0123456789abcdef&relay=wss%3A%2F%2Fuser%40relay.example.com',
+      protocol: 'https:',
+      host: 'app.example.com',
+    } as Location)).toBeNull();
 
     const encoded = encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', host: 'Fedora', action: 'approve', index: 0, total: 3 }));
     expect(parseNotificationTarget(encoded)).toMatchObject({ pane_id: 'w1:p1', action: 'approve', index: 0, total: 3 });

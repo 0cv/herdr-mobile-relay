@@ -23,6 +23,11 @@ if [ -z "$PLAYWRIGHT_VERSION" ]; then
     echo "Could not determine the pinned Playwright version from frontend/package.json" >&2
     exit 1
 fi
+WEBKIT_WORKERS="${HERDR_WEBKIT_WORKERS:-2}"
+if ! [[ "$WEBKIT_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "HERDR_WEBKIT_WORKERS must be a positive integer." >&2
+    exit 1
+fi
 
 echo "Fedora detected: installing Chromium browser files without apt dependencies."
 npm exec -- playwright install chromium
@@ -37,4 +42,6 @@ podman run --rm \
     -v "$REPO_DIR/web:/work/web:ro" \
     -w /work/frontend \
     "mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble" \
-    npx playwright test --project=webkit-mobile --output=/tmp/playwright-results
+    npx playwright test --project=webkit-mobile \
+        --workers="$WEBKIT_WORKERS" \
+        --output=/tmp/playwright-results

@@ -2,6 +2,7 @@ import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setTerminalHistoryLines } from '$lib/preferences';
 import { relayStore } from '$lib/store';
+import { pendingRelayUpdate } from '$lib/updates';
 
 class MockWebSocket {
   static CONNECTING = 0;
@@ -25,6 +26,7 @@ class MockWebSocket {
 describe('relay command store', () => {
   beforeEach(() => {
     MockWebSocket.instances = [];
+    sessionStorage.clear();
     vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
@@ -61,6 +63,108 @@ describe('relay command store', () => {
     await expect(relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' })).rejects.toThrow(/protocol v1/);
   });
 
+  it('checks and schedules an exact relay update across a protocol mismatch', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 99,
+      version: 'abc123',
+      release_version: '0.7.0',
+      revision: 'abc123',
+      capabilities: ['self_update'],
+      agent_profiles: [],
+      update: {
+        state: 'available',
+        current_version: '0.7.0',
+        current_revision: 'abc123',
+        available_version: '0.8.0',
+        available_revision: 'f'.repeat(12),
+        target_revision: 'f'.repeat(40),
+        can_install: true,
+        mode: 'local',
+      },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+
+    const checking = relayStore.checkRelayUpdate(relayId);
+    const checkCommand = JSON.parse(socket.sent.at(-1)!);
+    expect(checkCommand).toMatchObject({ type: 'check_update', protocol: 2 });
+    socket.message({
+      type: 'command_result',
+      request_id: checkCommand.request_id,
+      ok: true,
+      phase: 'confirmed',
+      data: {
+        update: {
+          state: 'available',
+          current_version: '0.7.0',
+          available_version: '0.8.0',
+          target_revision: 'f'.repeat(40),
+          can_install: true,
+          mode: 'local',
+        },
+      },
+    });
+    await checking;
+
+    const installing = relayStore.installRelayUpdate(relayId);
+    const installCommand = JSON.parse(socket.sent.at(-1)!);
+    expect(installCommand).toMatchObject({
+      type: 'install_update',
+      expected_version: '0.8.0',
+      expected_revision: 'f'.repeat(40),
+      protocol: 2,
+    });
+    socket.message({
+      type: 'command_result',
+      request_id: installCommand.request_id,
+      ok: true,
+      phase: 'scheduled',
+      data: { update: { state: 'scheduled', target_revision: 'f'.repeat(40) } },
+    });
+    await installing;
+
+    expect(pendingRelayUpdate(relayId)).toEqual({
+      version: '0.8.0',
+      revision: 'f'.repeat(40),
+    });
+  });
+
+  it('clears a pending relay update after an explicit scheduling failure', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      release_version: '0.7.0',
+      revision: 'abc123',
+      capabilities: ['self_update'],
+      agent_profiles: [],
+      update: {
+        state: 'available',
+        available_version: '0.8.0',
+        target_revision: 'e'.repeat(40),
+        can_install: true,
+      },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const installing = relayStore.installRelayUpdate(relayId);
+    const command = JSON.parse(socket.sent.at(-1)!);
+
+    socket.message({
+      type: 'command_result',
+      request_id: command.request_id,
+      ok: false,
+      phase: 'failed',
+      error: 'Update changed',
+      data: { update: { state: 'failed', error: 'Update changed' } },
+    });
+
+    await expect(installing).rejects.toThrow('Update changed');
+    expect(pendingRelayUpdate(relayId)).toBeNull();
+  });
+
   it('requests a fresh agent snapshot on connect and on demand', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -70,6 +174,36 @@ describe('relay command store', () => {
     expect(socket.sent.map((payload) => JSON.parse(payload).type)).toEqual([
       'refresh_agents',
       'refresh_agents',
+    ]);
+  });
+
+  it('privately registers the hosting origin when running as an installed app', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: true,
+      media: '(display-mode: standalone)',
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })));
+    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: 'secret' });
+
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    const sent = socket.sent.map((payload) => JSON.parse(payload));
+
+    expect(sent).toEqual([
+      {
+        type: 'register_app_origin',
+        origin: location.origin,
+        protocol: 2,
+      },
+      { type: 'refresh_agents' },
     ]);
   });
 

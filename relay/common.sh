@@ -284,7 +284,197 @@ host_label() {
 # link. The token passes through argv, briefly visible in ps; this matches the
 # pre-existing pattern and lasts only for the interpreter startup.
 build_setup_fragment() {
-    uv run python -c 'import sys, urllib.parse; print(urllib.parse.urlencode({"setup": sys.argv[1], "label": sys.argv[2]}))' "$1" "$2"
+    uv run python -c 'import sys, urllib.parse; values = {"setup": sys.argv[1], "label": sys.argv[2]}; relay = sys.argv[3] if len(sys.argv) > 3 else ""; values.update({"relay": relay} if relay else {}); print(urllib.parse.urlencode(values))' "$1" "$2" "${3:-}"
+}
+
+phone_app_base_url() {
+    local relay_fallback="$1"
+    local env_file="${2:-${HERDR_RELAY_ENV:-}}"
+    local app_url="${HERDR_PHONE_APP_URL:-}"
+    local normalized
+    local recorded_origin
+
+    if [ -z "$app_url" ] && [ -n "$env_file" ]; then
+        recorded_origin="$(dirname "$env_file")/phone-app-origin"
+        if [ -r "$recorded_origin" ]; then
+            app_url="$(head -1 "$recorded_origin")"
+        fi
+    fi
+    if [ -z "$app_url" ] || [ "$app_url" = "relay" ]; then
+        app_url="$relay_fallback"
+    fi
+    if ! normalized="$(uv run python -c '
+import sys
+import urllib.parse
+
+try:
+    value = sys.argv[1].strip()
+    if "://" not in value:
+        value = f"https://{value}"
+    parsed = urllib.parse.urlsplit(value)
+    port = parsed.port
+except ValueError:
+    raise SystemExit(1)
+loopback_http = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+if (
+    (parsed.scheme != "https" and not loopback_http)
+    or not parsed.hostname
+    or parsed.username
+    or parsed.password
+    or parsed.path not in {"", "/"}
+    or parsed.query
+    or parsed.fragment
+    or any(ord(character) < 33 for character in parsed.netloc)
+):
+    raise SystemExit(1)
+print(f"{parsed.scheme}://{parsed.netloc}")
+' "$app_url")"; then
+        echo "✗ Enter a domain or HTTPS URL without a path, such as app.example.com." >&2
+        return 1
+    fi
+    printf '%s\n' "$normalized"
+}
+
+phone_app_origin_serves_herdr() {
+    local origin="$1"
+    local manifest
+
+    if ! manifest="$(
+        curl --fail --silent --show-error \
+            --connect-timeout 3 \
+            --max-time 8 \
+            "$origin/manifest.webmanifest" 2>/dev/null
+    )"; then
+        return 1
+    fi
+    printf '%s\n' "$manifest" \
+        | grep -Eq '"name"[[:space:]]*:[[:space:]]*"Herdr Mobile Relay"'
+}
+
+choose_phone_app_base_url() {
+    local relay_fallback="$1"
+    local env_file="$2"
+    local setup_kind="${3:-stable}"
+    local choice
+    local confirmation
+    local current_origin=""
+    local entered_url
+    local normalized
+    local recorded_origin
+
+    recorded_origin="$(dirname "$env_file")/phone-app-origin"
+    if [ -n "${HERDR_PHONE_APP_URL:-}" ] || [ ! -t 0 ]; then
+        phone_app_base_url "$relay_fallback" "$env_file"
+        return
+    fi
+
+    echo "Where should the phone setup link open?" >&2
+    echo "" >&2
+    if [ -s "$recorded_origin" ]; then
+        if current_origin="$(phone_app_base_url "$relay_fallback" "$env_file")"; then
+            echo "  Current phone app: $current_origin" >&2
+            echo "  Press Enter to keep it, or choose another option below." >&2
+            echo "" >&2
+        else
+            echo "  The saved phone app address is invalid; choose a replacement." >&2
+            echo "" >&2
+        fi
+    fi
+    if [ "$setup_kind" = "temporary" ]; then
+        echo "  1. This temporary relay (recommended for trying one relay)" >&2
+        echo "     Opens the TryCloudflare app. Its address changes after restart." >&2
+    else
+        echo "  1. This relay (recommended for one relay)" >&2
+        echo "     Uses this computer's verified hostname as the installed app." >&2
+    fi
+    echo "" >&2
+    echo "  2. An existing installed Herdr app" >&2
+    echo "     Adds this computer to the same app as your other relays." >&2
+    echo "" >&2
+    while true; do
+        if [ -n "$current_origin" ]; then
+            read -r -p "Choice [keep current]: " choice || choice="cancel"
+        else
+            read -r -p "Choice [1]: " choice || choice="cancel"
+        fi
+        if [ "$choice" = "cancel" ]; then
+            echo "" >&2
+            echo "Setup cancelled." >&2
+            return 1
+        fi
+        if [ -z "$choice" ] && [ -n "$current_origin" ]; then
+            printf '%s\n' "$current_origin"
+            return
+        fi
+        case "${choice:-1}" in
+            1)
+                HERDR_PHONE_APP_URL=relay phone_app_base_url "$relay_fallback" "$env_file"
+                return
+                ;;
+            2)
+                while true; do
+                    if ! read -r -p "Installed app domain or URL (for example, app.example.com): " entered_url; then
+                        echo "" >&2
+                        echo "Setup cancelled." >&2
+                        return 1
+                    fi
+                    if [ -z "$entered_url" ]; then
+                        echo "✗ Enter the domain shown in the installed app's Site settings." >&2
+                        continue
+                    fi
+                    if ! normalized="$(
+                        HERDR_PHONE_APP_URL="$entered_url" \
+                            phone_app_base_url "$relay_fallback" "$env_file"
+                    )"; then
+                        continue
+                    fi
+                    if ! phone_app_origin_serves_herdr "$normalized"; then
+                        echo "✗ No Herdr app was found at $normalized." >&2
+                        echo "  Enter the exact domain shown in the installed app's Site settings." >&2
+                        if ! read -r -p "Use this address anyway? [y/N]: " confirmation; then
+                            echo "" >&2
+                            echo "Setup cancelled." >&2
+                            return 1
+                        fi
+                        case "$confirmation" in
+                            y|Y|yes|YES|Yes)
+                                ;;
+                            *)
+                                continue
+                                ;;
+                        esac
+                    fi
+                    printf '%s\n' "$normalized"
+                    return
+                done
+                ;;
+            *)
+                echo "✗ Choose 1 or 2." >&2
+                ;;
+        esac
+    done
+}
+
+record_phone_app_origin() {
+    local origin="$1"
+    local env_file="$2"
+    local target
+    local temporary
+
+    if [ -z "$env_file" ]; then
+        echo "✗ Cannot record the phone app origin without a relay environment path." >&2
+        return 1
+    fi
+    target="$(dirname "$env_file")/phone-app-origin"
+    temporary="$target.tmp.$$"
+    (
+        umask 077
+        trap 'rm -f "$temporary"' EXIT
+        printf '%s\n' "$origin" > "$temporary"
+        chmod 600 "$temporary"
+        mv "$temporary" "$target"
+        trap - EXIT
+    )
 }
 
 # Prints an indented terminal QR code for the URL, or nothing when it cannot

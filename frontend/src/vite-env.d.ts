@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+
 import 'svelte/elements';
 
 declare module 'svelte/elements' {

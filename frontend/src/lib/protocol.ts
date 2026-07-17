@@ -7,7 +7,12 @@ export function relayProtocolError(connection: Pick<RelayConnectionView, 'protoc
   return `Incompatible relay protocol v${connection.protocol}; this app requires v${APP_PROTOCOL_VERSION}.`;
 }
 
-export function relayVersionMeta(connection: Pick<RelayConnectionView, 'status' | 'protocol' | 'version'> | null | undefined) {
+export function relayVersionMeta(
+  connection: (
+    Pick<RelayConnectionView, 'status' | 'protocol' | 'version'>
+    & Partial<Pick<RelayConnectionView, 'releaseVersion' | 'revision'>>
+  ) | null | undefined,
+) {
   if (!connection || connection.status !== 'connected' || !connection.protocol) return null;
   if (connection.protocol < APP_PROTOCOL_VERSION) {
     return {
@@ -24,7 +29,15 @@ export function relayVersionMeta(connection: Pick<RelayConnectionView, 'status' 
     };
   }
   if (!connection.version || connection.version === 'unknown') return null;
-  return { label: `relay ${connection.version}`, tone: 'muted' as const, title: 'Relay git revision.' };
+  const revision = connection.revision || connection.version;
+  if (connection.releaseVersion) {
+    return {
+      label: `v${connection.releaseVersion} · ${revision}`,
+      tone: 'muted' as const,
+      title: 'Relay product version and Git revision.',
+    };
+  }
+  return { label: `relay ${revision}`, tone: 'muted' as const, title: 'Relay git revision.' };
 }
 
 export function parseNotificationTarget(value: string): NotificationTarget | null {

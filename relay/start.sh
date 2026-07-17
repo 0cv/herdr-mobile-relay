@@ -119,13 +119,24 @@ if command -v cloudflared >/dev/null 2>&1; then
     fi
 
     HOST_LABEL="$(host_label)"
-    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
-    PHONE_URL="$URL/#$SETUP_FRAGMENT"
+    RELAY_URL="wss://${URL#https://}"
+    SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
+    PHONE_APP_BASE="$(choose_phone_app_base_url "$URL" "$ENV_FILE" temporary)"
+    if [ "$PHONE_APP_BASE" != "$URL" ]; then
+        record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
+    fi
+    PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+    DIRECT_URL="$URL/#$SETUP_FRAGMENT"
 
     echo ""
     echo "✓ Relay ready!"
     echo ""
     print_phone_setup "$PHONE_URL"
+    if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
+        echo ""
+        echo "  Direct browser fallback:"
+        echo "  $DIRECT_URL"
+    fi
     echo ""
     echo "  The phone app and relay are both served by this tunnel."
     echo "  The link configures this relay automatically and removes the token from the address bar."

@@ -5,12 +5,16 @@ import versions from '../build-versions.json' with { type: 'json' };
 import { compressedAssets } from './compressed-assets.mjs';
 
 const root = resolve(process.argv[2] || 'dist');
+const pluginManifest = await readFile(new URL('../../herdr-plugin.toml', import.meta.url), 'utf8');
+const productVersion = pluginManifest.match(/^version = "([0-9]+\.[0-9]+\.[0-9]+)"$/m)?.[1];
+if (!productVersion) throw new Error('herdr-plugin.toml must declare a MAJOR.MINOR.PATCH version');
 const required = [
   '_headers',
   'index.html',
   'manifest.webmanifest',
   'notification-icons.js',
   'sw.js',
+  'version.json',
   'assets/app.js',
   'assets/app.css',
   'icons/icon.svg',
@@ -54,8 +58,13 @@ if (/assets\/app\.(?:js|css)(?!\?v=)/.test(html)) {
   throw new Error('Application asset references must carry the manual cache-busting version');
 }
 
+const appVersion = JSON.parse(await readFile(join(root, 'version.json'), 'utf8'));
+if (appVersion.version !== productVersion || appVersion.assets !== versions.assets) {
+  throw new Error('version.json differs from herdr-plugin.toml or build-versions.json');
+}
+
 const headers = await readFile(join(root, '_headers'), 'utf8');
-for (const route of ['/sw.js', '/', '/index.html']) {
+for (const route of ['/sw.js', '/', '/index.html', '/version.json']) {
   const block = new RegExp(`(?:^|\\n)${route.replace('.', '\\.')}\\n(?:[ \\t]+[^\\n]+\\n)*[ \\t]+Cache-Control: no-cache(?:\\n|$)`);
   if (!block.test(headers)) throw new Error(`_headers does not preserve no-cache for ${route}`);
 }

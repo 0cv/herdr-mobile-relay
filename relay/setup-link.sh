@@ -45,12 +45,22 @@ if [ -z "$TUNNEL_HOST" ]; then
 fi
 
 HOST_LABEL="$(host_label)"
-SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
-PHONE_URL="https://$TUNNEL_HOST/#$SETUP_FRAGMENT"
+RELAY_URL="wss://$TUNNEL_HOST"
+SETUP_FRAGMENT="$(build_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL" "$RELAY_URL")"
+PHONE_APP_FALLBACK="https://$TUNNEL_HOST"
+PHONE_APP_BASE="$(choose_phone_app_base_url "$PHONE_APP_FALLBACK" "$ENV_FILE" stable)"
+record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
+PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+DIRECT_URL="$PHONE_APP_FALLBACK/#$SETUP_FRAGMENT"
 
 echo "🐑 Herdr Mobile Relay phone setup"
 echo ""
 print_phone_setup "$PHONE_URL"
+if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
+    echo ""
+    echo "  Direct browser fallback:"
+    echo "  $DIRECT_URL"
+fi
 echo ""
 echo "  The relay and tunnel must be running for the link to work:"
 echo "  make service-status"

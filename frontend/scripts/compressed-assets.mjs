@@ -5,5 +5,6 @@ export const compressedAssets = [
   'notification-icons.js',
   'sw.js',
   'manifest.webmanifest',
+  'version.json',
   'icons/icon.svg',
 ];

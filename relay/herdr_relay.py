@@ -25,6 +25,25 @@ from collections import deque
 from pathlib import Path
 
 try:
+    from update_support import (
+        check_for_update,
+        launch_update_job,
+        product_version,
+        read_update_state,
+        state_file,
+        write_json_atomic,
+    )
+except ModuleNotFoundError:
+    from relay.update_support import (
+        check_for_update,
+        launch_update_job,
+        product_version,
+        read_update_state,
+        state_file,
+        write_json_atomic,
+    )
+
+try:
     from websockets.asyncio.server import serve
 except ImportError:
     from websockets.server import serve
@@ -58,6 +77,8 @@ def default_herdr_bin():
 
 
 HERDR = os.environ.get("HERDR_BIN") or default_herdr_bin()
+REPO_ROOT = Path(__file__).resolve().parent.parent
+RUNTIME_DIR = default_runtime_dir()
 WS_HOST = os.environ.get("HERDR_RELAY_HOST", "127.0.0.1")
 WS_PORT = int(os.environ.get("HERDR_RELAY_PORT", "8375"))
 POLL_INTERVAL = float(os.environ.get("HERDR_RELAY_POLL_INTERVAL", "2"))
@@ -74,6 +95,7 @@ ALLOWED_ORIGINS = {
 LOCAL_HOST = socket.gethostname().split(".")[0] or "local"
 PUSH_DIR = default_runtime_dir() / "push"
 PUSH_SUBSCRIPTIONS_FILE = PUSH_DIR / "subscriptions.json"
+PHONE_APP_ORIGIN_FILE = RUNTIME_DIR / "phone-app-origin"
 VAPID_PRIVATE_KEY_FILE = PUSH_DIR / "vapid_private.pem"
 VAPID_SUBJECT = f"mailto:herdr-mobile-relay@{LOCAL_HOST}.local"
 VAPID_PUBLIC_KEY = None
@@ -118,7 +140,12 @@ AGENT_PROFILE_CANDIDATES = {
     "opencode": "OpenCode",
 }
 MACOS_PROTECTED_HOME_DIRECTORIES = {"Desktop", "Documents", "Downloads"}
-RELAY_CAPABILITIES = ["directory_browser", "structured_questions", "slash_commands"]
+RELAY_CAPABILITIES = [
+    "directory_browser",
+    "self_update",
+    "structured_questions",
+    "slash_commands",
+]
 # Version 2 adds staged Claude Code question answers. Bump together with
 # APP_PROTOCOL_VERSION in frontend/src/lib/protocol.ts whenever mutations change incompatibly.
 PROTOCOL_VERSION = 2
@@ -138,6 +165,7 @@ MUTATING_MESSAGE_TYPES = frozenset({
     "agent_clear",
     "agent_restart",
     "acknowledge_pane",
+    "install_update",
     "upload_image",
 })
 POLL_WAKE_ACTIONS = frozenset({
@@ -300,6 +328,10 @@ def client_protocol_matches(msg):
 
 
 RELAY_VERSION = detect_relay_version()
+RELEASE_VERSION = product_version(REPO_ROOT)
+UPDATE_CHECK_INTERVAL = 24 * 60 * 60
+UPDATE_STATUS = read_update_state(RUNTIME_DIR, RELEASE_VERSION, RELAY_VERSION)
+update_check_lock = asyncio.Lock()
 
 TOOL_OPTIONS = ["yes, single permission", "trust, always allow", "no (tab to edit)"]
 SUBAGENT_OPTIONS = ["approve all pending", "configure individually", "exit (cancel subagents)"]
@@ -1551,6 +1583,46 @@ def ensure_private_dir(path):
         pass
 
 
+def normalize_phone_app_origin(value):
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+        parsed.port
+    except ValueError:
+        return ""
+    loopback_http = (
+        parsed.scheme == "http"
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    )
+    if parsed.scheme != "https" and not loopback_http:
+        return ""
+    if (
+        not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or any(ord(character) < 33 for character in parsed.netloc)
+    ):
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def store_phone_app_origin(value):
+    origin = normalize_phone_app_origin(value)
+    if not origin:
+        return False
+    temp = PHONE_APP_ORIGIN_FILE.with_suffix(".tmp")
+    try:
+        ensure_private_dir(PHONE_APP_ORIGIN_FILE.parent)
+        temp.write_text(origin + "\n", encoding="utf-8")
+        os.chmod(temp, 0o600)
+        os.replace(temp, PHONE_APP_ORIGIN_FILE)
+    except OSError:
+        return False
+    return True
+
+
 def prune_uploads():
     """Delete uploaded images past UPLOAD_MAX_AGE_DAYS; they only need to live
     long enough for the agent to read them."""
@@ -2318,6 +2390,177 @@ async def broadcast_serialized(data):
     clients.difference_update(dead)
 
 
+def public_update_status(status=None):
+    source = status if isinstance(status, dict) else UPDATE_STATUS
+    return {
+        key: source.get(key, default)
+        for key, default in (
+            ("state", "checking"),
+            ("current_version", RELEASE_VERSION),
+            ("current_revision", RELAY_VERSION),
+            ("available_version", ""),
+            ("available_revision", ""),
+            ("target_revision", ""),
+            ("checked_at", 0),
+            ("can_install", False),
+            ("mode", ""),
+            ("reason", ""),
+            ("error", ""),
+        )
+    }
+
+
+async def publish_update_status():
+    await broadcast({"type": "update_status", "update": public_update_status()})
+
+
+async def refresh_update_status():
+    global UPDATE_STATUS
+    if update_check_lock.locked():
+        return UPDATE_STATUS
+    async with update_check_lock:
+        UPDATE_STATUS = UPDATE_STATUS | {"state": "checking", "error": ""}
+        await publish_update_status()
+        try:
+            UPDATE_STATUS = await asyncio.to_thread(
+                check_for_update,
+                REPO_ROOT,
+                RUNTIME_DIR,
+                HERDR,
+            )
+        except Exception as exc:
+            UPDATE_STATUS = UPDATE_STATUS | {
+                "state": "failed",
+                "can_install": False,
+                "error": compact_text(str(exc), 500),
+            }
+        await publish_update_status()
+        return UPDATE_STATUS
+
+
+async def update_check_loop():
+    while True:
+        await refresh_update_status()
+        await asyncio.sleep(UPDATE_CHECK_INTERVAL)
+
+
+async def update_state_watch_loop():
+    global UPDATE_STATUS
+    previous = json.dumps(public_update_status(), sort_keys=True)
+    while True:
+        await asyncio.sleep(1)
+        loaded = await asyncio.to_thread(
+            read_update_state,
+            RUNTIME_DIR,
+            RELEASE_VERSION,
+            RELAY_VERSION,
+        )
+        serialized = json.dumps(public_update_status(loaded), sort_keys=True)
+        if serialized == previous:
+            continue
+        UPDATE_STATUS = loaded
+        previous = serialized
+        await publish_update_status()
+
+
+async def handle_check_update_command(ws, msg):
+    status = await refresh_update_status()
+    await send_command_result(
+        ws,
+        request_id_for(msg),
+        "check_update",
+        True,
+        data={"update": public_update_status(status)},
+    )
+
+
+async def handle_install_update_command(ws, msg):
+    global UPDATE_STATUS
+    request_id = request_id_for(msg)
+    expected_version = str(msg.get("expected_version") or "")
+    expected_revision = str(msg.get("expected_revision") or "")
+    if UPDATE_STATUS.get("state") != "available" or UPDATE_STATUS.get("can_install") is not True:
+        await send_command_result(
+            ws,
+            request_id,
+            "install_update",
+            False,
+            phase="failed",
+            error=str(UPDATE_STATUS.get("reason") or "No installable update is available"),
+            data={"update": public_update_status()},
+        )
+        return
+    if (
+        expected_version != UPDATE_STATUS.get("available_version")
+        or expected_revision != UPDATE_STATUS.get("target_revision")
+    ):
+        await send_command_result(
+            ws,
+            request_id,
+            "install_update",
+            False,
+            phase="failed",
+            error="The advertised update changed; check again before installing",
+            data={"update": public_update_status()},
+        )
+        return
+    scheduled = UPDATE_STATUS | {
+        "state": "scheduled",
+        "can_install": False,
+        "reason": "",
+        "error": "",
+    }
+    try:
+        write_json_atomic(state_file(RUNTIME_DIR), scheduled)
+    except Exception as exc:
+        await send_command_result(
+            ws,
+            request_id,
+            "install_update",
+            False,
+            phase="failed",
+            error=f"Could not persist the update request: {compact_text(str(exc), 400)}",
+            data={"update": public_update_status()},
+        )
+        return
+    UPDATE_STATUS = scheduled
+    await publish_update_status()
+    try:
+        job = await asyncio.to_thread(
+            launch_update_job,
+            REPO_ROOT,
+            RUNTIME_DIR,
+            HERDR,
+            os.environ.get("HERDR_RELAY_ENV", ""),
+            scheduled,
+        )
+    except Exception as exc:
+        UPDATE_STATUS = scheduled | {
+            "state": "failed",
+            "error": compact_text(str(exc), 500),
+        }
+        write_json_atomic(state_file(RUNTIME_DIR), UPDATE_STATUS)
+        await publish_update_status()
+        await send_command_result(
+            ws,
+            request_id,
+            "install_update",
+            False,
+            phase="failed",
+            error=UPDATE_STATUS["error"],
+            data={"update": public_update_status()},
+        )
+        return
+    await send_command_result(
+        ws,
+        request_id,
+        "install_update",
+        True,
+        phase="scheduled",
+        data={"job": job, "update": public_update_status()},
+    )
+
+
 BLOCKED_AGENT_DETAIL_FIELDS = (
     "prompt",
     "command",
@@ -2671,7 +2914,13 @@ def web_asset_path(request_path):
         if any(segment in {"", ".", ".."} for segment in segments):
             return None
     relative = "index.html" if path in {"", "/"} else path.lstrip("/")
-    root_assets = {"index.html", "manifest.webmanifest", "notification-icons.js", "sw.js"}
+    root_assets = {
+        "index.html",
+        "manifest.webmanifest",
+        "notification-icons.js",
+        "sw.js",
+        "version.json",
+    }
     compiled_assets = {"assets/app.js", "assets/app.css"}
     if (
         relative not in root_assets
@@ -2728,6 +2977,8 @@ async def process_request(connection, request):
             "status": "ok",
             "instance": RELAY_INSTANCE_ID,
             "version": RELAY_VERSION,
+            "release_version": RELEASE_VERSION,
+            "revision": RELAY_VERSION,
             "protocol": PROTOCOL_VERSION,
         }).encode() + b"\n"
         headers = Headers([("Content-Type", "application/json; charset=utf-8")])
@@ -3924,6 +4175,9 @@ async def handle_client(ws):
             "host": LOCAL_HOST,
             "protocol": PROTOCOL_VERSION,
             "version": RELAY_VERSION,
+            "release_version": RELEASE_VERSION,
+            "revision": RELAY_VERSION,
+            "update": public_update_status(),
             "capabilities": RELAY_CAPABILITIES,
             "agent_profiles": [
                 {"id": profile["id"], "label": profile["label"]}
@@ -3944,10 +4198,18 @@ async def handle_client(ws):
             if not isinstance(msg, dict):
                 continue
             msg_type = msg.get("type")
-            if msg_type in MUTATING_MESSAGE_TYPES and not client_protocol_matches(msg):
+            if (
+                msg_type in MUTATING_MESSAGE_TYPES
+                and msg_type != "install_update"
+                and not client_protocol_matches(msg)
+            ):
                 await reject_incompatible_client_protocol(ws, msg)
                 continue
-            if msg_type == "answer_question":
+            if msg_type == "check_update":
+                await handle_check_update_command(ws, msg)
+            elif msg_type == "install_update":
+                await handle_install_update_command(ws, msg)
+            elif msg_type == "answer_question":
                 await handle_answer_question_command(ws, msg)
             elif msg_type == "navigate_question":
                 await handle_navigate_question_command(ws, msg)
@@ -3977,6 +4239,9 @@ async def handle_client(ws):
                     "type": "activity_history",
                     "activities": await asyncio.to_thread(load_activity, msg.get("limit", ACTIVITY_MAX_ITEMS)),
                 })
+            elif msg_type == "register_app_origin":
+                if client_protocol_matches(msg):
+                    await asyncio.to_thread(store_phone_app_origin, msg.get("origin"))
             elif msg_type == "refresh_agents":
                 cached_agents = json.loads(latest_agents_message)
                 if await safe_send_json(ws, cached_agents):
@@ -4135,6 +4400,8 @@ async def main():
     asyncio.create_task(poll_loop())
     asyncio.create_task(event_push())
     asyncio.create_task(prune_uploads_loop())
+    asyncio.create_task(update_check_loop())
+    asyncio.create_task(update_state_watch_loop())
     server = await serve(handle_client, WS_HOST, WS_PORT, process_request=process_request, max_size=WS_MAX_SIZE)
     print(f"Herdr Mobile Relay {RELAY_VERSION} on {WS_HOST}:{WS_PORT} (WebSocket + phone app)")
     print(f"  polling: {LOCAL_HOST}")

@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 import os
+import pty
 import re
 import socket
 import subprocess
@@ -440,6 +441,328 @@ Production-like verification.
         }
         self.assertEqual(keys, {"HERDR_RELAY_TOKEN", "CLOUDFLARED_CONFIG"})
 
+    def test_phone_setup_fragment_carries_the_explicit_relay_url(self):
+        root = RELAY_PATH.parents[1]
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                '. "$1"; build_setup_fragment "$2" "$3" "$4"',
+                "bash",
+                str(root / "relay" / "common.sh"),
+                "0123456789abcdef0123456789abcdef",
+                "Fedora Workstation",
+                "wss://relay-fedora.example.com",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(
+            urllib.parse.parse_qs(result.stdout.strip()),
+            {
+                "setup": ["0123456789abcdef0123456789abcdef"],
+                "label": ["Fedora Workstation"],
+                "relay": ["wss://relay-fedora.example.com"],
+            },
+        )
+
+    def test_phone_app_base_url_prefers_private_record_then_falls_back_to_relay(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Path(temp_dir)
+            env_file = runtime / "relay.env"
+            env_file.write_text("HERDR_RELAY_TOKEN=test\n")
+            origin_file = runtime / "phone-app-origin"
+            origin_file.write_text("https://app.example.com\n")
+            command = [
+                "bash",
+                "-c",
+                '. "$1"; phone_app_base_url "$2" "$3"',
+                "bash",
+                str(root / "relay" / "common.sh"),
+                "https://relay-fedora.example.com",
+                str(env_file),
+            ]
+
+            recorded = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            origin_file.unlink()
+            fallback = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(recorded.stdout.strip(), "https://app.example.com")
+        self.assertEqual(fallback.stdout.strip(), "https://relay-fedora.example.com")
+
+    def test_phone_app_origin_shell_record_is_private_and_replaceable(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Path(temp_dir)
+            env_file = runtime / "relay.env"
+            env_file.write_text("HERDR_RELAY_TOKEN=test\n")
+            command = [
+                "bash",
+                "-c",
+                '. "$1"; record_phone_app_origin "$2" "$3"',
+                "bash",
+                str(root / "relay" / "common.sh"),
+                "https://app.example.com",
+                str(env_file),
+            ]
+
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            command[-2] = "https://replacement.example.com"
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            target = runtime / "phone-app-origin"
+
+            self.assertEqual(target.read_text(), "https://replacement.example.com\n")
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_guided_setup_link_prompts_for_and_records_existing_installed_app(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Path(temp_dir)
+            env_file = runtime / "relay.env"
+            env_file.write_text("HERDR_RELAY_TOKEN=test-token\n")
+            bin_dir = runtime / "bin"
+            bin_dir.mkdir()
+            fake_uv = bin_dir / "uv"
+            fake_uv.write_text(
+                "#!/bin/bash\n"
+                "case \"$*\" in\n"
+                "  *urllib.parse.urlencode*) echo 'setup=fake-token&label=workstation&relay=wss%3A%2F%2Frelay.example.test' ;;\n"
+                "  *urllib.parse.urlsplit*) value=\"${!#}\"; case \"$value\" in *://*) ;; *) value=\"https://$value\" ;; esac; echo \"${value%/}\" ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n"
+            )
+            fake_uv.chmod(0o700)
+            local_bin = runtime / ".local" / "bin"
+            local_bin.mkdir(parents=True)
+            fake_curl = local_bin / "curl"
+            fake_curl.write_text('#!/bin/bash\nprintf \'{"name":"Herdr Mobile Relay"}\\n\'\n')
+            fake_curl.chmod(0o700)
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(runtime),
+                "HERDR_RELAY_ENV": str(env_file),
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "TERM": "dumb",
+            })
+            env.pop("HERDR_PHONE_APP_URL", None)
+            master, slave = pty.openpty()
+            try:
+                process = subprocess.Popen(
+                    [
+                        "bash",
+                        str(root / "relay" / "setup-link.sh"),
+                        "relay.example.test",
+                    ],
+                    stdin=slave,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                )
+                os.close(slave)
+                slave = -1
+                os.write(master, b"2\napp.example.com\n")
+                stdout, stderr = process.communicate(timeout=10)
+            finally:
+                os.close(master)
+                if slave >= 0:
+                    os.close(slave)
+
+            target = runtime / "phone-app-origin"
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertIn("Where should the phone setup link open?", stderr)
+            self.assertIn("This relay (recommended for one relay)", stderr)
+            self.assertIn("An existing installed Herdr app", stderr)
+            self.assertIn("Installed app domain or URL", stderr)
+            self.assertEqual(target.read_text(), "https://app.example.com\n")
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_guided_phone_app_origin_reprompts_and_adds_https(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Path(temp_dir)
+            env_file = runtime / "relay.env"
+            env_file.write_text("HERDR_RELAY_TOKEN=test-token\n")
+            bin_dir = runtime / "bin"
+            bin_dir.mkdir()
+            fake_curl = bin_dir / "curl"
+            fake_curl.write_text(
+                "#!/bin/bash\n"
+                'case "${!#}" in\n'
+                "  *missing.example.com/*) exit 22 ;;\n"
+                '  *) printf \'{"name":"Herdr Mobile Relay"}\\n\' ;;\n'
+                "esac\n"
+            )
+            fake_curl.chmod(0o700)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env.pop("HERDR_PHONE_APP_URL", None)
+            master, slave = pty.openpty()
+            try:
+                process = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        '. "$1"; choose_phone_app_base_url "$2" "$3" stable',
+                        "bash",
+                        str(root / "relay" / "common.sh"),
+                        "https://relay.example.test",
+                        str(env_file),
+                    ],
+                    stdin=slave,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                )
+                os.close(slave)
+                slave = -1
+                os.write(
+                    master,
+                    b"2\napp.example.com/path\nmissing.example.com\n\napp.example.com\n",
+                )
+                stdout, stderr = process.communicate(timeout=10)
+            finally:
+                os.close(master)
+                if slave >= 0:
+                    os.close(slave)
+
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertEqual(stdout.strip(), "https://app.example.com")
+            self.assertIn("Enter a domain or HTTPS URL without a path", stderr)
+            self.assertIn("No Herdr app was found at https://missing.example.com", stderr)
+            self.assertEqual(stderr.count("Installed app domain or URL"), 3)
+
+    def test_guided_phone_app_origin_shows_and_reuses_the_saved_choice(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Path(temp_dir)
+            env_file = runtime / "relay.env"
+            env_file.write_text("HERDR_RELAY_TOKEN=test-token\n")
+            (runtime / "phone-app-origin").write_text("https://app.example.com\n")
+            env = os.environ.copy()
+            env.pop("HERDR_PHONE_APP_URL", None)
+            master, slave = pty.openpty()
+            try:
+                process = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        '. "$1"; choose_phone_app_base_url "$2" "$3" stable',
+                        "bash",
+                        str(root / "relay" / "common.sh"),
+                        "https://relay.example.test",
+                        str(env_file),
+                    ],
+                    stdin=slave,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                )
+                os.close(slave)
+                slave = -1
+                os.write(master, b"\n")
+                stdout, stderr = process.communicate(timeout=10)
+            finally:
+                os.close(master)
+                if slave >= 0:
+                    os.close(slave)
+
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertEqual(stdout.strip(), "https://app.example.com")
+            self.assertIn("Current phone app: https://app.example.com", stderr)
+            self.assertIn("Choice [keep current]:", stderr)
+
+    def test_guided_temporary_setup_defaults_to_its_own_relay_app(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime = Path(temp_dir)
+            env_file = runtime / "relay.env"
+            env_file.write_text("HERDR_RELAY_TOKEN=test-token\n")
+            bin_dir = runtime / "bin"
+            bin_dir.mkdir()
+            fake_uv = bin_dir / "uv"
+            fake_uv.write_text(
+                "#!/bin/bash\n"
+                "case \"$*\" in\n"
+                "  *urllib.parse.urlsplit*) value=\"${!#}\"; echo \"${value%/}\" ;;\n"
+                "  *) exit 1 ;;\n"
+                "esac\n"
+            )
+            fake_uv.chmod(0o700)
+            env = os.environ.copy()
+            env.update({
+                "HOME": str(runtime),
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "TERM": "dumb",
+            })
+            env.pop("HERDR_PHONE_APP_URL", None)
+            master, slave = pty.openpty()
+            try:
+                process = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        '. "$1"; choose_phone_app_base_url "$2" "$3" temporary',
+                        "bash",
+                        str(root / "relay" / "common.sh"),
+                        "https://temporary.trycloudflare.com",
+                        str(env_file),
+                    ],
+                    stdin=slave,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=env,
+                )
+                os.close(slave)
+                slave = -1
+                os.write(master, b"\n")
+                stdout, stderr = process.communicate(timeout=10)
+            finally:
+                os.close(master)
+                if slave >= 0:
+                    os.close(slave)
+
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertIn("This temporary relay", stderr)
+            self.assertIn("An existing installed Herdr app", stderr)
+            self.assertEqual(stdout.strip(), "https://temporary.trycloudflare.com")
+            self.assertFalse((runtime / "phone-app-origin").exists())
+
+    def test_phone_app_origin_is_validated_and_stored_privately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "runtime" / "phone-app-origin"
+            with patch.object(relay, "PHONE_APP_ORIGIN_FILE", target):
+                for invalid in (
+                    "http://app.example.com",
+                    "javascript:alert(1)",
+                    "https://user@app.example.com",
+                    "https://app.example.com/path",
+                    "https://app.example.com?query=1",
+                    "https://app.example.com:invalid",
+                ):
+                    self.assertFalse(relay.store_phone_app_origin(invalid), invalid)
+
+                self.assertTrue(relay.store_phone_app_origin("https://app.example.com/"))
+
+            self.assertEqual(target.read_text(), "https://app.example.com\n")
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
     def test_relay_env_generates_one_stable_internal_instance_id(self):
         root = RELAY_PATH.parents[1]
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -481,6 +804,7 @@ Production-like verification.
                 "manifest.webmanifest",
                 "notification-icons.js",
                 "sw.js",
+                "version.json",
                 "assets/app.js",
                 "assets/app.css",
                 "icons/icon.svg",
@@ -498,6 +822,7 @@ Production-like verification.
                         "/manifest.webmanifest",
                         "/notification-icons.js",
                         "/sw.js",
+                        "/version.json",
                         "/assets/app.js",
                         "/assets/app.css",
                         "/icons/icon.svg",
@@ -758,6 +1083,9 @@ Production-like verification.
         self.assertIn('id = "install-service"', manifest)
         self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "install-service"]', manifest)
         self.assertIn('command = ["bash", "relay/plugin-install-service.sh"]', manifest)
+        self.assertIn('id = "setup-link"', manifest)
+        self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "setup-link"]', manifest)
+        self.assertIn('command = ["bash", "relay/plugin-setup-link.sh"]', manifest)
         self.assertIn('id = "stable-teardown"', manifest)
         self.assertIn('command = ["bash", "relay/open-plugin-pane.sh", "stable-teardown"]', manifest)
         self.assertIn('command = ["bash", "relay/plugin-stable-teardown.sh"]', manifest)
@@ -1118,6 +1446,7 @@ Production-like verification.
             for name, output in (
                 ("plugin-quick-start.sh", "quick"),
                 ("plugin-install-service.sh", "stable"),
+                ("plugin-setup-link.sh", "link"),
                 ("plugin-stable-teardown.sh", "teardown"),
             ):
                 script = temp / name
@@ -1131,12 +1460,47 @@ Production-like verification.
                 ["bash", str(menu)], input="2\n", capture_output=True, text=True, check=True,
             )
             teardown = subprocess.run(
+                ["bash", str(menu)], input="4\n", capture_output=True, text=True, check=True,
+            )
+            setup_link = subprocess.run(
                 ["bash", str(menu)], input="3\n", capture_output=True, text=True, check=True,
             )
 
         self.assertTrue(quick.stdout.rstrip().endswith("quick"))
         self.assertTrue(stable.stdout.rstrip().endswith("stable"))
+        self.assertTrue(setup_link.stdout.rstrip().endswith("link"))
         self.assertTrue(teardown.stdout.rstrip().endswith("teardown"))
+
+    def test_plugin_setup_link_follows_the_installed_service_configuration(self):
+        root = RELAY_PATH.parents[1]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            home = temp / "home"
+            home.mkdir()
+            relay_env = temp / "checkout" / "relay" / ".env"
+            relay_env.parent.mkdir(parents=True)
+            relay_env.write_text("HERDR_RELAY_TOKEN=test-token\n")
+            write_service_env(home, relay_env)
+
+            for name in ("plugin-setup-link.sh", "common.sh"):
+                source = root / "relay" / name
+                target = temp / name
+                target.write_text(source.read_text())
+                target.chmod(0o700)
+            setup_link = temp / "setup-link.sh"
+            setup_link.write_text('#!/bin/sh\nprintf "resolved=%s\\n" "$HERDR_RELAY_ENV"\n')
+            setup_link.chmod(0o700)
+
+            result = subprocess.run(
+                ["bash", str(temp / "plugin-setup-link.sh")],
+                check=True,
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                env={**os.environ, "HOME": str(home), "HERDR_PLUGIN_CONFIG_DIR": str(temp / "plugin-config")},
+            )
+
+        self.assertIn(f"resolved={relay_env}", result.stdout)
 
     def test_relay_health_check_retries_until_detailed_health_is_ready(self):
         root = RELAY_PATH.parents[1]
@@ -2951,6 +3315,7 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
             "/assets/app.js?v=8": "text/javascript; charset=utf-8",
             "/assets/app.css?v=8": "text/css; charset=utf-8",
             "/notification-icons.js": "text/javascript; charset=utf-8",
+            "/version.json": "application/json; charset=utf-8",
             "/manifest.webmanifest": "application/manifest+json; charset=utf-8",
             "/icons/icon.svg": "image/svg+xml",
             "/icons/icon-192.png": "image/png",
@@ -3057,6 +3422,98 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertEqual(payload["instance"], relay.RELAY_INSTANCE_ID)
         self.assertEqual(payload["protocol"], relay.PROTOCOL_VERSION)
         self.assertEqual(payload["version"], relay.RELAY_VERSION)
+        self.assertEqual(payload["release_version"], PLUGIN_VERSION)
+        self.assertEqual(payload["revision"], relay.RELAY_VERSION)
+
+    async def test_update_check_returns_the_checked_status(self):
+        ws = FakeWebSocket()
+        status = {
+            "state": "available",
+            "current_version": PLUGIN_VERSION,
+            "current_revision": "abc123",
+            "available_version": "9.0.0",
+            "available_revision": "f" * 12,
+            "target_revision": "f" * 40,
+            "checked_at": 123,
+            "can_install": True,
+            "mode": "local",
+            "reason": "",
+            "error": "",
+        }
+        with patch.object(relay, "refresh_update_status", AsyncMock(return_value=status)):
+            await relay.handle_check_update_command(ws, {
+                "type": "check_update",
+                "request_id": "update-check-1",
+            })
+
+        self.assertEqual(ws.messages[-1]["type"], "command_result")
+        self.assertTrue(ws.messages[-1]["ok"])
+        self.assertEqual(ws.messages[-1]["data"]["update"]["target_revision"], "f" * 40)
+
+    async def test_update_install_requires_the_exact_advertised_release(self):
+        ws = FakeWebSocket()
+        status = {
+            "state": "available",
+            "current_version": PLUGIN_VERSION,
+            "current_revision": "abc123",
+            "available_version": "9.0.0",
+            "available_revision": "f" * 12,
+            "target_revision": "f" * 40,
+            "checked_at": 123,
+            "can_install": True,
+            "mode": "local",
+            "reason": "",
+            "error": "",
+        }
+        with patch.object(relay, "UPDATE_STATUS", status):
+            await relay.handle_install_update_command(ws, {
+                "type": "install_update",
+                "request_id": "update-install-1",
+                "expected_version": "9.0.0",
+                "expected_revision": "e" * 40,
+            })
+
+        self.assertFalse(ws.messages[-1]["ok"])
+        self.assertIn("changed", ws.messages[-1]["error"])
+
+    async def test_update_install_schedules_an_external_verified_job(self):
+        ws = FakeWebSocket()
+        status = {
+            "state": "available",
+            "current_version": PLUGIN_VERSION,
+            "current_revision": "abc123",
+            "available_version": "9.0.0",
+            "available_revision": "f" * 12,
+            "target_revision": "f" * 40,
+            "checked_at": 123,
+            "can_install": True,
+            "mode": "local",
+            "reason": "",
+            "error": "",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(relay, "UPDATE_STATUS", status),
+                patch.object(relay, "RUNTIME_DIR", Path(temp_dir)),
+                patch.object(relay, "publish_update_status", AsyncMock()),
+                patch.object(relay, "launch_update_job", return_value="update-job-1") as launch,
+                patch.object(
+                    relay.asyncio,
+                    "to_thread",
+                    AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+                ),
+            ):
+                await relay.handle_install_update_command(ws, {
+                    "type": "install_update",
+                    "request_id": "update-install-1",
+                    "expected_version": "9.0.0",
+                    "expected_revision": "f" * 40,
+                })
+
+        launch.assert_called_once()
+        self.assertTrue(ws.messages[-1]["ok"])
+        self.assertEqual(ws.messages[-1]["phase"], "scheduled")
+        self.assertEqual(ws.messages[-1]["data"]["job"], "update-job-1")
 
     async def test_incompatible_client_protocol_rejects_mutation(self):
         ws = FakeWebSocket()

@@ -58,6 +58,10 @@ EOF
 printf 'uv %s\n' "$*" >> "$STUB_LOG"
 case "$*" in
     *urllib.parse.urlencode*) echo 'setup=fake-token&label=workstation' ;;
+    *urllib.parse.urlsplit*)
+        value="${!#}"
+        echo "${value%/}"
+        ;;
 esac
 exit 0
 EOF
@@ -204,7 +208,7 @@ new_case() {
     export STUB_TUNNEL_UUID="$TUNNEL_UUID"
     export STUB_LOGIN_MARKER="$CASE_DIR/login-complete"
     export STUB_ROUTE_MARKER="$CASE_DIR/dns-routed"
-    unset CLOUDFLARED_CONFIG DISPLAY WAYLAND_DISPLAY
+    unset CLOUDFLARED_CONFIG DISPLAY WAYLAND_DISPLAY HERDR_PHONE_APP_URL
     unset STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE STUB_HTTP_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL
 }
@@ -250,9 +254,24 @@ test_success_and_alternate_port() {
     assert_contains "$HERDR_RELAY_ENV" 'HERDR_RELAY_INSTANCE_ID='
     assert_contains "$OUTPUT" 'Stable relay verified'
     assert_contains "$OUTPUT" 'Herdr Mobile Relay phone setup'
+    assert_contains "$OUTPUT" 'https://relay-workstation.example.test/#setup=fake-token'
+    assert_contains "$HOME/phone-app-origin" 'https://relay-workstation.example.test'
+    [ "$(/usr/bin/python3 -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777))' "$HOME/phone-app-origin")" = 0o600 ] \
+        || fail "phone app origin is not private"
     assert_contains "$STUB_LOG" 'cloudflared tunnel create --output json --credentials-file'
     assert_not_contains "$STUB_LOG" '--overwrite-dns'
     pass "successful creation uses the alternate relay port and prints QR only after verification"
+}
+
+test_existing_phone_app_origin() {
+    new_case
+    export HERDR_PHONE_APP_URL="https://app.example.test"
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with existing phone app"; }
+    assert_contains "$OUTPUT" 'https://app.example.test/#setup=fake-token'
+    assert_contains "$OUTPUT" 'Direct browser fallback:'
+    assert_contains "$HOME/phone-app-origin" 'https://app.example.test'
+    pass "guided setup records an existing installed app origin without baking it into the project"
 }
 
 test_creation_confirmation() {
@@ -421,8 +440,9 @@ test_teardown_ownership_and_dns_retention() {
     pass "teardown refuses foreign ownership and retains diagnosis when DNS remains"
 }
 
-echo "1..10"
+echo "1..11"
 test_success_and_alternate_port
+test_existing_phone_app_origin
 test_creation_confirmation
 test_existing_config_reuse
 test_login_guidance

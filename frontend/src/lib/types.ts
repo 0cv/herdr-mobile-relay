@@ -110,6 +110,9 @@ export interface RelayConnectionView {
   host: string;
   protocol: number;
   version: string;
+  releaseVersion: string;
+  revision: string;
+  update: RelayUpdateStatus;
   capabilities: string[];
   agentProfiles: AgentProfile[];
   directoryBrowser: DirectoryListing | null;
@@ -117,6 +120,43 @@ export interface RelayConnectionView {
   directoryError: string;
   pushStatus: string;
   vapidPublicKey: string;
+}
+
+export type RelayUpdateState =
+  | 'checking'
+  | 'current'
+  | 'available'
+  | 'blocked'
+  | 'scheduled'
+  | 'installing'
+  | 'restarting'
+  | 'succeeded'
+  | 'failed'
+  | 'rolled_back'
+  | 'unsupported';
+
+export interface RelayUpdateStatus {
+  state: RelayUpdateState;
+  current_version: string;
+  current_revision: string;
+  available_version: string;
+  available_revision: string;
+  target_revision: string;
+  checked_at: number;
+  can_install: boolean;
+  mode: string;
+  reason: string;
+  error: string;
+}
+
+export interface AppUpdateStatus {
+  state: 'checking' | 'current' | 'available' | 'failed';
+  currentVersion: string;
+  currentAssets: number;
+  availableVersion: string;
+  availableAssets: number;
+  checkedAt: number;
+  error: string;
 }
 
 export interface CommandResult {

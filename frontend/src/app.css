@@ -140,6 +140,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   backdrop-filter: blur(14px);
 }
 .app-header nav { display: flex; gap: .15rem; margin-left: auto; }
+.nav-button-shell { display: inline-flex; position: relative; }
+.nav-update-badge { background: var(--warning); border: 2px solid var(--background); border-radius: 50%; height: .62rem; pointer-events: none; position: absolute; right: .16rem; top: .16rem; width: .62rem; }
 .app-header.home-header > .status-dot { margin-inline-start: 1rem; }
 .header-title { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .header-title h1 { font-size: 1rem; line-height: 1.2; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -226,6 +228,10 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .relay-row { align-items: center; border-bottom: 1px solid var(--border); display: flex; gap: .65rem; padding: .75rem 0; }
 .relay-info { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .relay-info span, .relay-info small { color: var(--muted); font-size: .7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.relay-actions { display: flex; flex: 0 0 auto; flex-direction: column; gap: .3rem; }
+.update-command { background: var(--input); border: 1px solid var(--border); border-radius: .55rem; font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; padding: .7rem; user-select: text; white-space: pre-wrap; }
+.checkout-update { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: .85rem; }
+.checkout-update summary { cursor: pointer; font-size: .78rem; font-weight: 650; }
 .choice-grid { border: 0; display: grid; gap: .4rem; grid-template-columns: repeat(5, 1fr); margin: 0 0 1rem; padding: 0; }
 .choice-grid legend { font-size: .78rem; font-weight: 650; margin-bottom: .45rem; }
 .choice-grid button { background: var(--secondary); border: 1px solid var(--border); border-radius: .55rem; color: var(--foreground); font-size: .68rem; min-height: 2.5rem; padding: .4rem; text-transform: capitalize; }
