@@ -118,52 +118,91 @@ _DEFAULT_AGENT_PROFILE_CANDIDATES = {
     "opencode": "OpenCode",
 }
 
-# Default skill directories per agent profile id. These are used when the
-# INI config has no [skills] section or no entry for a particular agent.
+# Default skill directories per agent profile id. Entries are used when the
+# INI config has no ``[skills]`` section or no entry for a particular agent.
+#
+# The first directory in each list is treated as "personal" (user-level).
+# Subsequent directories are "project". Collisions are resolved by first
+# directory to provide a matching SKILL.md.
+#
+# OpenCode skill suggestions are omitted pending verification of its native
+# command syntax.
 _DEFAULT_SKILL_DIRS = {
     "pi": [
         "~/.pi/agent/skills",
     ],
-    "opencode": [
-        "~/.opencode/skills",
-        "~/.config/opencode/skills",
-    ],
 }
 
-_AGENT_PROFILES_INI = Path.home() / ".config" / "herdr" / "agent-profiles.ini"
+# INI file location — respects ``$XDG_CONFIG_HOME`` when set.
+_CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+_AGENT_PROFILES_INI = _CONFIG_HOME / "herdr" / "agent-profiles.ini"
 
 
-def _load_agent_profiles_from_config():
-    """Load agent profiles from ~/.config/herdr/agent-profiles.ini.
+def _read_agent_profiles_ini():
+    """Return a safe ``ConfigParser`` for agent-profiles.ini, or ``None``.
 
-    Expected INI section::
-
-        [profiles]
-        codex = Codex
-        claude = Claude Code
-        opencode = OpenCode
-        pi = Pi
-
-    Returns an ordered dict of ``id: label`` when the file exists and has a
-    non-empty ``[profiles]`` section. Returns ``None`` when missing so
-    callers fall back to the default candidates.
+    Uses ``interpolation=None`` so that values containing ``%`` (e.g. shell
+    prompts, skill descriptions) never trigger interpolation errors.
     """
     if not _AGENT_PROFILES_INI.is_file():
         return None
     try:
-        parser = configparser.ConfigParser()
+        parser = configparser.ConfigParser(interpolation=None)
         parser.read_string(_AGENT_PROFILES_INI.read_text())
     except (OSError, configparser.Error):
         return None
-    if not parser.has_section("profiles"):
+    return parser
+
+
+# Read once at import time so both profiles and skills share the same view.
+_AGENT_PROFILES_INI_CACHE = _read_agent_profiles_ini()
+
+
+def _load_agent_profiles_from_config():
+    """Load agent profiles from agent-profiles.ini with merge semantics.
+
+    Entries in ``[profiles]`` are **merged** into the defaults:
+    configured keys override existing defaults; extra keys are added.
+
+    To **replace** the defaults entirely, set under ``[config]``::
+
+        replace_profiles = true
+
+    Returns ``None`` when the file is missing or ``[profiles]`` is empty,
+    so the caller can fall back to ``_DEFAULT_AGENT_PROFILE_CANDIDATES``.
+    """
+    parser = _AGENT_PROFILES_INI_CACHE
+    try:
+        if parser is None or not parser.has_section("profiles"):
+            return None
+    except configparser.Error:
         return None
-    profiles = {}
-    for key, value in parser.items("profiles"):
-        key = key.strip()
-        value = value.strip()
-        if key and value:
-            profiles[key] = value
-    return profiles or None
+
+    configured = {}
+    try:
+        for key, value in parser.items("profiles"):
+            key = key.strip()
+            value = value.strip()
+            if key and value:
+                configured[key] = value
+    except configparser.Error:
+        return None
+    if not configured:
+        return None
+
+    # Replacement requested?
+    try:
+        if parser.has_section("config"):
+            replace = parser.get("config", "replace_profiles", fallback="false").strip().lower()
+            if replace in ("true", "yes", "1", "on"):
+                return configured
+    except configparser.Error:
+        pass
+
+    # Merge: configured entries override defaults; extras are appended.
+    merged = dict(_DEFAULT_AGENT_PROFILE_CANDIDATES)
+    merged.update(configured)
+    return merged
 
 
 AGENT_PROFILE_CANDIDATES = (
@@ -1840,48 +1879,58 @@ def _expand_skill_paths(paths):
 
 
 def _agent_skill_dirs(agent_id):
-    """Return skill-directory paths for *agent_id* from the INI config.
+    """Return skill-directory paths for *agent_id* parsed from the INI config.
 
-    Looks up the ``[skills]`` section in agent-profiles.ini. Keys match
-    profile ids; values are ````:-separated directory paths (``~`` is
-    expanded). When the section or key is absent, well-known defaults are
-    used. Returns an empty list when the agent has no configured skill
-    directories.
+    Paths are drawn from the ``[skills]`` section of agent-profiles.ini
+    (keys match profile ids; values are ``os.pathsep``-separated paths with
+    ``~`` expanded).  Falls back to ``_DEFAULT_SKILL_DIRS`` when the
+    section or key is absent.
     """
-    if not _AGENT_PROFILES_INI.is_file():
-        return _expand_skill_paths(_DEFAULT_SKILL_DIRS.get(agent_id, []))
+    parser = _AGENT_PROFILES_INI_CACHE
+    raw = ""
     try:
-        parser = configparser.ConfigParser()
-        parser.read_string(_AGENT_PROFILES_INI.read_text())
-    except (OSError, configparser.Error):
-        return _expand_skill_paths(_DEFAULT_SKILL_DIRS.get(agent_id, []))
-    if not parser.has_section("skills"):
-        return _expand_skill_paths(_DEFAULT_SKILL_DIRS.get(agent_id, []))
-    raw = parser.get("skills", agent_id, fallback="")
+        if parser is not None and parser.has_section("skills"):
+            raw = parser.get("skills", agent_id, fallback="")
+    except configparser.Error:
+        raw = ""
+
+    default = _DEFAULT_SKILL_DIRS.get(agent_id, [])
     if not raw.strip():
-        return _expand_skill_paths(_DEFAULT_SKILL_DIRS.get(agent_id, []))
+        return _expand_skill_paths(default)
+
     dirs = []
-    for token in raw.split(":"):
+    for token in raw.split(os.pathsep):
         token = token.strip()
         if not token:
             continue
         dirs.append(str(Path(token).expanduser()))
-    return dirs
+    return dirs or _expand_skill_paths(default)
 
 
 def discover_agent_skills(agent_id):
     """Discover skills for a generic agent from its configured directories.
 
-    Scans each directory returned by ``_agent_skill_dirs()`` for
-    ``*/SKILL.md`` files with YAML frontmatter (``name``, ``description``,
-    optional ``argument-hint``). Returns a list of slash-command entries
-    and a truncated flag.
+    Each directory in ``_agent_skill_dirs()`` is scanned for ``*/SKILL.md``
+    files with YAML frontmatter (``name``, ``description``, optional
+    ``argument-hint``).
+
+    - The **first** configured directory is labeled ``"personal"``.
+      Subsequent directories are ``"project"``.
+    - Duplicate command names are resolved by source order: later
+      directories **do not** override earlier ones.
+    - Pi skills are emitted as ``/skill:<name>``; all other agents use
+      plain ``/<name>``.
+
+    Returns ``(commands, truncated)``.
     """
     commands = []
     scanned = 0
     truncated = False
     seen = set()
-    for directory in _agent_skill_dirs(agent_id):
+    dirs = _agent_skill_dirs(agent_id)
+    is_pi = agent_id == "pi"
+    for dir_index, directory in enumerate(dirs):
+        source = "personal" if dir_index == 0 else "project"
         dir_path = Path(directory)
         if not dir_path.is_dir():
             continue
@@ -1907,15 +1956,17 @@ def discover_agent_skills(agent_id):
                 continue
             if not user_invocable(metadata):
                 continue
+            # First directory wins on collisions.
             if name in seen:
                 continue
             seen.add(name)
+            command_name = f"skill:{name}" if is_pi else name
             description = metadata.get("description") or f"{name.capitalize()} skill"
             commands.append(slash_command_entry(
-                name,
+                command_name,
                 description,
                 metadata.get("argument-hint", ""),
-                "project",
+                source,
             ))
         if truncated:
             break

@@ -2000,6 +2000,252 @@ Production-like verification.
         self.assertIn("/first", commands)
         self.assertNotIn("/second", commands)
 
+    # ── Dynamic agent-profiles INI tests ─────────────────────────────
+
+    def _make_test_ini(self, text, base_dir=""):
+        """Write a temporary agent-profiles.ini and point the relay at it."""
+        base = Path(base_dir) if base_dir else Path(tempfile.mkdtemp())
+        ini = base / "agent-profiles.ini"
+        ini.parent.mkdir(parents=True, exist_ok=True)
+        ini.write_text(text)
+        self.addCleanup(lambda: ini.unlink(missing_ok=True))
+        return ini, base
+
+    def test_dynamic_profiles_merge_with_defaults(self):
+        ini, base = self._make_test_ini("[profiles]\npi = Pi\n")
+        with (
+            patch.object(relay, "_CONFIG_HOME", base),
+            patch.object(relay, "_AGENT_PROFILES_INI", ini),
+        ):
+            relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+            candidates = relay._load_agent_profiles_from_config()
+        self.assertIn("codex", candidates)
+        self.assertIn("claude", candidates)
+        self.assertIn("opencode", candidates)
+        self.assertIn("pi", candidates)
+        self.assertEqual(candidates["pi"], "Pi")
+
+    def test_dynamic_profiles_replace_mode(self):
+        ini, base = self._make_test_ini(
+            "[profiles]\npi = Pi\n[config]\nreplace_profiles = true\n"
+        )
+        with (
+            patch.object(relay, "_CONFIG_HOME", base),
+            patch.object(relay, "_AGENT_PROFILES_INI", ini),
+        ):
+            relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+            candidates = relay._load_agent_profiles_from_config()
+        self.assertEqual(set(candidates), {"pi"})
+
+    def test_dynamic_profiles_missing_file_falls_back_to_defaults(self):
+        ini, base = self._make_test_ini("")
+        ini.unlink()
+        with (
+            patch.object(relay, "_CONFIG_HOME", base),
+            patch.object(relay, "_AGENT_PROFILES_INI", ini),
+        ):
+            relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+            candidates = relay._load_agent_profiles_from_config()
+        # No file → None returned → defaults used by module constant.
+        self.assertIsNone(candidates)
+
+    def test_dynamic_profiles_empty_section_falls_back(self):
+        ini, base = self._make_test_ini("[profiles]\n")
+        with (
+            patch.object(relay, "_CONFIG_HOME", base),
+            patch.object(relay, "_AGENT_PROFILES_INI", ini),
+        ):
+            relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+            candidates = relay._load_agent_profiles_from_config()
+        self.assertIsNone(candidates)
+
+    def test_dynamic_profiles_override_default_label(self):
+        ini, base = self._make_test_ini("[profiles]\ncodex = OpenCode (local)\n")
+        with (
+            patch.object(relay, "_CONFIG_HOME", base),
+            patch.object(relay, "_AGENT_PROFILES_INI", ini),
+        ):
+            relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+            candidates = relay._load_agent_profiles_from_config()
+        self.assertEqual(candidates["codex"], "OpenCode (local)")
+
+    def test_percent_signs_do_not_crash_ini_parsing(self):
+        ini, base = self._make_test_ini(
+            "[profiles]\npi = Pi %00\n"
+            "[skills]\npi = /tmp/skills%%dir0:/tmp/%%dir1\n"
+            "[config]\nreplace_profiles = false\n"
+        )
+        with (
+            patch.object(relay, "_CONFIG_HOME", base),
+            patch.object(relay, "_AGENT_PROFILES_INI", ini),
+        ):
+            relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+            candidates = relay._load_agent_profiles_from_config()
+            dirs = relay._agent_skill_dirs("pi")
+        self.assertEqual(candidates["pi"], "Pi %00")
+        # interpolation=None preserves literal %% characters.
+        self.assertEqual(dirs, ["/tmp/skills%%dir0", "/tmp/%%dir1"])
+
+    def test_malformed_ini_does_not_crash(self):
+        ini, base = self._make_test_ini("this is not valid INI at all [[[\n???\n")
+        with (
+            patch.object(relay, "_CONFIG_HOME", base),
+            patch.object(relay, "_AGENT_PROFILES_INI", ini),
+        ):
+            relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+            candidates = relay._load_agent_profiles_from_config()
+            dirs = relay._agent_skill_dirs("pi")
+        self.assertIsNone(candidates)
+        # Falls back to default skill dirs.
+        self.assertTrue(any("pi" in d for d in dirs))
+
+    def test_skill_discovery_labels_first_dir_personal(self):
+        with tempfile.TemporaryDirectory() as skills_dir:
+            (Path(skills_dir) / "alpha" / "SKILL.md").parent.mkdir(parents=True)
+            (Path(skills_dir) / "alpha" / "SKILL.md").write_text(
+                "---\nname: alpha\ndescription: First skill\n---\n"
+            )
+            ini, base = self._make_test_ini(
+                f"[skills]\npi = {skills_dir}\n"
+            )
+            with (
+                patch.object(relay, "_CONFIG_HOME", base),
+                patch.object(relay, "_AGENT_PROFILES_INI", ini),
+            ):
+                relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+                dirs = relay._agent_skill_dirs("pi")
+                cmds, _trunc = relay.discover_agent_skills("pi")
+            self.assertEqual(dirs, [skills_dir])
+            self.assertTrue(any(c["command"] == "/skill:alpha" for c in cmds))
+            self.assertTrue(any(
+                c["command"] == "/skill:alpha" and c["source"] == "personal"
+                for c in cmds
+            ))
+
+    def test_skill_discovery_labels_second_dir_project(self):
+        with tempfile.TemporaryDirectory() as dir1, tempfile.TemporaryDirectory() as dir2:
+            (Path(dir1) / "alpha" / "SKILL.md").parent.mkdir(parents=True)
+            (Path(dir1) / "alpha" / "SKILL.md").write_text(
+                "---\nname: alpha\ndescription: Personal\n---\n"
+            )
+            (Path(dir2) / "beta" / "SKILL.md").parent.mkdir(parents=True)
+            (Path(dir2) / "beta" / "SKILL.md").write_text(
+                "---\nname: beta\ndescription: Project\n---\n"
+            )
+            ini, base = self._make_test_ini(
+                f"[skills]\npi = {dir1}{os.pathsep}{dir2}\n"
+            )
+            with (
+                patch.object(relay, "_CONFIG_HOME", base),
+                patch.object(relay, "_AGENT_PROFILES_INI", ini),
+            ):
+                relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+                cmds, _trunc = relay.discover_agent_skills("pi")
+            beta = next(c for c in cmds if c["command"] == "/skill:beta")
+            self.assertEqual(beta["source"], "project")
+
+    def test_skill_discovery_first_dir_wins_on_duplicate(self):
+        with tempfile.TemporaryDirectory() as dir1, tempfile.TemporaryDirectory() as dir2:
+            (Path(dir1) / "dup" / "SKILL.md").parent.mkdir(parents=True)
+            (Path(dir1) / "dup" / "SKILL.md").write_text(
+                "---\nname: dup\ndescription: First\n---\n"
+            )
+            (Path(dir2) / "dup" / "SKILL.md").parent.mkdir(parents=True)
+            (Path(dir2) / "dup" / "SKILL.md").write_text(
+                "---\nname: dup\ndescription: Second\n---\n"
+            )
+            ini, base = self._make_test_ini(
+                f"[skills]\npi = {dir1}{os.pathsep}{dir2}\n"
+            )
+            with (
+                patch.object(relay, "_CONFIG_HOME", base),
+                patch.object(relay, "_AGENT_PROFILES_INI", ini),
+            ):
+                relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+                cmds, _trunc = relay.discover_agent_skills("pi")
+            dup = [c for c in cmds if c["command"] == "/skill:dup"]
+            self.assertEqual(len(dup), 1)
+            self.assertEqual(dup[0]["description"], "First")
+
+    def test_pi_skills_use_skill_prefix(self):
+        with tempfile.TemporaryDirectory() as skills_dir:
+            (Path(skills_dir) / "triage" / "SKILL.md").parent.mkdir(parents=True)
+            (Path(skills_dir) / "triage" / "SKILL.md").write_text(
+                "---\nname: triage\ndescription: Triage issues\n---\n"
+            )
+            ini, base = self._make_test_ini(
+                f"[skills]\npi = {skills_dir}\n"
+            )
+            with (
+                patch.object(relay, "_CONFIG_HOME", base),
+                patch.object(relay, "_AGENT_PROFILES_INI", ini),
+            ):
+                relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+                cmds, _trunc = relay.discover_agent_skills("pi")
+            self.assertTrue(any(c["command"] == "/skill:triage" for c in cmds))
+
+    def test_non_invocable_skills_are_filtered(self):
+        with tempfile.TemporaryDirectory() as skills_dir:
+            (Path(skills_dir) / "visible" / "SKILL.md").parent.mkdir(parents=True)
+            (Path(skills_dir) / "visible" / "SKILL.md").write_text(
+                "---\nname: visible\ndescription: Seen\n---\n"
+            )
+            (Path(skills_dir) / "hidden" / "SKILL.md").parent.mkdir()
+            (Path(skills_dir) / "hidden" / "SKILL.md").write_text(
+                "---\nname: hidden\ndescription: Not invocable\nuser-invocable: false\n---\n"
+            )
+            ini, base = self._make_test_ini(
+                f"[skills]\npi = {skills_dir}\n"
+            )
+            with (
+                patch.object(relay, "_CONFIG_HOME", base),
+                patch.object(relay, "_AGENT_PROFILES_INI", ini),
+            ):
+                relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+                cmds, _trunc = relay.discover_agent_skills("pi")
+            names = {c["command"] for c in cmds}
+            self.assertIn("/skill:visible", names)
+            self.assertNotIn("/skill:hidden", names)
+
+    def test_skill_discovery_truncation(self):
+        with tempfile.TemporaryDirectory() as skills_dir:
+            for i in range(3):
+                (Path(skills_dir) / f"s{i}" / "SKILL.md").parent.mkdir(parents=True)
+                (Path(skills_dir) / f"s{i}" / "SKILL.md").write_text(
+                    f"---\nname: s{i}\ndescription: Skill {i}\n---\n"
+                )
+            ini, base = self._make_test_ini(
+                f"[skills]\npi = {skills_dir}\n"
+            )
+            with (
+                patch.object(relay, "_CONFIG_HOME", base),
+                patch.object(relay, "_AGENT_PROFILES_INI", ini),
+                patch.object(relay, "SLASH_COMMAND_MAX_CUSTOM_FILES", 2),
+            ):
+                relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+                cmds, truncated = relay.discover_agent_skills("pi")
+            self.assertTrue(truncated)
+            self.assertEqual(len(cmds), 2)
+
+    def test_full_catalog_for_unknown_agent_discovers_skills(self):
+        with tempfile.TemporaryDirectory() as skills_dir:
+            (Path(skills_dir) / "firehose" / "SKILL.md").parent.mkdir(parents=True)
+            (Path(skills_dir) / "firehose" / "SKILL.md").write_text(
+                "---\nname: firehose\ndescription: Firehose skill\n---\n"
+            )
+            ini, base = self._make_test_ini(
+                f"[skills]\npi = {skills_dir}\n"
+            )
+            with (
+                patch.object(relay, "_CONFIG_HOME", base),
+                patch.object(relay, "_AGENT_PROFILES_INI", ini),
+            ):
+                relay._AGENT_PROFILES_INI_CACHE = relay._read_agent_profiles_ini()
+                catalog = relay.slash_command_catalog({"agent": "pi"})
+            self.assertTrue(any(
+                c["command"] == "/skill:firehose" for c in catalog["commands"]
+            ))
+
     def test_workspace_selection_prefers_the_space_owned_by_the_working_directory(self):
         cwd = Path("/home/test/Development/project")
         panes = {
