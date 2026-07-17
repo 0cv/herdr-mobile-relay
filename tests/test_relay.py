@@ -2234,6 +2234,54 @@ Production-like verification.
         for key in ("codex", "claude", "opencode"):
             self.assertIn(key, relay.AGENT_PROFILE_CANDIDATES)
 
+    def test_sighup_reloads_agent_profiles_from_changed_ini(self):
+        ini, base = self._make_test_ini(
+            "[profiles]\npi = Pi\n[config]\nreplace_profiles = true\n"
+        )
+        with self._patch_ini_config(ini, base):
+            relay._reload_agent_profiles_ini()
+        self.assertEqual(
+            set(relay.AGENT_PROFILE_CANDIDATES),
+            {"pi"},
+            "After SIGHUP, profiles should reflect the changed INI",
+        )
+
+    def test_sighup_reverts_to_defaults_when_ini_removed(self):
+        ini, base = self._make_test_ini(
+            "[profiles]\npi = Pi\n[config]\nreplace_profiles = true\n"
+        )
+        with self._patch_ini_config(ini, base):
+            relay._reload_agent_profiles_ini()
+            self.assertIn("pi", relay.AGENT_PROFILE_CANDIDATES)
+        # After removing the INI (restoring defaults), reload again.
+        # _patch_ini_config already restored _AGENT_PROFILES_INI to the
+        # real (absent) path, so we just need to reset the cache.
+        relay._AGENT_PROFILES_INI_CACHE = None
+        relay._reload_agent_profiles_ini()
+        self.assertNotIn("pi", relay.AGENT_PROFILE_CANDIDATES)
+        for key in ("codex", "claude", "opencode"):
+            self.assertIn(key, relay.AGENT_PROFILE_CANDIDATES)
+
+    def test_missing_binary_warns(self):
+        ini, base = self._make_test_ini(
+            "[profiles]\npi = Pi\nnonexistent = Ghost\n[config]\nreplace_profiles = true\n"
+        )
+        with self._patch_ini_config(ini, base):
+            relay._reload_agent_profiles_ini()
+            with patch("builtins.print") as mock_print:
+                relay.load_agent_profiles()
+        warnings = [
+            args[0]
+            for args, _kwargs in mock_print.call_args_list
+            if "WARNING" in str(args[0])
+        ]
+        self.assertTrue(
+            any("nonexistent" in w for w in warnings),
+            "Should warn for configured profile with no binary",
+        )
+        # pi may or may not be on PATH in the test runner; either way,
+        # the warning for nonexistent must appear.
+
     def test_workspace_selection_prefers_the_space_owned_by_the_working_directory(self):
         cwd = Path("/home/test/Development/project")
         panes = {

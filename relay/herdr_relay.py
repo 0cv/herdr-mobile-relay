@@ -158,6 +158,20 @@ def _read_agent_profiles_ini():
 _AGENT_PROFILES_INI_CACHE = _read_agent_profiles_ini()
 
 
+def _reload_agent_profiles_ini():
+    """Re-read agent-profiles.ini and recompute ``AGENT_PROFILE_CANDIDATES``.
+
+    Intended as a SIGHUP handler. Only new client connections see the
+    updated profiles (existing connections keep the ``push_config`` they
+    already received).
+    """
+    global _AGENT_PROFILES_INI_CACHE, AGENT_PROFILE_CANDIDATES
+    _AGENT_PROFILES_INI_CACHE = _read_agent_profiles_ini()
+    AGENT_PROFILE_CANDIDATES = (
+        _load_agent_profiles_from_config() or _DEFAULT_AGENT_PROFILE_CANDIDATES
+    )
+
+
 def _load_agent_profiles_from_config():
     """Load agent profiles from agent-profiles.ini with merge semantics.
 
@@ -1885,6 +1899,10 @@ def _agent_skill_dirs(agent_id):
     (keys match profile ids; values are ``os.pathsep``-separated paths with
     ``~`` expanded).  Falls back to ``_DEFAULT_SKILL_DIRS`` when the
     section or key is absent.
+
+    .. warning::
+       The value separator is ``os.pathsep`` (``:`` on macOS and Linux).
+       Directory names containing ``:`` are not supported.
     """
     parser = _AGENT_PROFILES_INI_CACHE
     raw = ""
@@ -2006,6 +2024,7 @@ def load_agent_profiles():
     for profile_id, label in AGENT_PROFILE_CANDIDATES.items():
         executable = shutil.which(profile_id)
         if not executable:
+            print(f"WARNING: configured agent profile '{profile_id}' ({label}) has no binary on PATH")
             continue
         profiles[profile_id] = {
             "id": profile_id,
@@ -4331,8 +4350,13 @@ async def main():
     def request_stop():
         if not stop.done():
             stop.set_result(None)
+    def request_reload():
+        print("SIGHUP: reloading agent profiles from", str(_AGENT_PROFILES_INI))
+        _reload_agent_profiles_ini()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, request_stop)
+    if hasattr(signal, "SIGHUP"):
+        loop.add_signal_handler(signal.SIGHUP, request_reload)
     await stop
     # In-flight captures are deliberately not awaited here: cancellation lands
     # at their herdr-read await, before any merge, so state stays consistent,
