@@ -129,26 +129,41 @@ pi = Pi
 
 - Keys in `[profiles]` are **merged** with the built-in defaults. You only need to add new agents or override existing labels.
 - Set `[config] replace_profiles = true` to replace instead of merge.
-- Each profile's binary must be on `PATH` for the relay to advertise it. Missing binaries print a warning.
+- Each profile id is also its executable name. Its binary must be on `PATH` for the relay to advertise it. A missing user-added binary prints one warning per relay run.
 
 ### Custom Slash-Command Suggestions
 
-For agents other than Claude Code and Codex, the relay discovers slash-command suggestions from skill directories. Add a `[skills]` section to configure per-agent paths:
+Claude Code has its own command discovery and Codex uses built-in suggestions. Other profiles need both skill directories and a known command format. Pi's defaults are `~/.pi/agent/skills` and `skill:{name}`, so its sections below are optional:
 
 ```ini
 [skills]
 pi = ~/.pi/agent/skills
+
+[commands]
+pi = skill:{name}
 ```
 
 - Keys match profile ids from `[profiles]`. Directories are scanned for `*/SKILL.md` frontmatter (`name`, `description`, optional `argument-hint`).
 - The first configured path is labelled **personal**; subsequent paths are **project**.
-- Paths are `:`-separated on macOS and Linux (``os.pathsep``). Directory names containing `:` are not supported.
-- Pi skills emit `/skill:<name>` (Pi's native syntax). Other agents use `/<name>`.
+- Paths are `:`-separated on macOS and Linux (`os.pathsep`). Directory names containing `:` are not supported.
+- A command format must contain exactly one `{name}` placeholder. The relay adds the leading `/`, although a configured leading slash is also accepted.
+- Profiles without a built-in or configured command format do not expose skill suggestions. Set a format to `off` or leave it empty to disable suggestions explicitly. Invalid formats print a warning and are disabled instead of interrupting the client connection.
 - `user-invocable: false` in frontmatter hides a skill from suggestions.
+
+### Running Agent Identity
+
+The relay remembers the exact profile id for panes it launches, rather than guessing from the agent name reported by Herdr. For agents that were already running or remain alive across a relay restart, add an exact reported-name alias when the Herdr name differs from the profile id:
+
+```ini
+[aliases]
+pi-coding-agent = pi
+```
+
+Pi's alias above is built in. Configured aliases can extend or override built-in aliases. Alias values must name a configured profile; unmatched agent names are not guessed by substring.
 
 ### Hot Reload
 
-Send `SIGHUP` to the relay process to re-read `agent-profiles.ini` without restarting. New client connections pick up the updated profiles; existing connections keep their already-received catalog. On the phone, the slash‑command cache is per agent + working directory, so switching directories fetches fresh suggestions.
+Send `SIGHUP` to the relay process to re-read `agent-profiles.ini` without restarting. New client connections receive the updated profile list, and later command-catalog requests use the reloaded skills, formats, and aliases. The phone caches a catalog per agent and working directory, so reconnect or switch directories to refresh a catalog already shown.
 
 ## Security
 

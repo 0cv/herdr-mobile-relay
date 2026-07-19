@@ -16,6 +16,7 @@ import secrets
 import shutil
 import signal
 import socket
+import string
 import subprocess
 import sys
 import threading
@@ -139,9 +140,16 @@ _DEFAULT_COMMAND_FORMATS = {
     "pi": "skill:{name}",
 }
 
-# Track which implied (default) profiles have already been warned about so
-# they only warn once per process lifetime.
+# Exact Herdr-reported agent names that differ from their launch profile ids.
+# User configuration in ``[aliases]`` can override or extend these defaults.
+_DEFAULT_AGENT_PROFILE_ALIASES = {
+    "claude-code": "claude",
+    "pi-coding-agent": "pi",
+}
+
+# Track configuration warnings so each one is printed only once per process.
 _MISSING_AGENT_WARNED = set()
+_INVALID_COMMAND_FORMAT_WARNED = set()
 
 # INI file location — respects ``$XDG_CONFIG_HOME`` when set.
 _CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
@@ -186,6 +194,7 @@ def _reload_agent_profiles_ini():
     )
     # Allow a fresh round of warnings after reload.
     _MISSING_AGENT_WARNED.clear()
+    _INVALID_COMMAND_FORMAT_WARNED.clear()
 
 
 def _load_agent_profiles_from_config():
@@ -490,6 +499,10 @@ finished_notification_panes = set()
 agent_activity_state = {}
 agent_activity_initialized = False
 agent_types = {}
+# Preserve the exact configured launch profile for panes started by the relay.
+# Herdr reports the agent implementation name, which may differ from that id.
+agent_profile_ids = {}
+agent_profile_seen_panes = set()
 claude_history_state = {}
 claude_history_capture_times = {}
 claude_history_save_times = {}
@@ -1945,8 +1958,8 @@ def _agent_command_format(profile_id):
     """Return the command-format template for *profile_id*, or ``None``.
 
     When ``None`` the agent has no known command syntax and skill
-    suggestions are disabled.  The format string may contain ``{name}``
-    as the only replacement field.
+    suggestions are disabled. A valid format contains exactly one ``{name}``
+    field and no other replacement fields, conversions, or format specifiers.
 
     The ``[commands]`` section in agent-profiles.ini can override the
     defaults.  A key with an empty or ``"off"`` value explicitly disables
@@ -1954,18 +1967,46 @@ def _agent_command_format(profile_id):
     """
     parser = _AGENT_PROFILES_INI_CACHE
     raw = ""
+    configured = False
     try:
-        if parser is not None and parser.has_section("commands"):
-            raw = parser.get("commands", profile_id, fallback="")
+        if (
+            parser is not None
+            and parser.has_section("commands")
+            and parser.has_option("commands", profile_id)
+        ):
+            configured = True
+            raw = parser.get("commands", profile_id)
     except configparser.Error:
-        raw = ""
+        configured = False
 
+    if not configured:
+        return _DEFAULT_COMMAND_FORMATS.get(profile_id)
     explicit = raw.strip()
-    if explicit:
-        if explicit.lower() in ("", "off"):
-            return None
-        return explicit
-    return _DEFAULT_COMMAND_FORMATS.get(profile_id)
+    if not explicit or explicit.casefold() == "off":
+        return None
+
+    try:
+        fields = []
+        for _literal, field_name, format_spec, conversion in string.Formatter().parse(
+            explicit
+        ):
+            if field_name is None:
+                continue
+            if field_name != "name" or format_spec or conversion is not None:
+                raise ValueError
+            fields.append(field_name)
+        if fields != ["name"]:
+            raise ValueError
+    except ValueError:
+        warning_key = (profile_id, explicit)
+        if warning_key not in _INVALID_COMMAND_FORMAT_WARNED:
+            _INVALID_COMMAND_FORMAT_WARNED.add(warning_key)
+            print(
+                "WARNING: invalid command format for agent profile "
+                f"'{profile_id}'; skill suggestions disabled"
+            )
+        return None
+    return explicit
 
 
 def discover_agent_skills(agent_id):
@@ -2038,20 +2079,64 @@ def discover_agent_skills(agent_id):
     return commands, truncated
 
 
-def _profile_id_for_agent_name(agent_name):
-    """Map a herdr-reported agent name to a configured profile ID.
+def _agent_profile_aliases():
+    """Return exact Herdr agent-name to configured profile-id mappings."""
+    aliases = dict(_DEFAULT_AGENT_PROFILE_ALIASES)
+    parser = _AGENT_PROFILES_INI_CACHE
+    try:
+        if parser is not None and parser.has_section("aliases"):
+            for agent_name, profile_id in parser.items("aliases"):
+                agent_name = agent_name.strip().casefold()
+                profile_id = profile_id.strip().casefold()
+                if agent_name and profile_id:
+                    aliases[agent_name] = profile_id
+    except configparser.Error:
+        pass
+    return aliases
 
-    The configuration uses profile IDs (e.g. ``"pi"``) but Herdr may report
-    a different name (e.g. ``"pi-coding-agent"``).  Normalise by checking
-    for direct or substring matches against the configured candidates.
+
+def remember_agent_profile(pane_id, profile_id):
+    """Associate a running pane with the exact profile used to launch it."""
+    pane_id = str(pane_id or "")
+    profile_id = str(profile_id or "").casefold()
+    if pane_id and profile_id:
+        agent_profile_ids[pane_id] = profile_id
+        agent_profile_seen_panes.discard(pane_id)
+
+
+def forget_agent_profile(pane_id):
+    pane_id = str(pane_id or "")
+    agent_profile_ids.pop(pane_id, None)
+    agent_profile_seen_panes.discard(pane_id)
+
+
+def prune_agent_profiles(live_pane_ids):
+    live_pane_ids = set(live_pane_ids)
+    agent_profile_seen_panes.update(set(agent_profile_ids) & live_pane_ids)
+    for pane_id in set(agent_profile_ids) - live_pane_ids:
+        if pane_id in agent_profile_seen_panes:
+            forget_agent_profile(pane_id)
+
+
+def _profile_id_for_agent(agent):
+    """Resolve a pane to a configured profile without substring guessing.
+
+    A remembered launch mapping wins. Existing panes fall back to an exact
+    profile-id match or an exact Herdr agent-name alias.
     """
-    normalized = str(agent_name or "").casefold()
-    if normalized in AGENT_PROFILE_CANDIDATES:
-        return normalized
-    for profile_id in AGENT_PROFILE_CANDIDATES:
-        if profile_id in normalized:
-            return profile_id
-    return normalized
+    pane_id = str(agent.get("pane_id") or "")
+    remembered = agent_profile_ids.get(pane_id, "")
+    if remembered in AGENT_PROFILE_CANDIDATES:
+        return remembered
+
+    agent_name = str(agent.get("agent") or "").casefold()
+    if agent_name in AGENT_PROFILE_CANDIDATES:
+        return agent_name
+
+    profile_id = _agent_profile_aliases().get(agent_name, "")
+    if profile_id in AGENT_PROFILE_CANDIDATES:
+        return profile_id
+    return ""
 
 
 def slash_command_catalog(agent):
@@ -2063,7 +2148,7 @@ def slash_command_catalog(agent):
         builtins = CODEX_SLASH_COMMANDS
         custom, truncated, hidden = [], False, set()
     else:
-        profile_id = _profile_id_for_agent_name(agent.get("agent") or "")
+        profile_id = _profile_id_for_agent(agent)
         builtins = {}
         custom, truncated = discover_agent_skills(profile_id)
         hidden = set()
@@ -2760,6 +2845,7 @@ async def poll_loop():
         unseen_done_panes.intersection_update(live_pane_ids)
         acknowledged_done_panes.intersection_update(live_pane_ids)
         finished_notification_panes.intersection_update(live_pane_ids)
+        prune_agent_profiles(live_pane_ids)
         agent_types.clear()
         agent_types.update({a["pane_id"]: str(a.get("agent") or "").lower() for a in agents})
         for pane_id in set(question_locks) - live_pane_ids:
@@ -3210,11 +3296,13 @@ async def start_agent_in_new_tab(profile, name, cwd):
     pane_id, _started_workspace_id = await resolve_started_agent(data, name)
     placed, placement, placement_error = await place_started_agent(pane_id, workspace_id, name, cwd)
     if not placed:
+        remember_agent_profile(pane_id, profile["id"])
         return True, data, pane_id, placement_error, ""
 
     data = {"agent": data, "placement": placement}
     final_pane_id, _final_workspace_id = await resolve_started_agent(None, name)
     pane_id = str(final_pane_id or nested_value(placement, "pane_id") or pane_id)
+    remember_agent_profile(pane_id, profile["id"])
     return True, data, pane_id, "", ""
 
 
@@ -4113,6 +4201,8 @@ async def handle_agent_stop_command(ws, msg):
         await complete_command(ws, request_id, "agent_stop", False, "Stop failed", error=error, pane_id=pane_id)
         return
     ok, _output, error = await run_herdr_async_result("pane", "close", pane_id)
+    if ok:
+        forget_agent_profile(pane_id)
     await complete_command(ws, request_id, "agent_stop", ok, "Stopped agent", error=error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""), details=command_details(msg))
 
 
@@ -4127,10 +4217,7 @@ async def handle_agent_clear_command(ws, msg):
         await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error=error, pane_id=pane_id)
         return
     profiles = load_agent_profiles()
-    agent_label = re.sub(r"[^a-z0-9]+", "-", str(agent.get("agent") or "").lower()).strip("-")
-    profile = profiles.get(agent_label)
-    if not profile:
-        profile = next((value for key, value in profiles.items() if key in agent_label or key in str(agent.get("agent") or "").lower()), None)
+    profile = profiles.get(_profile_id_for_agent(agent))
     if not profile:
         await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error="This agent does not match an available launch profile", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
         return
@@ -4145,7 +4232,11 @@ async def handle_agent_clear_command(ws, msg):
     result_data = data
     if ok and placement_error:
         if replacement_pane_id:
-            await run_herdr_async_result("pane", "close", replacement_pane_id)
+            close_ok, _close_output, _close_error = await run_herdr_async_result(
+                "pane", "close", replacement_pane_id
+            )
+            if close_ok:
+                forget_agent_profile(replacement_pane_id)
         ok = False
         error = f"Replacement could not be placed in the working-directory space: {placement_error}"
     elif ok:
@@ -4159,6 +4250,8 @@ async def handle_agent_clear_command(ws, msg):
         if not close_ok:
             warning = f"Replacement started, but the old pane could not be closed: {close_error}"
             result_data["warning"] = warning
+        else:
+            forget_agent_profile(pane_id)
     await complete_command(
         ws,
         request_id,

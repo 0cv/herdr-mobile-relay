@@ -135,11 +135,15 @@ class ClaudeHistoryIsolationMixin:
         relay.claude_history_state.clear()
         relay.claude_history_save_times.clear()
         relay.blocked_agent_details.clear()
+        relay.agent_profile_ids.clear()
+        relay.agent_profile_seen_panes.clear()
         relay.latest_agents_message = relay.agents_message([])
         relay.last_broadcast_agents_message = None
         self.addCleanup(relay.claude_history_state.clear)
         self.addCleanup(relay.claude_history_save_times.clear)
         self.addCleanup(relay.blocked_agent_details.clear)
+        self.addCleanup(relay.agent_profile_ids.clear)
+        self.addCleanup(relay.agent_profile_seen_panes.clear)
 
 
 class RelayHelpersTest(ClaudeHistoryIsolationMixin, unittest.TestCase):
@@ -2039,10 +2043,12 @@ Production-like verification.
                         or relay._DEFAULT_AGENT_PROFILE_CANDIDATES
                     )
                     relay._MISSING_AGENT_WARNED.clear()
+                    relay._INVALID_COMMAND_FORMAT_WARNED.clear()
                     yield ini, base
                 finally:
                     relay.AGENT_PROFILE_CANDIDATES = saved_candidates
                     relay._MISSING_AGENT_WARNED.clear()
+                    relay._INVALID_COMMAND_FORMAT_WARNED.clear()
 
     def test_dynamic_profiles_merge_with_defaults(self):
         ini, base = self._make_test_ini("[profiles]\npi = Pi\n")
@@ -2208,14 +2214,14 @@ Production-like verification.
             self.assertTrue(truncated)
             self.assertEqual(len(cmds), 2)
 
-    def test_full_catalog_for_unknown_agent_discovers_skills(self):
+    def test_full_catalog_for_configured_agent_discovers_skills(self):
         with tempfile.TemporaryDirectory() as skills_dir:
             (Path(skills_dir) / "firehose" / "SKILL.md").parent.mkdir(parents=True)
             (Path(skills_dir) / "firehose" / "SKILL.md").write_text(
                 "---\nname: firehose\ndescription: Firehose skill\n---\n"
             )
             ini, base = self._make_test_ini(
-                f"[skills]\npi = {skills_dir}\n"
+                f"[profiles]\npi = Pi\n[skills]\npi = {skills_dir}\n"
             )
             with self._patch_ini_config(ini, base):
                 catalog = relay.slash_command_catalog({"agent": "pi"})
@@ -2345,16 +2351,63 @@ Production-like verification.
             "",
         )
 
-    def test_profile_id_maps_agent_name_to_configured_profile(self):
+    def test_profile_id_uses_remembered_pane_mapping_without_substring_guessing(self):
         ini, base = self._make_test_ini(
-            "[profiles]\npi = Pi\n[config]\nreplace_profiles = true\n"
+            "[profiles]\npi = Pi\npi-local = Pi Local\n"
+            "[config]\nreplace_profiles = true\n"
+            "[aliases]\npi-coding-agent = pi\n"
         )
         with self._patch_ini_config(ini, base):
-            self.assertEqual(relay._profile_id_for_agent_name("pi"), "pi")
-            self.assertEqual(relay._profile_id_for_agent_name("pi-coding-agent"), "pi")
-            self.assertEqual(relay._profile_id_for_agent_name("opencode"), "opencode")
-            # Unknown agent returns itself as fallback
-            self.assertEqual(relay._profile_id_for_agent_name("unknown-agent"), "unknown-agent")
+            relay.remember_agent_profile("w1:p1", "pi-local")
+            self.assertEqual(
+                relay._profile_id_for_agent({
+                    "pane_id": "w1:p1",
+                    "agent": "pi-coding-agent",
+                }),
+                "pi-local",
+            )
+            self.assertEqual(
+                relay._profile_id_for_agent({"agent": "pi-coding-agent"}),
+                "pi",
+            )
+            self.assertEqual(relay._profile_id_for_agent({"agent": "pi"}), "pi")
+            self.assertEqual(
+                relay._profile_id_for_agent({"agent": "spider-agent"}),
+                "",
+            )
+
+    def test_configured_alias_recovers_profile_for_existing_pane(self):
+        ini, base = self._make_test_ini(
+            "[profiles]\npi-local = Pi Local\n"
+            "[config]\nreplace_profiles = true\n"
+            "[aliases]\npi-coding-agent = pi-local\n"
+        )
+        with self._patch_ini_config(ini, base):
+            self.assertEqual(
+                relay._profile_id_for_agent({
+                    "pane_id": "w1:p1",
+                    "agent": "pi-coding-agent",
+                }),
+                "pi-local",
+            )
+
+    def test_prune_agent_profiles_removes_only_closed_panes(self):
+        relay.agent_profile_ids.update({
+            "w1:p1": "pi",
+            "w1:p2": "pi-local",
+        })
+
+        relay.prune_agent_profiles({"w1:p1", "w1:p2"})
+        relay.prune_agent_profiles({"w1:p2"})
+
+        self.assertEqual(relay.agent_profile_ids, {"w1:p2": "pi-local"})
+
+    def test_prune_agent_profiles_keeps_new_mapping_until_pane_is_observed(self):
+        relay.remember_agent_profile("w1:p1", "pi-local")
+
+        relay.prune_agent_profiles(set())
+
+        self.assertEqual(relay.agent_profile_ids, {"w1:p1": "pi-local"})
 
     def test_non_utf8_ini_falls_back_without_crashing(self):
         ini, base = self._make_test_ini("")
@@ -2394,6 +2447,14 @@ Production-like verification.
         with self._patch_ini_config(ini, base):
             self.assertIsNone(relay._agent_command_format("pi"))
 
+    def test_empty_command_format_disables_default(self):
+        ini, base = self._make_test_ini(
+            "[profiles]\npi = Pi\n[config]\nreplace_profiles = true\n"
+            "[commands]\npi =\n"
+        )
+        with self._patch_ini_config(ini, base):
+            self.assertIsNone(relay._agent_command_format("pi"))
+
     def test_command_format_can_be_customised_in_ini(self):
         ini, base = self._make_test_ini(
             "[profiles]\npi = Pi\n[config]\nreplace_profiles = true\n"
@@ -2402,21 +2463,111 @@ Production-like verification.
         with self._patch_ini_config(ini, base):
             self.assertEqual(relay._agent_command_format("pi"), "/custom:{name}")
 
-    def test_slash_command_catalog_maps_pi_agent_name_to_profile(self):
-        """When herdr reports 'pi-coding-agent', commands still use Pi's format."""
+    def test_invalid_command_format_disables_suggestions_without_crashing(self):
         with tempfile.TemporaryDirectory() as skills_dir:
-            (Path(skills_dir) / "firehose" / "SKILL.md").parent.mkdir(parents=True)
-            (Path(skills_dir) / "firehose" / "SKILL.md").write_text(
+            skill = Path(skills_dir) / "firehose" / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(
                 "---\nname: firehose\ndescription: Firehose skill\n---\n"
             )
             ini, base = self._make_test_ini(
                 f"[profiles]\npi = Pi\n[skills]\npi = {skills_dir}\n"
+                "[commands]\npi = {unknown}\n"
             )
             with self._patch_ini_config(ini, base):
-                catalog = relay.slash_command_catalog({"agent": "pi-coding-agent"})
-            self.assertTrue(any(
-                c["command"] == "/skill:firehose" for c in catalog["commands"]
-            ))
+                with patch("builtins.print") as mock_print:
+                    commands, truncated = relay.discover_agent_skills("pi")
+                    repeated = relay._agent_command_format("pi")
+
+            self.assertEqual(commands, [])
+            self.assertFalse(truncated)
+            self.assertIsNone(repeated)
+            mock_print.assert_called_once()
+
+    def test_launched_custom_profile_keeps_identity_for_skill_catalog(self):
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            tempfile.TemporaryDirectory() as skills_dir,
+        ):
+            skill = Path(skills_dir) / "firehose" / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(
+                "---\nname: firehose\ndescription: Firehose skill\n---\n"
+            )
+            ini, base = self._make_test_ini(
+                "[profiles]\npi-local = Pi Local\n"
+                "[config]\nreplace_profiles = true\n"
+                f"[skills]\npi-local = {skills_dir}\n"
+                "[commands]\npi-local = skill:{name}\n"
+            )
+            command_results = [
+                (
+                    True,
+                    json.dumps({
+                        "result": {"pane_id": "w2:p0", "workspace_id": "w2"}
+                    }),
+                    "",
+                ),
+                (
+                    True,
+                    json.dumps({
+                        "result": {
+                            "move_result": {
+                                "pane": {"pane_id": "w2:p0", "tab_id": "w2:t2"}
+                            }
+                        }
+                    }),
+                    "",
+                ),
+                (
+                    True,
+                    json.dumps({
+                        "result": {
+                            "agent": {"pane_id": "w2:p1", "workspace_id": "w2"}
+                        }
+                    }),
+                    "",
+                ),
+            ]
+            profile = {
+                "id": "pi-local",
+                "label": "Pi Local",
+                "argv": ["pi-local"],
+            }
+            with (
+                self._patch_ini_config(ini, base),
+                patch.object(
+                    relay,
+                    "workspace_id_for_cwd",
+                    AsyncMock(return_value="w7"),
+                ),
+                patch.object(
+                    relay,
+                    "run_herdr_async_result",
+                    AsyncMock(side_effect=command_results),
+                ),
+            ):
+                ok, _data, pane_id, placement_error, error = asyncio.run(
+                    relay.start_agent_in_new_tab(
+                        profile,
+                        "mobile-pi",
+                        Path(temp_dir),
+                    )
+                )
+                catalog = relay.slash_command_catalog({
+                    "pane_id": pane_id,
+                    "agent": "pi-coding-agent",
+                })
+
+            self.assertTrue(ok)
+            self.assertEqual(placement_error, "")
+            self.assertEqual(error, "")
+            self.assertEqual(pane_id, "w2:p1")
+            self.assertEqual(relay.agent_profile_ids[pane_id], "pi-local")
+            self.assertIn(
+                "/skill:firehose",
+                {entry["command"] for entry in catalog["commands"]},
+            )
 
 
 class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTestCase):
@@ -3591,6 +3742,95 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertTrue(ws.messages[-1]["ok"])
         self.assertEqual(ws.messages[-1]["data"]["pane_id"], "w1:p2")
         self.assertEqual(ws.messages[-1]["data"]["cwd"], cwd)
+
+    async def test_agent_clear_uses_remembered_custom_profile(self):
+        ws = FakeWebSocket()
+        profile = {
+            "id": "pi-local",
+            "label": "Pi Local",
+            "argv": ["pi-local"],
+        }
+        with tempfile.TemporaryDirectory() as cwd:
+            agent = {
+                "pane_id": "w1:p1",
+                "status": "idle",
+                "agent": "pi-coding-agent",
+                "project": "relay",
+                "cwd": cwd,
+            }
+            relay.remember_agent_profile("w1:p1", "pi-local")
+            start_agent = AsyncMock(
+                return_value=(False, None, "", "", "start failed")
+            )
+            with (
+                patch.object(relay.Path, "home", return_value=Path(cwd)),
+                patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+                patch.object(
+                    relay.asyncio,
+                    "to_thread",
+                    AsyncMock(
+                        side_effect=lambda function, *args, **kwargs: function(
+                            *args, **kwargs
+                        )
+                    ),
+                ),
+                patch.object(
+                    relay,
+                    "load_agent_profiles",
+                    return_value={"pi-local": profile},
+                ),
+                patch.object(
+                    relay,
+                    "AGENT_PROFILE_CANDIDATES",
+                    {"pi-local": "Pi Local"},
+                ),
+                patch.object(relay, "start_agent_in_new_tab", start_agent),
+                patch.object(relay, "publish_activity", AsyncMock()),
+            ):
+                await relay.handle_agent_clear_command(ws, {
+                    "type": "agent_clear",
+                    "request_id": "request-custom-clear",
+                    "pane_id": "w1:p1",
+                })
+
+        self.assertEqual(start_agent.await_args.args[0], profile)
+        self.assertNotIn("does not match", ws.messages[-1]["error"])
+
+    async def test_agent_stop_forgets_remembered_profile(self):
+        ws = FakeWebSocket()
+        agent = {
+            "pane_id": "w1:p1",
+            "status": "idle",
+            "agent": "pi-coding-agent",
+            "project": "relay",
+        }
+        relay.remember_agent_profile("w1:p1", "pi-local")
+        with (
+            patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(
+                    side_effect=lambda function, *args, **kwargs: function(
+                        *args, **kwargs
+                    )
+                ),
+            ),
+            patch.object(
+                relay,
+                "run_herdr_async_result",
+                AsyncMock(return_value=(True, "", "")),
+            ),
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_agent_stop_command(ws, {
+                "type": "agent_stop",
+                "request_id": "request-custom-stop",
+                "pane_id": "w1:p1",
+            })
+
+        self.assertNotIn("w1:p1", relay.agent_profile_ids)
+        self.assertTrue(ws.messages[-1]["ok"])
 
     async def test_pane_placement_retries_on_pane_not_found(self):
         """pane_not_found errors are retried; other errors return immediately."""
