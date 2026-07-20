@@ -3138,6 +3138,48 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertEqual(ws.messages[0]["action"], "list_slash_commands")
         self.assertEqual(ws.messages[0]["error"], "Agent is required")
 
+    async def _run_agent_rename(self, agent, herdr):
+        ws = FakeWebSocket()
+        with (
+            patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "run_herdr_async_result", herdr),
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_agent_rename_command(ws, {
+                "type": "agent_rename",
+                "request_id": "request-rename",
+                "pane_id": "w1:p1",
+                "name": "My Tab",
+            })
+        return ws
+
+    async def test_agent_rename_also_renames_the_enclosing_tab(self):
+        agent = {"pane_id": "w1:p1", "tab_id": "w1", "agent": "claude", "project": "relay"}
+        herdr = AsyncMock(return_value=(True, "", ""))
+        ws = await self._run_agent_rename(agent, herdr)
+        herdr.assert_any_await("agent", "rename", "w1:p1", "My Tab")
+        herdr.assert_any_await("tab", "rename", "w1", "My Tab")
+        self.assertTrue(ws.messages[-1]["ok"])
+
+    async def test_agent_rename_reports_failure_when_tab_rename_fails(self):
+        agent = {"pane_id": "w1:p1", "tab_id": "w1", "agent": "claude", "project": "relay"}
+        herdr = AsyncMock(side_effect=[(True, "", ""), (False, "", "tab_not_found")])
+        ws = await self._run_agent_rename(agent, herdr)
+        self.assertFalse(ws.messages[-1]["ok"])
+        self.assertEqual(ws.messages[-1]["error"], "tab_not_found")
+
+    async def test_agent_rename_skips_tab_rename_without_a_tab_id(self):
+        agent = {"pane_id": "w1:p1", "tab_id": "", "agent": "claude", "project": "relay"}
+        herdr = AsyncMock(return_value=(True, "", ""))
+        ws = await self._run_agent_rename(agent, herdr)
+        herdr.assert_awaited_once_with("agent", "rename", "w1:p1", "My Tab")
+        self.assertTrue(ws.messages[-1]["ok"])
+
     async def test_codex_choice_moves_focus_and_submits_current_answer(self):
         interaction = relay.parse_codex_question(CODEX_QUESTION_VIEW)
         at_choice = copy.deepcopy(interaction)

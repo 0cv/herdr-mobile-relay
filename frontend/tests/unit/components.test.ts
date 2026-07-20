@@ -68,6 +68,25 @@ describe('accessible Svelte interactions', () => {
     respond.mockRestore();
   });
 
+  it('shows the Herdr tab name in the card meta line', () => {
+    const named: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w2:p1', pane_id: 'fedora::w2:p1',
+      project: 'relay', agent: 'codex', status: 'working', tab_label: 'my-tab',
+    };
+    const { container } = render(AgentList, { agents: [named], relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    expect(container.querySelector('.agent-meta')?.textContent).toBe('my-tab · codex · working');
+    expect(container.querySelector('.agent-project')?.textContent).toContain('relay');
+  });
+
+  it('omits the meta name segment when no tab or pane name is set', () => {
+    const plain: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w2:p2', pane_id: 'fedora::w2:p2',
+      project: 'relay', agent: 'codex', status: 'working',
+    };
+    const { container } = render(AgentList, { agents: [plain], relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    expect(container.querySelector('.agent-meta')?.textContent).toBe('codex · working');
+  });
+
   it('keeps a structured answer local until Submit', async () => {
     const interaction: QuestionInteraction = {
       id: 'question-1', kind: 'single_select', question: 'Where should the adapter live?',

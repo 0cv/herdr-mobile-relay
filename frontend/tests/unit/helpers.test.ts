@@ -6,6 +6,7 @@ import {
   mergeAgentDetails,
   mergeAgentList,
   sortedAgents,
+  tabName,
 } from '$lib/agents';
 import { APP_PROTOCOL_VERSION } from '$lib/config';
 import { quickSetupConfig } from '$lib/config';
@@ -287,6 +288,13 @@ describe('agent state and sorting', () => {
     expect(agentStatusTone(agent({ status: 'blocked' }))).toBe('danger');
     expect(agentStatusTone(agent({ status: 'done' }))).toBe('success');
     expect(agentStatusTone(agent({ status: 'idle' }))).toBe('muted');
+  });
+
+  it('resolves the tab name from the Herdr tab label over the pane name', () => {
+    expect(tabName(agent({ name: 'pane-name', tab_label: 'tab-label' }))).toBe('tab-label');
+    expect(tabName(agent({ name: 'pane-name' }))).toBe('pane-name');
+    expect(tabName(agent({ tab_label: '  spaced  ' }))).toBe('spaced');
+    expect(tabName(agent({}))).toBe('');
   });
 
   it('sorts activity newest-first with stable host fallback', () => {

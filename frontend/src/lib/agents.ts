@@ -26,8 +26,15 @@ export function hostLabel(agent: Partial<Agent>): string {
   return String(agent.relay_label || agent.host || 'relay');
 }
 
+export function tabName(agent: Partial<Agent>): string {
+  // The Herdr tab label is the authoritative "tab name" the user manages in the
+  // desktop panel, so prefer it; fall back to the pane's own name only when a
+  // pane has no labelled tab. This keeps laptop tab renames reflected on-device.
+  return String(agent.tab_label || agent.name || '').trim();
+}
+
 export function agentContextLabel(agent: Partial<Agent>): string {
-  const name = String(agent.name || agent.tab_label || '').trim();
+  const name = tabName(agent);
   if (name && name !== agent.project) return name;
   return String(agent.cwd || '').split(/[\\/]/).filter(Boolean).pop() || '';
 }

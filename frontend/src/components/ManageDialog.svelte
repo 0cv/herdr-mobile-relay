@@ -1,7 +1,7 @@
 <script lang="ts">
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { clientPaneId, displayName, hostLabel } from '$lib/agents';
+  import { clientPaneId, displayName, hostLabel, tabName } from '$lib/agents';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
   import type { Agent } from '$lib/types';
@@ -19,7 +19,7 @@
     }
     if (!agent || initializedPaneId === agent.pane_id) return;
     initializedPaneId = agent.pane_id;
-    name = String(agent.name || agent.tab_label || agent.project || '');
+    name = tabName(agent) || String(agent.project || '');
     confirming = '';
   });
 

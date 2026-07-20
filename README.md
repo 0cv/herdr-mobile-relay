@@ -4,7 +4,7 @@
 
 A remote control for [Herdr](https://herdr.dev) agents on Linux and macOS: use your smartphone to monitor status, answer prompts, build plans, and manage their lifecycle.
 
-**Current version:** `0.8.2`
+**Current version:** `0.8.3`
 
 Each computer runs its own local relay. The phone app connects to those relays directly and merges their agents; there is no central broker and the computers do not connect to each other.
 

@@ -9,6 +9,7 @@
     hostLabel,
     questionInteraction,
     sortedAgents,
+    tabName,
   } from '$lib/agents';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig } from '$lib/types';
@@ -66,6 +67,7 @@
             {@const interaction = questionInteraction(agent)}
             {@const options = approvalOptions(agent)}
             {@const blocked = group === 'blocked'}
+            {@const tab = tabName(agent)}
             <article class:blocked class="agent-card">
               <button
                 class="agent-open"
@@ -75,7 +77,7 @@
                 <span class={`status-dot status-${tone}`} class:hollow={group === 'ready'}></span>
                 <span class="agent-copy">
                   <span class="agent-project">{displayName(agent)} <span class="host-badge">@{hostLabel(agent)}</span></span>
-                  <span class="agent-meta">{agent.agent || 'agent'} · {agent.status || 'unknown'}</span>
+                  <span class="agent-meta">{tab && tab !== displayName(agent) ? `${tab} · ` : ''}{agent.agent || 'agent'} · {agent.status || 'unknown'}</span>
                   {#if blocked}
                     <span class="prompt-preview">{interaction?.question || approvalPromptPreview(agent)}</span>
                   {/if}

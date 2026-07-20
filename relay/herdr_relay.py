@@ -4595,6 +4595,14 @@ async def handle_agent_rename_command(ws, msg):
         await complete_command(ws, request_id, "agent_rename", False, "Rename failed", error=error, pane_id=pane_id)
         return
     ok, _output, error = await run_herdr_async_result("agent", "rename", pane_id, name)
+    # Also relabel the enclosing Herdr tab so the rename is reflected in the
+    # desktop panel, not just the pane/agent name the phone reads back.
+    tab_id = agent.get("tab_id", "")
+    if ok and tab_id:
+        tab_ok, _tab_output, tab_error = await run_herdr_async_result("tab", "rename", tab_id, name)
+        if not tab_ok:
+            ok = False
+            error = tab_error or "Renamed agent but could not rename its Herdr tab"
     await complete_command(ws, request_id, "agent_rename", ok, f"Renamed agent to {name}", error=error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""), details=command_details(msg))
 
 
