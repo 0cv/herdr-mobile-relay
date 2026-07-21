@@ -18,9 +18,11 @@ import {
 import { relayProtocolError } from './protocol';
 import { terminalHistoryLines } from './preferences';
 import {
+  clearPendingAppDeploy,
   clearPendingRelayUpdate,
   normalizeAppDeployment,
   normalizeRelayUpdate,
+  rememberPendingAppDeploy,
   rememberPendingRelayUpdate,
 } from './updates';
 import type {
@@ -386,6 +388,7 @@ class RelayStore {
       this.syncUpdateRestartReconnect(relayId, connection);
       if (['failed', 'rolled_back'].includes(connection.update.state)) {
         clearPendingRelayUpdate(relayId);
+        clearPendingAppDeploy(relayId);
       }
       this.emitConnections();
       return;
@@ -653,6 +656,7 @@ class RelayStore {
     } catch (error) {
       if (error instanceof CommandError && error.data?.update) {
         clearPendingRelayUpdate(relayId);
+        clearPendingAppDeploy(relayId);
         if (connection === this.connectionsValue.get(relayId)) {
           connection.update = normalizeRelayUpdate(
             error.data.update,
@@ -662,6 +666,19 @@ class RelayStore {
           this.emitConnections();
         }
       }
+      throw error;
+    }
+  }
+
+  // Update the deployment-owner relay and, once it reconnects at the target
+  // version, deploy the app from it (continued in App.svelte on reconnect via
+  // the pending-app-deploy marker). Lets the phone drive both steps with one tap.
+  async updateRelayAndDeploy(relayId: string, targetVersion: string): Promise<void> {
+    rememberPendingAppDeploy(relayId, targetVersion);
+    try {
+      await this.installRelayUpdate(relayId);
+    } catch (error) {
+      clearPendingAppDeploy(relayId);
       throw error;
     }
   }

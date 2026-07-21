@@ -4,6 +4,7 @@ import type { AppDeploymentStatus, AppUpdateStatus, RelayUpdateStatus } from './
 
 const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const PENDING_RELAY_UPDATES_KEY = 'herdr_pending_relay_updates';
+const PENDING_APP_DEPLOY_KEY = 'herdr_pending_app_deploy';
 const AUTO_RELOAD_VERSION_KEY = 'herdr_auto_reload_version';
 const RELAY_UPDATE_STATES = new Set([
   'checking',
@@ -220,6 +221,35 @@ export function clearPendingRelayUpdate(relayId: string): void {
   const pending = pendingRelayUpdates();
   delete pending[relayId];
   sessionStorage.setItem(PENDING_RELAY_UPDATES_KEY, JSON.stringify(pending));
+}
+
+// Records that an app deployment should fire from a relay once it finishes a
+// relay update and reconnects at the target version. Stored in sessionStorage
+// so the intent survives the relay's restart-and-reconnect cycle. Keyed by
+// relay id, valued by the app version to deploy.
+function pendingAppDeploys(): Record<string, string> {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(PENDING_APP_DEPLOY_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function rememberPendingAppDeploy(relayId: string, version: string): void {
+  const pending = pendingAppDeploys();
+  pending[relayId] = version;
+  sessionStorage.setItem(PENDING_APP_DEPLOY_KEY, JSON.stringify(pending));
+}
+
+export function pendingAppDeploy(relayId: string): string | null {
+  return pendingAppDeploys()[relayId] || null;
+}
+
+export function clearPendingAppDeploy(relayId: string): void {
+  const pending = pendingAppDeploys();
+  delete pending[relayId];
+  sessionStorage.setItem(PENDING_APP_DEPLOY_KEY, JSON.stringify(pending));
 }
 
 export function relayServesCurrentOrigin(relayUrl: string): boolean {

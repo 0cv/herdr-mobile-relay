@@ -34,8 +34,10 @@
   import { relayStore } from '$lib/store';
   import {
     appUpdateStatus,
+    clearPendingAppDeploy,
     clearPendingRelayUpdate,
     initializeAppUpdates,
+    pendingAppDeploy,
     pendingRelayUpdate,
     relayServesCurrentOrigin,
     reloadUpdatedSameOriginApp,
@@ -138,7 +140,16 @@
       if (!revision || !pending.revision.startsWith(revision)) continue;
       clearPendingRelayUpdate(relayId);
       relayStore.showToast(`${connection.relay.label} updated to v${pending.version}.`);
-      if (relayServesCurrentOrigin(connection.relay.url)) {
+      const deployAfter = pendingAppDeploy(relayId);
+      if (deployAfter) {
+        clearPendingAppDeploy(relayId);
+        if (connection.releaseVersion === deployAfter) {
+          relayStore.showToast(`Deploying app v${deployAfter} from ${connection.relay.label}…`);
+          void relayStore.deployAppUpdate(relayId, deployAfter).catch((error) => {
+            relayStore.showToast((error as Error).message, true);
+          });
+        }
+      } else if (relayServesCurrentOrigin(connection.relay.url)) {
         void reloadUpdatedSameOriginApp(pending.version);
       }
     }

@@ -4,11 +4,14 @@ import { APP_VERSION } from '$lib/config';
 import {
   appUpdateStatus,
   checkAppUpdate,
+  clearPendingAppDeploy,
   clearPendingRelayUpdate,
   newerVersion,
   normalizeAppDeployment,
   normalizeRelayUpdate,
+  pendingAppDeploy,
   pendingRelayUpdate,
+  rememberPendingAppDeploy,
   rememberPendingRelayUpdate,
   semverTuple,
 } from '$lib/updates';
@@ -130,5 +133,13 @@ describe('release updates', () => {
     });
     clearPendingRelayUpdate('fedora');
     expect(pendingRelayUpdate('fedora')).toBeNull();
+  });
+
+  it('remembers a queued app deploy across a relay update reconnect', () => {
+    rememberPendingAppDeploy('fedora', '0.8.3');
+    expect(pendingAppDeploy('fedora')).toBe('0.8.3');
+    expect(pendingAppDeploy('other')).toBeNull();
+    clearPendingAppDeploy('fedora');
+    expect(pendingAppDeploy('fedora')).toBeNull();
   });
 });
