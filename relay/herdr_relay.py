@@ -6,6 +6,7 @@
 """Herdr Mobile Relay server — polls local herdr and broadcasts to clients."""
 import asyncio
 import base64
+import contextvars
 import difflib
 import hashlib
 import hmac
@@ -13,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -98,6 +100,12 @@ POLL_INTERVAL = float(os.environ.get("HERDR_RELAY_POLL_INTERVAL", "2"))
 IDLE_POLL_INTERVAL = max(POLL_INTERVAL, 15.0)
 QUESTION_KEY_DELAY = 0.15
 PLUGIN_PORT = int(os.environ.get("HERDR_RELAY_PLUGIN_PORT", "8376"))
+HERDR_SOCKET_PATH = str(
+    Path(
+        os.environ.get("HERDR_SOCKET_PATH")
+        or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "herdr" / "herdr.sock"
+    ).expanduser().resolve(strict=False)
+)
 AUTH_TOKEN = os.environ.get("HERDR_RELAY_TOKEN", "")  # Shared secret for public/browser relay auth
 RELAY_INSTANCE_ID = os.environ.get("HERDR_RELAY_INSTANCE_ID", "")
 ALLOWED_ORIGINS = {
@@ -116,10 +124,27 @@ PUSH_LOCK = threading.RLock()
 ACTIVITY_FILE = Path.home() / ".cache" / "herdr-mobile-relay" / "activity.jsonl"
 ACTIVITY_MAX_ITEMS = 500
 ACTIVITY_MAX_BYTES = 2 * 1024 * 1024
-ACTIVITY_EXTRACT_MAX_CHARS = 10000
+ACTIVITY_EXTRACT_MAX_CHARS = 100000
 ACTIVITY_LOCK = threading.RLock()
+activity_tombstones = set()
+activity_cleanup_tasks = set()
 PROMPT_MAX_CHARS = 100000
 ANSWER_MAX_CHARS = 100000
+# The phone abandons an approval after 12 seconds. Finish or fail before any
+# keys are sent within a smaller budget so a late approval can never execute
+# after the UI reported a timeout.
+APPROVAL_DEADLINE_SECONDS = 9.0
+# The phone abandons ordinary commands after 15 seconds and question answers
+# after 20 seconds. Bound every mutating command by a smaller receipt-time
+# deadline so the relay never sends keys, a prompt, or a rename after the
+# phone already reported a timeout.
+COMMAND_DEADLINE_SECONDS = 12.0
+QUESTION_DEADLINE_SECONDS = 16.0
+MUTATION_NOT_STARTED = "Timed out before the command could run"
+MUTATION_DISPATCHED_UNKNOWN = "Command was dispatched but its outcome is unknown"
+MUTATION_GRACE_SECONDS = 1.0
+AGENT_START_DEADLINE_SECONDS = 40.0
+AGENT_START_ROLLBACK_SECONDS = 5.0
 QODER_PROJECTS_DIR = Path.home() / ".qoder" / "projects"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
@@ -138,6 +163,11 @@ UPLOAD_DIR = Path.home() / ".cache" / "herdr-mobile-relay" / "uploads"
 UPLOAD_MAX_BYTES = 10 * 1024 * 1024
 UPLOAD_MAX_AGE_DAYS = 7
 WS_MAX_SIZE = max(16 * 1024 * 1024, UPLOAD_MAX_BYTES * 2 + 1024 * 1024)
+WS_SEND_TIMEOUT = 5.0
+WS_CLOSE_TIMEOUT = 1.0
+CLIENT_OUTBOUND_MAX_ITEMS = 64
+CLIENT_OUTBOUND_FRAMING_BYTES = 1024
+CLIENT_OUTBOUND_MAX_BYTES = ACTIVITY_MAX_BYTES + CLIENT_OUTBOUND_FRAMING_BYTES
 DEFAULT_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 WEB_DIR = Path(os.environ.get("HERDR_WEB_ROOT", DEFAULT_WEB_DIR)).expanduser().resolve()
 WEB_ASSET_CONTENT_TYPES = {
@@ -162,6 +192,14 @@ _DEFAULT_AGENT_PROFILE_CANDIDATES = {
     "claude": "Claude Code",
     "opencode": "OpenCode",
 }
+HERDR_AGENT_KINDS = frozenset({
+    "agy", "amp", "claude", "cline", "codex", "copilot", "cursor", "devin",
+    "droid", "gemini", "grok", "hermes", "kilo", "kimi", "kiro", "maki",
+    "mastracode", "omp", "opencode", "pi", "qodercli",
+})
+HERDR_AGENT_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+HERDR_AGENT_START_TIMEOUT_MS = 30_000
+HERDR_AGENT_START_PROCESS_TIMEOUT = 35
 
 # Default skill directories per agent profile id. Entries are used when the
 # INI config has no ``[skills]`` section or no entry for a particular agent.
@@ -231,7 +269,7 @@ def _reload_agent_profiles_ini():
     updated profiles (existing connections keep the ``push_config`` they
     already received).
     """
-    global _AGENT_PROFILES_INI_CACHE, AGENT_PROFILE_CANDIDATES
+    global _AGENT_PROFILES_INI_CACHE, AGENT_PROFILE_CANDIDATES, _integrations_generation
     _AGENT_PROFILES_INI_CACHE = _read_agent_profiles_ini()
     AGENT_PROFILE_CANDIDATES = (
         _load_agent_profiles_from_config() or _DEFAULT_AGENT_PROFILE_CANDIDATES
@@ -239,9 +277,26 @@ def _reload_agent_profiles_ini():
     # Allow a fresh round of warnings after reload.
     _MISSING_AGENT_WARNED.clear()
     _INVALID_COMMAND_FORMAT_WARNED.clear()
-    # Re-query installed Herdr integrations on the next connection.
+    # Re-query installed Herdr integrations. In merge mode refresh
+    # asynchronously and hold new connections until the result lands, so a
+    # replace->merge reload still advertises discovered integrations to the
+    # first client (the hot-reload guarantee). Replacement mode never consults
+    # the cache, so mark ready immediately without spawning the subprocess.
     with ACTIVITY_LOCK:
         _herdr_integrations_cache["expires"] = 0.0
+    if _profiles_replace_mode():
+        _integrations_ready.set()
+    else:
+        with ACTIVITY_LOCK:
+            # Bump so a refresh started before this reload is discarded rather
+            # than overwriting the cache / setting readiness with stale data.
+            _integrations_generation += 1
+            generation = _integrations_generation
+            _herdr_integrations_cache["refreshing"] = True
+        _integrations_ready.clear()
+        threading.Thread(
+            target=_refresh_herdr_integrations, args=(generation,), daemon=True
+        ).start()
 
 
 def _load_agent_profiles_from_config():
@@ -312,6 +367,7 @@ AGENT_PROFILE_CANDIDATES = (
 )
 MACOS_PROTECTED_HOME_DIRECTORIES = {"Desktop", "Documents", "Downloads"}
 RELAY_CAPABILITIES = [
+    "clear_activities",
     "directory_browser",
     "self_update",
     "structured_questions",
@@ -322,6 +378,7 @@ RELAY_CAPABILITIES = [
 PROTOCOL_VERSION = 2
 MUTATING_MESSAGE_TYPES = frozenset({
     "answer_question",
+    "clear_activities",
     "navigate_question",
     "respond",
     "clarify_question",
@@ -575,12 +632,23 @@ COMMAND_RE = re.compile(r"^\s*(?:[$>]|\u276f|\u203a)\s+(.+?)\s*$")
 
 clients = set()
 agent_refresh_clients = set()
+failed_clients = set()
+client_outbound_queues = {}
+client_outbound_tasks = {}
+client_handler_tasks = {}
 latest_agents_message = json.dumps(
     {"type": "agents", "agents": []},
     sort_keys=True,
     separators=(",", ":"),
 )
 last_broadcast_agents_message = None
+agent_inventory_status = {
+    "state": "starting",
+    "error_code": "",
+    "message": "",
+    "last_attempt_at": 0,
+    "last_success_at": 0,
+}
 last_statuses = {}
 blocked_agent_details = {}
 unseen_done_panes = set()
@@ -599,14 +667,70 @@ claude_history_save_times = {}
 claude_history_inflight = set()
 claude_history_pending_captures = set()
 event_queue = asyncio.Queue()
+outbound_queue = asyncio.Queue()
 poll_wakeup = asyncio.Event()
+# Poll snapshots and plugin events both update the same transition caches. Keep
+# only their state changes atomic; slow enrichment and publication revalidate
+# the pane revision after releasing this lock.
+agent_state_application_lock = asyncio.Lock()
+activity_delivery_lock = asyncio.Lock()
+agent_state_revision_counter = 0
+agent_state_revisions = {}
+agent_transition_publication_tasks = {}
 question_locks = {}
+approval_locks = {}
+lifecycle_locks = {}
+lifecycle_generations = {}
+approved_event_results = {}
 
 
-def run_herdr_result(*args):
+def advance_agent_state_revision(pane_id):
+    global agent_state_revision_counter
+    publication = agent_transition_publication_tasks.get(pane_id)
+    if publication is not None:
+        _revision, task = publication
+        if not task.done():
+            task.cancel()
+    agent_state_revision_counter += 1
+    agent_state_revisions[pane_id] = agent_state_revision_counter
+    return agent_state_revision_counter
+
+
+async def agent_transition_is_current(pane_id, status, revision):
+    async with agent_state_application_lock:
+        return (
+            agent_state_revisions.get(pane_id) == revision
+            and last_statuses.get(pane_id) == status
+        )
+
+
+async def agent_snapshot_is_current(snapshot_state):
+    async with agent_state_application_lock:
+        return all(
+            agent_state_revisions.get(pane_id) == revision
+            and last_statuses.get(pane_id) == status
+            for pane_id, (status, revision) in snapshot_state.items()
+        )
+
+
+async def run_agent_transition_publication(pane_id, revision, publication):
+    task = asyncio.get_running_loop().create_task(publication)
+    agent_transition_publication_tasks[pane_id] = (revision, task)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if agent_state_revisions.get(pane_id) != revision:
+            return False
+        raise
+    finally:
+        if agent_transition_publication_tasks.get(pane_id) == (revision, task):
+            agent_transition_publication_tasks.pop(pane_id, None)
+
+
+def run_herdr_result(*args, timeout=15):
     try:
         cmd = [HERDR, *args]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if r.returncode != 0:
             error = (r.stderr or r.stdout or f"herdr exited with status {r.returncode}").strip()
             return False, "", error[:500]
@@ -626,8 +750,46 @@ async def run_herdr_async(*args):
     return await asyncio.to_thread(run_herdr, *args)
 
 
-async def run_herdr_async_result(*args):
-    return await asyncio.to_thread(run_herdr_result, *args)
+# Absolute monotonic deadline for the terminal mutation currently being handled.
+# Worker threads re-read it just before spawning Herdr so a command that was
+# queued behind a saturated executor never sends input after the phone gave up.
+mutation_deadline = contextvars.ContextVar("mutation_deadline", default=None)
+mutation_guard = contextvars.ContextVar("mutation_guard", default=None)
+MUTATION_PANE_REPLACED = "Pane was replaced by a concurrent operation"
+
+
+def _run_herdr_mutation(args, deadline, started):
+    started.set()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False, "", MUTATION_NOT_STARTED
+    guard = mutation_guard.get()
+    if guard is not None and not guard():
+        return False, "", MUTATION_PANE_REPLACED
+    ok, output, error = run_herdr_result(*args, timeout=remaining)
+    if not ok and error == "herdr command timed out":
+        return False, "", MUTATION_DISPATCHED_UNKNOWN
+    return ok, output, error
+
+
+async def run_herdr_async_result(*args, timeout=15, deadline=None):
+    if deadline is None:
+        deadline = mutation_deadline.get()
+    if deadline is None:
+        return await asyncio.to_thread(run_herdr_result, *args, timeout=timeout)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False, "", MUTATION_NOT_STARTED
+    started = threading.Event()
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_run_herdr_mutation, args, deadline, started),
+            timeout=remaining + MUTATION_GRACE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        if started.is_set():
+            return False, "", MUTATION_DISPATCHED_UNKNOWN
+        return False, "", MUTATION_NOT_STARTED
 
 
 def get_tabs():
@@ -642,13 +804,32 @@ def get_tabs():
         return {}
 
 
-def get_agents():
-    raw = run_herdr("pane", "list")
-    if raw is None:
-        return None
+def classify_agent_inventory_error(error):
+    """Return a stable code and an authenticated, actionable error message."""
+    detail = compact_text(error or "Herdr pane inventory failed", 500)
+    normalized = detail.lower()
+    if "protocol_mismatch" in normalized or (
+        "client protocol" in normalized and "server protocol" in normalized
+    ):
+        return (
+            "protocol_mismatch",
+            "The Herdr client and server protocols do not match. "
+            "Run `herdr server live-handoff` on this computer, then refresh.",
+        )
+    if "timed out" in normalized:
+        return "timeout", "Herdr did not return its agent inventory in time."
+    return "command_failed", detail
+
+
+def get_agent_inventory():
+    ok, raw, error = run_herdr_result("pane", "list")
+    if not ok:
+        return None, classify_agent_inventory_error(error)
     try:
         data = json.loads(raw)
         panes = data.get("result", {}).get("panes", [])
+        if not isinstance(panes, list):
+            raise ValueError("pane list is not an array")
         tabs = get_tabs()
         agents = []
         session_ids = {}
@@ -686,17 +867,89 @@ def get_agents():
                 ),
             }
             session = cached_session_name(p.get("agent", ""), p.get("cwd", ""), session_id)
-            if session:
-                agent["session"] = session
+            agent["session"] = session
             if session_id:
                 session_ids[raw_pane_id] = session_id
             agents.append(agent)
         with ACTIVITY_LOCK:
             pane_session_ids.clear()
             pane_session_ids.update(session_ids)
-        return agents
-    except (json.JSONDecodeError, KeyError):
-        return None
+        return agents, None
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None, (
+            "invalid_response",
+            "Herdr returned an invalid agent inventory response.",
+        )
+
+
+def get_agents():
+    agents, _error = get_agent_inventory()
+    return agents
+
+
+def public_agent_inventory_status(*, include_message=True):
+    payload = {
+        "state": agent_inventory_status["state"],
+        "error_code": agent_inventory_status["error_code"],
+        "last_attempt_at": agent_inventory_status["last_attempt_at"],
+        "last_success_at": agent_inventory_status["last_success_at"],
+        "stale": (
+            agent_inventory_status["state"] != "ready"
+            and bool(agent_inventory_status["last_success_at"])
+        ),
+    }
+    if include_message:
+        payload["message"] = agent_inventory_status["message"]
+    return payload
+
+
+def agent_inventory_message():
+    return json.dumps(
+        {"type": "inventory_status", **public_agent_inventory_status()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def set_agent_inventory_error(error):
+    error_code, message = error or (
+        "command_failed",
+        "Unable to read the current Herdr agent inventory.",
+    )
+    previous = (
+        agent_inventory_status["state"],
+        agent_inventory_status["error_code"],
+        agent_inventory_status["message"],
+    )
+    agent_inventory_status.update({
+        "state": "error",
+        "error_code": error_code,
+        "message": compact_text(message, 500),
+        "last_attempt_at": int(time.time()),
+    })
+    changed = previous != (
+        agent_inventory_status["state"],
+        agent_inventory_status["error_code"],
+        agent_inventory_status["message"],
+    )
+    if changed:
+        print(f"Herdr agent inventory unavailable ({error_code}): {message}")
+    return changed
+
+
+def set_agent_inventory_ready():
+    changed = agent_inventory_status["state"] != "ready"
+    now = int(time.time())
+    agent_inventory_status.update({
+        "state": "ready",
+        "error_code": "",
+        "message": "",
+        "last_attempt_at": now,
+        "last_success_at": now,
+    })
+    if changed:
+        print("Herdr agent inventory ready")
+    return changed
 
 
 ATTENTION_STATUSES = {"working", "blocked"}
@@ -726,6 +979,7 @@ def register_status_transition(pane_id, status, previous, focused=False):
         unseen_done_panes.add(pane_id)
     elif is_done_status(status) and previous in ATTENTION_STATUSES:
         acknowledged_done_panes.discard(pane_id)
+        unseen_done_panes.add(pane_id)
 
 
 def displayed_status(pane_id, status):
@@ -1268,17 +1522,20 @@ def question_prompt(lines, first_option_index):
     return "Claude Code needs an answer"
 
 
-def question_interaction_id(kind, question, options, submit_label):
+def question_interaction_id(kind, question, options, submit_label, position=None):
     # The multi-question header is mutable: selecting a checkbox changes its
     # empty/completed glyph even though Claude is still showing the same
     # question. Keep identity semantic so ordinary redraws cannot look like a
-    # chained-question transition.
+    # chained-question transition. The question position only changes when the
+    # agent advances to another question, so include it to give otherwise
+    # identical chained questions distinct identities.
     stable = json.dumps(
         {
             "kind": kind,
             "question": question,
             "options": [item["label"] for item in options],
             "submit_label": submit_label,
+            "position": list(position) if position else None,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1478,7 +1735,9 @@ def parse_codex_question(text):
     submit_label = "Submit" if current >= total else "Next"
     kind = "single_select"
     return {
-        "id": question_interaction_id(kind, question, all_options, submit_label),
+        "id": question_interaction_id(
+            kind, question, all_options, submit_label, position=(current, total),
+        ),
         "kind": kind,
         "question": question,
         "options": all_options,
@@ -1583,7 +1842,7 @@ def parse_claude_question(text):
         kind = "multi_select"
         return {
             "id": question_interaction_id(
-                kind, question, options, submit_label,
+                kind, question, options, submit_label, position=position,
             ),
             "kind": kind,
             "question": question,
@@ -1645,7 +1904,7 @@ def parse_claude_question(text):
     submit_label = "Next" if has_next else "Submit"
     return {
         "id": question_interaction_id(
-            kind, question, options, submit_label,
+            kind, question, options, submit_label, position=position,
         ),
         "kind": kind,
         "question": question,
@@ -1887,6 +2146,13 @@ async def prune_uploads_loop():
 
 def compact_text(value, limit=240):
     return re.sub(r"\s+", " ", str(value or "")).strip()[:limit]
+
+
+def generated_clear_agent_name(profile_id):
+    profile_part = re.sub(r"[^a-z0-9_-]+", "-", str(profile_id or "").lower()).strip("-_")
+    if not profile_part or not profile_part[0].isalpha():
+        profile_part = f"agent-{profile_part}".rstrip("-")
+    return f"clear-{profile_part[:20]}-{int(time.time()) % 100000:05d}"
 
 
 def compact_extract(value, limit=ACTIVITY_EXTRACT_MAX_CHARS):
@@ -2347,7 +2613,17 @@ HERDR_INTEGRATION_LABELS = {
 }
 _HERDR_INTEGRATION_STATUS_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*):\s*([A-Za-z]+)")
 HERDR_INTEGRATIONS_TTL = 300.0
+HERDR_INTEGRATIONS_READY_TIMEOUT = 20.0
 _herdr_integrations_cache = {"names": set(), "expires": 0.0, "refreshing": False}
+# Set whenever the cache holds a fresh result. Starts set because no client is
+# accepted before the startup prewarm runs; a SIGHUP reload clears it until the
+# asynchronous refresh completes so the next connection can wait for readiness.
+_integrations_ready = threading.Event()
+_integrations_ready.set()
+# Bumped on every reload so a refresh started before the reload is recognizable
+# as obsolete: it must neither overwrite the cache nor set the readiness event,
+# otherwise a stale pre-reload result could satisfy the gate the reload cleared.
+_integrations_generation = 0
 
 
 def herdr_installed_integrations():
@@ -2369,15 +2645,20 @@ def herdr_installed_integrations():
     return installed
 
 
-def _refresh_herdr_integrations():
+def _refresh_herdr_integrations(generation):
     try:
         names = herdr_installed_integrations()
     except Exception:
         names = set()
     with ACTIVITY_LOCK:
+        if generation != _integrations_generation:
+            # Superseded by a newer reload/refresh; this result is stale and must
+            # neither update the cache nor satisfy the readiness gate.
+            return
         _herdr_integrations_cache["names"] = names
         _herdr_integrations_cache["expires"] = time.time() + HERDR_INTEGRATIONS_TTL
         _herdr_integrations_cache["refreshing"] = False
+    _integrations_ready.set()
 
 
 def prewarm_herdr_integrations():
@@ -2386,8 +2667,15 @@ def prewarm_herdr_integrations():
     Without this, the first client to connect after a restart sees an empty
     cache while the background refresh is still running, so installed
     integrations are missing from its agent profile list until it reconnects.
+    Skipped in replacement mode, where auto-detection is suppressed and the
+    cache is never consulted, so the subprocess would only delay readiness.
     """
-    _refresh_herdr_integrations()
+    if _profiles_replace_mode():
+        _integrations_ready.set()
+        return
+    with ACTIVITY_LOCK:
+        generation = _integrations_generation
+    _refresh_herdr_integrations(generation)
 
 
 def cached_herdr_integrations():
@@ -2398,7 +2686,10 @@ def cached_herdr_integrations():
         if _herdr_integrations_cache["refreshing"]:
             return set(_herdr_integrations_cache["names"])
         _herdr_integrations_cache["refreshing"] = True
-    threading.Thread(target=_refresh_herdr_integrations, daemon=True).start()
+        generation = _integrations_generation
+    threading.Thread(
+        target=_refresh_herdr_integrations, args=(generation,), daemon=True
+    ).start()
     return set(_herdr_integrations_cache["names"])
 
 
@@ -2440,8 +2731,22 @@ def load_agent_profiles():
             "id": profile_id,
             "label": label,
             "argv": [executable],
+            "kind": profile_id if profile_id in HERDR_AGENT_KINDS else "",
         }
     return profiles
+
+
+async def agent_profiles_for_new_client():
+    """Profiles to advertise to a freshly connected client.
+
+    In merge mode, wait (bounded) for any in-flight integration refresh so a
+    client connecting right after a SIGHUP replace->merge reload still sees the
+    discovered integrations, honoring the hot-reload guarantee. Replacement mode
+    never consults the cache, so it returns immediately.
+    """
+    if not _profiles_replace_mode():
+        await asyncio.to_thread(_integrations_ready.wait, HERDR_INTEGRATIONS_READY_TIMEOUT)
+    return load_agent_profiles()
 
 
 def directory_is_browsable(path):
@@ -2520,6 +2825,18 @@ def resolve_agent_cwd(value):
     return None, "Working directory must be inside the current user's home directory"
 
 
+def persisted_activity_tombstones():
+    tombstone_file = ACTIVITY_FILE.with_suffix(".tombstones")
+    try:
+        return {
+            line.strip()
+            for line in tombstone_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        }
+    except OSError:
+        return set()
+
+
 def load_activity(limit=ACTIVITY_MAX_ITEMS):
     try:
         limit = int(limit or ACTIVITY_MAX_ITEMS)
@@ -2527,6 +2844,8 @@ def load_activity(limit=ACTIVITY_MAX_ITEMS):
         limit = ACTIVITY_MAX_ITEMS
     limit = max(1, min(limit, ACTIVITY_MAX_ITEMS))
     with ACTIVITY_LOCK:
+        activity_tombstones.update(persisted_activity_tombstones())
+        tombstones = set(activity_tombstones)
         try:
             with ACTIVITY_FILE.open(encoding="utf-8") as activity_file:
                 lines = deque(activity_file, maxlen=limit)
@@ -2541,7 +2860,7 @@ def load_activity(limit=ACTIVITY_MAX_ITEMS):
             entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(entry, dict):
+        if isinstance(entry, dict) and entry.get("id") not in tombstones:
             entries.append(entry)
             total_bytes += len(line)
     entries.reverse()
@@ -2564,6 +2883,25 @@ def trim_activity_file():
     tmp.replace(ACTIVITY_FILE)
 
 
+def clear_activity_history():
+    """Delete persisted activity while excluding concurrent record writes."""
+    tombstone_file = ACTIVITY_FILE.with_suffix(".tombstones")
+    with ACTIVITY_LOCK:
+        try:
+            ACTIVITY_FILE.unlink(missing_ok=True)
+        except OSError as exc:
+            return False, compact_text(exc, 500)
+        try:
+            tombstone_file.unlink(missing_ok=True)
+        except OSError as exc:
+            # Tombstones are internal stale-write guards, not visible activity.
+            # Keeping them is safe and must not turn a successful purge into a
+            # misleading failure.
+            print(f"Activity tombstone cleanup failed: {exc}")
+        activity_tombstones.clear()
+    return True, ""
+
+
 def project_dir_candidates(cwd):
     text = str(cwd or "").rstrip("/")
     if not text:
@@ -2582,13 +2920,6 @@ def find_project_dir(base_dir, cwd):
         if project_dir.is_dir():
             return project_dir
     return None
-
-
-def newest_jsonl(directory):
-    files = [item for item in Path(directory).glob("*.jsonl") if item.is_file()]
-    if not files:
-        return None
-    return max(files, key=lambda item: item.stat().st_mtime)
 
 
 _SESSION_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,128}")
@@ -2636,7 +2967,11 @@ def project_session_title(base_dir, cwd, session_id=""):
     project_dir = find_project_dir(base_dir, cwd)
     if not project_dir:
         return ""
-    session_file = session_file_for_id(project_dir, session_id) or newest_jsonl(project_dir)
+    if session_id:
+        session_file = session_file_for_id(project_dir, session_id)
+    else:
+        session_files = [item for item in project_dir.glob("*.jsonl") if item.is_file()]
+        session_file = session_files[0] if len(session_files) == 1 else None
     if not session_file:
         return ""
     titles = last_json_titles(session_file, ("custom-title", "ai-title", "summary"))
@@ -2668,19 +3003,22 @@ def codex_thread_names():
     return names
 
 
-def codex_session_name(cwd):
+def codex_session_name(cwd, session_id=""):
     if not str(cwd):
         return ""
     names = codex_thread_names()
     if not names:
         return ""
+    session_id = str(session_id or "").strip()
+    matches = {}
     day_dirs = sorted((item for item in CODEX_SESSIONS_DIR.glob("*/*/*") if item.is_dir()), reverse=True)
     scanned = 0
     for day_dir in day_dirs:
-        for rollout in sorted(day_dir.glob("rollout-*.jsonl"), reverse=True):
+        remaining = CODEX_ROLLOUT_SCAN_MAX_FILES - scanned
+        if remaining <= 0:
+            break
+        for rollout in sorted(day_dir.glob("rollout-*.jsonl"), reverse=True)[:remaining]:
             scanned += 1
-            if scanned > CODEX_ROLLOUT_SCAN_MAX_FILES:
-                return ""
             try:
                 with rollout.open("r", encoding="utf-8", errors="replace") as handle:
                     first_line = handle.readline()
@@ -2693,10 +3031,13 @@ def codex_session_name(cwd):
             if payload.get("cwd") != str(cwd):
                 continue
             for key in ("session_id", "id"):
-                thread_name = names.get(payload.get(key))
+                candidate_id = payload.get(key)
+                thread_name = names.get(candidate_id)
                 if thread_name:
-                    return thread_name
-    return ""
+                    matches[candidate_id] = thread_name
+    if session_id:
+        return matches.get(session_id, "")
+    return next(iter(matches.values())) if len(matches) == 1 else ""
 
 
 def agent_cwd_for_pane(pane_id):
@@ -2732,7 +3073,7 @@ def session_name_for_activity(agent, cwd, session_id=""):
         if "claude" in key:
             return claude_session_name(cwd, session_id)
         if "codex" in key:
-            return codex_session_name(cwd)
+            return codex_session_name(cwd, session_id)
     except OSError:
         return ""
     return ""
@@ -2742,22 +3083,65 @@ SESSION_NAME_TTL = 60.0
 session_name_cache = {}
 
 
+def path_signature(path):
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return (str(path), None, None, None)
+    return (str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
+def session_name_source_signature(agent, cwd, session_id=""):
+    key = str(agent or "").lower()
+    if "codex" in key:
+        day_dirs = [path for path in CODEX_SESSIONS_DIR.glob("*/*/*") if path.is_dir()]
+        return (
+            path_signature(CODEX_SESSION_INDEX_FILE),
+            tuple(sorted(path_signature(path) for path in day_dirs)),
+        )
+    if "qoder" in key:
+        base_dir = QODER_PROJECTS_DIR
+    elif "claude" in key:
+        base_dir = CLAUDE_PROJECTS_DIR
+    else:
+        return ()
+    project_dir = find_project_dir(base_dir, cwd)
+    if not project_dir:
+        return (path_signature(Path(base_dir)),)
+    if session_id and _SESSION_ID_RE.fullmatch(str(session_id)):
+        return (path_signature(project_dir / f"{session_id}.jsonl"),)
+    session_files = sorted(project_dir.glob("*.jsonl"))
+    return tuple(path_signature(path) for path in session_files)
+
+
 def cached_session_name(agent, cwd, session_id=""):
     key = (str(agent or "").lower(), str(cwd or ""), str(session_id or ""))
     now = time.time()
+    source_signature = session_name_source_signature(agent, cwd, session_id)
     with ACTIVITY_LOCK:
         hit = session_name_cache.get(key)
-        if hit and now - hit[1] < SESSION_NAME_TTL:
+        if hit and hit[1] == source_signature and now - hit[2] < SESSION_NAME_TTL:
             return hit[0]
     name = session_name_for_activity(agent, cwd, session_id)
     with ACTIVITY_LOCK:
-        session_name_cache[key] = (name, now)
+        session_name_cache[key] = (name, source_signature, now)
     return name
 
 
-def record_activity(kind, status, summary, pane_id="", agent="", project="", request_id="", details=None, extract=""):
+def record_activity(
+    kind,
+    status,
+    summary,
+    pane_id="",
+    agent="",
+    project="",
+    request_id="",
+    details=None,
+    extract="",
+    activity_id="",
+):
     entry = {
-        "id": secrets.token_urlsafe(12),
+        "id": activity_id or secrets.token_urlsafe(12),
         "timestamp": now_millis(),
         "kind": compact_text(kind, 40),
         "status": compact_text(status, 24),
@@ -2796,12 +3180,185 @@ def record_activity(kind, status, summary, pane_id="", agent="", project="", req
     return entry
 
 
+def discard_recorded_activity(activity_id):
+    if not activity_id:
+        return True
+    with ACTIVITY_LOCK:
+        try:
+            lines = ACTIVITY_FILE.read_text(encoding="utf-8").splitlines(keepends=True)
+        except OSError:
+            return True
+        retained = []
+        removed = False
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                retained.append(line)
+                continue
+            if isinstance(entry, dict) and entry.get("id") == activity_id:
+                removed = True
+            else:
+                retained.append(line)
+        if not removed:
+            return True
+        temp = ACTIVITY_FILE.with_suffix(".jsonl.tmp")
+        try:
+            temp.write_text("".join(retained), encoding="utf-8")
+            os.chmod(temp, 0o600)
+            temp.replace(ACTIVITY_FILE)
+            return True
+        except OSError as exc:
+            print(f"Stale activity cleanup failed: {exc}")
+            return False
+
+
+def tombstone_activity(activity_id):
+    if not activity_id:
+        return False
+    with ACTIVITY_LOCK:
+        activity_tombstones.update(persisted_activity_tombstones())
+        tombstone_file = ACTIVITY_FILE.with_suffix(".tombstones")
+        retained = set(activity_tombstones)
+        retained.add(activity_id)
+        if not write_activity_tombstones_atomic(tombstone_file, retained):
+            print("Activity tombstone write failed")
+            return False
+        activity_tombstones.add(activity_id)
+        return True
+
+
+def write_activity_tombstones_atomic(tombstone_file, tombstones):
+    temp = tombstone_file.with_name(
+        f".{tombstone_file.name}.{secrets.token_hex(8)}.tmp"
+    )
+    descriptor = None
+    try:
+        ensure_private_dir(tombstone_file.parent)
+        descriptor = os.open(
+            temp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write("".join(f"{item}\n" for item in sorted(tombstones)))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp, 0o600)
+        os.replace(temp, tombstone_file)
+    except OSError:
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+    directory_descriptor = None
+    try:
+        directory_descriptor = os.open(
+            tombstone_file.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        os.fsync(directory_descriptor)
+    except OSError as exc:
+        print(f"Activity tombstone directory sync failed: {exc}")
+        return False
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+    return True
+
+
+def clear_activity_tombstone(activity_id):
+    with ACTIVITY_LOCK:
+        tombstone_file = ACTIVITY_FILE.with_suffix(".tombstones")
+        activity_tombstones.update(persisted_activity_tombstones())
+        retained = set(activity_tombstones)
+        retained.discard(activity_id)
+        if not write_activity_tombstones_atomic(tombstone_file, retained):
+            print("Activity tombstone cleanup failed")
+            return False
+        activity_tombstones.discard(activity_id)
+        return True
+
+
+async def cleanup_tombstoned_activity(record_task, activity_id):
+    try:
+        await record_task
+    except Exception:
+        pass
+    removed = await asyncio.to_thread(discard_recorded_activity, activity_id)
+    if removed:
+        await asyncio.to_thread(clear_activity_tombstone, activity_id)
+
+
+def track_activity_cleanup(record_task, activity_id):
+    task = asyncio.get_running_loop().create_task(
+        cleanup_tombstoned_activity(record_task, activity_id)
+    )
+    activity_cleanup_tasks.add(task)
+    task.add_done_callback(activity_cleanup_tasks.discard)
+
+
 async def publish_activity(*args, **kwargs):
-    entry = await asyncio.to_thread(record_activity, *args, **kwargs)
-    if entry.get("pane_id"):
-        touch_agent_activity(entry["pane_id"], entry["timestamp"])
-    await broadcast({"type": "activity", "activity": entry})
-    return entry
+    expected_revision = kwargs.pop("expected_revision", None)
+    expected_status = kwargs.pop("expected_status", None)
+    pane_id = kwargs.get("pane_id", "")
+    activity_id = secrets.token_urlsafe(12)
+    kwargs["activity_id"] = activity_id
+    async with activity_delivery_lock:
+        record_task = None
+        entry = None
+        write_ahead = expected_revision is not None
+        tombstone_cleared = False
+        try:
+            if (
+                expected_revision is not None
+                and not await agent_transition_is_current(
+                    pane_id, expected_status, expected_revision
+                )
+            ):
+                return None
+            if write_ahead and not await asyncio.to_thread(
+                tombstone_activity, activity_id
+            ):
+                return None
+            record_task = asyncio.create_task(
+                asyncio.to_thread(record_activity, *args, **kwargs)
+            )
+            entry = await asyncio.shield(record_task)
+            if (
+                expected_revision is not None
+                and not await agent_transition_is_current(
+                    pane_id, expected_status, expected_revision
+                )
+            ):
+                track_activity_cleanup(record_task, activity_id)
+                return None
+            if write_ahead:
+                if not await asyncio.to_thread(clear_activity_tombstone, activity_id):
+                    track_activity_cleanup(record_task, activity_id)
+                    return None
+                tombstone_cleared = True
+            if entry.get("pane_id"):
+                touch_agent_activity(entry["pane_id"], entry["timestamp"])
+            await broadcast({"type": "activity", "activity": entry})
+            return entry
+        except asyncio.CancelledError:
+            if expected_revision is not None and record_task is not None:
+                if tombstone_cleared:
+                    await asyncio.to_thread(tombstone_activity, activity_id)
+                track_activity_cleanup(record_task, activity_id)
+            raise
 
 
 def ensure_vapid_public_key():
@@ -3044,6 +3601,13 @@ async def push_blocked(blocked_msg):
     await asyncio.to_thread(send_webpush_notifications, blocked_msg)
 
 
+async def push_blocked_if_current(blocked_msg, revision):
+    if await agent_transition_is_current(
+        blocked_msg.get("pane_id", ""), "blocked", revision
+    ):
+        await push_blocked(blocked_msg)
+
+
 async def publish_finished(event):
     pane_id = event.get("pane_id", "")
     event_id = f"finished-{secrets.token_urlsafe(8)}"
@@ -3062,10 +3626,10 @@ async def publish_finished(event):
     await asyncio.to_thread(send_finished_webpush_notifications, event, event_id)
 
 
-async def publish_blocked(blocked_msg):
+async def publish_blocked(blocked_msg, expected_revision=None):
     blocked_msg = dict(blocked_msg)
-    cache_blocked_agent_details(blocked_msg)
     blocked_msg.setdefault("event_id", secrets.token_urlsafe(12))
+    cache_blocked_agent_details(blocked_msg)
     activity = await publish_activity(
         "blocked",
         "attention",
@@ -3075,10 +3639,25 @@ async def publish_blocked(blocked_msg):
         project=blocked_msg.get("project", ""),
         details={"event_id": blocked_msg["event_id"]},
         extract=blocked_msg.get("prompt", ""),
+        expected_revision=expected_revision,
+        expected_status="blocked" if expected_revision is not None else None,
     )
+    if activity is None:
+        return False
+    if (
+        expected_revision is not None
+        and not await agent_transition_is_current(
+            blocked_msg.get("pane_id", ""), "blocked", expected_revision
+        )
+    ):
+        return False
     blocked_msg["updated_at"] = activity["timestamp"]
     await broadcast(blocked_msg)
-    asyncio.create_task(push_blocked(blocked_msg))
+    if expected_revision is None:
+        asyncio.create_task(push_blocked(blocked_msg))
+    else:
+        asyncio.create_task(push_blocked_if_current(blocked_msg, expected_revision))
+    return True
 
 
 def blocked_agent_details_for_content(agent, raw_content):
@@ -3094,9 +3673,14 @@ def blocked_agent_details_for_content(agent, raw_content):
     }
 
 
-async def publish_agent_blocked(agent):
+async def publish_agent_blocked(agent, expected_revision=None):
     pane_id = agent.get("pane_id", "")
     raw_content = await asyncio.to_thread(read_question_pane, pane_id)
+    if (
+        expected_revision is not None
+        and not await agent_transition_is_current(pane_id, "blocked", expected_revision)
+    ):
+        return False
     pre_event_id = blocked_agent_details.get(pane_id, {}).get("event_id", "")
     msg = {
         "type": "blocked",
@@ -3112,17 +3696,41 @@ async def publish_agent_blocked(agent):
     }
     if pre_event_id:
         msg["event_id"] = pre_event_id
-    await publish_blocked(msg)
+    if expected_revision is None:
+        return await publish_blocked(msg)
+    return await run_agent_transition_publication(
+        pane_id,
+        expected_revision,
+        publish_blocked(msg, expected_revision=expected_revision),
+    )
 
 
-async def publish_agent_status(agent, status):
-    await publish_activity(
-        "agent_status",
-        status or "unknown",
-        f"Agent is now {status or 'unknown'}",
-        pane_id=agent.get("pane_id", ""),
-        agent=agent.get("agent", ""),
-        project=agent.get("project", ""),
+async def publish_agent_status(agent, status, expected_revision=None, expected_status=None):
+    pane_id = agent.get("pane_id", "")
+    if (
+        expected_revision is not None
+        and not await agent_transition_is_current(
+            pane_id, expected_status or status, expected_revision
+        )
+    ):
+        return False
+    async def publication():
+        activity = await publish_activity(
+            "agent_status",
+            status or "unknown",
+            f"Agent is now {status or 'unknown'}",
+            pane_id=pane_id,
+            agent=agent.get("agent", ""),
+            project=agent.get("project", ""),
+            expected_revision=expected_revision,
+            expected_status=expected_status or status,
+        )
+        return activity is not None
+
+    if expected_revision is None:
+        return await publication()
+    return await run_agent_transition_publication(
+        pane_id, expected_revision, publication()
     )
 
 
@@ -3145,14 +3753,150 @@ async def broadcast(msg):
     await broadcast_serialized(json.dumps(msg))
 
 
-async def broadcast_serialized(data):
-    dead = set()
-    for ws in list(clients):
+async def close_failed_client(ws):
+    close = getattr(ws, "close", None)
+    if not callable(close):
+        terminate_failed_client(ws)
+        return
+    try:
+        await asyncio.wait_for(close(), timeout=WS_CLOSE_TIMEOUT)
+    except Exception:
+        terminate_failed_client(ws)
+
+
+def terminate_failed_client(ws):
+    """Abort a failed socket and unblock its owning connection handler."""
+    transport = getattr(ws, "transport", None)
+    if transport is None:
+        transport = getattr(getattr(ws, "protocol", None), "transport", None)
+    abort = getattr(transport, "abort", None)
+    if callable(abort):
         try:
-            await ws.send(data)
+            abort()
         except Exception:
-            dead.add(ws)
-    clients.difference_update(dead)
+            pass
+    handler = client_handler_tasks.get(ws)
+    if handler is not None and handler is not asyncio.current_task() and not handler.done():
+        handler.cancel()
+
+
+def fail_client(ws):
+    """Poison a connection immediately and close it without blocking delivery."""
+    clients.discard(ws)
+    agent_refresh_clients.discard(ws)
+    if ws in failed_clients:
+        return
+    failed_clients.add(ws)
+    stop_client_delivery(ws)
+    asyncio.create_task(close_failed_client(ws))
+
+
+async def send_client_message(ws, data):
+    try:
+        await asyncio.wait_for(ws.send(data), timeout=WS_SEND_TIMEOUT)
+        return True
+    except Exception:
+        fail_client(ws)
+        return False
+
+
+async def broadcast_serialized(data, recipients=None):
+    """Queue one ordered outbound message without awaiting socket delivery."""
+    targets = tuple(clients if recipients is None else recipients)
+    if targets:
+        outbound_queue.put_nowait((data, targets))
+
+
+class ClientOutboundBuffer:
+    def __init__(self):
+        self.items = deque()
+        self.bytes = 0
+        self.ready = asyncio.Event()
+        self.maxsize = CLIENT_OUTBOUND_MAX_ITEMS
+        self.maxbytes = CLIENT_OUTBOUND_MAX_BYTES
+
+    @staticmethod
+    def message_type(data):
+        try:
+            message = json.loads(data)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        return message.get("type", "") if isinstance(message, dict) else ""
+
+    def put_nowait(self, data):
+        size = len(data.encode("utf-8"))
+        message_type = self.message_type(data)
+        if message_type == "agents" and self.items and self.items[-1][2] == "agents":
+            previous_size = self.items[-1][1]
+            if self.bytes - previous_size + size > self.maxbytes:
+                return False
+            self.items[-1] = (data, size, message_type)
+            self.bytes += size - previous_size
+            return True
+        if len(self.items) >= self.maxsize or self.bytes + size > self.maxbytes:
+            return False
+        self.items.append((data, size, message_type))
+        self.bytes += size
+        self.ready.set()
+        return True
+
+    async def get(self):
+        while not self.items:
+            self.ready.clear()
+            if not self.items:
+                await self.ready.wait()
+        data, size, _message_type = self.items.popleft()
+        self.bytes -= size
+        return data
+
+    def qsize(self):
+        return len(self.items)
+
+
+def enqueue_client_delivery(ws, data):
+    queue = client_outbound_queues.get(ws)
+    task = client_outbound_tasks.get(ws)
+    if queue is None or task is None or task.done():
+        queue = ClientOutboundBuffer()
+        task = asyncio.create_task(client_outbound_push(ws, queue))
+        client_outbound_queues[ws] = queue
+        client_outbound_tasks[ws] = task
+
+        def cleanup(completed):
+            if client_outbound_tasks.get(ws) is completed:
+                client_outbound_tasks.pop(ws, None)
+                client_outbound_queues.pop(ws, None)
+
+        task.add_done_callback(cleanup)
+    if not queue.put_nowait(data):
+        fail_client(ws)
+
+
+def stop_client_delivery(ws):
+    client_outbound_queues.pop(ws, None)
+    task = client_outbound_tasks.pop(ws, None)
+    if task is not None and task is not asyncio.current_task():
+        task.cancel()
+
+
+async def client_outbound_push(ws, queue):
+    """Deliver one client's messages in FIFO order, independently of peers."""
+    while True:
+        data = await queue.get()
+        if not await send_client_message(ws, data):
+            return
+
+
+async def outbound_push():
+    """Fan ordered broadcasts into independent per-client FIFO workers."""
+    while True:
+        data, recipients = await outbound_queue.get()
+        try:
+            for ws in recipients:
+                if ws in clients:
+                    enqueue_client_delivery(ws, data)
+        finally:
+            outbound_queue.task_done()
 
 
 def public_update_status(status=None):
@@ -3526,6 +4270,38 @@ def agents_message(agents):
     )
 
 
+def merge_agent_event_into_snapshot(event, status, updated_at=None):
+    """Reflect a plugin-reported status change in the reconnect snapshot.
+
+    Polling rebuilds latest_agents_message from scratch, but between polls a
+    reconnecting client would otherwise see the stale pre-event state — e.g.
+    "working" with no event_id after the agent actually blocked. Updating the
+    cached agent's status lets agents_message merge the current blocked details.
+    """
+    global latest_agents_message
+    pane_id = event.get("pane_id", "")
+    if not pane_id:
+        return
+    try:
+        current_agents = json.loads(latest_agents_message).get("agents", [])
+    except (AttributeError, json.JSONDecodeError):
+        return
+    for agent in current_agents:
+        if agent.get("pane_id") == pane_id:
+            # The previous serialization baked any merged blocked details into
+            # the agent dict; drop them so agents_message re-merges from the
+            # current blocked_agent_details only while still blocked.
+            for key in BLOCKED_AGENT_DETAIL_FIELDS:
+                agent.pop(key, None)
+            agent["status"] = status
+            if updated_at is not None:
+                agent["updated_at"] = updated_at
+            break
+    else:
+        return
+    latest_agents_message = agents_message(current_agents)
+
+
 async def broadcast_agents_if_changed(agents):
     """Cache every current snapshot but send it only when clients would see a change."""
     global latest_agents_message, last_broadcast_agents_message
@@ -3541,20 +4317,17 @@ async def broadcast_agents_if_changed(agents):
 async def send_requested_agent_refreshes():
     waiting = set(agent_refresh_clients)
     agent_refresh_clients.difference_update(waiting)
-    for ws in waiting.intersection(clients):
-        try:
-            await ws.send(latest_agents_message)
-        except Exception:
-            clients.discard(ws)
+    recipients = waiting.intersection(clients)
+    if recipients:
+        await broadcast_serialized(agent_inventory_message(), recipients)
+        await broadcast_serialized(latest_agents_message, recipients)
 
 
 async def send_latest_agents(ws):
     """Give a new client the latest full state, including a concurrent update."""
     while True:
         message = latest_agents_message
-        try:
-            await ws.send(message)
-        except Exception:
+        if not await send_client_message(ws, message):
             return False
         if message == latest_agents_message:
             return True
@@ -3583,55 +4356,80 @@ async def wait_for_next_poll(agents):
 
 async def poll_loop():
     while True:
-        # Clear before reading so a hook or command arriving during the refresh
-        # remains set and makes the next wait return immediately.
+        # Inventory reads can take up to two command timeouts. Do not hold the
+        # application lock while waiting: plugin events must remain immediate.
         poll_wakeup.clear()
-        agents = await asyncio.to_thread(get_agents)
+        agents, inventory_error = await asyncio.to_thread(get_agent_inventory)
         if agents is None:
+            if set_agent_inventory_error(inventory_error):
+                await broadcast_serialized(agent_inventory_message())
+            await send_requested_agent_refreshes()
             await wait_for_next_poll(None)
             continue
-        stamp_agent_activity(agents)
-        live_pane_ids = {a["pane_id"] for a in agents}
-        raw_statuses = {}
+        transition_publications = []
+        history_captures = []
         finished_agents = []
-        for a in agents:
-            pid = a["pane_id"]
-            raw_status = a["status"]
-            raw_statuses[pid] = raw_status
-            previous_status = last_statuses.get(pid)
-            if register_finished_notification(pid, raw_status, previous_status):
-                finished_agents.append(dict(a))
-            register_status_transition(pid, raw_status, previous_status, a.pop("_focused", False))
-            a["status"] = displayed_status(pid, raw_status)
-        unseen_done_panes.intersection_update(live_pane_ids)
-        acknowledged_done_panes.intersection_update(live_pane_ids)
-        finished_notification_panes.intersection_update(live_pane_ids)
-        prune_agent_profiles(live_pane_ids)
-        agent_types.clear()
-        agent_types.update({a["pane_id"]: str(a.get("agent") or "").lower() for a in agents})
-        for pane_id in set(question_locks) - live_pane_ids:
-            question_locks.pop(pane_id, None)
-        for pane_id in set(claude_history_state) - live_pane_ids:
-            discard_claude_history_state(pane_id)
-        for pane_id in set(claude_history_capture_times) - live_pane_ids:
-            claude_history_capture_times.pop(pane_id, None)
-        claude_history_pending_captures.intersection_update(live_pane_ids)
-        prune_blocked_agent_details(agents)
-        for a in agents:
-            pid = a["pane_id"]
-            if raw_statuses[pid] == "blocked" and last_statuses.get(pid) != "blocked":
-                blocked_agent_details.setdefault(pid, {})["event_id"] = secrets.token_urlsafe(12)
-        await broadcast_agents_if_changed(agents)
-        await send_requested_agent_refreshes()
-        for agent in finished_agents:
-            asyncio.create_task(publish_finished(agent))
-        for pane_id in set(last_statuses) - live_pane_ids:
-            del last_statuses[pane_id]
-        if agents:
+        snapshot_state = None
+        async with agent_state_application_lock:
+            if poll_wakeup.is_set():
+                # A plugin event or command arrived during the unlocked read.
+                # It has either applied already or is next in the lock queue, so
+                # do not apply the snapshot that predates it.
+                continue
+            stamp_agent_activity(agents)
+            live_pane_ids = {a["pane_id"] for a in agents}
+            raw_statuses = {}
+            previous_statuses = {}
+            for a in agents:
+                pid = a["pane_id"]
+                raw_status = a["status"]
+                raw_statuses[pid] = raw_status
+                previous_status = last_statuses.get(pid)
+                previous_statuses[pid] = previous_status
+                if register_finished_notification(pid, raw_status, previous_status):
+                    finished_agents.append(dict(a))
+                register_status_transition(pid, raw_status, previous_status, a.pop("_focused", False))
+                a["status"] = displayed_status(pid, raw_status)
+            unseen_done_panes.intersection_update(live_pane_ids)
+            acknowledged_done_panes.intersection_update(live_pane_ids)
+            finished_notification_panes.intersection_update(live_pane_ids)
+            prune_agent_profiles(live_pane_ids)
+            agent_types.clear()
+            agent_types.update({a["pane_id"]: str(a.get("agent") or "").lower() for a in agents})
+            for pane_id in set(question_locks) - live_pane_ids:
+                question_locks.pop(pane_id, None)
+            for pane_id in set(approval_locks) - live_pane_ids:
+                if approval_locks[pane_id].locked():
+                    continue
+                approval_locks.pop(pane_id, None)
+                approved_event_results.pop(pane_id, None)
+            for pane_id in set(lifecycle_locks) - live_pane_ids:
+                if lifecycle_locks[pane_id].locked():
+                    continue
+                lifecycle_locks.pop(pane_id, None)
+                lifecycle_generations.pop(pane_id, None)
+            for pane_id in set(claude_history_state) - live_pane_ids:
+                discard_claude_history_state(pane_id)
+            for pane_id in set(claude_history_capture_times) - live_pane_ids:
+                claude_history_capture_times.pop(pane_id, None)
+            claude_history_pending_captures.intersection_update(live_pane_ids)
+            prune_blocked_agent_details(agents)
+            for a in agents:
+                pid = a["pane_id"]
+                if raw_statuses[pid] == "blocked" and last_statuses.get(pid) != "blocked":
+                    blocked_agent_details.setdefault(pid, {})["event_id"] = secrets.token_urlsafe(12)
+            for pane_id in set(last_statuses) - live_pane_ids:
+                del last_statuses[pane_id]
+                advance_agent_state_revision(pane_id)
+                agent_state_revisions.pop(pane_id, None)
             for a in agents:
                 pid = a["pane_id"]
                 status = raw_statuses[pid]
-                previous_status = last_statuses.get(pid)
+                previous_status = previous_statuses[pid]
+                if previous_status != status or pid not in agent_state_revisions:
+                    revision = advance_agent_state_revision(pid)
+                else:
+                    revision = agent_state_revisions[pid]
                 finished_now = previous_status in ATTENTION_STATUSES and status not in ATTENTION_STATUSES
                 if (
                     finished_now
@@ -3639,57 +4437,108 @@ async def poll_loop():
                     or previous_status != status
                     or pid in claude_history_pending_captures
                 ):
-                    schedule_claude_history_capture(a, force=finished_now)
+                    history_captures.append((dict(a), finished_now))
                 if status == "blocked" and previous_status != "blocked":
-                    await publish_agent_blocked(a)
+                    transition_publications.append(("blocked", dict(a), status, revision))
                 elif previous_status == "blocked" and status != "blocked":
-                    await publish_agent_status(a, status)
+                    transition_publications.append(("status", dict(a), status, revision))
                 last_statuses[pid] = status
+            snapshot_state = {
+                pane_id: (raw_statuses[pane_id], agent_state_revisions[pane_id])
+                for pane_id in live_pane_ids
+            }
+        snapshot_is_current = await agent_snapshot_is_current(snapshot_state)
+        if set_agent_inventory_ready():
+            await broadcast_serialized(agent_inventory_message())
+        if snapshot_is_current:
+            await broadcast_agents_if_changed(agents)
+        await send_requested_agent_refreshes()
+        for agent in finished_agents:
+            asyncio.create_task(publish_finished(agent))
+        for agent, force in history_captures:
+            schedule_claude_history_capture(agent, force=force)
+        for publication, agent, status, revision in transition_publications:
+            if publication == "blocked":
+                await publish_agent_blocked(agent, expected_revision=revision)
+            else:
+                await publish_agent_status(
+                    agent,
+                    status,
+                    expected_revision=revision,
+                    expected_status=status,
+                )
         await wait_for_next_poll(agents)
 
 
 async def event_push():
     while True:
         event = await event_queue.get()
-        raw_pane_id = event.get("pane_id", "")
-        status = event.get("status", "")
-        host = event.get("host", LOCAL_HOST)
-        previous_status = last_statuses.get(raw_pane_id) if raw_pane_id else None
-        was_blocked = previous_status == "blocked"
-        notify_finished = False
-        if raw_pane_id and status:
-            notify_finished = register_finished_notification(raw_pane_id, status, previous_status)
-            register_status_transition(raw_pane_id, status, previous_status)
-            last_statuses[raw_pane_id] = status
-            status = displayed_status(raw_pane_id, status)
+        async with agent_state_application_lock:
+            raw_pane_id = event.get("pane_id", "")
+            raw_status = event.get("status", "")
+            status = raw_status
+            host = event.get("host", LOCAL_HOST)
+            previous_status = last_statuses.get(raw_pane_id) if raw_pane_id else None
+            was_blocked = previous_status == "blocked"
+            notify_finished = False
+            revision = None
+            if raw_pane_id and status:
+                notify_finished = register_finished_notification(raw_pane_id, status, previous_status)
+                register_status_transition(raw_pane_id, status, previous_status)
+                last_statuses[raw_pane_id] = status
+                if previous_status != status or raw_pane_id not in agent_state_revisions:
+                    revision = advance_agent_state_revision(raw_pane_id)
+                else:
+                    revision = agent_state_revisions[raw_pane_id]
+                status = displayed_status(raw_pane_id, status)
+
+            is_agent_event = bool(raw_pane_id) and event.get("type") == "agent_event"
+            leaving_blocked = bool(raw_pane_id) and was_blocked and bool(status) and status != "blocked"
+            updated_at = touch_agent_activity(raw_pane_id) if is_agent_event else None
+            if leaving_blocked:
+                # Drop the stale blocked snapshot (including its event_id) now
+                # rather than waiting for the next poll's prune.
+                blocked_agent_details.pop(raw_pane_id, None)
+            if is_agent_event:
+                merge_agent_event_into_snapshot(
+                    {**event, "pane_id": raw_pane_id}, status, updated_at
+                )
 
         if status == "blocked" and raw_pane_id and not was_blocked:
-            await publish_agent_blocked({**event, "pane_id": raw_pane_id, "host": host})
-        elif raw_pane_id and was_blocked and status and status != "blocked":
-            await publish_agent_status({**event, "pane_id": raw_pane_id}, status)
+            await publish_agent_blocked(
+                {**event, "pane_id": raw_pane_id, "host": host},
+                expected_revision=revision,
+            )
+        elif leaving_blocked:
+            await publish_agent_status(
+                {**event, "pane_id": raw_pane_id},
+                status,
+                expected_revision=revision,
+                expected_status=raw_status,
+            )
 
-        if raw_pane_id and event.get("type") == "agent_event":
-            updated_at = touch_agent_activity(raw_pane_id)
+        if is_agent_event:
             schedule_claude_history_capture({
                 "pane_id": raw_pane_id,
                 "agent": event.get("agent", ""),
                 "status": status,
             }, force=previous_status in ATTENTION_STATUSES and status not in ATTENTION_STATUSES)
-            await broadcast({
-                "type": "agent_update",
-                "pane_id": raw_pane_id,
-                "raw_pane_id": raw_pane_id,
-                "tab_id": event.get("tab_id", ""),
-                "tab_label": event.get("tab_label", ""),
-                "tab_number": event.get("tab_number"),
-                "workspace_id": event.get("workspace_id", ""),
-                "agent": event.get("agent", ""),
-                "status": status,
-                "cwd": event.get("cwd", ""),
-                "project": event.get("project", ""),
-                "host": host,
-                "updated_at": updated_at,
-            })
+            if await agent_transition_is_current(raw_pane_id, raw_status, revision):
+                await broadcast({
+                    "type": "agent_update",
+                    "pane_id": raw_pane_id,
+                    "raw_pane_id": raw_pane_id,
+                    "tab_id": event.get("tab_id", ""),
+                    "tab_label": event.get("tab_label", ""),
+                    "tab_number": event.get("tab_number"),
+                    "workspace_id": event.get("workspace_id", ""),
+                    "agent": event.get("agent", ""),
+                    "status": status,
+                    "cwd": event.get("cwd", ""),
+                    "project": event.get("project", ""),
+                    "host": host,
+                    "updated_at": updated_at,
+                })
         if notify_finished:
             asyncio.create_task(publish_finished({**event, "pane_id": raw_pane_id, "host": host}))
 
@@ -3865,8 +4714,18 @@ async def process_request(connection, request):
         ])
         return Response(200, "OK", headers, b"ok\n")
     if path == "/healthz":
+        inventory = public_agent_inventory_status(include_message=False)
+        readiness = (
+            "ready"
+            if inventory["state"] == "ready"
+            else "starting"
+            if inventory["state"] == "starting"
+            else "degraded"
+        )
         body = json.dumps({
             "status": "ok",
+            "readiness": readiness,
+            "inventory": inventory,
             "instance": RELAY_INSTANCE_ID,
             "version": RELAY_VERSION,
             "release_version": RELEASE_VERSION,
@@ -3875,6 +4734,20 @@ async def process_request(connection, request):
         }).encode() + b"\n"
         headers = Headers([("Content-Type", "application/json; charset=utf-8")])
         return Response(200, "OK", headers, body)
+    if path == "/readyz":
+        inventory = public_agent_inventory_status(include_message=False)
+        ready = inventory["state"] == "ready"
+        body = json.dumps({
+            "status": "ready" if ready else "unavailable",
+            "inventory": inventory,
+        }).encode() + b"\n"
+        headers = Headers([("Content-Type", "application/json; charset=utf-8")])
+        return Response(
+            200 if ready else 503,
+            "OK" if ready else "Service Unavailable",
+            headers,
+            body,
+        )
 
     asset = web_asset_path(request.path)
     if not asset:
@@ -3949,19 +4822,6 @@ def nested_value(value, key):
     return None
 
 
-async def resolve_started_agent(data, name):
-    pane_id = nested_value(data, "pane_id")
-    workspace_id = nested_value(data, "workspace_id")
-    if pane_id and workspace_id:
-        return str(pane_id), str(workspace_id)
-    await asyncio.sleep(0.35)
-    ok, output, _error = await run_herdr_async_result("agent", "get", name)
-    if not ok:
-        return "", ""
-    current = parsed_herdr_output(output)
-    return str(nested_value(current, "pane_id") or ""), str(nested_value(current, "workspace_id") or "")
-
-
 def select_workspace_for_cwd(cwd, pane_data, workspace_data):
     panes = pane_data.get("panes", []) if isinstance(pane_data, dict) else []
     workspaces = workspace_data.get("workspaces", []) if isinstance(workspace_data, dict) else []
@@ -4018,93 +4878,157 @@ def select_workspace_for_cwd(cwd, pane_data, workspace_data):
     return ""
 
 
-async def workspace_id_for_cwd(cwd):
-    panes_ok, panes_output, _panes_error = await run_herdr_async_result("pane", "list")
-    workspaces_ok, workspaces_output, _workspaces_error = await run_herdr_async_result("workspace", "list")
+async def workspace_id_for_cwd(cwd, deadline=None):
+    panes_ok, panes_output, _panes_error = await run_herdr_async_result("pane", "list", deadline=deadline)
+    workspaces_ok, workspaces_output, _workspaces_error = await run_herdr_async_result("workspace", "list", deadline=deadline)
     panes = parsed_herdr_output(panes_output) if panes_ok else None
     workspaces = parsed_herdr_output(workspaces_output) if workspaces_ok else None
     return select_workspace_for_cwd(cwd, panes, workspaces)
 
 
-async def place_started_agent(pane_id, workspace_id, label, cwd):
-    if not pane_id:
-        return False, None, "Started agent identity is incomplete"
+async def create_agent_target_pane(workspace_id, label, cwd, deadline=None):
     if workspace_id:
         args = (
-            "pane", "move", pane_id,
-            "--new-tab", "--workspace", workspace_id,
-            "--label", label, "--no-focus",
+            "tab", "create", "--workspace", workspace_id,
+            "--cwd", str(cwd), "--label", label, "--no-focus",
         )
     else:
         workspace_label = Path(cwd).name or "workspace"
         args = (
-            "pane", "move", pane_id,
-            "--new-workspace", "--label", workspace_label,
-            "--tab-label", label, "--no-focus",
+            "workspace", "create", "--cwd", str(cwd),
+            "--label", workspace_label, "--no-focus",
         )
-    # Newly started agents (especially Node.js-based ones like Pi) may not
-    # have their pane registered in Herdr yet when the start response
-    # arrives. Retry with backoff until the pane is visible.
-    for attempt in range(6):
-        ok, output, error = await run_herdr_async_result(*args)
-        if ok:
-            return ok, parsed_herdr_output(output), error
-        if "pane_not_found" not in str(error or "").lower() or attempt == 5:
-            return False, None, error
-        await asyncio.sleep(0.2 * (attempt + 1))
-    return False, None, error
-
-
-async def start_agent_in_new_tab(profile, name, cwd):
-    workspace_id = await workspace_id_for_cwd(cwd)
-    start_args = ["agent", "start", name, "--cwd", str(cwd)]
-    if workspace_id:
-        start_args.extend(("--workspace", workspace_id))
-    start_args.extend(("--no-focus", "--", *profile["argv"]))
-    ok, output, error = await run_herdr_async_result(*start_args)
+    ok, output, error = await run_herdr_async_result(*args, deadline=deadline)
     data = parsed_herdr_output(output)
     if not ok:
+        return False, data, "", error
+    pane_id = str(nested_value(data, "pane_id") or "")
+    if not pane_id:
+        return False, data, "", "Herdr did not return the new target pane"
+    if not workspace_id:
+        tab_id = str(nested_value(data, "tab_id") or "")
+        if tab_id:
+            renamed, _rename_output, rename_error = await run_herdr_async_result(
+                "tab", "rename", tab_id, label, deadline=deadline
+            )
+            if not renamed:
+                await run_herdr_async_result("pane", "close", pane_id, deadline=deadline)
+                return False, data, "", rename_error or "Could not label the new tab"
+    return True, data, pane_id, ""
+
+
+async def close_failed_agent_target(pane_id, error, deadline=None):
+    if not pane_id:
+        return error
+    closed, _output, close_error = await run_herdr_async_result("pane", "close", pane_id, deadline=deadline)
+    if closed:
+        return error
+    return f"{error}; the unused target pane could not be closed: {close_error}"
+
+
+async def wait_for_custom_agent(pane_id, deadline=None):
+    internal_deadline = time.monotonic() + HERDR_AGENT_START_TIMEOUT_MS / 1000
+    effective_deadline = min(internal_deadline, deadline) if deadline else internal_deadline
+    last_error = "Agent did not become live"
+    while time.monotonic() < effective_deadline:
+        ok, output, error = await run_herdr_async_result("agent", "get", pane_id, deadline=effective_deadline)
+        if ok:
+            return True, parsed_herdr_output(output), ""
+        last_error = error or last_error
+        await asyncio.sleep(0.25)
+    return False, None, last_error
+
+
+async def start_agent_in_new_tab(profile, name, cwd, deadline=None):
+    startup_deadline = (deadline - AGENT_START_ROLLBACK_SECONDS) if deadline else None
+    workspace_id = await workspace_id_for_cwd(cwd, deadline=startup_deadline)
+    created, topology, pane_id, error = await create_agent_target_pane(
+        workspace_id, name, cwd, deadline=startup_deadline
+    )
+    if not created:
+        return False, topology, "", "", error
+
+    kind = str(profile.get("kind") or "")
+    if kind:
+        ok, output, error = await run_herdr_async_result(
+            "agent", "start", name, "--kind", kind, "--pane", pane_id,
+            "--timeout", str(HERDR_AGENT_START_TIMEOUT_MS),
+            deadline=startup_deadline, timeout=HERDR_AGENT_START_PROCESS_TIMEOUT,
+        )
+        data = parsed_herdr_output(output)
+    else:
+        command = shlex.join(profile["argv"])
+        ok, output, error = await run_herdr_async_result("pane", "run", pane_id, command, deadline=startup_deadline)
+        data = parsed_herdr_output(output)
+        if ok:
+            ok, agent_data, error = await wait_for_custom_agent(pane_id, deadline=startup_deadline)
+            if ok:
+                renamed, rename_output, rename_error = await run_herdr_async_result(
+                    "agent", "rename", pane_id, name, deadline=startup_deadline
+                )
+                ok = renamed
+                error = rename_error
+                data = {
+                    "run": data,
+                    "agent": agent_data,
+                    "rename": parsed_herdr_output(rename_output),
+                }
+    if not ok:
+        error = await close_failed_agent_target(pane_id, error or "Agent start failed", deadline=deadline)
         return False, data, "", "", error
 
-    pane_id, _started_workspace_id = await resolve_started_agent(data, name)
-    placed, placement, placement_error = await place_started_agent(pane_id, workspace_id, name, cwd)
-    if not placed:
-        remember_agent_profile(pane_id, profile["id"])
-        return True, data, pane_id, placement_error, ""
-
-    data = {"agent": data, "placement": placement}
-    final_pane_id, _final_workspace_id = await resolve_started_agent(None, name)
-    pane_id = str(final_pane_id or nested_value(placement, "pane_id") or pane_id)
     remember_agent_profile(pane_id, profile["id"])
-    return True, data, pane_id, "", ""
+    return True, {"topology": topology, "agent": data}, pane_id, "", ""
 
 
-async def send_prompt_to_pane(pane_id, prompt, is_codex=False):
-    ok, _output, error = await run_herdr_async_result("pane", "send-text", pane_id, prompt)
-    if ok:
-        ok, _output, error = await run_herdr_async_result("pane", "send-keys", pane_id, "Enter")
-    if ok and is_codex:
-        await asyncio.sleep(0.16)
-        ok, _output, error = await run_herdr_async_result("pane", "send-keys", pane_id, "Tab")
+async def send_prompt_to_pane(pane_id, prompt, deadline=None):
+    if deadline is not None:
+        ok, _output, error = await run_herdr_async_result("agent", "prompt", pane_id, prompt, deadline=deadline)
+    else:
+        ok, _output, error = await run_herdr_async_result(
+            "agent", "prompt", pane_id, prompt,
+            timeout=HERDR_AGENT_START_PROCESS_TIMEOUT,
+        )
     return ok, error
 
 
 def agent_for_pane(pane_id):
-    agents = get_agents()
+    agents, inventory_error = get_agent_inventory()
     if agents is None:
-        return None, "Unable to read current Herdr agents"
+        _error_code, message = inventory_error or (
+            "command_failed",
+            "Unable to read the current Herdr agent inventory.",
+        )
+        return None, message
     agent = next((item for item in agents if item.get("pane_id") == pane_id), None)
     if not agent:
         return None, "Agent is no longer available"
     return agent, ""
 
 
-async def safe_send_json(ws, payload):
+async def bounded_agent_for_pane(pane_id, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None, "Timed out reading the agent inventory"
     try:
-        await ws.send(json.dumps(payload))
-        return True
-    except Exception:
+        return await asyncio.wait_for(asyncio.to_thread(agent_for_pane, pane_id), timeout=remaining)
+    except asyncio.TimeoutError:
+        return None, "Timed out reading the agent inventory"
+
+
+async def bounded_lock_acquire(lock, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
         return False
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=remaining)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+async def safe_send_json(ws, payload):
+    return await send_client_message(ws, json.dumps(payload))
 
 
 async def send_command_result(ws, request_id, action, ok, phase="completed", error="", pane_id="", data=None):
@@ -4163,11 +5087,32 @@ async def complete_command(
     )
 
 
+async def handle_clear_activities_command(ws, msg):
+    request_id = request_id_for(msg)
+    async with activity_delivery_lock:
+        ok, error = await asyncio.to_thread(clear_activity_history)
+        if ok:
+            await broadcast({"type": "activity_history", "activities": []})
+        await send_command_result(
+            ws,
+            request_id,
+            "clear_activities",
+            ok,
+            error=error,
+        )
+
+
 async def wait_for_approval_result(pane_id, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         await asyncio.sleep(0.35)
-        agents = await asyncio.to_thread(get_agents)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            agents = await asyncio.wait_for(asyncio.to_thread(get_agents), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
         if agents is None:
             continue
         agent = next((item for item in agents if item.get("pane_id") == pane_id), None)
@@ -4187,6 +5132,17 @@ async def read_current_question(pane_id):
         "--format", "ansi",
     )
     return content or "", parse_question(content or "", agent_types.get(pane_id, ""))
+
+
+async def bounded_read_current_question(pane_id, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return "", None, "Timed out reading the question"
+    try:
+        content, interaction = await asyncio.wait_for(read_current_question(pane_id), timeout=remaining)
+        return content, interaction, ""
+    except asyncio.TimeoutError:
+        return "", None, "Timed out reading the question"
 
 
 def question_navigation_keys(interaction, target):
@@ -4236,7 +5192,13 @@ async def wait_for_question_state(pane_id, interaction_id, predicate, timeout=2.
     deadline = time.monotonic() + timeout
     latest = None
     while time.monotonic() < deadline:
-        content, latest = await read_current_question(pane_id)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            content, latest = await asyncio.wait_for(read_current_question(pane_id), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
         if latest and latest["id"] != interaction_id:
             return None, "The question changed while applying the answer"
         if latest and predicate(latest):
@@ -4330,14 +5292,26 @@ async def wait_for_question_transition(pane_id, interaction_id, timeout=5.0):
     nonblocked_samples = 0
     while time.monotonic() < deadline:
         await asyncio.sleep(0.3)
-        agents = await asyncio.to_thread(get_agents)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            agents = await asyncio.wait_for(asyncio.to_thread(get_agents), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
         if agents is None:
             continue
         agent = next((item for item in agents if item.get("pane_id") == pane_id), None)
         if not agent:
             return "confirmed", None, "closed"
         status = str(agent.get("status") or "unknown").lower()
-        content, latest = await read_current_question(pane_id)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            content, latest = await asyncio.wait_for(read_current_question(pane_id), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
         if question_review_visible(content):
             return "review", None, status
         if latest and latest["id"] != interaction_id:
@@ -4560,9 +5534,16 @@ async def handle_answer_question_command(ws, msg):
         )
         return
 
+    deadline = time.monotonic() + QUESTION_DEADLINE_SECONDS
     lock = question_locks.setdefault(pane_id, asyncio.Lock())
-    async with lock:
-        agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
+    if not await bounded_lock_acquire(lock, deadline):
+        await complete_command(ws, request_id, "question", False, "Question answer failed", error="Timed out waiting for the pane", pane_id=pane_id)
+        return
+    token = mutation_deadline.set(deadline)
+    gen = lifecycle_generations.get(pane_id, 0)
+    guard_token = mutation_guard.set(lambda: lifecycle_generations.get(pane_id, 0) == gen)
+    try:
+        agent, error = await bounded_agent_for_pane(pane_id, deadline)
         if error:
             await complete_command(ws, request_id, "question", False, "Question answer failed", error=error, pane_id=pane_id)
             return
@@ -4574,7 +5555,10 @@ async def handle_answer_question_command(ws, msg):
             )
             return
 
-        _content, interaction = await read_current_question(pane_id)
+        _content, interaction, read_error = await bounded_read_current_question(pane_id, deadline)
+        if read_error:
+            await complete_command(ws, request_id, "question", False, "Question answer failed", error=read_error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
         if not interaction or interaction["id"] != interaction_id:
             await complete_command(
                 ws, request_id, "question", False, "Question answer skipped",
@@ -4593,6 +5577,9 @@ async def handle_answer_question_command(ws, msg):
             )
             return
 
+        if deadline - time.monotonic() <= 0:
+            await complete_command(ws, request_id, "question", False, "Question answer failed", error="Timed out before the answer could be sent", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
         ok, error = await execute_question_answer(
             pane_id, interaction, selected, other_selected, other_text
         )
@@ -4604,6 +5591,10 @@ async def handle_answer_question_command(ws, msg):
             return
         await send_command_result(ws, request_id, "question", True, phase="accepted", pane_id=pane_id)
         await finish_question_command(ws, msg, agent, interaction)
+    finally:
+        mutation_guard.reset(guard_token)
+        mutation_deadline.reset(token)
+        lock.release()
 
 
 async def handle_navigate_question_command(ws, msg):
@@ -4624,16 +5615,30 @@ async def handle_navigate_question_command(ws, msg):
         )
         return
 
+    deadline = time.monotonic() + QUESTION_DEADLINE_SECONDS
     lock = question_locks.setdefault(pane_id, asyncio.Lock())
-    async with lock:
-        agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
+    if not await bounded_lock_acquire(lock, deadline):
+        await complete_command(ws, request_id, "question", False, "Question navigation failed", error="Timed out waiting for the pane", pane_id=pane_id)
+        return
+    token = mutation_deadline.set(deadline)
+    gen = lifecycle_generations.get(pane_id, 0)
+    guard_token = mutation_guard.set(lambda: lifecycle_generations.get(pane_id, 0) == gen)
+    try:
+        agent, error = await bounded_agent_for_pane(pane_id, deadline)
         if error:
             await complete_command(
                 ws, request_id, "question", False, "Question navigation failed",
                 error=error, pane_id=pane_id,
             )
             return
-        content, interaction = await read_current_question(pane_id)
+        content, interaction, read_error = await bounded_read_current_question(pane_id, deadline)
+        if read_error:
+            await complete_command(
+                ws, request_id, "question", False, "Question navigation failed",
+                error=read_error, pane_id=pane_id, agent=agent.get("agent", ""),
+                project=agent.get("project", ""),
+            )
+            return
         if (
             not supports_structured_questions(agent.get("agent", ""))
             or not interaction
@@ -4650,6 +5655,14 @@ async def handle_navigate_question_command(ws, msg):
             )
             return
 
+        if deadline - time.monotonic() <= 0:
+            await complete_command(
+                ws, request_id, "question", False, "Question navigation failed",
+                error="Timed out before the question could be opened",
+                pane_id=pane_id, agent=agent.get("agent", ""),
+                project=agent.get("project", ""),
+            )
+            return
         ok, error = await send_question_keys(pane_id, ["Left"])
         if not ok:
             await complete_command(
@@ -4683,6 +5696,10 @@ async def handle_navigate_question_command(ws, msg):
             project=agent.get("project", ""),
             data={"interaction": public_question_interaction(previous_interaction)},
         )
+    finally:
+        mutation_guard.reset(guard_token)
+        mutation_deadline.reset(token)
+        lock.release()
 
 
 async def handle_clarify_question_command(ws, msg):
@@ -4695,13 +5712,23 @@ async def handle_clarify_question_command(ws, msg):
             error="Agent and question are required", pane_id=pane_id,
         )
         return
+    deadline = time.monotonic() + QUESTION_DEADLINE_SECONDS
     lock = question_locks.setdefault(pane_id, asyncio.Lock())
-    async with lock:
-        agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
+    if not await bounded_lock_acquire(lock, deadline):
+        await complete_command(ws, request_id, "question", False, "Chat failed", error="Timed out waiting for the pane", pane_id=pane_id)
+        return
+    token = mutation_deadline.set(deadline)
+    gen = lifecycle_generations.get(pane_id, 0)
+    guard_token = mutation_guard.set(lambda: lifecycle_generations.get(pane_id, 0) == gen)
+    try:
+        agent, error = await bounded_agent_for_pane(pane_id, deadline)
         if error:
             await complete_command(ws, request_id, "question", False, "Chat failed", error=error, pane_id=pane_id)
             return
-        content, interaction = await read_current_question(pane_id)
+        content, interaction, read_error = await bounded_read_current_question(pane_id, deadline)
+        if read_error:
+            await complete_command(ws, request_id, "question", False, "Chat failed", error=read_error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
         if (
             "claude" not in str(agent.get("agent") or "").lower()
             or not interaction
@@ -4714,6 +5741,9 @@ async def handle_clarify_question_command(ws, msg):
                 pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""),
                 data={"interaction": public_question_interaction(interaction)} if question_layout_hint(content) else None,
             )
+            return
+        if deadline - time.monotonic() <= 0:
+            await complete_command(ws, request_id, "question", False, "Chat failed", error="Timed out before question chat could be opened", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
             return
         keys = question_navigation_keys(interaction, ("chat", 0)) + ["Enter"]
         ok, error = await send_question_keys(pane_id, keys)
@@ -4732,15 +5762,23 @@ async def handle_clarify_question_command(ws, msg):
             pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""),
             phase="confirmed", details=command_details(msg, {"resulting_status": status}),
         )
+    finally:
+        mutation_guard.reset(guard_token)
+        mutation_deadline.reset(token)
+        lock.release()
 
 
 async def handle_respond_command(ws, msg):
     request_id = request_id_for(msg)
     pane_id = msg.get("pane_id")
+    event_id = msg.get("event_id")
     index = msg.get("index")
     total = msg.get("total")
     if (
         not pane_id
+        or not isinstance(event_id, str)
+        or not event_id
+        or len(event_id) > 120
         or not isinstance(index, int)
         or isinstance(index, bool)
         or index < 0
@@ -4749,48 +5787,116 @@ async def handle_respond_command(ws, msg):
     ):
         await complete_command(ws, request_id, "approval", False, "Approval failed", error="Invalid approval request", pane_id=pane_id or "")
         return
-    agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
-    if error:
-        await complete_command(ws, request_id, "approval", False, "Approval failed", error=error, pane_id=pane_id)
-        return
-    if str(agent.get("status") or "").lower() != "blocked":
-        await complete_command(ws, request_id, "approval", False, "Approval skipped", error="Agent is no longer blocked", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
-        return
-
-    content = ""
-    if supports_structured_questions(agent.get("agent", "")):
-        content = await asyncio.to_thread(read_question_pane, pane_id)
-    if question_layout_hint(content):
-        await complete_command(
-            ws, request_id, "approval", False, "Approval skipped",
-            error="Use the question form to submit this answer",
-            pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""),
-        )
-        return
-
-    keys = respond_keys(index, total)
-    ok, _output, error = await run_herdr_async_result("pane", "send-keys", pane_id, *keys)
     choice = compact_text(msg.get("choice") or f"option {index + 1}", 120)
-    if not ok:
-        await complete_command(ws, request_id, "approval", False, f"Approval {choice}", error=error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+    deadline = time.monotonic() + APPROVAL_DEADLINE_SECONDS
+    lock = approval_locks.setdefault(pane_id, asyncio.Lock())
+    if not await bounded_lock_acquire(lock, deadline):
+        await complete_command(ws, request_id, "approval", False, f"Approval {choice}", error="Timed out waiting for the pane", pane_id=pane_id)
         return
+    try:
+        previous_result = approved_event_results.get(pane_id, {})
+        if previous_result.get("event_id") == event_id:
+            if previous_result.get("index") == index and previous_result.get("total") == total:
+                previous_phase = previous_result.get("phase", "unconfirmed")
+                if previous_phase == "dispatched_unknown":
+                    await complete_command(
+                        ws, request_id, "approval", False, f"Approval {choice}",
+                        error="Approval may have been sent but was not confirmed; retry blocked to prevent duplicates",
+                        pane_id=pane_id,
+                        details=command_details(msg, {"event_id": event_id, "idempotent": True}),
+                    )
+                else:
+                    await complete_command(
+                        ws, request_id, "approval", True, "Approval already submitted",
+                        pane_id=pane_id, phase=previous_phase,
+                        details=command_details(msg, {"event_id": event_id, "idempotent": True}),
+                    )
+            else:
+                await complete_command(
+                    ws, request_id, "approval", False, f"Approval {choice}",
+                    error="A different response was already submitted for this event",
+                    pane_id=pane_id,
+                    details=command_details(msg, {"event_id": event_id, "conflict": True}),
+                )
+            return
 
-    await send_command_result(ws, request_id, "approval", True, phase="accepted", pane_id=pane_id)
-    confirmed, status = await wait_for_approval_result(pane_id)
-    phase = "confirmed" if confirmed else "unconfirmed"
-    summary = f"Approval {choice}"
-    await complete_command(
-        ws,
-        request_id,
-        "approval",
-        True,
-        summary,
-        pane_id=pane_id,
-        agent=agent.get("agent", ""),
-        project=agent.get("project", ""),
-        phase=phase,
-        details=command_details(msg, {"choice": choice, "resulting_status": status, "source": msg.get("source") or "App"}),
-    )
+        gen = lifecycle_generations.get(pane_id, 0)
+        agent, error = await bounded_agent_for_pane(pane_id, deadline)
+        if error:
+            await complete_command(ws, request_id, "approval", False, "Approval failed", error=error, pane_id=pane_id)
+            return
+        if str(agent.get("status") or "").lower() != "blocked":
+            await complete_command(ws, request_id, "approval", False, "Approval skipped", error="Agent is no longer blocked", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
+        current_event_id = blocked_agent_details.get(pane_id, {}).get("event_id", "")
+        if not current_event_id or event_id != current_event_id:
+            await complete_command(
+                ws, request_id, "approval", False, "Approval skipped",
+                error="This approval is stale; refresh the agent and try again",
+                pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""),
+            )
+            return
+
+        content = ""
+        if supports_structured_questions(agent.get("agent", "")):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                await complete_command(ws, request_id, "approval", False, "Approval failed", error="Timed out reading the agent", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+                return
+            try:
+                content = await asyncio.wait_for(
+                    asyncio.to_thread(read_question_pane, pane_id),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                await complete_command(ws, request_id, "approval", False, "Approval failed", error="Timed out reading the agent", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+                return
+        if question_layout_hint(content):
+            await complete_command(
+                ws, request_id, "approval", False, "Approval skipped",
+                error="Use the question form to submit this answer",
+                pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""),
+            )
+            return
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            await complete_command(ws, request_id, "approval", False, f"Approval {choice}", error="Timed out before the response could be sent", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
+        keys = respond_keys(index, total)
+        token = mutation_guard.set(lambda: lifecycle_generations.get(pane_id, 0) == gen)
+        try:
+            ok, _output, error = await run_herdr_async_result("pane", "send-keys", pane_id, *keys, deadline=deadline)
+        finally:
+            mutation_guard.reset(token)
+        if not ok:
+            if error == MUTATION_DISPATCHED_UNKNOWN:
+                approved_event_results[pane_id] = {"event_id": event_id, "phase": "dispatched_unknown", "index": index, "total": total}
+                await complete_command(ws, request_id, "approval", False, f"Approval {choice}", error="Approval may have been sent but was not confirmed; retry blocked to prevent duplicates", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            else:
+                await complete_command(ws, request_id, "approval", False, f"Approval {choice}", error=error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
+
+        approved_event_results[pane_id] = {"event_id": event_id, "phase": "unconfirmed", "index": index, "total": total}
+        await send_command_result(ws, request_id, "approval", True, phase="accepted", pane_id=pane_id)
+        confirmed, status = await wait_for_approval_result(pane_id)
+        phase = "confirmed" if confirmed else "unconfirmed"
+        approved_event_results[pane_id]["phase"] = phase
+        summary = f"Approval {choice}"
+        await complete_command(
+            ws,
+            request_id,
+            "approval",
+            True,
+            summary,
+            pane_id=pane_id,
+            agent=agent.get("agent", ""),
+            project=agent.get("project", ""),
+            phase=phase,
+            details=command_details(msg, {"choice": choice, "event_id": event_id, "resulting_status": status, "source": msg.get("source") or "App"}),
+        )
+    finally:
+        lock.release()
 
 
 async def handle_submit_prompt_command(ws, msg):
@@ -4803,12 +5909,22 @@ async def handle_submit_prompt_command(ws, msg):
     if len(prompt) > PROMPT_MAX_CHARS:
         await complete_command(ws, request_id, "prompt", False, "Prompt failed", error="Prompt is longer than 100,000 characters", pane_id=pane_id)
         return
-    agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
+    deadline = time.monotonic() + COMMAND_DEADLINE_SECONDS
+    gen = lifecycle_generations.get(pane_id, 0)
+    agent, error = await bounded_agent_for_pane(pane_id, deadline)
     if error:
         await complete_command(ws, request_id, "prompt", False, "Prompt failed", error=error, pane_id=pane_id)
         return
-    is_codex = bool(re.search(r"\bcodex\b", str(agent.get("agent") or ""), re.IGNORECASE))
-    ok, error = await send_prompt_to_pane(pane_id, prompt, is_codex)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        await complete_command(ws, request_id, "prompt", False, "Prompt failed", error="Timed out before the prompt could be sent", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+        return
+    token = mutation_guard.set(lambda: lifecycle_generations.get(pane_id, 0) == gen)
+    try:
+        ok, error = await send_prompt_to_pane(pane_id, prompt, deadline=deadline)
+    finally:
+        mutation_guard.reset(token)
+    dispatched_unknown = not ok and error == MUTATION_DISPATCHED_UNKNOWN
     await complete_command(
         ws,
         request_id,
@@ -4819,6 +5935,7 @@ async def handle_submit_prompt_command(ws, msg):
         pane_id=pane_id,
         agent=agent.get("agent", ""),
         project=agent.get("project", ""),
+        data={"dispatched_unknown": True} if dispatched_unknown else None,
         details=command_details(msg, {"preview": compact_text(prompt, 120)}),
         extract=prompt,
     )
@@ -4831,7 +5948,13 @@ async def handle_send_keys_command(ws, msg):
     if not pane_id or not isinstance(keys, list) or not keys or not all(isinstance(key, str) and 0 < len(key) <= 40 for key in keys):
         await send_command_result(ws, request_id, "keys", False, phase="failed", error="Invalid key request", pane_id=pane_id)
         return
-    ok, _output, error = await run_herdr_async_result("pane", "send-keys", pane_id, *keys)
+    deadline = time.monotonic() + COMMAND_DEADLINE_SECONDS
+    gen = lifecycle_generations.get(pane_id, 0)
+    token = mutation_guard.set(lambda: lifecycle_generations.get(pane_id, 0) == gen)
+    try:
+        ok, _output, error = await run_herdr_async_result("pane", "send-keys", pane_id, *keys, deadline=deadline)
+    finally:
+        mutation_guard.reset(token)
     activity_label = compact_text(msg.get("activity_label"), 120)
     if activity_label:
         await complete_command(ws, request_id, "keys", ok, activity_label, error=error, pane_id=pane_id, details=command_details(msg, {"keys": ", ".join(keys)}))
@@ -4893,14 +6016,14 @@ async def handle_agent_start_command(ws, msg):
     profiles = load_agent_profiles()
     profile_id = str(msg.get("profile_id") or "")
     profile = profiles.get(profile_id)
-    name = compact_text(msg.get("name"), 48)
+    name = compact_text(msg.get("name"), 32)
     cwd_value = str(msg.get("cwd") or "").strip()
     prompt = msg.get("prompt", "")
     if not profile:
         await complete_command(ws, request_id, "agent_start", False, "Agent start failed", error="Unknown or unavailable agent profile")
         return
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,47}", name):
-        await complete_command(ws, request_id, "agent_start", False, "Agent start failed", error="Name must use letters, numbers, dots, underscores, or dashes")
+    if not HERDR_AGENT_NAME_RE.fullmatch(name):
+        await complete_command(ws, request_id, "agent_start", False, "Agent start failed", error="Name must start with a lowercase letter and use at most 32 lowercase letters, numbers, underscores, or dashes")
         return
     cwd, cwd_error = resolve_agent_cwd(cwd_value)
     if cwd_error:
@@ -4910,16 +6033,20 @@ async def handle_agent_start_command(ws, msg):
         await complete_command(ws, request_id, "agent_start", False, "Agent start failed", error="Initial task is longer than 100,000 characters")
         return
 
-    ok, data, pane_id, placement_error, error = await start_agent_in_new_tab(profile, name, cwd)
+    deadline = time.monotonic() + AGENT_START_DEADLINE_SECONDS
+    ok, data, pane_id, placement_error, error = await start_agent_in_new_tab(profile, name, cwd, deadline=deadline)
     warnings = []
     if placement_error:
         warnings.append(f"Agent started, but it could not be placed in the working-directory space: {placement_error}")
     if ok and prompt.strip():
         if pane_id:
-            await asyncio.sleep(0.25)
-            prompt_ok, prompt_error = await send_prompt_to_pane(str(pane_id), prompt.strip(), profile_id == "codex")
-            if not prompt_ok:
-                warnings.append(f"Agent started, but the initial task failed: {prompt_error}")
+            if deadline - time.monotonic() > 0:
+                await asyncio.sleep(0.25)
+                prompt_ok, prompt_error = await send_prompt_to_pane(str(pane_id), prompt.strip(), deadline=deadline)
+                if not prompt_ok:
+                    warnings.append(f"Agent started, but the initial task failed: {prompt_error}")
+            else:
+                warnings.append("Agent started, but the initial task was skipped (timed out)")
         else:
             warnings.append("Agent started, but its pane could not be found for the initial task")
     warning = "; ".join(warnings)
@@ -4954,23 +6081,34 @@ async def handle_agent_start_command(ws, msg):
 async def handle_agent_rename_command(ws, msg):
     request_id = request_id_for(msg)
     pane_id = msg.get("pane_id", "")
-    name = compact_text(msg.get("name"), 80)
+    name = compact_text(msg.get("name"), 32)
     if not pane_id or not name:
         await complete_command(ws, request_id, "agent_rename", False, "Rename failed", error="Agent and name are required", pane_id=pane_id)
         return
-    agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
+    if not HERDR_AGENT_NAME_RE.fullmatch(name):
+        await complete_command(ws, request_id, "agent_rename", False, "Rename failed", error="Name must start with a lowercase letter and use at most 32 lowercase letters, numbers, underscores, or dashes", pane_id=pane_id)
+        return
+    deadline = time.monotonic() + COMMAND_DEADLINE_SECONDS
+    gen = lifecycle_generations.get(pane_id, 0)
+    agent, error = await bounded_agent_for_pane(pane_id, deadline)
     if error:
         await complete_command(ws, request_id, "agent_rename", False, "Rename failed", error=error, pane_id=pane_id)
         return
-    ok, _output, error = await run_herdr_async_result("agent", "rename", pane_id, name)
-    # Also relabel the enclosing Herdr tab so the rename is reflected in the
-    # desktop panel, not just the pane/agent name the phone reads back.
-    tab_id = agent.get("tab_id", "")
-    if ok and tab_id:
-        tab_ok, _tab_output, tab_error = await run_herdr_async_result("tab", "rename", tab_id, name)
-        if not tab_ok:
-            ok = False
-            error = tab_error or "Renamed agent but could not rename its Herdr tab"
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        await complete_command(ws, request_id, "agent_rename", False, "Rename failed", error="Timed out before the agent could be renamed", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+        return
+    token = mutation_guard.set(lambda: lifecycle_generations.get(pane_id, 0) == gen)
+    try:
+        ok, _output, error = await run_herdr_async_result("agent", "rename", pane_id, name, deadline=deadline)
+        tab_id = agent.get("tab_id", "")
+        if ok and tab_id:
+            tab_ok, _tab_output, tab_error = await run_herdr_async_result("tab", "rename", tab_id, name, deadline=deadline)
+            if not tab_ok:
+                ok = False
+                error = tab_error or "Renamed agent but could not rename its Herdr tab"
+    finally:
+        mutation_guard.reset(token)
     await complete_command(ws, request_id, "agent_rename", ok, f"Renamed agent to {name}", error=error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""), details=command_details(msg))
 
 
@@ -4980,14 +6118,26 @@ async def handle_agent_stop_command(ws, msg):
     if not pane_id:
         await complete_command(ws, request_id, "agent_stop", False, "Stop failed", error="Agent is required")
         return
-    agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
-    if error:
-        await complete_command(ws, request_id, "agent_stop", False, "Stop failed", error=error, pane_id=pane_id)
+    deadline = time.monotonic() + COMMAND_DEADLINE_SECONDS
+    lock = lifecycle_locks.setdefault(pane_id, asyncio.Lock())
+    if not await bounded_lock_acquire(lock, deadline):
+        await complete_command(ws, request_id, "agent_stop", False, "Stop failed", error="Timed out waiting for the pane", pane_id=pane_id)
         return
-    ok, _output, error = await run_herdr_async_result("pane", "close", pane_id)
-    if ok:
-        forget_agent_profile(pane_id)
-    await complete_command(ws, request_id, "agent_stop", ok, "Stopped agent", error=error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""), details=command_details(msg))
+    try:
+        agent, error = await bounded_agent_for_pane(pane_id, deadline)
+        if error:
+            await complete_command(ws, request_id, "agent_stop", False, "Stop failed", error=error, pane_id=pane_id)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            await complete_command(ws, request_id, "agent_stop", False, "Stop failed", error="Timed out before the agent could be stopped", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
+        ok, _output, error = await run_herdr_async_result("pane", "close", pane_id, deadline=deadline)
+        if ok:
+            forget_agent_profile(pane_id)
+        await complete_command(ws, request_id, "agent_stop", ok, "Stopped agent", error=error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""), details=command_details(msg))
+    finally:
+        lock.release()
 
 
 async def handle_agent_clear_command(ws, msg):
@@ -4996,60 +6146,69 @@ async def handle_agent_clear_command(ws, msg):
     if not pane_id:
         await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error="Agent is required")
         return
-    agent, error = await asyncio.to_thread(agent_for_pane, pane_id)
-    if error:
-        await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error=error, pane_id=pane_id)
+    deadline = time.monotonic() + AGENT_START_DEADLINE_SECONDS
+    lock = lifecycle_locks.setdefault(pane_id, asyncio.Lock())
+    if not await bounded_lock_acquire(lock, deadline):
+        await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error="Timed out waiting for the pane", pane_id=pane_id)
         return
-    profiles = load_agent_profiles()
-    profile = profiles.get(_profile_id_for_agent(agent))
-    if not profile:
-        await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error="This agent does not match an available launch profile", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
-        return
-    cwd, cwd_error = resolve_agent_cwd(agent.get("cwd", ""))
-    if cwd_error:
-        await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error=cwd_error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
-        return
+    try:
+        lifecycle_generations[pane_id] = lifecycle_generations.get(pane_id, 0) + 1
+        agent, error = await bounded_agent_for_pane(pane_id, deadline)
+        if error:
+            await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error=error, pane_id=pane_id)
+            return
+        profiles = load_agent_profiles()
+        profile = profiles.get(_profile_id_for_agent(agent))
+        if not profile:
+            await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error="This agent does not match an available launch profile", pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
+        cwd, cwd_error = resolve_agent_cwd(agent.get("cwd", ""))
+        if cwd_error:
+            await complete_command(ws, request_id, "agent_clear", False, "Clear failed", error=cwd_error, pane_id=pane_id, agent=agent.get("agent", ""), project=agent.get("project", ""))
+            return
 
-    name = f"clear-{profile['id']}-{int(time.time()) % 100000}"
-    ok, data, replacement_pane_id, placement_error, error = await start_agent_in_new_tab(profile, name, cwd)
-    warning = ""
-    result_data = data
-    if ok and placement_error:
-        if replacement_pane_id:
-            close_ok, _close_output, _close_error = await run_herdr_async_result(
-                "pane", "close", replacement_pane_id
-            )
-            if close_ok:
-                forget_agent_profile(replacement_pane_id)
-        ok = False
-        error = f"Replacement could not be placed in the working-directory space: {placement_error}"
-    elif ok:
-        result_data = {
-            **(data if isinstance(data, dict) else {"result": data}),
-            "pane_id": replacement_pane_id,
-            "name": name,
-            "cwd": str(cwd),
-        }
-        close_ok, _close_output, close_error = await run_herdr_async_result("pane", "close", pane_id)
-        if not close_ok:
-            warning = f"Replacement started, but the old pane could not be closed: {close_error}"
-            result_data["warning"] = warning
-        else:
-            forget_agent_profile(pane_id)
-    await complete_command(
-        ws,
-        request_id,
-        "agent_clear",
-        ok,
-        "Cleared agent",
-        error=error,
-        pane_id=pane_id,
-        agent=agent.get("agent", ""),
-        project=agent.get("project", ""),
-        phase="completed_with_warning" if ok and warning else "completed",
-        data=result_data,
-        details=command_details(msg, {"profile": profile["label"], "cwd": str(cwd)}),
-    )
+        name = generated_clear_agent_name(profile["id"])
+        ok, data, replacement_pane_id, placement_error, error = await start_agent_in_new_tab(profile, name, cwd, deadline=deadline)
+        warning = ""
+        result_data = data
+        if ok and placement_error:
+            if replacement_pane_id:
+                close_ok, _close_output, _close_error = await run_herdr_async_result(
+                    "pane", "close", replacement_pane_id, deadline=deadline
+                )
+                if close_ok:
+                    forget_agent_profile(replacement_pane_id)
+            ok = False
+            error = f"Replacement could not be placed in the working-directory space: {placement_error}"
+        elif ok:
+            result_data = {
+                **(data if isinstance(data, dict) else {"result": data}),
+                "pane_id": replacement_pane_id,
+                "name": name,
+                "cwd": str(cwd),
+            }
+            close_ok, _close_output, close_error = await run_herdr_async_result("pane", "close", pane_id, deadline=deadline)
+            if not close_ok:
+                warning = f"Replacement started, but the old pane could not be closed: {close_error}"
+                result_data["warning"] = warning
+            else:
+                forget_agent_profile(pane_id)
+        await complete_command(
+            ws,
+            request_id,
+            "agent_clear",
+            ok,
+            "Cleared agent",
+            error=error,
+            pane_id=pane_id,
+            agent=agent.get("agent", ""),
+            project=agent.get("project", ""),
+            phase="completed_with_warning" if ok and warning else "completed",
+            data=result_data,
+            details=command_details(msg, {"profile": profile["label"], "cwd": str(cwd)}),
+        )
+    finally:
+        lock.release()
 
 
 async def reject_incompatible_client_protocol(ws, msg):
@@ -5085,10 +6244,77 @@ async def reject_incompatible_client_protocol(ws, msg):
     await safe_send_json(ws, response)
 
 
+async def handle_read_pane_message(ws, msg):
+    pane_id = msg.get("pane_id")
+    if not pane_id:
+        return
+    # Opening a terminal on the phone counts as viewing the pane.
+    await acknowledge_pane_viewed(pane_id)
+    start_revision = agent_state_revisions.get(pane_id)
+    lines = requested_terminal_history_lines(msg.get("lines", 30))
+    fmt = "ansi" if msg.get("format") == "ansi" else "text"
+    content = await run_herdr_async(
+        "pane", "read", pane_id,
+        "--lines", str(lines),
+        "--source", "recent-unwrapped",
+        "--format", fmt,
+    )
+    question_content = content or ""
+    pane_agent_type = agent_types.get(pane_id, "")
+    interaction = parse_question(question_content, pane_agent_type)
+    if (
+        interaction is None
+        and last_statuses.get(pane_id) == "blocked"
+        and supports_structured_questions(pane_agent_type)
+    ):
+        question_content, interaction = await read_current_question(pane_id)
+    # A read that started while the agent was blocked can finish after a newer
+    # status update; its frame would resurrect the cleared blocked state.
+    stale = agent_state_revisions.get(pane_id) != start_revision
+    if stale:
+        interaction = None
+    has_question_layout = not stale and question_layout_hint(question_content)
+    if not stale and last_statuses.get(pane_id) == "blocked":
+        cache_blocked_agent_details({
+            "pane_id": pane_id,
+            **blocked_agent_details_for_content(
+                {"agent": pane_agent_type},
+                question_content,
+            ),
+        })
+    if fmt == "ansi" and "claude" in agent_types.get(pane_id, ""):
+        content = claude_content_for_client(
+            pane_id,
+            content,
+            lines,
+            last_statuses.get(pane_id),
+            has_question_layout,
+        )
+    pane_payload = {
+        "type": "pane_content",
+        "pane_id": pane_id,
+        "content": content or "",
+        "format": fmt,
+        "interaction": public_question_interaction(interaction),
+        "question_layout": has_question_layout,
+    }
+    pane_payload.update(terminal_chrome_metadata(pane_agent_type, fmt, has_question_layout))
+    await safe_send_json(ws, pane_payload)
+
+
 async def handle_client(ws):
+    handler_task = asyncio.current_task()
+    pane_read_tasks = {}
+    client_handler_tasks[ws] = handler_task
     try:
-        profiles = load_agent_profiles()
-        await safe_send_json(ws, {
+        profiles = await agent_profiles_for_new_client()
+        startup_inventory = public_agent_inventory_status()
+        startup_inventory_message = json.dumps(
+            {"type": "inventory_status", **startup_inventory},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if not await safe_send_json(ws, {
             "type": "push_config",
             "vapid_public_key": ensure_vapid_public_key(),
             "host": LOCAL_HOST,
@@ -5099,18 +6325,37 @@ async def handle_client(ws):
             "update": public_update_status(),
             "app_deploy": public_app_deploy_status(),
             "capabilities": RELAY_CAPABILITIES,
+            "inventory": startup_inventory,
             "agent_profiles": [
                 {"id": profile["id"], "label": profile["label"]}
                 for profile in profiles.values()
             ],
-        })
-        clients.add(ws)
-        await send_latest_agents(ws)
-        await safe_send_json(ws, {
+        }):
+            return
+        if not await send_latest_agents(ws):
+            return
+        startup_agents_message = latest_agents_message
+        startup_activities = await asyncio.to_thread(load_activity)
+        if not await safe_send_json(ws, {
             "type": "activity_history",
-            "activities": await asyncio.to_thread(load_activity),
-        })
+            "activities": startup_activities,
+        }):
+            return
+        async with activity_delivery_lock:
+            clients.add(ws)
+            if agent_inventory_message() != startup_inventory_message:
+                await broadcast_serialized(agent_inventory_message(), {ws})
+            if latest_agents_message != startup_agents_message:
+                await broadcast_serialized(latest_agents_message, {ws})
+            current_activities = await asyncio.to_thread(load_activity)
+            if current_activities != startup_activities:
+                await broadcast_serialized(json.dumps({
+                    "type": "activity_history",
+                    "activities": current_activities,
+                }, separators=(",", ":")), {ws})
         async for raw in ws:
+            if ws in failed_clients:
+                return
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -5161,64 +6406,39 @@ async def handle_client(ws):
                     "type": "activity_history",
                     "activities": await asyncio.to_thread(load_activity, msg.get("limit", ACTIVITY_MAX_ITEMS)),
                 })
+            elif msg_type == "clear_activities":
+                await handle_clear_activities_command(ws, msg)
             elif msg_type == "register_app_origin":
                 if client_protocol_matches(msg):
                     await asyncio.to_thread(store_phone_app_origin, msg.get("origin"))
             elif msg_type == "refresh_agents":
                 cached_agents = json.loads(latest_agents_message)
-                if await safe_send_json(ws, cached_agents):
+                if (
+                    await safe_send_json(ws, {
+                        "type": "inventory_status",
+                        **public_agent_inventory_status(),
+                    })
+                    and await safe_send_json(ws, cached_agents)
+                ):
                     agent_refresh_clients.add(ws)
                     wake_poll_loop()
             elif msg_type == "read_pane":
                 pane_id = msg.get("pane_id")
                 if not pane_id:
                     continue
-                # Opening a terminal on the phone counts as viewing the pane.
-                await acknowledge_pane_viewed(pane_id)
-                lines = requested_terminal_history_lines(msg.get("lines", 30))
-                fmt = "ansi" if msg.get("format") == "ansi" else "text"
-                content = await run_herdr_async(
-                    "pane", "read", pane_id,
-                    "--lines", str(lines),
-                    "--source", "recent-unwrapped",
-                    "--format", fmt,
-                )
-                question_content = content or ""
-                pane_agent_type = agent_types.get(pane_id, "")
-                interaction = parse_question(question_content, pane_agent_type)
-                if (
-                    interaction is None
-                    and last_statuses.get(pane_id) == "blocked"
-                    and supports_structured_questions(pane_agent_type)
-                ):
-                    question_content, interaction = await read_current_question(pane_id)
-                has_question_layout = question_layout_hint(question_content)
-                if last_statuses.get(pane_id) == "blocked":
-                    cache_blocked_agent_details({
-                        "pane_id": pane_id,
-                        **blocked_agent_details_for_content(
-                            {"agent": pane_agent_type},
-                            question_content,
-                        ),
-                    })
-                if fmt == "ansi" and "claude" in agent_types.get(pane_id, ""):
-                    content = claude_content_for_client(
-                        pane_id,
-                        content,
-                        lines,
-                        last_statuses.get(pane_id),
-                        has_question_layout,
-                    )
-                pane_payload = {
-                    "type": "pane_content",
-                    "pane_id": pane_id,
-                    "content": content or "",
-                    "format": fmt,
-                    "interaction": public_question_interaction(interaction),
-                    "question_layout": has_question_layout,
-                }
-                pane_payload.update(terminal_chrome_metadata(pane_agent_type, fmt, has_question_layout))
-                await safe_send_json(ws, pane_payload)
+                pending_read = pane_read_tasks.get(pane_id)
+                if pending_read is not None and not pending_read.done():
+                    continue
+                read_task = asyncio.create_task(handle_read_pane_message(ws, msg))
+                pane_read_tasks[pane_id] = read_task
+
+                def discard_read_task(done_task, *, task_pane_id=pane_id):
+                    if pane_read_tasks.get(task_pane_id) is done_task:
+                        pane_read_tasks.pop(task_pane_id, None)
+                    if not done_task.cancelled():
+                        done_task.exception()
+
+                read_task.add_done_callback(discard_read_task)
             elif msg_type == "acknowledge_pane":
                 pane_id = msg.get("pane_id", "")
                 if not pane_id or pane_id not in agent_types:
@@ -5254,7 +6474,8 @@ async def handle_client(ws):
                 if not pane_id or not isinstance(text, str) or not text:
                     await complete_command(ws, request_id, "text", False, "Text input failed", error="Text and agent are required", pane_id=pane_id)
                     continue
-                ok, _output, error = await run_herdr_async_result("pane", "send-text", pane_id, text)
+                deadline = time.monotonic() + COMMAND_DEADLINE_SECONDS
+                ok, _output, error = await run_herdr_async_result("pane", "send-text", pane_id, text, deadline=deadline)
                 await complete_command(ws, request_id, "text", ok, "Text inserted", error=error, pane_id=pane_id, details=command_details(msg, {"preview": compact_text(text, 120)}))
             elif msg_type == "agent_start":
                 await handle_agent_start_command(ws, msg)
@@ -5292,8 +6513,17 @@ async def handle_client(ws):
     except ConnectionClosed:
         pass
     finally:
+        pending_reads = list(pane_read_tasks.values())
+        for task in pending_reads:
+            task.cancel()
+        if pending_reads:
+            await asyncio.gather(*pending_reads, return_exceptions=True)
         clients.discard(ws)
         agent_refresh_clients.discard(ws)
+        failed_clients.discard(ws)
+        stop_client_delivery(ws)
+        if client_handler_tasks.get(ws) is handler_task:
+            client_handler_tasks.pop(ws, None)
 
 
 class UDPPlugin(asyncio.DatagramProtocol):
@@ -5301,6 +6531,12 @@ class UDPPlugin(asyncio.DatagramProtocol):
         try:
             event = json.loads(data.decode())
             if not isinstance(event, dict):
+                return
+            event_socket = event.get("socket_path")
+            if not event_socket:
+                return
+            event_socket = str(Path(str(event_socket)).expanduser().resolve(strict=False))
+            if event_socket != HERDR_SOCKET_PATH:
                 return
             event_queue.put_nowait(event)
             wake_poll_loop()
@@ -5357,6 +6593,7 @@ async def main():
         print(f"UDP {PLUGIN_PORT} in use, plugin push disabled")
     asyncio.create_task(supervise(poll_loop, "poll_loop"))
     asyncio.create_task(supervise(event_push, "event_push"))
+    asyncio.create_task(supervise(outbound_push, "outbound_push"))
     asyncio.create_task(supervise(prune_uploads_loop, "prune_uploads_loop"))
     asyncio.create_task(supervise(update_check_loop, "update_check_loop"))
     asyncio.create_task(supervise(update_state_watch_loop, "update_state_watch_loop"))

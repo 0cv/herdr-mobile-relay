@@ -81,6 +81,9 @@
     connection: $connections.get(relay.id),
   })));
   const connectedCount = $derived([...$connections.values()].filter((connection) => connection.status === 'connected').length);
+  const degradedCount = $derived([...$connections.values()].filter(
+    (connection) => connection.status === 'connected' && connection.inventory.state !== 'ready',
+  ).length);
   const confirmRow = $derived(relayRows.find(({ relay }) => relay.id === confirmRelayId));
   const manualRow = $derived(relayRows.find(({ relay }) => relay.id === manualRelayId));
   const removalRow = $derived(relayRows.find(({ relay }) => relay.id === removalRelayId));
@@ -351,7 +354,7 @@
         {@const update = relayUpdateMeta(connection)}
         <article class="relay-row">
           <span
-            class={`status-dot status-${connectionStatus === 'connected' ? 'success' : connectionStatus === 'connecting' ? 'warning' : 'danger'}`}
+            class={`status-dot status-${connectionStatus === 'connected' && connection?.inventory.state === 'ready' ? 'success' : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'warning' : 'danger'}`}
             role="img"
             aria-label={`${relay.label} relay ${connectionStatus}`}
           ></span>
@@ -359,6 +362,13 @@
             <strong>{relay.label}</strong>
             <span>{relay.url}</span>
             <small>Push: {pushStatusLabel(connection)}</small>
+            {#if connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
+              <small class="warning" role="status">
+                {connection?.inventory.state === 'error'
+                  ? connection.inventory.message || 'Herdr agent inventory unavailable.'
+                  : 'Loading Herdr agent inventory…'}
+              </small>
+            {/if}
             {#if version}<small class:warning={version.tone === 'warning'} title={version.title}>{version.label}</small>{/if}
             <small class:warning={update.warning} role="status">{update.label}</small>
             {#if update.detail}<small class:warning={update.warning} title={update.detail}>{update.detail}</small>{/if}
@@ -447,7 +457,8 @@
 
   <Card>
     <h3>Status</h3>
-    <p><span class={`status-dot status-${connectedCount ? 'success' : 'danger'}`}></span> {connectedCount}/{$relays.length} relays connected · {$agents.length} agents</p>
+    <p><span class={`status-dot status-${degradedCount ? 'warning' : connectedCount ? 'success' : 'danger'}`}></span> {connectedCount}/{$relays.length} relays connected · {$agents.length} agents</p>
+    {#if degradedCount}<p class="warning" role="status">{degradedCount} connected {degradedCount === 1 ? 'relay has' : 'relays have'} unavailable agent inventory.</p>{/if}
   </Card>
 
   <Card>

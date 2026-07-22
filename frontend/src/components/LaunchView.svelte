@@ -19,9 +19,18 @@
   let error = $state(false);
   let submitting = $state(false);
   let loadedRelay = '';
+  let directoryLoadGeneration = 0;
+  let directoryRelayId = '';
   let directoryBrowser: HTMLDivElement;
 
-  const connectedRelays = $derived($relays.filter((relay) => $connections.get(relay.id)?.status === 'connected'));
+  const connectedRelays = $derived($relays.filter((relay) => {
+    const connection = $connections.get(relay.id);
+    return connection?.status === 'connected' && connection.inventory.state === 'ready';
+  }));
+  const unavailableRelays = $derived($relays.filter((relay) => {
+    const connection = $connections.get(relay.id);
+    return connection?.status === 'connected' && connection.inventory.state !== 'ready';
+  }));
   const connection = $derived($connections.get(relayId));
   const profiles = $derived(connection?.agentProfiles || []);
 
@@ -31,15 +40,21 @@
     if (relayId && relayId !== loadedRelay) {
       loadedRelay = relayId;
       cwd = '';
+      directoryRelayId = '';
       void loadDirectory('');
     }
   });
 
   async function loadDirectory(path: string) {
-    if (!relayId || !connection?.capabilities.includes('directory_browser')) return;
+    const loadRelayId = relayId;
+    const loadConnection = connection;
+    const generation = ++directoryLoadGeneration;
+    if (!loadRelayId || !loadConnection?.capabilities.includes('directory_browser')) return;
     try {
-      const listing = await relayStore.listDirectories(relayId, path);
+      const listing = await relayStore.listDirectories(loadRelayId, path);
+      if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
       cwd = listing.current.path;
+      directoryRelayId = loadRelayId;
       name = suggestedLaunchName(cwd, profileId);
     } catch {
       // The store exposes the relay error next to the directory browser.
@@ -56,7 +71,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (!relayId || !profileId || !cwd || !name) return;
+    if (!relayId || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
     submitting = true;
     error = false;
     status = 'Starting agent…';
@@ -65,7 +80,7 @@
       const launchCwd = cwd.trim();
       const result = await relayStore.sendCommand(relayId, {
         type: 'agent_start', profile_id: profileId, name: launchName, cwd: launchCwd, prompt,
-      }, 25_000);
+      }, 45_000);
       const warning = String(result.data?.warning || '');
       status = warning || 'Agent started.';
       error = Boolean(warning);
@@ -98,9 +113,12 @@
     <form class="form-stack" onfocusin={closeDirectoryForOtherField} onsubmit={submit}>
       <label for="launch-relay">Computer</label>
       <select id="launch-relay" bind:value={relayId} required>
-        {#if !connectedRelays.length}<option value="">No connected relays</option>{/if}
+        {#if !connectedRelays.length}<option value="">No ready relays</option>{/if}
         {#each connectedRelays as relay (relay.id)}<option value={relay.id}>{relay.label}</option>{/each}
       </select>
+      {#if unavailableRelays.length}
+        <p class="warning" role="status">Agent inventory is unavailable on {unavailableRelays.map((relay) => relay.label).join(', ')}.</p>
+      {/if}
 
       <label for="launch-profile">Agent</label>
       <select id="launch-profile" bind:value={profileId} onchange={updateName} required>
@@ -154,7 +172,7 @@
       <p class="hint">The folder shown above is selected. Tap it to browse; use ↑ or Parent folder to go back.</p>
 
       <label for="launch-name">Name</label>
-      <input id="launch-name" bind:value={name} required maxlength="48" pattern={'[A-Za-z0-9][A-Za-z0-9._-]{0,47}'} placeholder="project-codex" autocomplete="off" />
+      <input id="launch-name" bind:value={name} required maxlength="32" pattern={'[a-z][a-z0-9_-]{0,31}'} title="Start with a lowercase letter; use lowercase letters, numbers, underscores, or dashes." placeholder="project-codex" autocomplete="off" />
 
       <label for="launch-prompt">Initial task <span class="optional">(optional)</span></label>
       <textarea id="launch-prompt" bind:value={prompt} maxlength="100000" placeholder="Describe the task to start…"></textarea>

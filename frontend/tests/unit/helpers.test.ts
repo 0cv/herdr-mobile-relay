@@ -10,7 +10,7 @@ import {
 } from '$lib/agents';
 import { APP_PROTOCOL_VERSION } from '$lib/config';
 import { quickSetupConfig } from '$lib/config';
-import { suggestedLaunchName } from '$lib/launch';
+import { suggestedLaunchName, validAgentName } from '$lib/launch';
 import { parseNotificationTarget, relayProtocolError, relayVersionMeta } from '$lib/protocol';
 import { relayPushScope } from '$lib/push';
 import { stateFromLocation } from '$lib/router';
@@ -336,6 +336,12 @@ describe('agent state and sorting', () => {
       interaction, question_layout: true,
     });
   });
+
+  it('clears a previous session title when the relay sends an empty value', () => {
+    const previous = agent({ session: 'old-session' });
+    const resumed = agent({ session: '' });
+    expect(mergeAgentDetails(previous, resumed).session).toBe('');
+  });
 });
 
 describe('activity, question drafts, and launch names', () => {
@@ -405,6 +411,9 @@ describe('activity, question drafts, and launch names', () => {
     expect(suggestedLaunchName('/home/me/Development/herdr-mobile-relay', 'codex')).toBe('herdr-mobile-relay-codex');
     expect(suggestedLaunchName('/Users/me/Projects/Málaga App', 'claude')).toBe('malaga-app-claude');
     expect(suggestedLaunchName('/', 'opencode')).toBe('project-opencode');
-    expect(suggestedLaunchName(`/home/me/${'project'.repeat(12)}`, 'codex').length).toBeLessThanOrEqual(48);
+    expect(suggestedLaunchName(`/home/me/${'project'.repeat(12)}`, 'codex').length).toBeLessThanOrEqual(32);
+    expect(suggestedLaunchName('/home/me/123.App', 'codex')).toBe('project-123-app-codex');
+    expect(validAgentName('project-codex')).toBe(true);
+    expect(validAgentName('Project.codex')).toBe(false);
   });
 });

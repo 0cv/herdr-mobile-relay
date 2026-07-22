@@ -12,19 +12,34 @@
     tabName,
   } from '$lib/agents';
   import { relayStore } from '$lib/store';
-  import type { Agent, RelayConfig } from '$lib/types';
+  import type { Agent, RelayConfig, RelayConnectionView } from '$lib/types';
 
   let {
     agents,
     relays,
+    connections = new Map(),
     responding,
     onopen,
   }: {
     agents: Agent[];
     relays: RelayConfig[];
+    connections?: Map<string, RelayConnectionView>;
     responding: Set<string>;
     onopen: (agent: Agent) => void;
   } = $props();
+
+  const unavailableRelays = $derived(relays.filter((relay) => {
+    const connection = connections.get(relay.id);
+    return connection?.status === 'connected' && connection.inventory.state === 'error';
+  }));
+  const startingRelays = $derived(relays.filter((relay) => {
+    const connection = connections.get(relay.id);
+    return connection?.status === 'connected' && connection.inventory.state === 'starting';
+  }));
+  const readyRelays = $derived(relays.filter((relay) => {
+    const connection = connections.get(relay.id);
+    return connection?.status === 'connected' && connection.inventory.state === 'ready';
+  }));
 
   const definitions = [
     ['blocked', 'Blocked', 'danger'],
@@ -40,6 +55,15 @@
 </script>
 
 <main class="agent-list" aria-label="Agents">
+  {#each unavailableRelays as relay (relay.id)}
+    {@const inventory = connections.get(relay.id)?.inventory}
+    <section class="inventory-warning" role="status" aria-label={`${relay.label} agent inventory unavailable`}>
+      <strong>{relay.label} is connected, but its Herdr agent inventory is unavailable.</strong>
+      <span>{inventory?.message || 'Refresh after checking Herdr on that computer.'}</span>
+      {#if inventory?.stale}<span>Previously reported agents are shown as stale.</span>{/if}
+    </section>
+  {/each}
+
   {#if !agents.length && !relays.length}
     <div class="empty-state">
       <span class="empty-icon" aria-hidden="true">🐑</span>
@@ -51,8 +75,12 @@
         <li>Open Settings and add each relay.</li>
       </ol>
     </div>
-  {:else if !agents.length}
-    <div class="empty-state" role="status">Waiting for agents…</div>
+  {:else if !agents.length && startingRelays.length}
+    <div class="empty-state" role="status">Loading agents…</div>
+  {:else if !agents.length && readyRelays.length}
+    <div class="empty-state" role="status">No chat agents are running.</div>
+  {:else if !agents.length && !unavailableRelays.length}
+    <div class="empty-state" role="status">Waiting for relays…</div>
   {/if}
 
   {#each definitions as [group, title, tone] (group)}
@@ -68,10 +96,13 @@
             {@const options = approvalOptions(agent)}
             {@const blocked = group === 'blocked'}
             {@const tab = tabName(agent)}
-            <article class:blocked class="agent-card">
+          {@const inventoryReady = !connections.has(agent.relay_id) || connections.get(agent.relay_id)?.inventory.state === 'ready'}
+          <article class:blocked class:stale={!inventoryReady} class="agent-card">
               <button
                 class="agent-open"
                 aria-label={`Open ${displayName(agent)} on ${hostLabel(agent)}`}
+                disabled={!inventoryReady}
+                title={!inventoryReady ? 'This cached agent is unavailable until Herdr inventory recovers.' : undefined}
                 onclick={() => onopen(agent)}
               >
                 <span class={`status-dot status-${tone}`} class:hollow={group === 'ready'}></span>
@@ -94,6 +125,8 @@
                       <Button
                         variant={approvalButtonTone(option, index, options.length) === 'deny' ? 'danger' : approvalButtonTone(option, index, options.length) === 'trust' ? 'trust' : 'default'}
                         size="sm"
+                        disabled={!inventoryReady}
+                        title={!inventoryReady ? 'Agent controls are unavailable until Herdr inventory recovers.' : undefined}
                         onclick={() => respond(agent, index, options.length, option)}
                       >{option.length > 48 ? `${option.slice(0, 45)}...` : option}</Button>
                     {/each}

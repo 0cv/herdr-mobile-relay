@@ -150,7 +150,18 @@ url="${!#}"
 printf 'curl %s\n' "$url" >> "$STUB_LOG"
 case "$url" in
     http://127.0.0.1:*/healthz)
-        echo '{"status": "ok", "instance": "instance-a", "version": "abc1234", "protocol": 1}'
+        if [ "${STUB_READY_MODE:-success}" = protocol_mismatch ]; then
+            echo '{"status": "ok", "readiness": "degraded", "inventory": {"state": "error", "error_code": "protocol_mismatch"}, "instance": "instance-a", "version": "abc1234", "protocol": 1}'
+        else
+            echo '{"status": "ok", "readiness": "ready", "inventory": {"state": "ready", "error_code": ""}, "instance": "instance-a", "version": "abc1234", "protocol": 1}'
+        fi
+        ;;
+    http://127.0.0.1:*/readyz)
+        if [ "${STUB_READY_MODE:-success}" = success ]; then
+            echo '{"status": "ready", "inventory": {"state": "ready"}}'
+        else
+            exit 22
+        fi
         ;;
     https://cloudflare-dns.com/*)
         case "${STUB_DNS_MODE:-route}" in
@@ -202,6 +213,7 @@ new_case() {
     export HERDR_STABLE_HOSTNAME="relay-workstation.example.test"
     export HERDR_STABLE_DNS_TIMEOUT=0
     export HERDR_STABLE_HTTP_TIMEOUT=0
+    export HERDR_STABLE_READY_TIMEOUT=0
     export HERDR_STABLE_POLL_DELAY=0
     export HERDR_STABLE_YES=1
     export HERDR_SETUP_YES=1
@@ -209,7 +221,7 @@ new_case() {
     export STUB_LOGIN_MARKER="$CASE_DIR/login-complete"
     export STUB_ROUTE_MARKER="$CASE_DIR/dns-routed"
     unset CLOUDFLARED_CONFIG DISPLAY WAYLAND_DISPLAY HERDR_PHONE_APP_URL
-    unset STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE STUB_HTTP_MODE STUB_INGRESS_FAIL
+    unset STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL
 }
 
@@ -381,6 +393,17 @@ test_health_mismatch_suppresses_qr() {
     pass "public relay identity mismatch suppresses the phone QR"
 }
 
+test_inventory_failure_suppresses_qr() {
+    new_case
+    export STUB_READY_MODE=protocol_mismatch
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "inventory mismatch should fail"
+    assert_contains "$OUTPUT" 'Herdr agent inventory is unavailable'
+    assert_contains "$OUTPUT" 'herdr server live-handoff'
+    assert_not_contains "$OUTPUT" 'Herdr Mobile Relay phone setup'
+    pass "agent inventory failure is actionable and suppresses the phone QR"
+}
+
 test_separate_readiness_timeouts() {
     new_case
     export STUB_DNS_MODE=never
@@ -440,7 +463,7 @@ test_teardown_ownership_and_dns_retention() {
     pass "teardown refuses foreign ownership and retains diagnosis when DNS remains"
 }
 
-echo "1..11"
+echo "1..12"
 test_success_and_alternate_port
 test_existing_phone_app_origin
 test_creation_confirmation
@@ -450,5 +473,6 @@ test_zone_failure_preserves_state
 test_occupied_hostname
 test_interrupted_route_resume
 test_health_mismatch_suppresses_qr
+test_inventory_failure_suppresses_qr
 test_separate_readiness_timeouts
 test_teardown_ownership_and_dns_retention

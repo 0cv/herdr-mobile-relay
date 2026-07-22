@@ -411,6 +411,37 @@ wait_for_public_dns() {
     done
 }
 
+wait_for_agent_readiness() {
+    local timeout="${HERDR_STABLE_READY_TIMEOUT:-30}"
+    local delay="${HERDR_STABLE_POLL_DELAY:-2}"
+    local deadline=$((SECONDS + timeout))
+    local ready_file="$WORK_DIR/local-ready.json"
+
+    printf '▸ Waiting up to %s seconds for Herdr agent inventory' "$timeout"
+    while true; do
+        if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/readyz" > "$ready_file" 2>/dev/null; then
+            echo " ✓"
+            return
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo ""
+            curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" > "$LOCAL_HEALTH_FILE" 2>/dev/null || true
+            echo "✗ The relay is running, but Herdr agent inventory is unavailable." >&2
+            case "$(cat "$LOCAL_HEALTH_FILE" 2>/dev/null || true)" in
+                *'"error_code": "protocol_mismatch"'*)
+                    echo "  Run: herdr server live-handoff" >&2
+                    ;;
+                *)
+                    echo "  Check the relay service logs, then rerun this setup." >&2
+                    ;;
+            esac
+            return 1
+        fi
+        printf '.'
+        sleep "$delay"
+    done
+}
+
 wait_for_public_health() {
     local timeout="${HERDR_STABLE_HTTP_TIMEOUT:-60}"
     local delay="${HERDR_STABLE_POLL_DELAY:-2}"
@@ -724,6 +755,10 @@ if ! curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" > "$LOCAL_HEALTH_FI
 fi
 if ! state_command health-valid "$LOCAL_HEALTH_FILE"; then
     echo "✗ The local relay health response is incomplete." >&2
+    fail_resumable
+    exit 1
+fi
+if ! wait_for_agent_readiness; then
     fail_resumable
     exit 1
 fi

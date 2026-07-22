@@ -67,6 +67,12 @@
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
   const connected = $derived([...$connections.values()].filter((connection) => connection.status === 'connected').length);
   const connecting = $derived([...$connections.values()].some((connection) => connection.status === 'connecting'));
+  const inventoryUnavailable = $derived([...$connections.values()].filter(
+    (connection) => connection.status === 'connected' && connection.inventory.state === 'error',
+  ).length);
+  const inventoryLoading = $derived([...$connections.values()].filter(
+    (connection) => connection.status === 'connected' && connection.inventory.state === 'starting',
+  ).length);
   const updateAvailable = $derived(
     ['reload-ready', 'deployment-required'].includes($appUpdates.state)
       || [...$connections.values()].some((connection) => ['available', 'blocked'].includes(connection.update.state)),
@@ -83,14 +89,19 @@
   const headerMeta = $derived(activeAgent ? terminalSecondaryLabel(activeAgent) : '');
   const headerIndicator = $derived.by(() => {
     if (!activeAgent) return {
-      tone: connected ? 'success' : connecting ? 'warning' : 'danger',
+      tone: inventoryUnavailable || inventoryLoading ? 'warning' : connected ? 'success' : connecting ? 'warning' : 'danger',
       hollow: false,
-      label: `${connected}/${$relays.length} relays connected`,
+      label: `${connected}/${$relays.length} relays connected${inventoryUnavailable ? `; ${inventoryUnavailable} agent inventory unavailable` : inventoryLoading ? `; ${inventoryLoading} agent inventory loading` : ''}`,
     };
     if (activeConnection?.status !== 'connected') return {
       tone: 'warning' as const,
       hollow: false,
       label: 'Relay reconnecting',
+    };
+    if (activeConnection.inventory.state !== 'ready') return {
+      tone: 'warning' as const,
+      hollow: false,
+      label: activeConnection.inventory.state === 'error' ? 'Agent inventory unavailable' : 'Agent inventory loading',
     };
     const group = agentStatusGroup(activeAgent);
     return {
@@ -141,7 +152,7 @@
     // An action notification (the "Approve once" button) acts immediately and
     // lands on the live thread — it is not a "review what happened" open.
     if (target.action) {
-      if (!agent) return;
+      if (!agent || !agent.event_id) return;
       clearNotificationFallback();
       replaceView({ view: 'terminal', paneId: agent.pane_id });
       void executeNotificationAction(agent, target);
@@ -303,11 +314,16 @@
         relayStore.showToast('The agent is no longer blocked.');
         return;
       }
-      rememberNotificationAction(target);
+      if (!target.notification_id || target.notification_id !== agent.event_id) {
+        rememberNotificationAction(target);
+        relayStore.showToast('This notification belongs to an older approval request.', true);
+        return;
+      }
       const options = approvalOptions(agent);
       const index = target.index ?? 0;
       const total = target.total ?? Math.max(2, options.length);
-      await relayStore.respond(agent, index, total, options[index] || 'approve once', `Notification: ${target.action}`);
+      const approved = await relayStore.respond(agent, index, total, options[index] || 'approve once', `Notification: ${target.action}`);
+      if (approved) rememberNotificationAction(target);
     } finally {
       handlingNotifications.delete(key);
     }
@@ -394,6 +410,11 @@
     <ActivityView />
   {:else if $currentView.view === 'activity_detail'}
     <ActivityDetail key={$currentView.key} />
+  {:else if $currentView.view === 'terminal' && activeAgent && activeConnection?.status === 'connected' && activeConnection.inventory.state !== 'ready'}
+    <main class="page terminal-loading" aria-label="Agent inventory unavailable">
+      <p role="alert">{activeConnection.inventory.message || 'This computer’s Herdr agent inventory is not ready.'}</p>
+      <Button onclick={() => replaceView({ view: 'agents' })}>Back to agents</Button>
+    </main>
   {:else if $currentView.view === 'terminal' && activeAgent}
     {#key activeAgent.pane_id}
       <TerminalView agent={activeAgent} allAgents={$agents} frame={$frames.get(activeAgent.pane_id)} responding={$responding} />
@@ -408,7 +429,7 @@
       {/if}
     </main>
   {:else}
-    <AgentList agents={$agents} relays={$relays} responding={$responding} onopen={openAgent} />
+    <AgentList agents={$agents} relays={$relays} connections={$connections} responding={$responding} onopen={openAgent} />
   {/if}
 </div>
 

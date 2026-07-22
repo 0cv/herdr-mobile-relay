@@ -3,7 +3,7 @@
 This connects one Linux or macOS computer to your phone through a temporary TryCloudflare tunnel. It does not require a Cloudflare account or domain.
 
 > [!IMPORTANT]
-> Native Windows is not supported. You need Herdr 0.7.0 or newer, Git, and `curl`.
+> Native Windows is not supported. You need Herdr 0.7.5 or newer, Git, and `curl`.
 
 ## 1. Install the Plugin
 
@@ -49,7 +49,7 @@ If it stops, rerun the exact command it prints. Setup resumes its recorded state
 
 Repeat stable setup on each computer with a different hostname. Add each QR link to the same phone app.
 
-After the stable service is running on version 0.7.0 or newer, Settings can check and install later versioned relay updates one computer at a time. An older relay shows **Update Help** with the one-time command to update and restart it. That Marketplace command preserves the configuration used by an existing checkout-installed service; the checkout command remains available for users who prefer to stay checkout-managed. A separately hosted phone app remains a separate deployment.
+After the stable service is running with Herdr 0.7.5 or newer, Settings can check and install later versioned relay updates one computer at a time. An older relay shows **Update Help** with the one-time command to update and restart it. That Marketplace command preserves the configuration used by an existing checkout-installed service; the checkout command remains available for users who prefer to stay checkout-managed. A separately hosted phone app remains a separate deployment.
 
 The app also checks the committed upstream app release. Relay-hosted apps update with their relay. If you deliberately host one app separately on Cloudflare Pages, configure exactly one stable relay as its deployment owner:
 

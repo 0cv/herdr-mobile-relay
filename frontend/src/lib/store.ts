@@ -28,6 +28,7 @@ import {
 import type {
   Activity,
   Agent,
+  AgentInventoryStatus,
   CommandResult,
   DirectoryListing,
   QuestionDraft,
@@ -41,12 +42,48 @@ import type {
 } from './types';
 
 const COMMAND_TIMEOUT_MS = 15_000;
+const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
 const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
 const CONNECTION_HEALTH_TIMEOUT_MS = 10_000;
 const UPDATE_RESTART_RECONNECT_DELAY_MS = 1_000;
 const RECONNECT_BASE_DELAY_MS = 3_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
+const PANE_READ_RETRY_MS = 35_000;
 const IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+const INVENTORY_REQUIRED_COMMANDS = new Set([
+  'answer_question',
+  'navigate_question',
+  'respond',
+  'clarify_question',
+  'submit_prompt',
+  'send_keys',
+  'send_text',
+  'agent_start',
+  'agent_rename',
+  'agent_stop',
+  'agent_clear',
+  'agent_restart',
+  'acknowledge_pane',
+  'upload_image',
+]);
+
+function normalizeAgentInventory(
+  value: unknown,
+  fallbackState: AgentInventoryStatus['state'] = 'starting',
+): AgentInventoryStatus {
+  const inventory = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const state = ['starting', 'ready', 'error'].includes(String(inventory.state))
+    ? String(inventory.state) as AgentInventoryStatus['state']
+    : fallbackState;
+  return {
+    state,
+    errorCode: String(inventory.error_code || '').slice(0, 80),
+    message: String(inventory.message || '').slice(0, 500),
+    lastAttemptAt: Number(inventory.last_attempt_at) || 0,
+    lastSuccessAt: Number(inventory.last_success_at) || 0,
+    stale: inventory.stale === true,
+  };
+}
 
 interface RelayConnection extends RelayConnectionView {
   ws: WebSocket | null;
@@ -54,6 +91,7 @@ interface RelayConnection extends RelayConnectionView {
   healthTimer: ReturnType<typeof setTimeout> | null;
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
+  directoryGeneration: number;
 }
 
 interface PendingRequest {
@@ -104,6 +142,7 @@ class RelayStore {
   private blockedSnapshotMisses = new Map<string, number>();
   private pendingRequests = new Map<string, PendingRequest>();
   private pendingUploads = new Map<string, PendingUpload>();
+  private pendingPaneReads = new Map<string, number>();
   private slashCommandCache = new Map<string, SlashCommandCacheEntry>();
   private pendingSlashCommands = new Map<string, PendingSlashCommands>();
   private respondingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -145,6 +184,7 @@ class RelayStore {
     this.responding.set(new Set());
     this.slashCommandCache.clear();
     this.pendingSlashCommands.clear();
+    this.pendingPaneReads.clear();
   }
 
   setPushConfigHandler(handler: ((relayId: string) => void) | null): void {
@@ -204,6 +244,7 @@ class RelayStore {
       directoryBrowser: null,
       directoryLoading: false,
       directoryError: '',
+      directoryGeneration: 0,
       host: '',
       protocol: 0,
       version: '',
@@ -211,6 +252,7 @@ class RelayStore {
       revision: '',
       update: normalizeRelayUpdate(null),
       appDeploy: normalizeAppDeployment(null),
+      inventory: normalizeAgentInventory(null),
       pushStatus: '',
       vapidPublicKey: '',
     };
@@ -269,6 +311,9 @@ class RelayStore {
 
   disconnectRelay(id: string): void {
     this.clearSlashCommandCacheForRelay(id);
+    for (const paneId of this.pendingPaneReads.keys()) {
+      if (paneId.startsWith(`${id}::`)) this.pendingPaneReads.delete(paneId);
+    }
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
     connection.closed = true;
@@ -371,12 +416,18 @@ class RelayStore {
       );
       this.syncUpdateRestartReconnect(relayId, connection);
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
+      connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
       connection.agentProfiles = Array.isArray(message.agent_profiles)
         ? message.agent_profiles.filter((profile: any) => profile?.id)
         : [];
       this.emitConnections();
       this.pushConfigHandler?.(relayId);
+      return;
+    }
+    if (message.type === 'inventory_status' && connection) {
+      connection.inventory = normalizeAgentInventory(message);
+      this.emitConnections();
       return;
     }
     if (message.type === 'update_status' && connection) {
@@ -425,6 +476,16 @@ class RelayStore {
       return;
     }
     if (message.type === 'agents') {
+      // Starting/error snapshots are not authoritative. In particular, a relay
+      // restart has no in-memory pane cache yet; accepting its placeholder []
+      // would erase the phone's last useful snapshot and recreate the original
+      // "no agents" failure. The first ready transition is followed by a fresh
+      // authoritative agents frame.
+      if (
+        connection
+        && connection.inventory.state !== 'ready'
+        && !connection.inventory.stale
+      ) return;
       const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
       const incoming = (Array.isArray(message.agents) ? message.agents : [])
         .map((agent: Partial<Agent>) => normalizeAgent(relayId, label, agent));
@@ -471,6 +532,7 @@ class RelayStore {
     }
     if (message.type === 'pane_content') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+      this.pendingPaneReads.delete(paneId);
       const desktopFooterLines = Number(message.desktop_footer_lines);
       const desktopPromptLines = Number(message.desktop_prompt_lines);
       this.terminalFramesValue.set(paneId, {
@@ -514,6 +576,9 @@ class RelayStore {
     this.agentsValue = this.agentsValue.filter((agent) => agent.relay_id !== relayId);
     for (const paneId of this.blockedSnapshotMisses.keys()) {
       if (paneId.startsWith(`${relayId}::`)) this.blockedSnapshotMisses.delete(paneId);
+    }
+    for (const paneId of this.pendingPaneReads.keys()) {
+      if (paneId.startsWith(`${relayId}::`)) this.pendingPaneReads.delete(paneId);
     }
     this.agents.set(this.agentsValue);
   }
@@ -584,6 +649,11 @@ class RelayStore {
     }
     const protocolError = relayProtocolError(connection);
     if (protocolError && !allowProtocolMismatch) return Promise.reject(new CommandError(protocolError));
+    if (INVENTORY_REQUIRED_COMMANDS.has(String(payload.type)) && connection.inventory.state !== 'ready') {
+      return Promise.reject(new CommandError(
+        connection.inventory.message || 'Herdr agent inventory is not ready on this computer',
+      ));
+    }
     const requestId = commandRequestId();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -707,6 +777,13 @@ class RelayStore {
     const pending = this.pendingRequests.get(result.request_id);
     if (!pending || pending.relayId !== relayId) return;
     if (result.phase === 'accepted') {
+      // The relay already acted; give the final confirmation its own window
+      // instead of counting it against the original send timeout.
+      clearTimeout(pending.timer);
+      pending.timer = setTimeout(() => {
+        this.pendingRequests.delete(result.request_id);
+        pending.reject(new CommandError('Relay did not confirm the command in time'));
+      }, ACCEPTED_COMMAND_TIMEOUT_MS);
       this.showToast('Command accepted; waiting for agent state…');
       return;
     }
@@ -744,12 +821,15 @@ class RelayStore {
   }
 
   readPane(agent: Agent): void {
-    this.sendRaw(agent.relay_id, {
+    const requestedAt = this.pendingPaneReads.get(agent.pane_id);
+    if (requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
+    const sent = this.sendRaw(agent.relay_id, {
       type: 'read_pane',
       pane_id: agent.raw_pane_id,
       lines: get(terminalHistoryLines),
       format: 'ansi',
     });
+    if (sent) this.pendingPaneReads.set(agent.pane_id, Date.now());
   }
 
   requestAgents(): void {
@@ -810,7 +890,9 @@ class RelayStore {
     const label = choice || approvalOptions(agent)[index] || `option ${index + 1}`;
     this.markResponding(agent.pane_id);
     try {
-      const result = await this.sendToAgent(agent, { type: 'respond', index, total, choice: label, source }, 12_000);
+      const result = await this.sendToAgent(agent, {
+        type: 'respond', index, total, choice: label, source, event_id: agent.event_id || '',
+      }, 12_000);
       this.showToast(result.phase === 'unconfirmed'
         ? 'Approval was accepted but the agent still appears blocked.'
         : `Confirmed: ${label}`,
@@ -883,6 +965,33 @@ class RelayStore {
     }
   }
 
+  async clearActivities(): Promise<void> {
+    const relayIds = [...this.connectionsValue.keys()];
+    const cleared = new Set<string>();
+    const failures: string[] = [];
+    await Promise.all(relayIds.map(async (relayId) => {
+      const connection = this.connectionsValue.get(relayId);
+      const label = connection?.relay.label || relayId;
+      if (!connection?.capabilities.includes('clear_activities')) {
+        failures.push(`${label} needs an update`);
+        return;
+      }
+      try {
+        await this.sendCommand(relayId, { type: 'clear_activities' });
+        cleared.add(relayId);
+      } catch {
+        failures.push(`${label} is unavailable`);
+      }
+    }));
+    if (cleared.size) {
+      this.activitiesValue = this.activitiesValue.filter((activity) => !cleared.has(activity.relay_id));
+      this.activities.set(this.activitiesValue);
+    }
+    if (failures.length) {
+      throw new CommandError(`Some activity could not be deleted: ${failures.join(', ')}.`);
+    }
+  }
+
   private normalizeActivity(relayId: string, activity: Record<string, any>): Activity {
     const relay = get(this.relayConfigs).find((item) => item.id === relayId);
     return {
@@ -911,6 +1020,7 @@ class RelayStore {
   async listDirectories(relayId: string, path = ''): Promise<DirectoryListing> {
     const connection = this.connectionsValue.get(relayId);
     if (!connection) throw new CommandError('Relay is not connected');
+    const generation = ++connection.directoryGeneration;
     connection.directoryLoading = true;
     connection.directoryError = '';
     this.emitConnections();
@@ -921,15 +1031,17 @@ class RelayStore {
       if (!this.isCurrentConnection(relayId, connection)) {
         throw new CommandError('Relay reconnected while loading directories');
       }
-      connection.directoryBrowser = listing;
+      if (generation === connection.directoryGeneration) {
+        connection.directoryBrowser = listing;
+      }
       return listing;
     } catch (error) {
-      if (this.isCurrentConnection(relayId, connection)) {
+      if (this.isCurrentConnection(relayId, connection) && generation === connection.directoryGeneration) {
         connection.directoryError = (error as Error).message;
       }
       throw error;
     } finally {
-      if (this.isCurrentConnection(relayId, connection)) {
+      if (this.isCurrentConnection(relayId, connection) && generation === connection.directoryGeneration) {
         connection.directoryLoading = false;
         this.emitConnections();
       }
@@ -967,7 +1079,9 @@ class RelayStore {
           }))
           .sort((left, right) => left.command.localeCompare(right.command, undefined, { sensitivity: 'base' }));
         const catalog = { commands, truncated: Boolean(result.data.truncated) };
-        this.slashCommandCache.set(agent.pane_id, { identity, catalog });
+        if (this.pendingSlashCommands.get(agent.pane_id)?.promise === promise) {
+          this.slashCommandCache.set(agent.pane_id, { identity, catalog });
+        }
         return catalog;
       });
     this.pendingSlashCommands.set(agent.pane_id, { identity, promise });

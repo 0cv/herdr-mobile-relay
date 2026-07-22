@@ -2,6 +2,7 @@
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
   import { clientPaneId, displayName, hostLabel, tabName } from '$lib/agents';
+  import { validAgentName } from '$lib/launch';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
   import type { Agent } from '$lib/types';
@@ -24,15 +25,21 @@
   });
 
   async function rename() {
-    if (!agent || !name.trim()) {
+    if (!agent) return;
+    const nextName = name.trim();
+    if (!nextName) {
       relayStore.showToast('Enter a name for the agent.', true);
+      return;
+    }
+    if (!validAgentName(nextName)) {
+      relayStore.showToast('Use up to 32 lowercase letters, numbers, underscores, or dashes, starting with a letter.', true);
       return;
     }
     busy = true;
     try {
-      await relayStore.sendToAgent(agent, { type: 'agent_rename', name: name.trim() });
+      await relayStore.sendToAgent(agent, { type: 'agent_rename', name: nextName });
       open = false;
-      relayStore.showToast(`Agent renamed to ${name.trim()}.`);
+      relayStore.showToast(`Agent renamed to ${nextName}.`);
     } catch (error) {
       relayStore.showToast((error as Error).message, true);
     } finally {
@@ -48,7 +55,7 @@
     }
     busy = true;
     try {
-      const result = await relayStore.sendToAgent(agent, { type: 'agent_clear' }, 25_000);
+      const result = await relayStore.sendToAgent(agent, { type: 'agent_clear' }, 45_000);
       const warning = String(result.data?.warning || '');
       relayStore.showToast(warning || 'Agent cleared.', Boolean(warning));
       const rawPaneId = String(result.data?.pane_id || '');
@@ -90,7 +97,7 @@
 <AppDialog id="manage-agent-dialog" bind:open title="Manage Agent" description={agent ? `${displayName(agent)} @${hostLabel(agent)}` : 'Agent unavailable'}>
   <div class="form-stack">
     <label for="manage-name">New name</label>
-    <input id="manage-name" bind:value={name} maxlength="80" autocomplete="off" />
+    <input id="manage-name" bind:value={name} required maxlength="32" pattern={'[a-z][a-z0-9_-]{0,31}'} title="Start with a lowercase letter; use lowercase letters, numbers, underscores, or dashes." autocomplete="off" />
     <div class="dialog-actions">
       <Button disabled={busy} onclick={rename}>Rename</Button>
       <Button variant="secondary" disabled={busy} onclick={clearAgent}>{confirming === 'clear' ? 'Confirm Clear' : 'Clear Agent'}</Button>

@@ -6,16 +6,19 @@ import json
 import os
 import pty
 import re
+import runpy
 import socket
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 
 RELAY_PATH = Path(__file__).parents[1] / "relay" / "herdr_relay.py"
@@ -331,6 +334,21 @@ Do you want to proceed?
             interaction["other"]["text"], "Preserve only the public contract"
         )
         self.assertEqual(interaction["_focus"], ("option", 3))
+
+    def test_chained_codex_questions_with_identical_content_get_distinct_ids(self):
+        first = relay.parse_codex_question(CODEX_QUESTION_VIEW)
+        second = relay.parse_codex_question(
+            CODEX_QUESTION_VIEW.replace(
+                "Question 1/3 (3 unanswered)", "Question 2/3 (2 unanswered)"
+            )
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(
+            relay.parse_codex_question(CODEX_QUESTION_VIEW)["id"], first["id"]
+        )
 
     def test_parses_narrow_codex_option_table_without_losing_wrapped_labels(self):
         narrow = """
@@ -1100,6 +1118,7 @@ Production-like verification.
         self.assertIn("remote", description)
         self.assertIn("smartphone", description)
         self.assertRegex(PLUGIN_VERSION, r"^\d+\.\d+\.\d+$")
+        self.assertIn('min_herdr_version = "0.7.5"', manifest)
         self.assertIn(f'**Current version:** `{PLUGIN_VERSION}`', (root / "README.md").read_text())
         self.assertIn('id = "setup"', manifest)
         self.assertIn('command = "herdr-mobile-relay.events.setup"', manifest)
@@ -1210,6 +1229,38 @@ Production-like verification.
             result.stdout.strip(),
             f"run --quiet python {root / 'relay' / 'on_event.py'}",
         )
+
+    def test_plugin_event_identifies_its_herdr_socket(self):
+        root = RELAY_PATH.parents[1]
+        sent = []
+
+        class FakeDatagramSocket:
+            def sendto(self, payload, address):
+                sent.append((payload, address))
+
+            def close(self):
+                pass
+
+        fake_socket = SimpleNamespace(
+            AF_INET=socket.AF_INET,
+            SOCK_DGRAM=socket.SOCK_DGRAM,
+            gethostname=lambda: "relay-host",
+            socket=lambda *_args: FakeDatagramSocket(),
+        )
+        with (
+            patch.dict(os.environ, {
+                "HERDR_RELAY_PLUGIN_PORT": "18376",
+                "HERDR_SOCKET_PATH": "/tmp/herdr-named.sock",
+                "HERDR_PLUGIN_EVENT_JSON": json.dumps({"data": {"pane_id": "w1:p1"}}),
+            }, clear=False),
+            patch.dict(sys.modules, {"socket": fake_socket}),
+        ):
+            runpy.run_path(str(root / "relay" / "on_event.py"))
+
+        payload = json.loads(sent[0][0].decode())
+
+        self.assertEqual(payload["socket_path"], "/tmp/herdr-named.sock")
+        self.assertEqual(sent[0][1], ("127.0.0.1", 18376))
 
     def test_plugin_build_detaches_post_install_waiter_inside_herdr(self):
         root = RELAY_PATH.parents[1]
@@ -2020,6 +2071,52 @@ Production-like verification.
             self.assertEqual([entry["summary"] for entry in entries], ["Second", "Third"])
             self.assertEqual(activity_file.stat().st_mode & 0o777, 0o600)
 
+    def test_clear_activity_history_removes_records_and_tombstones(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            activity_file = Path(temp_dir) / "activity.jsonl"
+            tombstone_file = activity_file.with_suffix(".tombstones")
+            activity_file.write_text('{"id":"activity-a"}\n')
+            tombstone_file.write_text("stale-a\n")
+            relay.activity_tombstones.add("stale-a")
+            with patch.object(relay, "ACTIVITY_FILE", activity_file):
+                ok, error = relay.clear_activity_history()
+
+            self.assertTrue(ok)
+            self.assertEqual(error, "")
+            self.assertFalse(activity_file.exists())
+            self.assertFalse(tombstone_file.exists())
+            self.assertEqual(relay.activity_tombstones, set())
+
+    def test_failed_tombstone_rewrite_preserves_other_stale_activity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            activity_file = Path(temp_dir) / "activity.jsonl"
+            tombstone_file = activity_file.with_suffix(".tombstones")
+            stale_a = {"id": "stale-a", "kind": "blocked"}
+            stale_b = {"id": "stale-b", "kind": "blocked"}
+            activity_file.write_text(
+                json.dumps(stale_a, separators=(",", ":")) + "\n"
+                + json.dumps(stale_b, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            tombstone_file.write_text("stale-a\nstale-b\n", encoding="utf-8")
+            tombstones = {"stale-a", "stale-b"}
+
+            with (
+                patch.object(relay, "ACTIVITY_FILE", activity_file),
+                patch.object(relay, "activity_tombstones", tombstones),
+            ):
+                self.assertTrue(relay.discard_recorded_activity("stale-a"))
+                with patch.object(relay.os, "replace", side_effect=OSError("injected")):
+                    self.assertFalse(relay.clear_activity_tombstone("stale-a"))
+
+                self.assertEqual(
+                    set(tombstone_file.read_text(encoding="utf-8").splitlines()),
+                    {"stale-a", "stale-b"},
+                )
+                tombstones.clear()
+                self.assertEqual(relay.load_activity(), [])
+                self.assertIn("stale-b", relay.persisted_activity_tombstones())
+
     def test_record_activity_stores_multiline_extract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             activity_file = Path(temp_dir) / "activity.jsonl"
@@ -2040,6 +2137,7 @@ Production-like verification.
             self.assertNotIn("extract", entry)
 
     def test_compact_extract_caps_length(self):
+        self.assertEqual(relay.ACTIVITY_EXTRACT_MAX_CHARS, relay.PROMPT_MAX_CHARS)
         capped = relay.compact_extract("x" * (relay.ACTIVITY_EXTRACT_MAX_CHARS + 50))
         self.assertEqual(len(capped), relay.ACTIVITY_EXTRACT_MAX_CHARS)
 
@@ -2072,6 +2170,24 @@ Production-like verification.
             session_file.write_text('{"type":"summary","summary":"Fix the relay tests","leafUuid":"x"}\n')
             with patch.object(relay, "CLAUDE_PROJECTS_DIR", Path(temp_dir)):
                 self.assertEqual(relay.claude_session_name("/home/u/app"), "Fix the relay tests")
+
+    def test_project_session_name_does_not_substitute_another_session(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_dir = Path(temp_dir) / "-home-u-app"
+            project_dir.mkdir()
+            (project_dir / "session-a.jsonl").write_text(
+                '{"type":"custom-title","customTitle":"Session A"}\n'
+            )
+            with patch.object(relay, "QODER_PROJECTS_DIR", Path(temp_dir)):
+                self.assertEqual(relay.qoder_session_name("/home/u/app", "missing-session"), "")
+            with patch.object(relay, "CLAUDE_PROJECTS_DIR", Path(temp_dir)):
+                self.assertEqual(relay.claude_session_name("/home/u/app", "missing-session"), "")
+
+            (project_dir / "session-b.jsonl").write_text(
+                '{"type":"custom-title","customTitle":"Session B"}\n'
+            )
+            with patch.object(relay, "CLAUDE_PROJECTS_DIR", Path(temp_dir)):
+                self.assertEqual(relay.claude_session_name("/home/u/app"), "")
 
     def test_project_dir_candidates_handle_dots_and_underscores(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2106,6 +2222,33 @@ Production-like verification.
                 self.assertEqual(relay.codex_session_name("/home/u/other"), "other-thread")
                 self.assertEqual(relay.codex_session_name("/home/u/missing"), "")
 
+    def test_codex_session_name_uses_exact_id_for_shared_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_dir = Path(temp_dir) / "sessions"
+            day_dir = sessions_dir / "2026" / "07" / "21"
+            day_dir.mkdir(parents=True)
+            (day_dir / "rollout-a.jsonl").write_text(
+                '{"type":"session_meta","payload":{"session_id":"sess-a","cwd":"/home/u/app"}}\n'
+            )
+            (day_dir / "rollout-b.jsonl").write_text(
+                '{"type":"session_meta","payload":{"session_id":"sess-b","cwd":"/home/u/app"}}\n'
+            )
+            index_file = Path(temp_dir) / "session_index.jsonl"
+            index_file.write_text(
+                '{"id":"sess-a","thread_name":"implementer"}\n'
+                '{"id":"sess-b","thread_name":"reviewer"}\n'
+            )
+            with patch.object(relay, "CODEX_SESSIONS_DIR", sessions_dir), \
+                    patch.object(relay, "CODEX_SESSION_INDEX_FILE", index_file):
+                self.assertEqual(relay.codex_session_name("/home/u/app", "sess-a"), "implementer")
+                self.assertEqual(relay.codex_session_name("/home/u/app", "sess-b"), "reviewer")
+                self.assertEqual(relay.codex_session_name("/home/u/app", "missing"), "")
+                self.assertEqual(relay.codex_session_name("/home/u/app"), "")
+                self.assertEqual(
+                    relay.session_name_for_activity("Codex", "/home/u/app", "sess-b"),
+                    "reviewer",
+                )
+
     def test_record_activity_stores_session_name(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -2122,7 +2265,7 @@ Production-like verification.
             self.assertEqual(entry["session"], "My rename")
             self.assertNotIn("session", unnamed)
 
-    def test_cached_session_name_reuses_recent_resolution(self):
+    def test_cached_session_name_refreshes_when_session_file_changes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             project_dir = Path(temp_dir) / "-home-u-app"
             project_dir.mkdir()
@@ -2132,13 +2275,61 @@ Production-like verification.
             try:
                 with patch.object(relay, "QODER_PROJECTS_DIR", Path(temp_dir)):
                     self.assertEqual(relay.cached_session_name("Qoder", "/home/u/app"), "First")
-                    session_file.write_text('{"type":"custom-title","customTitle":"Second","sessionId":"s1"}\n')
-                    self.assertEqual(relay.cached_session_name("Qoder", "/home/u/app"), "First")
-                relay.session_name_cache[("qoder", "/home/u/app", "")] = ("First", time.time() - relay.SESSION_NAME_TTL - 1)
-                with patch.object(relay, "QODER_PROJECTS_DIR", Path(temp_dir)):
-                    self.assertEqual(relay.cached_session_name("Qoder", "/home/u/app"), "Second")
+                    session_file.write_text(
+                        '{"type":"custom-title","customTitle":"Second title","sessionId":"s1"}\n'
+                    )
+                    self.assertEqual(relay.cached_session_name("Qoder", "/home/u/app"), "Second title")
             finally:
                 relay.session_name_cache.clear()
+
+    def test_cached_codex_session_name_refreshes_when_index_title_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions_dir = Path(temp_dir) / "sessions"
+            day_dir = sessions_dir / "2026" / "07" / "21"
+            day_dir.mkdir(parents=True)
+            (day_dir / "rollout-a.jsonl").write_text(
+                '{"type":"session_meta","payload":{"session_id":"sess-a","cwd":"/home/u/app"}}\n'
+            )
+            index_file = Path(temp_dir) / "session_index.jsonl"
+            index_file.write_text('{"id":"sess-a","thread_name":"Before"}\n')
+            relay.session_name_cache.clear()
+            try:
+                with patch.object(relay, "CODEX_SESSIONS_DIR", sessions_dir), \
+                        patch.object(relay, "CODEX_SESSION_INDEX_FILE", index_file):
+                    self.assertEqual(
+                        relay.cached_session_name("Codex", "/home/u/app", "sess-a"),
+                        "Before",
+                    )
+                    index_file.write_text('{"id":"sess-a","thread_name":"After rename"}\n')
+                    self.assertEqual(
+                        relay.cached_session_name("Codex", "/home/u/app", "sess-a"),
+                        "After rename",
+                    )
+            finally:
+                relay.session_name_cache.clear()
+
+    def test_agent_inventory_sends_empty_session_to_clear_previous_title(self):
+        pane_result = json.dumps({
+            "result": {
+                "panes": [{
+                    "agent": "codex",
+                    "agent_status": "working",
+                    "cwd": "/home/me/project",
+                    "pane_id": "w1:p1",
+                    "tab_id": "w1:t1",
+                }],
+            },
+        })
+        tab_result = json.dumps({"result": {"tabs": []}})
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[(True, pane_result, ""), (True, tab_result, "")],
+        ), patch.object(relay, "cached_session_name", return_value=""):
+            agents, inventory_error = relay.get_agent_inventory()
+
+        self.assertIsNone(inventory_error)
+        self.assertEqual(agents[0]["session"], "")
 
     def test_finished_agents_read_done_until_viewed(self):
         pane = "w1:p1"
@@ -2177,6 +2368,9 @@ Production-like verification.
             relay.register_status_transition(pane, "working", "idle")
             relay.register_status_transition(pane, "done", "working")
             self.assertEqual(relay.displayed_status(pane, "done"), "done")
+            self.assertIn(pane, relay.unseen_done_panes)
+            relay.register_status_transition(pane, "idle", "done")
+            self.assertEqual(relay.displayed_status(pane, "idle"), "done")
 
             relay.acknowledged_done_panes.add(pane)
             self.assertEqual(relay.displayed_status(pane, "done"), "idle")
@@ -2229,6 +2423,14 @@ Production-like verification.
             profiles = relay.load_agent_profiles()
         self.assertEqual(set(profiles), {"codex", "claude"})
         self.assertEqual(profiles["claude"]["argv"], ["/usr/bin/claude"])
+        self.assertEqual(profiles["claude"]["kind"], "claude")
+
+    def test_generated_clear_agent_name_obeys_herdr_075_rules(self):
+        with patch.object(relay.time, "time", return_value=123456):
+            name = relay.generated_clear_agent_name("123.Custom Profile With A Very Long Name")
+
+        self.assertLessEqual(len(name), 32)
+        self.assertRegex(name, r"^[a-z][a-z0-9_-]{0,31}$")
 
     def test_herdr_installed_integrations_parses_status(self):
         status_output = "\n".join([
@@ -2284,6 +2486,18 @@ Production-like verification.
         self.assertEqual(set(profiles), {"pi"})
         mock_integrations.assert_not_called()
 
+    def test_replace_profiles_mode_skips_startup_prewarm_discovery(self):
+        ini_content = "[profiles]\npi = Pi\n[config]\nreplace_profiles = true\n"
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read_string(ini_content)
+        cache = {"names": set(), "expires": 0.0, "refreshing": False}
+        with patch.object(relay, "_AGENT_PROFILES_INI_CACHE", parser), \
+                patch.object(relay, "_herdr_integrations_cache", cache), \
+                patch.object(relay, "herdr_installed_integrations", return_value={"qodercli"}) as mock_discovery:
+            relay.prewarm_herdr_integrations()
+        mock_discovery.assert_not_called()
+        self.assertEqual(cache["names"], set())
+
     def test_cached_herdr_integrations_returns_stale_and_refreshes_in_background(self):
         cache = {"names": {"codex"}, "expires": 0.0, "refreshing": False}
         with patch.object(relay, "_herdr_integrations_cache", cache), \
@@ -2303,6 +2517,32 @@ Production-like verification.
                 patch.object(relay.threading, "Thread") as mock_thread:
             self.assertEqual(relay.cached_herdr_integrations(), {"qodercli", "codex"})
         mock_thread.assert_not_called()
+
+    def test_obsolete_integration_refresh_cannot_update_cache_or_readiness(self):
+        # A reload bumped the generation to 5 and cleared readiness; a refresh
+        # started earlier under generation 4 now returns with stale data.
+        cache = {"names": {"stale"}, "expires": 0.0, "refreshing": True}
+        ready = threading.Event()
+        with patch.object(relay, "_herdr_integrations_cache", cache), \
+                patch.object(relay, "_integrations_ready", ready), \
+                patch.object(relay, "_integrations_generation", 5), \
+                patch.object(relay, "herdr_installed_integrations", return_value={"stale-result"}):
+            relay._refresh_herdr_integrations(4)
+        self.assertEqual(cache["names"], {"stale"})
+        self.assertTrue(cache["refreshing"])
+        self.assertFalse(ready.is_set())
+
+    def test_current_generation_integration_refresh_updates_cache_and_readiness(self):
+        cache = {"names": set(), "expires": 0.0, "refreshing": True}
+        ready = threading.Event()
+        with patch.object(relay, "_herdr_integrations_cache", cache), \
+                patch.object(relay, "_integrations_ready", ready), \
+                patch.object(relay, "_integrations_generation", 5), \
+                patch.object(relay, "herdr_installed_integrations", return_value={"qodercli"}):
+            relay._refresh_herdr_integrations(5)
+        self.assertEqual(cache["names"], {"qodercli"})
+        self.assertFalse(cache["refreshing"])
+        self.assertTrue(ready.is_set())
 
     def test_load_activity_respects_byte_budget(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2342,13 +2582,54 @@ Production-like verification.
         })
         tab_result = json.dumps({"result": {"tabs": [{"tab_id": "w1:t1", "label": "project"}]}})
 
-        with patch.object(relay, "run_herdr", side_effect=[pane_result, tab_result]):
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[(True, pane_result, ""), (True, tab_result, "")],
+        ):
             agents = relay.get_agents()
 
         self.assertEqual(
             agents[0]["_activity_fingerprint"],
             ("working", 4, 27, "/home/me/project", "/home/me/project", ""),
         )
+
+    def test_agent_inventory_classifies_client_server_protocol_mismatch(self):
+        error = (
+            "client protocol 17 is newer than server protocol 16; "
+            "restart the Herdr server before using this command"
+        )
+        with patch.object(relay, "run_herdr_result", return_value=(False, "", error)):
+            agents, inventory_error = relay.get_agent_inventory()
+
+        self.assertIsNone(agents)
+        self.assertEqual(inventory_error[0], "protocol_mismatch")
+        self.assertIn("herdr server live-handoff", inventory_error[1])
+
+    def test_agent_inventory_classifies_machine_protocol_mismatch(self):
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            return_value=(False, "", '{"code":"protocol_mismatch"}'),
+        ):
+            agents, inventory_error = relay.get_agent_inventory()
+
+        self.assertIsNone(agents)
+        self.assertEqual(inventory_error[0], "protocol_mismatch")
+
+    def test_agent_inventory_accepts_successful_empty_pane_list(self):
+        with patch.object(
+            relay,
+            "run_herdr_result",
+            side_effect=[
+                (True, '{"result":{"panes":[]}}', ""),
+                (True, '{"result":{"tabs":[]}}', ""),
+            ],
+        ):
+            agents, inventory_error = relay.get_agent_inventory()
+
+        self.assertEqual(agents, [])
+        self.assertIsNone(inventory_error)
 
     def test_agent_activity_timestamp_tracks_observed_changes_and_events(self):
         def agent(pane_id, fingerprint):
@@ -3238,30 +3519,19 @@ Production-like verification.
                 (
                     True,
                     json.dumps({
-                        "result": {"pane_id": "w2:p0", "workspace_id": "w2"}
+                        "result": {"pane_id": "w7:p0", "workspace_id": "w7", "tab_id": "w7:t2"}
                     }),
                     "",
                 ),
+                (True, "", ""),
                 (
                     True,
                     json.dumps({
-                        "result": {
-                            "move_result": {
-                                "pane": {"pane_id": "w2:p0", "tab_id": "w2:t2"}
-                            }
-                        }
+                        "result": {"agent": {"pane_id": "w7:p0", "workspace_id": "w7"}}
                     }),
                     "",
                 ),
-                (
-                    True,
-                    json.dumps({
-                        "result": {
-                            "agent": {"pane_id": "w2:p1", "workspace_id": "w2"}
-                        }
-                    }),
-                    "",
-                ),
+                (True, "", ""),
             ]
             profile = {
                 "id": "pi-local",
@@ -3296,7 +3566,7 @@ Production-like verification.
             self.assertTrue(ok)
             self.assertEqual(placement_error, "")
             self.assertEqual(error, "")
-            self.assertEqual(pane_id, "w2:p1")
+            self.assertEqual(pane_id, "w7:p0")
             self.assertEqual(relay.agent_profile_ids[pane_id], "pi-local")
             self.assertIn(
                 "/skill:firehose",
@@ -3305,6 +3575,31 @@ Production-like verification.
 
 
 class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTestCase):
+    async def test_clear_activities_broadcasts_empty_history_and_confirms(self):
+        ws = FakeWebSocket()
+        broadcast = AsyncMock()
+        with (
+            patch.object(relay, "activity_delivery_lock", asyncio.Lock()),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(return_value=(True, "")),
+            ) as to_thread,
+            patch.object(relay, "broadcast", broadcast),
+        ):
+            await relay.handle_clear_activities_command(ws, {
+                "type": "clear_activities",
+                "request_id": "clear-1",
+            })
+
+        to_thread.assert_awaited_once_with(relay.clear_activity_history)
+        broadcast.assert_awaited_once_with({
+            "type": "activity_history",
+            "activities": [],
+        })
+        self.assertEqual(ws.messages[-1]["action"], "clear_activities")
+        self.assertTrue(ws.messages[-1]["ok"])
+
     async def test_publish_finished_records_excerpt_and_matches_notification(self):
         captured = {}
 
@@ -3338,9 +3633,11 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         # the stored excerpt instead of scanning the live pane.
         self.assertEqual(send_finished.call_args.args[1], event_id)
 
-    async def test_submit_prompt_records_prompt_text_as_excerpt(self):
+    async def test_submit_prompt_atomically_sends_and_records_full_wall_text(self):
         ws = FakeWebSocket()
         agent = {"pane_id": "w1:p1", "agent": "codex", "project": "relay"}
+        prompt = "wall of text\n" * 7692 + "done"
+        self.assertLessEqual(len(prompt), relay.PROMPT_MAX_CHARS)
         captured = {}
 
         async def fake_publish_activity(*args, **kwargs):
@@ -3355,18 +3652,25 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
                 "to_thread",
                 AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
             ),
-            patch.object(relay, "send_prompt_to_pane", AsyncMock(return_value=(True, ""))),
+            patch.object(
+                relay,
+                "run_herdr_async_result",
+                AsyncMock(return_value=(True, "", "")),
+            ) as run_command,
             patch.object(relay, "publish_activity", side_effect=fake_publish_activity),
         ):
             await relay.handle_submit_prompt_command(ws, {
                 "type": "submit_prompt",
                 "request_id": "request-1",
                 "pane_id": "w1:p1",
-                "text": "refactor the relay tests",
+                "text": prompt,
             })
 
+        self.assertEqual(run_command.await_count, 1)
+        self.assertEqual(run_command.await_args.args, ("agent", "prompt", "w1:p1", prompt))
+        self.assertGreater(run_command.await_args.kwargs["deadline"], relay.time.monotonic() - 5)
         self.assertEqual(captured["args"][0], "prompt")
-        self.assertEqual(captured["kwargs"]["extract"], "refactor the relay tests")
+        self.assertEqual(captured["kwargs"]["extract"], prompt)
 
     async def test_slash_command_request_resolves_agent_from_pane(self):
         ws = FakeWebSocket()
@@ -3434,7 +3738,7 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
                 "type": "agent_rename",
                 "request_id": "request-rename",
                 "pane_id": "w1:p1",
-                "name": "My Tab",
+                "name": "my-tab",
             })
         return ws
 
@@ -3442,8 +3746,9 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         agent = {"pane_id": "w1:p1", "tab_id": "w1", "agent": "claude", "project": "relay"}
         herdr = AsyncMock(return_value=(True, "", ""))
         ws = await self._run_agent_rename(agent, herdr)
-        herdr.assert_any_await("agent", "rename", "w1:p1", "My Tab")
-        herdr.assert_any_await("tab", "rename", "w1", "My Tab")
+        calls = [call.args for call in herdr.await_args_list]
+        self.assertIn(("agent", "rename", "w1:p1", "my-tab"), calls)
+        self.assertIn(("tab", "rename", "w1", "my-tab"), calls)
         self.assertTrue(ws.messages[-1]["ok"])
 
     async def test_agent_rename_reports_failure_when_tab_rename_fails(self):
@@ -3457,7 +3762,8 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         agent = {"pane_id": "w1:p1", "tab_id": "", "agent": "claude", "project": "relay"}
         herdr = AsyncMock(return_value=(True, "", ""))
         ws = await self._run_agent_rename(agent, herdr)
-        herdr.assert_awaited_once_with("agent", "rename", "w1:p1", "My Tab")
+        self.assertEqual(herdr.await_count, 1)
+        self.assertEqual(herdr.await_args.args, ("agent", "rename", "w1:p1", "my-tab"))
         self.assertTrue(ws.messages[-1]["ok"])
 
     async def test_codex_choice_moves_focus_and_submits_current_answer(self):
@@ -4012,8 +4318,16 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
 
         wakeup = asyncio.Event()
         with (
+            patch.object(relay, "agent_inventory_status", {
+                "state": "ready", "error_code": "", "message": "",
+                "last_attempt_at": 1, "last_success_at": 1,
+            }),
             patch.object(relay, "poll_wakeup", wakeup),
-            patch.object(relay, "get_agents", side_effect=[agent_snapshot(), agent_snapshot()]),
+            patch.object(
+                relay,
+                "get_agent_inventory",
+                side_effect=[(agent_snapshot(), None), (agent_snapshot(), None)],
+            ),
             patch.object(
                 relay.asyncio,
                 "to_thread",
@@ -4047,6 +4361,832 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         broadcast.assert_awaited_once()
         self.assertEqual(capture.call_count, 2)
 
+    async def test_poll_retains_cached_agents_during_failure_then_recovers(self):
+        cached = relay.agents_message([
+            {"pane_id": "w1:p1", "status": "working", "agent": "codex"},
+        ])
+        recovered = [{
+            "pane_id": "w1:p1",
+            "status": "idle",
+            "agent": "codex",
+            "_focused": False,
+        }]
+        waits = 0
+
+        async def wait_for_next_poll(_agents):
+            nonlocal waits
+            waits += 1
+            if waits == 1:
+                self.assertEqual(relay.latest_agents_message, cached)
+                self.assertEqual(relay.agent_inventory_status["state"], "error")
+                return
+            raise asyncio.CancelledError()
+
+        inventory = {
+            "state": "starting",
+            "error_code": "",
+            "message": "",
+            "last_attempt_at": 0,
+            "last_success_at": 0,
+        }
+        with (
+            patch.object(relay, "agent_inventory_status", inventory),
+            patch.object(relay, "get_agent_inventory", side_effect=[
+                (None, ("protocol_mismatch", "Run live handoff")),
+                (recovered, None),
+            ]),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "wait_for_next_poll", side_effect=wait_for_next_poll),
+            patch.object(relay, "broadcast_serialized", AsyncMock()) as broadcast,
+            patch.object(relay, "publish_agent_status", AsyncMock()),
+            patch.object(relay, "schedule_claude_history_capture"),
+            patch.object(relay, "latest_agents_message", cached),
+            patch.object(relay, "last_broadcast_agents_message", cached),
+            patch.object(relay, "last_statuses", {"w1:p1": "working"}),
+            patch.object(relay, "agent_types", {"w1:p1": "codex"}),
+            patch.object(relay, "agent_activity_state", {}),
+            patch.object(relay, "agent_activity_initialized", False),
+            patch.object(relay, "unseen_done_panes", set()),
+            patch.object(relay, "acknowledged_done_panes", set()),
+            patch.object(relay, "finished_notification_panes", set()),
+            patch.object(relay, "claude_history_state", {}),
+            patch.object(relay, "claude_history_capture_times", {}),
+            patch.object(relay, "claude_history_pending_captures", set()),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await relay.poll_loop()
+
+            self.assertEqual(relay.agent_inventory_status["state"], "ready")
+            self.assertEqual(
+                json.loads(relay.latest_agents_message)["agents"][0]["status"],
+                "done",
+            )
+
+        self.assertEqual(
+            [json.loads(call.args[0])["type"] for call in broadcast.await_args_list],
+            ["inventory_status", "inventory_status", "agents"],
+        )
+
+    async def test_poll_discards_snapshot_invalidated_by_concurrent_event(self):
+        wakeup = asyncio.Event()
+        calls = []
+
+        def fake_get_agents():
+            calls.append(len(calls))
+            if len(calls) == 1:
+                # A plugin event lands while this refresh is in flight, so the
+                # snapshot about to be returned already predates it.
+                wakeup.set()
+                return ([{"pane_id": "w1:p1", "status": "working", "agent": "codex", "_focused": False}], None)
+            return ([{"pane_id": "w1:p1", "status": "blocked", "agent": "codex", "_focused": False}], None)
+
+        with (
+            patch.object(relay, "agent_inventory_status", {
+                "state": "ready", "error_code": "", "message": "",
+                "last_attempt_at": 1, "last_success_at": 1,
+            }),
+            patch.object(relay, "poll_wakeup", wakeup),
+            patch.object(relay, "get_agent_inventory", side_effect=fake_get_agents),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "wait_for_next_poll", AsyncMock(side_effect=asyncio.CancelledError())),
+            patch.object(relay, "broadcast_serialized", AsyncMock()) as broadcast,
+            patch.object(relay, "publish_agent_blocked", AsyncMock()) as publish_blocked,
+            patch.object(relay, "schedule_claude_history_capture"),
+            patch.multiple(
+                relay,
+                last_broadcast_agents_message=None,
+                latest_agents_message=relay.agents_message([]),
+                last_statuses={},
+                agent_types={},
+                blocked_agent_details={},
+                agent_activity_state={},
+                agent_activity_initialized=False,
+                unseen_done_panes=set(),
+                acknowledged_done_panes=set(),
+                finished_notification_panes=set(),
+                claude_history_state={},
+                claude_history_capture_times={},
+                claude_history_pending_captures=set(),
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await relay.poll_loop()
+            final_statuses = dict(relay.last_statuses)
+
+        # The stale "working" snapshot was discarded and the loop re-polled at
+        # once: only the fresh "blocked" snapshot was broadcast and published, so
+        # one physical blocked cycle yields a single notification.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(final_statuses, {"w1:p1": "blocked"})
+        broadcast.assert_awaited_once()
+        publish_blocked.assert_awaited_once()
+
+    async def test_plugin_event_completes_while_poll_inventory_read_is_blocked(self):
+        pane_id = "w1:p1"
+        queue = asyncio.Queue()
+        wakeup = asyncio.Event()
+        get_agents_started = asyncio.Event()
+        release_get_agents = asyncio.Event()
+        event_processed = asyncio.Event()
+        activity_ids = []
+        push_ids = []
+        get_agents_calls = 0
+
+        async def fake_to_thread(function, *args, **kwargs):
+            nonlocal get_agents_calls
+            if function is relay.get_agent_inventory:
+                get_agents_calls += 1
+                if get_agents_calls > 1:
+                    raise asyncio.CancelledError()
+                get_agents_started.set()
+                await release_get_agents.wait()
+                return ([{
+                    "pane_id": pane_id,
+                    "status": "working",
+                    "agent": "codex",
+                    "_focused": False,
+                }], None)
+            return function(*args, **kwargs)
+
+        async def fake_broadcast_serialized(data):
+            if json.loads(data).get("type") == "agent_update":
+                event_processed.set()
+
+        async def fake_publish_activity(kind, *_args, **kwargs):
+            if kind == "blocked":
+                activity_ids.append(kwargs["details"]["event_id"])
+            return {"timestamp": 12345}
+
+        async def fake_push_blocked(message):
+            push_ids.append(message["event_id"])
+
+        with (
+            patch.object(relay, "agent_inventory_status", {
+                "state": "ready", "error_code": "", "message": "",
+                "last_attempt_at": 1, "last_success_at": 1,
+            }),
+            patch.object(relay, "agent_state_application_lock", asyncio.Lock()),
+            patch.object(relay, "event_queue", queue),
+            patch.object(relay, "poll_wakeup", wakeup),
+            patch.object(relay.asyncio, "to_thread", side_effect=fake_to_thread),
+            patch.object(relay, "broadcast_serialized", side_effect=fake_broadcast_serialized),
+            patch.object(relay, "publish_activity", side_effect=fake_publish_activity),
+            patch.object(relay, "push_blocked", side_effect=fake_push_blocked),
+            patch.object(relay, "read_question_pane", return_value=""),
+            patch.object(relay, "schedule_claude_history_capture"),
+            patch.multiple(
+                relay,
+                last_broadcast_agents_message=None,
+                latest_agents_message=relay.agents_message([
+                    {"pane_id": pane_id, "status": "working", "agent": "codex"},
+                ]),
+                last_statuses={pane_id: "working"},
+                agent_types={pane_id: "codex"},
+                blocked_agent_details={},
+                agent_activity_state={},
+                agent_activity_initialized=False,
+                unseen_done_panes=set(),
+                acknowledged_done_panes=set(),
+                finished_notification_panes=set(),
+                claude_history_state={},
+                claude_history_capture_times={},
+                claude_history_pending_captures=set(),
+            ),
+        ):
+            poll_task = asyncio.create_task(relay.poll_loop())
+            event_task = asyncio.create_task(relay.event_push())
+            try:
+                await asyncio.wait_for(get_agents_started.wait(), timeout=1.5)
+                relay.UDPPlugin().datagram_received(json.dumps({
+                    "type": "agent_event",
+                    "socket_path": relay.HERDR_SOCKET_PATH,
+                    "pane_id": pane_id,
+                    "status": "blocked",
+                    "agent": "codex",
+                }).encode(), None)
+
+                # The plugin event must finish while the poll's worker thread is
+                # still blocked, rather than waiting for its command timeouts.
+                await asyncio.wait_for(event_processed.wait(), timeout=0.5)
+                self.assertFalse(release_get_agents.is_set())
+                await asyncio.sleep(0)
+            finally:
+                release_get_agents.set()
+                event_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await event_task
+                with self.assertRaises(asyncio.CancelledError):
+                    await poll_task
+
+        self.assertEqual(get_agents_calls, 2)
+        self.assertEqual(len(activity_ids), 1)
+        self.assertEqual(len(push_ids), 1)
+        self.assertEqual(activity_ids, push_ids)
+
+    async def test_working_udp_event_supersedes_stalled_poll_blocked_enrichment(self):
+        pane_id = "w1:p1"
+        queue = asyncio.Queue()
+        wakeup = asyncio.Event()
+        pane_read_started = threading.Event()
+        release_pane_read = threading.Event()
+        event_processed = asyncio.Event()
+        activity_kinds = []
+        pushed_blocked = []
+        broadcasts = []
+
+        def fake_get_agents():
+            return ([{
+                "pane_id": pane_id,
+                "status": "blocked",
+                "agent": "codex",
+                "_focused": False,
+            }], None)
+
+        def stalled_question_read(_pane_id):
+            pane_read_started.set()
+            if not release_pane_read.wait(timeout=2):
+                raise AssertionError("test did not release blocked enrichment")
+            return "Allow command?"
+
+        async def fake_publish_activity(kind, *_args, **_kwargs):
+            activity_kinds.append(kind)
+            return {"timestamp": 12345}
+
+        async def fake_push_blocked(message):
+            pushed_blocked.append(message)
+
+        async def fake_broadcast(message):
+            broadcasts.append(message)
+            if message.get("type") == "agent_update" and message.get("status") == "working":
+                event_processed.set()
+
+        working_snapshot = relay.agents_message([
+            {"pane_id": pane_id, "status": "working", "agent": "codex"},
+        ])
+        with (
+            patch.object(relay, "agent_inventory_status", {
+                "state": "ready", "error_code": "", "message": "",
+                "last_attempt_at": 1, "last_success_at": 1,
+            }),
+            patch.object(relay, "agent_state_application_lock", asyncio.Lock()),
+            patch.object(relay, "agent_state_revision_counter", 1),
+            patch.object(relay, "agent_state_revisions", {pane_id: 1}),
+            patch.object(relay, "event_queue", queue),
+            patch.object(relay, "poll_wakeup", wakeup),
+            patch.object(relay, "get_agent_inventory", side_effect=fake_get_agents),
+            patch.object(relay, "read_question_pane", side_effect=stalled_question_read),
+            patch.object(relay, "publish_activity", side_effect=fake_publish_activity),
+            patch.object(relay, "push_blocked", side_effect=fake_push_blocked),
+            patch.object(relay, "broadcast", side_effect=fake_broadcast),
+            patch.object(relay, "broadcast_serialized", AsyncMock()),
+            patch.object(relay, "wait_for_next_poll", AsyncMock(side_effect=asyncio.CancelledError())),
+            patch.object(relay, "schedule_claude_history_capture"),
+            patch.multiple(
+                relay,
+                last_broadcast_agents_message=working_snapshot,
+                latest_agents_message=working_snapshot,
+                last_statuses={pane_id: "working"},
+                agent_types={pane_id: "codex"},
+                blocked_agent_details={},
+                agent_activity_state={},
+                agent_activity_initialized=False,
+                unseen_done_panes=set(),
+                acknowledged_done_panes=set(),
+                finished_notification_panes=set(),
+                claude_history_state={},
+                claude_history_capture_times={},
+                claude_history_pending_captures=set(),
+            ),
+        ):
+            poll_task = asyncio.create_task(relay.poll_loop())
+            event_task = asyncio.create_task(relay.event_push())
+            try:
+                started = await asyncio.wait_for(
+                    asyncio.to_thread(pane_read_started.wait, 1), timeout=1.5
+                )
+                self.assertTrue(started)
+                relay.UDPPlugin().datagram_received(json.dumps({
+                    "type": "agent_event",
+                    "socket_path": relay.HERDR_SOCKET_PATH,
+                    "pane_id": pane_id,
+                    "status": "working",
+                    "agent": "codex",
+                }).encode(), None)
+
+                await asyncio.wait_for(event_processed.wait(), timeout=0.5)
+                self.assertFalse(release_pane_read.is_set())
+                self.assertEqual(relay.last_statuses[pane_id], "working")
+
+                release_pane_read.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(poll_task, timeout=0.5)
+                await asyncio.sleep(0)
+            finally:
+                release_pane_read.set()
+                event_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await event_task
+                if not poll_task.done():
+                    poll_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await poll_task
+
+        self.assertNotIn("blocked", activity_kinds)
+        self.assertEqual(pushed_blocked, [])
+        self.assertFalse(any(message.get("type") == "blocked" for message in broadcasts))
+
+    async def test_working_udp_event_cancels_stalled_blocked_activity_publication(self):
+        pane_id = "w1:p1"
+        queue = asyncio.Queue()
+        wakeup = asyncio.Event()
+        blocked_activity_started = asyncio.Event()
+        blocked_activity_cancelled = asyncio.Event()
+        release_blocked_activity = asyncio.Event()
+        event_processed = asyncio.Event()
+        activities = []
+        pushed_blocked = []
+        broadcasts = []
+
+        def fake_get_agents():
+            return ([{
+                "pane_id": pane_id,
+                "status": "blocked",
+                "agent": "codex",
+                "_focused": False,
+            }], None)
+
+        async def stalled_publish_activity(kind, *_args, **_kwargs):
+            if kind == "blocked":
+                blocked_activity_started.set()
+                try:
+                    await release_blocked_activity.wait()
+                except asyncio.CancelledError:
+                    blocked_activity_cancelled.set()
+                    raise
+            activities.append(kind)
+            return {"timestamp": 12345}
+
+        async def fake_push_blocked(message):
+            pushed_blocked.append(message)
+
+        async def fake_broadcast(message):
+            broadcasts.append(message)
+            if message.get("type") == "agent_update" and message.get("status") == "working":
+                event_processed.set()
+
+        working_snapshot = relay.agents_message([
+            {"pane_id": pane_id, "status": "working", "agent": "codex"},
+        ])
+        with (
+            patch.object(relay, "agent_inventory_status", {
+                "state": "ready", "error_code": "", "message": "",
+                "last_attempt_at": 1, "last_success_at": 1,
+            }),
+            patch.object(relay, "agent_state_application_lock", asyncio.Lock()),
+            patch.object(relay, "agent_state_revision_counter", 1),
+            patch.object(relay, "agent_state_revisions", {pane_id: 1}),
+            patch.object(relay, "agent_transition_publication_tasks", {}),
+            patch.object(relay, "event_queue", queue),
+            patch.object(relay, "poll_wakeup", wakeup),
+            patch.object(relay, "get_agent_inventory", side_effect=fake_get_agents),
+            patch.object(relay, "read_question_pane", return_value="Allow command?"),
+            patch.object(relay, "publish_activity", side_effect=stalled_publish_activity),
+            patch.object(relay, "push_blocked", side_effect=fake_push_blocked),
+            patch.object(relay, "broadcast", side_effect=fake_broadcast),
+            patch.object(relay, "broadcast_serialized", AsyncMock()),
+            patch.object(relay, "wait_for_next_poll", AsyncMock(side_effect=asyncio.CancelledError())),
+            patch.object(relay, "schedule_claude_history_capture"),
+            patch.multiple(
+                relay,
+                last_broadcast_agents_message=working_snapshot,
+                latest_agents_message=working_snapshot,
+                last_statuses={pane_id: "working"},
+                agent_types={pane_id: "codex"},
+                blocked_agent_details={},
+                agent_activity_state={},
+                agent_activity_initialized=False,
+                unseen_done_panes=set(),
+                acknowledged_done_panes=set(),
+                finished_notification_panes=set(),
+                claude_history_state={},
+                claude_history_capture_times={},
+                claude_history_pending_captures=set(),
+            ),
+        ):
+            poll_task = asyncio.create_task(relay.poll_loop())
+            event_task = asyncio.create_task(relay.event_push())
+            try:
+                await asyncio.wait_for(blocked_activity_started.wait(), timeout=0.5)
+                relay.UDPPlugin().datagram_received(json.dumps({
+                    "type": "agent_event",
+                    "socket_path": relay.HERDR_SOCKET_PATH,
+                    "pane_id": pane_id,
+                    "status": "working",
+                    "agent": "codex",
+                }).encode(), None)
+
+                await asyncio.wait_for(event_processed.wait(), timeout=0.5)
+                await asyncio.wait_for(blocked_activity_cancelled.wait(), timeout=0.5)
+                self.assertEqual(relay.last_statuses[pane_id], "working")
+
+                release_blocked_activity.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(poll_task, timeout=0.5)
+                await asyncio.sleep(0)
+            finally:
+                release_blocked_activity.set()
+                event_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await event_task
+                if not poll_task.done():
+                    poll_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await poll_task
+
+        self.assertNotIn("blocked", activities)
+        self.assertIn("agent_status", activities)
+        self.assertEqual(pushed_blocked, [])
+        self.assertFalse(any(message.get("type") == "blocked" for message in broadcasts))
+
+    async def test_reconnect_filters_tombstoned_activity_while_cleanup_is_paused(self):
+        pane_id = "w1:p1"
+        queue = asyncio.Queue()
+        writer_started = threading.Event()
+        release_writer = threading.Event()
+        deletion_started = threading.Event()
+        release_deletion = threading.Event()
+        working_processed = asyncio.Event()
+        history_reads = []
+        original_record_activity = relay.record_activity
+        original_discard_activity = relay.discard_recorded_activity
+        original_load_activity = relay.load_activity
+
+        def stalled_record_activity(kind, *args, **kwargs):
+            if kind == "blocked":
+                writer_started.set()
+                if not release_writer.wait(timeout=2):
+                    raise AssertionError("test did not release stale activity writer")
+            return original_record_activity(kind, *args, **kwargs)
+
+        def paused_discard_activity(activity_id):
+            deletion_started.set()
+            if not release_deletion.wait(timeout=2):
+                raise AssertionError("test did not release stale activity deletion")
+            return original_discard_activity(activity_id)
+
+        def observed_load_activity(*args, **kwargs):
+            activities = original_load_activity(*args, **kwargs)
+            history_reads.append(list(activities))
+            return activities
+
+        async def fake_broadcast(message):
+            if message.get("type") == "agent_update" and message.get("status") == "working":
+                working_processed.set()
+
+        blocked_snapshot = relay.agents_message([
+            {"pane_id": pane_id, "status": "blocked", "agent": "codex"},
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with ExitStack() as stack:
+                stack.enter_context(patch.multiple(
+                    relay,
+                    ACTIVITY_FILE=Path(temp_dir) / "activity.jsonl",
+                    activity_tombstones=set(),
+                    activity_cleanup_tasks=set(),
+                    activity_delivery_lock=asyncio.Lock(),
+                    agent_state_application_lock=asyncio.Lock(),
+                    agent_state_revision_counter=1,
+                    agent_state_revisions={pane_id: 1},
+                    agent_transition_publication_tasks={},
+                    event_queue=queue,
+                    poll_wakeup=asyncio.Event(),
+                    clients=set(),
+                    agent_refresh_clients=set(),
+                    failed_clients=set(),
+                    client_outbound_queues={},
+                    client_outbound_tasks={},
+                    client_handler_tasks={},
+                    latest_agents_message=blocked_snapshot,
+                    last_broadcast_agents_message=blocked_snapshot,
+                    last_statuses={pane_id: "blocked"},
+                    agent_types={pane_id: "codex"},
+                    blocked_agent_details={},
+                    unseen_done_panes=set(),
+                    acknowledged_done_panes=set(),
+                    finished_notification_panes=set(),
+                ))
+                for patcher in (
+                    patch.object(relay, "record_activity", side_effect=stalled_record_activity),
+                    patch.object(relay, "discard_recorded_activity", side_effect=paused_discard_activity),
+                    patch.object(relay, "load_activity", side_effect=observed_load_activity),
+                    patch.object(relay, "read_question_pane", return_value="Allow command?"),
+                    patch.object(relay, "agent_cwd_for_pane", return_value=""),
+                    patch.object(relay, "agent_session_for_pane", return_value=""),
+                    patch.object(relay, "session_name_for_activity", return_value=""),
+                    patch.object(relay, "broadcast", side_effect=fake_broadcast),
+                    patch.object(relay, "push_blocked", AsyncMock()),
+                    patch.object(relay, "schedule_claude_history_capture"),
+                    patch.object(relay, "load_agent_profiles", return_value={}),
+                    patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+                ):
+                    stack.enter_context(patcher)
+                event_task = asyncio.create_task(relay.event_push())
+                blocked_task = asyncio.create_task(relay.publish_agent_blocked(
+                    {"pane_id": pane_id, "status": "blocked", "agent": "codex"},
+                    expected_revision=1,
+                ))
+                try:
+                    started = await asyncio.wait_for(
+                        asyncio.to_thread(writer_started.wait, 1), timeout=1.5
+                    )
+                    self.assertTrue(started)
+                    relay.UDPPlugin().datagram_received(json.dumps({
+                        "type": "agent_event",
+                        "socket_path": relay.HERDR_SOCKET_PATH,
+                        "pane_id": pane_id,
+                        "status": "working",
+                        "agent": "codex",
+                    }).encode(), None)
+                    await asyncio.wait_for(working_processed.wait(), timeout=0.5)
+                    self.assertFalse(await asyncio.wait_for(blocked_task, timeout=0.5))
+                    self.assertTrue(relay.activity_tombstones)
+                    tombstoned_id = next(iter(relay.activity_tombstones))
+
+                    release_writer.set()
+                    deletion_ready = await asyncio.wait_for(
+                        asyncio.to_thread(deletion_started.wait, 1), timeout=1.5
+                    )
+                    self.assertTrue(deletion_ready)
+
+                    ws = FakeWebSocket()
+                    await asyncio.wait_for(relay.handle_client(ws), timeout=0.5)
+                    self.assertGreaterEqual(len(history_reads), 2)
+                    for activities in history_reads[:2]:
+                        self.assertNotIn(tombstoned_id, {
+                            activity.get("id") for activity in activities
+                        })
+                    self.assertTrue(any(
+                        activity.get("kind") == "agent_status"
+                        for activity in history_reads[0]
+                    ))
+                finally:
+                    release_writer.set()
+                    release_deletion.set()
+                    for _attempt in range(50):
+                        if not relay.activity_cleanup_tasks:
+                            break
+                        await asyncio.sleep(0.01)
+                    event_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await event_task
+                    if not blocked_task.done():
+                        blocked_task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await blocked_task
+
+                self.assertEqual(relay.activity_tombstones, set())
+                self.assertEqual(relay.activity_cleanup_tasks, set())
+
+    async def test_revision_activity_does_not_write_without_durable_tombstone(self):
+        pane_id = "w1:p1"
+        record_activity = Mock()
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(relay, "ACTIVITY_FILE", Path(temp_dir) / "activity.jsonl"),
+            patch.object(relay, "activity_tombstones", set()),
+            patch.object(relay, "activity_delivery_lock", asyncio.Lock()),
+            patch.object(relay, "agent_state_application_lock", asyncio.Lock()),
+            patch.object(relay, "agent_state_revisions", {pane_id: 1}),
+            patch.object(relay, "last_statuses", {pane_id: "blocked"}),
+            patch.object(relay, "record_activity", record_activity),
+            patch.object(relay, "write_activity_tombstones_atomic", return_value=False),
+            patch.object(relay, "broadcast", AsyncMock()),
+        ):
+            result = await relay.publish_activity(
+                "blocked",
+                "attention",
+                "Agent needs approval",
+                pane_id=pane_id,
+                expected_revision=1,
+                expected_status="blocked",
+            )
+
+        self.assertIsNone(result)
+        record_activity.assert_not_called()
+
+    async def test_restart_before_activity_commit_filters_write_ahead_id(self):
+        pane_id = "w1:p1"
+        clear_started = threading.Event()
+        release_clear = threading.Event()
+        original_clear_tombstone = relay.clear_activity_tombstone
+        original_load_activity = relay.load_activity
+
+        def paused_clear_tombstone(activity_id):
+            clear_started.set()
+            if not release_clear.wait(timeout=2):
+                raise AssertionError("test did not release activity commit")
+            return original_clear_tombstone(activity_id)
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch.object(relay, "ACTIVITY_FILE", Path(temp_dir) / "activity.jsonl"),
+            patch.object(relay, "activity_tombstones", set()),
+            patch.object(relay, "activity_cleanup_tasks", set()),
+            patch.object(relay, "activity_delivery_lock", asyncio.Lock()),
+            patch.object(relay, "agent_state_application_lock", asyncio.Lock()),
+            patch.object(relay, "agent_state_revisions", {pane_id: 1}),
+            patch.object(relay, "last_statuses", {pane_id: "blocked"}),
+            patch.object(relay, "agent_cwd_for_pane", return_value=""),
+            patch.object(relay, "agent_session_for_pane", return_value=""),
+            patch.object(relay, "session_name_for_activity", return_value=""),
+            patch.object(relay, "clear_activity_tombstone", side_effect=paused_clear_tombstone),
+            patch.object(relay, "broadcast", AsyncMock()),
+        ):
+            publication = asyncio.create_task(relay.publish_activity(
+                "blocked",
+                "attention",
+                "Agent needs approval",
+                pane_id=pane_id,
+                expected_revision=1,
+                expected_status="blocked",
+            ))
+            try:
+                commit_ready = await asyncio.wait_for(
+                    asyncio.to_thread(clear_started.wait, 1), timeout=1.5
+                )
+                self.assertTrue(commit_ready)
+                written = [
+                    json.loads(line)
+                    for line in relay.ACTIVITY_FILE.read_text(encoding="utf-8").splitlines()
+                ]
+                self.assertEqual(len(written), 1)
+                pending_id = written[0]["id"]
+
+                relay.activity_tombstones.clear()
+                self.assertEqual(
+                    await asyncio.to_thread(original_load_activity),
+                    [],
+                )
+                self.assertIn(pending_id, relay.persisted_activity_tombstones())
+            finally:
+                release_clear.set()
+
+            committed = await asyncio.wait_for(publication, timeout=0.5)
+            self.assertEqual(committed["id"], pending_id)
+            relay.activity_tombstones.clear()
+            self.assertEqual(
+                [entry["id"] for entry in original_load_activity()],
+                [pending_id],
+            )
+
+    async def test_plugin_blocked_event_during_poll_broadcast_is_applied_once(self):
+        pane_id = "w1:p1"
+        queue = asyncio.Queue()
+        outbound = asyncio.Queue()
+        wakeup = asyncio.Event()
+        slow_send_started = asyncio.Event()
+        release_slow_send = asyncio.Event()
+        resume_poll = asyncio.Event()
+        event_processed = asyncio.Event()
+        delivery_complete = asyncio.Event()
+        activity_ids = []
+        push_ids = []
+        delivered_types = []
+        wait_calls = 0
+        poll_snapshots = [
+            [{"pane_id": pane_id, "status": "working", "agent": "codex", "_focused": False}],
+            [{"pane_id": pane_id, "status": "blocked", "agent": "codex", "_focused": False}],
+        ]
+
+        class SlowWebSocket:
+            async def send(self, data):
+                delivered_types.append(json.loads(data)["type"])
+                if len(delivered_types) >= 3:
+                    delivery_complete.set()
+                slow_send_started.set()
+                await release_slow_send.wait()
+
+        async def fake_publish_activity(kind, *_args, **kwargs):
+            if kind == "blocked":
+                activity_ids.append(kwargs["details"]["event_id"])
+            return {"timestamp": 12345}
+
+        async def fake_push_blocked(message):
+            push_ids.append(message["event_id"])
+            event_processed.set()
+
+        def fake_get_agents():
+            return poll_snapshots.pop(0), None
+
+        async def fake_wait_for_next_poll(_agents):
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls == 1:
+                await resume_poll.wait()
+                return
+            raise asyncio.CancelledError()
+
+        slow_client = SlowWebSocket()
+
+        with (
+            patch.object(relay, "agent_inventory_status", {
+                "state": "ready", "error_code": "", "message": "",
+                "last_attempt_at": 1, "last_success_at": 1,
+            }),
+            patch.object(relay, "agent_state_application_lock", asyncio.Lock()),
+            patch.object(relay, "event_queue", queue),
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "clients", {slow_client}),
+            patch.object(relay, "poll_wakeup", wakeup),
+            patch.object(relay, "get_agent_inventory", side_effect=fake_get_agents),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(
+                relay,
+                "wait_for_next_poll",
+                side_effect=fake_wait_for_next_poll,
+            ),
+            patch.object(relay, "publish_activity", side_effect=fake_publish_activity),
+            patch.object(relay, "push_blocked", side_effect=fake_push_blocked),
+            patch.object(relay, "read_question_pane", return_value=""),
+            patch.object(relay, "schedule_claude_history_capture"),
+            patch.multiple(
+                relay,
+                last_broadcast_agents_message=None,
+                latest_agents_message=relay.agents_message([]),
+                last_statuses={},
+                agent_types={},
+                blocked_agent_details={},
+                agent_activity_state={},
+                agent_activity_initialized=False,
+                unseen_done_panes=set(),
+                acknowledged_done_panes=set(),
+                finished_notification_panes=set(),
+                claude_history_state={},
+                claude_history_capture_times={},
+                claude_history_pending_captures=set(),
+            ),
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            poll_task = asyncio.create_task(relay.poll_loop())
+            event_task = asyncio.create_task(relay.event_push())
+            try:
+                await slow_send_started.wait()
+                relay.UDPPlugin().datagram_received(json.dumps({
+                    "type": "agent_event",
+                    "socket_path": relay.HERDR_SOCKET_PATH,
+                    "pane_id": pane_id,
+                    "status": "blocked",
+                    "agent": "codex",
+                }).encode(), None)
+
+                # Delivery of the poll snapshot is still stalled, but event
+                # state, activity, and Web Push must already be complete.
+                await asyncio.wait_for(event_processed.wait(), timeout=0.5)
+                self.assertFalse(release_slow_send.is_set())
+                self.assertEqual(relay.last_statuses, {pane_id: "blocked"})
+
+                resume_poll.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await poll_task
+                await asyncio.sleep(0)
+            finally:
+                release_slow_send.set()
+                await asyncio.wait_for(outbound.join(), timeout=0.5)
+                await asyncio.wait_for(delivery_complete.wait(), timeout=0.5)
+                event_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await event_task
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+                relay.stop_client_delivery(slow_client)
+                if not poll_task.done():
+                    poll_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await poll_task
+
+            final_statuses = dict(relay.last_statuses)
+
+        self.assertEqual(final_statuses, {pane_id: "blocked"})
+        self.assertEqual(len(activity_ids), 1)
+        self.assertEqual(len(push_ids), 1)
+        self.assertEqual(activity_ids, push_ids)
+        self.assertEqual(delivered_types[:3], ["agents", "blocked", "agent_update"])
+
     async def test_poll_wait_returns_immediately_when_woken(self):
         wakeup = asyncio.Event()
         with patch.object(relay, "poll_wakeup", wakeup):
@@ -4074,21 +5214,716 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertEqual(broadcast.await_count, 2)
         self.assertEqual(json.loads(latest)["agents"][0]["status"], "working")
 
+    async def test_outbound_delivery_times_out_and_evicts_slow_client(self):
+        outbound = asyncio.Queue()
+        send_cancelled = asyncio.Event()
+        close_started = asyncio.Event()
+
+        class SlowWebSocket:
+            async def send(self, _data):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    send_cancelled.set()
+
+            async def close(self):
+                close_started.set()
+                await asyncio.Event().wait()
+
+        slow_client = SlowWebSocket()
+        with (
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "clients", {slow_client}),
+            patch.object(relay, "agent_refresh_clients", {slow_client}),
+            patch.object(relay, "failed_clients", set()),
+            patch.object(relay, "WS_SEND_TIMEOUT", 0.01),
+            patch.object(relay, "WS_CLOSE_TIMEOUT", 0.01),
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            try:
+                await relay.broadcast_serialized('{"type":"test"}')
+                await asyncio.wait_for(outbound.join(), timeout=0.2)
+                await asyncio.wait_for(close_started.wait(), timeout=0.2)
+                await asyncio.sleep(0.02)
+            finally:
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+
+            self.assertTrue(send_cancelled.is_set())
+            self.assertNotIn(slow_client, relay.clients)
+            self.assertNotIn(slow_client, relay.agent_refresh_clients)
+
+    async def test_stalled_close_cancels_handler_and_clears_client_registries(self):
+        outbound = asyncio.Queue()
+        receive_started = asyncio.Event()
+        stalled_send_started = asyncio.Event()
+        close_started = asyncio.Event()
+        transport_aborted = asyncio.Event()
+
+        class StalledTransport:
+            def abort(self):
+                transport_aborted.set()
+
+        class StalledWebSocket(FakeWebSocket):
+            def __init__(self):
+                super().__init__()
+                self.transport = StalledTransport()
+                self.send_count = 0
+
+            async def send(self, payload):
+                self.send_count += 1
+                if self.send_count <= 3:
+                    await super().send(payload)
+                    return
+                stalled_send_started.set()
+                await asyncio.Event().wait()
+
+            async def close(self):
+                close_started.set()
+                await asyncio.Event().wait()
+
+            async def __anext__(self):
+                receive_started.set()
+                await asyncio.Event().wait()
+
+        ws = StalledWebSocket()
+        connected_clients = set()
+        refresh_clients = set()
+        failed_clients = set()
+        delivery_queues = {}
+        delivery_tasks = {}
+        handler_tasks = {}
+        with (
+            patch.object(relay, "clients", connected_clients),
+            patch.object(relay, "agent_refresh_clients", refresh_clients),
+            patch.object(relay, "failed_clients", failed_clients),
+            patch.object(relay, "client_outbound_queues", delivery_queues),
+            patch.object(relay, "client_outbound_tasks", delivery_tasks),
+            patch.object(relay, "client_handler_tasks", handler_tasks),
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "latest_agents_message", relay.agents_message([])),
+            patch.object(relay, "load_agent_profiles", return_value={}),
+            patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+            patch.object(relay, "load_activity", return_value=[]),
+            patch.object(relay, "WS_SEND_TIMEOUT", 0.01),
+            patch.object(relay, "WS_CLOSE_TIMEOUT", 0.01),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            handler_task = asyncio.create_task(relay.handle_client(ws))
+            try:
+                await asyncio.wait_for(receive_started.wait(), timeout=0.2)
+                self.assertIs(handler_tasks.get(ws), handler_task)
+
+                await relay.broadcast_serialized('{"type":"test"}')
+                await asyncio.wait_for(outbound.join(), timeout=0.2)
+                await asyncio.wait_for(stalled_send_started.wait(), timeout=0.2)
+                await asyncio.wait_for(close_started.wait(), timeout=0.2)
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(handler_task, timeout=0.2)
+                await asyncio.wait_for(transport_aborted.wait(), timeout=0.2)
+
+                self.assertNotIn(ws, connected_clients)
+                self.assertNotIn(ws, refresh_clients)
+                self.assertNotIn(ws, failed_clients)
+                self.assertNotIn(ws, delivery_queues)
+                self.assertNotIn(ws, delivery_tasks)
+                self.assertNotIn(ws, handler_tasks)
+            finally:
+                if not handler_task.done():
+                    handler_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await handler_task
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+
+    async def test_slow_client_does_not_delay_healthy_client_next_message(self):
+        outbound = asyncio.Queue()
+        slow_started = asyncio.Event()
+        release_slow = asyncio.Event()
+        healthy_second = asyncio.Event()
+
+        class SlowWebSocket:
+            async def send(self, _data):
+                slow_started.set()
+                await release_slow.wait()
+
+        class HealthyWebSocket:
+            def __init__(self):
+                self.messages = []
+
+            async def send(self, data):
+                self.messages.append(json.loads(data)["sequence"])
+                if len(self.messages) == 2:
+                    healthy_second.set()
+
+        slow_client = SlowWebSocket()
+        healthy_client = HealthyWebSocket()
+        with (
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "clients", {slow_client, healthy_client}),
+            patch.object(relay, "failed_clients", set()),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "WS_SEND_TIMEOUT", 1.0),
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            try:
+                await relay.broadcast_serialized('{"sequence":1}')
+                await asyncio.wait_for(slow_started.wait(), timeout=0.2)
+                await relay.broadcast_serialized('{"sequence":2}')
+
+                await asyncio.wait_for(healthy_second.wait(), timeout=0.2)
+                self.assertFalse(release_slow.is_set())
+                self.assertEqual(healthy_client.messages, [1, 2])
+            finally:
+                release_slow.set()
+                relay.stop_client_delivery(slow_client)
+                relay.stop_client_delivery(healthy_client)
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+
+    async def test_client_backlog_coalesces_agents_then_evicts_on_overflow(self):
+        outbound = asyncio.Queue()
+        slow_started = asyncio.Event()
+        release_slow = asyncio.Event()
+        close_finished = asyncio.Event()
+
+        class SlowWebSocket:
+            async def send(self, _data):
+                slow_started.set()
+                await release_slow.wait()
+
+            async def close(self):
+                close_finished.set()
+
+        slow_client = SlowWebSocket()
+        with (
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "clients", {slow_client}),
+            patch.object(relay, "agent_refresh_clients", set()),
+            patch.object(relay, "failed_clients", set()),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "CLIENT_OUTBOUND_MAX_ITEMS", 2),
+            patch.object(relay, "CLIENT_OUTBOUND_MAX_BYTES", 4096),
+            patch.object(relay, "WS_SEND_TIMEOUT", 1.0),
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            try:
+                await relay.broadcast_serialized('{"type":"activity","sequence":0}')
+                await asyncio.wait_for(slow_started.wait(), timeout=0.2)
+
+                for sequence in (1, 2, 3):
+                    await relay.broadcast_serialized(
+                        json.dumps({"type": "agents", "sequence": sequence})
+                    )
+                await outbound.join()
+                buffer = relay.client_outbound_queues[slow_client]
+                self.assertEqual(buffer.qsize(), 1)
+                self.assertEqual(json.loads(buffer.items[-1][0])["sequence"], 3)
+                self.assertNotIn(slow_client, relay.failed_clients)
+
+                await relay.broadcast_serialized('{"type":"activity","sequence":4}')
+                await relay.broadcast_serialized('{"type":"activity","sequence":5}')
+                await asyncio.wait_for(close_finished.wait(), timeout=0.2)
+                self.assertIn(slow_client, relay.failed_clients)
+                self.assertNotIn(slow_client, relay.clients)
+            finally:
+                release_slow.set()
+                relay.stop_client_delivery(slow_client)
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+
+    async def test_timed_out_client_cannot_dispatch_agent_stop(self):
+        outbound = asyncio.Queue()
+        registered = asyncio.Event()
+
+        class TrackingClients(set):
+            def add(self, item):
+                super().add(item)
+                registered.set()
+
+        class CommandWebSocket:
+            def __init__(self):
+                self.incoming = asyncio.Queue()
+                self.stall_sends = False
+                self.closed = False
+                self.close_finished = asyncio.Event()
+
+            async def send(self, _data):
+                if self.stall_sends:
+                    await asyncio.Event().wait()
+
+            async def close(self):
+                self.closed = True
+                self.close_finished.set()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                return await self.incoming.get()
+
+        ws = CommandWebSocket()
+        tracked_clients = TrackingClients()
+        with (
+            patch.object(relay, "clients", tracked_clients),
+            patch.object(relay, "agent_refresh_clients", set()),
+            patch.object(relay, "failed_clients", set()),
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "latest_agents_message", relay.agents_message([])),
+            patch.object(relay, "load_agent_profiles", return_value={}),
+            patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+            patch.object(relay, "load_activity", return_value=[]),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "WS_SEND_TIMEOUT", 0.01),
+            patch.object(relay, "handle_agent_stop_command", AsyncMock()) as stop,
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            handler_task = asyncio.create_task(relay.handle_client(ws))
+            try:
+                await asyncio.wait_for(registered.wait(), timeout=0.2)
+                ws.stall_sends = True
+                await relay.broadcast_serialized('{"type":"agents","agents":[]}')
+                await asyncio.wait_for(outbound.join(), timeout=0.2)
+                await asyncio.wait_for(ws.close_finished.wait(), timeout=0.2)
+                self.assertTrue(ws.closed)
+
+                await ws.incoming.put(json.dumps({
+                    "type": "agent_stop",
+                    "pane_id": "w1:p1",
+                    "protocol": relay.PROTOCOL_VERSION,
+                }))
+                await asyncio.wait_for(handler_task, timeout=0.2)
+            finally:
+                if not handler_task.done():
+                    handler_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await handler_task
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+
+        stop.assert_not_awaited()
+        self.assertNotIn(ws, tracked_clients)
+
+    async def test_failed_startup_sends_never_register_client(self):
+        class TrackingClients(set):
+            def __init__(self):
+                super().__init__()
+                self.added = []
+
+            def add(self, item):
+                self.added.append(item)
+                super().add(item)
+
+        class StartupWebSocket(FakeWebSocket):
+            def __init__(self, fail_at):
+                super().__init__()
+                self.fail_at = fail_at
+                self.send_count = 0
+                self.closed = False
+
+            async def send(self, payload):
+                self.send_count += 1
+                if self.send_count == self.fail_at:
+                    raise OSError("send failed")
+                await super().send(payload)
+
+            async def close(self):
+                self.closed = True
+
+        for fail_at in (1, 2):
+            with self.subTest(fail_at=fail_at):
+                ws = StartupWebSocket(fail_at)
+                tracked_clients = TrackingClients()
+                with (
+                    patch.object(relay, "clients", tracked_clients),
+                    patch.object(relay, "agent_refresh_clients", set()),
+                    patch.object(relay, "failed_clients", set()),
+                    patch.object(relay, "latest_agents_message", relay.agents_message([])),
+                    patch.object(relay, "load_agent_profiles", return_value={}),
+                    patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+                    patch.object(relay, "load_activity", return_value=[]),
+                    patch.object(
+                        relay.asyncio,
+                        "to_thread",
+                        AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+                    ),
+                ):
+                    await relay.handle_client(ws)
+                    await asyncio.sleep(0)
+
+                self.assertEqual(tracked_clients.added, [])
+                self.assertNotIn(ws, tracked_clients)
+                self.assertTrue(ws.closed)
+
+    async def test_client_catches_up_state_changed_during_activity_history_send(self):
+        outbound = asyncio.Queue()
+        activity_send_started = asyncio.Event()
+        release_activity_send = asyncio.Event()
+        catchup_complete = asyncio.Event()
+        catchup = {"agents": False, "activities": False}
+        activity_entry = {"id": "activity-2", "kind": "blocked"}
+        load_activity_calls = 0
+
+        def fake_load_activity():
+            nonlocal load_activity_calls
+            load_activity_calls += 1
+            return [] if load_activity_calls == 1 else [activity_entry]
+
+        class HandshakeWebSocket(FakeWebSocket):
+            async def send(self, payload):
+                message = json.loads(payload)
+                self.messages.append(message)
+                if message.get("type") == "activity_history" and not activity_send_started.is_set():
+                    activity_send_started.set()
+                    await release_activity_send.wait()
+                if (
+                    message.get("type") == "agents"
+                    and message.get("agents")
+                    and message["agents"][0].get("status") == "blocked"
+                ):
+                    catchup["agents"] = True
+                if message.get("type") == "activity_history" and message.get("activities"):
+                    catchup["activities"] = True
+                if all(catchup.values()):
+                    catchup_complete.set()
+
+            async def __anext__(self):
+                await catchup_complete.wait()
+                raise StopAsyncIteration
+
+        ws = HandshakeWebSocket()
+        working = relay.agents_message([
+            {"pane_id": "w1:p1", "status": "working", "agent": "codex"},
+        ])
+        inventory = {
+            "state": "error",
+            "error_code": "protocol_mismatch",
+            "message": "Run live handoff",
+            "last_attempt_at": 1,
+            "last_success_at": 0,
+        }
+        with (
+            patch.object(relay, "agent_inventory_status", inventory),
+            patch.object(relay, "clients", set()),
+            patch.object(relay, "agent_refresh_clients", set()),
+            patch.object(relay, "failed_clients", set()),
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "latest_agents_message", working),
+            patch.object(relay, "last_broadcast_agents_message", working),
+            patch.object(relay, "load_agent_profiles", return_value={}),
+            patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+            patch.object(relay, "load_activity", side_effect=fake_load_activity),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            handler_task = asyncio.create_task(relay.handle_client(ws))
+            try:
+                await asyncio.wait_for(activity_send_started.wait(), timeout=0.2)
+                relay.set_agent_inventory_ready()
+                changed = await relay.broadcast_agents_if_changed([{
+                    "pane_id": "w1:p1",
+                    "status": "blocked",
+                    "agent": "codex",
+                }])
+                self.assertTrue(changed)
+
+                release_activity_send.set()
+                await asyncio.wait_for(catchup_complete.wait(), timeout=0.2)
+                await asyncio.wait_for(handler_task, timeout=0.2)
+            finally:
+                release_activity_send.set()
+                if not handler_task.done():
+                    handler_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await handler_task
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+
+        snapshots = [
+            message["agents"][0]["status"]
+            for message in ws.messages
+            if message.get("type") == "agents" and message.get("agents")
+        ]
+        self.assertEqual(snapshots, ["working", "blocked"])
+        ready_index = next(
+            index
+            for index, message in enumerate(ws.messages)
+            if message.get("type") == "inventory_status" and message.get("state") == "ready"
+        )
+        blocked_index = next(
+            index
+            for index, message in enumerate(ws.messages)
+            if message.get("type") == "agents"
+            and message.get("agents")
+            and message["agents"][0].get("status") == "blocked"
+        )
+        self.assertLess(ready_index, blocked_index)
+        activity_snapshots = [
+            message["activities"]
+            for message in ws.messages
+            if message.get("type") == "activity_history"
+        ]
+        self.assertEqual(activity_snapshots, [[], [activity_entry]])
+
+    async def test_maximum_activity_history_fits_actual_catchup_queue(self):
+        entry_count = 250
+        activities = [
+            {"id": str(index), "extract": ""}
+            for index in range(entry_count)
+        ]
+        jsonl_size = sum(
+            len((json.dumps(entry, separators=(",", ":")) + "\n").encode("utf-8"))
+            for entry in activities
+        )
+        padding, remainder = divmod(relay.ACTIVITY_MAX_BYTES - jsonl_size, entry_count)
+        for index, entry in enumerate(activities):
+            entry["extract"] = "x" * (padding + (index < remainder))
+        self.assertEqual(
+            sum(
+                len((json.dumps(entry, separators=(",", ":")) + "\n").encode("utf-8"))
+                for entry in activities
+            ),
+            relay.ACTIVITY_MAX_BYTES,
+        )
+        catchup_payload = json.dumps({
+            "type": "activity_history",
+            "activities": activities,
+        }, separators=(",", ":"))
+        self.assertGreater(len(catchup_payload.encode("utf-8")), relay.ACTIVITY_MAX_BYTES)
+        self.assertLessEqual(
+            len(catchup_payload.encode("utf-8")),
+            relay.CLIENT_OUTBOUND_MAX_BYTES,
+        )
+
+        outbound = asyncio.Queue()
+        catchup_delivered = asyncio.Event()
+        release_handler = asyncio.Event()
+        load_activity_calls = 0
+
+        def fake_load_activity():
+            nonlocal load_activity_calls
+            load_activity_calls += 1
+            return [] if load_activity_calls == 1 else activities
+
+        class HandshakeWebSocket(FakeWebSocket):
+            async def send(self, payload):
+                message = json.loads(payload)
+                self.messages.append(message)
+                if message.get("type") == "activity_history" and message.get("activities"):
+                    catchup_delivered.set()
+
+            async def __anext__(self):
+                await release_handler.wait()
+                raise StopAsyncIteration
+
+        ws = HandshakeWebSocket()
+        connected_clients = set()
+        failed_clients = set()
+        with (
+            patch.object(relay, "clients", connected_clients),
+            patch.object(relay, "agent_refresh_clients", set()),
+            patch.object(relay, "failed_clients", failed_clients),
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "activity_delivery_lock", asyncio.Lock()),
+            patch.object(relay, "latest_agents_message", relay.agents_message([])),
+            patch.object(relay, "load_agent_profiles", return_value={}),
+            patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+            patch.object(relay, "load_activity", side_effect=fake_load_activity),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            handler_task = asyncio.create_task(relay.handle_client(ws))
+            try:
+                await asyncio.wait_for(catchup_delivered.wait(), timeout=1.0)
+                self.assertIn(ws, connected_clients)
+                self.assertNotIn(ws, failed_clients)
+                self.assertEqual(ws.messages[-1]["activities"], activities)
+            finally:
+                release_handler.set()
+                await asyncio.wait_for(handler_task, timeout=0.2)
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+
+    async def test_activity_catchup_is_enqueued_before_concurrent_live_activity(self):
+        outbound = asyncio.Queue()
+        initial_history_started = asyncio.Event()
+        release_initial_history = asyncio.Event()
+        catchup_read_started = asyncio.Event()
+        release_catchup_read = asyncio.Event()
+        delivery_complete = asyncio.Event()
+        activity_a = {"id": "activity-a", "kind": "prompt"}
+        activity_b = {
+            "id": "activity-b",
+            "kind": "blocked",
+            "pane_id": "w1:p1",
+            "timestamp": 2,
+        }
+        load_activity_calls = 0
+
+        async def fake_to_thread(function, *args, **kwargs):
+            nonlocal load_activity_calls
+            if function is relay.load_activity:
+                load_activity_calls += 1
+                if load_activity_calls == 1:
+                    return []
+                catchup_read_started.set()
+                await release_catchup_read.wait()
+                return [activity_a]
+            if function is relay.record_activity:
+                return activity_b
+            return function(*args, **kwargs)
+
+        class HandshakeWebSocket(FakeWebSocket):
+            async def send(self, payload):
+                message = json.loads(payload)
+                self.messages.append(message)
+                if message.get("type") == "activity_history" and not initial_history_started.is_set():
+                    initial_history_started.set()
+                    await release_initial_history.wait()
+                has_catchup = any(
+                    item.get("id") == "activity-a"
+                    for item in message.get("activities", [])
+                )
+                if has_catchup:
+                    self.saw_catchup = True
+                if message.get("type") == "activity" and message.get("activity", {}).get("id") == "activity-b":
+                    self.saw_live = True
+                if getattr(self, "saw_catchup", False) and getattr(self, "saw_live", False):
+                    delivery_complete.set()
+
+            async def __anext__(self):
+                await delivery_complete.wait()
+                raise StopAsyncIteration
+
+        ws = HandshakeWebSocket()
+        with (
+            patch.object(relay, "clients", set()),
+            patch.object(relay, "agent_refresh_clients", set()),
+            patch.object(relay, "failed_clients", set()),
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "activity_delivery_lock", asyncio.Lock()),
+            patch.object(relay, "latest_agents_message", relay.agents_message([])),
+            patch.object(relay, "load_agent_profiles", return_value={}),
+            patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+            patch.object(relay.asyncio, "to_thread", side_effect=fake_to_thread),
+        ):
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            handler_task = asyncio.create_task(relay.handle_client(ws))
+            live_activity_task = None
+            try:
+                await asyncio.wait_for(initial_history_started.wait(), timeout=0.2)
+                release_initial_history.set()
+                await asyncio.wait_for(catchup_read_started.wait(), timeout=0.2)
+
+                live_activity_task = asyncio.create_task(relay.publish_activity(
+                    "blocked", "attention", "Agent blocked", pane_id="w1:p1"
+                ))
+                await asyncio.sleep(0)
+                self.assertFalse(live_activity_task.done())
+
+                release_catchup_read.set()
+                await asyncio.wait_for(delivery_complete.wait(), timeout=0.2)
+                await asyncio.wait_for(live_activity_task, timeout=0.2)
+                await asyncio.wait_for(handler_task, timeout=0.2)
+            finally:
+                release_initial_history.set()
+                release_catchup_read.set()
+                if live_activity_task is not None and not live_activity_task.done():
+                    live_activity_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await live_activity_task
+                if not handler_task.done():
+                    handler_task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await handler_task
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
+
+        activity_wire = [
+            (message["type"], message.get("activities") or message.get("activity"))
+            for message in ws.messages
+            if message.get("type") in {"activity_history", "activity"}
+        ]
+        catchup_index = activity_wire.index(("activity_history", [activity_a]))
+        live_index = activity_wire.index(("activity", activity_b))
+        self.assertLess(catchup_index, live_index)
+
     async def test_requested_refresh_sends_unchanged_snapshot_to_requesting_client(self):
-        ws = FakeWebSocket()
+        delivered = asyncio.Event()
+
+        class RefreshWebSocket(FakeWebSocket):
+            async def send(self, payload):
+                await super().send(payload)
+                delivered.set()
+
+        ws = RefreshWebSocket()
+        outbound = asyncio.Queue()
         snapshot = relay.agents_message([
             {"pane_id": "w1:p1", "status": "working", "agent": "codex"},
         ])
         with (
             patch.object(relay, "clients", {ws}),
             patch.object(relay, "agent_refresh_clients", {ws}),
+            patch.object(relay, "outbound_queue", outbound),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
             patch.object(relay, "latest_agents_message", snapshot),
         ):
-            await relay.send_requested_agent_refreshes()
+            outbound_task = asyncio.create_task(relay.outbound_push())
+            try:
+                await relay.send_requested_agent_refreshes()
+                await outbound.join()
+                await asyncio.wait_for(delivered.wait(), timeout=0.2)
+            finally:
+                relay.stop_client_delivery(ws)
+                outbound_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await outbound_task
 
             self.assertEqual(relay.agent_refresh_clients, set())
 
-        self.assertEqual(ws.messages, [json.loads(snapshot)])
+        self.assertEqual(
+            [message["type"] for message in ws.messages],
+            ["inventory_status", "agents"],
+        )
+        self.assertEqual(ws.messages[1], json.loads(snapshot))
 
     async def test_new_client_receives_cached_agents_immediately_after_config(self):
         ws = FakeWebSocket()
@@ -4159,7 +5994,13 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         wake.assert_called_once_with()
         self.assertEqual(
             [message["type"] for message in ws.messages],
-            ["push_config", "agents", "activity_history", "agents"],
+            [
+                "push_config",
+                "agents",
+                "activity_history",
+                "inventory_status",
+                "agents",
+            ],
         )
         self.assertEqual(ws.messages[-1]["agents"][0]["pane_id"], "w1:p1")
         self.assertEqual(refresh_clients.added, [ws])
@@ -4177,14 +6018,28 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
 
     async def test_udp_plugin_event_queues_payload_and_wakes_polling(self):
         queue = Mock()
+        payload = {"pane_id": "w1:p1", "socket_path": relay.HERDR_SOCKET_PATH}
         with (
             patch.object(relay, "event_queue", queue),
             patch.object(relay, "wake_poll_loop") as wake,
         ):
-            relay.UDPPlugin().datagram_received(b'{"pane_id":"w1:p1"}', None)
+            relay.UDPPlugin().datagram_received(json.dumps(payload).encode(), None)
 
-        queue.put_nowait.assert_called_once_with({"pane_id": "w1:p1"})
+        queue.put_nowait.assert_called_once_with(payload)
         wake.assert_called_once_with()
+
+    async def test_udp_plugin_ignores_other_herdr_sessions(self):
+        queue = Mock()
+        with (
+            patch.object(relay, "event_queue", queue),
+            patch.object(relay, "wake_poll_loop") as wake,
+        ):
+            relay.UDPPlugin().datagram_received(
+                b'{"pane_id":"w1:p1","socket_path":"/tmp/other-herdr.sock"}', None
+            )
+
+        queue.put_nowait.assert_not_called()
+        wake.assert_not_called()
 
     async def test_udp_plugin_ignores_non_object_json(self):
         queue = Mock()
@@ -4419,6 +6274,36 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertEqual(payload["version"], relay.RELAY_VERSION)
         self.assertEqual(payload["release_version"], PLUGIN_VERSION)
         self.assertEqual(payload["revision"], relay.RELAY_VERSION)
+        self.assertIn(payload["readiness"], {"starting", "ready", "degraded"})
+        self.assertIn("inventory", payload)
+
+    async def test_health_keeps_identity_valid_while_readiness_reports_inventory_failure(self):
+        inventory = {
+            "state": "error",
+            "error_code": "protocol_mismatch",
+            "message": "secret local command output",
+            "last_attempt_at": 123,
+            "last_success_at": 0,
+        }
+        with patch.object(relay, "agent_inventory_status", inventory):
+            healthz = await relay.process_request(None, FakeRequest("/healthz"))
+            readyz = await relay.process_request(None, FakeRequest("/readyz"))
+
+        health_payload = json.loads(healthz.body)
+        self.assertEqual(healthz.status_code, 200)
+        self.assertEqual(health_payload["status"], "ok")
+        self.assertEqual(health_payload["readiness"], "degraded")
+        self.assertEqual(health_payload["inventory"]["error_code"], "protocol_mismatch")
+        self.assertNotIn("message", health_payload["inventory"])
+        self.assertNotIn("secret local command output", healthz.body.decode())
+        self.assertEqual(readyz.status_code, 503)
+        self.assertEqual(json.loads(readyz.body)["status"], "unavailable")
+
+        inventory["state"] = "ready"
+        inventory["error_code"] = ""
+        with patch.object(relay, "agent_inventory_status", inventory):
+            readyz = await relay.process_request(None, FakeRequest("/readyz"))
+        self.assertEqual(readyz.status_code, 200)
 
     async def test_update_check_returns_the_checked_status(self):
         ws = FakeWebSocket()
@@ -4592,12 +6477,66 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertFalse(ws.messages[0]["ok"])
         self.assertIn("Incompatible app protocol", ws.messages[0]["error"])
 
+    async def test_slow_terminal_read_does_not_queue_a_later_mutation(self):
+        read_started = asyncio.Event()
+        release_read = asyncio.Event()
+        mutation_handled = asyncio.Event()
+
+        class QueueWebSocket(FakeWebSocket):
+            def __init__(self):
+                super().__init__()
+                self.incoming = asyncio.Queue()
+
+            async def __anext__(self):
+                item = await self.incoming.get()
+                if item is None:
+                    raise StopAsyncIteration
+                return json.dumps(item)
+
+        async def slow_read(_ws, _msg):
+            read_started.set()
+            await release_read.wait()
+
+        async def handle_prompt(_ws, _msg):
+            mutation_handled.set()
+
+        ws = QueueWebSocket()
+        with (
+            patch.object(relay, "clients", set()),
+            patch.object(relay, "agent_refresh_clients", set()),
+            patch.object(relay, "failed_clients", set()),
+            patch.object(relay, "client_outbound_queues", {}),
+            patch.object(relay, "client_outbound_tasks", {}),
+            patch.object(relay, "client_handler_tasks", {}),
+            patch.object(relay, "latest_agents_message", relay.agents_message([])),
+            patch.object(relay, "activity_delivery_lock", asyncio.Lock()),
+            patch.object(relay, "agent_profiles_for_new_client", AsyncMock(return_value={})),
+            patch.object(relay, "ensure_vapid_public_key", return_value="public-key"),
+            patch.object(relay, "load_activity", return_value=[]),
+            patch.object(relay, "handle_read_pane_message", side_effect=slow_read),
+            patch.object(relay, "handle_submit_prompt_command", side_effect=handle_prompt),
+        ):
+            handler = asyncio.create_task(relay.handle_client(ws))
+            await ws.incoming.put({"type": "read_pane", "pane_id": "w1:p1"})
+            await asyncio.wait_for(read_started.wait(), timeout=0.2)
+            await ws.incoming.put({
+                "type": "submit_prompt", "pane_id": "w1:p1", "text": "approve",
+                "protocol": relay.PROTOCOL_VERSION,
+            })
+            await asyncio.wait_for(mutation_handled.wait(), timeout=0.2)
+            release_read.set()
+            await ws.incoming.put(None)
+            await asyncio.wait_for(handler, timeout=0.2)
+
     async def test_approval_reports_accepted_then_confirmed(self):
         ws = FakeWebSocket()
         agent = {"pane_id": "w1:p1", "status": "blocked", "agent": "codex", "project": "relay"}
-        msg = {"type": "respond", "request_id": "request-1", "pane_id": "w1:p1", "index": 0, "total": 3, "choice": "yes"}
+        msg = {"type": "respond", "request_id": "request-1", "pane_id": "w1:p1", "event_id": "event-1", "index": 0, "total": 3, "choice": "yes"}
 
         with (
+            patch.object(relay, "approval_locks", {}),
+            patch.object(relay, "approved_event_results", {}),
+            patch.object(relay, "blocked_agent_details", {"w1:p1": {"event_id": "event-1"}}),
             patch.object(relay, "agent_for_pane", return_value=(agent, "")),
             patch.object(
                 relay.asyncio,
@@ -4611,14 +6550,18 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
             await relay.handle_respond_command(ws, msg)
 
         self.assertEqual([message["phase"] for message in ws.messages], ["accepted", "confirmed"])
-        run_command.assert_awaited_once_with("pane", "send-keys", "w1:p1", "Enter")
+        run_command.assert_awaited_once()
+        self.assertEqual(run_command.await_args.args, ("pane", "send-keys", "w1:p1", "Enter"))
+        self.assertGreater(run_command.await_args.kwargs["deadline"], relay.time.monotonic() - 5)
 
     async def test_stale_approval_is_rejected_without_sending_keys(self):
         ws = FakeWebSocket()
         agent = {"pane_id": "w1:p1", "status": "working", "agent": "codex", "project": "relay"}
-        msg = {"type": "respond", "request_id": "request-2", "pane_id": "w1:p1", "index": 0, "total": 3}
+        msg = {"type": "respond", "request_id": "request-2", "pane_id": "w1:p1", "event_id": "event-1", "index": 0, "total": 3}
 
         with (
+            patch.object(relay, "approval_locks", {}),
+            patch.object(relay, "approved_event_results", {}),
             patch.object(relay, "agent_for_pane", return_value=(agent, "")),
             patch.object(
                 relay.asyncio,
@@ -4634,27 +6577,563 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertIn("no longer blocked", ws.messages[0]["error"])
         run_command.assert_not_awaited()
 
-    async def test_agent_start_sends_initial_task_as_literal_pane_text(self):
+    async def test_approval_rejects_a_previous_blocked_event(self):
+        ws = FakeWebSocket()
+        agent = {"pane_id": "w1:p1", "status": "blocked", "agent": "codex", "project": "relay"}
+        msg = {"type": "respond", "request_id": "request-stale", "pane_id": "w1:p1", "event_id": "old-event", "index": 0, "total": 3}
+
+        with (
+            patch.object(relay, "approval_locks", {}),
+            patch.object(relay, "approved_event_results", {}),
+            patch.object(relay, "blocked_agent_details", {"w1:p1": {"event_id": "new-event"}}),
+            patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "run_herdr_async_result", AsyncMock()) as run_command,
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_respond_command(ws, msg)
+
+        self.assertFalse(ws.messages[0]["ok"])
+        self.assertIn("stale", ws.messages[0]["error"])
+        run_command.assert_not_awaited()
+
+    async def test_concurrent_approvals_send_keys_once_per_event(self):
+        first_ws = FakeWebSocket()
+        second_ws = FakeWebSocket()
+        agent = {"pane_id": "w1:p1", "status": "blocked", "agent": "codex", "project": "relay"}
+        send_started = asyncio.Event()
+        release_send = asyncio.Event()
+
+        async def paused_send(*_args, **_kwargs):
+            send_started.set()
+            await release_send.wait()
+            return True, "", ""
+
+        with (
+            patch.object(relay, "approval_locks", {}),
+            patch.object(relay, "approved_event_results", {}),
+            patch.object(relay, "blocked_agent_details", {"w1:p1": {"event_id": "event-1"}}),
+            patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=paused_send)) as run_command,
+            patch.object(relay, "wait_for_approval_result", AsyncMock(return_value=(False, "blocked"))),
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            first = asyncio.create_task(relay.handle_respond_command(first_ws, {
+                "type": "respond", "request_id": "request-1", "pane_id": "w1:p1",
+                "event_id": "event-1", "index": 0, "total": 3,
+            }))
+            await asyncio.wait_for(send_started.wait(), timeout=0.2)
+            second = asyncio.create_task(relay.handle_respond_command(second_ws, {
+                "type": "respond", "request_id": "request-2", "pane_id": "w1:p1",
+                "event_id": "event-1", "index": 0, "total": 3,
+            }))
+            await asyncio.sleep(0)
+            release_send.set()
+            await asyncio.gather(first, second)
+
+        run_command.assert_awaited_once()
+        self.assertEqual(run_command.await_args.args, ("pane", "send-keys", "w1:p1", "Enter"))
+        self.assertTrue(second_ws.messages[-1]["ok"])
+        self.assertEqual(second_ws.messages[-1]["phase"], "unconfirmed")
+
+    async def test_conflicting_approval_for_same_event_is_rejected(self):
+        ws = FakeWebSocket()
+        msg = {
+            "type": "respond", "request_id": "request-conflict", "pane_id": "w1:p1",
+            "event_id": "event-1", "index": 2, "total": 3, "choice": "Reject",
+        }
+
+        with (
+            patch.object(relay, "approval_locks", {}),
+            patch.object(
+                relay,
+                "approved_event_results",
+                {"w1:p1": {"event_id": "event-1", "phase": "confirmed", "index": 0, "total": 3}},
+            ),
+            patch.object(relay, "run_herdr_async_result", AsyncMock()) as run_command,
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_respond_command(ws, msg)
+
+        self.assertFalse(ws.messages[0]["ok"])
+        self.assertIn("different response", ws.messages[0]["error"])
+        run_command.assert_not_awaited()
+
+    async def test_approval_times_out_before_sending_keys(self):
+        ws = FakeWebSocket()
+        agent = {"pane_id": "w1:p1", "status": "blocked", "agent": "codex", "project": "relay"}
+        msg = {"type": "respond", "request_id": "request-slow", "pane_id": "w1:p1", "event_id": "event-1", "index": 0, "total": 3}
+
+        async def slow_inventory(*_args, **_kwargs):
+            await asyncio.sleep(0.2)
+            return agent, ""
+
+        with (
+            patch.object(relay, "approval_locks", {}),
+            patch.object(relay, "approved_event_results", {}),
+            patch.object(relay, "blocked_agent_details", {"w1:p1": {"event_id": "event-1"}}),
+            patch.object(relay, "APPROVAL_DEADLINE_SECONDS", 0.05),
+            patch.object(relay.asyncio, "to_thread", AsyncMock(side_effect=slow_inventory)),
+            patch.object(relay, "run_herdr_async_result", AsyncMock()) as run_command,
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_respond_command(ws, msg)
+
+        self.assertFalse(ws.messages[0]["ok"])
+        self.assertIn("Timed out", ws.messages[0]["error"])
+        run_command.assert_not_awaited()
+
+    async def test_approval_deadline_starts_before_lock_acquisition(self):
+        ws = FakeWebSocket()
+        msg = {"type": "respond", "request_id": "request-lock", "pane_id": "w1:p1", "event_id": "event-1", "index": 0, "total": 3}
+        lock = asyncio.Lock()
+        await lock.acquire()
+
+        async def release_later():
+            await asyncio.sleep(0.08)
+            lock.release()
+
+        with (
+            patch.object(relay, "approval_locks", {"w1:p1": lock}),
+            patch.object(relay, "approved_event_results", {}),
+            patch.object(relay, "APPROVAL_DEADLINE_SECONDS", 0.05),
+            patch.object(relay, "run_herdr_async_result", AsyncMock()) as run_command,
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            releaser = asyncio.create_task(release_later())
+            await relay.handle_respond_command(ws, msg)
+            await releaser
+
+        self.assertFalse(ws.messages[0]["ok"])
+        self.assertIn("Timed out waiting for the pane", ws.messages[0]["error"])
+        run_command.assert_not_awaited()
+
+    async def test_submit_prompt_times_out_before_sending(self):
+        ws = FakeWebSocket()
+        agent = {"pane_id": "w1:p1", "status": "working", "agent": "codex", "project": "relay"}
+        msg = {"type": "submit_prompt", "request_id": "request-prompt", "pane_id": "w1:p1", "text": "hello"}
+
+        async def slow_inventory(*_args, **_kwargs):
+            await asyncio.sleep(0.2)
+            return agent, ""
+
+        with (
+            patch.object(relay, "COMMAND_DEADLINE_SECONDS", 0.05),
+            patch.object(relay.asyncio, "to_thread", AsyncMock(side_effect=slow_inventory)),
+            patch.object(relay, "send_prompt_to_pane", AsyncMock()) as send_prompt,
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_submit_prompt_command(ws, msg)
+
+        self.assertFalse(ws.messages[0]["ok"])
+        self.assertIn("Timed out", ws.messages[0]["error"])
+        send_prompt.assert_not_awaited()
+
+    async def test_wait_for_approval_result_bounds_slow_inventory(self):
+        async def slow_to_thread(function, *args, **kwargs):
+            await asyncio.sleep(5)
+            return function(*args, **kwargs)
+
+        with (
+            patch.object(relay, "get_agents", return_value=[{"pane_id": "w1:p1", "status": "blocked"}]),
+            patch.object(relay.asyncio, "to_thread", AsyncMock(side_effect=slow_to_thread)),
+        ):
+            started = relay.time.monotonic()
+            confirmed, status = await relay.wait_for_approval_result("w1:p1", timeout=0.6)
+            elapsed = relay.time.monotonic() - started
+
+        self.assertFalse(confirmed)
+        self.assertEqual(status, "blocked")
+        self.assertLess(elapsed, 2.0)
+
+    def test_mutation_worker_rechecks_deadline_before_spawning(self):
+        deadline = relay.time.monotonic() - 0.01
+        with patch.object(relay, "run_herdr_result", return_value=(True, "", "")) as run_result:
+            ok, _output, error = relay._run_herdr_mutation(
+                ("pane", "send-keys", "w1:p1", "Enter"), deadline, threading.Event()
+            )
+        self.assertFalse(ok)
+        self.assertIn("Timed out", error)
+        run_result.assert_not_called()
+
+    def test_mutation_worker_sizes_subprocess_timeout_to_remaining_budget(self):
+        deadline = relay.time.monotonic() + 0.5
+        with patch.object(relay, "run_herdr_result", return_value=(True, "", "")) as run_result:
+            relay._run_herdr_mutation(("pane", "send-keys", "w1:p1", "Enter"), deadline, threading.Event())
+        timeout = run_result.call_args.kwargs["timeout"]
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 0.5)
+
+    async def test_mutation_queued_past_deadline_never_spawns(self):
+        async def delayed_worker(function, *args, **kwargs):
+            await asyncio.sleep(0.08)
+            return function(*args, **kwargs)
+
+        deadline = relay.time.monotonic() + 0.05
+        with (
+            patch.object(relay.asyncio, "to_thread", AsyncMock(side_effect=delayed_worker)),
+            patch.object(relay, "run_herdr_result", return_value=(True, "", "")) as run_result,
+        ):
+            ok, _output, error = await relay.run_herdr_async_result(
+                "pane", "send-keys", "w1:p1", "Enter", deadline=deadline
+            )
+        self.assertFalse(ok)
+        self.assertIn("Timed out", error)
+        run_result.assert_not_called()
+
+    async def test_question_keys_stop_once_the_mutation_deadline_expires(self):
+        token = relay.mutation_deadline.set(relay.time.monotonic() - 0.01)
+        try:
+            with patch.object(relay, "run_herdr_result", return_value=(True, "", "")) as run_result:
+                ok, error = await relay.send_question_keys("w1:p1", ["Down", "Down", "Enter"])
+        finally:
+            relay.mutation_deadline.reset(token)
+        self.assertFalse(ok)
+        self.assertIn("Timed out", error)
+        run_result.assert_not_called()
+
+    async def test_rename_passes_the_same_deadline_to_every_stage(self):
+        agent = {"pane_id": "w1:p1", "tab_id": "w1", "agent": "claude", "project": "relay"}
+        herdr = AsyncMock(return_value=(True, "", ""))
+        await self._run_agent_rename(agent, herdr)
+        deadlines = [call.kwargs.get("deadline") for call in herdr.await_args_list]
+        self.assertEqual(len(deadlines), 2)
+        self.assertTrue(all(deadline is not None for deadline in deadlines))
+        self.assertEqual(deadlines[0], deadlines[1])
+
+    def test_mutation_worker_maps_subprocess_timeout_to_dispatched_unknown(self):
+        deadline = relay.time.monotonic() + 5.0
+        with patch.object(relay, "run_herdr_result", return_value=(False, "", "herdr command timed out")):
+            ok, _output, error = relay._run_herdr_mutation(
+                ("pane", "send-keys", "w1:p1", "Enter"), deadline, threading.Event()
+            )
+        self.assertFalse(ok)
+        self.assertEqual(error, relay.MUTATION_DISPATCHED_UNKNOWN)
+
+    def test_mutation_worker_preserves_not_started_for_expired_deadline(self):
+        deadline = relay.time.monotonic() - 0.01
+        with patch.object(relay, "run_herdr_result", return_value=(True, "", "")) as run_result:
+            ok, _output, error = relay._run_herdr_mutation(
+                ("pane", "send-keys", "w1:p1", "Enter"), deadline, threading.Event()
+            )
+        self.assertFalse(ok)
+        self.assertEqual(error, relay.MUTATION_NOT_STARTED)
+        run_result.assert_not_called()
+
+    async def test_approval_dispatched_unknown_blocks_retry(self):
+        ws = FakeWebSocket()
+        agent = {"pane_id": "w1:p1", "status": "blocked", "agent": "codex", "project": "relay"}
+        msg = {"type": "respond", "request_id": "request-1", "pane_id": "w1:p1", "event_id": "event-1", "index": 0, "total": 3, "choice": "yes"}
+        approved = {}
+
+        with (
+            patch.object(relay, "approval_locks", {}),
+            patch.object(relay, "approved_event_results", approved),
+            patch.object(relay, "blocked_agent_details", {"w1:p1": {"event_id": "event-1"}}),
+            patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "run_herdr_async_result", AsyncMock(return_value=(False, "", relay.MUTATION_DISPATCHED_UNKNOWN))),
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_respond_command(ws, msg)
+
+        self.assertFalse(ws.messages[-1]["ok"])
+        self.assertIn("not confirmed", ws.messages[-1]["error"])
+        self.assertEqual(approved["w1:p1"]["event_id"], "event-1")
+        self.assertEqual(approved["w1:p1"]["phase"], "dispatched_unknown")
+
+        ws2 = FakeWebSocket()
+        msg2 = {**msg, "request_id": "request-retry"}
+        with (
+            patch.object(relay, "approval_locks", {}),
+            patch.object(relay, "approved_event_results", approved),
+            patch.object(relay, "blocked_agent_details", {"w1:p1": {"event_id": "event-1"}}),
+            patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "run_herdr_async_result", AsyncMock()) as run_command,
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_respond_command(ws2, msg2)
+
+        self.assertFalse(ws2.messages[-1]["ok"])
+        self.assertIn("retry blocked", ws2.messages[-1]["error"])
+        run_command.assert_not_awaited()
+
+    async def test_agent_start_passes_deadline_to_every_stage(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            with (
+                patch.object(relay, "workspace_id_for_cwd", AsyncMock(return_value="w7")) as ws_mock,
+                patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=[
+                    (True, json.dumps({"result": {"pane_id": "w7:p1", "tab_id": "w7:t2"}}), ""),
+                    (True, json.dumps({"result": {"agent": {"pane_id": "w7:p1"}}}), ""),
+                ])) as run_command,
+            ):
+                deadline = relay.time.monotonic() + 40.0
+                await relay.start_agent_in_new_tab(
+                    {"id": "codex", "label": "Codex", "argv": ["codex"], "kind": "codex"},
+                    "test-agent",
+                    Path(cwd),
+                    deadline=deadline,
+                )
+
+        startup_deadline = deadline - relay.AGENT_START_ROLLBACK_SECONDS
+        ws_mock.assert_awaited_once_with(Path(cwd), deadline=startup_deadline)
+        deadlines = [call.kwargs.get("deadline") for call in run_command.await_args_list]
+        self.assertTrue(all(d == startup_deadline for d in deadlines), f"Expected all deadlines to be {startup_deadline}, got {deadlines}")
+
+    async def test_concurrent_clear_serialized_by_lifecycle_lock(self):
+        ws1 = FakeWebSocket()
+        ws2 = FakeWebSocket()
+
+        with tempfile.TemporaryDirectory() as cwd:
+            agent = {"pane_id": "w1:p1", "status": "idle", "agent": "codex", "project": "relay", "cwd": cwd}
+            first_call = True
+
+            async def bounded_agent_side_effect(pane_id, deadline):
+                nonlocal first_call
+                if first_call:
+                    first_call = False
+                    return agent, ""
+                return None, "Agent is no longer available"
+
+            with (
+                patch.object(relay, "lifecycle_locks", {}),
+                patch.object(relay, "bounded_agent_for_pane", AsyncMock(side_effect=bounded_agent_side_effect)),
+                patch.object(relay, "_profile_id_for_agent", return_value="codex"),
+                patch.object(relay, "load_agent_profiles", return_value={"codex": {"id": "codex", "label": "Codex", "argv": ["codex"], "kind": "codex"}}),
+                patch.object(relay, "resolve_agent_cwd", return_value=(Path(cwd), "")),
+                patch.object(relay, "start_agent_in_new_tab", AsyncMock(return_value=(True, {}, "w1:p2", "", ""))),
+                patch.object(relay, "run_herdr_async_result", AsyncMock(return_value=(True, "", ""))),
+                patch.object(relay, "publish_activity", AsyncMock()),
+            ):
+                msg = {"type": "agent_clear", "request_id": "r1", "pane_id": "w1:p1"}
+                await asyncio.gather(
+                    relay.handle_agent_clear_command(ws1, {**msg, "request_id": "r1"}),
+                    relay.handle_agent_clear_command(ws2, {**msg, "request_id": "r2"}),
+                )
+
+        results = [ws.messages[-1] for ws in (ws1, ws2)]
+        ok_results = [r for r in results if r["ok"]]
+        failed_results = [r for r in results if not r["ok"]]
+        self.assertEqual(len(ok_results), 1)
+        self.assertEqual(len(failed_results), 1)
+        self.assertIn("no longer available", failed_results[0]["error"])
+
+    async def test_outer_timeout_returns_dispatched_unknown_when_worker_started(self):
+        def slow_mutation(args, deadline, started_signal):
+            started_signal.set()
+            time.sleep(2)
+            return True, "", ""
+
+        deadline = relay.time.monotonic() + 0.05
+        with patch.object(relay, "_run_herdr_mutation", slow_mutation):
+            ok, _output, error = await relay.run_herdr_async_result(
+                "pane", "send-keys", "w1:p1", "Enter", deadline=deadline
+            )
+        self.assertFalse(ok)
+        self.assertEqual(error, relay.MUTATION_DISPATCHED_UNKNOWN)
+
+    async def test_outer_timeout_returns_not_started_when_worker_never_started(self):
+        def queued_mutation(args, deadline, started_signal):
+            time.sleep(2)
+            started_signal.set()
+            return True, "", ""
+
+        deadline = relay.time.monotonic() + 0.05
+        with patch.object(relay, "_run_herdr_mutation", queued_mutation):
+            ok, _output, error = await relay.run_herdr_async_result(
+                "pane", "send-keys", "w1:p1", "Enter", deadline=deadline
+            )
+        self.assertFalse(ok)
+        self.assertEqual(error, relay.MUTATION_NOT_STARTED)
+
+    async def test_prompt_dispatched_unknown_includes_data_flag(self):
+        ws = FakeWebSocket()
+        agent = {"pane_id": "w1:p1", "agent": "codex", "project": "relay"}
+        with (
+            patch.object(relay, "agent_for_pane", return_value=(agent, "")),
+            patch.object(
+                relay.asyncio,
+                "to_thread",
+                AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
+            ),
+            patch.object(relay, "send_prompt_to_pane", AsyncMock(return_value=(False, relay.MUTATION_DISPATCHED_UNKNOWN))),
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            await relay.handle_submit_prompt_command(ws, {
+                "type": "submit_prompt",
+                "request_id": "req-prompt",
+                "pane_id": "w1:p1",
+                "text": "do something",
+            })
+
+        result = ws.messages[-1]
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["data"]["dispatched_unknown"], True)
+
+    async def test_stop_acquires_lifecycle_lock(self):
+        ws = FakeWebSocket()
+        agent = {"pane_id": "w1:p1", "agent": "codex", "project": "relay"}
+        lock = asyncio.Lock()
+        await lock.acquire()
+
+        with (
+            patch.object(relay, "lifecycle_locks", {"w1:p1": lock}),
+            patch.object(relay, "bounded_agent_for_pane", AsyncMock(return_value=(agent, ""))),
+            patch.object(relay, "run_herdr_async_result", AsyncMock(return_value=(True, "", ""))),
+            patch.object(relay, "publish_activity", AsyncMock()),
+        ):
+            task = asyncio.create_task(relay.handle_agent_stop_command(ws, {
+                "type": "agent_stop", "request_id": "req-stop", "pane_id": "w1:p1",
+            }))
+            await asyncio.sleep(0.05)
+            self.assertFalse(task.done())
+            lock.release()
+            await task
+
+        self.assertTrue(ws.messages[-1]["ok"])
+
+    async def test_close_failed_agent_target_receives_deadline(self):
+        deadline = relay.time.monotonic() + 10.0
+        with patch.object(relay, "run_herdr_async_result", AsyncMock(return_value=(True, "", ""))) as run_command:
+            await relay.close_failed_agent_target("w1:p1", "start failed", deadline=deadline)
+        self.assertEqual(run_command.await_args.kwargs["deadline"], deadline)
+
+    def test_worker_sets_started_before_deadline_check(self):
+        started = threading.Event()
+        deadline = relay.time.monotonic() - 0.01
+        with patch.object(relay, "run_herdr_result", return_value=(True, "", "")) as run_result:
+            ok, _output, error = relay._run_herdr_mutation(
+                ("pane", "send-keys", "w1:p1", "Enter"), deadline, started
+            )
+        self.assertTrue(started.is_set())
+        self.assertFalse(ok)
+        self.assertEqual(error, relay.MUTATION_NOT_STARTED)
+        run_result.assert_not_called()
+
+    async def test_lifecycle_guard_blocks_mutation_after_clear(self):
+        relay.lifecycle_generations["w1:p1"] = 0
+        gen = relay.lifecycle_generations.get("w1:p1", 0)
+        token = relay.mutation_guard.set(lambda: relay.lifecycle_generations.get("w1:p1", 0) == gen)
+        try:
+            relay.lifecycle_generations["w1:p1"] = 1
+            deadline = relay.time.monotonic() + 5.0
+            started = threading.Event()
+            with patch.object(relay, "run_herdr_result", return_value=(True, "", "")) as run_result:
+                ok, _output, error = relay._run_herdr_mutation(
+                    ("pane", "send-keys", "w1:p1", "Enter"), deadline, started
+                )
+        finally:
+            relay.mutation_guard.reset(token)
+            relay.lifecycle_generations.pop("w1:p1", None)
+        self.assertFalse(ok)
+        self.assertEqual(error, relay.MUTATION_PANE_REPLACED)
+        run_result.assert_not_called()
+
+    async def test_cleanup_gets_full_deadline_when_startup_expires(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            deadline = relay.time.monotonic() + 40.0
+            startup_deadline = deadline - relay.AGENT_START_ROLLBACK_SECONDS
+            with (
+                patch.object(relay, "workspace_id_for_cwd", AsyncMock(return_value="w7")),
+                patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=[
+                    (True, json.dumps({"result": {"pane_id": "w7:p1", "tab_id": "w7:t2"}}), ""),
+                    (False, "", "Agent start timed out"),
+                    (True, "", ""),
+                ])) as run_command,
+            ):
+                ok, _data, _pane_id, _placement, error = await relay.start_agent_in_new_tab(
+                    {"id": "codex", "label": "Codex", "argv": ["codex"], "kind": "codex"},
+                    "test-agent",
+                    Path(cwd),
+                    deadline=deadline,
+                )
+
+        self.assertFalse(ok)
+        cleanup_call = run_command.await_args_list[-1]
+        self.assertEqual(cleanup_call.args[:2], ("pane", "close"))
+        self.assertEqual(cleanup_call.kwargs["deadline"], deadline)
+        self.assertNotEqual(cleanup_call.kwargs["deadline"], startup_deadline)
+
+    async def test_stale_pane_read_does_not_resurrect_blocked_state(self):
+        ws = FakeWebSocket()
+
+        async def read_that_unblocks(*_args, **_kwargs):
+            relay.last_statuses["w1:p1"] = "working"
+            relay.advance_agent_state_revision("w1:p1")
+            return CODEX_QUESTION_VIEW
+
+        with (
+            patch.object(relay, "agent_types", {"w1:p1": "codex"}),
+            patch.object(relay, "last_statuses", {"w1:p1": "blocked"}),
+            patch.object(relay, "agent_state_revisions", {"w1:p1": 7}),
+            patch.object(relay, "blocked_agent_details", {}),
+            patch.object(relay, "acknowledge_pane_viewed", AsyncMock()),
+            patch.object(relay, "run_herdr_async", AsyncMock(side_effect=read_that_unblocks)),
+        ):
+            await relay.handle_read_pane_message(ws, {"pane_id": "w1:p1", "lines": 30})
+
+        payload = ws.messages[0]
+        self.assertEqual(payload["type"], "pane_content")
+        self.assertIsNone(payload["interaction"])
+        self.assertFalse(payload["question_layout"])
+        self.assertEqual(relay.blocked_agent_details, {})
+
+    async def test_fresh_pane_read_still_reports_blocked_question(self):
+        ws = FakeWebSocket()
+
+        with (
+            patch.object(relay, "agent_types", {"w1:p1": "codex"}),
+            patch.object(relay, "last_statuses", {"w1:p1": "blocked"}),
+            patch.object(relay, "agent_state_revisions", {"w1:p1": 7}),
+            patch.object(relay, "blocked_agent_details", {}),
+            patch.object(relay, "latest_agents_message", relay.agents_message([])),
+            patch.object(relay, "acknowledge_pane_viewed", AsyncMock()),
+            patch.object(relay, "run_herdr_async", AsyncMock(return_value=CODEX_QUESTION_VIEW)),
+        ):
+            await relay.handle_read_pane_message(ws, {"pane_id": "w1:p1", "lines": 30})
+
+        payload = ws.messages[0]
+        self.assertEqual(payload["type"], "pane_content")
+        self.assertIsNotNone(payload["interaction"])
+        self.assertTrue(payload["question_layout"])
+
+    async def test_agent_start_uses_live_facade_and_atomic_initial_prompt(self):
         ws = FakeWebSocket()
         msg = {
             "type": "agent_start",
             "request_id": "request-3",
-            "profile_id": "test",
+            "profile_id": "codex",
             "name": "mobile-test",
             "prompt": "--literal task text",
         }
         with tempfile.TemporaryDirectory() as cwd:
             msg["cwd"] = cwd
             command_results = [
-                (True, json.dumps({"result": {"pane_id": "w2:p0", "workspace_id": "w2"}}), ""),
-                (True, json.dumps({"result": {"move_result": {"pane": {"pane_id": "w2:p0", "tab_id": "w2:t2"}}}}), ""),
-                (True, json.dumps({"result": {"agent": {"pane_id": "w2:p1", "workspace_id": "w2"}}}), ""),
-                (True, "", ""),
+                (True, json.dumps({"result": {"pane_id": "w7:p1", "tab_id": "w7:t2"}}), ""),
+                (True, json.dumps({"result": {"agent": {"pane_id": "w7:p1", "workspace_id": "w7"}}}), ""),
                 (True, "", ""),
             ]
             with (
                 patch.object(relay.Path, "home", return_value=Path(cwd)),
-                patch.object(relay, "load_agent_profiles", return_value={"test": {"id": "test", "label": "Test", "argv": ["test-agent"]}}),
+                patch.object(relay, "load_agent_profiles", return_value={"codex": {"id": "codex", "label": "Codex", "argv": ["codex"], "kind": "codex"}}),
                 patch.object(relay, "workspace_id_for_cwd", AsyncMock(return_value="w7")),
                 patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=command_results)) as run_command,
                 patch.object(relay, "publish_activity", AsyncMock()),
@@ -4664,15 +7143,17 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
 
         calls = [call.args for call in run_command.await_args_list]
         self.assertEqual(calls[0], (
-            "agent", "start", "mobile-test", "--cwd", cwd,
-            "--workspace", "w7", "--no-focus", "--", "test-agent",
+            "tab", "create", "--workspace", "w7", "--cwd", cwd,
+            "--label", "mobile-test", "--no-focus",
         ))
-        self.assertNotIn("--literal task text", calls[0])
-        self.assertEqual(calls[1], ("pane", "move", "w2:p0", "--new-tab", "--workspace", "w7", "--label", "mobile-test", "--no-focus"))
-        self.assertEqual(calls[2], ("agent", "get", "mobile-test"))
-        self.assertEqual(calls[3], ("pane", "send-text", "w2:p1", "--literal task text"))
+        self.assertEqual(calls[1], (
+            "agent", "start", "mobile-test", "--kind", "codex", "--pane", "w7:p1",
+            "--timeout", "30000",
+        ))
+        self.assertNotIn("--literal task text", calls[1])
+        self.assertEqual(calls[2], ("agent", "prompt", "w7:p1", "--literal task text"))
         self.assertTrue(ws.messages[-1]["ok"])
-        self.assertEqual(ws.messages[-1]["data"]["pane_id"], "w2:p1")
+        self.assertEqual(ws.messages[-1]["data"]["pane_id"], "w7:p1")
         self.assertEqual(ws.messages[-1]["data"]["name"], "mobile-test")
         self.assertEqual(ws.messages[-1]["data"]["cwd"], cwd)
 
@@ -4683,25 +7164,25 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
             with (
                 patch.object(relay, "workspace_id_for_cwd", AsyncMock(return_value="")),
                 patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=[
-                    (True, json.dumps({"result": {"pane_id": "w8:p11", "workspace_id": "w8"}}), ""),
-                    (True, json.dumps({"result": {"move_result": {"pane": {"pane_id": "w10:p1", "workspace_id": "w10"}}}}), ""),
+                    (True, json.dumps({"result": {"pane_id": "w10:p1", "tab_id": "w10:t1", "workspace_id": "w10"}}), ""),
+                    (True, "", ""),
                     (True, json.dumps({"result": {"agent": {"pane_id": "w10:p1", "workspace_id": "w10"}}}), ""),
                 ])) as run_command,
             ):
                 ok, _data, pane_id, placement_error, error = await relay.start_agent_in_new_tab(
-                    {"id": "test", "label": "Test", "argv": ["test-agent"]},
+                    {"id": "codex", "label": "Codex", "argv": ["codex"], "kind": "codex"},
                     "mobile-test",
                     cwd,
                 )
 
         calls = [call.args for call in run_command.await_args_list]
         self.assertEqual(calls[0], (
-            "agent", "start", "mobile-test", "--cwd", str(cwd),
-            "--no-focus", "--", "test-agent",
+            "workspace", "create", "--cwd", str(cwd), "--label", "new-project", "--no-focus",
         ))
-        self.assertEqual(calls[1], (
-            "pane", "move", "w8:p11", "--new-workspace", "--label", "new-project",
-            "--tab-label", "mobile-test", "--no-focus",
+        self.assertEqual(calls[1], ("tab", "rename", "w10:t1", "mobile-test"))
+        self.assertEqual(calls[2], (
+            "agent", "start", "mobile-test", "--kind", "codex", "--pane", "w10:p1",
+            "--timeout", "30000",
         ))
         self.assertTrue(ok)
         self.assertEqual(pane_id, "w10:p1")
@@ -4720,11 +7201,10 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
                     "to_thread",
                     AsyncMock(side_effect=lambda function, *args, **kwargs: function(*args, **kwargs)),
                 ),
-                patch.object(relay, "load_agent_profiles", return_value={"codex": {"id": "codex", "label": "Codex", "argv": ["codex"]}}),
+                patch.object(relay, "load_agent_profiles", return_value={"codex": {"id": "codex", "label": "Codex", "argv": ["codex"], "kind": "codex"}}),
                 patch.object(relay, "workspace_id_for_cwd", AsyncMock(return_value="w1")),
                 patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=[
-                    (True, json.dumps({"result": {"pane_id": "w1:p2", "workspace_id": "w1"}}), ""),
-                    (True, json.dumps({"result": {"move_result": {"pane": {"pane_id": "w1:p2", "tab_id": "w1:t3"}}}}), ""),
+                    (True, json.dumps({"result": {"pane_id": "w1:p2", "tab_id": "w1:t3"}}), ""),
                     (True, json.dumps({"result": {"agent": {"pane_id": "w1:p2", "workspace_id": "w1"}}}), ""),
                     (True, "", ""),
                 ])) as run_command,
@@ -4737,10 +7217,9 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
                 })
 
         calls = [call.args for call in run_command.await_args_list]
-        self.assertEqual(calls[0][0:2], ("agent", "start"))
-        self.assertEqual(calls[1][0:3], ("pane", "move", "w1:p2"))
-        self.assertEqual(calls[2][0:2], ("agent", "get"))
-        self.assertEqual(calls[3], ("pane", "close", "w1:p1"))
+        self.assertEqual(calls[0][0:2], ("tab", "create"))
+        self.assertEqual(calls[1][0:2], ("agent", "start"))
+        self.assertEqual(calls[2], ("pane", "close", "w1:p1"))
         self.assertTrue(ws.messages[-1]["ok"])
         self.assertEqual(ws.messages[-1]["data"]["pane_id"], "w1:p2")
         self.assertEqual(ws.messages[-1]["data"]["cwd"], cwd)
@@ -4834,53 +7313,278 @@ class RelayCommandsTest(ClaudeHistoryIsolationMixin, unittest.IsolatedAsyncioTes
         self.assertNotIn("w1:p1", relay.agent_profile_ids)
         self.assertTrue(ws.messages[-1]["ok"])
 
-    async def test_pane_placement_retries_on_pane_not_found(self):
-        """pane_not_found errors are retried; other errors return immediately."""
+    async def test_custom_profile_runs_in_target_pane_and_keeps_identity(self):
         async_side_effect = [
-            (False, "", "pane_not_found"),
-            (False, "", "pane_not_found"),
-            (True, json.dumps({"ok": True}), ""),
+            (True, json.dumps({"result": {"pane_id": "w9:p0", "tab_id": "w9:t2"}}), ""),
+            (True, "", ""),
+            (True, json.dumps({"result": {"agent": {"pane_id": "w9:p0"}}}), ""),
+            (True, "", ""),
         ]
         with (
+            patch.object(relay, "workspace_id_for_cwd", AsyncMock(return_value="w9")),
             patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=async_side_effect)) as run_command,
-            patch.object(relay.asyncio, "sleep", AsyncMock()) as sleep,
         ):
-            ok, _data, error = await relay.place_started_agent(
-                "w9:p0", "w9", "test-agent", Path("/tmp")
+            ok, _data, pane_id, placement_error, error = await relay.start_agent_in_new_tab(
+                {"id": "pi-local", "label": "Pi Local", "argv": ["/opt/Pi Local/pi", "--model", "fast"], "kind": ""},
+                "mobile-pi", Path("/tmp"),
             )
         self.assertTrue(ok)
+        self.assertEqual(pane_id, "w9:p0")
+        self.assertEqual(placement_error, "")
         self.assertEqual(error, "")
-        self.assertEqual(run_command.await_count, 3)
-        self.assertGreater(sleep.await_count, 0)
+        calls = [call.args for call in run_command.await_args_list]
+        self.assertEqual(calls[1], ("pane", "run", "w9:p0", "'/opt/Pi Local/pi' --model fast"))
+        self.assertEqual(calls[2], ("agent", "get", "w9:p0"))
+        self.assertEqual(calls[3], ("agent", "rename", "w9:p0", "mobile-pi"))
+        self.assertEqual(relay.agent_profile_ids["w9:p0"], "pi-local")
 
-    async def test_pane_placement_fails_immediately_on_other_errors(self):
+    async def test_failed_agent_start_closes_unused_target_pane(self):
         async_side_effect = [
-            (False, "", "permission denied"),
+            (True, json.dumps({"result": {"pane_id": "w9:p0", "tab_id": "w9:t2"}}), ""),
+            (False, "", "agent_prompt_stalled"),
+            (True, "", ""),
         ]
         with (
+            patch.object(relay, "workspace_id_for_cwd", AsyncMock(return_value="w9")),
             patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=async_side_effect)) as run_command,
-            patch.object(relay.asyncio, "sleep", AsyncMock()),
         ):
-            ok, _data, error = await relay.place_started_agent(
-                "w9:p0", "w9", "test-agent", Path("/tmp")
+            ok, _data, pane_id, placement_error, error = await relay.start_agent_in_new_tab(
+                {"id": "codex", "label": "Codex", "argv": ["codex"], "kind": "codex"},
+                "mobile-codex", Path("/tmp"),
             )
         self.assertFalse(ok)
-        self.assertIn("permission denied", error)
-        self.assertEqual(run_command.await_count, 1)
+        self.assertEqual(pane_id, "")
+        self.assertEqual(placement_error, "")
+        self.assertIn("agent_prompt_stalled", error)
+        self.assertEqual(run_command.await_args_list[-1].args, ("pane", "close", "w9:p0"))
 
-    async def test_pane_placement_exhausts_retries(self):
-        """After 6 attempts, even pane_not_found gives up."""
-        async_side_effect = [(False, "", "pane_not_found")] * 6
-        with (
-            patch.object(relay, "run_herdr_async_result", AsyncMock(side_effect=async_side_effect)) as run_command,
-            patch.object(relay.asyncio, "sleep", AsyncMock()),
-        ):
-            ok, _data, error = await relay.place_started_agent(
-                "w9:p0", "w9", "test-agent", Path("/tmp")
-            )
-        self.assertFalse(ok)
-        self.assertIn("pane_not_found", error)
-        self.assertEqual(run_command.await_count, 6)
+    async def test_replace_to_merge_reload_first_client_sees_discovered_integrations(self):
+        def find_executable(name):
+            return f"/usr/bin/{name}" if name in {"pi", "qodercli"} else None
+
+        replace_parser = configparser.ConfigParser(interpolation=None)
+        replace_parser.read_string("[profiles]\npi = Pi\n[config]\nreplace_profiles = true\n")
+        merge_parser = configparser.ConfigParser(interpolation=None)
+        merge_parser.read_string("[profiles]\npi = Pi\n")
+
+        cache = {"names": set(), "expires": 0.0, "refreshing": False}
+        ready = threading.Event()
+        ready.set()
+
+        with patch.object(relay, "_herdr_integrations_cache", cache), \
+                patch.object(relay, "_integrations_ready", ready), \
+                patch.object(relay, "_integrations_generation", 0), \
+                patch.object(relay, "_AGENT_PROFILES_INI_CACHE", replace_parser), \
+                patch.object(relay, "AGENT_PROFILE_CANDIDATES", {"pi": "Pi"}), \
+                patch.object(relay, "herdr_installed_integrations", return_value={"qodercli"}), \
+                patch.object(relay.shutil, "which", side_effect=find_executable):
+            # Replacement-mode startup: prewarm skips discovery, cache stays empty.
+            relay.prewarm_herdr_integrations()
+            self.assertEqual(cache["names"], set())
+            self.assertTrue(ready.is_set())
+
+            # SIGHUP switches the config to merge mode and reloads.
+            with patch.object(relay, "_read_agent_profiles_ini", return_value=merge_parser):
+                relay._reload_agent_profiles_ini()
+
+            # The reload cleared readiness and kicked off an async refresh; the
+            # first client waits for readiness and sees the discovered agent.
+            profiles = await relay.agent_profiles_for_new_client()
+
+        self.assertIn("qodercli", profiles)
+        self.assertIn("pi", profiles)
+
+    async def test_publish_blocked_generates_shared_id_without_pregenerated_one(self):
+        pane_id = "w1:p1"
+        captured = {}
+        spawned = []
+
+        async def fake_publish_activity(*args, **kwargs):
+            captured["activity_details"] = kwargs.get("details")
+            return {"timestamp": 12345}
+
+        async def fake_broadcast(msg):
+            captured["broadcast"] = msg
+
+        async def fake_push_blocked(msg):
+            captured["push"] = msg
+
+        def fake_create_task(coro, **kwargs):
+            spawned.append(coro)
+            return None
+
+        cache = {}
+        with patch.object(relay, "blocked_agent_details", cache), \
+                patch.object(relay, "latest_agents_message", relay.agents_message([])), \
+                patch.object(relay, "publish_activity", side_effect=fake_publish_activity), \
+                patch.object(relay, "broadcast", side_effect=fake_broadcast), \
+                patch.object(relay, "push_blocked", side_effect=fake_push_blocked), \
+                patch.object(relay.asyncio, "create_task", side_effect=fake_create_task):
+            await relay.publish_blocked({
+                "type": "blocked",
+                "pane_id": pane_id,
+                "agent": "codex",
+                "command": "Run tests?",
+                "prompt": "Run tests?",
+                "options": ["Yes", "No"],
+            })
+            for coro in spawned:
+                await coro
+
+        # No pre-generated ID was supplied (the plugin/UDP path), so
+        # publish_blocked generated one and every artifact shares it — including
+        # the reconnect snapshot a later client relies on for notification
+        # routing.
+        generated = cache[pane_id]["event_id"]
+        self.assertTrue(generated)
+        self.assertEqual(captured["activity_details"]["event_id"], generated)
+        self.assertEqual(captured["broadcast"]["event_id"], generated)
+        self.assertEqual(captured["push"]["event_id"], generated)
+
+    async def test_rapid_plugin_blocked_cycles_mint_distinct_event_ids(self):
+        pane_id = "w2:p7"
+        blocked_ids = []
+        spawned = []
+
+        async def fake_publish_activity(*args, **kwargs):
+            return {"timestamp": 12345}
+
+        async def fake_broadcast(msg):
+            if msg.get("type") == "blocked":
+                blocked_ids.append(msg.get("event_id"))
+
+        async def fake_push_blocked(msg):
+            return None
+
+        def fake_create_task(coro, **kwargs):
+            spawned.append(coro)
+            return None
+
+        events = [
+            {"type": "agent_event", "pane_id": pane_id, "status": "blocked", "agent": "codex"},
+            {"type": "agent_event", "pane_id": pane_id, "status": "working", "agent": "codex"},
+            {"type": "agent_event", "pane_id": pane_id, "status": "blocked", "agent": "codex"},
+        ]
+
+        async def fake_queue_get():
+            if events:
+                return events.pop(0)
+            raise asyncio.CancelledError()
+
+        snapshot = relay.agents_message([{"pane_id": pane_id, "status": "working", "agent": "codex"}])
+        with patch.object(relay, "blocked_agent_details", {}), \
+                patch.object(relay, "last_statuses", {}), \
+                patch.object(relay, "latest_agents_message", snapshot), \
+                patch.object(relay.event_queue, "get", side_effect=fake_queue_get), \
+                patch.object(relay, "read_question_pane", return_value=""), \
+                patch.object(relay, "register_finished_notification", return_value=False), \
+                patch.object(relay, "register_status_transition", return_value=None), \
+                patch.object(relay, "displayed_status", side_effect=lambda pid, status: status), \
+                patch.object(relay, "publish_activity", side_effect=fake_publish_activity), \
+                patch.object(relay, "broadcast", side_effect=fake_broadcast), \
+                patch.object(relay, "push_blocked", side_effect=fake_push_blocked), \
+                patch.object(relay.asyncio, "create_task", side_effect=fake_create_task):
+            with self.assertRaises(asyncio.CancelledError):
+                await relay.event_push()
+            for coro in spawned:
+                await coro
+
+        # Two blocked cycles separated by a working transition — each must mint
+        # its own event_id. Before the fix, the second cycle reused the stale
+        # cached id because blocked_agent_details was only pruned on the next poll.
+        self.assertEqual(len(blocked_ids), 2)
+        self.assertTrue(blocked_ids[0])
+        self.assertTrue(blocked_ids[1])
+        self.assertNotEqual(blocked_ids[0], blocked_ids[1])
+
+    async def test_plugin_event_updates_reconnect_snapshot_before_poll(self):
+        pane_id = "w3:p1"
+        queue = asyncio.Queue()
+        sent_snapshots = []
+        processed = asyncio.Event()
+        spawned = []
+        snapshot_at_blocked_broadcast = {}
+        touch_stamp = 424242
+
+        async def fake_broadcast(msg):
+            if msg.get("type") == "blocked":
+                # Capture the reconnect snapshot at the moment the blocked message
+                # is published. The merge must already have flipped the status, so
+                # a client reconnecting inside this window sees "blocked", not the
+                # prior "working".
+                snapshot_at_blocked_broadcast["agents"] = json.loads(relay.latest_agents_message)["agents"]
+            if msg.get("type") == "agent_update":
+                # The agent_update broadcast is the last step of event_push's
+                # agent_event handling, so it signals processing is complete.
+                processed.set()
+
+        async def fake_publish_activity(*args, **kwargs):
+            return {"timestamp": 1}
+
+        async def fake_push_blocked(msg):
+            return None
+
+        def fake_create_task(coro, **kwargs):
+            spawned.append(coro)
+            return None
+
+        class FakeWS:
+            async def send(self, data):
+                sent_snapshots.append(data)
+
+        snapshot = relay.agents_message([
+            {"pane_id": pane_id, "status": "working", "agent": "codex", "updated_at": 111},
+        ])
+        with patch.object(relay, "blocked_agent_details", {}), \
+                patch.object(relay, "last_statuses", {}), \
+                patch.object(relay, "latest_agents_message", snapshot), \
+                patch.object(relay, "event_queue", queue), \
+                patch.object(relay, "read_question_pane", return_value=""), \
+                patch.object(relay, "register_finished_notification", return_value=False), \
+                patch.object(relay, "register_status_transition", return_value=None), \
+                patch.object(relay, "displayed_status", side_effect=lambda pid, status: status), \
+                patch.object(relay, "touch_agent_activity", return_value=touch_stamp), \
+                patch.object(relay, "publish_activity", side_effect=fake_publish_activity), \
+                patch.object(relay, "broadcast", side_effect=fake_broadcast), \
+                patch.object(relay, "push_blocked", side_effect=fake_push_blocked), \
+                patch.object(relay.asyncio, "create_task", side_effect=fake_create_task):
+            task = asyncio.get_running_loop().create_task(relay.event_push())
+            try:
+                # working -> blocked
+                processed.clear()
+                await queue.put({"type": "agent_event", "pane_id": pane_id, "status": "blocked", "agent": "codex"})
+                await processed.wait()
+
+                # The snapshot must have been merged before the blocked message was
+                # published, not after.
+                published_agent = snapshot_at_blocked_broadcast["agents"][0]
+                self.assertEqual(published_agent["status"], "blocked")
+                self.assertTrue(published_agent.get("event_id"))
+
+                await relay.send_latest_agents(FakeWS())
+                blocked_agent = json.loads(sent_snapshots[-1])["agents"][0]
+                self.assertEqual(blocked_agent["status"], "blocked")
+                self.assertTrue(blocked_agent.get("event_id"))
+                self.assertEqual(blocked_agent.get("updated_at"), touch_stamp)
+
+                # blocked -> working: the snapshot must drop the blocked state and
+                # its event_id rather than lingering until the next poll.
+                processed.clear()
+                await queue.put({"type": "agent_event", "pane_id": pane_id, "status": "working", "agent": "codex"})
+                await processed.wait()
+                await relay.send_latest_agents(FakeWS())
+                working_agent = json.loads(sent_snapshots[-1])["agents"][0]
+                self.assertEqual(working_agent["status"], "working")
+                self.assertNotIn("event_id", working_agent)
+                self.assertEqual(working_agent.get("updated_at"), touch_stamp)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            for coro in spawned:
+                coro.close()
 
 
 class SuperviseTest(unittest.IsolatedAsyncioTestCase):

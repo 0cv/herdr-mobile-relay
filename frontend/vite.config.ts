@@ -50,9 +50,17 @@ function stableReleaseAssets(): Plugin {
       if (javascript.length !== 1 || javascript[0]?.fileName !== 'assets/app.js') {
         this.error(`Expected only assets/app.js; found ${javascript.map((item) => item.fileName).join(', ')}`);
       }
+      const appJavascript = javascript[0];
+      if (!appJavascript || appJavascript.type !== 'chunk') {
+        this.error('Vite did not emit assets/app.js as a JavaScript chunk');
+      }
       if (stylesheets.length !== 1 || stylesheets[0]?.fileName !== 'assets/app.css') {
         this.error(`Expected only assets/app.css; found ${stylesheets.map((item) => item.fileName).join(', ')}`);
       }
+
+      const whitespaceTable = '` \t\n\\r\\f\\xA0\\v\uFEFF`';
+      const escapedWhitespaceTable = '" \\t\\n\\r\\f\\xA0\\v\\uFEFF"';
+      appJavascript.code = appJavascript.code.replaceAll(whitespaceTable, escapedWhitespaceTable);
 
       const html = bundle['index.html'];
       if (!html || html.type !== 'asset' || typeof html.source !== 'string') {

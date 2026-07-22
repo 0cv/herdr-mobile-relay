@@ -9,9 +9,9 @@
     questionInteraction,
     sortedAgents,
   } from '$lib/agents';
-  import { showAgentStatusLine } from '$lib/preferences';
+  import { interfaceSize, showAgentStatusLine } from '$lib/preferences';
   import { replaceView } from '$lib/router';
-  import { relayStore } from '$lib/store';
+  import { relayStore, CommandError } from '$lib/store';
   import { claudeMobileTerminalContent, lastCompletedResponse, renderTerminalContent } from '$lib/terminal';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
@@ -101,6 +101,13 @@
     void tick().then(() => document.getElementById(optionId)?.scrollIntoView?.({ block: 'nearest' }));
   });
 
+  $effect(() => {
+    const resizeFor = [composer, $interfaceSize];
+    void tick().then(() => {
+      if (resizeFor[0] === composer && resizeFor[1] === $interfaceSize) resizeComposer();
+    });
+  });
+
   onMount(() => {
     let mounted = true;
     void relayStore.loadSlashCommands(agent).then((catalog) => {
@@ -182,7 +189,7 @@
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
       relayStore.showToast('Prompt sent.');
     } catch (error) {
-      if (!composer) composer = text;
+      if (!composer && !(error as CommandError).data?.dispatched_unknown) composer = text;
       relayStore.showToast((error as Error).message, true);
     }
     setTimeout(() => relayStore.readPane(agent), 500);
@@ -191,6 +198,16 @@
   function composerInput() {
     if (dismissedSlashQuery !== composer) dismissedSlashQuery = null;
     activeSlashIndex = 0;
+  }
+
+  function resizeComposer() {
+    if (!composerElement) return;
+    composerElement.style.height = 'auto';
+    const maxHeight = Number.parseFloat(getComputedStyle(composerElement).maxHeight);
+    const contentHeight = composerElement.scrollHeight;
+    const capped = Number.isFinite(maxHeight) && contentHeight > maxHeight;
+    composerElement.style.height = `${capped ? maxHeight : contentHeight}px`;
+    composerElement.style.overflowY = capped ? 'auto' : 'hidden';
   }
 
   async function selectSlashCommand(command: SlashCommand) {

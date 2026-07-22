@@ -1,5 +1,16 @@
 export type RelayStatus = 'connecting' | 'connected' | 'disconnected';
 
+export type AgentInventoryState = 'starting' | 'ready' | 'error';
+
+export interface AgentInventoryStatus {
+  state: AgentInventoryState;
+  errorCode: string;
+  message: string;
+  lastAttemptAt: number;
+  lastSuccessAt: number;
+  stale: boolean;
+}
+
 export interface RelayConfig {
   id: string;
   label: string;
@@ -118,6 +129,7 @@ export interface RelayConnectionView {
   revision: string;
   update: RelayUpdateStatus;
   appDeploy: AppDeploymentStatus;
+  inventory: AgentInventoryStatus;
   capabilities: string[];
   agentProfiles: AgentProfile[];
   directoryBrowser: DirectoryListing | null;

@@ -55,12 +55,127 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
   });
 
+  it('binds approvals to their blocked event and coalesces pane polling', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({
+      type: 'agents',
+      agents: [{ pane_id: 'w1:p1', status: 'blocked', event_id: 'event-1', agent: 'codex' }],
+    });
+    const agent = get(relayStore.agents)[0];
+
+    relayStore.readPane(agent);
+    relayStore.readPane(agent);
+    expect(socket.sent.map((payload) => JSON.parse(payload)).filter((message) => message.type === 'read_pane')).toHaveLength(1);
+    socket.message({ type: 'pane_content', pane_id: 'w1:p1', content: 'blocked', format: 'ansi' });
+    relayStore.readPane(agent);
+    expect(socket.sent.map((payload) => JSON.parse(payload)).filter((message) => message.type === 'read_pane')).toHaveLength(2);
+
+    const approval = relayStore.respond(agent, 0, 2, 'Approve once');
+    const command = socket.sent.map((payload) => JSON.parse(payload)).findLast((message) => message.type === 'respond');
+    expect(command).toMatchObject({ pane_id: 'w1:p1', event_id: 'event-1', index: 0, total: 2 });
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
+    await expect(approval).resolves.toBe(true);
+  });
+
+  it('deletes persisted activity through its relay and clears the merged view', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, host: 'fedora',
+      capabilities: ['clear_activities'], agent_profiles: [],
+    });
+    socket.message({
+      type: 'activity_history',
+      activities: [{ id: 'activity-1', timestamp: 123, summary: 'Prompt sent' }],
+    });
+    expect(get(relayStore.activities)).toHaveLength(1);
+
+    const pending = relayStore.clearActivities();
+    const command = JSON.parse(socket.sent.at(-1)!);
+    expect(command).toMatchObject({ type: 'clear_activities', protocol: 2 });
+    socket.message({
+      type: 'command_result', request_id: command.request_id,
+      action: 'clear_activities', ok: true, phase: 'completed',
+    });
+
+    await expect(pending).resolves.toBeUndefined();
+    expect(get(relayStore.activities)).toEqual([]);
+  });
+
   it('rejects mutations on protocol mismatch', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({ type: 'push_config', protocol: 1, host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
     await expect(relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' })).rejects.toThrow(/protocol v1/);
+  });
+
+  it('retains agents, blocks mutations, and recovers when inventory becomes ready', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      host: 'fedora',
+      capabilities: [],
+      agent_profiles: [],
+      inventory: { state: 'ready', last_attempt_at: 100, last_success_at: 100 },
+    });
+    socket.message({
+      type: 'agents',
+      agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Relay', agent: 'codex' }],
+    });
+    socket.message({
+      type: 'inventory_status',
+      state: 'error',
+      error_code: 'protocol_mismatch',
+      message: 'Run `herdr server live-handoff` on this computer, then refresh.',
+      last_attempt_at: 123,
+      last_success_at: 100,
+      stale: true,
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const before = socket.sent.length;
+
+    await expect(
+      relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' }),
+    ).rejects.toThrow(/live-handoff/);
+    expect(socket.sent).toHaveLength(before);
+    expect(get(relayStore.agents)).toHaveLength(1);
+    expect(get(relayStore.connections).get(relayId)?.inventory).toMatchObject({
+      state: 'error',
+      errorCode: 'protocol_mismatch',
+      stale: true,
+    });
+
+    socket.message({
+      type: 'inventory_status',
+      state: 'error',
+      error_code: 'protocol_mismatch',
+      message: 'Run `herdr server live-handoff` on this computer, then refresh.',
+      last_attempt_at: 124,
+      last_success_at: 0,
+      stale: false,
+    });
+    socket.message({ type: 'agents', agents: [] });
+    expect(get(relayStore.agents)).toHaveLength(1);
+
+    socket.message({
+      type: 'inventory_status',
+      state: 'ready',
+      error_code: '',
+      message: '',
+      last_attempt_at: 200,
+      last_success_at: 200,
+      stale: false,
+    });
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' });
+    const command = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true });
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(get(relayStore.connections).get(relayId)?.inventory.state).toBe('ready');
   });
 
   it('checks and schedules an exact relay update across a protocol mismatch', async () => {
@@ -234,6 +349,8 @@ describe('relay command store', () => {
     const [fedora, mac] = MockWebSocket.instances.slice(-2);
     fedora.open();
     mac.open();
+    fedora.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
+    mac.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
     fedora.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Fedora app' }] });
     mac.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Mac app' }] });
     const agents = get(relayStore.agents);
@@ -450,6 +567,53 @@ describe('relay command store', () => {
     expect(get(relayStore.connections).get(relayId)?.directoryBrowser).toBeNull();
   });
 
+  it('keeps the newest directory listing when responses arrive out of order', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: ['directory_browser'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+
+    const older = relayStore.listDirectories(relayId, '/home/test/older');
+    const olderRequest = JSON.parse(socket.sent.at(-1)!);
+    const newer = relayStore.listDirectories(relayId, '/home/test/newer');
+    const newerRequest = JSON.parse(socket.sent.at(-1)!);
+
+    socket.message({
+      type: 'command_result', request_id: newerRequest.request_id, ok: true, phase: 'confirmed',
+      data: { current: { path: '/home/test/newer', label: 'newer' }, parent: '/home/test', directories: [] },
+    });
+    socket.message({
+      type: 'command_result', request_id: olderRequest.request_id, ok: true, phase: 'confirmed',
+      data: { current: { path: '/home/test/older', label: 'older' }, parent: '/home/test', directories: [] },
+    });
+
+    await expect(newer).resolves.toMatchObject({ current: { path: '/home/test/newer' } });
+    await expect(older).resolves.toMatchObject({ current: { path: '/home/test/older' } });
+    expect(get(relayStore.connections).get(relayId)?.directoryBrowser?.current.path).toBe('/home/test/newer');
+    expect(get(relayStore.connections).get(relayId)?.directoryLoading).toBe(false);
+  });
+
+  it('keeps waiting for the final result once the relay accepts a command', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      inventory: { state: 'ready', last_attempt_at: 100, last_success_at: 100 },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+
+    const pending = relayStore.sendCommand(relayId, { type: 'respond', pane_id: 'w1:p1', index: 0, total: 2 }, 12_000);
+    const command = JSON.parse(socket.sent.at(-1)!);
+    await vi.advanceTimersByTimeAsync(9_000);
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'accepted' });
+
+    // Past the original 12 second send timeout the request must still be open.
+    await vi.advanceTimersByTimeAsync(5_000);
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
+    await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
+  });
+
   it('loads and caches slash commands for one agent identity', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -530,6 +694,45 @@ describe('relay command store', () => {
       data: { commands: [], truncated: false },
     });
     await refreshed;
+  });
+
+  it('does not let an older slash-command response overwrite a newer identity cache', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora',
+      capabilities: ['slash_commands'], agent_profiles: [],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agentOld = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'codex', cwd: '/home/test/old',
+    };
+    const agentNew = { ...agentOld, cwd: '/home/test/new' };
+
+    const olderPromise = relayStore.loadSlashCommands(agentOld);
+    const olderRequest = socket.sent.map((p) => JSON.parse(p)).at(-1)!;
+    const newerPromise = relayStore.loadSlashCommands(agentNew);
+    const newerRequest = socket.sent.map((p) => JSON.parse(p)).at(-1)!;
+    expect(olderRequest.request_id).not.toBe(newerRequest.request_id);
+
+    socket.message({
+      type: 'command_result', request_id: newerRequest.request_id, ok: true, phase: 'completed',
+      data: { commands: [{ command: '/new', description: 'New', source: 'builtin' }], truncated: false },
+    });
+    await newerPromise;
+
+    socket.message({
+      type: 'command_result', request_id: olderRequest.request_id, ok: true, phase: 'completed',
+      data: { commands: [{ command: '/old', description: 'Old', source: 'builtin' }], truncated: false },
+    });
+    await olderPromise;
+
+    const cached = relayStore.loadSlashCommands(agentNew);
+    await expect(cached).resolves.toMatchObject({ commands: [{ command: '/new' }] });
+    const allRequests = socket.sent.map((p) => JSON.parse(p))
+      .filter((m) => m.type === 'list_slash_commands');
+    expect(allRequests).toHaveLength(2);
   });
 
   it('keeps a newer responding window when an older timer is cleared', async () => {

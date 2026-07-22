@@ -28,9 +28,14 @@ load_env_file()
 
 event = json.loads(os.environ.get("HERDR_PLUGIN_EVENT_JSON", "{}"))
 data = event.get("data", {})
+herdr_socket_path = Path(
+    os.environ.get("HERDR_SOCKET_PATH")
+    or Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "herdr" / "herdr.sock"
+).expanduser().resolve(strict=False)
 
 payload = json.dumps({
     "type": "agent_event",
+    "socket_path": str(herdr_socket_path),
     "pane_id": data.get("pane_id", ""),
     "tab_id": data.get("tab_id", ""),
     "tab_label": data.get("tab_label") or data.get("tab_name") or data.get("label") or "",

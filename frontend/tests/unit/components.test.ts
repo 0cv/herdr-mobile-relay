@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
+import ActivityView from '$components/ActivityView.svelte';
 import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
@@ -13,6 +14,25 @@ const blockedAgent: Agent = {
 };
 
 describe('accessible Svelte interactions', () => {
+  it('requires confirmation before deleting all activity', async () => {
+    const user = userEvent.setup();
+    relayStore.activities.set([{
+      id: 'activity-1', timestamp: 123, summary: 'Prompt sent',
+      relay_id: 'fedora', relay_label: 'Fedora', activity_key: 'fedora:activity-1',
+    }]);
+    const clear = vi.spyOn(relayStore, 'clearActivities').mockResolvedValue();
+    render(ActivityView);
+
+    await user.click(screen.getByRole('button', { name: 'Delete all' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete all activity?' });
+    expect(dialog).toHaveTextContent('permanently deletes the activity history');
+    expect(clear).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'Delete all' }));
+    expect(clear).toHaveBeenCalledOnce();
+
+    relayStore.activities.set([]);
+  });
+
   it('filters slash commands and fills the composer without submitting', async () => {
     const user = userEvent.setup();
     const agent: Agent = {
@@ -66,6 +86,55 @@ describe('accessible Svelte interactions', () => {
     await user.click(screen.getByRole('button', { name: /Open relay on Fedora/ }));
     expect(onopen).toHaveBeenCalledWith(blockedAgent);
     respond.mockRestore();
+  });
+
+  it('shows degraded inventory, keeps stale agents visible, and disables approvals', () => {
+    const connections = new Map([['fedora', {
+      status: 'connected',
+      inventory: {
+        state: 'error',
+        errorCode: 'protocol_mismatch',
+        message: 'Run `herdr server live-handoff` on this computer, then refresh.',
+        lastAttemptAt: 123,
+        lastSuccessAt: 100,
+        stale: true,
+      },
+    } as any]]);
+    const { container } = render(AgentList, {
+      agents: [blockedAgent],
+      relays: [{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }],
+      connections,
+      responding: new Set<string>(),
+      onopen: vi.fn(),
+    });
+
+    expect(screen.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toHaveTextContent('live-handoff');
+    expect(screen.getByRole('button', { name: 'Approve once' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Open relay on Fedora/ })).toBeDisabled();
+    expect(container.querySelector('.agent-card')).toHaveClass('stale');
+    expect(screen.queryByText('No chat agents are running.')).not.toBeInTheDocument();
+  });
+
+  it('distinguishes successful empty inventory from loading inventory', () => {
+    const relay = { id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' };
+    const readyConnections = new Map([['fedora', {
+      status: 'connected', inventory: { state: 'ready' },
+    } as any]]);
+    const { unmount } = render(AgentList, {
+      agents: [], relays: [relay], connections: readyConnections,
+      responding: new Set<string>(), onopen: vi.fn(),
+    });
+    expect(screen.getByText('No chat agents are running.')).toBeInTheDocument();
+    unmount();
+
+    const loadingConnections = new Map([['fedora', {
+      status: 'connected', inventory: { state: 'starting' },
+    } as any]]);
+    render(AgentList, {
+      agents: [], relays: [relay], connections: loadingConnections,
+      responding: new Set<string>(), onopen: vi.fn(),
+    });
+    expect(screen.getByText('Loading agents…')).toBeInTheDocument();
   });
 
   it('shows the Herdr tab name and session in the card meta line', () => {

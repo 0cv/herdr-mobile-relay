@@ -158,13 +158,53 @@ async function commandsForSocket(page: Page, index: number) {
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
   await server(page, index, {
     type: 'push_config', protocol: 2, version: 'abc1234', host: index ? 'mac' : 'fedora',
-    capabilities: ['directory_browser', 'structured_questions', 'slash_commands'],
+    capabilities: ['clear_activities', 'directory_browser', 'structured_questions', 'slash_commands'],
     agent_profiles: [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
     ...overrides,
   });
 }
 
 const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: 'secret' };
+
+test('keeps activity cards inside the page and confirms permanent deletion', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'activity_history',
+    activities: [{
+      id: 'activity-1', timestamp: Date.now(), summary: 'codex completed',
+      project: 'herdr-mobile-relay', agent: 'codex', status: 'completed',
+    }],
+  });
+
+  await page.getByRole('button', { name: 'Activity history' }).click();
+  const activity = page.getByRole('button', { name: /codex completed/ });
+  await expect(activity).toBeVisible();
+  const headingBox = await page.getByRole('heading', { name: 'Activity', level: 2 }).boundingBox();
+  const deleteBox = await page.getByRole('button', { name: 'Delete all' }).boundingBox();
+  const box = await activity.boundingBox();
+  const chevronBox = await activity.locator('.activity-chevron').boundingBox();
+  const viewport = page.viewportSize();
+  expect(headingBox).not.toBeNull();
+  expect(deleteBox).not.toBeNull();
+  expect(box).not.toBeNull();
+  expect(chevronBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  const headingCenter = headingBox!.y + headingBox!.height / 2;
+  const deleteCenter = deleteBox!.y + deleteBox!.height / 2;
+  expect(Math.abs(headingCenter - deleteCenter)).toBeLessThanOrEqual(2);
+  expect(viewport!.width - (box!.x + box!.width)).toBeGreaterThanOrEqual(10);
+  expect(box!.x + box!.width - (chevronBox!.x + chevronBox!.width)).toBeGreaterThanOrEqual(10);
+
+  await page.getByRole('button', { name: 'Delete all' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Delete all activity?' });
+  await expect(dialog).toContainText('Running agents and their conversations are not affected.');
+  await dialog.getByRole('button', { name: 'Delete all' }).click();
+  await expect(page.getByText('No activity yet.')).toBeVisible();
+  expect((await commands(page)).find((command) => command.type === 'clear_activities'))
+    .toMatchObject({ type: 'clear_activities', protocol: 2 });
+});
 
 test('keeps device verification modal until native authentication succeeds', async ({ page }) => {
   await page.addInitScript(() => {
@@ -270,6 +310,44 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
 
   await page.evaluate(() => (window as any).__relayClose(0));
   await expect.poll(() => socketCount(page)).toBe(2);
+});
+
+test('shows inventory failure instead of zero agents and recovers without reconnecting', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    inventory: {
+      state: 'error',
+      error_code: 'protocol_mismatch',
+      message: 'Run `herdr server live-handoff` on this computer, then refresh.',
+      last_attempt_at: 123,
+      last_success_at: 0,
+      stale: false,
+    },
+  });
+  await server(page, 0, { type: 'agents', agents: [] });
+
+  await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toContainText('live-handoff');
+  await expect(page.getByText('No chat agents are running.')).toBeHidden();
+  await expect(page.getByRole('img', { name: /agent inventory unavailable/ })).toBeVisible();
+
+  await server(page, 0, {
+    type: 'inventory_status',
+    state: 'ready',
+    error_code: '',
+    message: '',
+    last_attempt_at: 200,
+    last_success_at: 200,
+    stale: false,
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Recovered relay', agent: 'codex' }],
+  });
+
+  await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toBeHidden();
+  await expect(page.getByText('Recovered relay')).toBeVisible();
+  expect(await socketCount(page)).toBe(1);
 });
 
 test('confirms and tracks one relay update through its verified reconnect', async ({ page }) => {
@@ -453,9 +531,9 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 1);
   await expect.poll(async () =>
     (await commandsForSocket(page, 1)).some((command) => command.type === 'read_pane')).toBe(true);
-  await handshake(page, 1);
   await server(page, 1, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'fresh output after resume',
   });
@@ -623,6 +701,45 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
     .some((command) => command.type === 'read_pane' && command.lines === 10000)).toBe(true);
 });
 
+test('scales and expands the prompt composer for multiline text', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Composer app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Composer app on Fedora' }).click();
+
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await composer.fill('One line');
+  const compactHeight = (await composer.boundingBox())!.height;
+  await composer.fill('Line one\nLine two\nLine three\nLine four');
+  await expect.poll(async () => (await composer.boundingBox())!.height).toBeGreaterThan(compactHeight + 20);
+
+  await composer.fill(Array.from({ length: 30 }, (_, index) => `Line ${index + 1}`).join('\n'));
+  expect(await composer.evaluate((element) => {
+    const textarea = element as HTMLTextAreaElement;
+    return textarea.scrollHeight > textarea.clientHeight && getComputedStyle(textarea).overflowY === 'auto';
+  })).toBe(true);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sizes = page.getByRole('group', { name: 'Interface Size' });
+  await sizes.getByRole('button', { name: 'Regular' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await composer.fill('One line');
+  const regularHeight = (await composer.boundingBox())!.height;
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await sizes.getByRole('button', { name: 'Large' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await composer.fill('One line');
+  const largeHeight = (await composer.boundingBox())!.height;
+
+  expect(regularHeight).toBeGreaterThan(compactHeight);
+  expect(largeHeight).toBeGreaterThan(regularHeight);
+});
+
 test('handles approvals, chained questions, and notification routing', async ({ page }) => {
   const target = encodeURIComponent(JSON.stringify({
     pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'notice-1',
@@ -631,8 +748,11 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
+  expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', event_id: 'notice-1', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
   await expect(page.getByRole('main', { name: /Terminal for Approvals/ })).toBeVisible();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(1);
+  expect((await commands(page)).find((command) => command.type === 'respond')).toMatchObject({ event_id: 'notice-1' });
 
   const first = {
     id: 'q1', kind: 'single_select', question: 'Choose deployment scope',
@@ -668,6 +788,37 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await server(page, 0, working);
   await server(page, 0, working);
   await expect(composer).toBeEnabled();
+});
+
+test('rejects stale notification approvals and retries transient failures', async ({ page }) => {
+  const staleTarget = encodeURIComponent(JSON.stringify({
+    pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'old-event',
+  }));
+  await boot(page, [fedora], `/#notify=${staleTarget}`);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', event_id: 'new-event', project: 'Stale approval', agent: 'codex' }],
+  });
+  await expect(page.getByRole('status').filter({ hasText: /older approval request/ })).toBeVisible();
+  expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
+
+  const retryTarget = encodeURIComponent(JSON.stringify({
+    pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'new-event',
+  }));
+  await page.evaluate(() => (window as any).__relayAutoCommands(false));
+  await page.evaluate((target) => { location.hash = `#notify=${target}`; }, retryTarget);
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(1);
+  const first = (await commands(page)).filter((command) => command.type === 'respond')[0];
+  await server(page, 0, {
+    type: 'command_result', request_id: first.request_id, action: 'respond', ok: false, phase: 'failed', error: 'Relay reconnecting',
+  });
+  await expect(page.getByRole('status').filter({ hasText: 'Relay reconnecting' })).toBeVisible();
+
+  await page.evaluate(() => (window as any).__relayAutoCommands(true));
+  await page.evaluate((target) => { location.hash = `#notify=${target}`; }, retryTarget);
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(2);
 });
 
 test('restores structured questions from the cached agent snapshot after reload', async ({ page }) => {
@@ -1003,6 +1154,46 @@ test('resets the home page scroll offset before opening a terminal', async ({ pa
     const bounds = element.getBoundingClientRect();
     return Math.round(window.innerHeight - bounds.bottom);
   })).toBe(0);
+});
+
+test('ignores a directory result after switching computers', async ({ page }) => {
+  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: 'secret' };
+  await boot(page, [fedora, mac]);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 0);
+  await handshake(page, 1);
+  await page.getByRole('button', { name: 'Start agent' }).click();
+  await expect.poll(async () => (await commandsForSocket(page, 0)).filter((command) => command.type === 'list_directories').length).toBe(1);
+  const fedoraDirectory = (await commandsForSocket(page, 0)).find((command) => command.type === 'list_directories')!;
+
+  await page.getByLabel('Computer').selectOption('mac');
+  await expect.poll(async () => (await commandsForSocket(page, 1)).filter((command) => command.type === 'list_directories').length).toBe(1);
+  const macDirectory = (await commandsForSocket(page, 1)).find((command) => command.type === 'list_directories')!;
+  await server(page, 1, {
+    type: 'command_result', request_id: macDirectory.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/Users/test/mac-project', label: '~/mac-project' },
+      parent: '/Users/test', directories: [],
+    },
+  });
+  await expect(page.getByRole('button', { name: '~/mac-project' })).toBeVisible();
+
+  await server(page, 0, {
+    type: 'command_result', request_id: fedoraDirectory.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/home/test/fedora-project', label: '~/fedora-project' },
+      parent: '/home/test', directories: [],
+    },
+  });
+  await expect(page.getByRole('button', { name: '~/mac-project' })).toBeVisible();
+  await expect(page.getByLabel('Name')).toHaveValue('mac-project-codex');
+
+  await page.getByRole('button', { name: 'Start Agent', exact: true }).click();
+  await expect.poll(async () => (await commandsForSocket(page, 1)).some((command) => command.type === 'agent_start')).toBe(true);
+  expect((await commandsForSocket(page, 1)).find((command) => command.type === 'agent_start')).toMatchObject({
+    cwd: '/Users/test/mac-project', name: 'mac-project-codex', profile_id: 'codex',
+  });
+  expect((await commandsForSocket(page, 0)).filter((command) => command.type === 'agent_start')).toHaveLength(0);
 });
 
 test('launches and manages agent lifecycle commands', async ({ page }) => {

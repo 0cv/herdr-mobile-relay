@@ -31,11 +31,13 @@ Each computer runs its own local relay. The phone app connects to those relays d
 
 ## Quick Start
 
-Requirements: Herdr 0.7.0 or newer, Git, and `curl`.
+Requirements: Herdr 0.7.5 or newer, Git, and `curl`.
 
 ```bash
 herdr plugin install 0cv/herdr-mobile-relay
 ```
+
+Herdr 0.7.5 stores installed plugins globally for the current user. If this plugin was installed only inside a named Herdr 0.7.3 session, install it once again after upgrading; existing plugin configuration and state remain in place.
 
 The setup menu normally opens after installation. If it does not, run:
 
@@ -279,12 +281,13 @@ make web-release-check
 - **Port 8375 is busy:** stop the earlier quick start or installed service before starting another relay.
 - **Temporary link does not open:** keep the Quick Start pane open and rerun it if `cloudflared` exited; every run creates a new hostname.
 - **App opens but does not connect:** reopen the complete setup link, including its `#setup=...` fragment.
+- **Relay connects but agents are unavailable:** inspect `/healthz` for the inventory state. If it reports `protocol_mismatch`, run `herdr server live-handoff`; the relay will recover on its next poll without another restart.
 - **Stable setup stops:** preserve its state and rerun the exact command printed in the error.
 - **Need to add the relay to another phone:** choose **Show Phone Setup QR** or invoke the `setup-link` plugin action.
 - **Stable hostname already exists:** choose another hostname or remove the unrelated DNS record yourself; the wizard never overwrites it.
 - **Need a support snapshot:** run the plugin `status` action.
 
-`GET /health` returns `ok`. `GET /healthz` returns the relay instance, product version, Git revision, and protocol used by the stable wizard, updater, and Settings diagnostics.
+`GET /health` returns process liveness. `GET /healthz` returns the relay instance, product version, Git revision, protocol, and sanitized Herdr inventory readiness used by the stable wizard, updater, and Settings diagnostics. Its top-level `status` describes the relay process so an unrelated Herdr inventory problem cannot roll back a valid relay update. `GET /readyz` returns HTTP 200 only after a Herdr pane inventory succeeds; starting or degraded inventory returns HTTP 503.
 
 ## License
 
