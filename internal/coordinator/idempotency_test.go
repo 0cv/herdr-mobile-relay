@@ -30,7 +30,7 @@ func recordingHerdr(t *testing.T, dir, record, stdout string) string {
 func TestDuplicateAgentStartCreatesOnePane(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "starts.log")
-	bin := recordingHerdr(t, dir, record, `{\"result\":{\"pane_id\":\"pane-new\"}}`)
+	bin := recordingHerdr(t, dir, record, `{"result":{"pane_id":"pane-new"}}`)
 
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 
@@ -60,13 +60,13 @@ func TestDuplicateAgentStartCreatesOnePane(t *testing.T) {
 func TestAgentStartRetryDoesNotResubmitInitialPrompt(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "starts.log")
-	bin := recordingHerdr(t, dir, record, `{\"result\":{\"pane_id\":\"pane-new\"}}`)
+	bin := recordingHerdr(t, dir, record, `{"result":{"pane_id":"pane-new"}}`)
 
 	// Pre-check: verify the script produces valid JSON output directly.
 	preDir := filepath.Join(dir, "pre")
 	os.MkdirAll(preDir, 0o755)
 	preRecord := filepath.Join(preDir, "pre.log")
-	preBin := recordingHerdr(t, preDir, preRecord, `{\"result\":{\"pane_id\":\"pane-new\"}}`)
+	preBin := recordingHerdr(t, preDir, preRecord, `{"result":{"pane_id":"pane-new"}}`)
 	preCmd := exec.Command(preBin, "agent", "start", "pre", "--kind", "claude", "--pane", "p", "--timeout", "30000")
 	preOut, preErr := preCmd.CombinedOutput()
 	if preErr != nil {
@@ -159,7 +159,7 @@ func TestLedgerReplayReturnsConfirmationWatchPhase(t *testing.T) {
 func TestAgentStopRetryDoesNotCloseOrBumpTwice(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "stops.log")
-	bin := recordingHerdr(t, dir, record, `{\"ok\":true}`)
+	bin := recordingHerdr(t, dir, record, `{"ok":true}`)
 	state := NewState(testLogger())
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
 	message := map[string]any{

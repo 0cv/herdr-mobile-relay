@@ -22,7 +22,7 @@ import (
 func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, `{\"ok\":true}`), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 
 	// Occupy the pane FIFO so the prompt captures the generation and then queues.
 	slot := d.paneSlot("pane-1")
@@ -57,7 +57,7 @@ func TestMutationAbortsWhenGenerationAdvancesWhileQueued(t *testing.T) {
 func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "sends.log")
-	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, `{\"ok\":true}`), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "blocked"}}, d.state.RevisionCounter())
 	eventID := blockedEventID(t, d, "pane-1")
 
