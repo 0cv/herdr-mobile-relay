@@ -617,7 +617,9 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.udp.Run(ctx)
 	}
 	go s.pruneUploads(ctx)
-	go s.writeSupportLoop(ctx)
+	var bg sync.WaitGroup
+	bg.Add(1)
+	go func() { defer bg.Done(); s.writeSupportLoop(ctx) }()
 	go s.watchJobStates(ctx)
 	go s.updateCheckLoop(ctx)
 
@@ -645,9 +647,11 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.webH != nil {
 			_ = s.webH.Close()
 		}
+		bg.Wait()
 		return nil
 	case err := <-errCh:
 		if err == http.ErrServerClosed {
+			bg.Wait()
 			return nil
 		}
 		return err
