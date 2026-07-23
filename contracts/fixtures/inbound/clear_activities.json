@@ -1,0 +1,5 @@
+{
+  "type": "clear_activities",
+  "protocol": 2,
+  "request_id": "req-clear-activities"
+}

@@ -1,0 +1,83 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    name: Go quality and black-box
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.5
+          cache: true
+      - name: Format
+        run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: make shell-check production-path-audit
+
+  frontend:
+    name: Frontend and mobile browsers (Node 24)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --prefix frontend
+      - run: make frontend-check
+      - run: npm --prefix frontend exec -- playwright install --with-deps chromium webkit
+      - run: make frontend-browser
+      - id: web-changes
+        name: Check for release bundle changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BASE_SHA" HEAD -- web; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.web-changes.outputs.changed == 'true'
+        run: make web-release-check
+
+  release:
+    name: Complete release bundles
+    runs-on: ubuntu-latest
+    needs: [go, frontend]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.5
+          cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Build, manifest, checksum, and offline-verify four targets
+        run: |
+          make cross-build
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"
+          scripts/package-release.sh "$version" "$GITHUB_SHA" dist/release
+          scripts/check-installed-release.sh \
+            "dist/release/herdr-mobile-relay_${version}_linux_amd64.tar.gz"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-bundles
+          path: dist/release/

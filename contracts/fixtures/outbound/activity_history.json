@@ -1,0 +1,16 @@
+{
+  "type": "activity_history",
+  "activities": [
+    {
+      "id": "1753178400000000000",
+      "timestamp": 1753178400000,
+      "kind": "prompt",
+      "status": "sent",
+      "summary": "Hello, fix the bug in main.go",
+      "pane_id": "pane-1",
+      "agent": "claude",
+      "project": "project",
+      "request_id": "req-001"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "type": "command",
+  "action": "agent_start",
+  "request_id": "req-004",
+  "protocol": 2,
+  "profile_id": "claude",
+  "name": "fix-bug",
+  "cwd": "/home/user/project",
+  "prompt": "Fix the failing test"
+}

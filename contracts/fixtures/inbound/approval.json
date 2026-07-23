@@ -1,0 +1,9 @@
+{
+  "type": "command",
+  "action": "respond",
+  "request_id": "req-003",
+  "protocol": 2,
+  "pane_id": "pane-1",
+  "event_id": "evt-abc123",
+  "index": 0
+}

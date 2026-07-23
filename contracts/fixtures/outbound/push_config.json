@@ -1,0 +1,23 @@
+{
+  "type": "push_config",
+  "vapid_public_key": "BTest-key-base64url",
+  "host": "dev-workstation",
+  "protocol": 2,
+  "version": "0.9.0",
+  "release_version": "0.9.0",
+  "revision": "abc123",
+  "update": {"state": "current"},
+  "app_deploy": {"state": "idle", "configured": false},
+  "capabilities": [
+    "clear_activities",
+    "directory_browser",
+    "self_update",
+    "structured_questions",
+    "slash_commands"
+  ],
+  "inventory": {"state": "ready"},
+  "agent_profiles": [
+    {"id": "claude", "label": "Claude"},
+    {"id": "codex", "label": "Codex"}
+  ]
+}

@@ -1,0 +1,221 @@
+package coordinator
+
+import (
+	"errors"
+	"io"
+	"log/slog"
+	"testing"
+)
+
+func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) {
+	state := NewState(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
+	if !state.InventoryReady() {
+		t.Fatal("inventory should be ready after a successful commit")
+	}
+	state.MarkInventoryFailure(errors.New("offline"))
+	if state.InventoryReady() {
+		t.Fatal("inventory remained ready after a failed poll")
+	}
+	status := state.InventoryStatus()
+	if status["state"] != "error" || status["stale"] != true {
+		t.Fatalf("inventory status = %+v", status)
+	}
+	if state.AgentCount() != 1 {
+		t.Fatal("failed poll discarded the last known snapshot")
+	}
+}
+
+func TestTopologyChurnMarksInventoryDegraded(t *testing.T) {
+	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, 0)
+	state.MarkTopologyDegraded()
+	status := state.InventoryStatus()
+	if status["state"] != "error" || status["error_code"] != "topology_churn" || status["stale"] != true {
+		t.Fatalf("degraded inventory status = %+v", status)
+	}
+}
+
+func testState() *State {
+	return NewState(slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func TestCommitInventoryAndSnapshot(t *testing.T) {
+	s := testState()
+
+	agents := []*AgentState{
+		{PaneID: "p1", Status: "working", Agent: "claude"},
+		{PaneID: "p2", Status: "idle", Agent: "codex"},
+	}
+	s.CommitInventory(agents, s.RevisionCounter())
+
+	snap := s.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("snapshot len = %d, want 2", len(snap))
+	}
+	if s.AgentCount() != 2 {
+		t.Errorf("agent count = %d, want 2", s.AgentCount())
+	}
+}
+
+func TestDisplayedStatusUnseenDone(t *testing.T) {
+	s := testState()
+
+	s.CommitInventory([]*AgentState{
+		{PaneID: "p1", Status: "working"},
+	}, s.RevisionCounter())
+
+	// Transition to done
+	s.CommitEvent("p1", "done", 1000)
+	if got := s.DisplayedStatus("p1"); got != "done" {
+		t.Errorf("displayed = %q, want done", got)
+	}
+
+	// Transition to idle (should show "done" because unseen)
+	s.CommitEvent("p1", "idle", 2000)
+	if got := s.DisplayedStatus("p1"); got != "done" {
+		t.Errorf("displayed after idle = %q, want done (unseen)", got)
+	}
+
+	// Acknowledge
+	s.AcknowledgePane("p1")
+	if got := s.DisplayedStatus("p1"); got != "idle" {
+		t.Errorf("displayed after ack = %q, want idle", got)
+	}
+}
+
+func TestAttentionClearsUnseen(t *testing.T) {
+	s := testState()
+
+	s.CommitInventory([]*AgentState{
+		{PaneID: "p1", Status: "idle"},
+	}, s.RevisionCounter())
+
+	s.CommitEvent("p1", "done", 1000)
+	if got := s.DisplayedStatus("p1"); got != "done" {
+		t.Fatalf("expected done, got %q", got)
+	}
+
+	// New attention status clears unseen
+	s.CommitEvent("p1", "working", 3000)
+	if got := s.DisplayedStatus("p1"); got != "working" {
+		t.Errorf("displayed = %q, want working", got)
+	}
+
+	// A new attention cycle followed by idle is a new unseen completion.
+	s.CommitEvent("p1", "idle", 4000)
+	if got := s.DisplayedStatus("p1"); got != "done" {
+		t.Errorf("displayed = %q, want done", got)
+	}
+}
+
+func TestTopologyGenerationBumps(t *testing.T) {
+	s := testState()
+
+	gen1 := s.TopologyGeneration()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "idle"}}, s.RevisionCounter())
+	gen2 := s.TopologyGeneration()
+
+	if gen2 <= gen1 {
+		t.Errorf("topology gen did not bump: %d -> %d", gen1, gen2)
+	}
+}
+
+func TestPaneRemoval(t *testing.T) {
+	s := testState()
+
+	s.CommitInventory([]*AgentState{
+		{PaneID: "p1", Status: "working"},
+		{PaneID: "p2", Status: "idle"},
+	}, s.RevisionCounter())
+
+	// Remove p2
+	s.CommitInventory([]*AgentState{
+		{PaneID: "p1", Status: "working"},
+	}, s.RevisionCounter())
+
+	if s.AgentCount() != 1 {
+		t.Errorf("agent count = %d, want 1", s.AgentCount())
+	}
+	snap := s.Snapshot()
+	if len(snap) != 1 || snap[0].PaneID != "p1" {
+		t.Errorf("unexpected snapshot: %+v", snap)
+	}
+}
+
+func TestFinishedNotificationOneShot(t *testing.T) {
+	s := testState()
+
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "idle"}}, s.RevisionCounter())
+
+	if !s.RegisterFinishedNotification("p1") {
+		t.Error("first registration should return true")
+	}
+	if s.RegisterFinishedNotification("p1") {
+		t.Error("second registration should return false")
+	}
+}
+
+func TestFinishedNotificationRejectsSupersededTransition(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
+	s.CommitEvent("p1", "idle", 1000)
+	revision := s.Revision("p1")
+	s.CommitEvent("p1", "working", 2000)
+	if s.RegisterFinishedNotificationForTransition("p1", "idle", revision) {
+		t.Fatal("superseded completion registered a notification")
+	}
+}
+
+func TestRevisionTracking(t *testing.T) {
+	s := testState()
+
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "idle"}}, s.RevisionCounter())
+	rev1 := s.Revision("p1")
+
+	s.CommitEvent("p1", "working", 1000)
+	rev2 := s.Revision("p1")
+
+	if rev2 <= rev1 {
+		t.Errorf("revision did not advance: %d -> %d", rev1, rev2)
+	}
+}
+
+func TestTransitionCurrentRequiresExactStatusAndRevision(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
+	revision := s.Revision("p1")
+	if !s.TransitionCurrent("p1", "working", revision) {
+		t.Fatal("current transition was rejected")
+	}
+	s.CommitEvent("p1", "idle", 2000)
+	if s.TransitionCurrent("p1", "working", revision) {
+		t.Fatal("superseded transition remained current")
+	}
+}
+
+func TestBlockedEventIDIsStableOnlyWithinBlockedCycle(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "blocked"}}, s.RevisionCounter())
+	first, ok := s.Agent("p1")
+	if !ok || first.BlockedEventID == "" {
+		t.Fatal("first blocked cycle has no event ID")
+	}
+
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "blocked"}}, s.RevisionCounter())
+	same, _ := s.Agent("p1")
+	if same.BlockedEventID != first.BlockedEventID {
+		t.Fatalf("blocked event ID changed within one cycle: %q -> %q", first.BlockedEventID, same.BlockedEventID)
+	}
+
+	s.CommitEvent("p1", "working", 1000)
+	working, _ := s.Agent("p1")
+	if working.BlockedEventID != "" {
+		t.Fatalf("non-blocked pane retained event ID %q", working.BlockedEventID)
+	}
+	s.CommitEvent("p1", "blocked", 2000)
+	next, _ := s.Agent("p1")
+	if next.BlockedEventID == "" || next.BlockedEventID == first.BlockedEventID {
+		t.Fatalf("new blocked cycle event ID = %q, want a new non-empty value", next.BlockedEventID)
+	}
+}

@@ -1,0 +1,23 @@
+{
+  "type": "agents",
+  "agents": [
+    {
+      "pane_id": "pane-1",
+      "raw_pane_id": "pane-1",
+      "terminal_id": "term-1",
+      "tab_id": "tab-1",
+      "tab_label": "main",
+      "tab_number": 1,
+      "workspace_id": "ws-1",
+      "agent": "claude",
+      "name": "fix-bug",
+      "status": "working",
+      "_focused": true,
+      "cwd": "/home/user/project",
+      "project": "project",
+      "host": "localhost",
+      "session": "",
+      "updated_at": 0
+    }
+  ]
+}

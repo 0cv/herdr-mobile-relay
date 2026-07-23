@@ -1,0 +1,7 @@
+{
+  "type": "read_pane",
+  "request_id": "req-read",
+  "pane_id": "pane-1",
+  "lines": 80,
+  "format": "ansi"
+}

@@ -1,0 +1,8 @@
+{
+  "type": "navigate_question",
+  "protocol": 2,
+  "request_id": "req-question-navigate",
+  "pane_id": "pane-1",
+  "interaction_id": "interaction-2",
+  "direction": "previous"
+}

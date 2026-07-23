@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Herdr Mobile Relay</title>
+  <desc id="desc">A green app icon with a dark relay mark and a white Herdr monogram.</desc>
+  <rect width="512" height="512" fill="#22c55e"/>
+  <circle cx="256" cy="256" r="164" fill="#052e16"/>
+  <path d="M169 161h58v70h58v-70h58v190h-58v-74h-58v74h-58V161Z" fill="#f8fafc"/>
+  <path d="M365 188c34 31 54 75 54 122" fill="none" stroke="#86efac" stroke-width="30" stroke-linecap="round"/>
+  <path d="M147 188c-34 31-54 75-54 122" fill="none" stroke="#86efac" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="256" cy="390" r="28" fill="#86efac"/>
+</svg>

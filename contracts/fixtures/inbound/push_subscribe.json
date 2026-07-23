@@ -1,0 +1,11 @@
+{
+  "type": "push_subscribe",
+  "protocol": 2,
+  "client_id": "device-1:relay-1",
+  "replace_endpoints": [],
+  "notify_finished": true,
+  "subscription": {
+    "endpoint": "https://push.example.test/subscription",
+    "keys": {"p256dh": "test-p256dh", "auth": "test-auth"}
+  }
+}

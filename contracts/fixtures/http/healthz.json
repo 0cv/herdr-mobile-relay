@@ -1,0 +1,16 @@
+{
+  "status": "ok",
+  "readiness": "ready",
+  "inventory": {
+    "state": "ready",
+    "error_code": "",
+    "last_attempt_at": 1753178400,
+    "last_success_at": 1753178400,
+    "stale": false
+  },
+  "instance": "test-instance",
+  "version": "0.9.0",
+  "release_version": "0.9.0",
+  "revision": "abc123def456",
+  "protocol": 2
+}

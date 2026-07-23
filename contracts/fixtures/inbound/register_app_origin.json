@@ -1,0 +1,5 @@
+{
+  "type": "register_app_origin",
+  "protocol": 2,
+  "origin": "https://app.example.test"
+}

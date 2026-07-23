@@ -1,0 +1,6 @@
+{
+  "type": "push_unsubscribe",
+  "protocol": 2,
+  "client_id": "device-1:relay-1",
+  "endpoints": ["https://push.example.test/subscription"]
+}

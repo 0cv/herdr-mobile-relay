@@ -1,0 +1,9 @@
+{
+  "type": "upload_image",
+  "protocol": 2,
+  "request_id": "req-upload",
+  "pane_id": "pane-1",
+  "filename": "screen.png",
+  "mime": "image/png",
+  "data": "data:image/png;base64,iVBORw0KGgo="
+}

@@ -1,0 +1,1288 @@
+import { expect, test, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const webRoot = process.env.HERDR_WEB_ROOT || 'dist';
+const APP_METADATA = JSON.parse(
+  readFileSync(resolve(webRoot, 'version.json'), 'utf8'),
+) as { version: string; assets: number };
+const APP_RELEASE = APP_METADATA.version;
+
+interface RelayFixture {
+  id: string;
+  label: string;
+  url: string;
+  token: string;
+}
+
+interface BootOptions {
+  standalone?: boolean;
+  upstreamVersion?: string;
+}
+
+async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
+  await page.route('https://raw.githubusercontent.com/0cv/herdr-mobile-relay/main/web/version.json*', (route) =>
+    route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        version: options.upstreamVersion || APP_RELEASE,
+        assets: APP_METADATA.assets,
+      }),
+    }));
+  await page.addInitScript(({ savedRelays, standalone }) => {
+    if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
+    if (standalone) {
+      const nativeMatchMedia = window.matchMedia.bind(window);
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value(query: string) {
+          const result = nativeMatchMedia(query);
+          if (query === '(display-mode: standalone)') {
+            Object.defineProperty(result, 'matches', { configurable: true, value: true });
+          }
+          return result;
+        },
+      });
+    }
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+      nativeSetTimeout(handler, timeout === 3000 ? 30 : timeout, ...args)) as typeof window.setTimeout;
+
+    const sockets: MockSocket[] = [];
+    const commands: Record<string, unknown>[] = [];
+    const socketCommands: Record<string, unknown>[][] = [];
+    let nextInteraction: Record<string, unknown> | null = null;
+    let autoCommands = true;
+
+    class MockSocket {
+      static OPEN = 1;
+      static CONNECTING = 0;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = MockSocket.CONNECTING;
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      readonly index: number;
+      constructor(readonly url: string) {
+        this.index = sockets.length;
+        sockets.push(this);
+        socketCommands.push([]);
+        queueMicrotask(() => {
+          this.readyState = MockSocket.OPEN;
+          this.onopen?.();
+        });
+      }
+      send(serialized: string) {
+        const message = JSON.parse(serialized) as Record<string, unknown>;
+        commands.push(message);
+        socketCommands[this.index].push(message);
+        if (message.type === 'read_pane' || message.type === 'get_activity' || message.type === 'list_directories' || message.type === 'refresh_agents') return;
+        if (!autoCommands) return;
+        if (message.type === 'upload_image') {
+          queueMicrotask(() => this.server({
+            type: 'upload_result', ok: true, request_id: message.request_id, pane_id: message.pane_id,
+            path: '/home/test/.cache/herdr-mobile-relay/uploads/shot.png',
+          }));
+          return;
+        }
+        if (message.type === 'list_slash_commands') {
+          queueMicrotask(() => this.server({
+            type: 'command_result', request_id: message.request_id, ok: true, phase: 'completed',
+            data: {
+              commands: [
+                { command: '/help', description: 'Show the full command reference and explain every available action', source: 'builtin' },
+                { command: '/model', description: 'Choose the active model', source: 'builtin' },
+                { command: '/plan', description: 'Enter plan mode', argument_hint: '[prompt]', source: 'builtin' },
+                ...Array.from({ length: 18 }, (_, index) => ({
+                  command: `/sample-${index + 1}`,
+                  description: `Example command ${index + 1}`,
+                  source: 'builtin',
+                })),
+              ],
+              truncated: false,
+            },
+          }));
+          return;
+        }
+        if (message.type === 'push_subscribe' || message.type === 'push_unsubscribe') return;
+        const phase = message.type === 'answer_question' && nextInteraction
+          ? 'advanced'
+          : message.type === 'navigate_question' && nextInteraction ? 'navigated' : 'confirmed';
+        let data: Record<string, unknown> = {};
+        if ((message.type === 'answer_question' || message.type === 'navigate_question') && nextInteraction) data = { interaction: nextInteraction };
+        else if (message.type === 'agent_start') data = { pane_id: 'w1:pre-placement' };
+        else if (message.type === 'agent_clear') data = {
+          pane_id: 'w1:pre-clear', name: 'clear-codex-123', cwd: '/home/test/Development/relay',
+        };
+        if (message.type === 'answer_question' || message.type === 'navigate_question') nextInteraction = null;
+        queueMicrotask(() => this.server({ type: 'command_result', request_id: message.request_id, ok: true, phase, data }));
+      }
+      close() { this.readyState = MockSocket.CLOSED; }
+      server(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
+      serverClose() { this.readyState = MockSocket.CLOSED; this.onclose?.(); }
+    }
+
+    Object.defineProperty(window, 'WebSocket', { configurable: true, value: MockSocket });
+    Object.assign(window, {
+      __relayCommands: commands,
+      __relaySockets: sockets,
+      __relaySocketCommands(index: number) { return socketCommands[index] || []; },
+      __relayServer(index: number, message: unknown) { sockets[index]?.server(message); },
+      __relayClose(index: number) { sockets[index]?.serverClose(); },
+      __relayNextInteraction(interaction: Record<string, unknown>) { nextInteraction = interaction; },
+      __relayAutoCommands(enabled: boolean) { autoCommands = enabled; },
+    });
+  }, { savedRelays: relays, standalone: options.standalone ?? false });
+  await page.goto(path);
+}
+
+async function socketCount(page: Page) {
+  return page.evaluate(() => (window as any).__relaySockets.length as number);
+}
+
+async function server(page: Page, index: number, message: unknown) {
+  await page.evaluate(({ socketIndex, payload }) => (window as any).__relayServer(socketIndex, payload), { socketIndex: index, payload: message });
+}
+
+async function commands(page: Page) {
+  return page.evaluate(() => (window as any).__relayCommands as Record<string, unknown>[]);
+}
+
+async function commandsForSocket(page: Page, index: number) {
+  return page.evaluate((socketIndex) =>
+    (window as any).__relaySocketCommands(socketIndex) as Record<string, unknown>[], index);
+}
+
+async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
+  await server(page, index, {
+    type: 'push_config', protocol: 2, version: 'abc1234', host: index ? 'mac' : 'fedora',
+    capabilities: ['clear_activities', 'directory_browser', 'structured_questions', 'slash_commands'],
+    agent_profiles: [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
+    ...overrides,
+  });
+}
+
+const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: 'secret' };
+
+test('keeps activity cards inside the page and confirms permanent deletion', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'activity_history',
+    activities: [{
+      id: 'activity-1', timestamp: Date.now(), summary: 'codex completed',
+      project: 'herdr-mobile-relay', agent: 'codex', status: 'completed',
+    }],
+  });
+
+  await page.getByRole('button', { name: 'Activity history' }).click();
+  const activity = page.getByRole('button', { name: /codex completed/ });
+  await expect(activity).toBeVisible();
+  const headingBox = await page.getByRole('heading', { name: 'Activity', level: 2 }).boundingBox();
+  const deleteBox = await page.getByRole('button', { name: 'Delete all' }).boundingBox();
+  const box = await activity.boundingBox();
+  const chevronBox = await activity.locator('.activity-chevron').boundingBox();
+  const viewport = page.viewportSize();
+  expect(headingBox).not.toBeNull();
+  expect(deleteBox).not.toBeNull();
+  expect(box).not.toBeNull();
+  expect(chevronBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  const headingCenter = headingBox!.y + headingBox!.height / 2;
+  const deleteCenter = deleteBox!.y + deleteBox!.height / 2;
+  expect(Math.abs(headingCenter - deleteCenter)).toBeLessThanOrEqual(2);
+  expect(viewport!.width - (box!.x + box!.width)).toBeGreaterThanOrEqual(10);
+  expect(box!.x + box!.width - (chevronBox!.x + chevronBox!.width)).toBeGreaterThanOrEqual(10);
+
+  await page.getByRole('button', { name: 'Delete all' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Delete all activity?' });
+  await expect(dialog).toContainText('Running agents and their conversations are not affected.');
+  await dialog.getByRole('button', { name: 'Delete all' }).click();
+  await expect(page.getByText('No activity yet.')).toBeVisible();
+  expect((await commands(page)).find((command) => command.type === 'clear_activities'))
+    .toMatchObject({ type: 'clear_activities', protocol: 2 });
+});
+
+test('keeps device verification modal until native authentication succeeds', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('herdr_require_device_unlock', 'true');
+    localStorage.setItem('herdr_device_unlock_credential', 'AQ');
+    Object.defineProperty(window, 'PublicKeyCredential', { configurable: true, value: class {} });
+    Object.defineProperty(navigator, 'credentials', {
+      configurable: true,
+      value: {
+        get: () => new Promise((resolve) => {
+          Object.assign(window, { __resolveDeviceVerification: () => resolve({}) });
+        }),
+      },
+    });
+  });
+  await boot(page, [fedora]);
+
+  const unlockDialog = page.getByRole('dialog', { name: 'Unlock Herdr' });
+  await expect(unlockDialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(unlockDialog).toBeVisible();
+  expect(await socketCount(page)).toBe(0);
+
+  await page.evaluate(() => (window as any).__resolveDeviceVerification());
+  await expect(unlockDialog).toBeHidden();
+  await expect.poll(() => socketCount(page)).toBe(1);
+});
+
+test('imports quick setup and merges agents from multiple relays', async ({ page }) => {
+  await boot(
+    page,
+    [],
+    '/#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com',
+    { standalone: true },
+  );
+  await expect(page.getByRole('button', { name: 'Activity history' }).locator('svg')).toBeVisible();
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await expect.poll(async () =>
+    (await commandsForSocket(page, 0)).some((command) => command.type === 'register_app_origin')).toBe(true);
+  expect((await commandsForSocket(page, 0)).find((command) => command.type === 'register_app_origin'))
+    .toMatchObject({
+      type: 'register_app_origin',
+      origin: 'http://127.0.0.1:4173',
+      protocol: 2,
+    });
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_relays') || '[]')[0]))
+    .toMatchObject({
+      label: 'Fedora Workstation',
+      url: 'wss://relay-fedora.example.com',
+      token: '0123456789abcdef0123456789abcdef',
+    });
+  expect(await page.evaluate(() => location.hash)).toBe('');
+
+  await page.evaluate(() => {
+    location.hash = '#setup=abcdef0123456789abcdef0123456789&label=Mac&relay=wss%3A%2F%2Fmac.example';
+  });
+  await expect.poll(() => socketCount(page)).toBe(3);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_relays') || '[]')[1]))
+    .toMatchObject({
+      label: 'Mac',
+      url: 'wss://mac.example',
+      token: 'abcdef0123456789abcdef0123456789',
+    });
+  expect(await page.evaluate(() => location.hash)).toBe('');
+  const base = 1;
+  await handshake(page, base);
+  await handshake(page, base + 1);
+  await server(page, base, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Fedora app', agent: 'codex' }] });
+  await server(page, base + 1, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Mac app', agent: 'claude', options: ['Approve once', 'Deny'] }] });
+  const headerBox = await page.getByRole('banner').boundingBox();
+  const connectionBox = await page.getByRole('img', { name: /relays connected/ }).boundingBox();
+  const settingsBox = await page.getByRole('button', { name: 'Settings' }).boundingBox();
+  expect(headerBox && connectionBox && settingsBox).toBeTruthy();
+  const leadingInset = connectionBox!.x + connectionBox!.width / 2 - headerBox!.x;
+  const trailingInset = headerBox!.x + headerBox!.width - settingsBox!.x - settingsBox!.width / 2;
+  expect(Math.abs(leadingInset - trailingInset)).toBeLessThan(2);
+  await expect(page.getByText('Fedora app')).toBeVisible();
+  await expect(page.getByText('Mac app')).toBeVisible();
+  await expect(page.getByText('@Fedora Workstation')).toBeVisible();
+  await expect(page.getByText('@Mac')).toBeVisible();
+});
+
+test('reconnects and blocks mutations for an incompatible relay protocol', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { protocol: 1, version: 'old' });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Old relay', agent: 'codex', options: ['Approve once', 'Deny'] }] });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByText(/Relay outdated/)).toBeVisible();
+  await page.getByRole('button', { name: 'How to update Fedora' }).click();
+  const updateHelp = page.getByRole('dialog', { name: 'Update Fedora' });
+  await expect(updateHelp).toContainText('herdr plugin install 0cv/herdr-mobile-relay-dev');
+  await updateHelp.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Remove Fedora' }).click();
+  const removeDialog = page.getByRole('dialog', { name: 'Remove Fedora?' });
+  await expect(removeDialog).toContainText('You will need its setup link or connection details to add it again.');
+  await removeDialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByText('wss://fedora.example')).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Approve once' }).click();
+  await expect(page.getByRole('status').filter({ hasText: /protocol v1/ })).toBeVisible();
+  expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
+
+  await page.evaluate(() => (window as any).__relayClose(0));
+  await expect.poll(() => socketCount(page)).toBe(2);
+});
+
+test('shows inventory failure instead of zero agents and recovers without reconnecting', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    inventory: {
+      state: 'error',
+      error_code: 'protocol_mismatch',
+      message: 'Run `herdr server live-handoff` on this computer, then refresh.',
+      last_attempt_at: 123,
+      last_success_at: 0,
+      stale: false,
+    },
+  });
+  await server(page, 0, { type: 'agents', agents: [] });
+
+  await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toContainText('live-handoff');
+  await expect(page.getByText('No chat agents are running.')).toBeHidden();
+  await expect(page.getByRole('img', { name: /agent inventory unavailable/ })).toBeVisible();
+
+  await server(page, 0, {
+    type: 'inventory_status',
+    state: 'ready',
+    error_code: '',
+    message: '',
+    last_attempt_at: 200,
+    last_success_at: 200,
+    stale: false,
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Recovered relay', agent: 'codex' }],
+  });
+
+  await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toBeHidden();
+  await expect(page.getByText('Recovered relay')).toBeVisible();
+  expect(await socketCount(page)).toBe(1);
+});
+
+test('confirms and tracks one relay update through its verified reconnect', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    release_version: '0.7.0',
+    revision: 'abc1234',
+    capabilities: ['directory_browser', 'self_update'],
+    update: {
+      state: 'available',
+      current_version: '0.7.0',
+      current_revision: 'abc1234',
+      available_version: '0.8.0',
+      available_revision: 'f'.repeat(12),
+      target_revision: 'f'.repeat(40),
+      checked_at: 123,
+      can_install: true,
+      mode: 'local',
+    },
+  });
+
+  await page.getByRole('button', { name: 'Settings, update available' }).click();
+  await expect(page.getByText('Update v0.8.0 available')).toBeVisible();
+  await expect(page.getByText(`Phone app version ${APP_RELEASE}`)).toBeVisible();
+  await page.getByRole('button', { name: 'Update Fedora to version 0.8.0' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Update Relay' });
+  await expect(dialog).toContainText('Update Fedora from v0.7.0 to v0.8.0?');
+  await page.evaluate(() => (window as any).__relayAutoCommands(false));
+  await dialog.getByRole('button', { name: 'Update Relay' }).click();
+
+  await expect.poll(async () =>
+    (await commands(page)).filter((command) => command.type === 'install_update').length).toBe(1);
+  const install = (await commands(page)).find((command) => command.type === 'install_update')!;
+  expect(install).toMatchObject({
+    expected_version: '0.8.0',
+    expected_revision: 'f'.repeat(40),
+    protocol: 2,
+  });
+  await server(page, 0, {
+    type: 'update_status',
+    update: {
+      state: 'scheduled',
+      current_version: '0.7.0',
+      current_revision: 'abc1234',
+      available_version: '0.8.0',
+      target_revision: 'f'.repeat(40),
+      mode: 'local',
+    },
+  });
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: install.request_id,
+    ok: true,
+    phase: 'scheduled',
+    data: {
+      update: {
+        state: 'scheduled',
+        current_version: '0.7.0',
+        current_revision: 'abc1234',
+        available_version: '0.8.0',
+        target_revision: 'f'.repeat(40),
+        mode: 'local',
+      },
+    },
+  });
+  await expect(page.getByText('Update scheduled…')).toBeVisible();
+
+  await server(page, 0, {
+    type: 'update_status',
+    update: {
+      state: 'restarting',
+      current_version: '0.7.0',
+      current_revision: 'abc1234',
+      available_version: '0.8.0',
+      target_revision: 'f'.repeat(40),
+      mode: 'local',
+    },
+  });
+  await expect(page.getByText('Restarting relay…')).toBeVisible();
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 1, {
+    host: 'fedora',
+    release_version: '0.8.0',
+    revision: 'f'.repeat(12),
+    capabilities: ['directory_browser', 'self_update'],
+    update: {
+      state: 'succeeded',
+      current_version: '0.8.0',
+      current_revision: 'f'.repeat(12),
+      checked_at: 124,
+      can_install: false,
+      mode: 'local',
+    },
+  });
+
+  await expect(page.getByRole('status').filter({ hasText: 'Fedora updated to v0.8.0.' })).toBeVisible();
+  await expect(page.getByText('Update installed')).toBeVisible();
+});
+
+test('confirms deployment when an authorized relay has the upstream app bundle', async ({ page }) => {
+  await boot(page, [fedora], '/', { upstreamVersion: '9.0.0' });
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    release_version: '9.0.0',
+    revision: 'abc1234',
+    capabilities: ['directory_browser', 'self_update', 'app_deploy'],
+    app_deploy: {
+      configured: true,
+      origin: 'http://127.0.0.1:4173',
+      project: 'herdr-app',
+      branch: 'main',
+      revision: 'f'.repeat(40),
+      state: 'idle',
+    },
+  });
+
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await expect(page.getByText(`Version 9.0.0 is released, but this app origin still serves ${APP_RELEASE}.`)).toBeVisible();
+  await page.getByRole('button', { name: 'Deploy App' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Deploy Phone App' });
+  await expect(dialog).toContainText('Deploy app version 9.0.0 from Fedora');
+  await dialog.getByRole('button', { name: 'Deploy App' }).click();
+
+  await expect.poll(async () =>
+    (await commands(page)).some((command) => command.type === 'deploy_app_update')).toBe(true);
+  expect((await commands(page)).find((command) => command.type === 'deploy_app_update')).toMatchObject({
+    expected_version: '9.0.0',
+    expected_revision: 'f'.repeat(40),
+    expected_origin: 'http://127.0.0.1:4173',
+  });
+});
+
+test('resets drafts and terminal output when moving to another agent', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      { pane_id: 'w1:p1', status: 'working', project: 'Working A', agent: 'codex' },
+      { pane_id: 'w1:p2', status: 'blocked', project: 'Blocked B', agent: 'claude', options: ['Approve once', 'Deny'] },
+    ],
+  });
+  await page.getByRole('button', { name: 'Open Working A on Fedora' }).click();
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'private output from agent A' });
+  await expect(page.getByRole('log')).toContainText('private output from agent A');
+  await page.getByRole('combobox', { name: 'Prompt' }).fill('draft intended only for A');
+
+  await page.getByRole('button', { name: 'Next blocked' }).click();
+
+  await expect(page.getByRole('main', { name: 'Terminal for Blocked B' })).toBeVisible();
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveValue('');
+  await expect(page.getByRole('log')).not.toContainText('private output from agent A');
+});
+
+test('replaces a half-open socket immediately when a sleeping phone resumes', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Resume app on Fedora' }).click();
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'cached terminal output' });
+  await expect(page.getByRole('log')).toContainText('cached terminal output');
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.waitForTimeout(5_100);
+  await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
+  await expect(page.getByRole('main', { name: 'Agent unavailable' })).toBeHidden();
+  await expect(page.getByRole('log')).toContainText('cached terminal output');
+  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 1);
+  await expect.poll(async () =>
+    (await commandsForSocket(page, 1)).some((command) => command.type === 'read_pane')).toBe(true);
+  await server(page, 1, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'fresh output after resume',
+  });
+  await expect(page.getByRole('log')).toContainText('fresh output after resume');
+  await server(page, 1, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
+  });
+  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
+  await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
+});
+
+test('removes the Claude desktop prompt and hides its structural status footer', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Wrapped status', agent: 'claude' }],
+  });
+  await page.getByRole('button', { name: 'Open Wrapped status on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: [
+      ...Array.from({ length: 8 }, (_, index) => `Conversation output ${index + 1}`),
+      '❯ Try "edit Info.plist to..."',
+      '─'.repeat(100),
+      'Opus 4.8',
+      'ctx: -',
+      'main ~16',
+      '/rc ⏸ manual mode on · ← for agents',
+    ].join('\n'),
+    desktop_footer_lines: 6,
+    desktop_prompt_lines: 2,
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('Conversation output 8');
+  await expect(terminal).not.toContainText('edit Info.plist');
+  await expect(terminal).not.toContainText('Opus 4.8');
+  await expect(terminal).not.toContainText('ctx: -');
+  await expect(terminal).not.toContainText('manual mode');
+});
+
+test('removes the styled Codex desktop input from the mobile terminal', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Codex placeholder', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Codex placeholder on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: [
+      'Completed output',
+      '\u001b[48;2;61;64;64m                    \u001b[0m',
+      '\u001b[1;48;2;61;64;64m›\u001b[0m\u001b[2;48;2;61;64;64m Review the current diff\u001b[0m',
+      '\u001b[48;2;61;64;64m                    \u001b[0m',
+      'gpt-5.6-sol xhigh · ~/project · main · Context 30% used',
+    ].join('\n'),
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('Completed output');
+  await expect(terminal).not.toContainText('Review the current diff');
+});
+
+test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      { pane_id: 'w1:p1', status: 'working', project: 'Codex app', agent: 'codex', cwd: '/home/test/codex' },
+      { pane_id: 'w1:p2', status: 'idle', project: 'Claude app', agent: 'claude', cwd: '/home/test/claude' },
+    ],
+  });
+
+  await page.getByRole('button', { name: 'Open Codex app on Fedora' }).click();
+  const codexComposer = page.getByRole('combobox', { name: 'Prompt' });
+  const restingComposerBox = await codexComposer.boundingBox();
+  await codexComposer.fill('/');
+  const popover = page.getByRole('region', { name: 'Command suggestions' });
+  await expect(popover).toBeVisible();
+  const [popoverBox, composerBox, viewport] = await Promise.all([
+    popover.boundingBox(),
+    codexComposer.boundingBox(),
+    page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
+  ]);
+  expect(restingComposerBox).not.toBeNull();
+  expect(popoverBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(composerBox!.y).toBeCloseTo(restingComposerBox!.y, 0);
+  expect(composerBox!.height).toBeCloseTo(restingComposerBox!.height, 0);
+  expect(popoverBox!.y + popoverBox!.height).toBeLessThan(composerBox!.y);
+  expect(popoverBox!.height).toBeLessThanOrEqual(viewport.height * 0.5);
+  await expect(popover.getByRole('option')).toHaveCount(21);
+  const description = popover.getByText('Show the full command reference and explain every available action');
+  await expect(description).toBeVisible();
+  expect(await description.evaluate((element) => ({
+    overflow: getComputedStyle(element).overflow,
+    textOverflow: getComputedStyle(element).textOverflow,
+    whiteSpace: getComputedStyle(element).whiteSpace,
+  }))).toEqual({ overflow: 'visible', textOverflow: 'clip', whiteSpace: 'normal' });
+  expect(await page.getByRole('listbox', { name: 'Slash commands' }).evaluate((element) => (
+    element.scrollHeight > element.clientHeight && getComputedStyle(element).overflowY === 'auto'
+  ))).toBe(true);
+
+  await codexComposer.fill('/pl');
+  const menu = page.getByRole('listbox', { name: 'Slash commands' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('option', { name: /\/plan/ })).toBeVisible();
+  await expect(menu.getByRole('option', { name: /\/model/ })).toBeHidden();
+  await menu.getByRole('option', { name: /\/plan/ }).click();
+  await expect(codexComposer).toHaveValue('/plan ');
+  expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(0);
+  await codexComposer.pressSequentially('Review the release');
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  expect((await commands(page)).find((command) => command.type === 'submit_prompt')).toMatchObject({
+    pane_id: 'w1:p1', text: '/plan Review the release',
+  });
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open Claude app on Fedora' }).click();
+  const claudeComposer = page.getByRole('combobox', { name: 'Prompt' });
+  await claudeComposer.fill('/he');
+  await expect(page.getByRole('option', { name: /\/help/ })).toBeVisible();
+  await claudeComposer.press('Enter');
+  await expect(claudeComposer).toHaveValue('/help');
+  expect((await commands(page)).filter((command) => command.type === 'list_slash_commands')).toHaveLength(2);
+  expect((await commands(page)).filter((command) => command.type === 'submit_prompt')).toHaveLength(1);
+});
+
+test('scales the whole interface from accessible settings', async ({ page }) => {
+  await boot(page, [fedora]);
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sizes = page.getByRole('group', { name: 'Interface Size' });
+  const history = page.getByRole('group', { name: 'Terminal History' });
+  const heading = page.getByRole('heading', { name: 'Settings', level: 2 });
+
+  await sizes.getByRole('button', { name: 'Compact' }).click();
+  const compactHeadingSize = await heading.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+  const compactInputSize = await page.getByLabel('Relay Name').evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+  await page.getByLabel('Relay Name').focus();
+  expect(compactInputSize).toBeGreaterThanOrEqual(16);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await sizes.getByRole('button', { name: 'Large' }).click();
+  const largeHeadingSize = await heading.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+
+  expect(largeHeadingSize).toBeGreaterThan(compactHeadingSize);
+  expect(await page.evaluate(() => document.documentElement.dataset.interfaceSize)).toBe('large');
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_font_size'))).toBe('large');
+
+  await history.getByRole('button', { name: '10000' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_history_lines'))).toBe('10000');
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'History app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open History app on Fedora' }).click();
+  await expect.poll(async () => (await commands(page))
+    .some((command) => command.type === 'read_pane' && command.lines === 10000)).toBe(true);
+});
+
+test('scales and expands the prompt composer for multiline text', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Composer app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Composer app on Fedora' }).click();
+
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await composer.fill('One line');
+  const compactHeight = (await composer.boundingBox())!.height;
+  await composer.fill('Line one\nLine two\nLine three\nLine four');
+  await expect.poll(async () => (await composer.boundingBox())!.height).toBeGreaterThan(compactHeight + 20);
+
+  await composer.fill(Array.from({ length: 30 }, (_, index) => `Line ${index + 1}`).join('\n'));
+  expect(await composer.evaluate((element) => {
+    const textarea = element as HTMLTextAreaElement;
+    return textarea.scrollHeight > textarea.clientHeight && getComputedStyle(textarea).overflowY === 'auto';
+  })).toBe(true);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sizes = page.getByRole('group', { name: 'Interface Size' });
+  await sizes.getByRole('button', { name: 'Regular' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await composer.fill('One line');
+  const regularHeight = (await composer.boundingBox())!.height;
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await sizes.getByRole('button', { name: 'Large' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await composer.fill('One line');
+  const largeHeight = (await composer.boundingBox())!.height;
+
+  expect(regularHeight).toBeGreaterThan(compactHeight);
+  expect(largeHeight).toBeGreaterThan(regularHeight);
+});
+
+test('handles approvals, chained questions, and notification routing', async ({ page }) => {
+  const target = encodeURIComponent(JSON.stringify({
+    pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'notice-1',
+  }));
+  await boot(page, [fedora], `/#notify=${target}`);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
+  expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', event_id: 'notice-1', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
+  await expect(page.getByRole('main', { name: /Terminal for Approvals/ })).toBeVisible();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(1);
+  expect((await commands(page)).find((command) => command.type === 'respond')).toMatchObject({ event_id: 'notice-1' });
+
+  const first = {
+    id: 'q1', kind: 'single_select', question: 'Choose deployment scope',
+    options: [{ index: 0, label: 'Repository', description: 'All files' }, { index: 1, label: 'Module' }],
+    other: { label: 'None of the above', placeholder: 'Optional notes', allow_empty: true },
+    submit_label: 'Next', can_go_back: false, can_chat: true, question_index: 1, question_total: 2,
+  };
+  const second = {
+    ...first, id: 'q2', question: 'Choose device coverage', submit_label: 'Submit', can_go_back: true, question_index: 2,
+  };
+  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), second);
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', project: 'Approvals', agent: 'claude', interaction: first, question_layout: true });
+  await expect(page.getByText('Question 1 of 2')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Chat about this' })).toBeHidden();
+  await page.getByRole('radio', { name: /Repository/ }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect(page.getByRole('group', { name: 'Choose device coverage' })).toBeVisible();
+  await expect(page.getByText('Question 2 of 2')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Previous' })).toBeVisible();
+  const answer = (await commands(page)).find((command) => command.type === 'answer_question');
+  expect(answer).toMatchObject({ selected_indices: [0], other_selected: false, protocol: 2 });
+
+  await server(page, 0, {
+    type: 'blocked', pane_id: 'w1:p1', project: 'Approvals', agent: 'claude',
+    interaction: null, question_layout: false, options: ['Proceed with plan', 'Cancel'],
+  });
+  await expect(page.getByRole('group', { name: 'Choose device coverage' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Proceed with plan' })).toBeVisible();
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await expect(composer).toBeDisabled();
+
+  const working = { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Approvals', agent: 'claude' }] };
+  await server(page, 0, working);
+  await server(page, 0, working);
+  await expect(composer).toBeEnabled();
+});
+
+test('rejects stale notification approvals and retries transient failures', async ({ page }) => {
+  const staleTarget = encodeURIComponent(JSON.stringify({
+    pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'old-event',
+  }));
+  await boot(page, [fedora], `/#notify=${staleTarget}`);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', event_id: 'new-event', project: 'Stale approval', agent: 'codex' }],
+  });
+  await expect(page.getByRole('status').filter({ hasText: /older approval request/ })).toBeVisible();
+  expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
+
+  const retryTarget = encodeURIComponent(JSON.stringify({
+    pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'new-event',
+  }));
+  await page.evaluate(() => (window as any).__relayAutoCommands(false));
+  await page.evaluate((target) => { location.hash = `#notify=${target}`; }, retryTarget);
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(1);
+  const first = (await commands(page)).filter((command) => command.type === 'respond')[0];
+  await server(page, 0, {
+    type: 'command_result', request_id: first.request_id, action: 'respond', ok: false, phase: 'failed', error: 'Relay reconnecting',
+  });
+  await expect(page.getByRole('status').filter({ hasText: 'Relay reconnecting' })).toBeVisible();
+
+  await page.evaluate(() => (window as any).__relayAutoCommands(true));
+  await page.evaluate((target) => { location.hash = `#notify=${target}`; }, retryTarget);
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(2);
+});
+
+test('restores structured questions from the cached agent snapshot after reload', async ({ page }) => {
+  const interaction = {
+    id: 'reload-question', kind: 'single_select', question: 'Choose reconnect behavior',
+    options: [{ index: 0, label: 'Backoff' }, { index: 1, label: 'Fixed retry' }],
+    other: { label: 'Other', placeholder: 'Other answer', selected: false, text: '' },
+    submit_label: 'Next', can_go_back: false,
+  };
+  const snapshot = {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude',
+      prompt: interaction.question, command: interaction.question, options: [],
+      interaction, question_layout: true,
+    }],
+  };
+
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, snapshot);
+  await expect(page.getByRole('button', { name: 'Choose answer (2)' })).toBeVisible();
+
+  await page.reload();
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, snapshot);
+
+  await expect(page.getByText('Choose reconnect behavior')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Choose answer (2)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'yes, single permission' })).toBeHidden();
+});
+
+test('restores a confirmed choice after navigating away from an incomplete draft', async ({ page }) => {
+  const first = {
+    id: 'confirmed-reconnect', kind: 'single_select', question: 'Choose reconnect strategy',
+    options: [{ index: 0, label: 'Backoff' }, { index: 1, label: 'Signals' }],
+    other: { label: 'Other', placeholder: 'Other answer', selected: false, text: '' },
+    submit_label: 'Next', can_go_back: false,
+  };
+  const second = {
+    id: 'confirmed-offline', kind: 'multi_select', question: 'Choose offline scope',
+    options: [{ index: 0, label: 'App shell' }], submit_label: 'Next', can_go_back: true,
+  };
+
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude' }] });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude', interaction: first, question_layout: true });
+  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
+  await page.getByRole('textbox', { name: 'Other answer' }).focus();
+  await expect(page.getByRole('radio', { name: 'Other' })).toBeChecked();
+
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude', interaction: second, question_layout: true });
+  await expect(page.getByRole('group', { name: 'Choose offline scope' })).toBeVisible();
+  const confirmed = {
+    ...first,
+    options: first.options.map((option) => ({ ...option, selected: option.index === 1 })),
+  };
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude', interaction: confirmed, question_layout: true });
+
+  await expect(page.getByRole('radio', { name: 'Signals' })).toBeChecked();
+  await expect(page.getByRole('radio', { name: 'Other' })).not.toBeChecked();
+});
+
+test('keeps the third single choice checked across live pane transitions', async ({ page }) => {
+  const first = {
+    id: 'live-reconnect', kind: 'single_select', question: 'When the relay connection drops, how should the client attempt to reconnect?',
+    options: [
+      { index: 0, label: 'Exponential backoff', description: 'Retry on a growing delay.' },
+      { index: 1, label: 'Fixed short interval', description: 'Retry every few seconds.' },
+      { index: 2, label: 'Backoff plus signals', description: 'Reset when connectivity returns.', selected: true },
+    ],
+    other: { label: 'Other', placeholder: 'Other answer', selected: false, text: '' },
+    submit_label: 'Next', can_go_back: false,
+  };
+  const second = {
+    id: 'live-offline', kind: 'multi_select', question: 'Which capabilities should remain available offline?',
+    options: [
+      { index: 0, label: 'App shell', selected: true },
+      { index: 1, label: 'Queued prompts' },
+      { index: 2, label: 'Activity cache', selected: true },
+      { index: 3, label: 'Notification handoff' },
+    ],
+    other: { label: 'Other', placeholder: 'Other answer', selected: false, text: '' },
+    submit_label: 'Next', can_go_back: true,
+  };
+  const agent = {
+    pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude',
+    interaction: first, question_layout: true,
+  };
+
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, { type: 'agents', agents: [agent] });
+  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Questions for Questions' })).toBeVisible();
+  await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Refresh terminal' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Attach image' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeHidden();
+  await expect(page.getByRole('radio', { name: /Backoff plus signals/ })).toBeChecked();
+
+  await page.evaluate(() => (window as any).__relayAutoCommands(false));
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
+  const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', interaction: second, question_layout: true });
+  await server(page, 0, { type: 'command_result', request_id: answer.request_id, ok: true, phase: 'advanced', data: { interaction: second } });
+  await expect(page.getByRole('group', { name: second.question })).toBeVisible();
+
+  await page.getByRole('button', { name: /Previous/ }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'navigate_question').length).toBe(1);
+  const navigation = (await commands(page)).find((command) => command.type === 'navigate_question')!;
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'command_result', request_id: navigation.request_id, ok: true, phase: 'navigated', data: { interaction: first } });
+  await server(page, 0, { type: 'agents', agents: [agent] });
+  for (let refresh = 0; refresh < 20; refresh += 1) {
+    await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', interaction: first, question_layout: true });
+    await page.waitForTimeout(5);
+  }
+
+  await expect(page.getByRole('radio', { name: /Backoff plus signals/ })).toBeChecked();
+  await expect(page.getByRole('button', { name: 'Next' })).toBeEnabled();
+  expect((await commands(page)).filter((command) => command.type === 'read_pane').length).toBeLessThan(6);
+});
+
+test('keeps normal single-select answers across repeated question navigation', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  const first = {
+    id: 'stable-reconnect', kind: 'single_select', question: 'Choose reconnect behavior',
+    options: [
+      { index: 0, label: 'Backoff' },
+      { index: 1, label: 'Fixed retry' },
+      { index: 2, label: 'Backoff plus signals' },
+    ],
+    other: { label: 'Other', placeholder: 'Other answer', selected: false, text: '' },
+    submit_label: 'Next', can_go_back: false,
+  };
+  const second = {
+    id: 'offline-scope', kind: 'multi_select', question: 'Choose offline scope',
+    options: [{ index: 0, label: 'App shell' }, { index: 1, label: 'Activity cache' }],
+    other: { label: 'Other', placeholder: 'Other answer', selected: false, text: '' },
+    submit_label: 'Next', can_go_back: true,
+  };
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude' }] });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', project: 'Questions', agent: 'claude', interaction: first, question_layout: true });
+  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
+  const questionForm = page.getByRole('form', { name: 'Choose reconnect behavior' });
+  const formHeight = await questionForm.evaluate((element) => element.getBoundingClientRect().height);
+  expect(formHeight / await page.evaluate(() => innerHeight)).toBeGreaterThan(0.65);
+
+  await page.getByRole('textbox', { name: 'Other answer' }).fill('Hello');
+  await expect(page.getByRole('radio', { name: 'Other' })).toBeChecked();
+  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), second);
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect(page.getByRole('group', { name: 'Choose offline scope' })).toBeVisible();
+  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), {
+    ...first, can_go_back: false, other: { ...first.other, selected: true, text: 'Hello' },
+  });
+  await page.getByRole('button', { name: 'Previous' }).click();
+  await page.getByRole('radio', { name: 'Backoff plus signals' }).click();
+  await expect(page.getByRole('textbox', { name: 'Other answer' })).toHaveValue('');
+
+  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), second);
+  await page.getByRole('button', { name: 'Next' }).click();
+  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), {
+    ...first,
+    options: first.options.map((option) => ({ ...option, selected: option.index === 2 })),
+    other: { ...first.other, selected: false, text: '' },
+  });
+  await page.getByRole('button', { name: 'Previous' }).click();
+  await expect(page.getByRole('radio', { name: 'Backoff plus signals' })).toBeChecked();
+  await expect(page.getByRole('radio', { name: 'Other' })).not.toBeChecked();
+  await expect(page.getByRole('textbox', { name: 'Other answer' })).toHaveValue('');
+});
+
+test('refreshes agents on return home and preserves terminal behavior', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_show_codex_status_line', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'codex' }] });
+  await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
+  await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
+  const attachImage = page.getByRole('button', { name: 'Attach image' });
+  const arrowKeys = page.getByRole('button', { name: 'Arrow keys' });
+  const enterKey = page.getByRole('button', { name: 'Enter' });
+  await expect(attachImage.locator('svg')).toBeVisible();
+  await expect(arrowKeys.locator('svg')).toBeVisible();
+  await expect(enterKey).toBeVisible();
+  await expect(attachImage).not.toContainText('▧');
+  await expect(arrowKeys).not.toContainText('⌨');
+  await arrowKeys.click();
+  await expect(page.getByRole('button', { name: 'Up' })).toBeVisible();
+  await expect(page.locator('.arrow-popup').getByRole('button', { name: 'Enter' })).toHaveCount(0);
+  await enterKey.click();
+  expect((await commands(page)).find((command) => command.type === 'send_keys')).toMatchObject({
+    pane_id: 'w1:p1', keys: ['Enter'],
+  });
+  const refreshesBeforeBack = (await commands(page)).filter((command) => command.type === 'refresh_agents').length;
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
+    .toBe(refreshesBeforeBack + 1);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'codex' }] });
+  await expect(page.getByRole('heading', { name: 'Working' })).toBeVisible();
+  await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '\u001b[38;5;6mSafe\u001b[0m <img src=x onerror=alert(1)>' });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('Safe <img src=x onerror=alert(1)>');
+  expect(await terminal.locator('img').count()).toBe(0);
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: ['Before', '', '', '', '', '----------------', '', '————————', '', '________________', '', '', '', 'After'].join('\n'),
+  });
+  expect(await terminal.evaluate((element) => {
+    let blankRun = 0;
+    let maximumBlankRun = 0;
+    for (const row of element.children) {
+      if (row.classList.contains('ansi-line') && !row.textContent?.trim()) {
+        blankRun += 1;
+        maximumBlankRun = Math.max(maximumBlankRun, blankRun);
+      } else blankRun = 0;
+    }
+    return {
+      maximumBlankRun,
+      separators: element.querySelectorAll('.term-separator').length,
+    };
+  })).toEqual({ maximumBlankRun: 2, separators: 1 });
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: `─ Worked for 1m 46s ${'─'.repeat(120)}`,
+  });
+  await expect(terminal.locator('.ansi-line')).toHaveText('─ Worked for 1m 46s');
+
+  const claudeRule = '─'.repeat(120);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'claude' }],
+  });
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: [
+      `\u001b[36m│\u001b[0m  Claude result${' '.repeat(80)}\u001b[36m│\u001b[0m`,
+      '\u001b[36m│\u001b[0m',
+      `\u001b[36m╰${claudeRule}╯\u001b[0m`,
+      `\u001b[36m${claudeRule}\u001b[0m`,
+      `\u001b[36m╭${claudeRule}╮\u001b[0m`,
+      `\u001b[38;5;147m${'▔'.repeat(150)}\u001b[0m`,
+      `\u001b[2m${claudeRule} Opus 4.8 | ctx: 20%\u001b[0m`,
+    ].join('\n'),
+  });
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Claude result' })).toHaveText('Claude result');
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Opus 4.8' })).toHaveText('Opus 4.8 | ctx: 20%');
+  await expect(terminal.locator('.term-separator')).toHaveCount(1);
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: `${'.'.repeat(120)} [29%]`,
+  });
+  await expect(terminal.locator('.ansi-line')).toHaveText(`${'.'.repeat(24)} [29%]`);
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: '\u001b[48;2;250;250;250;38;2;20;20;20mMac light terminal\u001b[0m',
+  });
+  const normalizedMacRow = terminal.locator('.ansi-line', { hasText: 'Mac light terminal' });
+  await expect(normalizedMacRow).toHaveCSS('background-color', 'rgb(61, 64, 64)');
+  await expect(normalizedMacRow.locator('span')).toHaveCSS('color', 'rgb(236, 239, 244)');
+
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await composer.focus();
+  await composer.fill('draft prompt');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'newest live frame' });
+  await expect(page.getByRole('log')).not.toContainText('newest live frame');
+  await composer.evaluate((element) => (element as HTMLTextAreaElement).blur());
+  await expect(page.getByRole('log')).toContainText('newest live frame');
+
+  const longFrame = Array.from({ length: 120 }, (_, index) => `terminal line ${index}`).join('\n');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: longFrame });
+  await terminal.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: `${longFrame}\nlatest output` });
+  const jumpToLatest = page.getByRole('button', { name: 'Jump to latest output' });
+  await expect(jumpToLatest).toBeVisible();
+  await jumpToLatest.click();
+  await expect.poll(() => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+
+  await page.locator('input[type=file]').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from('png') });
+  await expect(composer).toHaveValue(/Image: \/home\/test\/.cache\/herdr-mobile-relay\/uploads\/shot.png/);
+  expect((await commands(page)).find((command) => command.type === 'upload_image')).toMatchObject({ mime: 'image/png', protocol: 2, pane_id: 'w1:p1' });
+
+  await composer.fill('send this');
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  expect((await commands(page)).find((command) => command.type === 'submit_prompt')).toMatchObject({ text: 'send this', pane_id: 'w1:p1' });
+});
+
+test('resets the home page scroll offset before opening a terminal', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: Array.from({ length: 20 }, (_, index) => ({
+      pane_id: `w1:p${index + 1}`,
+      status: 'working',
+      project: `Scrollable agent ${index + 1}`,
+      agent: 'codex',
+    })),
+  });
+
+  const lastAgent = page.getByRole('button', { name: 'Open Scrollable agent 20 on Fedora' });
+  await page.evaluate(() => { document.documentElement.style.minHeight = '300vh'; });
+  await lastAgent.scrollIntoViewIfNeeded();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await page.evaluate(() => { window.scrollTo = () => {}; });
+  await lastAgent.click();
+
+  const terminal = page.getByRole('main', { name: 'Terminal for Scrollable agent 20' });
+  await expect(terminal).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await expect.poll(async () => terminal.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return Math.round(window.innerHeight - bounds.bottom);
+  })).toBe(0);
+});
+
+test('ignores a directory result after switching computers', async ({ page }) => {
+  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: 'secret' };
+  await boot(page, [fedora, mac]);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await handshake(page, 0);
+  await handshake(page, 1);
+  await page.getByRole('button', { name: 'Start agent' }).click();
+  await expect.poll(async () => (await commandsForSocket(page, 0)).filter((command) => command.type === 'list_directories').length).toBe(1);
+  const fedoraDirectory = (await commandsForSocket(page, 0)).find((command) => command.type === 'list_directories')!;
+
+  await page.getByLabel('Computer').selectOption('mac');
+  await expect.poll(async () => (await commandsForSocket(page, 1)).filter((command) => command.type === 'list_directories').length).toBe(1);
+  const macDirectory = (await commandsForSocket(page, 1)).find((command) => command.type === 'list_directories')!;
+  await server(page, 1, {
+    type: 'command_result', request_id: macDirectory.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/Users/test/mac-project', label: '~/mac-project' },
+      parent: '/Users/test', directories: [],
+    },
+  });
+  await expect(page.getByRole('button', { name: '~/mac-project' })).toBeVisible();
+
+  await server(page, 0, {
+    type: 'command_result', request_id: fedoraDirectory.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/home/test/fedora-project', label: '~/fedora-project' },
+      parent: '/home/test', directories: [],
+    },
+  });
+  await expect(page.getByRole('button', { name: '~/mac-project' })).toBeVisible();
+  await expect(page.getByLabel('Name')).toHaveValue('mac-project-codex');
+
+  await page.getByRole('button', { name: 'Start Agent', exact: true }).click();
+  await expect.poll(async () => (await commandsForSocket(page, 1)).some((command) => command.type === 'agent_start')).toBe(true);
+  expect((await commandsForSocket(page, 1)).find((command) => command.type === 'agent_start')).toMatchObject({
+    cwd: '/Users/test/mac-project', name: 'mac-project-codex', profile_id: 'codex',
+  });
+  expect((await commandsForSocket(page, 0)).filter((command) => command.type === 'agent_start')).toHaveLength(0);
+});
+
+test('launches and manages agent lifecycle commands', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await page.getByRole('button', { name: 'Start agent' }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'list_directories')).toBe(true);
+  const directoryCommand = (await commands(page)).find((command) => command.type === 'list_directories')!;
+  await server(page, 0, {
+    type: 'command_result', request_id: directoryCommand.request_id, ok: true, phase: 'confirmed',
+    data: {
+      current: { path: '/home/test/Development/relay', label: '~/Development/relay' },
+      parent: '/home/test/Development',
+      directories: [{ name: 'frontend', path: '/home/test/Development/relay/frontend' }],
+    },
+  });
+  await expect(page.getByLabel('Name')).toHaveValue('relay-codex');
+  const currentDirectory = page.getByRole('button', { name: '~/Development/relay' });
+  const directoryList = page.getByLabel('Subdirectories');
+  await currentDirectory.click();
+  await expect(directoryList).toBeVisible();
+  await page.getByLabel('Name').focus();
+  await expect(directoryList).toBeHidden();
+  await currentDirectory.click();
+  await page.getByRole('button', { name: /frontend/ }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'list_directories').length).toBe(2);
+  const childDirectoryCommand = (await commands(page)).filter((command) => command.type === 'list_directories').at(-1)!;
+  expect(childDirectoryCommand).toMatchObject({ path: '/home/test/Development/relay/frontend' });
+  await server(page, 0, {
+    type: 'command_result', request_id: childDirectoryCommand.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/home/test/Development/relay/frontend', label: '~/Development/relay/frontend' },
+      parent: '/home/test/Development/relay', directories: [],
+    },
+  });
+  await expect(page.getByRole('button', { name: '~/Development/relay/frontend' })).toBeVisible();
+  await expect(page.getByLabel('Name')).toHaveValue('frontend-codex');
+  await page.getByRole('button', { name: 'Open parent directory' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'list_directories').length).toBe(3);
+  const parentDirectoryCommand = (await commands(page)).filter((command) => command.type === 'list_directories').at(-1)!;
+  expect(parentDirectoryCommand).toMatchObject({ path: '/home/test/Development/relay' });
+  await server(page, 0, {
+    type: 'command_result', request_id: parentDirectoryCommand.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/home/test/Development/relay', label: '~/Development/relay' },
+      parent: '/home/test/Development', directories: [{ name: 'frontend', path: '/home/test/Development/relay/frontend' }],
+    },
+  });
+  await expect(page.getByRole('button', { name: '~/Development/relay' })).toBeVisible();
+  await expect(page.getByLabel('Name')).toHaveValue('relay-codex');
+  await page.getByLabel(/Initial task/).fill('Run the migration');
+  await page.getByRole('button', { name: 'Start Agent', exact: true }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_start')).toBe(true);
+  expect((await commands(page)).find((command) => command.type === 'agent_start')).toMatchObject({
+    profile_id: 'codex', cwd: '/home/test/Development/relay', name: 'relay-codex', prompt: 'Run the migration',
+  });
+  await expect(page.getByRole('heading', { name: 'Idle' })).toBeHidden();
+
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p2', status: 'working', project: 'relay', cwd: '/home/test/Development/relay', name: 'relay-codex', agent: 'codex' }] });
+  await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#pane=fedora%3A%3Aw1%3Ap2');
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  const manageDialog = page.getByRole('dialog', { name: 'Manage Agent' });
+  await expect(manageDialog).toBeVisible();
+  await expect(page.getByLabel('New name')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(manageDialog).toBeHidden();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await page.getByLabel('New name').fill('renamed-agent');
+  await server(page, 0, { type: 'agent_update', pane_id: 'w1:p2', status: 'working', updated_at: 2 });
+  await expect(page.getByLabel('New name')).toHaveValue('renamed-agent');
+  await page.getByRole('button', { name: 'Rename' }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_rename')).toBe(true);
+
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await page.getByRole('button', { name: 'Clear Agent' }).click();
+  await server(page, 0, { type: 'agent_update', pane_id: 'w1:p2', status: 'working', updated_at: 3 });
+  await expect(page.getByRole('button', { name: 'Confirm Clear' })).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm Clear' }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_clear')).toBe(true);
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p3', status: 'working', project: 'relay', cwd: '/home/test/Development/relay', name: 'clear-codex-123', agent: 'codex' }] });
+  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#pane=fedora%3A%3Aw1%3Ap3');
+  await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
+
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await page.getByRole('button', { name: 'Stop Agent' }).click();
+  await server(page, 0, { type: 'agent_update', pane_id: 'w1:p3', status: 'working', updated_at: 4 });
+  await expect(page.getByRole('button', { name: 'Confirm Stop' })).toBeVisible();
+  await page.getByRole('button', { name: 'Confirm Stop' }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_stop')).toBe(true);
+});

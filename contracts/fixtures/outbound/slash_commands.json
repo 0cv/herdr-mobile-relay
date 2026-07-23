@@ -1,0 +1,33 @@
+{
+  "type": "command_result",
+  "request_id": "req-slash-1",
+  "action": "list_slash_commands",
+  "ok": true,
+  "phase": "completed",
+  "pane_id": "pane-1",
+  "data": {
+    "commands": [
+      {"command": "/clear", "description": "Start a fresh conversation", "source": "builtin"},
+      {"command": "/compact", "description": "Summarize and compact conversation history", "source": "builtin", "argument_hint": "[instructions]"},
+      {"command": "/config", "description": "View or modify configuration", "source": "builtin", "argument_hint": "[key] [value]"},
+      {"command": "/cost", "description": "Show token usage and cost", "source": "builtin"},
+      {"command": "/doctor", "description": "Check system health and configuration", "source": "builtin"},
+      {"command": "/help", "description": "Show available commands", "source": "builtin"},
+      {"command": "/init", "description": "Initialize a new CLAUDE.md project file", "source": "builtin"},
+      {"command": "/login", "description": "Switch Anthropic accounts", "source": "builtin"},
+      {"command": "/logout", "description": "Sign out of current account", "source": "builtin"},
+      {"command": "/mcp", "description": "Manage MCP server connections", "source": "builtin", "argument_hint": "[subcommand]"},
+      {"command": "/memory", "description": "Edit CLAUDE.md memory files", "source": "builtin", "argument_hint": "[path]"},
+      {"command": "/model", "description": "Switch the AI model", "source": "builtin", "argument_hint": "[model-name]"},
+      {"command": "/permissions", "description": "View or modify permissions", "source": "builtin"},
+      {"command": "/pr-comments", "description": "View PR comments", "source": "builtin", "argument_hint": "[pr-url]"},
+      {"command": "/review", "description": "Review a pull request", "source": "builtin", "argument_hint": "[pr-url]"},
+      {"command": "/status", "description": "Show session status", "source": "builtin"},
+      {"command": "/terminal-setup", "description": "Install Shift+Enter key binding", "source": "builtin"},
+      {"command": "/vim", "description": "Toggle vim mode", "source": "builtin"},
+      {"command": "/deploy", "description": "Deploy the application", "source": "personal"},
+      {"command": "/git:commit", "description": "Commit staged changes", "source": "project"}
+    ],
+    "truncated": false
+  }
+}

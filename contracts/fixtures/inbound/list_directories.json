@@ -1,0 +1,5 @@
+{
+  "type": "list_directories",
+  "request_id": "req-directories",
+  "path": "/home/user/project"
+}

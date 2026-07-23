@@ -1,0 +1,8 @@
+{
+  "type": "deploy_app_update",
+  "protocol": 2,
+  "request_id": "req-deploy",
+  "expected_version": "0.9.0",
+  "expected_revision": "0123456789abcdef0123456789abcdef01234567",
+  "expected_origin": "https://app.example.test"
+}
