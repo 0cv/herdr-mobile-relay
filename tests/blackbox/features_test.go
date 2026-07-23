@@ -226,6 +226,20 @@ func TestListSlashCommands(t *testing.T) {
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
+	// Wait for the initial agents snapshot so the inventory is committed.
+	for {
+		waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+		_, data, err := conn.Read(waitCtx)
+		waitCancel()
+		if err != nil {
+			t.Fatalf("waiting for agents: %v", err)
+		}
+		var msg map[string]any
+		if json.Unmarshal(data, &msg) == nil && msg["type"] == "agents" {
+			break
+		}
+	}
+
 	req := map[string]any{
 		"type":       "list_slash_commands",
 		"request_id": "slash-1",
