@@ -5,7 +5,9 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -59,6 +61,24 @@ func TestAgentStartRetryDoesNotResubmitInitialPrompt(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "starts.log")
 	bin := recordingHerdr(t, dir, record, `{\"result\":{\"pane_id\":\"pane-new\"}}`)
+
+	// Pre-check: verify the script produces valid JSON output directly.
+	preDir := filepath.Join(dir, "pre")
+	os.MkdirAll(preDir, 0o755)
+	preRecord := filepath.Join(preDir, "pre.log")
+	preBin := recordingHerdr(t, preDir, preRecord, `{\"result\":{\"pane_id\":\"pane-new\"}}`)
+	preCmd := exec.Command(preBin, "agent", "start", "pre", "--kind", "claude", "--pane", "p", "--timeout", "30000")
+	preOut, preErr := preCmd.CombinedOutput()
+	if preErr != nil {
+		t.Fatalf("script pre-check failed: %v\noutput: %q", preErr, preOut)
+	}
+	var envelope struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(preOut, &envelope); err != nil {
+		t.Fatalf("script pre-check produced invalid JSON: %v\nraw output: %q", err, preOut)
+	}
+
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 	message := map[string]any{
 		"action": "agent_start", "request_id": "same-req",
@@ -67,7 +87,8 @@ func TestAgentStartRetryDoesNotResubmitInitialPrompt(t *testing.T) {
 	first := d.Handle(context.Background(), message)
 	second := d.Handle(context.Background(), message)
 	if !first.OK || !second.OK {
-		t.Fatalf("start results = %+v, %+v", first, second)
+		data, _ := os.ReadFile(record)
+		t.Fatalf("start results = %+v, %+v\nrecord:\n%s", first, second, data)
 	}
 	data, _ := os.ReadFile(record)
 	if starts := strings.Count(string(data), "--kind"); starts != 1 {

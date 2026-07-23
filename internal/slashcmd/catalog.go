@@ -50,7 +50,20 @@ func CatalogForProfile(profileID, reportedAgent, cwd, home string, skillDirs []s
 		CommandFormat: commandFormat,
 	}
 
-	if p := resolveProvider(profileID); p != nil {
+	p := resolveProvider(profileID)
+	if p == nil && reportedAgent != "" {
+		agentLower := strings.ToLower(strings.TrimSpace(reportedAgent))
+		switch agentLower {
+		case "claude", "claude-code", "claude code":
+			p = resolveProvider("claude")
+		case "codex":
+			p = resolveProvider("codex")
+		case "qoder", "qodercli":
+			p = resolveProvider("qoder")
+		}
+	}
+
+	if p != nil {
 		commands, truncated = p.Discover(ctx)
 	} else {
 		commands, truncated = discoverGenericSkills(skillDirs, commandFormat)
