@@ -95,6 +95,8 @@ func NewState(logger *slog.Logger) *State {
 }
 
 func (s *State) SetOnTransition(fn TransitionCallback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.onTransition = fn
 }
 
@@ -414,7 +416,7 @@ func (s *State) registerTransition(paneID, prev, status string) {
 			if a != nil {
 				agent, project = a.Agent, a.Project
 			}
-			go s.onTransition(paneID, agent, project, status, s.revision[paneID])
+			s.onTransition(paneID, agent, project, status, s.revision[paneID])
 		}
 		return
 	}
@@ -430,7 +432,7 @@ func (s *State) registerTransition(paneID, prev, status string) {
 				if a != nil {
 					agent, project = a.Agent, a.Project
 				}
-				go s.onTransition(paneID, agent, project, status, s.revision[paneID])
+				s.onTransition(paneID, agent, project, status, s.revision[paneID])
 			}
 		}
 		return
@@ -448,7 +450,7 @@ func (s *State) registerTransition(paneID, prev, status string) {
 			if a != nil {
 				agent, project = a.Agent, a.Project
 			}
-			go s.onTransition(paneID, agent, project, status, s.revision[paneID])
+			s.onTransition(paneID, agent, project, status, s.revision[paneID])
 		}
 	}
 }

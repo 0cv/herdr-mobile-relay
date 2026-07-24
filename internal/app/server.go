@@ -77,6 +77,9 @@ type Server struct {
 	historyCaptureMu sync.Mutex
 	historyInflight  map[string]bool
 	historyLast      map[string]time.Time
+	historyActive    map[string]bool
+	transitionTasks  *lifecycleTasks
+	historyTasks     *lifecycleTasks
 }
 
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
@@ -119,10 +122,18 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		inventoryView:   cloneStringMap(state.InventoryStatus()),
 		historyInflight: make(map[string]bool),
 		historyLast:     make(map[string]time.Time),
+		historyActive:   make(map[string]bool),
 	}
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	ctx = runCtx
+	s.transitionTasks = newLifecycleTasks(ctx)
+	s.historyTasks = newLifecycleTasks(ctx)
+	defer s.drainLifecycleWork()
+
 	journal, err := activity.OpenJournal(s.cfg.CacheDir)
 	if err != nil {
 		s.recordSafeError("activity persistence unavailable", err)
@@ -141,99 +152,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	s.state.SetOnTransition(func(paneID, agent, project, status string, revision int64) {
-		if status == "blocked" && !s.state.TransitionCurrent(paneID, status, revision) {
-			return
-		}
-		if status != "blocked" && !s.state.CompletionCurrent(paneID, revision) {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		agentState, agentExists := s.state.Agent(paneID)
-		var session string
-		if agentExists {
-			session = agentState.Session
-		}
-
-		if status == "blocked" {
-			eventID := paneID
-			hasApproval := false
-			approvalTotal := 0
-			command := "Agent needs approval"
-			extract := ""
-			if agentExists {
-				s.enrichBlockedTransition(ctx, agentState)
-				if agentState.BlockedEventID != "" {
-					eventID = agentState.BlockedEventID
-				}
-				hasApproval = agentState.Interaction == nil && !agentState.QuestionLayout
-				approvalTotal = len(agentState.Options)
-				if agentState.Command != "" {
-					command = agentState.Command
-				}
-				extract = agentState.Prompt
-			}
-			if s.dispatcher != nil {
-				if !s.dispatcher.RecordTransitionActivity(
-					"blocked", "attention", command, paneID, status, revision,
-					map[string]any{"event_id": eventID}, agent, project, s.hostname, session, extract,
-				) {
-					return
-				}
-			}
-			if s.pushM != nil {
-				payload := push.BuildBlockedPayload(agent, project, command, eventID, paneID, s.hostname, hasApproval, approvalTotal)
-				s.pushM.Send(ctx, payload)
-			}
-			if agentExists {
-				s.hub.Broadcast(map[string]any{
-					"type":            "blocked",
-					"pane_id":         agentState.PaneID,
-					"raw_pane_id":     agentState.RawPaneID,
-					"terminal_id":     agentState.TerminalID,
-					"tab_id":          agentState.TabID,
-					"tab_label":       agentState.TabLabel,
-					"tab_number":      agentState.TabNumber,
-					"workspace_id":    agentState.WorkspaceID,
-					"agent":           agentState.Agent,
-					"name":            agentState.Name,
-					"status":          "blocked",
-					"cwd":             agentState.Cwd,
-					"project":         agentState.Project,
-					"host":            agentState.Host,
-					"session":         agentState.Session,
-					"updated_at":      agentState.UpdatedAt,
-					"event_id":        eventID,
-					"prompt":          agentState.Prompt,
-					"command":         agentState.Command,
-					"options":         agentState.Options,
-					"interaction":     agentState.Interaction,
-					"interaction_id":  agentState.InteractionID,
-					"question_layout": agentState.QuestionLayout,
-				})
-			}
-			return
-		}
-		if !s.state.RegisterFinishedNotificationForTransition(paneID, status, revision) {
-			return
-		}
-		eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
-		extract := s.captureFinishedPane(ctx, paneID, agent)
-		summary := agent + " completed"
-		if agent == "" {
-			summary = "Agent completed"
-		}
-		if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
-			"finished", "completed", summary, paneID, status, revision,
-			map[string]any{"event_id": eventID}, agent, project, s.hostname, session, extract,
-		) {
-			return
-		}
-		if s.pushM != nil {
-			payload := push.BuildFinishedPayload(agent, project, paneID, s.hostname, eventID)
-			s.pushM.Send(ctx, payload)
-		}
+		s.transitionTasks.Start(func(taskCtx context.Context) {
+			s.handleTransition(taskCtx, paneID, agent, project, status, revision)
+		})
 	})
 
 	s.dispatcher = coordinator.NewDispatcher(s.herdrC, s.state, s.journal, s.logger)
@@ -560,6 +481,9 @@ func (s *Server) Run(ctx context.Context) error {
 		active := make(map[string]bool, len(agents))
 		for _, a := range agents {
 			active[a.PaneID] = true
+		}
+		s.syncHistoryPanes(agents)
+		for _, a := range agents {
 			if isClaudeLike(a.Agent) && (a.Status == "working" || a.Status == "blocked") {
 				s.scheduleHistoryCapture(ctx, a.PaneID)
 			}
@@ -635,21 +559,27 @@ func (s *Server) Run(ctx context.Context) error {
 		"web_root", s.cfg.WebRoot,
 	)
 
-	go s.poller.Run(ctx)
-	go s.captureHistoryLoop(ctx)
+	var bg sync.WaitGroup
+	startBackground := func(work func()) {
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			work()
+		}()
+	}
+	startBackground(func() { s.poller.Run(ctx) })
+	startBackground(func() { s.captureHistoryLoop(ctx) })
 	profileSignals := make(chan os.Signal, 1)
 	signal.Notify(profileSignals, syscall.SIGHUP)
 	defer signal.Stop(profileSignals)
-	go s.reloadProfilesLoop(ctx, profileSignals)
+	startBackground(func() { s.reloadProfilesLoop(ctx, profileSignals) })
 	if s.udp != nil {
-		go s.udp.Run(ctx)
+		startBackground(func() { s.udp.Run(ctx) })
 	}
-	go s.pruneUploads(ctx)
-	var bg sync.WaitGroup
-	bg.Add(1)
-	go func() { defer bg.Done(); s.writeSupportLoop(ctx) }()
-	go s.watchJobStates(ctx)
-	go s.updateCheckLoop(ctx)
+	startBackground(func() { s.pruneUploads(ctx) })
+	startBackground(func() { s.writeSupportLoop(ctx) })
+	startBackground(func() { s.watchJobStates(ctx) })
+	startBackground(func() { s.updateCheckLoop(ctx) })
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -661,28 +591,140 @@ func (s *Server) Run(ctx context.Context) error {
 		s.logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		cancelRun()
 		if s.dispatcher != nil {
 			s.dispatcher.CancelInflight()
 		}
 		_ = srv.Shutdown(shutdownCtx)
 		_ = s.hub.Shutdown(shutdownCtx)
-		if s.dispatcher != nil {
-			_ = s.dispatcher.Close(shutdownCtx)
-		}
 		if s.udp != nil {
 			_ = s.udp.Close()
+		}
+		bg.Wait()
+		s.drainLifecycleWork()
+		if s.dispatcher != nil {
+			_ = s.dispatcher.Close(shutdownCtx)
 		}
 		if s.webH != nil {
 			_ = s.webH.Close()
 		}
-		bg.Wait()
 		return nil
 	case err := <-errCh:
+		cancelRun()
+		if s.udp != nil {
+			_ = s.udp.Close()
+		}
+		bg.Wait()
+		s.drainLifecycleWork()
 		if err == http.ErrServerClosed {
-			bg.Wait()
 			return nil
 		}
 		return err
+	}
+}
+
+func (s *Server) drainLifecycleWork() {
+	s.state.SetOnTransition(nil)
+	s.transitionTasks.Stop()
+	s.historyTasks.Stop()
+	s.historyM.SaveAll()
+}
+
+func (s *Server) handleTransition(
+	parent context.Context,
+	paneID, agent, project, status string,
+	revision int64,
+) {
+	if status == "blocked" && !s.state.TransitionCurrent(paneID, status, revision) {
+		return
+	}
+	if status != "blocked" && !s.state.CompletionCurrent(paneID, revision) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+
+	agentState, agentExists := s.state.Agent(paneID)
+	var session string
+	if agentExists {
+		session = agentState.Session
+	}
+
+	if status == "blocked" {
+		eventID := paneID
+		hasApproval := false
+		approvalTotal := 0
+		command := "Agent needs approval"
+		extract := ""
+		if agentExists {
+			s.enrichBlockedTransition(ctx, agentState)
+			if agentState.BlockedEventID != "" {
+				eventID = agentState.BlockedEventID
+			}
+			hasApproval = agentState.Interaction == nil && !agentState.QuestionLayout
+			approvalTotal = len(agentState.Options)
+			if agentState.Command != "" {
+				command = agentState.Command
+			}
+			extract = agentState.Prompt
+		}
+		if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
+			"blocked", "attention", command, paneID, status, revision,
+			map[string]any{"event_id": eventID}, agent, project, s.hostname, session, extract,
+		) {
+			return
+		}
+		if s.pushM != nil {
+			payload := push.BuildBlockedPayload(agent, project, command, eventID, paneID, s.hostname, hasApproval, approvalTotal)
+			s.pushM.Send(ctx, payload)
+		}
+		if agentExists {
+			s.hub.Broadcast(map[string]any{
+				"type":            "blocked",
+				"pane_id":         agentState.PaneID,
+				"raw_pane_id":     agentState.RawPaneID,
+				"terminal_id":     agentState.TerminalID,
+				"tab_id":          agentState.TabID,
+				"tab_label":       agentState.TabLabel,
+				"tab_number":      agentState.TabNumber,
+				"workspace_id":    agentState.WorkspaceID,
+				"agent":           agentState.Agent,
+				"name":            agentState.Name,
+				"status":          "blocked",
+				"cwd":             agentState.Cwd,
+				"project":         agentState.Project,
+				"host":            agentState.Host,
+				"session":         agentState.Session,
+				"updated_at":      agentState.UpdatedAt,
+				"event_id":        eventID,
+				"prompt":          agentState.Prompt,
+				"command":         agentState.Command,
+				"options":         agentState.Options,
+				"interaction":     agentState.Interaction,
+				"interaction_id":  agentState.InteractionID,
+				"question_layout": agentState.QuestionLayout,
+			})
+		}
+		return
+	}
+	if !s.state.RegisterFinishedNotificationForTransition(paneID, status, revision) {
+		return
+	}
+	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
+	extract := s.captureFinishedPane(ctx, paneID, agent)
+	summary := agent + " completed"
+	if agent == "" {
+		summary = "Agent completed"
+	}
+	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
+		"finished", "completed", summary, paneID, status, revision,
+		map[string]any{"event_id": eventID}, agent, project, s.hostname, session, extract,
+	) {
+		return
+	}
+	if s.pushM != nil {
+		payload := push.BuildFinishedPayload(agent, project, paneID, s.hostname, eventID)
+		s.pushM.Send(ctx, payload)
 	}
 }
 
@@ -717,7 +759,6 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			s.historyM.SaveAll()
 			return
 		case <-ticker.C:
 			for _, agent := range s.state.Snapshot() {
@@ -731,6 +772,9 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 }
 
 func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
+	if s.historyTasks == nil {
+		return
+	}
 	s.historyCaptureMu.Lock()
 	if s.historyInflight[paneID] || time.Since(s.historyLast[paneID]) < history.CaptureInterval {
 		s.historyCaptureMu.Unlock()
@@ -740,13 +784,13 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 	s.historyLast[paneID] = time.Now()
 	s.historyCaptureMu.Unlock()
 
-	go func() {
+	started := s.historyTasks.Start(func(taskCtx context.Context) {
 		defer func() {
 			s.historyCaptureMu.Lock()
 			delete(s.historyInflight, paneID)
 			s.historyCaptureMu.Unlock()
 		}()
-		readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		readCtx, cancel := context.WithTimeout(taskCtx, 3*time.Second)
 		defer cancel()
 		content, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
 		if err != nil || len(content) == 0 || question.LayoutHint(string(content)) {
@@ -756,8 +800,42 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		if !ok || !isClaudeLike(agent.Agent) {
 			return
 		}
+		s.historyCaptureMu.Lock()
+		defer s.historyCaptureMu.Unlock()
+		if !s.historyActive[paneID] {
+			return
+		}
 		s.historyM.Merge(paneID, string(content))
-	}()
+	})
+	if started {
+		return
+	}
+	s.historyCaptureMu.Lock()
+	delete(s.historyInflight, paneID)
+	s.historyCaptureMu.Unlock()
+}
+
+func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
+	active := make(map[string]bool, len(agents))
+	for _, agent := range agents {
+		if isClaudeLike(agent.Agent) {
+			active[agent.PaneID] = true
+		}
+	}
+
+	s.historyCaptureMu.Lock()
+	defer s.historyCaptureMu.Unlock()
+	for paneID := range s.historyActive {
+		if active[paneID] {
+			continue
+		}
+		delete(s.historyActive, paneID)
+		delete(s.historyLast, paneID)
+		s.historyM.Discard(paneID)
+	}
+	for paneID := range active {
+		s.historyActive[paneID] = true
+	}
 }
 
 func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent string) string {

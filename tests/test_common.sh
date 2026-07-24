@@ -44,4 +44,11 @@ update_launchd_release_paths "$WORK_DIR/service.plist" \
 grep -F "Set :ProgramArguments:0 $WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh" "$PLIST_LOG" >/dev/null
 grep -F "Set :WorkingDirectory $WORK_DIR/releases/current" "$PLIST_LOG" >/dev/null
 
+HEALTH='{"status":"ok","release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
+verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"
+if verify_relay_release_health "$HEALTH" "0.9.0" "wrong" "web456"; then
+    echo "release health accepted the wrong revision" >&2
+    exit 1
+fi
+
 echo "common shell tests passed"

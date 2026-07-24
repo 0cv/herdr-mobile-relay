@@ -54,8 +54,6 @@ func TestBlockedTransitionFiresOncePerCycle(t *testing.T) {
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "blocked"}}, s.RevisionCounter())
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "blocked"}}, s.RevisionCounter())
 
-	time.Sleep(200 * time.Millisecond) // onTransition is dispatched on a goroutine
-
 	if n := blockedFires.Load(); n != 1 {
 		t.Fatalf("blocked notification fired %d times across two polls, want 1 "+
 			"(no once-per-event guard; notification spam every poll interval)", n)
@@ -87,8 +85,6 @@ func TestCompletionTransitionFiresOnIdle(t *testing.T) {
 
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "idle"}}, s.RevisionCounter())
-
-	time.Sleep(200 * time.Millisecond)
 
 	if completions.Load() < 1 {
 		t.Fatalf("working->idle produced no completion transition, want >=1 " +

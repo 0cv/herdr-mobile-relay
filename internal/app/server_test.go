@@ -228,9 +228,12 @@ func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
 		RuntimeDir: filepath.Join(root, "runtime"),
 	}
 	s := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.historyTasks = newLifecycleTasks(context.Background())
+	defer s.historyTasks.Stop()
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "Claude Code", Status: "working",
 	}}, s.state.RevisionCounter())
+	s.syncHistoryPanes(s.state.Snapshot())
 
 	s.scheduleHistoryCapture(context.Background(), "pane-1")
 	deadline := time.Now().Add(2 * time.Second)
@@ -239,5 +242,36 @@ func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
 			t.Fatal("background capture did not persist Claude pane output")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRemovedPaneHistoryIsDiscarded(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		CacheDir:   filepath.Join(root, "cache"),
+		RuntimeDir: filepath.Join(root, "runtime"),
+	}
+	s := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.historyM.Merge("pane-1", "one\ntwo\nthree\nfour\nfive\nsix\nseven")
+	s.historyCaptureMu.Lock()
+	s.historyActive["pane-1"] = true
+	s.historyLast["pane-1"] = time.Now()
+	s.historyCaptureMu.Unlock()
+
+	s.syncHistoryPanes(nil)
+
+	s.historyCaptureMu.Lock()
+	_, active := s.historyActive["pane-1"]
+	_, last := s.historyLast["pane-1"]
+	s.historyCaptureMu.Unlock()
+	if active || last {
+		t.Fatalf("removed pane tracking remains: active=%v last=%v", active, last)
+	}
+	files, err := filepath.Glob(filepath.Join(cfg.CacheDir, "claude-history", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("removed pane history files remain: %v", files)
 	}
 }

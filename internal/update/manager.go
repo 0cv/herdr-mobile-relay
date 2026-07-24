@@ -334,8 +334,8 @@ func (m *Manager) eligibility() (bool, string, string) {
 	if err != nil {
 		return false, "unsupported", "Self-update requires a verified packaged release"
 	}
-	if manifest.Version != m.version {
-		return false, "unsupported", "The running version does not match the active packaged release"
+	if matches, reason := activeManifestIdentity(manifest, m.version, m.revision); !matches {
+		return false, "unsupported", reason
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -349,6 +349,19 @@ func (m *Manager) eligibility() (bool, string, string) {
 		return false, "unsupported", "The service is not running from the active release directory"
 	}
 	return true, "release", ""
+}
+
+func activeManifestIdentity(
+	manifest relayrelease.Manifest,
+	version, revision string,
+) (bool, string) {
+	if manifest.Version != version {
+		return false, "The running version does not match the active packaged release"
+	}
+	if !strings.EqualFold(manifest.Revision, revision) {
+		return false, "The running revision does not match the active packaged release"
+	}
+	return true, ""
 }
 
 func (m *Manager) launchWorker(ctx context.Context, jobPath, serviceName string) error {

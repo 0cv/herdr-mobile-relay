@@ -25,33 +25,46 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	budget := maxCustomFiles
 
 	var personalCmds, personalSkills, projectCmds, projectSkills []Command
+	var personalSuppressed, projectSuppressed []string
 
 	if ctx.Cwd != "" {
 		projectDirs := findQoderProjectDirs(ctx.Cwd)
 		for _, dir := range projectDirs {
 			cmdDir := filepath.Join(dir, "commands")
-			cmds, _, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
+			cmds, suppressed, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
 			projectCmds = append(projectCmds, cmds...)
+			projectSuppressed = append(projectSuppressed, suppressed...)
 			truncated = truncated || trunc
 
 			skillDir := filepath.Join(dir, "skills")
-			cmds, _, trunc = scanSkillDirBudget(skillDir, "project", &budget)
+			cmds, suppressed, trunc = scanSkillDirBudget(skillDir, "project", &budget)
 			projectSkills = append(projectSkills, cmds...)
+			projectSuppressed = append(projectSuppressed, suppressed...)
 			truncated = truncated || trunc
 		}
 	}
 
 	personalCmdDir := filepath.Join(ctx.Home, ".qoder", "commands")
-	cmds, _, trunc := walkCommandDirBudget(personalCmdDir, "personal", &budget)
+	cmds, suppressed, trunc := walkCommandDirBudget(personalCmdDir, "personal", &budget)
 	personalCmds = append(personalCmds, cmds...)
+	personalSuppressed = append(personalSuppressed, suppressed...)
 	truncated = truncated || trunc
 
 	personalSkillDir := filepath.Join(ctx.Home, ".qoder", "skills")
-	cmds, _, trunc = scanSkillDirBudget(personalSkillDir, "personal", &budget)
+	cmds, suppressed, trunc = scanSkillDirBudget(personalSkillDir, "personal", &budget)
 	personalSkills = append(personalSkills, cmds...)
+	personalSuppressed = append(personalSuppressed, suppressed...)
 	truncated = truncated || trunc
 
-	commands := dedupQoder(qoderBuiltins, personalCmds, personalSkills, projectCmds, projectSkills)
+	commands := dedupQoder(
+		qoderBuiltins,
+		personalCmds,
+		personalSkills,
+		projectCmds,
+		projectSkills,
+		personalSuppressed,
+		projectSuppressed,
+	)
 
 	if budget <= 0 {
 		truncated = true
@@ -64,7 +77,13 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 //   - Same-name commands from personal and project scopes coexist.
 //   - Personal skills override project skills with the same name.
 //   - Custom skills override builtins with the same name.
-func dedupQoder(builtins, personalCmds, personalSkills, projectCmds, projectSkills []Command) []Command {
+func dedupQoder(
+	builtins, personalCmds, personalSkills, projectCmds, projectSkills []Command,
+	personalSuppressed, projectSuppressed []string,
+) []Command {
+	personalSuppressions := commandSet(personalSuppressed)
+	projectSuppressions := commandSet(projectSuppressed)
+
 	// Collect personal skill names (personal overrides project for skills).
 	personalSkillNames := make(map[string]bool, len(personalSkills))
 	for _, cmd := range personalSkills {
@@ -85,6 +104,12 @@ func dedupQoder(builtins, personalCmds, personalSkills, projectCmds, projectSkil
 	for _, cmd := range projectSkills {
 		customNames[cmd.Command] = true
 	}
+	for name := range personalSuppressions {
+		customNames[name] = true
+	}
+	for name := range projectSuppressions {
+		customNames[name] = true
+	}
 
 	var result []Command
 
@@ -96,10 +121,18 @@ func dedupQoder(builtins, personalCmds, personalSkills, projectCmds, projectSkil
 	}
 
 	// Personal commands (coexist with project commands of same name).
-	result = append(result, personalCmds...)
+	for _, cmd := range personalCmds {
+		if !projectSuppressions[cmd.Command] {
+			result = append(result, cmd)
+		}
+	}
 
 	// Personal skills.
-	result = append(result, personalSkills...)
+	for _, cmd := range personalSkills {
+		if !projectSuppressions[cmd.Command] {
+			result = append(result, cmd)
+		}
+	}
 
 	// Project commands (coexist with personal commands of same name).
 	result = append(result, projectCmds...)
@@ -111,6 +144,14 @@ func dedupQoder(builtins, personalCmds, personalSkills, projectCmds, projectSkil
 		}
 	}
 
+	return result
+}
+
+func commandSet(names []string) map[string]bool {
+	result := make(map[string]bool, len(names))
+	for _, name := range names {
+		result[name] = true
+	}
 	return result
 }
 

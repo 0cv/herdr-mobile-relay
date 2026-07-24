@@ -34,4 +34,10 @@ test "$checksum_url" = "https://api.github.com/repos/0cv/herdr-mobile-relay-dev/
 commit_json='{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"tree":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}'
 test "$(resolve_tag_revision "$commit_json")" = "0123456789abcdef0123456789abcdef01234567"
 
+sentinel_root="$WORK_DIR/custom-root"
+write_install_sentinel "$sentinel_root"
+canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
+grep -Fx 'product=herdr-mobile-relay' "$sentinel_root/.herdr-mobile-relay-installation" >/dev/null
+grep -Fx "root=$canonical_root" "$sentinel_root/.herdr-mobile-relay-installation" >/dev/null
+
 echo "install shell tests passed"

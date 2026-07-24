@@ -115,3 +115,40 @@ func TestQoderDoesNotUseClaudeDirectories(t *testing.T) {
 		t.Error("qoder should not discover from .claude/ directories")
 	}
 }
+
+func TestQoderNonInvocableCommandSuppressesBuiltin(t *testing.T) {
+	home := t.TempDir()
+	cmdDir := filepath.Join(home, ".qoder", "commands")
+	os.MkdirAll(cmdDir, 0o755)
+	os.WriteFile(
+		filepath.Join(cmdDir, "clear.md"),
+		[]byte("---\nuser-invocable: false\n---\n"),
+		0o644,
+	)
+
+	catalog := CatalogFor("qoder", "/tmp", home)
+	if hasCommand(catalog, "/clear") {
+		t.Error("non-invocable personal command did not suppress builtin /clear")
+	}
+}
+
+func TestQoderProjectSuppressionHidesLowerScopeCommand(t *testing.T) {
+	home := t.TempDir()
+	personalDir := filepath.Join(home, ".qoder", "commands")
+	os.MkdirAll(personalDir, 0o755)
+	os.WriteFile(filepath.Join(personalDir, "deploy.md"), []byte("Personal"), 0o644)
+
+	cwd := t.TempDir()
+	projectDir := filepath.Join(cwd, ".qoder", "commands")
+	os.MkdirAll(projectDir, 0o755)
+	os.WriteFile(
+		filepath.Join(projectDir, "deploy.md"),
+		[]byte("---\nuser-invocable: false\n---\n"),
+		0o644,
+	)
+
+	catalog := CatalogFor("qoder", cwd, home)
+	if hasCommand(catalog, "/deploy") {
+		t.Error("project suppression did not hide lower-scope /deploy")
+	}
+}

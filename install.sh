@@ -130,6 +130,20 @@ validate_archive_paths() {
     ' || return 1
 }
 
+write_install_sentinel() {
+    sentinel_root=$1
+    mkdir -p "$sentinel_root"
+    chmod 700 "$sentinel_root"
+    canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
+    sentinel_temp="$sentinel_root/.herdr-mobile-relay-installation.$$"
+    {
+        printf 'product=herdr-mobile-relay\n'
+        printf 'root=%s\n' "$canonical_root"
+    } > "$sentinel_temp"
+    chmod 600 "$sentinel_temp"
+    mv -f "$sentinel_temp" "$sentinel_root/.herdr-mobile-relay-installation"
+}
+
 main() {
     command -v tar >/dev/null 2>&1 || fatal "tar is required"
     command -v awk >/dev/null 2>&1 || fatal "awk is required"
@@ -150,6 +164,8 @@ main() {
     tag="v$version"
     release_root=${INSTALL_ROOT:-"${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay"}
     shim_dir=${BIN_DIR:-"$HOME/.local/bin"}
+    config_root=${HERDR_PLUGIN_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay"}
+    cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay"
 
     work_dir=$(mktemp -d "${TMPDIR:-/tmp}/herdr-install.XXXXXX")
     trap 'rm -rf "$work_dir"' EXIT INT TERM
@@ -225,6 +241,9 @@ main() {
     fi
     mkdir -p "$releases_dir" "$shim_dir"
     chmod 700 "$release_root" "$releases_dir"
+    write_install_sentinel "$release_root"
+    write_install_sentinel "$config_root"
+    write_install_sentinel "$cache_root"
     if [ -e "$final_dir" ]; then
         "$stage/$BINARY" verify-release --target "$target" "$final_dir" >/dev/null ||
             fatal "existing target release directory is invalid"

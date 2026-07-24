@@ -76,10 +76,23 @@ func (p *codexProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 }
 
 func codexBuiltinsForVersion(version string) []Command {
+	var selected []Command
+	var selectedMinimum string
 	for _, vb := range codexBuiltinVersions {
-		if vb.MinVersion == "" || semverAtLeast(version, vb.MinVersion) {
-			return vb.Commands
+		if vb.MinVersion == "" {
+			if selected == nil {
+				selected = vb.Commands
+			}
+			continue
 		}
+		if semverAtLeast(version, vb.MinVersion) &&
+			(selectedMinimum == "" || semverAtLeast(vb.MinVersion, selectedMinimum)) {
+			selected = vb.Commands
+			selectedMinimum = vb.MinVersion
+		}
+	}
+	if selected != nil {
+		return selected
 	}
 	return codexBuiltinsBase
 }

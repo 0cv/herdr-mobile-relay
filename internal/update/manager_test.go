@@ -8,11 +8,24 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
 func TestNewerVersion(t *testing.T) {
 	if !NewerVersion("1.2.4", "1.2.3") || NewerVersion("1.2.3", "1.2.3") || NewerVersion("latest", "1.2.3") {
 		t.Fatal("semantic version comparison failed")
+	}
+}
+
+func TestActiveManifestIdentityRequiresExactRevision(t *testing.T) {
+	manifest := relayrelease.Manifest{Version: "1.2.3", Revision: "abcdef"}
+	if ok, reason := activeManifestIdentity(manifest, "1.2.3", "ABCDEF"); !ok || reason != "" {
+		t.Fatalf("matching identity rejected: ok=%v reason=%q", ok, reason)
+	}
+	if ok, reason := activeManifestIdentity(manifest, "1.2.3", "different"); ok ||
+		!strings.Contains(reason, "revision") {
+		t.Fatalf("revision mismatch accepted: ok=%v reason=%q", ok, reason)
 	}
 }
 

@@ -78,19 +78,15 @@ verify_removal_target() {
         return 1
     fi
 
-    # Require an installation marker to confirm this is actually a relay directory.
+    # Require a dedicated sentinel whose recorded canonical root matches the
+    # deletion target. Generic relay-looking filenames never authorize removal.
     if [ -d "$canonical" ]; then
-        if [ ! -f "$canonical/release-manifest.json" ] && \
-           [ ! -d "$canonical/releases" ] && \
-           [ ! -f "$canonical/subscriptions.json" ] && \
-           [ ! -d "$canonical/push" ] && \
-           [ ! -f "$canonical/relay.env" ] && \
-           [ ! -f "$canonical/herdr-mobile-relay.env" ] && \
-           [ ! -f "$canonical/activity.jsonl" ] && \
-           [ ! -d "$canonical/claude-history" ] && \
-           [ ! -d "$canonical/uploads" ]; then
+        sentinel="$canonical/.herdr-mobile-relay-installation"
+        if [ ! -f "$sentinel" ] ||
+           ! grep -Fx 'product=herdr-mobile-relay' "$sentinel" >/dev/null ||
+           ! grep -Fx "root=$canonical" "$sentinel" >/dev/null; then
             echo "  REFUSING to remove $label: $canonical" >&2
-            echo "  Directory exists but contains no herdr-mobile-relay installation marker." >&2
+            echo "  Directory has no matching herdr-mobile-relay installation sentinel." >&2
             return 1
         fi
     fi

@@ -102,6 +102,7 @@ func (m *Manager) Discard(paneID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.states, paneID)
+	delete(m.lastSave, paneID)
 	os.Remove(m.stateFile(paneID))
 }
 

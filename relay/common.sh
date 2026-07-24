@@ -343,6 +343,26 @@ wait_for_relay_health() {
     return 1
 }
 
+json_string_field() {
+    local json="$1"
+    local key="$2"
+    printf '%s\n' "$json" |
+        sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" |
+        head -1
+}
+
+verify_relay_release_health() {
+    local health="$1"
+    local expected_version="$2"
+    local expected_revision="$3"
+    local expected_web_hash="$4"
+
+    [ "$(json_string_field "$health" status)" = "ok" ] &&
+        [ "$(json_string_field "$health" release_version)" = "$expected_version" ] &&
+        [ "$(json_string_field "$health" revision)" = "$expected_revision" ] &&
+        [ "$(json_string_field "$health" bundle_hash)" = "$expected_web_hash" ]
+}
+
 host_label() {
     hostname -s 2>/dev/null || hostname 2>/dev/null || echo relay
 }

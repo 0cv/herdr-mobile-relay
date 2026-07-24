@@ -80,3 +80,17 @@ func TestParseVersionParts(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexVersionSpecificCatalogWinsOverBaseFallback(t *testing.T) {
+	original := codexBuiltinVersions
+	codexBuiltinVersions = []versionedBuiltins{
+		{MinVersion: "", Commands: []Command{{Command: "/base"}}},
+		{MinVersion: "1.2.0", Commands: []Command{{Command: "/new"}}},
+	}
+	defer func() { codexBuiltinVersions = original }()
+
+	commands := codexBuiltinsForVersion("1.3.0")
+	if len(commands) != 1 || commands[0].Command != "/new" {
+		t.Fatalf("version-specific commands = %+v, want /new", commands)
+	}
+}
