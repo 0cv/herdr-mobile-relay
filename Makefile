@@ -73,6 +73,7 @@ shell-check:
 	bash -n relay/plugin-setup-terminal.command
 	sh tests/test_install.sh
 	bash tests/test_common.sh
+	bash tests/test_plugin_build.sh
 	bash tests/test_uninstall.sh
 	tests/test_stable_setup.sh
 
@@ -178,7 +179,9 @@ web-release:
 	node frontend/scripts/release.mjs
 	$(MAKE) web-bundle-check
 
-web-release-check: web-bundle-check frontend-browser-release
+web-release-check: web-bundle-check
+	@diff -qr frontend/dist web
+	$(MAKE) frontend-browser-release
 
 web-deploy: web-bundle-check
 	npx --yes wrangler@$(WRANGLER_VERSION) pages deploy web --project-name "$(WEB_PROJECT)" --branch "$(WEB_BRANCH)"

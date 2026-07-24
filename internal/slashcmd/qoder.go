@@ -9,6 +9,12 @@ type qoderProvider struct{}
 
 func (p *qoderProvider) ID() string { return "qoder" }
 
+type qoderProjectScope struct {
+	commands   []Command
+	skills     []Command
+	suppressed []string
+}
+
 var qoderBuiltins = []Command{
 	{"/clear", "Start a fresh conversation", "builtin", ""},
 	{"/compact", "Summarize and compact conversation history", "builtin", "[instructions]"},
@@ -24,23 +30,25 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	truncated := false
 	budget := maxCustomFiles
 
-	var personalCmds, personalSkills, projectCmds, projectSkills []Command
-	var personalSuppressed, projectSuppressed []string
+	var personalCmds, personalSkills []Command
+	var personalSuppressed []string
+	var projectScopes []qoderProjectScope
 
 	if ctx.Cwd != "" {
 		projectDirs := findQoderProjectDirs(ctx.Cwd)
 		for _, dir := range projectDirs {
 			cmdDir := filepath.Join(dir, "commands")
-			cmds, suppressed, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
-			projectCmds = append(projectCmds, cmds...)
-			projectSuppressed = append(projectSuppressed, suppressed...)
+			projectCmds, commandSuppressions, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
 			truncated = truncated || trunc
 
 			skillDir := filepath.Join(dir, "skills")
-			cmds, suppressed, trunc = scanSkillDirBudget(skillDir, "project", &budget)
-			projectSkills = append(projectSkills, cmds...)
-			projectSuppressed = append(projectSuppressed, suppressed...)
+			projectSkills, skillSuppressions, trunc := scanSkillDirBudget(skillDir, "project", &budget)
 			truncated = truncated || trunc
+			projectScopes = append(projectScopes, qoderProjectScope{
+				commands:   projectCmds,
+				skills:     projectSkills,
+				suppressed: append(commandSuppressions, skillSuppressions...),
+			})
 		}
 	}
 
@@ -60,10 +68,8 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		qoderBuiltins,
 		personalCmds,
 		personalSkills,
-		projectCmds,
-		projectSkills,
+		projectScopes,
 		personalSuppressed,
-		projectSuppressed,
 	)
 
 	if budget <= 0 {
@@ -78,11 +84,29 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 //   - Personal skills override project skills with the same name.
 //   - Custom skills override builtins with the same name.
 func dedupQoder(
-	builtins, personalCmds, personalSkills, projectCmds, projectSkills []Command,
-	personalSuppressed, projectSuppressed []string,
+	builtins, personalCmds, personalSkills []Command,
+	projectScopes []qoderProjectScope,
+	personalSuppressed []string,
 ) []Command {
 	personalSuppressions := commandSet(personalSuppressed)
-	projectSuppressions := commandSet(projectSuppressed)
+	projectSuppressions := make(map[string]bool)
+	var projectCmds, projectSkills []Command
+	for _, scope := range projectScopes {
+		scopeSuppressions := commandSet(scope.suppressed)
+		projectCmds = filterQoderCommands(projectCmds, scopeSuppressions)
+		projectSkills = filterQoderCommands(projectSkills, scopeSuppressions)
+		for name := range scopeSuppressions {
+			projectSuppressions[name] = true
+		}
+		for _, cmd := range scope.commands {
+			delete(projectSuppressions, cmd.Command)
+			projectCmds = append(projectCmds, cmd)
+		}
+		for _, cmd := range scope.skills {
+			delete(projectSuppressions, cmd.Command)
+			projectSkills = append(projectSkills, cmd)
+		}
+	}
 
 	// Collect personal skill names (personal overrides project for skills).
 	personalSkillNames := make(map[string]bool, len(personalSkills))
@@ -153,6 +177,16 @@ func commandSet(names []string) map[string]bool {
 		result[name] = true
 	}
 	return result
+}
+
+func filterQoderCommands(commands []Command, suppressed map[string]bool) []Command {
+	filtered := commands[:0]
+	for _, command := range commands {
+		if !suppressed[command.Command] {
+			filtered = append(filtered, command)
+		}
+	}
+	return filtered
 }
 
 // findQoderProjectDirs returns all .qoder directories from git root through cwd.

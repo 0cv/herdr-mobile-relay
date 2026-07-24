@@ -1,6 +1,8 @@
 package history
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -149,5 +151,24 @@ func TestDiscard(t *testing.T) {
 	m.mu.Unlock()
 	if exists {
 		t.Error("state should be discarded")
+	}
+}
+
+func TestReconcileRemovesHistoryLeftByEarlierProcess(t *testing.T) {
+	dir := t.TempDir()
+	first := NewManager(dir)
+	frame := "line1\nline2\nline3\nline4\nline5\nline6\nf1\nf2\nf3\nf4\nf5\nf6"
+	first.Merge("removed-pane", frame)
+	first.Merge("active-pane", frame)
+	first.SaveAll()
+
+	restarted := NewManager(dir)
+	restarted.Reconcile(map[string]bool{"active-pane": true})
+
+	if _, err := os.Stat(filepath.Join(dir, "claude-history", "removed-pane.json")); !os.IsNotExist(err) {
+		t.Fatalf("removed pane history still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "claude-history", "active-pane.json")); err != nil {
+		t.Fatalf("active pane history was removed: %v", err)
 	}
 }

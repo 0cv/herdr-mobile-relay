@@ -164,7 +164,11 @@ main() {
     tag="v$version"
     release_root=${INSTALL_ROOT:-"${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay"}
     shim_dir=${BIN_DIR:-"$HOME/.local/bin"}
-    config_root=${HERDR_PLUGIN_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay"}
+    if [ -n "${HERDR_RELAY_ENV:-}" ]; then
+        config_root=$(dirname "$HERDR_RELAY_ENV")
+    else
+        config_root=${HERDR_PLUGIN_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay"}
+    fi
     cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay"
 
     work_dir=$(mktemp -d "${TMPDIR:-/tmp}/herdr-install.XXXXXX")

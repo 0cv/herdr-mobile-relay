@@ -50,6 +50,11 @@ type Dispatcher struct {
 	wakePoll         func()
 	readMu           sync.Mutex
 	reads            map[string]*paneRead
+	watcherMu        sync.Mutex
+	watcherCtx       context.Context
+	watcherCancel    context.CancelFunc
+	watcherClosed    bool
+	watcherWG        sync.WaitGroup
 
 	// testGates is a deterministic pre-admission hook retained for the existing
 	// package tests. Production never creates an entry and never takes a lock.
@@ -67,14 +72,17 @@ type paneRead struct {
 }
 
 func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
+	watcherCtx, watcherCancel := context.WithCancel(context.Background())
 	dispatcher := &Dispatcher{
-		herdr:     client,
-		state:     state,
-		journal:   journal,
-		logger:    logger,
-		scheduler: NewScheduler(defaultHerdrCapacity, logger),
-		testGates: make(map[string]chan struct{}),
-		reads:     make(map[string]*paneRead),
+		herdr:         client,
+		state:         state,
+		journal:       journal,
+		logger:        logger,
+		scheduler:     NewScheduler(defaultHerdrCapacity, logger),
+		testGates:     make(map[string]chan struct{}),
+		reads:         make(map[string]*paneRead),
+		watcherCtx:    watcherCtx,
+		watcherCancel: watcherCancel,
 	}
 	if journal != nil {
 		dispatcher.activityW = activity.NewWorker(journal)
@@ -92,6 +100,7 @@ func (d *Dispatcher) CancelInflight() {
 }
 
 func (d *Dispatcher) Close(ctx context.Context) error {
+	d.closeWatchers()
 	err := d.scheduler.Close(ctx)
 	if d.activityW != nil {
 		if workerErr := d.activityW.Close(ctx); err == nil {
@@ -99,6 +108,33 @@ func (d *Dispatcher) Close(ctx context.Context) error {
 		}
 	}
 	return err
+}
+
+func (d *Dispatcher) startWatcher(work func(context.Context)) bool {
+	d.watcherMu.Lock()
+	if d.watcherClosed {
+		d.watcherMu.Unlock()
+		return false
+	}
+	d.watcherWG.Add(1)
+	ctx := d.watcherCtx
+	d.watcherMu.Unlock()
+
+	go func() {
+		defer d.watcherWG.Done()
+		work(ctx)
+	}()
+	return true
+}
+
+func (d *Dispatcher) closeWatchers() {
+	d.watcherMu.Lock()
+	if !d.watcherClosed {
+		d.watcherClosed = true
+		d.watcherCancel()
+	}
+	d.watcherMu.Unlock()
+	d.watcherWG.Wait()
 }
 
 func (d *Dispatcher) Metrics() SchedulerMetrics {

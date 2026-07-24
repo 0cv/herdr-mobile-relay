@@ -275,3 +275,29 @@ func TestRemovedPaneHistoryIsDiscarded(t *testing.T) {
 		t.Fatalf("removed pane history files remain: %v", files)
 	}
 }
+
+func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		CacheDir:   filepath.Join(root, "cache"),
+		RuntimeDir: filepath.Join(root, "runtime"),
+	}
+	earlier := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	earlier.historyM.Merge("removed-pane", "one\ntwo\nthree\nfour\nfive\nsix\nseven")
+	earlier.historyM.SaveAll()
+
+	restarted := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	restarted.syncHistoryPanes([]*coordinator.AgentState{{
+		PaneID: "active-pane",
+		Agent:  "Claude Code",
+		Status: "working",
+	}})
+
+	files, err := filepath.Glob(filepath.Join(cfg.CacheDir, "claude-history", "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("stale history from earlier process remains: %v", files)
+	}
+}

@@ -74,12 +74,13 @@ type Server struct {
 	refreshMu      sync.Mutex
 	refreshClients map[string]bool
 
-	historyCaptureMu sync.Mutex
-	historyInflight  map[string]bool
-	historyLast      map[string]time.Time
-	historyActive    map[string]bool
-	transitionTasks  *lifecycleTasks
-	historyTasks     *lifecycleTasks
+	historyCaptureMu  sync.Mutex
+	historyInflight   map[string]bool
+	historyLast       map[string]time.Time
+	historyActive     map[string]bool
+	historyReconciled bool
+	transitionTasks   *lifecycleTasks
+	historyTasks      *lifecycleTasks
 }
 
 func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Server {
@@ -586,41 +587,38 @@ func (s *Server) Run(ctx context.Context) error {
 		errCh <- srv.Serve(ln)
 	}()
 
+	var runErr error
 	select {
 	case <-ctx.Done():
 		s.logger.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		cancelRun()
-		if s.dispatcher != nil {
-			s.dispatcher.CancelInflight()
-		}
-		_ = srv.Shutdown(shutdownCtx)
-		_ = s.hub.Shutdown(shutdownCtx)
-		if s.udp != nil {
-			_ = s.udp.Close()
-		}
-		bg.Wait()
-		s.drainLifecycleWork()
-		if s.dispatcher != nil {
-			_ = s.dispatcher.Close(shutdownCtx)
-		}
-		if s.webH != nil {
-			_ = s.webH.Close()
-		}
-		return nil
 	case err := <-errCh:
-		cancelRun()
-		if s.udp != nil {
-			_ = s.udp.Close()
+		if err != http.ErrServerClosed {
+			runErr = err
 		}
-		bg.Wait()
-		s.drainLifecycleWork()
-		if err == http.ErrServerClosed {
-			return nil
-		}
-		return err
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cancelRun()
+	if s.dispatcher != nil {
+		s.dispatcher.CancelInflight()
+	}
+	_ = srv.Shutdown(shutdownCtx)
+	_ = s.hub.Shutdown(shutdownCtx)
+	if s.udp != nil {
+		_ = s.udp.Close()
+	}
+	bg.Wait()
+	s.drainLifecycleWork()
+	if s.dispatcher != nil {
+		if err := s.dispatcher.Close(shutdownCtx); runErr == nil && err != nil {
+			runErr = err
+		}
+	}
+	if s.webH != nil {
+		_ = s.webH.Close()
+	}
+	return runErr
 }
 
 func (s *Server) drainLifecycleWork() {
@@ -825,6 +823,10 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 
 	s.historyCaptureMu.Lock()
 	defer s.historyCaptureMu.Unlock()
+	if !s.historyReconciled {
+		s.historyM.Reconcile(active)
+		s.historyReconciled = true
+	}
 	for paneID := range s.historyActive {
 		if active[paneID] {
 			continue

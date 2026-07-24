@@ -40,19 +40,19 @@ jobs:
       - run: make frontend-check
       - run: npm --prefix frontend exec -- playwright install --with-deps chromium webkit
       - run: make frontend-browser
-      - id: web-changes
-        name: Check for release bundle changes
+      - id: release-ui-changes
+        name: Check for frontend or release bundle changes
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet "$BASE_SHA" HEAD -- web; then
+          elif git diff --quiet "$BASE_SHA" HEAD -- frontend web; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - if: steps.web-changes.outputs.changed == 'true'
+      - if: steps.release-ui-changes.outputs.changed == 'true'
         run: make web-release-check
 
   release:

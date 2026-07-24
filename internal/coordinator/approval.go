@@ -105,7 +105,9 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 	}
 	d.recordActivity("approval", "approved", fmt.Sprintf("Approved option %d", payload.Index+1), paneID, requestID)
 	d.wake()
-	go d.watchApproval(requestID, paneID, payload.EventID, uint64(generation))
+	d.startWatcher(func(ctx context.Context) {
+		d.watchApproval(ctx, requestID, paneID, payload.EventID, uint64(generation))
+	})
 	return result
 }
 
@@ -123,8 +125,8 @@ func approvalKeys(index, total int) []string {
 	return append(keys, "Enter")
 }
 
-func (d *Dispatcher) watchApproval(requestID, paneID, eventID string, generation uint64) {
-	ctx, cancel := context.WithTimeout(context.Background(), approvalPollTimeout)
+func (d *Dispatcher) watchApproval(parent context.Context, requestID, paneID, eventID string, generation uint64) {
+	ctx, cancel := context.WithTimeout(parent, approvalPollTimeout)
 	defer cancel()
 	ticker := time.NewTicker(approvalPollInterval)
 	defer ticker.Stop()
@@ -310,7 +312,9 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 	if result.OK && !result.replayed {
 		d.recordActivity("question", "answered", "Answered question", paneID, requestID)
 		d.wake()
-		go d.watchQuestion(requestID, action, paneID, payload.InteractionID, uint64(d.state.Generation(paneID)))
+		d.startWatcher(func(ctx context.Context) {
+			d.watchQuestion(ctx, requestID, action, paneID, payload.InteractionID, uint64(d.state.Generation(paneID)))
+		})
 	}
 	return result
 }
@@ -533,8 +537,12 @@ func contextDelay(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func (d *Dispatcher) watchQuestion(requestID, action, paneID, interactionID string, generation uint64) {
-	ctx, cancel := context.WithTimeout(context.Background(), approvalPollTimeout)
+func (d *Dispatcher) watchQuestion(
+	parent context.Context,
+	requestID, action, paneID, interactionID string,
+	generation uint64,
+) {
+	ctx, cancel := context.WithTimeout(parent, approvalPollTimeout)
 	defer cancel()
 	ticker := time.NewTicker(approvalPollInterval)
 	defer ticker.Stop()

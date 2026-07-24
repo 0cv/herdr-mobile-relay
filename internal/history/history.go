@@ -114,6 +114,36 @@ func (m *Manager) SaveAll() {
 	}
 }
 
+// Reconcile removes persisted and in-memory history for panes that are absent
+// from a successful inventory snapshot. It does not need to decode pane IDs
+// from filenames; active panes are mapped through the same canonical filename
+// function used for persistence.
+func (m *Manager) Reconcile(activePaneIDs map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	activeFiles := make(map[string]bool, len(activePaneIDs))
+	for paneID := range activePaneIDs {
+		activeFiles[filepath.Base(m.stateFile(paneID))] = true
+	}
+	entries, err := os.ReadDir(m.dir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || activeFiles[entry.Name()] {
+				continue
+			}
+			_ = os.Remove(filepath.Join(m.dir, entry.Name()))
+		}
+	}
+	for paneID := range m.states {
+		if activePaneIDs[paneID] {
+			continue
+		}
+		delete(m.states, paneID)
+		delete(m.lastSave, paneID)
+	}
+}
+
 func (m *Manager) applyMatch(state *PaneState, body []string, match seqmatch.Match) {
 	historyEnd := match.A + match.Size
 	currentEnd := match.B + match.Size

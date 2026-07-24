@@ -152,3 +152,25 @@ func TestQoderProjectSuppressionHidesLowerScopeCommand(t *testing.T) {
 		t.Error("project suppression did not hide lower-scope /deploy")
 	}
 }
+
+func TestQoderNearProjectSuppressionHidesOuterProjectCommand(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	outerCommands := filepath.Join(root, ".qoder", "commands")
+	os.MkdirAll(outerCommands, 0o755)
+	os.WriteFile(filepath.Join(outerCommands, "deploy.md"), []byte("Outer project"), 0o644)
+
+	cwd := filepath.Join(root, "packages", "mobile")
+	nearCommands := filepath.Join(cwd, ".qoder", "commands")
+	os.MkdirAll(nearCommands, 0o755)
+	os.WriteFile(
+		filepath.Join(nearCommands, "deploy.md"),
+		[]byte("---\nuser-invocable: false\n---\n"),
+		0o644,
+	)
+
+	catalog := CatalogFor("qoder", cwd, t.TempDir())
+	if hasCommand(catalog, "/deploy") {
+		t.Error("near project suppression did not hide outer project /deploy")
+	}
+}
