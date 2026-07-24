@@ -365,11 +365,15 @@ func (m *Manager) Send(ctx context.Context, payload []byte) {
 
 func payloadType(payload []byte) string {
 	var envelope struct {
+		Tag  string `json:"tag"`
 		Data struct {
 			Type string `json:"type"`
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(payload, &envelope)
+	if envelope.Data.Type == "" && strings.HasPrefix(envelope.Tag, "herdr-finished-") {
+		return "finished"
+	}
 	return envelope.Data.Type
 }
 
@@ -421,7 +425,7 @@ func (m *Manager) sendOne(ctx context.Context, sub Subscription, payload []byte)
 		Subscriber:      "relay@herdr.local",
 		VAPIDPublicKey:  m.vapidPublic,
 		VAPIDPrivateKey: m.vapidPrivate,
-		TTL:             60,
+		TTL:             300,
 	})
 	if err != nil {
 		return err
@@ -541,7 +545,6 @@ func BuildFinishedPayload(agent, project, paneID, host, eventID string) []byte {
 		"url":         notifyURL,
 		"actions":     []any{},
 		"action_urls": map[string]string{},
-		"data":        map[string]string{"type": "finished"},
 	}
 	data, _ := json.Marshal(payload)
 	return data

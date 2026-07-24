@@ -93,6 +93,7 @@ func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal
 		watcherCtx:    watcherCtx,
 		watcherCancel: watcherCancel,
 	}
+	dispatcher.scheduler.SetGenerationCurrent(state.PaneSessionCurrent)
 	if journal != nil {
 		dispatcher.activityW = activity.NewWorker(journal)
 	}
@@ -189,6 +190,10 @@ func (d *Dispatcher) PruneSlots(active map[string]bool) {
 	for paneID := range active {
 		generations[paneID] = uint64(d.state.Generation(paneID))
 	}
+	d.ApplyTopology(active, generations)
+}
+
+func (d *Dispatcher) ApplyTopology(active map[string]bool, generations map[string]uint64) {
 	d.scheduler.ApplyTopology(active, generations)
 	d.testGatesMu.Lock()
 	defer d.testGatesMu.Unlock()

@@ -15,10 +15,14 @@ UNIT_FILE="$TEST_HOME/.config/systemd/user/herdr-mobile-relay.service"
 FAKE_BIN="$WORK_DIR/bin"
 HEALTH_FILE="$WORK_DIR/health.json"
 CONFIG_RECORD="$WORK_DIR/installer-config-root"
+TOKEN_RECORD="$WORK_DIR/installer-token"
 mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$CUSTOM_CONFIG" \
     "$(dirname "$UNIT_FILE")" "$FAKE_BIN"
 
-printf "HERDR_RELAY_PORT='18375'\n" > "$ENV_FILE"
+printf "HERDR_RELAY_PORT='18375'\nHERDR_GITHUB_TOKEN_FILE='%s/github-token'\n" \
+    "$CUSTOM_CONFIG" > "$ENV_FILE"
+printf 'persisted-private-token\n' > "$CUSTOM_CONFIG/github-token"
+chmod 600 "$CUSTOM_CONFIG/github-token"
 printf '{"version":"0.8.6","revision":"old-revision","web_hash":"old-web"}\n' \
     > "$OLD_RELEASE/release-manifest.json"
 printf '{"version":"0.9.0","revision":"new-revision","web_hash":"new-web"}\n' \
@@ -59,6 +63,7 @@ cat > "$FAKE_INSTALLER" <<EOF
 #!/bin/sh
 set -eu
 printf '%s\n' "\$HERDR_PLUGIN_CONFIG_DIR" > "$CONFIG_RECORD"
+printf '%s\n' "\${GH_TOKEN:-}" > "$TOKEN_RECORD"
 temp="\$INSTALL_ROOT/.current-install"
 rm -f "\$temp"
 ln -s "$NEW_RELEASE" "\$temp"
@@ -87,7 +92,7 @@ cat "$HEALTH_FILE"
 EOF
 chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl"
 
-export OLD_RELEASE UNIT_FILE HEALTH_FILE
+export OLD_RELEASE UNIT_FILE HEALTH_FILE TOKEN_RECORD
 if HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
@@ -101,6 +106,7 @@ test "$(readlink -f "$RELEASE_ROOT/current")" = "$OLD_RELEASE"
 grep -Fx "ExecStart=$OLD_RELEASE/relay/herdr-mobile-relay-service.sh" "$UNIT_FILE" >/dev/null
 grep -Fx "WorkingDirectory=$OLD_RELEASE" "$UNIT_FILE" >/dev/null
 test "$(cat "$CONFIG_RECORD")" = "$CUSTOM_CONFIG"
+test "$(cat "$TOKEN_RECORD")" = "persisted-private-token"
 grep -F "previous service recovered successfully" "$WORK_DIR/output" >/dev/null
 
 echo "plugin build rollback tests passed"

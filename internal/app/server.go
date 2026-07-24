@@ -707,7 +707,7 @@ func (s *Server) handleTransition(
 		}
 		if s.transitionPush != nil {
 			payload := push.BuildBlockedPayload(agent, project, command, eventID, paneID, s.hostname, hasApproval, approvalTotal)
-			s.transitionPush.Send(ctx, payload)
+			s.sendTransitionPush(ctx, payload, transitionCurrent)
 		}
 		if !transitionCurrent() {
 			return
@@ -766,8 +766,40 @@ func (s *Server) handleTransition(
 	}
 	if s.transitionPush != nil {
 		payload := push.BuildFinishedPayload(agent, project, paneID, s.hostname, eventID)
-		s.transitionPush.Send(ctx, payload)
+		s.sendTransitionPush(ctx, payload, transitionCurrent)
 	}
+}
+
+func (s *Server) sendTransitionPush(
+	ctx context.Context,
+	payload []byte,
+	transitionCurrent func() bool,
+) {
+	pushCtx, cancel := context.WithCancel(ctx)
+	finished := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-finished:
+				return
+			case <-pushCtx.Done():
+				return
+			case <-ticker.C:
+				if !transitionCurrent() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	s.transitionPush.Send(pushCtx, payload)
+	close(finished)
+	cancel()
+	<-watcherDone
 }
 
 func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator.AgentState) {
@@ -1118,12 +1150,8 @@ func commandResultMessage(result *coordinator.CommandResult) map[string]any {
 		"action":     result.Action,
 		"ok":         result.OK,
 		"phase":      result.Phase,
-	}
-	if result.Error != "" {
-		message["error"] = result.Error
-	}
-	if result.PaneID != "" {
-		message["pane_id"] = result.PaneID
+		"error":      result.Error,
+		"pane_id":    result.PaneID,
 	}
 	if result.Data != nil {
 		message["data"] = result.Data

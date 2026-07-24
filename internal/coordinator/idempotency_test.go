@@ -6,6 +6,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -266,5 +267,50 @@ func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
 	enters := strings.Count(string(data), "Enter")
 	if enters != 1 {
 		t.Fatalf("duplicate question answer confirmed %d times, want 1\nrecord:\n%s", enters, data)
+	}
+}
+
+func TestSchedulerEvictsOldCompletedLedgerEntries(t *testing.T) {
+	scheduler := NewScheduler(1, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := scheduler.Close(ctx); err != nil {
+			t.Errorf("close scheduler: %v", err)
+		}
+	})
+
+	executions := make(map[string]int)
+	run := func(key string) *CommandResult {
+		now := time.Now()
+		result, err := scheduler.Execute(context.Background(), ScheduleOptions{
+			Command: Command{
+				ID: scheduler.NextCommandID(), RequestID: key, ReceivedAt: now,
+				Deadline: now.Add(time.Second), Kind: CommandStart,
+			},
+			RelayLevel:  true,
+			LedgerKey:   key,
+			PayloadHash: "same",
+		}, EffectFunc(func(context.Context, WorkerToken) EffectResult {
+			executions[key]++
+			return EffectResult{Result: completed(key, "agent_start", "", nil)}
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	for index := 0; index < maxLedgerEntries+8; index++ {
+		run(fmt.Sprintf("start-%03d", index))
+	}
+	run("start-000")
+	if executions["start-000"] != 2 {
+		t.Fatalf("old ledger entry executions = %d, want eviction and rerun", executions["start-000"])
+	}
+	latest := fmt.Sprintf("start-%03d", maxLedgerEntries+7)
+	result := run(latest)
+	if executions[latest] != 1 || result == nil || !result.replayed {
+		t.Fatalf("latest ledger entry was not replayed: executions=%d result=%+v", executions[latest], result)
 	}
 }

@@ -4,5 +4,6 @@
   "action": "prompt",
   "ok": true,
   "phase": "completed",
+  "error": "",
   "pane_id": "pane-1"
 }

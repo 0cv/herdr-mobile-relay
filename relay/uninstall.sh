@@ -148,14 +148,15 @@ safe_remove_bin_link() {
         echo "  Skipping binary link (symlink target not in release root): $target -> $link_target" >&2
         return 0
     fi
-    # Regular file: only remove if it matches the expected binary name and is executable
-    local base
-    base="$(basename "$target")"
-    if [ "$base" = "herdr-mobile-relay" ] && [ -x "$target" ]; then
+    # A regular shim must be byte-identical to the active verified release.
+    # Its filename and executable bit alone are not ownership proof.
+    local active_binary="$RELEASE_ROOT/current/herdr-mobile-relay"
+    if [ -f "$active_binary" ] && [ ! -L "$active_binary" ] &&
+       command -v cmp >/dev/null 2>&1 && cmp -s "$target" "$active_binary"; then
         rm -f "$target"
         echo "  Removed binary: $target"
     else
-        echo "  Skipping binary (not a herdr-mobile-relay executable): $target" >&2
+        echo "  Skipping binary (not identical to the active owned release): $target" >&2
     fi
 }
 
@@ -262,5 +263,14 @@ safe_remove_dir "$CACHE_DIR" "cache"
 
 echo ""
 echo "Herdr Mobile Relay has been uninstalled."
-echo "Note: plugin registration in herdr-plugin.toml must be removed manually"
-echo "      (herdr plugin uninstall herdr-mobile-relay.events)."
+if command -v herdr >/dev/null 2>&1; then
+    echo "Removing Herdr plugin registration..."
+    if ! herdr plugin uninstall herdr-mobile-relay.events; then
+        echo "Plugin registration remains; remove it with:" >&2
+        echo "  herdr plugin uninstall herdr-mobile-relay.events" >&2
+        exit 1
+    fi
+else
+    echo "Herdr is unavailable; remove plugin registration later with:"
+    echo "  herdr plugin uninstall herdr-mobile-relay.events"
+fi

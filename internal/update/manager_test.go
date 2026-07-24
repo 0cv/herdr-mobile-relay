@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -143,4 +144,88 @@ func TestManagerAllowsScheduledUpdateStartupGrace(t *testing.T) {
 	if state := manager.State(); state.State != "scheduled" {
 		t.Fatalf("state = %#v", state)
 	}
+}
+
+func TestManagerSchedulesPersistedRollbackRecovery(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "installed")
+	runtimeDir := filepath.Join(root, "runtime")
+	statePath := filepath.Join(runtimeDir, "update-state.json")
+	jobPath := filepath.Join(runtimeDir, "update-job-1.json")
+	state := State{
+		State:            "restarting",
+		TargetVersion:    "1.2.4",
+		TargetRevision:   "new",
+		RollbackTarget:   filepath.Join(releaseRoot, "releases", "previous"),
+		RollbackVersion:  "1.2.3",
+		RollbackRevision: "old",
+	}
+	if err := writeState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONAtomic(jobPath, Job{
+		ReleaseRoot:    releaseRoot,
+		StatePath:      statePath,
+		TargetVersion:  state.TargetVersion,
+		TargetRevision: state.TargetRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := &Manager{
+		releaseRoot: releaseRoot,
+		runtimeDir:  runtimeDir,
+		serviceName: "test.service",
+	}
+	var launched string
+	manager.launch = func(_ context.Context, path, service string) error {
+		launched = path + ":" + service
+		return nil
+	}
+	manager.recoverOrphan(false)
+	if launched != jobPath+":test.service" {
+		t.Fatalf("recovery launch = %q", launched)
+	}
+	recovering, err := readState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovering.State != "recovering" {
+		t.Fatalf("state = %+v", recovering)
+	}
+}
+
+type blockingRoundTripper struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b blockingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	close(b.started)
+	<-b.release
+	return nil, errors.New("injected network failure")
+}
+
+func TestManagerStateDoesNotBlockOnReleaseCheckNetwork(t *testing.T) {
+	manager := NewManager(t.TempDir(), t.TempDir(), "1.2.3", "old", "service", "http://127.0.0.1:8375/healthz")
+	transport := blockingRoundTripper{started: make(chan struct{}), release: make(chan struct{})}
+	manager.client = &http.Client{Transport: transport}
+	done := make(chan struct{})
+	go func() {
+		manager.Check(context.Background())
+		close(done)
+	}()
+	<-transport.started
+
+	stateDone := make(chan State, 1)
+	go func() { stateDone <- manager.State() }()
+	select {
+	case state := <-stateDone:
+		if state.State != "checking" {
+			t.Fatalf("state = %+v", state)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("State blocked behind release network I/O")
+	}
+	close(transport.release)
+	<-done
 }

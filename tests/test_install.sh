@@ -50,4 +50,39 @@ fi
 [ -f "$unowned_root/keep.txt" ]
 [ ! -e "$unowned_root/.herdr-mobile-relay-installation" ]
 
+legacy_home="$WORK_DIR/legacy-home"
+legacy_release="$legacy_home/.local/share/herdr-mobile-relay"
+legacy_config="$legacy_home/.config/herdr-mobile-relay"
+legacy_cache="$legacy_home/.cache/herdr-mobile-relay"
+mkdir -p "$legacy_config/push" "$legacy_cache/claude-history" "$legacy_cache/uploads"
+printf "HERDR_RELAY_TOKEN='legacy-token'\nHERDR_RELAY_INSTANCE_ID='legacy-instance'\n" > "$legacy_config/relay.env"
+printf '[]\n' > "$legacy_config/push/subscriptions.json"
+printf '{"id":"legacy"}\n' > "$legacy_cache/activity.jsonl"
+printf '{"history":["preserved"]}\n' > "$legacy_cache/claude-history/pane.json"
+HOME="$legacy_home"
+prepare_install_roots "$legacy_release" "$legacy_config" "$legacy_cache"
+test -f "$legacy_config/.herdr-mobile-relay-installation"
+test -f "$legacy_cache/.herdr-mobile-relay-installation"
+grep -F legacy-token "$legacy_config/relay.env" >/dev/null
+grep -F preserved "$legacy_cache/claude-history/pane.json" >/dev/null
+
+xdg_home="$WORK_DIR/xdg-home"
+xdg_release="$xdg_home/.local/share/herdr-mobile-relay"
+xdg_config="$xdg_home/.config/herdr-mobile-relay"
+old_cache="$xdg_home/.cache/herdr-mobile-relay"
+new_cache="$xdg_home/custom-cache/herdr-mobile-relay"
+mkdir -p "$xdg_config/push" "$old_cache/claude-history"
+printf "HERDR_RELAY_TOKEN='xdg-token'\n" > "$xdg_config/relay.env"
+printf '[]\n' > "$xdg_config/push/subscriptions.json"
+printf '{"history":["migrated"]}\n' > "$old_cache/claude-history/pane.json"
+mkdir -p "$new_cache"
+printf '#!/bin/sh\n' > "$new_cache/post-install.sh"
+printf 'legacy waiter\n' > "$new_cache/post-install.log"
+HOME="$xdg_home"
+prepare_install_roots "$xdg_release" "$xdg_config" "$new_cache"
+test ! -e "$old_cache"
+grep -F migrated "$new_cache/claude-history/pane.json" >/dev/null
+grep -F 'legacy waiter' "$new_cache/post-install.log" >/dev/null
+test -f "$new_cache/.herdr-mobile-relay-installation"
+
 echo "install shell tests passed"

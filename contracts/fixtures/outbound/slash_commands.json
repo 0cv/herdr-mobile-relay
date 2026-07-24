@@ -4,6 +4,7 @@
   "action": "list_slash_commands",
   "ok": true,
   "phase": "completed",
+  "error": "",
   "pane_id": "pane-1",
   "data": {
     "commands": [

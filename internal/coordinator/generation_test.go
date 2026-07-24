@@ -221,8 +221,8 @@ func TestQueuedMutationDoesNotReachReplacementPane(t *testing.T) {
 	}
 
 	close(release)
-	if result := <-firstResult; result == nil || result.OK || result.Error != "pane session was replaced" {
-		t.Fatalf("in-flight prompt result = %+v, want stale generation failure", result)
+	if result := <-firstResult; result == nil || result.OK || result.Phase != "dispatched_unknown" {
+		t.Fatalf("in-flight prompt result = %+v, want dispatched-unknown result", result)
 	}
 
 	now := time.Now()

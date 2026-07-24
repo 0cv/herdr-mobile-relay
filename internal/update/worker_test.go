@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -311,6 +312,89 @@ func TestWorkerRollsBackPostActivationFailures(t *testing.T) {
 				t.Fatalf("restart/verify calls = %d/%d, want 2/%d", restarts, verifies, wantVerifies)
 			}
 		})
+	}
+}
+
+func TestWorkerRecoversKilledActivationFromPersistedRollbackGeneration(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "installed")
+	previousDir := filepath.Join(releaseRoot, "releases", "previous")
+	unverifiedDir := filepath.Join(releaseRoot, "releases", "unverified")
+	writeWorkerTestRelease(t, previousDir, "1.0.0", "old-revision")
+	writeWorkerTestRelease(t, unverifiedDir, "1.1.0", "new-revision")
+	if err := Activate(releaseRoot, unverifiedDir); err != nil {
+		t.Fatal(err)
+	}
+
+	statePath := filepath.Join(root, "runtime", "update-state.json")
+	jobPath := filepath.Join(root, "runtime", "update-job-recovery.json")
+	job := Job{
+		ReleaseRoot:    releaseRoot,
+		DownloadURL:    "https://example.test/release.tar.gz",
+		ChecksumURL:    "https://example.test/checksums.txt",
+		ArchiveName:    "release.tar.gz",
+		TargetVersion:  "1.1.0",
+		TargetRevision: "new-revision",
+		Target:         relayrelease.CurrentTarget(),
+		StatePath:      statePath,
+		ServiceName:    "test.service",
+		HealthURL:      "http://127.0.0.1:1/healthz",
+	}
+	if err := writeJSONAtomic(jobPath, job); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := relayrelease.Verify(previousDir, relayrelease.CurrentTarget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(statePath, State{
+		State:            "recovering",
+		TargetVersion:    job.TargetVersion,
+		TargetRevision:   job.TargetRevision,
+		RollbackTarget:   previousDir,
+		RollbackVersion:  previous.Version,
+		RollbackRevision: previous.Revision,
+		RollbackWebHash:  previous.WebHash,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []string
+	worker := Worker{
+		Restart: func(context.Context, string) error {
+			calls = append(calls, "restart")
+			return nil
+		},
+		Verify: func(_ context.Context, _ string, manifest relayrelease.Manifest) error {
+			calls = append(calls, "verify:"+manifest.Version)
+			return nil
+		},
+	}
+	if err := worker.Run(t.Context(), jobPath); err != nil {
+		t.Fatal(err)
+	}
+	target, err := os.Readlink(filepath.Join(releaseRoot, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(releaseRoot, target)
+	}
+	if filepath.Clean(target) != filepath.Clean(previousDir) {
+		t.Fatalf("current = %q, want %q", target, previousDir)
+	}
+	if !reflect.DeepEqual(calls, []string{"restart", "verify:1.0.0"}) {
+		t.Fatalf("recovery calls = %v", calls)
+	}
+	recovered, err := readState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != "rolled_back" || recovered.CurrentVersion != "1.0.0" {
+		t.Fatalf("recovered state = %+v", recovered)
+	}
+	if _, err := os.Stat(jobPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery job was not removed: %v", err)
 	}
 }
 

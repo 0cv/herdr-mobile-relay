@@ -249,11 +249,18 @@ func TestCommittedStateViewRejectsStalePerPaneUpdates(t *testing.T) {
 type blockingTransitionPush struct {
 	started chan struct{}
 	release chan struct{}
+	cancel  chan struct{}
 }
 
-func (p *blockingTransitionPush) Send(context.Context, []byte) {
+func (p *blockingTransitionPush) Send(ctx context.Context, _ []byte) {
 	close(p.started)
-	<-p.release
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		if p.cancel != nil {
+			close(p.cancel)
+		}
+	}
 }
 
 type recordingTransitionBroadcast struct {
@@ -328,7 +335,9 @@ func TestUnchangedPollPreservesBlockedTransitionSideEffects(t *testing.T) {
 
 func TestBlockedBroadcastDoesNotOvertakeNewerWorkingState(t *testing.T) {
 	s := testServer()
-	push := &blockingTransitionPush{started: make(chan struct{}), release: make(chan struct{})}
+	push := &blockingTransitionPush{
+		started: make(chan struct{}), release: make(chan struct{}), cancel: make(chan struct{}),
+	}
 	broadcast := &recordingTransitionBroadcast{messages: make(chan any, 1)}
 	s.transitionPush = push
 	s.transitionBroadcast = broadcast
@@ -346,7 +355,11 @@ func TestBlockedBroadcastDoesNotOvertakeNewerWorkingState(t *testing.T) {
 	<-push.started
 
 	s.state.CommitEvent("pane-1", "working", time.Now().UnixMilli())
-	close(push.release)
+	select {
+	case <-push.cancel:
+	case <-time.After(time.Second):
+		t.Fatal("stale blocked push request was not canceled")
+	}
 	<-done
 
 	select {

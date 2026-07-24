@@ -16,6 +16,8 @@ const (
 	coordinatorLedgerCapacity     = 32
 	protectedCompletionBatch      = 8
 	defaultHerdrCapacity          = 8
+	maxLedgerEntries              = 256
+	ledgerRetention               = 24 * time.Hour
 )
 
 type InFlightOperation struct {
@@ -60,6 +62,7 @@ type scheduledOperation struct {
 	waiters    []scheduleWaiter
 	index      int
 	cancel     context.CancelFunc
+	dispatched bool
 }
 
 type scheduleWaiter struct {
@@ -156,6 +159,8 @@ type Scheduler struct {
 
 	metricsMu sync.RWMutex
 	metrics   SchedulerMetrics
+
+	generationCurrent func(string, uint64) bool
 }
 
 func NewScheduler(capacity int, logger *slog.Logger) *Scheduler {
@@ -211,6 +216,10 @@ func (s *Scheduler) ApplyTopology(active map[string]bool, paneGenerations ...map
 	case <-s.done:
 		return false
 	}
+}
+
+func (s *Scheduler) SetGenerationCurrent(fn func(string, uint64) bool) {
+	s.generationCurrent = fn
 }
 
 func (s *Scheduler) NextCommandID() CommandID {
@@ -491,6 +500,9 @@ func (s *Scheduler) run() {
 				return
 			}
 			stale := slot.InFlight.Generation != slot.Generation
+			if !stale && s.generationCurrent != nil {
+				stale = !s.generationCurrent(op.options.PaneID, slot.InFlight.Generation)
+			}
 			if event.result.BumpGeneration && !stale {
 				slot.Generation++
 				for key, entry := range ledger {
@@ -551,10 +563,101 @@ func (s *Scheduler) run() {
 		dispatch()
 	}
 
+	applyTopology := func(update topologyUpdate) {
+		for paneID := range knownActive {
+			if update.active[paneID] {
+				continue
+			}
+			slot := slots[paneID]
+			if slot == nil {
+				continue
+			}
+			slot.Generation++
+			if slot.InFlight != nil && slot.InFlight.cancel != nil {
+				slot.InFlight.cancel()
+			}
+			for _, op := range slot.Queue {
+				if op.index >= 0 {
+					heap.Remove(&deadlines, op.index)
+				}
+				s.replyStale(op, ledger)
+			}
+			slot.Queue = nil
+			for key, entry := range ledger {
+				if entry.paneID == paneID && entry.generation < slot.Generation {
+					delete(ledger, key)
+				}
+			}
+		}
+		for paneID, generation := range update.generations {
+			slot := slots[paneID]
+			if slot == nil {
+				slot = &PaneSlot{}
+				slots[paneID] = slot
+			}
+			if generation <= slot.Generation {
+				continue
+			}
+			slot.Generation = generation
+			if slot.InFlight != nil && slot.InFlight.cancel != nil {
+				slot.InFlight.cancel()
+			}
+			for _, op := range slot.Queue {
+				if op.index >= 0 {
+					heap.Remove(&deadlines, op.index)
+				}
+				s.replyStale(op, ledger)
+			}
+			slot.Queue = nil
+			for key, entry := range ledger {
+				if entry.paneID == paneID && entry.generation < slot.Generation {
+					delete(ledger, key)
+				}
+			}
+		}
+		knownActive = update.active
+		close(update.response)
+		dispatch()
+	}
+
+	pruneLedger := func(now time.Time) {
+		for key, entry := range ledger {
+			if entry.operation == nil && now.Sub(entry.createdAt) >= ledgerRetention {
+				delete(ledger, key)
+			}
+		}
+		for len(ledger) >= maxLedgerEntries {
+			var oldestKey string
+			var oldest time.Time
+			for key, entry := range ledger {
+				if entry.operation != nil {
+					continue
+				}
+				if oldestKey == "" || entry.createdAt.Before(oldest) {
+					oldestKey = key
+					oldest = entry.createdAt
+				}
+			}
+			if oldestKey == "" {
+				return
+			}
+			delete(ledger, oldestKey)
+		}
+	}
+
 	for {
 		if stopping && inUse == 0 && stopAck != nil {
 			close(stopAck)
 			return
+		}
+
+		// Prefer pending topology before ordinary completion handling. The
+		// state-generation validator below remains the correctness barrier.
+		select {
+		case update := <-s.topology:
+			applyTopology(update)
+			continue
+		default:
 		}
 
 		// Give protected completions priority over ordinary ingress without
@@ -575,6 +678,7 @@ func (s *Scheduler) run() {
 		select {
 		case request := <-s.ingress:
 			op := request.operation
+			pruneLedger(time.Now())
 			if stopping {
 				s.reply(op, nil, ErrClosed)
 				continue
@@ -676,60 +780,7 @@ func (s *Scheduler) run() {
 			query.response <- response
 
 		case update := <-s.topology:
-			for paneID := range knownActive {
-				if update.active[paneID] {
-					continue
-				}
-				slot := slots[paneID]
-				if slot == nil {
-					continue
-				}
-				slot.Generation++
-				if slot.InFlight != nil && slot.InFlight.cancel != nil {
-					slot.InFlight.cancel()
-				}
-				for _, op := range slot.Queue {
-					if op.index >= 0 {
-						heap.Remove(&deadlines, op.index)
-					}
-					s.replyStale(op, ledger)
-				}
-				slot.Queue = nil
-				for key, entry := range ledger {
-					if entry.paneID == paneID && entry.generation < slot.Generation {
-						delete(ledger, key)
-					}
-				}
-			}
-			for paneID, generation := range update.generations {
-				slot := slots[paneID]
-				if slot == nil {
-					slot = &PaneSlot{}
-					slots[paneID] = slot
-				}
-				if generation <= slot.Generation {
-					continue
-				}
-				slot.Generation = generation
-				if slot.InFlight != nil && slot.InFlight.cancel != nil {
-					slot.InFlight.cancel()
-				}
-				for _, op := range slot.Queue {
-					if op.index >= 0 {
-						heap.Remove(&deadlines, op.index)
-					}
-					s.replyStale(op, ledger)
-				}
-				slot.Queue = nil
-				for key, entry := range ledger {
-					if entry.paneID == paneID && entry.generation < slot.Generation {
-						delete(ledger, key)
-					}
-				}
-			}
-			knownActive = update.active
-			close(update.response)
-			dispatch()
+			applyTopology(update)
 
 		case <-timer.C:
 			now := time.Now()
@@ -805,6 +856,7 @@ func (s *Scheduler) start(op *scheduledOperation, generation uint64) context.Can
 	s.metrics.Dispatched++
 	s.metricsMu.Unlock()
 	ctx, cancel := context.WithDeadline(context.Background(), token.Deadline)
+	op.dispatched = true
 	go func() {
 		defer cancel()
 		result := op.runner.Run(ctx, token)
@@ -854,12 +906,18 @@ func (s *Scheduler) replyStale(op *scheduledOperation, ledger map[string]*ledger
 	if op.options.LedgerKey != "" {
 		delete(ledger, op.options.LedgerKey)
 	}
+	phase := "failed"
+	publicError := ErrPaneReplaced.Error()
+	if op.dispatched {
+		phase = "dispatched_unknown"
+		publicError = "command was dispatched before the pane session was replaced; outcome is unknown"
+	}
 	result := &CommandResult{
 		RequestID: op.options.RequestID,
 		Action:    string(op.options.Kind),
 		OK:        false,
-		Phase:     "failed",
-		Error:     "pane session was replaced",
+		Phase:     phase,
+		Error:     publicError,
 		PaneID:    op.options.PaneID,
 	}
 	s.reply(op, result, nil)

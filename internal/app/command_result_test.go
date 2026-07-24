@@ -7,7 +7,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 )
 
-func TestCommandResultMessageOmitsAbsentOptionalFields(t *testing.T) {
+func TestCommandResultMessageKeepsPythonMandatoryEmptyFields(t *testing.T) {
 	got := commandResultMessage(&coordinator.CommandResult{
 		RequestID: "req-001",
 		Action:    "prompt",
@@ -21,6 +21,7 @@ func TestCommandResultMessageOmitsAbsentOptionalFields(t *testing.T) {
 		"action":     "prompt",
 		"ok":         true,
 		"phase":      "completed",
+		"error":      "",
 		"pane_id":    "pane-1",
 	}
 	if !reflect.DeepEqual(got, want) {

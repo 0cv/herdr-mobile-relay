@@ -66,6 +66,10 @@ type State struct {
 	CanInstall        bool   `json:"can_install"`
 	Reason            string `json:"reason,omitempty"`
 	Error             string `json:"error,omitempty"`
+	RollbackTarget    string `json:"rollback_target,omitempty"`
+	RollbackVersion   string `json:"rollback_version,omitempty"`
+	RollbackRevision  string `json:"rollback_revision,omitempty"`
+	RollbackWebHash   string `json:"rollback_web_hash,omitempty"`
 }
 
 type Worker struct {
@@ -132,6 +136,10 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	if w.Verify == nil {
 		w.Verify = verifyHealth
 	}
+	if persisted, readErr := readState(job.StatePath); readErr == nil &&
+		persisted.State == "recovering" {
+		return recoverRollback(ctx, w, job, persisted, jobPath)
+	}
 
 	if err := os.MkdirAll(filepath.Join(job.ReleaseRoot, "releases"), 0o700); err != nil {
 		return failStartup(err)
@@ -158,6 +166,10 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	if previousManifest.Version != "" {
 		state.CurrentVersion = previousManifest.Version
 		state.CurrentRevision = previousManifest.Revision
+		state.RollbackTarget = previousTarget
+		state.RollbackVersion = previousManifest.Version
+		state.RollbackRevision = previousManifest.Revision
+		state.RollbackWebHash = previousManifest.WebHash
 	}
 
 	workDir, err := os.MkdirTemp(filepath.Join(job.ReleaseRoot, "releases"), ".update-")
@@ -213,6 +225,9 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 		return fail(job.StatePath, state, fmt.Errorf("install release directory: %w", err))
 	}
 
+	if err := writeState(job.StatePath, state); err != nil {
+		return fmt.Errorf("persist rollback generation: %w", err)
+	}
 	if err := Activate(job.ReleaseRoot, finalDir); err != nil {
 		return fail(job.StatePath, state, fmt.Errorf("activate release: %w", err))
 	}
@@ -288,6 +303,18 @@ func loadJob(filename string) (Job, error) {
 		job.Target = relayrelease.CurrentTarget()
 	}
 	return job, nil
+}
+
+func readState(filename string) (State, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return State{}, err
+	}
+	var state State
+	if err := json.Unmarshal(data, &state); err != nil {
+		return State{}, err
+	}
+	return state, nil
 }
 
 func (w Worker) download(ctx context.Context, source, destination string, limit int64) error {
@@ -590,6 +617,47 @@ func rollback(
 		return fmt.Errorf("update failed and rollback failed: %v: %w", rollbackErr, updateErr)
 	}
 	return fmt.Errorf("update failed and was rolled back: %w", updateErr)
+}
+
+func recoverRollback(
+	ctx context.Context,
+	worker Worker,
+	job Job,
+	state State,
+	jobPath string,
+) error {
+	if state.RollbackTarget == "" || state.RollbackVersion == "" ||
+		state.RollbackRevision == "" {
+		return fail(job.StatePath, state, errors.New("orphaned update has no verified rollback generation"))
+	}
+	rollbackManifest, err := relayrelease.Verify(state.RollbackTarget, job.Target)
+	if err != nil {
+		return fail(job.StatePath, state, fmt.Errorf("verify rollback release: %w", err))
+	}
+	if rollbackManifest.Version != state.RollbackVersion ||
+		!strings.EqualFold(rollbackManifest.Revision, state.RollbackRevision) ||
+		rollbackManifest.WebHash != state.RollbackWebHash {
+		return fail(job.StatePath, state, errors.New("rollback release identity changed"))
+	}
+	if err := Activate(job.ReleaseRoot, state.RollbackTarget); err != nil {
+		return fail(job.StatePath, state, fmt.Errorf("reactivate rollback release: %w", err))
+	}
+	if err := worker.Restart(ctx, job.ServiceName); err != nil {
+		return fail(job.StatePath, state, fmt.Errorf("restart rollback service: %w", err))
+	}
+	if err := worker.Verify(ctx, job.HealthURL, rollbackManifest); err != nil {
+		return fail(job.StatePath, state, fmt.Errorf("verify rollback service: %w", err))
+	}
+	state.State = "rolled_back"
+	state.CurrentVersion = rollbackManifest.Version
+	state.CurrentRevision = rollbackManifest.Revision
+	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	state.Error = "Update worker stopped before verification; the previous release was restored"
+	if err := writeState(job.StatePath, state); err != nil {
+		return err
+	}
+	_ = os.Remove(jobPath)
+	return nil
 }
 
 func restartService(ctx context.Context, serviceName string) error {

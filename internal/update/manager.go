@@ -76,7 +76,6 @@ type gitObject struct {
 }
 
 func NewManager(releaseRoot, runtimeDir, version, revision, serviceName, healthURL string) *Manager {
-	recoverUpdateState(releaseRoot, runtimeDir, true)
 	manager := &Manager{
 		releaseRoot: releaseRoot,
 		runtimeDir:  runtimeDir,
@@ -94,12 +93,15 @@ func NewManager(releaseRoot, runtimeDir, version, revision, serviceName, healthU
 	}
 	manager.launch = manager.launchWorker
 	manager.state = manager.loadState()
+	manager.recoverOrphan(true)
+	manager.state = manager.loadState()
 	return manager
 }
 
 func (m *Manager) State() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.recoverOrphan(false)
 	state := m.loadState()
 	if state.State != "" {
 		m.state = state
@@ -109,14 +111,16 @@ func (m *Manager) State() State {
 
 func (m *Manager) Check(ctx context.Context) State {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.state.State = "checking"
 	m.state.Error = ""
 	m.state.CurrentVersion = m.version
 	m.state.CurrentRevision = m.revision
 	_ = writeState(m.statePath(), m.state)
+	m.mu.Unlock()
 
 	metadata, err := m.fetchRelease(ctx)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if err != nil {
 		m.state.State = "failed"
 		m.state.CanInstall = false
@@ -415,54 +419,95 @@ func (m *Manager) loadState() State {
 			Target:          relayrelease.CurrentTarget(),
 		}
 	}
-	if state.State == "installing" || state.State == "restarting" || scheduledUpdateExpired(state) {
-		recoverUpdateState(m.releaseRoot, m.runtimeDir, false)
-		if recovered, readErr := os.ReadFile(m.statePath()); readErr == nil {
-			var updated State
-			if json.Unmarshal(recovered, &updated) == nil && validState(updated.State) {
-				state = updated
-			}
-		}
-	}
 	state.CurrentVersion = m.version
 	state.CurrentRevision = m.revision
 	return state
 }
 
-func recoverUpdateState(releaseRoot, runtimeDir string, includeScheduled bool) {
-	statePath := filepath.Join(runtimeDir, "update-state.json")
-	data, err := os.ReadFile(statePath)
+func (m *Manager) recoverOrphan(includeScheduled bool) {
+	statePath := m.statePath()
+	state, err := readState(statePath)
 	if err != nil {
-		return
-	}
-	var state State
-	if json.Unmarshal(data, &state) != nil {
 		return
 	}
 	_, startedErr := time.Parse(time.RFC3339, state.StartedAt)
 	recoverScheduled := state.State == "scheduled" &&
 		(scheduledUpdateExpired(state) || (includeScheduled && startedErr != nil))
-	if state.State != "installing" && state.State != "restarting" && !recoverScheduled {
+	if state.State == "recovering" && startedErr == nil {
+		started, _ := time.Parse(time.RFC3339, state.StartedAt)
+		if time.Since(started) < updateStartupGrace {
+			return
+		}
+	}
+	if state.State != "installing" && state.State != "restarting" &&
+		state.State != "recovering" && !recoverScheduled {
 		return
 	}
-	if releaseRoot == "" || !filepath.IsAbs(releaseRoot) {
+	if m.releaseRoot == "" || !filepath.IsAbs(m.releaseRoot) {
 		return
 	}
-	if err := os.MkdirAll(releaseRoot, 0o700); err != nil {
+	if err := os.MkdirAll(m.releaseRoot, 0o700); err != nil {
 		return
 	}
-	lock, err := acquireLock(filepath.Join(releaseRoot, "update.lock"))
+	lock, err := acquireLock(filepath.Join(m.releaseRoot, "update.lock"))
 	if err != nil {
 		return
 	}
-	defer func() {
-		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		_ = lock.Close()
-	}()
-	state.State = "failed"
-	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-	state.Error = "Update worker stopped before completion"
-	_ = writeState(statePath, state)
+	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	_ = lock.Close()
+
+	if recoverScheduled || state.RollbackTarget == "" {
+		state.State = "failed"
+		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		state.Error = "Update worker stopped before completion"
+		_ = writeState(statePath, state)
+		return
+	}
+	jobPath, findErr := m.orphanJob(state)
+	if findErr != nil {
+		state.State = "failed"
+		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		state.Error = safeError(findErr)
+		_ = writeState(statePath, state)
+		return
+	}
+	state.State = "recovering"
+	state.StartedAt = time.Now().UTC().Format(time.RFC3339)
+	state.Error = "Update worker stopped before verification; restoring the previous release"
+	if err := writeState(statePath, state); err != nil {
+		return
+	}
+	if err := m.launch(context.Background(), jobPath, m.serviceName); err != nil {
+		state.State = "failed"
+		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		state.Error = safeError(fmt.Errorf("schedule rollback recovery: %w", err))
+		_ = writeState(statePath, state)
+	}
+}
+
+func (m *Manager) orphanJob(state State) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(m.runtimeDir, "update-job-*.json"))
+	if err != nil {
+		return "", err
+	}
+	var selected string
+	for _, candidate := range matches {
+		job, loadErr := loadJob(candidate)
+		if loadErr != nil || filepath.Clean(job.ReleaseRoot) != filepath.Clean(m.releaseRoot) ||
+			filepath.Clean(job.StatePath) != filepath.Clean(m.statePath()) ||
+			job.TargetVersion != state.TargetVersion ||
+			job.TargetRevision != state.TargetRevision {
+			continue
+		}
+		if selected != "" {
+			return "", errors.New("multiple update jobs match the orphaned activation")
+		}
+		selected = candidate
+	}
+	if selected == "" {
+		return "", errors.New("orphaned activation has no matching persisted update job")
+	}
+	return selected, nil
 }
 
 func scheduledUpdateExpired(state State) bool {
@@ -522,7 +567,7 @@ func parseSemver(value string) ([3]int, bool) {
 func validState(value string) bool {
 	switch value {
 	case "current", "checking", "available", "blocked", "scheduled", "installing",
-		"restarting", "succeeded", "failed", "rolled_back", "unsupported":
+		"restarting", "recovering", "succeeded", "failed", "rolled_back", "unsupported":
 		return true
 	default:
 		return false

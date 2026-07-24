@@ -148,9 +148,15 @@ Use the HTTPS address shown in the installed app's site settings. After the app 
 
 Marketplace installation downloads the exact version in `herdr-plugin.toml` as a pre-built release bundle. It requires the published `checksums.txt`, verifies the archive and its internal file manifest, then atomically activates the executable, web app, and runtime wrappers together. End-user hosts never compile Go.
 
+An upgrade from the Python 0.8.6 plugin adopts only its validated relay
+configuration and cache layout. Relay identity, push subscriptions, activity,
+Claude history, and uploads are preserved. When `XDG_CACHE_HOME` is customized,
+the legacy Python cache under `~/.cache/herdr-mobile-relay` is moved into the
+active XDG cache root.
+
 Later releases are checked periodically and whenever you tap **Settings → Check** for a relay. An update is offered only for a higher stable semantic version published by the canonical GitHub repository with an exact revision and target bundle. After confirmation, an external supervised worker verifies and installs the complete release, restarts the service, and checks `/healthz` for the exact executable and web identities. A failed post-activation check reactivates and verifies the previous complete release.
 
-Self-update is available only while the service is running from a verified packaged release. A source checkout, modified release, noncanonical build, missing matching service, or incomplete release is reported as blocked instead of being changed. Each relay is updated separately.
+Self-update is available only while the service is running from a verified packaged release. A source checkout, modified release, noncanonical build, missing matching service, or incomplete release is reported as blocked instead of being changed. The rollback generation and its exact identity are persisted before activation, so an interrupted worker is recovered by reactivating, restarting, and health-verifying the previous release. Each relay is updated separately.
 
 The **About** card checks both the `version.json` deployed by the app’s current web origin and the published upstream release. It distinguishes an app that is ready to reload from an origin that has not deployed the upstream bundle yet; an old host is never described as the latest version.
 

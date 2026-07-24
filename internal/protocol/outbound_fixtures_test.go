@@ -38,6 +38,23 @@ func TestAgentsFixtureMatchesGoType(t *testing.T) {
 			t.Errorf("updated_at = %d, want 0 (initial snapshot) or epoch milliseconds (>1e12)", agent.UpdatedAt)
 		}
 	}
+	serialized, err := json.Marshal(struct {
+		Type   string                   `json:"type"`
+		Agents []coordinator.AgentState `json:"agents"`
+	}{Type: msg.Type, Agents: msg.Agents})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixtureValue, serializedValue any
+	if err := json.Unmarshal(data, &fixtureValue); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(serialized, &serializedValue); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(serializedValue, fixtureValue) {
+		t.Fatalf("agents Go serialization differs from exact fixture\nserialized: %s\nfixture: %s", serialized, data)
+	}
 }
 
 func TestCommandResultFixtureIsExact(t *testing.T) {
@@ -55,6 +72,7 @@ func TestCommandResultFixtureIsExact(t *testing.T) {
 		"action":     "prompt",
 		"ok":         true,
 		"phase":      "completed",
+		"error":      "",
 		"pane_id":    "pane-1",
 	}
 	if !reflect.DeepEqual(actual, expected) {
@@ -73,6 +91,7 @@ func TestSlashCommandsFixtureMatchesCompleteClaudeCatalog(t *testing.T) {
 		Action    string           `json:"action"`
 		OK        bool             `json:"ok"`
 		Phase     string           `json:"phase"`
+		Error     string           `json:"error"`
 		PaneID    string           `json:"pane_id"`
 		Data      slashcmd.Catalog `json:"data"`
 	}
@@ -82,7 +101,7 @@ func TestSlashCommandsFixtureMatchesCompleteClaudeCatalog(t *testing.T) {
 	actual := slashcmd.CatalogFor("claude", "/nonexistent", "/nonexistent")
 	if fixture.Type != "command_result" || fixture.RequestID != "req-slash-1" ||
 		fixture.Action != "list_slash_commands" || !fixture.OK ||
-		fixture.Phase != "completed" || fixture.PaneID != "pane-1" ||
+		fixture.Phase != "completed" || fixture.Error != "" || fixture.PaneID != "pane-1" ||
 		!reflect.DeepEqual(fixture.Data, actual) {
 		t.Fatalf("slash fixture does not match complete wire catalog\nfixture: %#v\nactual: %#v", fixture, actual)
 	}

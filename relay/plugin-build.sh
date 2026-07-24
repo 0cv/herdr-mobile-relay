@@ -143,7 +143,28 @@ cleanup_plugin_build() {
 trap cleanup_plugin_build EXIT
 
 echo "herdr-mobile-relay: installing verified release $VERSION..." >&2
-sh "$INSTALLER" "$VERSION"
+INSTALL_TOKEN=${GH_TOKEN:-}
+if [ -z "$INSTALL_TOKEN" ] && [ -f "$ENV_FILE" ]; then
+    configured_token_file="$(env_file_value "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE)"
+    expected_token_file="$(dirname "$ENV_FILE")/github-token"
+    if [ "$configured_token_file" = "$expected_token_file" ] &&
+       [ -f "$configured_token_file" ] &&
+       [ ! -L "$configured_token_file" ]; then
+        case "$(ls -ld "$configured_token_file" | awk '{print $1}')" in
+            -rw-------*) ;;
+            *) configured_token_file= ;;
+        esac
+    fi
+    if [ -n "$configured_token_file" ]; then
+        IFS= read -r INSTALL_TOKEN < "$configured_token_file" || true
+    fi
+fi
+if [ -n "$INSTALL_TOKEN" ]; then
+    GH_TOKEN="$INSTALL_TOKEN" sh "$INSTALLER" "$VERSION"
+else
+    sh "$INSTALLER" "$VERSION"
+fi
+unset INSTALL_TOKEN
 if [ -n "$PREVIOUS_RELEASE" ] || [ -n "$SERVICE_BACKUP" ]; then
     rollback_armed=true
 fi
