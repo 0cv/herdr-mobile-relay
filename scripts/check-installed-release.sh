@@ -1,11 +1,80 @@
 #!/bin/sh
-# Exercise version, serve, and support using only an extracted native release.
+# Verify and exercise version, serve, and support from a native release.
 set -eu
 
 ARCHIVE=${1:-}
-[ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ] || {
-    echo "usage: scripts/check-installed-release.sh NATIVE-RELEASE.tar.gz" >&2
+CHECKSUMS=${2:-}
+EXPECTED_VERSION=${3:-}
+EXPECTED_REVISION=${4:-}
+EXPECTED_TARGET=${5:-}
+[ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ] &&
+    [ -n "$CHECKSUMS" ] && [ -f "$CHECKSUMS" ] &&
+    [ -n "$EXPECTED_VERSION" ] && [ -n "$EXPECTED_REVISION" ] &&
+    [ -n "$EXPECTED_TARGET" ] || {
+    echo "usage: scripts/check-installed-release.sh ARCHIVE CHECKSUMS VERSION REVISION os/arch" >&2
     exit 2
+}
+
+case $(uname -s) in
+    Linux) HOST_OS=linux ;;
+    Darwin) HOST_OS=darwin ;;
+    *)
+        echo "unsupported release-check operating system: $(uname -s)" >&2
+        exit 1
+        ;;
+esac
+case $(uname -m) in
+    x86_64|amd64) HOST_ARCH=amd64 ;;
+    arm64|aarch64) HOST_ARCH=arm64 ;;
+    *)
+        echo "unsupported release-check architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+HOST_TARGET="$HOST_OS/$HOST_ARCH"
+[ "$EXPECTED_TARGET" = "$HOST_TARGET" ] || {
+    echo "expected release target $EXPECTED_TARGET does not match native target $HOST_TARGET" >&2
+    exit 1
+}
+ARCHIVE_NAME=${ARCHIVE##*/}
+EXPECTED_NAME="herdr-mobile-relay_${EXPECTED_VERSION}_${HOST_OS}_${HOST_ARCH}.tar.gz"
+[ "$ARCHIVE_NAME" = "$EXPECTED_NAME" ] || {
+    echo "release archive $ARCHIVE_NAME does not match candidate $EXPECTED_NAME" >&2
+    exit 1
+}
+
+EXPECTED_HASH=$(
+    awk -v name="$ARCHIVE_NAME" '
+        $2 == name { count++; hash = $1 }
+        END {
+            if (count != 1) {
+                exit 1
+            }
+            print hash
+        }
+    ' "$CHECKSUMS"
+) || {
+    echo "checksums.txt must contain exactly one entry for $ARCHIVE_NAME" >&2
+    exit 1
+}
+[ "${#EXPECTED_HASH}" -eq 64 ] || {
+    echo "invalid SHA-256 for $ARCHIVE_NAME" >&2
+    exit 1
+}
+case "$EXPECTED_HASH" in
+    *[!0-9a-f]*)
+        echo "invalid SHA-256 for $ARCHIVE_NAME" >&2
+        exit 1
+        ;;
+esac
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_HASH=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+else
+    ACTUAL_HASH=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+fi
+[ "$ACTUAL_HASH" = "$EXPECTED_HASH" ] || {
+    echo "checksum mismatch for $ARCHIVE_NAME" >&2
+    exit 1
 }
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/herdr-installed-check.XXXXXX")
@@ -31,7 +100,11 @@ RELAY="$RELEASE_DIR/herdr-mobile-relay"
     echo "release does not contain an executable relay" >&2
     exit 1
 }
-"$RELAY" version --json >/dev/null
+"$RELAY" verify-release \
+    --target "$EXPECTED_TARGET" \
+    --version "$EXPECTED_VERSION" \
+    --revision "$EXPECTED_REVISION" \
+    "$RELEASE_DIR" >/dev/null
 
 PORT=$((40000 + ($$ % 20000)))
 PLUGIN_PORT=$((PORT + 1))

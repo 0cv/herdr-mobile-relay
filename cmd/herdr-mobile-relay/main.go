@@ -163,6 +163,8 @@ func run(args []string) (int, error) {
 		verifyFlags := flag.NewFlagSet("verify-release", flag.ContinueOnError)
 		verifyFlags.SetOutput(os.Stderr)
 		target := verifyFlags.String("target", release.CurrentTarget(), "expected os/architecture")
+		expectedVersion := verifyFlags.String("version", "", "expected release version")
+		expectedRevision := verifyFlags.String("revision", "", "expected release revision")
 		if err := verifyFlags.Parse(args); err != nil {
 			return 2, err
 		}
@@ -181,6 +183,9 @@ func run(args []string) (int, error) {
 		}
 		manifest, err := release.Verify(root, *target)
 		if err != nil {
+			return 1, err
+		}
+		if err := verifyReleaseIdentity(manifest, *expectedVersion, *expectedRevision); err != nil {
 			return 1, err
 		}
 		encoded, _ := json.Marshal(manifest)
@@ -255,6 +260,22 @@ func run(args []string) (int, error) {
 	default:
 		return 2, fmt.Errorf("unknown subcommand %q", command)
 	}
+}
+
+func verifyReleaseIdentity(manifest release.Manifest, expectedVersion, expectedRevision string) error {
+	if expectedVersion != "" && manifest.Version != expectedVersion {
+		return fmt.Errorf("release manifest version %q does not match expected version %q", manifest.Version, expectedVersion)
+	}
+	if expectedRevision != "" && manifest.Revision != expectedRevision {
+		return fmt.Errorf("release manifest revision %q does not match expected revision %q", manifest.Revision, expectedRevision)
+	}
+	if manifest.Version != version {
+		return fmt.Errorf("release manifest version %q does not match binary version %q", manifest.Version, version)
+	}
+	if manifest.Revision != revision {
+		return fmt.Errorf("release manifest revision %q does not match binary revision %q", manifest.Revision, revision)
+	}
+	return nil
 }
 
 func runServe() (int, error) {

@@ -32,7 +32,7 @@ jobs:
             exit 1
           }
 
-  publish:
+  build:
     needs: verify
     runs-on: ubuntu-latest
     steps:
@@ -59,8 +59,50 @@ jobs:
             exit 1
           }
           scripts/package-release.sh "$version" "$GITHUB_SHA" dist/release
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-bundles
+          path: dist/release/
+
+  native-smoke:
+    name: Native release smoke (${{ matrix.target }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux_amd64
+          - runner: ubuntu-24.04-arm
+            target: linux_arm64
+          - runner: macos-15-intel
+            target: darwin_amd64
+          - runner: macos-15
+            target: darwin_arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-bundles
+          path: dist/release
+      - name: Exercise packaged relay on its native target
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          target="${{ matrix.target }}"
           scripts/check-installed-release.sh \
-            "dist/release/herdr-mobile-relay_${version}_linux_amd64.tar.gz"
+            "dist/release/herdr-mobile-relay_${version}_${{ matrix.target }}.tar.gz" \
+            dist/release/checksums.txt "$version" "$GITHUB_SHA" \
+            "${target%_*}/${target#*_}"
+
+  publish:
+    needs: [verify, build, native-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-bundles
+          path: dist/release
       - name: Publish verified complete bundles
         env:
           GH_TOKEN: ${{ github.token }}

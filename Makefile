@@ -74,6 +74,7 @@ shell-check:
 	sh tests/test_install.sh
 	bash tests/test_common.sh
 	bash tests/test_plugin_build.sh
+	sh tests/test_release_scripts.sh
 	bash tests/test_uninstall.sh
 	tests/test_stable_setup.sh
 
@@ -104,7 +105,8 @@ release-bundle-check:
 	test -s "$$tmp/checksums.txt"; \
 	host_os="$$(go env GOOS)"; host_arch="$$(go env GOARCH)"; \
 	scripts/check-installed-release.sh \
-		"$$tmp/herdr-mobile-relay_$${version}_$${host_os}_$${host_arch}.tar.gz"
+		"$$tmp/herdr-mobile-relay_$${version}_$${host_os}_$${host_arch}.tar.gz" \
+		"$$tmp/checksums.txt" "$$version" "$$revision" "$${host_os}/$${host_arch}"
 
 frontend-check:
 	npm --prefix frontend run lint
