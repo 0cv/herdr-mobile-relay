@@ -117,7 +117,9 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 
 func waitForHealth(t *testing.T, base string) {
 	t.Helper()
-	for i := 0; i < 50; i++ {
+	// Fresh CI runners build several test packages concurrently. Give the relay
+	// enough time to complete its first fake-Herdr inventory under that load.
+	for i := 0; i < 200; i++ {
 		resp, err := http.Get(base + "/health")
 		if err == nil {
 			resp.Body.Close()
