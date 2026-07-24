@@ -39,6 +39,7 @@ type WorkerToken struct {
 	OperationID OperationID
 	PaneID      string
 	Generation  uint64
+	AllowAbsent bool
 	Revision    uint64
 	Deadline    time.Time
 }
@@ -87,14 +88,17 @@ type EffectResult struct {
 }
 
 var (
-	ErrIngressFull = errors.New("coordinator ingress is full")
-	ErrConflict    = errors.New("a different response was already submitted")
-	ErrClosed      = errors.New("coordinator is closed")
+	ErrIngressFull  = errors.New("coordinator ingress is full")
+	ErrConflict     = errors.New("a different response was already submitted")
+	ErrClosed       = errors.New("coordinator is closed")
+	ErrPaneReplaced = errors.New("pane session was replaced")
 )
 
 type ScheduleOptions struct {
 	Command
-	RelayLevel  bool
-	LedgerKey   string
-	PayloadHash string
+	RelayLevel     bool
+	PaneGeneration uint64
+	AllowAbsent    bool
+	LedgerKey      string
+	PayloadHash    string
 }

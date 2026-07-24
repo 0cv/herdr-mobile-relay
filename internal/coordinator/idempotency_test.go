@@ -161,6 +161,7 @@ func TestAgentStopRetryDoesNotCloseOrBumpTwice(t *testing.T) {
 	record := filepath.Join(dir, "stops.log")
 	bin := recordingHerdr(t, dir, record, `{"ok":true}`)
 	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, state.RevisionCounter())
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
 	message := map[string]any{
 		"action": "agent_stop", "request_id": "stop-1", "pane_id": "pane-1",

@@ -66,6 +66,14 @@ type Dispatcher struct {
 type receiptContextKey struct{}
 type admissionContextKey struct{}
 
+type paneSessionContextKey struct{}
+
+type paneSessionAdmission struct {
+	generation  uint64
+	active      bool
+	allowAbsent bool
+}
+
 type paneRead struct {
 	done    chan struct{}
 	content []byte
@@ -177,6 +185,11 @@ func (d *Dispatcher) waitTestGate(ctx context.Context, paneID string, generation
 }
 
 func (d *Dispatcher) PruneSlots(active map[string]bool) {
+	generations := make(map[string]uint64, len(active))
+	for paneID := range active {
+		generations[paneID] = uint64(d.state.Generation(paneID))
+	}
+	d.scheduler.ApplyTopology(active, generations)
 	d.testGatesMu.Lock()
 	defer d.testGatesMu.Unlock()
 	for paneID, gate := range d.testGates {
@@ -184,6 +197,21 @@ func (d *Dispatcher) PruneSlots(active map[string]bool) {
 			delete(d.testGates, paneID)
 		}
 	}
+}
+
+func (d *Dispatcher) paneSessionCurrent(token WorkerToken, requestID, action string) *CommandResult {
+	if d.paneSessionError(token) == nil {
+		return nil
+	}
+	return d.fail(requestID, action, token.PaneID, ErrPaneReplaced.Error())
+}
+
+func (d *Dispatcher) paneSessionError(token WorkerToken) error {
+	generation, active := d.state.PaneSession(token.PaneID)
+	if uint64(generation) != token.Generation || (!active && !token.AllowAbsent) {
+		return ErrPaneReplaced
+	}
+	return nil
 }
 
 func (d *Dispatcher) SetBroadcast(fn func(any)) {
@@ -213,6 +241,13 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		requestID = fmt.Sprintf("req-%d", receivedAt.UnixNano())
 	}
 	paneID := stringValue(message, "pane_id")
+	if paneID != "" {
+		generation, active := d.state.PaneSession(paneID)
+		ctx = context.WithValue(ctx, paneSessionContextKey{}, paneSessionAdmission{
+			generation: uint64(generation),
+			active:     active,
+		})
+	}
 
 	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
 
@@ -276,7 +311,10 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandPrompt, paneID, commandDeadline, text),
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "prompt"); stale != nil {
+			return EffectResult{Result: stale}
+		}
 		if err := d.herdr.Prompt(effectCtx, paneID, text); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
 		}
@@ -296,7 +334,10 @@ func (d *Dispatcher) handleKeys(ctx context.Context, receivedAt time.Time, reque
 	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandKeys, paneID, commandDeadline, keys),
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "keys"); stale != nil {
+			return EffectResult{Result: stale}
+		}
 		if err := d.herdr.SendKeys(effectCtx, paneID, keys); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "keys", paneID, err)}
 		}
@@ -320,7 +361,10 @@ func (d *Dispatcher) handleText(ctx context.Context, receivedAt time.Time, reque
 	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandText, paneID, commandDeadline, text),
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "text"); stale != nil {
+			return EffectResult{Result: stale}
+		}
 		if err := d.herdr.SendText(effectCtx, paneID, text); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "text", paneID, err)}
 		}
@@ -341,7 +385,10 @@ func (d *Dispatcher) handleStop(ctx context.Context, receivedAt time.Time, reque
 		Command:     d.command(ctx, receivedAt, requestID, CommandStop, paneID, commandDeadline, nil),
 		LedgerKey:   "stop\x00" + paneID + "\x00" + requestID,
 		PayloadHash: hashPayload(struct{}{}),
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "agent_stop"); stale != nil {
+			return EffectResult{Result: stale}
+		}
 		if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "agent_stop", paneID, err)}
 		}
@@ -370,7 +417,10 @@ func (d *Dispatcher) handleRename(ctx context.Context, receivedAt time.Time, req
 	agent, _ := d.state.Agent(paneID)
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandRename, paneID, commandDeadline, name),
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "agent_rename"); stale != nil {
+			return EffectResult{Result: stale}
+		}
 		if err := d.herdr.RenameAgent(effectCtx, paneID, name); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "agent_rename", paneID, err)}
 		}
@@ -396,7 +446,13 @@ func (d *Dispatcher) handleAcknowledge(requestID, paneID string) *CommandResult 
 	}
 	d.wake()
 	if d.broadcast != nil {
-		d.broadcast(map[string]any{"type": "agent_update", "pane_id": paneID, "raw_pane_id": paneID, "status": d.state.DisplayedStatus(paneID)})
+		d.broadcast(map[string]any{
+			"type":          "agent_update",
+			"pane_id":       paneID,
+			"raw_pane_id":   paneID,
+			"status":        d.state.DisplayedStatus(paneID),
+			"pane_revision": d.state.Revision(paneID),
+		})
 	}
 	return completed(requestID, "acknowledge_pane", paneID, nil)
 }
@@ -460,7 +516,13 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		}
 	}
 	if request.Prompt != "" && data.PaneID != "" {
-		promptResult := d.handlePrompt(ctx, receivedAt, requestID+"-initial", data.PaneID, map[string]any{"text": request.Prompt})
+		generation, active := d.state.PaneSession(data.PaneID)
+		initialPromptCtx := context.WithValue(ctx, paneSessionContextKey{}, paneSessionAdmission{
+			generation:  uint64(generation),
+			active:      active,
+			allowAbsent: true,
+		})
+		promptResult := d.handlePrompt(initialPromptCtx, receivedAt, requestID+"-initial", data.PaneID, map[string]any{"text": request.Prompt})
 		if !promptResult.OK {
 			result.Phase = "completed_with_warning"
 			result.Data = map[string]any{
@@ -489,7 +551,10 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 		// Direct unit-test fallback still preserves serialization.
 		return d.schedule(ctx, ScheduleOptions{
 			Command: d.command(ctx, receivedAt, requestID, CommandClear, paneID, agentStartDeadline, nil),
-		}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+		}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+			if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
+				return EffectResult{Result: stale}
+			}
 			if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
 				return EffectResult{Result: d.failErr(requestID, "agent_clear", paneID, err)}
 			}
@@ -512,12 +577,18 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	result := d.schedule(ctx, ScheduleOptions{
 		Command:   d.command(ctx, receivedAt, requestID, CommandClear, paneID, agentStartDeadline, request),
 		LedgerKey: "clear\x00" + paneID + "\x00" + requestID,
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
+			return EffectResult{Result: stale}
+		}
 		replacement, err := d.lifecycle.Start(effectCtx, profile, request)
 		if err != nil {
 			return EffectResult{Result: d.failErr(requestID, "agent_clear", paneID, err)}
 		}
 		data := map[string]any{"pane_id": replacement.PaneID, "name": replacement.Name, "cwd": replacement.Cwd}
+		if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
+			return EffectResult{Result: stale}
+		}
 		if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
 			data["warning"] = "Replacement started, but the old pane could not be closed"
 			result := completed(requestID, "agent_clear", paneID, data)
@@ -554,6 +625,20 @@ func (d *Dispatcher) command(ctx context.Context, receivedAt time.Time, requestI
 }
 
 func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runner EffectRunner) *CommandResult {
+	if !options.RelayLevel {
+		admission, captured := ctx.Value(paneSessionContextKey{}).(paneSessionAdmission)
+		if !captured {
+			generation, active := d.state.PaneSession(options.PaneID)
+			admission = paneSessionAdmission{generation: uint64(generation), active: active}
+		}
+		generation, active := d.state.PaneSession(options.PaneID)
+		if uint64(generation) != admission.generation ||
+			(!active && !admission.allowAbsent) {
+			return d.fail(options.RequestID, string(options.Kind), options.PaneID, ErrPaneReplaced.Error())
+		}
+		options.PaneGeneration = admission.generation
+		options.AllowAbsent = admission.allowAbsent
+	}
 	admitted, _ := ctx.Value(admissionContextKey{}).(func())
 	result, err := d.scheduler.ExecuteAdmitted(ctx, options, runner, admitted)
 	switch {
@@ -659,6 +744,7 @@ func (d *Dispatcher) RecordTransitionActivity(
 	host string,
 	session string,
 	extract string,
+	blockedIdentity ...any,
 ) bool {
 	if d.activityW == nil {
 		return false
@@ -668,6 +754,13 @@ func (d *Dispatcher) RecordTransitionActivity(
 	transitionCurrent := func() bool {
 		if kind == "finished" {
 			return d.state.CompletionCurrent(paneID, revision)
+		}
+		if kind == "blocked" && len(blockedIdentity) == 2 {
+			eventID, eventOK := blockedIdentity[0].(string)
+			generation, generationOK := blockedIdentity[1].(uint64)
+			if eventOK && generationOK {
+				return d.state.BlockedTransitionCurrent(paneID, eventID, generation)
+			}
 		}
 		return d.state.TransitionCurrent(paneID, expectedStatus, revision)
 	}

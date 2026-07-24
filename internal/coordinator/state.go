@@ -36,6 +36,7 @@ type AgentState struct {
 	QuestionLayout  bool                  `json:"question_layout,omitempty"`
 	InteractionID   string                `json:"-"`
 	PaneRevision    int                   `json:"-"`
+	StateRevision   int64                 `json:"pane_revision,omitempty"`
 	ScrollMaxOffset int                   `json:"-"`
 	ForegroundCwd   string                `json:"-"`
 }
@@ -68,9 +69,11 @@ type State struct {
 }
 
 type pendingEvent struct {
-	status    string
-	updatedAt int64
-	expiresAt time.Time
+	tabID       string
+	workspaceID string
+	status      string
+	updatedAt   int64
+	expiresAt   time.Time
 }
 
 type PollToken struct {
@@ -190,6 +193,20 @@ func (s *State) Generation(paneID string) int64 {
 	return s.generation[paneID]
 }
 
+func (s *State) PaneSession(paneID string) (int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, active := s.agents[paneID]
+	return s.generation[paneID], active
+}
+
+func (s *State) PaneSessionCurrent(paneID string, generation uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, active := s.agents[paneID]
+	return active && uint64(s.generation[paneID]) == generation
+}
+
 func (s *State) BumpGeneration(paneID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -201,6 +218,16 @@ func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
 	defer s.mu.RUnlock()
 	agent := s.agents[paneID]
 	return agent != nil && agent.Status == status && s.revision[paneID] == revision
+}
+
+func (s *State) BlockedTransitionCurrent(paneID, eventID string, generation uint64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	agent := s.agents[paneID]
+	return agent != nil &&
+		agent.Status == "blocked" &&
+		agent.BlockedEventID == eventID &&
+		uint64(s.generation[paneID]) == generation
 }
 
 func (s *State) CompletionCurrent(paneID string, revision int64) bool {
@@ -243,7 +270,8 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 	topologyChanged := len(agents) != len(s.agents)
 	if !topologyChanged {
 		for _, agent := range agents {
-			if _, exists := s.agents[agent.PaneID]; !exists {
+			existing, exists := s.agents[agent.PaneID]
+			if !exists || paneSessionReplaced(existing, agent) {
 				topologyChanged = true
 				break
 			}
@@ -265,6 +293,24 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 
 		cp := *incoming
 		existing, exists := s.agents[incoming.PaneID]
+		replaced := exists && paneSessionReplaced(existing, incoming)
+		if replaced {
+			topologyChanged = true
+			s.generation[incoming.PaneID]++
+			delete(s.prevStatus, incoming.PaneID)
+			delete(s.unseenDone, incoming.PaneID)
+			delete(s.ackDone, incoming.PaneID)
+			delete(s.finishedNotif, incoming.PaneID)
+			delete(s.completionRev, incoming.PaneID)
+			existing = nil
+			exists = false
+		}
+		if !exists && !replaced && !initialSnapshot && s.generation[incoming.PaneID] > 0 {
+			// Disappearance already ended the previous epoch. Reappearance must
+			// establish another one so work admitted during the absence cannot
+			// target the replacement session.
+			s.generation[incoming.PaneID]++
+		}
 
 		// If an event landed during this poll (revision advanced past baseRev),
 		// preserve the event's authoritative status.
@@ -274,7 +320,8 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 
 		pendingTimestamp := false
 		if pending, ok := s.pendingEvents[incoming.PaneID]; ok {
-			if time.Now().Before(pending.expiresAt) {
+			if time.Now().Before(pending.expiresAt) &&
+				eventIdentityMatches(incoming, pending.tabID, pending.workspaceID) {
 				cp.Status = pending.status
 				cp.UpdatedAt = pending.updatedAt
 				pendingTimestamp = true
@@ -312,6 +359,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 
 	for id := range s.agents {
 		if !seen[id] {
+			s.generation[id]++
 			delete(s.agents, id)
 			delete(s.revision, id)
 			delete(s.contentRev, id)
@@ -330,13 +378,41 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 	}
 }
 
+func paneSessionReplaced(existing, incoming *AgentState) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
+	for _, identity := range [][2]string{
+		{existing.RawPaneID, incoming.RawPaneID},
+		{existing.TerminalID, incoming.TerminalID},
+		{existing.TabID, incoming.TabID},
+		{existing.WorkspaceID, incoming.WorkspaceID},
+	} {
+		if identity[0] != "" && identity[1] != "" && identity[0] != identity[1] {
+			return true
+		}
+	}
+	return false
+}
+
 // CommitEvent applies an authoritative status update from a UDP event. These
 // take precedence over in-flight inventory polls (§10.3).
 func (s *State) CommitEvent(paneID, status string, updatedAt int64) bool {
+	return s.CommitEventForSession(paneID, "", "", status, updatedAt)
+}
+
+// CommitEventForSession applies an event only when any supplied stable
+// tab/workspace identity matches the current pane session. Empty identity is
+// accepted for compatibility with older event-hook senders.
+func (s *State) CommitEventForSession(
+	paneID, tabID, workspaceID, status string,
+	updatedAt int64,
+) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.agents[paneID]; !exists {
+	agent, exists := s.agents[paneID]
+	if !exists {
 		if len(s.pendingEvents) >= 128 {
 			var oldestID string
 			var oldest time.Time
@@ -348,16 +424,21 @@ func (s *State) CommitEvent(paneID, status string, updatedAt int64) bool {
 			delete(s.pendingEvents, oldestID)
 		}
 		s.pendingEvents[paneID] = pendingEvent{
-			status:    status,
-			updatedAt: updatedAt,
-			expiresAt: time.Now().Add(30 * time.Second),
+			tabID:       tabID,
+			workspaceID: workspaceID,
+			status:      status,
+			updatedAt:   updatedAt,
+			expiresAt:   time.Now().Add(30 * time.Second),
 		}
+		return false
+	}
+	if !eventIdentityMatches(agent, tabID, workspaceID) {
 		return false
 	}
 	s.revCounter++
 	s.revision[paneID] = s.revCounter
 
-	a := s.agents[paneID]
+	a := agent
 	prev := a.Status
 	a.Status = status
 	a.UpdatedAt = updatedAt
@@ -373,6 +454,19 @@ func (s *State) CommitEvent(paneID, status string, updatedAt int64) bool {
 	}
 	s.prevStatus[paneID] = status
 	s.registerTransition(paneID, prev, status)
+	return true
+}
+
+func eventIdentityMatches(agent *AgentState, tabID, workspaceID string) bool {
+	if agent == nil {
+		return false
+	}
+	if tabID != "" && agent.TabID != "" && tabID != agent.TabID {
+		return false
+	}
+	if workspaceID != "" && agent.WorkspaceID != "" && workspaceID != agent.WorkspaceID {
+		return false
+	}
 	return true
 }
 
@@ -499,6 +593,7 @@ func (s *State) Snapshot() []*AgentState {
 	result := make([]*AgentState, 0, len(s.agents))
 	for _, a := range s.agents {
 		cp := *a
+		cp.StateRevision = s.revision[cp.PaneID]
 		if cp.Status == "idle" && s.unseenDone[cp.PaneID] {
 			cp.Status = "done"
 		}
@@ -515,6 +610,7 @@ func (s *State) Agent(paneID string) (*AgentState, bool) {
 		return nil, false
 	}
 	copy := *agent
+	copy.StateRevision = s.revision[paneID]
 	return &copy, true
 }
 

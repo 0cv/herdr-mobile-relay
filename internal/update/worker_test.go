@@ -119,6 +119,53 @@ func TestExtractArchiveAcceptsPackagerRootDirectoryEntry(t *testing.T) {
 	}
 }
 
+func TestWorkerStartupFailureDoesNotLeaveUpdateScheduled(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "installed")
+	if err := os.WriteFile(releaseRoot, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(root, "runtime", "update-state.json")
+	job := Job{
+		ReleaseRoot:    releaseRoot,
+		DownloadURL:    "https://example.test/release.tar.gz",
+		ChecksumURL:    "https://example.test/checksums.txt",
+		ArchiveName:    "release.tar.gz",
+		TargetVersion:  "1.2.4",
+		TargetRevision: "new",
+		Target:         relayrelease.CurrentTarget(),
+		StatePath:      statePath,
+		ServiceName:    "relay.service",
+		HealthURL:      "http://127.0.0.1/healthz",
+	}
+	jobPath := filepath.Join(root, "update-job.json")
+	if err := writeJSONAtomic(jobPath, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(statePath, State{
+		State:          "scheduled",
+		TargetVersion:  job.TargetVersion,
+		TargetRevision: job.TargetRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Run(t.Context(), jobPath); err == nil {
+		t.Fatal("worker startup unexpectedly succeeded")
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state State
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.State != "failed" || state.Error == "" || state.FinishedAt == "" {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
 func TestActivateKeepsCompleteReleaseTarget(t *testing.T) {
 	root := t.TempDir()
 	releaseDir := filepath.Join(root, "releases", "one")

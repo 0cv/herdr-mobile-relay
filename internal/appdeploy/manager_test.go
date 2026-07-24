@@ -2,9 +2,13 @@ package appdeploy
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
 func TestManagerRejectsPhoneOverrides(t *testing.T) {
@@ -26,6 +30,24 @@ func TestManagerRejectsPhoneOverrides(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webRoot, "version.json"), []byte(`{"release_version":"1.2.3","revision":"abc"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	webHash, err := release.WebHashFS(os.DirFS(webRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := json.Marshal(release.Manifest{
+		Schema:   release.ManifestSchema,
+		Version:  "1.2.3",
+		Revision: "abc",
+		Target:   release.CurrentTarget(),
+		WebHash:  webHash,
+		Files:    map[string]string{"web/version.json": "unused"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, release.ManifestName), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HERDR_APP_DEPLOY_ORIGIN", "https://app.example.test")
 	t.Setenv("HERDR_CLOUDFLARE_PAGES_PROJECT", "relay-app")
 	t.Setenv("HERDR_CLOUDFLARE_PAGES_BRANCH", "main")
@@ -38,5 +60,64 @@ func TestManagerRejectsPhoneOverrides(t *testing.T) {
 	}
 	if _, _, err := manager.Schedule(context.Background(), "1.2.3", "abc", "https://other.example.test"); err == nil {
 		t.Fatal("phone origin override was accepted")
+	}
+}
+
+func TestManagerRecoversOrphanedDeploymentState(t *testing.T) {
+	for _, stateName := range []string{"scheduled", "deploying"} {
+		t.Run(stateName, func(t *testing.T) {
+			root := t.TempDir()
+			if err := writeState(filepath.Join(root, "app-deploy-state.json"), State{
+				State:          stateName,
+				TargetVersion:  "1.2.3",
+				TargetRevision: "abc",
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			manager := NewManager(root, filepath.Join(root, "web"), "1.2.3", "abc")
+			state := manager.State()
+			if state.State != "failed" || state.Error != "App deployment worker stopped before completion" {
+				t.Fatalf("state = %#v", state)
+			}
+		})
+	}
+}
+
+func TestManagerPreservesStateOwnedByWorker(t *testing.T) {
+	root := t.TempDir()
+	lock, err := lockFile(filepath.Join(root, "app-deploy.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := writeState(filepath.Join(root, "app-deploy-state.json"), State{
+		State:          "deploying",
+		TargetVersion:  "1.2.3",
+		TargetRevision: "abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(root, filepath.Join(root, "web"), "1.2.3", "abc")
+	if state := manager.State(); state.State != "deploying" {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestManagerAllowsScheduledWorkerStartupGracePeriod(t *testing.T) {
+	root := t.TempDir()
+	if err := writeState(filepath.Join(root, "app-deploy-state.json"), State{
+		State:          "scheduled",
+		TargetVersion:  "1.2.3",
+		TargetRevision: "abc",
+		StartedAt:      time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(root, filepath.Join(root, "web"), "1.2.3", "abc")
+	if state := manager.State(); state.State != "scheduled" {
+		t.Fatalf("state = %#v", state)
 	}
 }

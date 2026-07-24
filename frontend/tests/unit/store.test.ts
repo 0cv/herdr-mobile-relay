@@ -359,6 +359,55 @@ describe('relay command store', () => {
     expect(agents.map((agent) => agent.project).sort()).toEqual(['Fedora app', 'Mac app']);
   });
 
+  it('ignores blocked and agent update frames older than the pane revision', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
+    socket.message({
+      type: 'agents',
+      agents: [{ pane_id: 'w1:p1', status: 'working', pane_revision: 12, project: 'Current' }],
+    });
+
+    socket.message({
+      type: 'blocked', pane_id: 'w1:p1', status: 'blocked',
+      pane_revision: 11, event_id: 'stale-blocked',
+    });
+    socket.message({
+      type: 'agent_update', pane_id: 'w1:p1', status: 'idle', pane_revision: 10,
+    });
+
+    expect(get(relayStore.agents)[0]).toMatchObject({
+      status: 'working',
+      pane_revision: 12,
+      project: 'Current',
+    });
+  });
+
+  it('accepts a fresh low pane revision after a relay reconnect', () => {
+    const first = MockWebSocket.instances.at(-1)!;
+    first.open();
+    first.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
+    first.message({
+      type: 'agents',
+      agents: [{ pane_id: 'w1:p1', status: 'working', pane_revision: 100 }],
+    });
+
+    relayStore.connectAll();
+    const replacement = MockWebSocket.instances.at(-1)!;
+    replacement.open();
+    replacement.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
+    replacement.message({
+      type: 'agents',
+      agents: [{ pane_id: 'w1:p1', status: 'blocked', pane_revision: 1, event_id: 'fresh' }],
+    });
+
+    expect(get(relayStore.agents)[0]).toMatchObject({
+      status: 'blocked',
+      pane_revision: 1,
+      event_id: 'fresh',
+    });
+  });
+
   it('preserves relay-provided desktop footer metadata on terminal frames', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     const relayId = get(relayStore.relayConfigs)[0].id;

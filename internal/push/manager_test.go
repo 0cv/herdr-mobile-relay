@@ -1,6 +1,7 @@
 package push
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
@@ -166,6 +167,41 @@ func TestBuildFinishedPayload(t *testing.T) {
 	}
 }
 
+func TestFinishedPayloadIsClassifiedForOptInFiltering(t *testing.T) {
+	payload := BuildFinishedPayload("Codex", "app", "pane-1", "myhost", "evt-finished-1")
+	if kind := payloadType(payload); kind != "finished" {
+		t.Fatalf("finished payload type = %q, want finished so non-opted-in subscriptions are skipped", kind)
+	}
+}
+
+func TestSendFinishedHonorsSubscriptionOptIn(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []Subscription{
+		{Endpoint: "https://push.example.com/disabled"},
+		{Endpoint: "https://push.example.com/enabled", NotifyFinished: true},
+	} {
+		sub.Keys.P256dh = "test-p256dh"
+		sub.Keys.Auth = "test-auth"
+		if err := manager.Subscribe(sub); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var sent []string
+	manager.sendPush = func(_ context.Context, sub Subscription, _ []byte) error {
+		sent = append(sent, sub.Endpoint)
+		return nil
+	}
+	manager.Send(t.Context(), BuildFinishedPayload("Codex", "app", "pane-1", "myhost", "evt-finished-1"))
+
+	if !reflect.DeepEqual(sent, []string{"https://push.example.com/enabled"}) {
+		t.Fatalf("finished push endpoints = %v, want only opted-in subscription", sent)
+	}
+}
+
 func assertPayloadFixture(t *testing.T, actual []byte, name string) {
 	t.Helper()
 	expected, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "push", name))
@@ -190,6 +226,12 @@ func TestIsTerminalError(t *testing.T) {
 	}
 	if !isTerminalError(&pushError{statusCode: 404}) {
 		t.Error("404 should be terminal")
+	}
+	if isTerminalError(&pushError{statusCode: 401}) {
+		t.Error("401 should not be terminal")
+	}
+	if isTerminalError(&pushError{statusCode: 403}) {
+		t.Error("403 should not be terminal")
 	}
 	if isTerminalError(&pushError{statusCode: 503}) {
 		t.Error("503 should not be terminal")

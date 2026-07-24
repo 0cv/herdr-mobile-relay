@@ -157,6 +157,37 @@ func TestPaneRemoval(t *testing.T) {
 	if len(snap) != 1 || snap[0].PaneID != "p1" {
 		t.Errorf("unexpected snapshot: %+v", snap)
 	}
+	if generation := s.Generation("p2"); generation != 1 {
+		t.Errorf("removed pane generation = %d, want 1", generation)
+	}
+	s.CommitInventory([]*AgentState{
+		{PaneID: "p1", Status: "working"},
+		{PaneID: "p2", Status: "idle"},
+	}, s.RevisionCounter())
+	if generation := s.Generation("p2"); generation != 2 {
+		t.Errorf("replacement pane generation = %d, want new epoch 2", generation)
+	}
+}
+
+func TestSamePaneIDReplacementBumpsGeneration(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", RawPaneID: "p1", TerminalID: "terminal-old",
+		WorkspaceID: "workspace-old", Status: "working",
+	}}, s.RevisionCounter())
+
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", RawPaneID: "p1", TerminalID: "terminal-new",
+		WorkspaceID: "workspace-new", Status: "idle",
+	}}, s.RevisionCounter())
+
+	if generation := s.Generation("p1"); generation != 1 {
+		t.Fatalf("same-ID replacement generation = %d, want 1", generation)
+	}
+	agent, ok := s.Agent("p1")
+	if !ok || agent.TerminalID != "terminal-new" || agent.WorkspaceID != "workspace-new" {
+		t.Fatalf("replacement agent = %#v", agent)
+	}
 }
 
 func TestFinishedNotificationOneShot(t *testing.T) {

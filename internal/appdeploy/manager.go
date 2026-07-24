@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 )
 
@@ -35,6 +36,7 @@ type Manager struct {
 	webRoot    string
 	version    string
 	revision   string
+	webHash    string
 	origin     string
 	project    string
 	branch     string
@@ -47,6 +49,7 @@ type Manager struct {
 }
 
 func NewManager(runtimeDir, webRoot, version, revision string) *Manager {
+	recoverAppDeployState(runtimeDir, true)
 	manager := &Manager{
 		runtimeDir: runtimeDir,
 		webRoot:    webRoot,
@@ -57,10 +60,22 @@ func NewManager(runtimeDir, webRoot, version, revision string) *Manager {
 		npxPath:    strings.TrimSpace(os.Getenv("HERDR_APP_DEPLOY_NPX")),
 		nodeDir:    strings.TrimSpace(os.Getenv("HERDR_APP_DEPLOY_NODE_DIR")),
 	}
+	manifest, manifestErr := release.Load(filepath.Dir(webRoot))
+	if manifestErr != nil {
+		manager.reason = "The verified release manifest is unavailable"
+	} else if manifest.Version != version || manifest.Revision != revision || manifest.WebHash == "" {
+		manager.reason = "The verified release manifest does not match this relay release"
+	} else {
+		manager.webHash = manifest.WebHash
+	}
 	if manager.branch == "" {
 		manager.branch = "main"
 	}
-	manager.origin, manager.reason = configuredOrigin(os.Getenv("HERDR_APP_DEPLOY_ORIGIN"))
+	var originReason string
+	manager.origin, originReason = configuredOrigin(os.Getenv("HERDR_APP_DEPLOY_ORIGIN"))
+	if manager.reason == "" {
+		manager.reason = originReason
+	}
 	if manager.reason == "" {
 		job := Job{
 			RuntimeDir: runtimeDir,
@@ -70,6 +85,7 @@ func NewManager(runtimeDir, webRoot, version, revision string) *Manager {
 			Branch:     manager.branch,
 			Version:    version,
 			Revision:   revision,
+			WebHash:    manager.webHash,
 			NPXPath:    manager.npxPath,
 			NodeDir:    manager.nodeDir,
 		}
@@ -98,6 +114,7 @@ func RunConfigured(ctx context.Context, runtimeDir, webRoot, version, revision s
 		Branch:     manager.branch,
 		Version:    version,
 		Revision:   revision,
+		WebHash:    manager.webHash,
 		NPXPath:    manager.npxPath,
 		NodeDir:    manager.nodeDir,
 	}
@@ -135,6 +152,7 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 		Branch:     m.branch,
 		Version:    m.version,
 		Revision:   m.revision,
+		WebHash:    m.webHash,
 		NPXPath:    m.npxPath,
 		NodeDir:    m.nodeDir,
 	}
@@ -145,6 +163,7 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 		State:          "scheduled",
 		TargetVersion:  m.version,
 		TargetRevision: m.revision,
+		StartedAt:      time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := writeState(filepath.Join(m.runtimeDir, "app-deploy-state.json"), scheduled); err != nil {
 		_ = os.Remove(jobPath)
@@ -162,11 +181,22 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 
 func (m *Manager) loadState() PublicState {
 	state := State{State: "idle"}
-	data, err := os.ReadFile(filepath.Join(m.runtimeDir, "app-deploy-state.json"))
+	statePath := filepath.Join(m.runtimeDir, "app-deploy-state.json")
+	data, err := os.ReadFile(statePath)
 	if err == nil {
 		var loaded State
 		if json.Unmarshal(data, &loaded) == nil && validDeployState(loaded.State) {
 			state = loaded
+		}
+	}
+	if state.State == "deploying" || scheduledStateExpired(state) {
+		recoverAppDeployState(m.runtimeDir, false)
+		data, err = os.ReadFile(statePath)
+		if err == nil {
+			var recovered State
+			if json.Unmarshal(data, &recovered) == nil && validDeployState(recovered.State) {
+				state = recovered
+			}
 		}
 	}
 	return m.public(state)
@@ -267,6 +297,41 @@ func validDeployState(value string) bool {
 	default:
 		return false
 	}
+}
+
+func recoverAppDeployState(runtimeDir string, includeScheduled bool) {
+	statePath := filepath.Join(runtimeDir, "app-deploy-state.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return
+	}
+	var state State
+	if json.Unmarshal(data, &state) != nil {
+		return
+	}
+	_, startedErr := time.Parse(time.RFC3339, state.StartedAt)
+	recoverScheduled := state.State == "scheduled" &&
+		(scheduledStateExpired(state) || (includeScheduled && startedErr != nil))
+	if state.State != "deploying" && !recoverScheduled {
+		return
+	}
+	lock, err := lockFile(filepath.Join(runtimeDir, "app-deploy.lock"))
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	state.State = "failed"
+	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	state.Error = "App deployment worker stopped before completion"
+	_ = writeState(statePath, state)
+}
+
+func scheduledStateExpired(state State) bool {
+	if state.State != "scheduled" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, state.StartedAt)
+	return err == nil && time.Since(started) >= deploymentStartupGrace
 }
 
 func unixTime(values ...string) int64 {

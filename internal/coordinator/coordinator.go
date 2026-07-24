@@ -97,6 +97,12 @@ type ledgerReplayResponse struct {
 	err    error
 }
 
+type topologyUpdate struct {
+	active      map[string]bool
+	generations map[string]uint64
+	response    chan struct{}
+}
+
 type ledgerEntry struct {
 	payloadHash string
 	operation   *scheduledOperation
@@ -139,6 +145,7 @@ type Scheduler struct {
 	completions    chan completionEvent
 	ledger         chan ledgerPhaseUpdate
 	replays        chan ledgerReplayQuery
+	topology       chan topologyUpdate
 	cancelInflight chan struct{}
 	stop           chan chan struct{}
 	done           chan struct{}
@@ -162,6 +169,7 @@ func NewScheduler(capacity int, logger *slog.Logger) *Scheduler {
 		completions:    make(chan completionEvent, coordinatorCompletionCapacity),
 		ledger:         make(chan ledgerPhaseUpdate, coordinatorLedgerCapacity),
 		replays:        make(chan ledgerReplayQuery, coordinatorLedgerCapacity),
+		topology:       make(chan topologyUpdate, 1),
 		cancelInflight: make(chan struct{}, 1),
 		stop:           make(chan chan struct{}),
 		done:           make(chan struct{}),
@@ -169,6 +177,40 @@ func NewScheduler(capacity int, logger *slog.Logger) *Scheduler {
 	s.metrics.HerdrCapacity = capacity
 	go s.run()
 	return s
+}
+
+// ApplyTopology publishes the latest committed pane inventory to the scheduler
+// owner. A pane disappearance advances its slot generation before this method
+// returns, so queued work from the old pane session cannot reach a replacement
+// that later reuses the same pane ID.
+func (s *Scheduler) ApplyTopology(active map[string]bool, paneGenerations ...map[string]uint64) bool {
+	if s.closed.Load() {
+		return false
+	}
+	snapshot := make(map[string]bool, len(active))
+	for paneID, present := range active {
+		if present {
+			snapshot[paneID] = true
+		}
+	}
+	generations := make(map[string]uint64)
+	if len(paneGenerations) > 0 {
+		for paneID, generation := range paneGenerations[0] {
+			generations[paneID] = generation
+		}
+	}
+	response := make(chan struct{})
+	select {
+	case s.topology <- topologyUpdate{active: snapshot, generations: generations, response: response}:
+	case <-s.done:
+		return false
+	}
+	select {
+	case <-response:
+		return true
+	case <-s.done:
+		return false
+	}
 }
 
 func (s *Scheduler) NextCommandID() CommandID {
@@ -334,6 +376,7 @@ func (s *Scheduler) run() {
 	var relayQueue []*scheduledOperation
 	relayInFlight := make(map[OperationID]*scheduledOperation)
 	ledger := make(map[string]*ledgerEntry)
+	knownActive := make(map[string]bool)
 	deadlines := deadlineHeap{}
 	heap.Init(&deadlines)
 	inUse := 0
@@ -447,7 +490,8 @@ func (s *Scheduler) run() {
 			if slot == nil || slot.InFlight == nil || slot.InFlight.OperationID != op.operation {
 				return
 			}
-			if event.result.BumpGeneration {
+			stale := slot.InFlight.Generation != slot.Generation
+			if event.result.BumpGeneration && !stale {
 				slot.Generation++
 				for key, entry := range ledger {
 					if key != op.options.LedgerKey &&
@@ -458,8 +502,21 @@ func (s *Scheduler) run() {
 				}
 			}
 			slot.InFlight = nil
-			if len(slot.Queue) == 0 && event.result.BumpGeneration && event.result.Result != nil && event.result.Result.Phase == "closed" {
+			if len(slot.Queue) == 0 && event.result.BumpGeneration && !stale && event.result.Result != nil && event.result.Result.Phase == "closed" {
 				delete(slots, op.options.PaneID)
+			}
+			if stale {
+				inUse--
+				if op.index >= 0 {
+					heap.Remove(&deadlines, op.index)
+				}
+				s.metricsMu.Lock()
+				s.metrics.Completed++
+				s.metricsMu.Unlock()
+				s.setOwnerMetrics(inUse, len(slots))
+				s.replyStale(op, ledger)
+				dispatch()
+				return
 			}
 		}
 		inUse--
@@ -477,7 +534,6 @@ func (s *Scheduler) run() {
 				}
 			}
 		}
-		s.reply(op, event.result.Result, nil)
 		s.metricsMu.Lock()
 		s.metrics.Completed++
 		latency := time.Since(op.options.ReceivedAt)
@@ -490,6 +546,8 @@ func (s *Scheduler) run() {
 			}
 		}
 		s.metricsMu.Unlock()
+		s.setOwnerMetrics(inUse, len(slots))
+		s.reply(op, event.result.Result, nil)
 		dispatch()
 	}
 
@@ -525,6 +583,13 @@ func (s *Scheduler) run() {
 				s.replyNotStarted(op)
 				continue
 			}
+			if !op.options.RelayLevel {
+				slot := slots[op.options.PaneID]
+				if slot != nil && op.options.PaneGeneration < slot.Generation {
+					s.replyStale(op, ledger)
+					continue
+				}
+			}
 			if key := op.options.LedgerKey; key != "" {
 				if existing, ok := ledger[key]; ok {
 					if existing.payloadHash != op.options.PayloadHash {
@@ -556,6 +621,26 @@ func (s *Scheduler) run() {
 				if slot == nil {
 					slot = &PaneSlot{}
 					slots[op.options.PaneID] = slot
+				}
+				if op.options.PaneGeneration > slot.Generation {
+					slot.Generation = op.options.PaneGeneration
+					if slot.InFlight != nil && slot.InFlight.cancel != nil {
+						slot.InFlight.cancel()
+					}
+					for _, queued := range slot.Queue {
+						if queued.index >= 0 {
+							heap.Remove(&deadlines, queued.index)
+						}
+						s.replyStale(queued, ledger)
+					}
+					slot.Queue = nil
+					for key, entry := range ledger {
+						if key != op.options.LedgerKey &&
+							entry.paneID == op.options.PaneID &&
+							entry.generation < slot.Generation {
+							delete(ledger, key)
+						}
+					}
 				}
 				if entry := ledger[op.options.LedgerKey]; entry != nil {
 					entry.generation = slot.Generation
@@ -589,6 +674,62 @@ func (s *Scheduler) run() {
 				}
 			}
 			query.response <- response
+
+		case update := <-s.topology:
+			for paneID := range knownActive {
+				if update.active[paneID] {
+					continue
+				}
+				slot := slots[paneID]
+				if slot == nil {
+					continue
+				}
+				slot.Generation++
+				if slot.InFlight != nil && slot.InFlight.cancel != nil {
+					slot.InFlight.cancel()
+				}
+				for _, op := range slot.Queue {
+					if op.index >= 0 {
+						heap.Remove(&deadlines, op.index)
+					}
+					s.replyStale(op, ledger)
+				}
+				slot.Queue = nil
+				for key, entry := range ledger {
+					if entry.paneID == paneID && entry.generation < slot.Generation {
+						delete(ledger, key)
+					}
+				}
+			}
+			for paneID, generation := range update.generations {
+				slot := slots[paneID]
+				if slot == nil {
+					slot = &PaneSlot{}
+					slots[paneID] = slot
+				}
+				if generation <= slot.Generation {
+					continue
+				}
+				slot.Generation = generation
+				if slot.InFlight != nil && slot.InFlight.cancel != nil {
+					slot.InFlight.cancel()
+				}
+				for _, op := range slot.Queue {
+					if op.index >= 0 {
+						heap.Remove(&deadlines, op.index)
+					}
+					s.replyStale(op, ledger)
+				}
+				slot.Queue = nil
+				for key, entry := range ledger {
+					if entry.paneID == paneID && entry.generation < slot.Generation {
+						delete(ledger, key)
+					}
+				}
+			}
+			knownActive = update.active
+			close(update.response)
+			dispatch()
 
 		case <-timer.C:
 			now := time.Now()
@@ -657,6 +798,7 @@ func (s *Scheduler) start(op *scheduledOperation, generation uint64) context.Can
 		OperationID: op.operation,
 		PaneID:      op.options.PaneID,
 		Generation:  generation,
+		AllowAbsent: op.options.AllowAbsent,
 		Deadline:    op.options.Deadline,
 	}
 	s.metricsMu.Lock()

@@ -13,6 +13,7 @@ import {
   mergeAgentDetails,
   mergeAgentList,
   normalizeAgent,
+  staleAgentRevision,
   stabilizeBlockedSnapshot,
 } from './agents';
 import { relayProtocolError } from './protocol';
@@ -404,6 +405,15 @@ class RelayStore {
     const connection = this.connectionsValue.get(relayId);
     if (message.type === 'push_config') {
       if (!connection) return;
+      // Pane revisions are monotonic only for one relay process. A new socket
+      // handshake may follow a relay restart, so discard the retained
+      // process-local baseline before its fresh snapshot arrives.
+      this.agentsValue = this.agentsValue.map((agent) => {
+        if (agent.relay_id !== relayId || agent.pane_revision === undefined) return agent;
+        const withoutRevision = { ...agent };
+        delete withoutRevision.pane_revision;
+        return withoutRevision;
+      });
       connection.vapidPublicKey = String(message.vapid_public_key || '');
       connection.host = String(message.host || '');
       connection.protocol = Number.isInteger(message.protocol) && message.protocol > 0 ? message.protocol : 1;
@@ -506,11 +516,13 @@ class RelayStore {
     if (message.type === 'blocked') {
       const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
       const next = normalizeAgent(relayId, label, { ...message, status: 'blocked' });
-      this.blockedSnapshotMisses.delete(next.pane_id);
       const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
+      const before = index >= 0 ? this.agentsValue[index] : undefined;
+      if (staleAgentRevision(before, next)) return;
+      this.blockedSnapshotMisses.delete(next.pane_id);
       if (index >= 0) {
         const copy = [...this.agentsValue];
-        copy[index] = mergeAgentDetails(copy[index], next);
+        copy[index] = mergeAgentDetails(before, next);
         this.agentsValue = copy;
       } else this.agentsValue = [...this.agentsValue, next];
       this.respondingValue.delete(next.pane_id);
@@ -523,6 +535,7 @@ class RelayStore {
       const next = normalizeAgent(relayId, label, message);
       const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
       const before = index >= 0 ? this.agentsValue[index] : undefined;
+      if (staleAgentRevision(before, next)) return;
       const stabilized = stabilizeBlockedSnapshot(before, next, this.blockedSnapshotMisses, this.respondingValue);
       if (index >= 0) {
         const copy = [...this.agentsValue];

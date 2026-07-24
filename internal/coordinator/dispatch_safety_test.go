@@ -81,7 +81,9 @@ func TestPostDispatchTimeoutIsDispatchedUnknown(t *testing.T) {
 	// and then killed by the deadline (post-dispatch timeout).
 	bin := writeScript(t, dir, "herdr", "#!/bin/sh\nsleep 30\n")
 
-	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, state.RevisionCounter())
+	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
 
 	// A short parent deadline wins over the handler's internal command deadline,
 	// so the herdr child is started and then cancelled quickly.

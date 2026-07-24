@@ -48,6 +48,17 @@ export function agentUpdatedAt(agent: Partial<Agent> | null | undefined): number
   return Number.isFinite(value) ? value : 0;
 }
 
+export function agentPaneRevision(agent: Partial<Agent> | null | undefined): number {
+  const value = Number(agent?.pane_revision);
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+export function staleAgentRevision(previous: Agent | undefined, next: Agent): boolean {
+  const previousRevision = agentPaneRevision(previous);
+  const nextRevision = agentPaneRevision(next);
+  return previousRevision > 0 && nextRevision > 0 && nextRevision < previousRevision;
+}
+
 export function compareAgentUpdatedAt(a: Agent, b: Agent): number {
   return agentUpdatedAt(b) - agentUpdatedAt(a);
 }
@@ -157,6 +168,7 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
     tab_number: next.tab_number ?? previous.tab_number,
     workspace_id: next.workspace_id || previous.workspace_id || '',
     updated_at: Math.max(agentUpdatedAt(previous), agentUpdatedAt(next)),
+    pane_revision: Math.max(agentPaneRevision(previous), agentPaneRevision(next)) || undefined,
     prompt: blocked ? (next.prompt ?? previous.prompt) : next.prompt,
     command: blocked ? (next.command ?? previous.command) : next.command,
     options: blocked ? (next.options ?? previous.options) : next.options,
@@ -176,6 +188,7 @@ export function mergeAgentList(
   const retained = current.filter((agent) => agent.relay_id !== relayId);
   const merged = incoming.map((agent) => {
     const before = previous.get(agent.pane_id);
+    if (staleAgentRevision(before, agent)) return before!;
     return mergeAgentDetails(before, stabilizeBlockedSnapshot(before, agent, misses, responding));
   });
   const live = new Set(incoming.map((agent) => agent.pane_id));

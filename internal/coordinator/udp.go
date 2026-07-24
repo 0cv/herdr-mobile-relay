@@ -11,12 +11,14 @@ import (
 )
 
 type UDPEvent struct {
-	Type       string `json:"type"`
-	SocketPath string `json:"socket_path"`
-	PaneID     string `json:"pane_id"`
-	Status     string `json:"status"`
-	Agent      string `json:"agent"`
-	UpdatedAt  string `json:"updated_at"`
+	Type        string `json:"type"`
+	SocketPath  string `json:"socket_path"`
+	PaneID      string `json:"pane_id"`
+	TabID       string `json:"tab_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Status      string `json:"status"`
+	Agent       string `json:"agent"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 type UDPListener struct {
@@ -112,7 +114,13 @@ func (l *UDPListener) Run(ctx context.Context) {
 
 		updatedAt := parseUpdatedAt(event.UpdatedAt)
 
-		committed := l.state.CommitEvent(event.PaneID, event.Status, updatedAt)
+		committed := l.state.CommitEventForSession(
+			event.PaneID,
+			event.TabID,
+			event.WorkspaceID,
+			event.Status,
+			updatedAt,
+		)
 		l.logger.Debug("udp event committed",
 			"pane", event.PaneID,
 			"status", event.Status,

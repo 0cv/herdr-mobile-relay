@@ -215,6 +215,147 @@ func TestCommittedStateViewTracksSnapshotsAndDeltas(t *testing.T) {
 	}
 }
 
+func TestCommittedStateViewRejectsStalePerPaneUpdates(t *testing.T) {
+	s := testServer()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.hub.Shutdown(ctx)
+	})
+	s.broadcastCommitted(map[string]any{
+		"type": "agents",
+		"agents": []*coordinator.AgentState{{
+			PaneID: "pane-1", Status: "working", StateRevision: 12,
+		}},
+	})
+	s.broadcastCommitted(map[string]any{
+		"type": "agent_update", "pane_id": "pane-1", "status": "blocked",
+		"event_id": "stale-event", "pane_revision": int64(11),
+	})
+	s.broadcastCommitted(map[string]any{
+		"type": "agents",
+		"agents": []*coordinator.AgentState{{
+			PaneID: "pane-1", Status: "blocked", BlockedEventID: "stale-snapshot", StateRevision: 10,
+		}},
+	})
+
+	agents := s.committedAgents()
+	if len(agents) != 1 || agents[0].Status != "working" ||
+		agents[0].StateRevision != 12 || agents[0].BlockedEventID != "" {
+		t.Fatalf("reconnect snapshot regressed after stale messages: %+v", agents)
+	}
+}
+
+type blockingTransitionPush struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingTransitionPush) Send(context.Context, []byte) {
+	close(p.started)
+	<-p.release
+}
+
+type recordingTransitionBroadcast struct {
+	messages chan any
+}
+
+func (b *recordingTransitionBroadcast) Broadcast(message any) {
+	b.messages <- message
+}
+
+type recordingTransitionPush struct {
+	messages chan []byte
+}
+
+func (p *recordingTransitionPush) Send(_ context.Context, payload []byte) {
+	p.messages <- payload
+}
+
+func TestUnchangedPollPreservesBlockedTransitionSideEffects(t *testing.T) {
+	root := t.TempDir()
+	s := testServer()
+	journal, err := activity.OpenJournal(filepath.Join(root, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.dispatcher = coordinator.NewDispatcher(nil, s.state, journal, s.logger)
+	t.Cleanup(func() {
+		_ = s.dispatcher.Close(context.Background())
+	})
+	push := &recordingTransitionPush{messages: make(chan []byte, 2)}
+	broadcast := &recordingTransitionBroadcast{messages: make(chan any, 2)}
+	s.transitionPush = push
+	s.transitionBroadcast = broadcast
+	enrichStarted := make(chan struct{})
+	enrichRelease := make(chan struct{})
+	s.transitionEnrich = func(_ context.Context, agent *coordinator.AgentState) {
+		close(enrichStarted)
+		<-enrichRelease
+		agent.Command = "Approve deployment"
+		agent.Prompt = "Allow this command?"
+		agent.Options = []string{"Approve", "Reject"}
+	}
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "codex", Project: "relay", Status: "working",
+	}}, s.state.RevisionCounter())
+	s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli())
+	revision := s.state.Revision("pane-1")
+
+	done := make(chan struct{})
+	go func() {
+		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision)
+		close(done)
+	}()
+	<-enrichStarted
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "codex", Project: "relay", Status: "blocked",
+	}}, s.state.RevisionCounter())
+	close(enrichRelease)
+	<-done
+
+	if entries := journal.Recent(10); len(entries) != 1 ||
+		entries[0].Kind != "blocked" || entries[0].Summary != "Approve deployment" {
+		t.Fatalf("blocked activity entries = %+v, want exactly one enriched entry", entries)
+	}
+	if len(push.messages) != 1 {
+		t.Fatalf("blocked pushes = %d, want exactly one", len(push.messages))
+	}
+	if len(broadcast.messages) != 1 {
+		t.Fatalf("blocked broadcasts = %d, want exactly one", len(broadcast.messages))
+	}
+}
+
+func TestBlockedBroadcastDoesNotOvertakeNewerWorkingState(t *testing.T) {
+	s := testServer()
+	push := &blockingTransitionPush{started: make(chan struct{}), release: make(chan struct{})}
+	broadcast := &recordingTransitionBroadcast{messages: make(chan any, 1)}
+	s.transitionPush = push
+	s.transitionBroadcast = broadcast
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "codex", Project: "relay", Status: "working",
+	}}, s.state.RevisionCounter())
+	s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli())
+	revision := s.state.Revision("pane-1")
+
+	done := make(chan struct{})
+	go func() {
+		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision)
+		close(done)
+	}()
+	<-push.started
+
+	s.state.CommitEvent("pane-1", "working", time.Now().UnixMilli())
+	close(push.release)
+	<-done
+
+	select {
+	case message := <-broadcast.messages:
+		t.Fatalf("stale blocked transition was broadcast after working revision: %#v", message)
+	default:
+	}
+}
+
 func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
 	root := t.TempDir()
 	fakeHerdr := filepath.Join(root, "herdr")

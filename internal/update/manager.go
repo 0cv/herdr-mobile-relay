@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
@@ -75,6 +76,7 @@ type gitObject struct {
 }
 
 func NewManager(releaseRoot, runtimeDir, version, revision, serviceName, healthURL string) *Manager {
+	recoverUpdateState(releaseRoot, runtimeDir, true)
 	manager := &Manager{
 		releaseRoot: releaseRoot,
 		runtimeDir:  runtimeDir,
@@ -205,6 +207,8 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 	m.state.Eligible = true
 	m.state.Reason = ""
 	m.state.Error = ""
+	m.state.StartedAt = time.Now().UTC().Format(time.RFC3339)
+	m.state.FinishedAt = ""
 	if err := writeState(m.statePath(), m.state); err != nil {
 		_ = os.Remove(jobPath)
 		return "", m.publicState(m.state), fmt.Errorf("persist scheduled update: %w", err)
@@ -411,9 +415,62 @@ func (m *Manager) loadState() State {
 			Target:          relayrelease.CurrentTarget(),
 		}
 	}
+	if state.State == "installing" || state.State == "restarting" || scheduledUpdateExpired(state) {
+		recoverUpdateState(m.releaseRoot, m.runtimeDir, false)
+		if recovered, readErr := os.ReadFile(m.statePath()); readErr == nil {
+			var updated State
+			if json.Unmarshal(recovered, &updated) == nil && validState(updated.State) {
+				state = updated
+			}
+		}
+	}
 	state.CurrentVersion = m.version
 	state.CurrentRevision = m.revision
 	return state
+}
+
+func recoverUpdateState(releaseRoot, runtimeDir string, includeScheduled bool) {
+	statePath := filepath.Join(runtimeDir, "update-state.json")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		return
+	}
+	var state State
+	if json.Unmarshal(data, &state) != nil {
+		return
+	}
+	_, startedErr := time.Parse(time.RFC3339, state.StartedAt)
+	recoverScheduled := state.State == "scheduled" &&
+		(scheduledUpdateExpired(state) || (includeScheduled && startedErr != nil))
+	if state.State != "installing" && state.State != "restarting" && !recoverScheduled {
+		return
+	}
+	if releaseRoot == "" || !filepath.IsAbs(releaseRoot) {
+		return
+	}
+	if err := os.MkdirAll(releaseRoot, 0o700); err != nil {
+		return
+	}
+	lock, err := acquireLock(filepath.Join(releaseRoot, "update.lock"))
+	if err != nil {
+		return
+	}
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}()
+	state.State = "failed"
+	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	state.Error = "Update worker stopped before completion"
+	_ = writeState(statePath, state)
+}
+
+func scheduledUpdateExpired(state State) bool {
+	if state.State != "scheduled" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, state.StartedAt)
+	return err == nil && time.Since(started) >= updateStartupGrace
 }
 
 func (m *Manager) publicState(state State) State {

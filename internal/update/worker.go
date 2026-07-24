@@ -25,9 +25,10 @@ import (
 )
 
 const (
-	maxArchiveBytes   = 128 * 1024 * 1024
-	maxExtractedBytes = 256 * 1024 * 1024
-	maxArchiveFiles   = 10000
+	maxArchiveBytes    = 128 * 1024 * 1024
+	maxExtractedBytes  = 256 * 1024 * 1024
+	maxArchiveFiles    = 10000
+	updateStartupGrace = 30 * time.Second
 )
 
 var ErrConcurrent = errors.New("another update is already running")
@@ -84,8 +85,42 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	if err != nil {
 		return err
 	}
+	started := time.Now().UTC().Format(time.RFC3339)
+	startupState := State{
+		State:          "scheduled",
+		TargetVersion:  job.TargetVersion,
+		TargetRevision: job.TargetRevision,
+		Target:         job.Target,
+		StartedAt:      started,
+		Mode:           "release",
+		Eligible:       true,
+		CanInstall:     false,
+	}
+	failStartup := func(startupErr error) error {
+		if job.StatePath == "" || !filepath.IsAbs(job.StatePath) {
+			return startupErr
+		}
+		return fail(job.StatePath, startupState, startupErr)
+	}
+	if job.ReleaseRoot == "" || !filepath.IsAbs(job.ReleaseRoot) {
+		return failStartup(errors.New("release_root must be absolute"))
+	}
+	if err := os.MkdirAll(job.ReleaseRoot, 0o700); err != nil {
+		return failStartup(err)
+	}
+	lock, err := acquireLock(filepath.Join(job.ReleaseRoot, "update.lock"))
+	if err != nil {
+		if errors.Is(err, ErrConcurrent) {
+			return err
+		}
+		return failStartup(err)
+	}
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}()
 	if err := validateJob(job); err != nil {
-		return err
+		return failStartup(err)
 	}
 	w.tokenFile = job.TokenFile
 	if w.Client == nil {
@@ -99,18 +134,9 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	}
 
 	if err := os.MkdirAll(filepath.Join(job.ReleaseRoot, "releases"), 0o700); err != nil {
-		return err
+		return failStartup(err)
 	}
-	lock, err := acquireLock(filepath.Join(job.ReleaseRoot, "update.lock"))
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		_ = lock.Close()
-	}()
 
-	started := time.Now().UTC().Format(time.RFC3339)
 	state := State{
 		State:          "installing",
 		TargetVersion:  job.TargetVersion,

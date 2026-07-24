@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 )
@@ -69,4 +72,75 @@ func testGOOS() string   { return strings.Split(CurrentTestTarget(), "/")[0] }
 func testGOARCH() string { return strings.Split(CurrentTestTarget(), "/")[1] }
 func CurrentTestTarget() string {
 	return currentTargetForTest()
+}
+
+func TestManagerRecoversOrphanedUpdateState(t *testing.T) {
+	for _, stateName := range []string{"scheduled", "installing", "restarting"} {
+		t.Run(stateName, func(t *testing.T) {
+			root := t.TempDir()
+			releaseRoot := filepath.Join(root, "installed")
+			runtimeDir := filepath.Join(root, "runtime")
+			started := time.Now().Add(-updateStartupGrace - time.Second).UTC().Format(time.RFC3339)
+			if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+				State:          stateName,
+				TargetVersion:  "1.2.4",
+				TargetRevision: "new",
+				StartedAt:      started,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			manager := NewManager(releaseRoot, runtimeDir, "1.2.3", "old", "service", "http://127.0.0.1/healthz")
+			state := manager.State()
+			if state.State != "failed" || state.Error != "Update worker stopped before completion" || state.FinishedAt == "" {
+				t.Fatalf("state = %#v", state)
+			}
+		})
+	}
+}
+
+func TestManagerPreservesUpdateStateOwnedByWorker(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "installed")
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := os.MkdirAll(releaseRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireLock(filepath.Join(releaseRoot, "update.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+		State:          "installing",
+		TargetVersion:  "1.2.4",
+		TargetRevision: "new",
+		StartedAt:      time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(releaseRoot, runtimeDir, "1.2.3", "old", "service", "http://127.0.0.1/healthz")
+	if state := manager.State(); state.State != "installing" || state.Error != "" {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestManagerAllowsScheduledUpdateStartupGrace(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "installed")
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+		State:          "scheduled",
+		TargetVersion:  "1.2.4",
+		TargetRevision: "new",
+		StartedAt:      time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(releaseRoot, runtimeDir, "1.2.3", "old", "service", "http://127.0.0.1/healthz")
+	if state := manager.State(); state.State != "scheduled" {
+		t.Fatalf("state = %#v", state)
+	}
 }

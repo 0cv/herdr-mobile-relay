@@ -1,10 +1,14 @@
 package appdeploy
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
 func TestValidateRejectsOverridesAndUnpinnedIdentity(t *testing.T) {
@@ -36,6 +40,11 @@ func TestValidateRejectsOverridesAndUnpinnedIdentity(t *testing.T) {
 		NPXPath:    filepath.Join(root, "npx"),
 		NodeDir:    nodeDir,
 	}
+	webHash, err := release.WebHashFS(os.DirFS(web))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.WebHash = webHash
 	if err := validate(job); err != nil {
 		t.Fatal(err)
 	}
@@ -47,6 +56,107 @@ func TestValidateRejectsOverridesAndUnpinnedIdentity(t *testing.T) {
 	job.Branch = "../preview"
 	if err := validate(job); err == nil {
 		t.Fatal("unsafe branch accepted")
+	}
+}
+
+func TestRunRejectsWebBundleThatDoesNotMatchReleaseManifest(t *testing.T) {
+	root := t.TempDir()
+	nodeDir := filepath.Join(root, "node")
+	web := filepath.Join(root, "web")
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(web, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	npx := filepath.Join(root, "npx")
+	for _, name := range []string{npx, filepath.Join(nodeDir, "node")} {
+		if err := os.WriteFile(name, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(web, "version.json"), []byte(`{"release_version":"1.2.3","revision":"abc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	webHash, err := release.WebHashFS(os.DirFS(web))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(web, "index.html"), []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job := Job{
+		RuntimeDir: root,
+		WebRoot:    web,
+		Origin:     "https://example.test",
+		Project:    "relay-app",
+		Branch:     "main",
+		Version:    "1.2.3",
+		Revision:   "abc",
+		WebHash:    webHash,
+		NPXPath:    npx,
+		NodeDir:    nodeDir,
+	}
+	jobPath := filepath.Join(root, "job.json")
+	if err := writeManagerJSON(jobPath, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(filepath.Join(root, "app-deploy-state.json"), State{
+		State:          "scheduled",
+		TargetVersion:  job.Version,
+		TargetRevision: job.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = Run(t.Context(), jobPath)
+	if err == nil || !strings.Contains(err.Error(), "verified release manifest") {
+		t.Fatalf("Run() error = %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(root, "app-deploy-state.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var state State
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.State != "failed" || state.FinishedAt == "" || !strings.Contains(state.Error, "verified release manifest") {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestRunDoesNotOverwriteStateOwnedByAnotherWorker(t *testing.T) {
+	root := t.TempDir()
+	jobPath := filepath.Join(root, "job.json")
+	if err := writeManagerJSON(jobPath, Job{RuntimeDir: root}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(filepath.Join(root, "app-deploy-state.json"), State{
+		State:          "deploying",
+		TargetVersion:  "1.2.3",
+		TargetRevision: "abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := lockFile(filepath.Join(root, "app-deploy.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	if err := Run(t.Context(), jobPath); !errors.Is(err, errDeployLocked) {
+		t.Fatalf("Run() error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "app-deploy-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state State
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.State != "deploying" || state.Error != "" {
+		t.Fatalf("state = %#v", state)
 	}
 }
 

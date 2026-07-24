@@ -44,20 +44,27 @@ type Server struct {
 	hostname string
 	logger   *slog.Logger
 
-	state      *coordinator.State
-	hub        *transport.Hub
-	poller     *coordinator.Poller
-	udp        *coordinator.UDPListener
-	journal    *activity.Journal
-	pushM      *push.Manager
-	historyM   *history.Manager
-	profiles   *profiles.Resolver
-	sessions   *session.Resolver
-	webH       *web.Handler
-	herdrC     *herdr.Client
-	dispatcher *coordinator.Dispatcher
-	updateM    *relayupdate.Manager
-	appDeployM *appdeploy.Manager
+	state          *coordinator.State
+	hub            *transport.Hub
+	poller         *coordinator.Poller
+	udp            *coordinator.UDPListener
+	journal        *activity.Journal
+	pushM          *push.Manager
+	transitionPush interface {
+		Send(context.Context, []byte)
+	}
+	transitionBroadcast interface {
+		Broadcast(any)
+	}
+	transitionEnrich func(context.Context, *coordinator.AgentState)
+	historyM         *history.Manager
+	profiles         *profiles.Resolver
+	sessions         *session.Resolver
+	webH             *web.Handler
+	herdrC           *herdr.Client
+	dispatcher       *coordinator.Dispatcher
+	updateM          *relayupdate.Manager
+	appDeployM       *appdeploy.Manager
 
 	mu        sync.RWMutex
 	ready     bool
@@ -104,26 +111,27 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", cfg.Port)
 
 	return &Server{
-		cfg:             cfg,
-		version:         version,
-		revision:        revision,
-		hostname:        hostname,
-		logger:          logger,
-		state:           state,
-		hub:             hub,
-		poller:          poller,
-		herdrC:          herdrClient,
-		profiles:        profResolver,
-		sessions:        sessResolver,
-		historyM:        histManager,
-		updateM:         relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, version, revision, cfg.ServiceName, healthURL),
-		appDeployM:      appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
-		startedAt:       time.Now(),
-		refreshClients:  make(map[string]bool),
-		inventoryView:   cloneStringMap(state.InventoryStatus()),
-		historyInflight: make(map[string]bool),
-		historyLast:     make(map[string]time.Time),
-		historyActive:   make(map[string]bool),
+		cfg:                 cfg,
+		version:             version,
+		revision:            revision,
+		hostname:            hostname,
+		logger:              logger,
+		state:               state,
+		hub:                 hub,
+		transitionBroadcast: hub,
+		poller:              poller,
+		herdrC:              herdrClient,
+		profiles:            profResolver,
+		sessions:            sessResolver,
+		historyM:            histManager,
+		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, version, revision, cfg.ServiceName, healthURL),
+		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
+		startedAt:           time.Now(),
+		refreshClients:      make(map[string]bool),
+		inventoryView:       cloneStringMap(state.InventoryStatus()),
+		historyInflight:     make(map[string]bool),
+		historyLast:         make(map[string]time.Time),
+		historyActive:       make(map[string]bool),
 	}
 }
 
@@ -150,6 +158,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.logger.Warn("push manager unavailable", "error", err)
 	} else {
 		s.pushM = pm
+		s.transitionPush = pm
 	}
 
 	s.state.SetOnTransition(func(paneID, agent, project, status string, revision int64) {
@@ -424,20 +433,21 @@ func (s *Server) Run(ctx context.Context) error {
 		s.udp.SetOnDirty(func() { s.poller.Wake() })
 		s.udp.SetOnChange(func(agent *coordinator.AgentState) {
 			s.broadcastCommitted(map[string]any{
-				"type":         "agent_update",
-				"pane_id":      agent.PaneID,
-				"raw_pane_id":  agent.RawPaneID,
-				"status":       agent.Status,
-				"agent":        agent.Agent,
-				"tab_id":       agent.TabID,
-				"tab_label":    agent.TabLabel,
-				"tab_number":   agent.TabNumber,
-				"workspace_id": agent.WorkspaceID,
-				"cwd":          agent.Cwd,
-				"project":      agent.Project,
-				"host":         agent.Host,
-				"updated_at":   agent.UpdatedAt,
-				"event_id":     agent.BlockedEventID,
+				"type":          "agent_update",
+				"pane_id":       agent.PaneID,
+				"raw_pane_id":   agent.RawPaneID,
+				"status":        agent.Status,
+				"agent":         agent.Agent,
+				"tab_id":        agent.TabID,
+				"tab_label":     agent.TabLabel,
+				"tab_number":    agent.TabNumber,
+				"workspace_id":  agent.WorkspaceID,
+				"cwd":           agent.Cwd,
+				"project":       agent.Project,
+				"host":          agent.Host,
+				"updated_at":    agent.UpdatedAt,
+				"event_id":      agent.BlockedEventID,
+				"pane_revision": agent.StateRevision,
 			})
 			s.poller.Wake()
 		})
@@ -633,20 +643,32 @@ func (s *Server) handleTransition(
 	paneID, agent, project, status string,
 	revision int64,
 ) {
-	if status == "blocked" && !s.state.TransitionCurrent(paneID, status, revision) {
-		return
+	agentState, agentExists := s.state.Agent(paneID)
+	var session string
+	var blockedEventID string
+	var paneGeneration uint64
+	if agentExists {
+		session = agentState.Session
+		blockedEventID = agentState.BlockedEventID
 	}
-	if status != "blocked" && !s.state.CompletionCurrent(paneID, revision) {
+	if status == "blocked" {
+		generation, active := s.state.PaneSession(paneID)
+		if !active || blockedEventID == "" {
+			return
+		}
+		paneGeneration = uint64(generation)
+	}
+	transitionCurrent := func() bool {
+		if status == "blocked" {
+			return s.state.BlockedTransitionCurrent(paneID, blockedEventID, paneGeneration)
+		}
+		return s.state.CompletionCurrent(paneID, revision)
+	}
+	if !transitionCurrent() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
-
-	agentState, agentExists := s.state.Agent(paneID)
-	var session string
-	if agentExists {
-		session = agentState.Session
-	}
 
 	if status == "blocked" {
 		eventID := paneID
@@ -655,7 +677,14 @@ func (s *Server) handleTransition(
 		command := "Agent needs approval"
 		extract := ""
 		if agentExists {
-			s.enrichBlockedTransition(ctx, agentState)
+			if s.transitionEnrich != nil {
+				s.transitionEnrich(ctx, agentState)
+			} else {
+				s.enrichBlockedTransition(ctx, agentState)
+			}
+			if !transitionCurrent() {
+				return
+			}
 			if agentState.BlockedEventID != "" {
 				eventID = agentState.BlockedEventID
 			}
@@ -669,15 +698,23 @@ func (s *Server) handleTransition(
 		if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
 			"blocked", "attention", command, paneID, status, revision,
 			map[string]any{"event_id": eventID}, agent, project, s.hostname, session, extract,
+			blockedEventID, paneGeneration,
 		) {
 			return
 		}
-		if s.pushM != nil {
-			payload := push.BuildBlockedPayload(agent, project, command, eventID, paneID, s.hostname, hasApproval, approvalTotal)
-			s.pushM.Send(ctx, payload)
+		if !transitionCurrent() {
+			return
 		}
-		if agentExists {
-			s.hub.Broadcast(map[string]any{
+		if s.transitionPush != nil {
+			payload := push.BuildBlockedPayload(agent, project, command, eventID, paneID, s.hostname, hasApproval, approvalTotal)
+			s.transitionPush.Send(ctx, payload)
+		}
+		if !transitionCurrent() {
+			return
+		}
+		if agentExists && s.transitionBroadcast != nil {
+			currentRevision := s.state.Revision(paneID)
+			s.transitionBroadcast.Broadcast(map[string]any{
 				"type":            "blocked",
 				"pane_id":         agentState.PaneID,
 				"raw_pane_id":     agentState.RawPaneID,
@@ -701,6 +738,7 @@ func (s *Server) handleTransition(
 				"interaction":     agentState.Interaction,
 				"interaction_id":  agentState.InteractionID,
 				"question_layout": agentState.QuestionLayout,
+				"pane_revision":   currentRevision,
 			})
 		}
 		return
@@ -710,6 +748,9 @@ func (s *Server) handleTransition(
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
 	extract := s.captureFinishedPane(ctx, paneID, agent)
+	if !transitionCurrent() {
+		return
+	}
 	summary := agent + " completed"
 	if agent == "" {
 		summary = "Agent completed"
@@ -720,9 +761,12 @@ func (s *Server) handleTransition(
 	) {
 		return
 	}
-	if s.pushM != nil {
+	if !transitionCurrent() {
+		return
+	}
+	if s.transitionPush != nil {
 		payload := push.BuildFinishedPayload(agent, project, paneID, s.hostname, eventID)
-		s.pushM.Send(ctx, payload)
+		s.transitionPush.Send(ctx, payload)
 	}
 }
 
@@ -1286,7 +1330,7 @@ func (s *Server) broadcastCommitted(message any) {
 		}
 		s.hub.BroadcastPrepared(message, func() {
 			s.stateViewMu.Lock()
-			s.agentView = cloneAgents(agents)
+			s.agentView = mergeAgentSnapshot(s.agentView, agents)
 			s.stateViewMu.Unlock()
 		})
 	case "agent_update":
@@ -1303,7 +1347,9 @@ func (s *Server) broadcastCommitted(message any) {
 				if agent.PaneID != paneID {
 					continue
 				}
-				applyAgentDelta(agent, envelope)
+				if deltaRevision(envelope) >= agent.StateRevision {
+					applyAgentDelta(agent, envelope)
+				}
 				found = true
 				break
 			}
@@ -1394,6 +1440,35 @@ func cloneAgents(agents []*coordinator.AgentState) []*coordinator.AgentState {
 	return result
 }
 
+func mergeAgentSnapshot(current, incoming []*coordinator.AgentState) []*coordinator.AgentState {
+	merged := cloneAgents(incoming)
+	currentByPane := make(map[string]*coordinator.AgentState, len(current))
+	for _, agent := range current {
+		currentByPane[agent.PaneID] = agent
+	}
+	for index, agent := range merged {
+		if existing := currentByPane[agent.PaneID]; existing != nil &&
+			agent.StateRevision < existing.StateRevision {
+			merged[index] = cloneAgents([]*coordinator.AgentState{existing})[0]
+		}
+	}
+	return merged
+}
+
+func deltaRevision(delta map[string]any) int64 {
+	switch number := delta["pane_revision"].(type) {
+	case int:
+		return int64(number)
+	case int64:
+		return number
+	case float64:
+		return int64(number)
+	default:
+		// Revision-less legacy/internal deltas remain applicable.
+		return int64(^uint64(0) >> 1)
+	}
+}
+
 func cloneStringMap(values map[string]any) map[string]any {
 	result := make(map[string]any, len(values))
 	for key, value := range values {
@@ -1430,6 +1505,14 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 	setString("event_id", &agent.BlockedEventID)
 	if value, exists := delta["tab_number"]; exists {
 		agent.TabNumber = messageInt(value, agent.TabNumber)
+	}
+	if value, exists := delta["pane_revision"]; exists {
+		switch number := value.(type) {
+		case int64:
+			agent.StateRevision = number
+		case float64:
+			agent.StateRevision = int64(number)
+		}
 	}
 }
 

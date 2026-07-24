@@ -60,6 +60,7 @@ type Manager struct {
 	vapidPublic   string
 	vapidPrivate  string
 	httpClient    webpush.HTTPClient
+	sendPush      func(context.Context, Subscription, []byte) error
 }
 
 func NewManager(pushDir string, logger *slog.Logger) (*Manager, error) {
@@ -83,6 +84,7 @@ func NewManager(pushDir string, logger *slog.Logger) (*Manager, error) {
 	if err := m.loadOrGenerateVAPIDKeys(pushDir); err != nil {
 		return nil, err
 	}
+	m.sendPush = m.sendOne
 
 	return m, nil
 }
@@ -345,7 +347,7 @@ func (m *Manager) Send(ctx context.Context, payload []byte) {
 		if finished && !sub.NotifyFinished {
 			continue
 		}
-		if err := m.sendOne(ctx, sub, payload); err != nil {
+		if err := m.sendPush(ctx, sub, payload); err != nil {
 			m.logger.Warn("push send failed", "endpoint", truncateEndpoint(sub.Endpoint), "error", err)
 			if isTerminalError(err) {
 				toRemove = append(toRemove, sub.Endpoint)
@@ -441,14 +443,14 @@ func (e *pushError) Error() string {
 	return fmt.Sprintf("push service returned %d", e.statusCode)
 }
 
-// isTerminalError returns true for 401/403/404/410 — the subscription is
-// permanently gone or unauthorized. Python pruned all four.
+// isTerminalError returns true only when the push endpoint is permanently gone.
+// Authentication failures can be caused by relay-side VAPID configuration and
+// must not destroy an otherwise valid subscription.
 func isTerminalError(err error) bool {
 	var pe *pushError
 	if ok := asPushError(err, &pe); ok {
 		switch pe.statusCode {
-		case http.StatusUnauthorized, http.StatusForbidden,
-			http.StatusNotFound, http.StatusGone:
+		case http.StatusNotFound, http.StatusGone:
 			return true
 		}
 	}
@@ -539,6 +541,7 @@ func BuildFinishedPayload(agent, project, paneID, host, eventID string) []byte {
 		"url":         notifyURL,
 		"actions":     []any{},
 		"action_urls": map[string]string{},
+		"data":        map[string]string{"type": "finished"},
 	}
 	data, _ := json.Marshal(payload)
 	return data

@@ -29,3 +29,5 @@ relay/phone-app-origin.*
 .claude/
 .qoder/
 .codex/
+.ralph
+ralph.yml

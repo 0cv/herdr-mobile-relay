@@ -87,6 +87,7 @@ export interface Agent {
   cwd?: string;
   host?: string;
   updated_at?: number | string;
+  pane_revision?: number;
   prompt?: string;
   command?: string;
   options?: string[];

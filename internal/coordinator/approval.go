@@ -78,7 +78,7 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 		Command:     d.command(ctx, receivedAt, requestID, CommandApproval, paneID, approvalDeadline, payload),
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if current, ok := d.state.Agent(paneID); !ok || current.Status != "blocked" ||
 			current.BlockedEventID == "" || current.BlockedEventID != payload.EventID {
 			return EffectResult{Result: d.fail(requestID, "approval", paneID, "This approval request is no longer current")}
@@ -89,6 +89,9 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 		}
 		if question.LayoutHint(string(content)) {
 			return EffectResult{Result: d.fail(requestID, "approval", paneID, "Use the question form for this request")}
+		}
+		if stale := d.paneSessionCurrent(token, requestID, "approval"); stale != nil {
+			return EffectResult{Result: stale}
 		}
 		if err := d.herdr.SendKeys(effectCtx, paneID, approvalKeys(payload.Index, payload.Total)); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "approval", paneID, err)}
@@ -263,30 +266,15 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 		default:
 			return d.fail(requestID, action, paneID, "Agent is no longer waiting for a question")
 		}
-	} else {
-		readCtx, cancel := context.WithDeadline(ctx, receivedAt.Add(questionDeadline))
-		content, err := d.herdr.ReadPane(readCtx, paneID, 80, "ansi")
-		cancel()
-		if err != nil {
-			return d.failErr(requestID, action, paneID, err)
-		}
-		interaction := question.Parse(string(content), agent.Agent)
-		if interaction == nil || interaction.ID != payload.InteractionID {
-			return d.fail(requestID, action, paneID, "The question changed before the answer was applied")
-		}
-		if err := validateQuestionPayload(payload, interaction); err != nil {
-			return d.fail(requestID, action, paneID, err.Error())
-		}
-		if replay != nil {
-			replay.RequestID = requestID
-			return replay
-		}
+	} else if replay != nil {
+		replay.RequestID = requestID
+		return replay
 	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command:     d.command(ctx, receivedAt, requestID, CommandQuestion, paneID, questionDeadline, payload),
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		current, ok := d.state.Agent(paneID)
 		if !ok || (current.Status != "blocked" && current.Status != "done") {
 			return EffectResult{Result: d.fail(requestID, action, paneID, "The question changed before the answer was applied")}
@@ -302,7 +290,13 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 		if err := validateQuestionPayload(payload, interaction); err != nil {
 			return EffectResult{Result: d.fail(requestID, action, paneID, err.Error())}
 		}
-		if err := d.executeQuestion(effectCtx, paneID, payload, interaction); err != nil {
+		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
+			return EffectResult{Result: stale}
+		}
+		if err := d.executeQuestion(effectCtx, token, paneID, payload, interaction); err != nil {
+			if errors.Is(err, ErrPaneReplaced) {
+				return EffectResult{Result: d.fail(requestID, action, paneID, ErrPaneReplaced.Error())}
+			}
 			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
 		accepted := completed(requestID, action, paneID, nil)
@@ -353,13 +347,14 @@ func boolInt(value bool) int {
 
 func (d *Dispatcher) executeQuestion(
 	ctx context.Context,
+	token WorkerToken,
 	paneID string,
 	payload questionPayload,
 	interaction *question.Interaction,
 ) error {
 	var dispatched bool
 	keys := func(ks []string) error {
-		err := d.sendQuestionKeys(ctx, paneID, ks)
+		err := d.sendQuestionKeysForSession(ctx, token, paneID, ks)
 		if err == nil {
 			dispatched = true
 			return nil
@@ -370,6 +365,9 @@ func (d *Dispatcher) executeQuestion(
 		return err
 	}
 	text := func(s string) error {
+		if err := d.paneSessionError(token); err != nil {
+			return err
+		}
 		err := d.herdr.SendText(ctx, paneID, s)
 		if err == nil {
 			dispatched = true
@@ -501,7 +499,21 @@ func navigationKeys(interaction *question.Interaction, target question.Focus) []
 }
 
 func (d *Dispatcher) sendQuestionKeys(ctx context.Context, paneID string, keys []string) error {
+	return d.sendQuestionKeysForSession(ctx, WorkerToken{
+		PaneID:      paneID,
+		Generation:  uint64(d.state.Generation(paneID)),
+		AllowAbsent: true,
+	}, paneID, keys)
+}
+
+func (d *Dispatcher) sendQuestionKeysForSession(ctx context.Context, token WorkerToken, paneID string, keys []string) error {
 	for index, key := range keys {
+		if err := d.paneSessionError(token); err != nil {
+			if index > 0 {
+				return fmt.Errorf("%w: question input was only partially applied: %w", herdr.ErrDispatchedUnknown, err)
+			}
+			return err
+		}
 		if err := d.herdr.SendKeys(ctx, paneID, []string{key}); err != nil {
 			if index > 0 && !errors.Is(err, herdr.ErrDispatchedUnknown) {
 				return fmt.Errorf("%w: question input was only partially applied: %w", herdr.ErrDispatchedUnknown, err)

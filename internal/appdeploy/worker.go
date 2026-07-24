@@ -15,14 +15,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 )
 
-const WranglerVersion = "4.112.0"
+const (
+	WranglerVersion        = "4.112.0"
+	deploymentStartupGrace = 30 * time.Second
+)
 
 var (
-	projectPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
-	branchPattern  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,118}[A-Za-z0-9])?$`)
+	projectPattern  = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
+	branchPattern   = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,118}[A-Za-z0-9])?$`)
+	errDeployLocked = errors.New("another app deployment is already running")
 )
 
 type Job struct {
@@ -33,6 +38,7 @@ type Job struct {
 	Branch     string `json:"branch"`
 	Version    string `json:"version"`
 	Revision   string `json:"revision"`
+	WebHash    string `json:"web_hash"`
 	NPXPath    string `json:"npx_path"`
 	NodeDir    string `json:"node_dir"`
 }
@@ -51,20 +57,40 @@ func Run(ctx context.Context, jobPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := validate(job); err != nil {
-		return err
+	started := time.Now().UTC().Format(time.RFC3339)
+	statePath := filepath.Join(job.RuntimeDir, "app-deploy-state.json")
+	fail := func(deployErr error) error {
+		stateErr := writeState(statePath, State{
+			State:          "failed",
+			TargetVersion:  job.Version,
+			TargetRevision: job.Revision,
+			StartedAt:      started,
+			FinishedAt:     time.Now().UTC().Format(time.RFC3339),
+			Error:          safeError(deployErr),
+		})
+		if stateErr != nil {
+			return errors.Join(deployErr, fmt.Errorf("write failed app deployment state: %w", stateErr))
+		}
+		return deployErr
+	}
+	if !filepath.IsAbs(job.RuntimeDir) {
+		return errors.New("app deployment runtime directory must be absolute")
 	}
 	if err := os.MkdirAll(job.RuntimeDir, 0o700); err != nil {
-		return err
+		return fail(err)
 	}
 	lock, err := lockFile(filepath.Join(job.RuntimeDir, "app-deploy.lock"))
 	if err != nil {
-		return err
+		if errors.Is(err, errDeployLocked) {
+			return err
+		}
+		return fail(err)
 	}
 	defer lock.Close()
 
-	statePath := filepath.Join(job.RuntimeDir, "app-deploy-state.json")
-	started := time.Now().UTC().Format(time.RFC3339)
+	if err := validate(job); err != nil {
+		return fail(err)
+	}
 	write := func(state string, deployErr error) {
 		value := State{
 			State:          state,
@@ -82,6 +108,10 @@ func Run(ctx context.Context, jobPath string) error {
 	}
 	write("deploying", nil)
 
+	if err := verifyWebBundle(job); err != nil {
+		write("failed", err)
+		return err
+	}
 	command := exec.CommandContext(
 		ctx,
 		job.NPXPath,
@@ -167,6 +197,23 @@ func validate(job Job) error {
 	if err := verifyVersion(local, job.Version, job.Revision); err != nil {
 		return fmt.Errorf("web bundle identity: %w", err)
 	}
+	if err := verifyWebBundle(job); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyWebBundle(job Job) error {
+	if job.WebHash == "" {
+		return errors.New("verified release web hash is required")
+	}
+	actual, err := release.WebHashFS(os.DirFS(job.WebRoot))
+	if err != nil {
+		return fmt.Errorf("hash web bundle: %w", err)
+	}
+	if actual != job.WebHash {
+		return errors.New("web bundle does not match the verified release manifest")
+	}
 	return nil
 }
 
@@ -229,7 +276,10 @@ func lockFile(filename string) (*os.File, error) {
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		file.Close()
-		return nil, errors.New("another app deployment is already running")
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errDeployLocked
+		}
+		return nil, fmt.Errorf("lock app deployment: %w", err)
 	}
 	return file, nil
 }
