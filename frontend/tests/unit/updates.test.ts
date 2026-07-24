@@ -11,6 +11,7 @@ import {
   newerVersion,
   normalizeAppDeployment,
   normalizeRelayUpdate,
+  observeAppUpstreamVersion,
   pendingAppDeploy,
   pendingRelayUpdate,
   rememberPendingAppDeploy,
@@ -63,28 +64,25 @@ describe('release updates', () => {
     expect(normalizeRelayUpdate({ state: 'anything' }).state).toBe('unsupported');
   });
 
-  it('detects a newer bundle from no-cache version metadata', async () => {
+  it('combines no-cache origin metadata with credential-safe relay release metadata', async () => {
     const [major, minor, patch] = semverTuple(APP_VERSION)!;
     const available = `${major}.${minor + 1}.${patch}`;
-    const fetcher = vi.fn().mockImplementation(async (url: string) => ({
+    const fetcher = vi.fn().mockImplementation(async () => ({
       ok: true,
-      json: async () => url.startsWith('/version.json')
-        ? { version: APP_VERSION, assets: 68 }
-        : { version: available, assets: 999 },
+      json: async () => ({ version: APP_VERSION, assets: 68 }),
     }));
 
-    const status = await checkAppUpdate(fetcher, 123);
+    await checkAppUpdate(fetcher, 123);
+    observeAppUpstreamVersion(available);
+    const status = get(appUpdateStatus);
 
     expect(fetcher).toHaveBeenCalledWith('/version.json?check=123', { cache: 'no-store' });
-    expect(fetcher).toHaveBeenCalledWith(
-      expect.stringContaining('raw.githubusercontent.com/0cv/herdr-mobile-relay/main/web/version.json?check=123'),
-      { cache: 'no-store' },
-    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
     expect(status).toMatchObject({
       state: 'deployment-required',
       deployedVersion: APP_VERSION,
       upstreamVersion: available,
-      upstreamAssets: 999,
+      upstreamAssets: 0,
       checkedAt: 123,
     });
     expect(get(appUpdateStatus).state).toBe('deployment-required');
@@ -118,23 +116,21 @@ describe('release updates', () => {
     });
   });
 
-  it('still reloads a newer origin bundle when the upstream check is unavailable', async () => {
+  it('reloads a newer origin bundle without browser access to private GitHub', async () => {
     const [major, minor, patch] = semverTuple(APP_VERSION)!;
     const available = `${major}.${minor + 1}.${patch}`;
-    const fetcher = vi.fn().mockImplementation(async (url: string) => {
-      if (!url.startsWith('/version.json')) throw new Error('GitHub unavailable');
-      return {
-        ok: true,
-        json: async () => ({ version: available, assets: 999 }),
-      };
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: available, assets: 999 }),
     });
 
     expect(await checkAppUpdate(fetcher, 125)).toMatchObject({
       state: 'reload-ready',
       deployedVersion: available,
-      upstreamVersion: '',
-      error: 'GitHub unavailable',
+      upstreamVersion: available,
+      error: '',
     });
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it('normalizes app deployment metadata without exposing unknown fields', () => {

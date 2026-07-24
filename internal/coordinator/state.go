@@ -53,6 +53,7 @@ type State struct {
 	unseenDone         map[string]bool
 	ackDone            map[string]bool
 	finishedNotif      map[string]bool
+	completionRev      map[string]int64
 	generation         map[string]int64
 	inventoryReady     bool
 	inventoryErrorCode string
@@ -86,6 +87,7 @@ func NewState(logger *slog.Logger) *State {
 		unseenDone:    make(map[string]bool),
 		ackDone:       make(map[string]bool),
 		finishedNotif: make(map[string]bool),
+		completionRev: make(map[string]int64),
 		generation:    make(map[string]int64),
 		pendingEvents: make(map[string]pendingEvent),
 		logger:        logger,
@@ -199,6 +201,13 @@ func (s *State) TransitionCurrent(paneID, status string, revision int64) bool {
 	return agent != nil && agent.Status == status && s.revision[paneID] == revision
 }
 
+func (s *State) CompletionCurrent(paneID string, revision int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	agent := s.agents[paneID]
+	return agent != nil && !attentionStatuses[agent.Status] && s.completionRev[paneID] == revision
+}
+
 func (s *State) MarkTopologyChanged() {
 	s.mu.Lock()
 	s.topologyGen++
@@ -299,6 +308,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.unseenDone, id)
 			delete(s.ackDone, id)
 			delete(s.finishedNotif, id)
+			delete(s.completionRev, id)
 		}
 	}
 	now := time.Now()
@@ -397,6 +407,7 @@ func (s *State) registerTransition(paneID, prev, status string) {
 		delete(s.unseenDone, paneID)
 		delete(s.ackDone, paneID)
 		delete(s.finishedNotif, paneID)
+		delete(s.completionRev, paneID)
 		if status == "blocked" && prev != "blocked" && s.onTransition != nil {
 			a := s.agents[paneID]
 			agent, project := "", ""
@@ -412,14 +423,15 @@ func (s *State) registerTransition(paneID, prev, status string) {
 		if attentionStatuses[prev] {
 			delete(s.ackDone, paneID)
 			s.unseenDone[paneID] = true
-		}
-		if prev != status && s.onTransition != nil {
-			a := s.agents[paneID]
-			agent, project := "", ""
-			if a != nil {
-				agent, project = a.Agent, a.Project
+			s.completionRev[paneID] = s.revision[paneID]
+			if s.onTransition != nil {
+				a := s.agents[paneID]
+				agent, project := "", ""
+				if a != nil {
+					agent, project = a.Agent, a.Project
+				}
+				go s.onTransition(paneID, agent, project, status, s.revision[paneID])
 			}
-			go s.onTransition(paneID, agent, project, status, s.revision[paneID])
 		}
 		return
 	}
@@ -429,6 +441,7 @@ func (s *State) registerTransition(paneID, prev, status string) {
 	if status == "idle" && attentionStatuses[prev] {
 		delete(s.ackDone, paneID)
 		s.unseenDone[paneID] = true
+		s.completionRev[paneID] = s.revision[paneID]
 		if s.onTransition != nil {
 			a := s.agents[paneID]
 			agent, project := "", ""
@@ -537,13 +550,14 @@ func (s *State) RegisterFinishedNotification(paneID string) bool {
 
 func (s *State) RegisterFinishedNotificationForTransition(
 	paneID string,
-	status string,
+	_ string,
 	revision int64,
 ) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	agent := s.agents[paneID]
-	if agent == nil || agent.Status != status || s.revision[paneID] != revision || s.finishedNotif[paneID] {
+	if agent == nil || attentionStatuses[agent.Status] ||
+		s.completionRev[paneID] != revision || s.finishedNotif[paneID] {
 		return false
 	}
 	s.finishedNotif[paneID] = true

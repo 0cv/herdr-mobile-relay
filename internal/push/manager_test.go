@@ -5,11 +5,13 @@ import (
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -118,16 +120,17 @@ func TestSubscriptionsPersist(t *testing.T) {
 }
 
 func TestBuildBlockedPayload(t *testing.T) {
-	payload := BuildBlockedPayload("Claude", "my-project", "evt-1", "pane-1", "myhost", true, 3)
+	payload := BuildBlockedPayload("Claude", "my-project", "rm -rf build-cache", "evt-1", "pane-1", "myhost", true, 3)
+	assertPayloadFixture(t, payload, "blocked.json")
 	if len(payload) == 0 {
 		t.Fatal("payload is empty")
 	}
 	s := string(payload)
-	if !strings.Contains(s, `"title":"my-project"`) {
-		t.Errorf("expected project as title, payload = %s", s)
+	if !strings.Contains(s, `"title":"my-project blocked"`) {
+		t.Errorf("expected blocked project title, payload = %s", s)
 	}
-	if !strings.Contains(s, "needs approval on myhost") {
-		t.Errorf("expected agent+host in body, payload = %s", s)
+	if !strings.Contains(s, "rm -rf build-cache · myhost") {
+		t.Errorf("expected command+host in body, payload = %s", s)
 	}
 	if !strings.Contains(s, `"tag":"herdr-myhost-pane-1"`) {
 		t.Errorf("expected stable host/pane tag, payload = %s", s)
@@ -140,20 +143,44 @@ func TestBuildBlockedPayload(t *testing.T) {
 	}
 }
 
+func TestBuildQuestionPayloadMatchesPythonContract(t *testing.T) {
+	payload := BuildBlockedPayload("Claude", "my-project", "Which database?", "evt-1", "pane-1", "myhost", false, 0)
+	assertPayloadFixture(t, payload, "question.json")
+}
+
 func TestBuildFinishedPayload(t *testing.T) {
 	payload := BuildFinishedPayload("Codex", "app", "pane-1", "myhost", "evt-finished-1")
+	assertPayloadFixture(t, payload, "finished.json")
 	s := string(payload)
-	if !strings.Contains(s, `"title":"app"`) {
+	if !strings.Contains(s, `"title":"app finished"`) {
 		t.Errorf("expected project as title, payload = %s", s)
 	}
-	if !strings.Contains(s, "Codex finished on myhost") {
+	if !strings.Contains(s, "Codex completed · myhost") {
 		t.Errorf("expected agent finished on host in body, payload = %s", s)
 	}
-	if !strings.Contains(s, `"tag":"herdr-myhost-pane-1"`) {
-		t.Errorf("expected stable host/pane tag, payload = %s", s)
+	if !strings.Contains(s, `"tag":"herdr-finished-myhost-pane-1"`) {
+		t.Errorf("expected distinct finished host/pane tag, payload = %s", s)
 	}
 	if !strings.Contains(s, "evt-finished-1") {
 		t.Errorf("expected event ID in payload = %s", s)
+	}
+}
+
+func assertPayloadFixture(t *testing.T, actual []byte, name string) {
+	t.Helper()
+	expected, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "push", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actualValue, expectedValue any
+	if err := json.Unmarshal(actual, &actualValue); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(expected, &expectedValue); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(actualValue, expectedValue) {
+		t.Fatalf("payload mismatch\nactual: %s\nexpected: %s", actual, expected)
 	}
 }
 

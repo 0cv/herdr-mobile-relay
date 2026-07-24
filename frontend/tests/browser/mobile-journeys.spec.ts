@@ -17,18 +17,9 @@ interface RelayFixture {
 
 interface BootOptions {
   standalone?: boolean;
-  upstreamVersion?: string;
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.route('https://raw.githubusercontent.com/0cv/herdr-mobile-relay/main/web/version.json*', (route) =>
-    route.fulfill({
-      contentType: 'application/json',
-      body: JSON.stringify({
-        version: options.upstreamVersion || APP_RELEASE,
-        assets: APP_METADATA.assets,
-      }),
-    }));
   await page.addInitScript(({ savedRelays, standalone }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
     if (standalone) {
@@ -449,12 +440,17 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
 });
 
 test('confirms deployment when an authorized relay has the upstream app bundle', async ({ page }) => {
-  await boot(page, [fedora], '/', { upstreamVersion: '9.0.0' });
+  await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
     release_version: '9.0.0',
     revision: 'abc1234',
     capabilities: ['directory_browser', 'self_update', 'app_deploy'],
+    update: {
+      state: 'current',
+      current_version: '9.0.0',
+      upstream_version: '9.0.0',
+    },
     app_deploy: {
       configured: true,
       origin: 'http://127.0.0.1:4173',

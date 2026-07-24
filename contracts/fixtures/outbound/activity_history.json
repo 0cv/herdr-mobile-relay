@@ -11,6 +11,34 @@
       "agent": "claude",
       "project": "project",
       "request_id": "req-001"
+    },
+    {
+      "id": "blocked-event",
+      "timestamp": 1753178401000,
+      "kind": "blocked",
+      "status": "attention",
+      "summary": "git push",
+      "host": "localhost",
+      "pane_id": "pane-1",
+      "agent": "claude",
+      "project": "project",
+      "extract": "Allow command?\n$ git push",
+      "session": "Fix release",
+      "details": {"event_id": "evt-1"}
+    },
+    {
+      "id": "finished-event",
+      "timestamp": 1753178402000,
+      "kind": "finished",
+      "status": "completed",
+      "summary": "claude completed",
+      "host": "localhost",
+      "pane_id": "pane-1",
+      "agent": "claude",
+      "project": "project",
+      "extract": "Implemented release fixes\nAll tests pass",
+      "session": "Fix release",
+      "details": {"event_id": "evt-finished-1"}
     }
   ]
 }

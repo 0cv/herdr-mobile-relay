@@ -86,6 +86,20 @@ installed_service_env_file() {
     esac
 }
 
+update_launchd_release_paths() {
+    local plist="$1"
+    local service_wrapper="$2"
+    local work_dir="$3"
+    local plist_buddy="${HERDR_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
+
+    [ -x "$plist_buddy" ] || {
+        echo "PlistBuddy is unavailable: $plist_buddy" >&2
+        return 1
+    }
+    "$plist_buddy" -c "Set :ProgramArguments:0 $service_wrapper" "$plist"
+    "$plist_buddy" -c "Set :WorkingDirectory $work_dir" "$plist"
+}
+
 assert_service_env_matches() {
     local resolved_env
     local service_env
@@ -211,6 +225,38 @@ remove_env_value_if_equals_atomic() {
     mv "$temp_file" "$env_file"
 }
 
+remove_env_value_atomic() {
+    local env_file="$1"
+    local key="$2"
+    local directory
+    local temp_file
+
+    if [ ! -f "$env_file" ] || ! grep -q "^${key}=" "$env_file"; then
+        return
+    fi
+    directory="$(dirname "$env_file")"
+    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")"
+    grep -v "^${key}=" "$env_file" > "$temp_file" || true
+    chmod 600 "$temp_file"
+    mv "$temp_file" "$env_file"
+}
+
+persist_github_token() {
+    local env_file="$1"
+    local token_file
+    local temp_file
+
+    if [ -z "${GH_TOKEN:-}" ]; then
+        return 0
+    fi
+    token_file="$(dirname "$env_file")/github-token"
+    temp_file="$(mktemp "$(dirname "$env_file")/.github-token.XXXXXX")"
+    printf '%s\n' "$GH_TOKEN" > "$temp_file"
+    chmod 600 "$temp_file"
+    mv "$temp_file" "$token_file"
+    set_env_value_atomic "$env_file" HERDR_GITHUB_TOKEN_FILE "$token_file"
+}
+
 append_env_default() {
     local env_file="$1"
     local key="$2"
@@ -242,9 +288,10 @@ ensure_relay_env() {
     if [ -n "$cloudflared_config" ]; then
         append_env_default "$env_file" CLOUDFLARED_CONFIG "$cloudflared_config"
     fi
-    if [ -n "${GH_TOKEN:-}" ]; then
-        set_env_value_atomic "$env_file" GH_TOKEN "$GH_TOKEN"
-    fi
+    persist_github_token "$env_file"
+    # Migrate older installs that exposed the token to the complete service
+    # process tree. Only the credential-file path remains in relay.env.
+    remove_env_value_atomic "$env_file" GH_TOKEN
 }
 
 load_relay_env() {

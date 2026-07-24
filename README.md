@@ -46,7 +46,8 @@ herdr plugin install 0cv/herdr-mobile-relay-dev
 > ```bash
 > export GH_TOKEN=ghp_...
 > ```
-> The token is persisted into the service environment for self-update checks.
+> The token is persisted in a private credential file. The service receives
+> only that file's path, and only the update code reads it.
 
 Herdr 0.7.5 stores installed plugins globally for the current user. If this plugin was installed only inside a named Herdr 0.7.3 session, install it once again after upgrading; existing plugin configuration and state remain in place.
 
@@ -97,11 +98,16 @@ herdr plugin action invoke setup-link --plugin herdr-mobile-relay.events
 herdr plugin action invoke status --plugin herdr-mobile-relay.events
 herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events
 herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
+herdr plugin action invoke uninstall --plugin herdr-mobile-relay.events
 ```
 
 The `setup-link` action safely reprints the private link and QR for the installed stable relay. It follows the configuration recorded in the background service, including services installed from a source checkout.
 
 Teardown is explicit and confirmed. It removes only resources recorded as owned by the wizard. Run it before uninstalling the plugin if you also want the Cloudflare resources removed.
+
+The `uninstall` action removes the local service, verified releases, relay
+configuration, push credentials, and cache. It does not remove Cloudflare
+resources; run `stable-teardown` first when those should also be removed.
 
 > [!NOTE]
 > `make stable-setup` and `make setup-link` are checkout-development commands. Do not use a checkout's `make setup-link` for a marketplace installation whose service uses the plugin configuration; the command intentionally refuses that configuration mismatch.

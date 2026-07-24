@@ -214,3 +214,30 @@ func TestCommittedStateViewTracksSnapshotsAndDeltas(t *testing.T) {
 		t.Fatalf("inventory view leaked transport type: %+v", inventory)
 	}
 }
+
+func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
+	root := t.TempDir()
+	fakeHerdr := filepath.Join(root, "herdr")
+	script := "#!/bin/sh\nprintf 'first output\\nsecond output\\nfooter 1\\nfooter 2\\nfooter 3\\nfooter 4\\nfooter 5\\nfooter 6\\n'\n"
+	if err := os.WriteFile(fakeHerdr, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		HerdrBin:   fakeHerdr,
+		CacheDir:   filepath.Join(root, "cache"),
+		RuntimeDir: filepath.Join(root, "runtime"),
+	}
+	s := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "Claude Code", Status: "working",
+	}}, s.state.RevisionCounter())
+
+	s.scheduleHistoryCapture(context.Background(), "pane-1")
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(s.historyM.Content("pane-1", 100), "second output") {
+		if time.Now().After(deadline) {
+			t.Fatal("background capture did not persist Claude pane output")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

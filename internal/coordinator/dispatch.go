@@ -596,19 +596,27 @@ func (d *Dispatcher) RecordTransitionActivity(
 	project string,
 	host string,
 	session string,
-) {
+	extract string,
+) bool {
 	if d.activityW == nil {
-		return
+		return false
 	}
 	d.activityOrder.Lock()
 	defer d.activityOrder.Unlock()
-	if !d.state.TransitionCurrent(paneID, expectedStatus, revision) {
-		return
+	transitionCurrent := func() bool {
+		if kind == "finished" {
+			return d.state.CompletionCurrent(paneID, revision)
+		}
+		return d.state.TransitionCurrent(paneID, expectedStatus, revision)
+	}
+	if !transitionCurrent() {
+		return false
 	}
 	entry := activity.NewEntry(kind, status, summary, paneID, agent, project, "")
 	entry.Host = host
 	entry.Session = session
 	entry.Details = details
+	entry.Extract = extract
 	committed, err := d.activityW.Commit(context.Background(), activity.ActivityCommitRequested{
 		Sequence: d.activitySequence.Add(1),
 		Entry:    entry,
@@ -616,9 +624,9 @@ func (d *Dispatcher) RecordTransitionActivity(
 	if err != nil {
 		d.activityFailures.Add(1)
 		d.logger.Warn("transition activity append failed", "error", err)
-		return
+		return false
 	}
-	if !d.state.TransitionCurrent(paneID, expectedStatus, revision) {
+	if !transitionCurrent() {
 		_, discardErr := d.activityW.Discard(context.Background(), activity.ActivityDiscardRequested{
 			Sequence: d.activitySequence.Add(1),
 			ID:       committed.Entry.ID,
@@ -627,11 +635,12 @@ func (d *Dispatcher) RecordTransitionActivity(
 			d.activityFailures.Add(1)
 			d.logger.Warn("stale transition activity discard failed", "error", discardErr)
 		}
-		return
+		return false
 	}
 	if d.broadcast != nil {
 		d.broadcast(map[string]any{"type": "activity", "activity": committed.Entry})
 	}
+	return true
 }
 
 func (d *Dispatcher) wake() {

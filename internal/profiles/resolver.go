@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -56,7 +57,15 @@ type Resolver struct {
 	skillDirs  map[string][]string
 	formats    map[string]string
 	warned     map[string]bool
+	versions   map[string]cachedVersion
 }
+
+type cachedVersion struct {
+	value   string
+	expires time.Time
+}
+
+var semanticVersionPattern = regexp.MustCompile(`\b[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\b`)
 
 func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
 	return &Resolver{
@@ -67,6 +76,7 @@ func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
 		skillDirs:  cloneStringSlices(defaultSkillDirs),
 		formats:    cloneStrings(defaultCommandFormats),
 		warned:     make(map[string]bool),
+		versions:   make(map[string]cachedVersion),
 	}
 }
 
@@ -310,7 +320,37 @@ func (r *Resolver) Reload() {
 	r.mu.Lock()
 	r.cached = nil
 	r.expires = time.Time{}
+	r.versions = make(map[string]cachedVersion)
 	r.mu.Unlock()
+}
+
+func (r *Resolver) AgentVersion(profileID string) string {
+	profileID = strings.ToLower(strings.TrimSpace(profileID))
+	if profileID == "" {
+		return ""
+	}
+	r.mu.Lock()
+	if cached, ok := r.versions[profileID]; ok && time.Now().Before(cached.expires) {
+		r.mu.Unlock()
+		return cached.value
+	}
+	r.mu.Unlock()
+
+	profile, ok := r.Profile(profileID)
+	if !ok || len(profile.Argv) == 0 {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, profile.Argv[0], "--version").CombinedOutput()
+	version := ""
+	if err == nil {
+		version = semanticVersionPattern.FindString(string(output))
+	}
+	r.mu.Lock()
+	r.versions[profileID] = cachedVersion{value: version, expires: time.Now().Add(5 * time.Minute)}
+	r.mu.Unlock()
+	return version
 }
 
 func (r *Resolver) CommandConfig(profileID string) ([]string, string, bool) {

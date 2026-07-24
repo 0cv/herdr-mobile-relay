@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 )
 
 func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) {
@@ -164,6 +165,53 @@ func TestFinishedNotificationRejectsSupersededTransition(t *testing.T) {
 	s.CommitEvent("p1", "working", 2000)
 	if s.RegisterFinishedNotificationForTransition("p1", "idle", revision) {
 		t.Fatal("superseded completion registered a notification")
+	}
+}
+
+func TestInitialDoneAndDoneSynonymsDoNotPublishCompletion(t *testing.T) {
+	s := testState()
+	transitions := make(chan string, 2)
+	s.SetOnTransition(func(_, _, _, status string, _ int64) {
+		transitions <- status
+	})
+
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "done"}}, s.RevisionCounter())
+	s.CommitEvent("p1", "completed", 1000)
+
+	select {
+	case status := <-transitions:
+		t.Fatalf("false completion transition published for %q", status)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if s.RegisterFinishedNotificationForTransition("p1", "completed", s.Revision("p1")) {
+		t.Fatal("non-attention completion transition registered a notification")
+	}
+}
+
+func TestFinishedRegistrationRequiresAttentionTransition(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
+	s.CommitEvent("p1", "finished", 1000)
+	revision := s.Revision("p1")
+	if !s.RegisterFinishedNotificationForTransition("p1", "finished", revision) {
+		t.Fatal("working-to-finished transition did not register")
+	}
+	if s.RegisterFinishedNotificationForTransition("p1", "finished", revision) {
+		t.Fatal("completion transition registered twice")
+	}
+}
+
+func TestCompletionRegistrationSurvivesDoneSynonymRedraw(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
+	s.CommitEvent("p1", "done", 1000)
+	completionRevision := s.Revision("p1")
+	s.CommitEvent("p1", "completed", 1100)
+	if !s.CompletionCurrent("p1", completionRevision) {
+		t.Fatal("done-synonym redraw invalidated the real completion cycle")
+	}
+	if !s.RegisterFinishedNotificationForTransition("p1", "done", completionRevision) {
+		t.Fatal("real completion could not register after a done-synonym redraw")
 	}
 }
 

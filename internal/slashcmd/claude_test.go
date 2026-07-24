@@ -140,14 +140,58 @@ func TestClaudeSkillUserInvocableFalse(t *testing.T) {
 func TestClaudeBuiltinArgumentHints(t *testing.T) {
 	catalog := CatalogFor("claude", "/tmp", "/nonexistent")
 	for _, cmd := range catalog.Commands {
-		if cmd.Command == "/model" {
-			if cmd.ArgumentHint != "[model-name]" {
-				t.Errorf("/model argument_hint = %q", cmd.ArgumentHint)
+		if cmd.Command == "/remote-control" {
+			if cmd.ArgumentHint != "[name]" {
+				t.Errorf("/remote-control argument_hint = %q", cmd.ArgumentHint)
 			}
 			return
 		}
 	}
-	t.Error("/model not found")
+	t.Error("/remote-control not found")
+}
+
+func TestClaudeLaterScopeRestoresSuppressedCommand(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectSkill := filepath.Join(cwd, ".claude", "skills", "deploy")
+	personalSkill := filepath.Join(home, ".claude", "skills", "deploy")
+	if err := os.MkdirAll(projectSkill, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(personalSkill, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(projectSkill, "SKILL.md"), "---\nname: deploy\nuser-invocable: false\n---\n")
+	writeTestFile(t, filepath.Join(personalSkill, "SKILL.md"), "---\nname: deploy\ndescription: Personal deploy\n---\n")
+
+	catalog := CatalogFor("claude", cwd, home)
+	if !hasCommand(catalog, "/deploy") {
+		t.Fatal("later personal skill did not restore a project-suppressed command")
+	}
+}
+
+func TestClaudeLaterSettingsReenableEarlierOff(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cwd, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cwd, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(home, ".claude", "settings.json"), `{"skillOverrides":{"review":"off"}}`)
+	writeTestFile(t, filepath.Join(cwd, ".claude", "settings.json"), `{"skillOverrides":{"review":"on"}}`)
+
+	catalog := CatalogFor("claude", cwd, home)
+	if !hasCommand(catalog, "/review") {
+		t.Fatal("later project setting did not re-enable /review")
+	}
 }
 
 func hasCommand(catalog Catalog, name string) bool {

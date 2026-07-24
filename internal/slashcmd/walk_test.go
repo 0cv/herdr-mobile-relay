@@ -48,7 +48,7 @@ func TestWalkRecursive(t *testing.T) {
 	}
 }
 
-func TestWalkDepthLimit(t *testing.T) {
+func TestWalkHasNoArbitraryDepthLimit(t *testing.T) {
 	dir := t.TempDir()
 	deep := dir
 	for i := 0; i < 7; i++ {
@@ -66,11 +66,18 @@ func TestWalkDepthLimit(t *testing.T) {
 	os.WriteFile(filepath.Join(at5, "ok.md"), []byte("At depth 5"), 0o644)
 
 	commands := walkCommandDir(dir, "personal")
-	for _, cmd := range commands {
-		if cmd.Command == "/level:level:level:level:level:level:level:too-deep" {
-			t.Error("command beyond max depth was discovered")
+	if !commandSliceHas(commands, "/level:level:level:level:level:level:level:too-deep") {
+		t.Error("deep command was omitted")
+	}
+}
+
+func commandSliceHas(commands []Command, name string) bool {
+	for _, command := range commands {
+		if command.Command == name {
+			return true
 		}
 	}
+	return false
 }
 
 func TestWalkFileLimit(t *testing.T) {

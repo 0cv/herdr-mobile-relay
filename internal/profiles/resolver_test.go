@@ -20,6 +20,19 @@ func TestDefaultCandidatesFiltered(t *testing.T) {
 	}
 }
 
+func TestAgentVersionUsesResolvedProfileExecutable(t *testing.T) {
+	binDir := t.TempDir()
+	codex := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(codex, []byte("#!/bin/sh\necho 'codex-cli 1.2.3'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	resolver := NewResolver(t.TempDir(), nil)
+	if version := resolver.AgentVersion("codex"); version != "1.2.3" {
+		t.Fatalf("AgentVersion(codex) = %q, want 1.2.3", version)
+	}
+}
+
 func TestINIProfiles(t *testing.T) {
 	dir := t.TempDir()
 	herdrDir := filepath.Join(dir, "herdr")

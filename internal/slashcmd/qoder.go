@@ -35,7 +35,7 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			truncated = truncated || trunc
 
 			skillDir := filepath.Join(dir, "skills")
-			cmds, trunc = scanSkillDirBudget(skillDir, "project", &budget)
+			cmds, _, trunc = scanSkillDirBudget(skillDir, "project", &budget)
 			projectSkills = append(projectSkills, cmds...)
 			truncated = truncated || trunc
 		}
@@ -47,7 +47,7 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	truncated = truncated || trunc
 
 	personalSkillDir := filepath.Join(ctx.Home, ".qoder", "skills")
-	cmds, trunc = scanSkillDirBudget(personalSkillDir, "personal", &budget)
+	cmds, _, trunc = scanSkillDirBudget(personalSkillDir, "personal", &budget)
 	personalSkills = append(personalSkills, cmds...)
 	truncated = truncated || trunc
 

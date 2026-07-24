@@ -87,13 +87,8 @@ func NewManager(releaseRoot, runtimeDir, version, revision, serviceName, healthU
 			Timeout: 15 * time.Second,
 		},
 	}
-	if token := os.Getenv("GH_TOKEN"); token != "" {
-		tokenFile := filepath.Join(runtimeDir, "gh-token")
-		if err := os.MkdirAll(runtimeDir, 0o700); err == nil {
-			if err := os.WriteFile(tokenFile, []byte(token), 0o600); err == nil {
-				manager.tokenFile = tokenFile
-			}
-		}
+	if tokenFile := strings.TrimSpace(os.Getenv("HERDR_GITHUB_TOKEN_FILE")); filepath.IsAbs(tokenFile) {
+		manager.tokenFile = filepath.Clean(tokenFile)
 	}
 	manager.launch = manager.launchWorker
 	manager.state = manager.loadState()
@@ -331,7 +326,7 @@ func (m *Manager) token() string {
 			}
 		}
 	}
-	return os.Getenv("GH_TOKEN")
+	return ""
 }
 
 func (m *Manager) eligibility() (bool, string, string) {

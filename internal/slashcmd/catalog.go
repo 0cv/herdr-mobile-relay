@@ -36,10 +36,14 @@ func CatalogFor(agent, cwd, home string) Catalog {
 	case "qoder", "qodercli":
 		profileID = "qoder"
 	}
-	return CatalogForProfile(profileID, agent, cwd, home, nil, "")
+	return CatalogForProfile(profileID, agent, cwd, home, nil, "", "")
 }
 
-func CatalogForProfile(profileID, reportedAgent, cwd, home string, skillDirs []string, commandFormat string) Catalog {
+func CatalogForProfile(
+	profileID, reportedAgent, cwd, home string,
+	skillDirs []string,
+	commandFormat, agentVersion string,
+) Catalog {
 	var commands []Command
 	var truncated bool
 
@@ -48,6 +52,7 @@ func CatalogForProfile(profileID, reportedAgent, cwd, home string, skillDirs []s
 		Home:          home,
 		SkillDirs:     skillDirs,
 		CommandFormat: commandFormat,
+		AgentVersion:  agentVersion,
 	}
 
 	p := resolveProvider(profileID)

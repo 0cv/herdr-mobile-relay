@@ -145,6 +145,18 @@ func LayoutHint(text string) bool {
 // ApprovalDetails extracts the display summary, command context, and final
 // sequential menu from a non-question approval pane.
 func ApprovalDetails(text string) (string, string, []string) {
+	summaryLines := paneSummaryLines(text)
+	summary := strings.Join(summaryLines, "\n")
+	options := approvalOptions(cleanLines(text))
+	command := approvalCommand(summaryLines)
+	return compact(summary, 500), compact(command, 240), options
+}
+
+func PaneSummary(text string) string {
+	return strings.Join(paneSummaryLines(text), "\n")
+}
+
+func paneSummaryLines(text string) []string {
 	lines := cleanLines(text)
 	var summaryLines []string
 	for _, line := range lines {
@@ -156,10 +168,7 @@ func ApprovalDetails(text string) (string, string, []string) {
 	if len(summaryLines) > 12 {
 		summaryLines = summaryLines[len(summaryLines)-12:]
 	}
-	summary := strings.Join(summaryLines, "\n")
-	options := approvalOptions(lines)
-	command := approvalCommand(summaryLines)
-	return compact(summary, 500), compact(command, 240), options
+	return summaryLines
 }
 
 func approvalOptions(lines []string) []string {

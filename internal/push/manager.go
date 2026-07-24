@@ -478,54 +478,42 @@ func truncateEndpoint(endpoint string) string {
 	return endpoint
 }
 
-func BuildBlockedPayload(agent, project, eventID, paneID, host string, hasApproval bool, approvalTotal int) []byte {
-	notifyTarget := map[string]any{
-		"pane_id":         paneID,
-		"host":            host,
-		"notification_id": eventID,
-	}
-	notifyJSON, _ := json.Marshal(notifyTarget)
-	notifyURL := "./#notify=" + url.QueryEscape(string(notifyJSON))
+func BuildBlockedPayload(agent, project, command, eventID, paneID, host string, hasApproval bool, approvalTotal int) []byte {
+	notifyURL := notificationURL(host, paneID, eventID, "", 0, 0)
 
-	body := fmt.Sprintf("%s needs approval on %s", agent, host)
+	if project == "" {
+		project = agent
+	}
+	if project == "" {
+		project = "agent"
+	}
+	if command == "" {
+		command = "Agent needs approval"
+	}
+	title := fmt.Sprintf("%s blocked", project)
+	body := fmt.Sprintf("%s · %s", command, host)
 	if !hasApproval {
-		body = fmt.Sprintf("%s has a question on %s", agent, host)
+		title = fmt.Sprintf("%s needs answers", project)
 	}
 
 	payload := map[string]any{
-		"title":       project,
+		"title":       title,
 		"body":        body,
 		"tag":         fmt.Sprintf("herdr-%s-%s", host, paneID),
 		"url":         notifyURL,
 		"actions":     []any{},
 		"action_urls": map[string]string{},
-		"data": map[string]any{
-			"type":            "blocked",
-			"event_id":        eventID,
-			"pane_id":         paneID,
-			"host":            host,
-			"notification_id": eventID,
-		},
 	}
 	if hasApproval {
 		total := approvalTotal
 		if total < 2 {
 			total = 2
 		}
-		approveTarget := map[string]any{
-			"pane_id":         paneID,
-			"host":            host,
-			"action":          "approve",
-			"index":           0,
-			"total":           total,
-			"notification_id": eventID,
-		}
-		approveJSON, _ := json.Marshal(approveTarget)
 		payload["actions"] = []map[string]any{
 			{"action": "approve", "title": "Approve once"},
 		}
 		payload["action_urls"] = map[string]string{
-			"approve": "./#notify=" + url.QueryEscape(string(approveJSON)),
+			"approve": notificationURL(host, paneID, eventID, "approve", 0, total),
 		}
 	}
 	data, _ := json.Marshal(payload)
@@ -533,29 +521,47 @@ func BuildBlockedPayload(agent, project, eventID, paneID, host string, hasApprov
 }
 
 func BuildFinishedPayload(agent, project, paneID, host, eventID string) []byte {
-	notifyTarget := map[string]any{
-		"pane_id":         paneID,
-		"host":            host,
-		"notification_id": eventID,
-	}
-	notifyJSON, _ := json.Marshal(notifyTarget)
-	notifyURL := "./#notify=" + url.QueryEscape(string(notifyJSON))
+	notifyURL := notificationURL(host, paneID, eventID, "", 0, 0)
 
+	if project == "" {
+		project = agent
+	}
+	if project == "" {
+		project = "Agent"
+	}
+	if agent == "" {
+		agent = "Agent"
+	}
 	payload := map[string]any{
-		"title":       project,
-		"body":        fmt.Sprintf("%s finished on %s", agent, host),
-		"tag":         fmt.Sprintf("herdr-%s-%s", host, paneID),
+		"title":       fmt.Sprintf("%s finished", project),
+		"body":        fmt.Sprintf("%s completed · %s", agent, host),
+		"tag":         fmt.Sprintf("herdr-finished-%s-%s", host, paneID),
 		"url":         notifyURL,
 		"actions":     []any{},
 		"action_urls": map[string]string{},
-		"data": map[string]any{
-			"type":            "finished",
-			"event_id":        eventID,
-			"pane_id":         paneID,
-			"host":            host,
-			"notification_id": eventID,
-		},
 	}
 	data, _ := json.Marshal(payload)
 	return data
+}
+
+func notificationURL(host, paneID, eventID, action string, index, total int) string {
+	target := struct {
+		Host           string `json:"host"`
+		PaneID         string `json:"pane_id"`
+		NotificationID string `json:"notification_id"`
+		Action         string `json:"action,omitempty"`
+		Index          *int   `json:"index,omitempty"`
+		Total          *int   `json:"total,omitempty"`
+	}{
+		Host:           host,
+		PaneID:         paneID,
+		NotificationID: eventID,
+		Action:         action,
+	}
+	if action != "" {
+		target.Index = &index
+		target.Total = &total
+	}
+	encoded, _ := json.Marshal(target)
+	return "./#notify=" + url.QueryEscape(string(encoded))
 }

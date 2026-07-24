@@ -13,8 +13,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
+
+func TestTransitionActivityPreservesExtract(t *testing.T) {
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, state.RevisionCounter())
+	state.CommitEvent("p1", "blocked", ts())
+	journal, err := activity.OpenJournal(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := NewDispatcher(nil, state, journal, testLogger())
+	t.Cleanup(func() {
+		_ = dispatcher.Close(context.Background())
+	})
+	revision := state.Revision("p1")
+	if !dispatcher.RecordTransitionActivity(
+		"blocked", "attention", "git push", "p1", "blocked", revision,
+		map[string]any{"event_id": "event-1"}, "Claude", "project", "host", "session",
+		"Allow command?\n$ git push",
+	) {
+		t.Fatal("current transition activity was not committed")
+	}
+	recent := journal.Recent(1)
+	if len(recent) != 1 || recent[0].Summary != "git push" ||
+		recent[0].Extract != "Allow command?\n$ git push" {
+		t.Fatalf("transition activity = %+v", recent)
+	}
+}
 
 // §10.3: a UDP event must not pin a pane's status indefinitely. Once fresh
 // inventory polls (which necessarily started after the event) consistently

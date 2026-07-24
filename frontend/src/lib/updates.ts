@@ -1,5 +1,5 @@
 import { get, writable } from 'svelte/store';
-import { APP_ASSET_VERSION, APP_VERSION, UPSTREAM_APP_VERSION_URL } from './config';
+import { APP_ASSET_VERSION, APP_VERSION } from './config';
 import type { AppDeploymentStatus, AppUpdateStatus, RelayUpdateStatus } from './types';
 
 const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
@@ -33,6 +33,7 @@ export const appUpdateStatus = writable<AppUpdateStatus>({
 });
 
 let checking: Promise<AppUpdateStatus> | null = null;
+let relayUpstreamVersion = '';
 
 export function semverTuple(value: string): [number, number, number] | null {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
@@ -60,6 +61,31 @@ export function newerBundle(
 
 export function appUpdateAvailable(deployed: { version: string; assets: number }): boolean {
   return newerBundle(deployed, { version: APP_VERSION, assets: APP_ASSET_VERSION });
+}
+
+export function observeAppUpstreamVersion(value: string): void {
+  if (!semverTuple(value)) return;
+  if (!relayUpstreamVersion || newerVersion(value, relayUpstreamVersion)) {
+    relayUpstreamVersion = value;
+  }
+  appUpdateStatus.update((current) => {
+    if (!current.deployedVersion) return current;
+    const state = appUpdateAvailable({
+      version: current.deployedVersion,
+      assets: current.deployedAssets,
+    })
+      ? 'reload-ready'
+      : newerVersion(relayUpstreamVersion, current.deployedVersion)
+        ? 'deployment-required'
+        : 'current';
+    return {
+      ...current,
+      state,
+      upstreamVersion: relayUpstreamVersion,
+      upstreamAssets: 0,
+      error: '',
+    };
+  });
 }
 
 export function normalizeRelayUpdate(
@@ -129,34 +155,10 @@ export async function checkAppUpdate(
   appUpdateStatus.update((status) => ({ ...status, state: 'checking', error: '' }));
   checking = (async () => {
     try {
-      const [deployedResult, upstreamResult] = await Promise.allSettled([
-        versionMetadata(fetcher, `/version.json?check=${now}`),
-        versionMetadata(fetcher, `${UPSTREAM_APP_VERSION_URL}?check=${now}`),
-      ]);
-      if (deployedResult.status === 'rejected') throw deployedResult.reason;
-      const deployed = deployedResult.value;
-      if (upstreamResult.status === 'rejected') {
-        const error = upstreamResult.reason instanceof Error
-          ? upstreamResult.reason.message
-          : 'Could not check the upstream app version';
-        const status: AppUpdateStatus = {
-          state: appUpdateAvailable(deployed) ? 'reload-ready' : 'failed',
-          currentVersion: APP_VERSION,
-          currentAssets: APP_ASSET_VERSION,
-          deployedVersion: deployed.version,
-          deployedAssets: deployed.assets,
-          upstreamVersion: '',
-          upstreamAssets: 0,
-          checkedAt: now,
-          error,
-        };
-        appUpdateStatus.set(status);
-        return status;
-      }
-      const upstream = upstreamResult.value;
+      const deployed = await versionMetadata(fetcher, `/version.json?check=${now}`);
       const state = appUpdateAvailable(deployed)
         ? 'reload-ready'
-        : newerBundle(upstream, deployed)
+        : relayUpstreamVersion && newerVersion(relayUpstreamVersion, deployed.version)
           ? 'deployment-required'
           : 'current';
       const status: AppUpdateStatus = {
@@ -165,8 +167,8 @@ export async function checkAppUpdate(
         currentAssets: APP_ASSET_VERSION,
         deployedVersion: deployed.version,
         deployedAssets: deployed.assets,
-        upstreamVersion: upstream.version,
-        upstreamAssets: upstream.assets,
+        upstreamVersion: relayUpstreamVersion,
+        upstreamAssets: 0,
         checkedAt: now,
         error: '',
       };

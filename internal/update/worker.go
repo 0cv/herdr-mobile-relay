@@ -200,6 +200,9 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	if err := w.Verify(ctx, job.HealthURL, manifest); err != nil {
 		return rollback(ctx, w, job, state, previousTarget, previousManifest, fmt.Errorf("verify updated relay: %w", err))
 	}
+	if err := PruneOldReleases(job.ReleaseRoot, finalDir, previousTarget); err != nil {
+		return rollback(ctx, w, job, state, previousTarget, previousManifest, fmt.Errorf("prune old releases: %w", err))
+	}
 
 	state.State = "succeeded"
 	state.CurrentVersion = manifest.Version
@@ -307,7 +310,49 @@ func (w Worker) token() string {
 			}
 		}
 	}
-	return os.Getenv("GH_TOKEN")
+	return ""
+}
+
+func PruneOldReleases(releaseRoot string, keep ...string) error {
+	if !filepath.IsAbs(releaseRoot) || filepath.Clean(releaseRoot) == string(filepath.Separator) {
+		return errors.New("release root must be a non-root absolute path")
+	}
+	releasesDir := filepath.Join(releaseRoot, "releases")
+	entries, err := os.ReadDir(releasesDir)
+	if err != nil {
+		return err
+	}
+	kept := make(map[string]bool, len(keep))
+	for _, item := range keep {
+		if item == "" {
+			continue
+		}
+		absolute, absErr := filepath.Abs(item)
+		if absErr == nil {
+			kept[filepath.Clean(absolute)] = true
+		}
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".update-") {
+			continue
+		}
+		candidate := filepath.Join(releasesDir, entry.Name())
+		absolute, absErr := filepath.Abs(candidate)
+		if absErr != nil || kept[filepath.Clean(absolute)] {
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if _, verifyErr := relayrelease.Verify(candidate, relayrelease.CurrentTarget()); verifyErr != nil {
+			continue
+		}
+		if err := os.RemoveAll(candidate); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func verifyChecksum(archivePath, checksumPath, expectedName string) error {

@@ -20,7 +20,6 @@ export const APP_PROTOCOL_VERSION = __APP_PROTOCOL_VERSION__;
 export const APP_VERSION = __APP_VERSION__;
 export const APP_ASSET_VERSION = __APP_ASSET_VERSION__;
 export const SERVICE_WORKER_URL = __SERVICE_WORKER_URL__;
-export const UPSTREAM_APP_VERSION_URL = 'https://raw.githubusercontent.com/0cv/herdr-mobile-relay/main/web/version.json';
 export const THEMES = ['dark', 'light', 'nord', 'solarized', 'rose'] as const;
 export type Theme = (typeof THEMES)[number];
 export const INTERFACE_SIZES = ['compact', 'regular', 'large'] as const;

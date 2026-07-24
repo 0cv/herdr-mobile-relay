@@ -137,6 +137,34 @@ func TestActivateKeepsCompleteReleaseTarget(t *testing.T) {
 	}
 }
 
+func TestPruneOldReleasesKeepsCurrentAndRollbackOnly(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "installed")
+	releases := filepath.Join(root, "releases")
+	current := filepath.Join(releases, "current-release")
+	previous := filepath.Join(releases, "previous-release")
+	old := filepath.Join(releases, "old-release")
+	inflight := filepath.Join(releases, ".update-inflight")
+	for _, directory := range []string{current, previous, old, inflight} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, directory := range []string{current, previous, old} {
+		writeWorkerTestRelease(t, directory, filepath.Base(directory), filepath.Base(directory)+"-revision")
+	}
+	if err := PruneOldReleases(root, current, previous); err != nil {
+		t.Fatal(err)
+	}
+	for _, kept := range []string{current, previous, inflight} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Fatalf("kept release %s: %v", kept, err)
+		}
+	}
+	if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old release was not pruned: %v", err)
+	}
+}
+
 func TestWorkerRollsBackPostActivationFailures(t *testing.T) {
 	for _, failure := range []string{"restart", "health"} {
 		t.Run(failure, func(t *testing.T) {

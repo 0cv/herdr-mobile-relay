@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
+	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 )
 
 func TestAgentsFixtureMatchesGoType(t *testing.T) {
@@ -35,6 +37,54 @@ func TestAgentsFixtureMatchesGoType(t *testing.T) {
 		if agent.UpdatedAt != 0 && agent.UpdatedAt < 1_000_000_000_000 {
 			t.Errorf("updated_at = %d, want 0 (initial snapshot) or epoch milliseconds (>1e12)", agent.UpdatedAt)
 		}
+	}
+}
+
+func TestCommandResultFixtureIsExact(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "command_result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actual map[string]any
+	if err := json.Unmarshal(data, &actual); err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]any{
+		"type":       "command_result",
+		"request_id": "req-001",
+		"action":     "prompt",
+		"ok":         true,
+		"phase":      "completed",
+		"pane_id":    "pane-1",
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		t.Fatalf("command_result fixture = %#v, want %#v", actual, expected)
+	}
+}
+
+func TestSlashCommandsFixtureMatchesCompleteClaudeCatalog(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "slash_commands.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Type      string           `json:"type"`
+		RequestID string           `json:"request_id"`
+		Action    string           `json:"action"`
+		OK        bool             `json:"ok"`
+		Phase     string           `json:"phase"`
+		PaneID    string           `json:"pane_id"`
+		Data      slashcmd.Catalog `json:"data"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	actual := slashcmd.CatalogFor("claude", "/nonexistent", "/nonexistent")
+	if fixture.Type != "command_result" || fixture.RequestID != "req-slash-1" ||
+		fixture.Action != "list_slash_commands" || !fixture.OK ||
+		fixture.Phase != "completed" || fixture.PaneID != "pane-1" ||
+		!reflect.DeepEqual(fixture.Data, actual) {
+		t.Fatalf("slash fixture does not match complete wire catalog\nfixture: %#v\nactual: %#v", fixture, actual)
 	}
 }
 

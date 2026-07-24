@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type claudeProvider struct{}
@@ -11,67 +12,111 @@ type claudeProvider struct{}
 func (p *claudeProvider) ID() string { return "claude" }
 
 var claudeBuiltins = []Command{
+	{"/add-dir", "Add another working directory", "builtin", "<path>"},
+	{"/agents", "Manage agent configurations", "builtin", ""},
+	{"/batch", "Run independent work in parallel worktrees", "builtin", "[task]"},
+	{"/background", "Move the current session to the background", "builtin", ""},
+	{"/branch", "Fork an earlier conversation", "builtin", "[session]"},
 	{"/clear", "Start a fresh conversation", "builtin", ""},
-	{"/compact", "Summarize and compact conversation history", "builtin", "[instructions]"},
-	{"/config", "View or modify configuration", "builtin", "[key] [value]"},
-	{"/cost", "Show token usage and cost", "builtin", ""},
-	{"/doctor", "Check system health and configuration", "builtin", ""},
-	{"/help", "Show available commands", "builtin", ""},
-	{"/init", "Initialize a new CLAUDE.md project file", "builtin", ""},
-	{"/login", "Switch Anthropic accounts", "builtin", ""},
-	{"/logout", "Sign out of current account", "builtin", ""},
-	{"/mcp", "Manage MCP server connections", "builtin", "[subcommand]"},
-	{"/memory", "Edit CLAUDE.md memory files", "builtin", "[path]"},
-	{"/model", "Switch the AI model", "builtin", "[model-name]"},
-	{"/permissions", "View or modify permissions", "builtin", ""},
-	{"/pr-comments", "View PR comments", "builtin", "[pr-url]"},
-	{"/review", "Review a pull request", "builtin", "[pr-url]"},
-	{"/status", "Show session status", "builtin", ""},
-	{"/terminal-setup", "Install Shift+Enter key binding", "builtin", ""},
-	{"/vim", "Toggle vim mode", "builtin", ""},
+	{"/compact", "Summarize the conversation to free context", "builtin", "[instructions]"},
+	{"/config", "Open Claude Code settings", "builtin", ""},
+	{"/context", "Show context-window usage", "builtin", ""},
+	{"/debug", "Troubleshoot the current Claude Code session", "builtin", "[description]"},
+	{"/diff", "Show changes in the working tree", "builtin", ""},
+	{"/doctor", "Check the Claude Code installation", "builtin", ""},
+	{"/effort", "Change the reasoning effort", "builtin", ""},
+	{"/exit", "Exit Claude Code", "builtin", ""},
+	{"/export", "Export the current conversation", "builtin", "[path]"},
+	{"/extra-usage", "Configure extra usage", "builtin", ""},
+	{"/feedback", "Report an issue with session context", "builtin", ""},
+	{"/fork", "Fork the current conversation", "builtin", ""},
+	{"/goal", "Set or clear a persistent goal", "builtin", "[condition|clear]"},
+	{"/help", "Show help and available commands", "builtin", ""},
+	{"/hooks", "View hook configuration", "builtin", ""},
+	{"/ide", "Manage IDE integrations", "builtin", ""},
+	{"/init", "Create a CLAUDE.md project guide", "builtin", ""},
+	{"/insights", "Analyze Claude Code session patterns", "builtin", ""},
+	{"/login", "Sign in to Claude Code", "builtin", ""},
+	{"/logout", "Sign out of Claude Code", "builtin", ""},
+	{"/mcp", "Manage MCP servers", "builtin", ""},
+	{"/memory", "View or edit project memory", "builtin", ""},
+	{"/mobile", "Show the Claude mobile app QR code", "builtin", ""},
+	{"/model", "Choose the active Claude model", "builtin", ""},
+	{"/permissions", "View or change permission rules", "builtin", ""},
+	{"/plan", "Enter plan mode", "builtin", "[planning prompt]"},
+	{"/plugin", "Browse and manage plugins", "builtin", ""},
+	{"/reload-plugins", "Reload installed plugins", "builtin", ""},
+	{"/remote-control", "Continue this session from another device", "builtin", "[name]"},
+	{"/rename", "Rename the current session", "builtin", "[name]"},
+	{"/resume", "Resume a saved conversation", "builtin", "[session]"},
+	{"/review", "Review a pull request", "builtin", "[PR]"},
+	{"/rewind", "Return to an earlier checkpoint", "builtin", ""},
+	{"/security-review", "Review the current branch for security issues", "builtin", ""},
+	{"/simplify", "Review recent changes for reusable improvements", "builtin", ""},
+	{"/skills", "Browse available skills", "builtin", ""},
+	{"/stats", "Show account usage statistics", "builtin", ""},
+	{"/status", "Show version, model, account, and connectivity", "builtin", ""},
+	{"/tasks", "Show background tasks", "builtin", ""},
+	{"/teleport", "Pull a web session into this terminal", "builtin", "[session]"},
+	{"/theme", "Choose the terminal theme", "builtin", ""},
+	{"/usage", "Show plan and usage information", "builtin", ""},
+	{"/verify", "Build and observe the application to verify changes", "builtin", "[instructions]"},
+	{"/voice", "Configure voice dictation", "builtin", "[hold|tap|off]"},
 }
 
 func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
-	var personal, project []Command
-	var suppressed []string
 	truncated := false
 	budget := maxCustomFiles
+	active := make(map[string]Command, len(claudeBuiltins))
+	order := make([]string, 0, len(claudeBuiltins))
+	apply := func(commands []Command, suppressed []string) {
+		for _, name := range suppressed {
+			if _, exists := active[name]; exists {
+				delete(active, name)
+				order = removeCommandName(order, name)
+			}
+		}
+		for _, command := range commands {
+			if _, exists := active[command.Command]; !exists {
+				order = append(order, command.Command)
+			}
+			active[command.Command] = command
+		}
+	}
+	apply(claudeBuiltins, nil)
 
 	if ctx.Cwd != "" {
 		projectDirs := findClaudeProjectDirs(ctx.Cwd)
 		for _, dir := range projectDirs {
 			cmdDir := filepath.Join(dir, "commands")
 			cmds, supp, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
-			project = append(project, cmds...)
-			suppressed = append(suppressed, supp...)
+			apply(cmds, supp)
 			truncated = truncated || trunc
 
 			skillDir := filepath.Join(dir, "skills")
-			cmds, trunc = scanSkillDirBudget(skillDir, "project", &budget)
-			project = append(project, cmds...)
+			cmds, supp, trunc = scanSkillDirBudget(skillDir, "project", &budget)
+			apply(cmds, supp)
 			truncated = truncated || trunc
 		}
 	}
 
 	personalCmds := filepath.Join(ctx.Home, ".claude", "commands")
 	cmds, supp, trunc := walkCommandDirBudget(personalCmds, "personal", &budget)
-	personal = append(personal, cmds...)
-	suppressed = append(suppressed, supp...)
+	apply(cmds, supp)
 	truncated = truncated || trunc
 
 	personalSkills := filepath.Join(ctx.Home, ".claude", "skills")
-	cmds, trunc = scanSkillDirBudget(personalSkills, "personal", &budget)
-	personal = append(personal, cmds...)
+	cmds, supp, trunc = scanSkillDirBudget(personalSkills, "personal", &budget)
+	apply(cmds, supp)
 	truncated = truncated || trunc
 
-	suppressed = append(suppressed, claudeSkillOverrides(ctx)...)
-
-	commands := make([]Command, 0, len(claudeBuiltins)+len(personal)+len(project))
-	commands = append(commands, claudeBuiltins...)
-	commands = append(commands, personal...)
-	commands = append(commands, project...)
-
-	commands = dedupClaudePrecedence(commands, len(claudeBuiltins), len(personal), suppressed)
+	apply(nil, claudeSkillOverrides(ctx))
+	commands := make([]Command, 0, len(order))
+	for _, name := range order {
+		if command, exists := active[name]; exists {
+			commands = append(commands, command)
+		}
+	}
 
 	if budget <= 0 {
 		truncated = true
@@ -79,10 +124,19 @@ func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	return commands, truncated
 }
 
+func removeCommandName(values []string, name string) []string {
+	for index, value := range values {
+		if value == name {
+			return append(values[:index], values[index+1:]...)
+		}
+	}
+	return values
+}
+
 // claudeSkillOverrides reads skillOverrides from Claude's settings files.
 // Entries mapped to "off", "hidden", or "disabled" suppress the matching command.
 func claudeSkillOverrides(ctx DiscoverContext) []string {
-	var overridden []string
+	values := make(map[string]string)
 	paths := []string{
 		filepath.Join(ctx.Home, ".claude", "settings.json"),
 	}
@@ -106,14 +160,18 @@ func claudeSkillOverrides(ctx DiscoverContext) []string {
 			continue
 		}
 		for name, value := range settings.SkillOverrides {
-			switch value {
-			case "off", "hidden", "disabled":
-				if len(name) > 0 && name[0] != '/' {
-					name = "/" + name
-				}
-				overridden = append(overridden, name)
-			}
+			values[name] = value
 		}
+	}
+	var overridden []string
+	for name, value := range values {
+		if !strings.EqualFold(strings.TrimSpace(value), "off") {
+			continue
+		}
+		if len(name) > 0 && name[0] != '/' {
+			name = "/" + name
+		}
+		overridden = append(overridden, name)
 	}
 	return overridden
 }

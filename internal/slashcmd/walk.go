@@ -8,7 +8,6 @@ import (
 )
 
 const (
-	maxWalkDepth    = 5
 	maxWalkFiles    = 250
 	maxGitWalkDepth = 32
 )
@@ -18,7 +17,7 @@ func walkCommandDir(root, source string) []Command {
 	var suppressed []string
 	var commands []Command
 	truncated := false
-	walkDirBudget(root, "", source, &commands, &suppressed, &budget, 0, &truncated)
+	walkDirBudget(root, "", source, &commands, &suppressed, &budget, &truncated)
 	return commands
 }
 
@@ -26,15 +25,11 @@ func walkCommandDirBudget(root, source string, budget *int) ([]Command, []string
 	var commands []Command
 	var suppressed []string
 	truncated := false
-	walkDirBudget(root, "", source, &commands, &suppressed, budget, 0, &truncated)
+	walkDirBudget(root, "", source, &commands, &suppressed, budget, &truncated)
 	return commands, suppressed, truncated
 }
 
-func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]string, budget *int, depth int, truncated *bool) {
-	if depth > maxWalkDepth {
-		*truncated = true
-		return
-	}
+func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]string, budget *int, truncated *bool) {
 	if *budget <= 0 {
 		*truncated = true
 		return
@@ -60,8 +55,10 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 			skillFile := filepath.Join(fullPath, "SKILL.md")
 			if info, err := os.Stat(skillFile); err == nil && info.Mode().IsRegular() {
 				*budget--
-				if cmd := parseSkillEntry(skillFile, name, namespace, source); cmd != nil {
+				if cmd, suppressedName := parseSkillEntry(skillFile, name, namespace, source); cmd != nil {
 					*out = append(*out, *cmd)
+				} else if suppressedName != "" {
+					*suppressed = append(*suppressed, suppressedName)
 				}
 				continue
 			}
@@ -69,7 +66,7 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 			if namespace != "" {
 				childNS = namespace + ":" + name
 			}
-			walkDirBudget(fullPath, childNS, source, out, suppressed, budget, depth+1, truncated)
+			walkDirBudget(fullPath, childNS, source, out, suppressed, budget, truncated)
 			continue
 		}
 		if !strings.HasSuffix(name, ".md") {
@@ -101,24 +98,24 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 	}
 }
 
-func parseSkillEntry(skillFile, dirName, namespace, source string) *Command {
+func parseSkillEntry(skillFile, dirName, namespace, source string) (*Command, string) {
 	metadata, ok := readSkillMetadata(skillFile)
 	if !ok {
-		return nil
+		return nil, ""
 	}
 	name := metadata["name"]
 	if name == "" {
 		name = dirName
 	}
 	if !commandNamePattern.MatchString(name) {
-		return nil
-	}
-	if !userInvocable(metadata) {
-		return nil
+		return nil, ""
 	}
 	fullName := "/" + name
 	if namespace != "" {
 		fullName = "/" + namespace + ":" + name
+	}
+	if !userInvocable(metadata) {
+		return nil, fullName
 	}
 	description := metadata["description"]
 	if description == "" {
@@ -129,7 +126,7 @@ func parseSkillEntry(skillFile, dirName, namespace, source string) *Command {
 		Description:  compact(description, 240),
 		Source:       source,
 		ArgumentHint: compact(metadata["argument-hint"], 120),
-	}
+	}, ""
 }
 
 func findGitRoot(dir string) string {
@@ -150,16 +147,17 @@ func findGitRoot(dir string) string {
 
 func scanSkillDir(dir, source string) []Command {
 	budget := maxWalkFiles
-	cmds, _ := scanSkillDirBudget(dir, source, &budget)
+	cmds, _, _ := scanSkillDirBudget(dir, source, &budget)
 	return cmds
 }
 
-func scanSkillDirBudget(dir, source string, budget *int) ([]Command, bool) {
+func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	var commands []Command
+	var suppressed []string
 	truncated := false
 	for _, e := range entries {
 		if *budget <= 0 {
@@ -181,11 +179,13 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, bool) {
 			continue
 		}
 		*budget--
-		if cmd := parseSkillEntry(skillFile, e.Name(), "", source); cmd != nil {
+		if cmd, suppressedName := parseSkillEntry(skillFile, e.Name(), "", source); cmd != nil {
 			commands = append(commands, *cmd)
+		} else if suppressedName != "" {
+			suppressed = append(suppressed, suppressedName)
 		}
 	}
-	return commands, truncated
+	return commands, suppressed, truncated
 }
 
 func fileFrontmatter(path string) map[string]string {

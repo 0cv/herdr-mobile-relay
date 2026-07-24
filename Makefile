@@ -68,9 +68,12 @@ backend-check: go-check shell-check production-path-audit
 
 shell-check:
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
-	@for script in relay/plugin-build.sh relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
+	@for script in relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done
 	bash -n relay/plugin-setup-terminal.command
+	sh tests/test_install.sh
+	bash tests/test_common.sh
+	bash tests/test_uninstall.sh
 	tests/test_stable_setup.sh
 
 production-path-audit:

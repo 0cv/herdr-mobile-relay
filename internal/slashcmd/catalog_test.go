@@ -117,12 +117,10 @@ func TestDiscoverSkills(t *testing.T) {
 	}
 }
 
-func TestCommandsSorted(t *testing.T) {
+func TestClaudeBuiltinCatalogIsComplete(t *testing.T) {
 	catalog := CatalogFor("claude", "/tmp", "/nonexistent")
-	for i := 1; i < len(catalog.Commands); i++ {
-		if catalog.Commands[i-1].Command > catalog.Commands[i].Command {
-			t.Errorf("not sorted: %q > %q", catalog.Commands[i-1].Command, catalog.Commands[i].Command)
-		}
+	if len(catalog.Commands) != 50 {
+		t.Fatalf("Claude builtins = %d, want 50", len(catalog.Commands))
 	}
 }
 
@@ -161,7 +159,7 @@ func TestGenericConfiguredSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	catalog := CatalogForProfile("pi", "pi-coding-agent", root, root, []string{first, second}, "skill:{name}")
+	catalog := CatalogForProfile("pi", "pi-coding-agent", root, root, []string{first, second}, "skill:{name}", "")
 	if len(catalog.Commands) != 1 {
 		t.Fatalf("commands = %+v", catalog.Commands)
 	}
@@ -173,7 +171,7 @@ func TestGenericConfiguredSkills(t *testing.T) {
 }
 
 func TestUnknownProfileHasNoClaudeFallback(t *testing.T) {
-	catalog := CatalogForProfile("custom", "custom", t.TempDir(), t.TempDir(), nil, "")
+	catalog := CatalogForProfile("custom", "custom", t.TempDir(), t.TempDir(), nil, "", "")
 	if len(catalog.Commands) != 0 {
 		t.Fatalf("unexpected commands: %+v", catalog.Commands)
 	}

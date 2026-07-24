@@ -1,0 +1,8 @@
+{
+  "title": "my-project needs answers",
+  "body": "Which database? · myhost",
+  "tag": "herdr-myhost-pane-1",
+  "url": "./#notify=%7B%22host%22%3A%22myhost%22%2C%22pane_id%22%3A%22pane-1%22%2C%22notification_id%22%3A%22evt-1%22%7D",
+  "actions": [],
+  "action_urls": {}
+}

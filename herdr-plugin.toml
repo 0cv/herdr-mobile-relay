@@ -26,7 +26,7 @@ platforms = ["macos", "linux"]
 # dependency. cloudflared remains an interactive Quick Start decision because
 # it opens a public tunnel.
 [[build]]
-command = ["sh", "relay/plugin-build.sh"]
+command = ["bash", "relay/plugin-build.sh"]
 
 # setup — the post-install chooser. The build schedules this automatically
 # after Herdr registers the new manifest when it can identify a safe terminal
@@ -75,6 +75,11 @@ id = "stable-teardown"
 title = "Herdr Mobile Relay: Stable Tunnel Teardown"
 command = ["bash", "relay/open-plugin-pane.sh", "stable-teardown"]
 
+[[actions]]
+id = "uninstall"
+title = "Herdr Mobile Relay: Full Uninstall"
+command = ["bash", "relay/open-plugin-pane.sh", "uninstall"]
+
 # status — a smoke test for support: shows the resolved config, background
 # service state, and the local relay health endpoint, then waits for Enter.
 [[actions]]
@@ -119,6 +124,12 @@ id = "stable-teardown"
 title = "Herdr Mobile Relay: Stable Tunnel Teardown"
 placement = "zoomed"
 command = ["bash", "relay/plugin-stable-teardown.sh"]
+
+[[panes]]
+id = "uninstall"
+title = "Herdr Mobile Relay: Full Uninstall"
+placement = "zoomed"
+command = ["bash", "relay/uninstall.sh"]
 
 [[panes]]
 id = "status"

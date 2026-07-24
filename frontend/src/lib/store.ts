@@ -22,6 +22,7 @@ import {
   clearPendingRelayUpdate,
   normalizeAppDeployment,
   normalizeRelayUpdate,
+  observeAppUpstreamVersion,
   rememberPendingAppDeploy,
   rememberPendingRelayUpdate,
 } from './updates';
@@ -414,6 +415,7 @@ class RelayStore {
         connection.releaseVersion,
         connection.revision,
       );
+      observeAppUpstreamVersion(connection.update.upstream_version);
       this.syncUpdateRestartReconnect(relayId, connection);
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
@@ -436,6 +438,7 @@ class RelayStore {
         connection.releaseVersion,
         connection.revision,
       );
+      observeAppUpstreamVersion(connection.update.upstream_version);
       this.syncUpdateRestartReconnect(relayId, connection);
       if (['failed', 'rolled_back'].includes(connection.update.state)) {
         clearPendingRelayUpdate(relayId);
@@ -692,6 +695,7 @@ class RelayStore {
         connection.releaseVersion,
         connection.revision,
       );
+      observeAppUpstreamVersion(connection.update.upstream_version);
       this.emitConnections();
     }
   }
@@ -721,6 +725,7 @@ class RelayStore {
           connection.releaseVersion,
           connection.revision,
         );
+        observeAppUpstreamVersion(connection.update.upstream_version);
         this.emitConnections();
       }
     } catch (error) {
@@ -733,6 +738,7 @@ class RelayStore {
             connection.releaseVersion,
             connection.revision,
           );
+          observeAppUpstreamVersion(connection.update.upstream_version);
           this.emitConnections();
         }
       }

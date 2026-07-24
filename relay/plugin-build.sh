@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Marketplace build hook: install the exact pre-built release named by the
 # plugin manifest. End-user hosts never compile Go or install Python/uv.
 set -eu
@@ -24,7 +24,8 @@ echo "herdr-mobile-relay: installing verified release $VERSION..." >&2
 sh "$REPO_DIR/install.sh" "$VERSION"
 "$INSTALL_ROOT/current/herdr-mobile-relay" verify-release "$INSTALL_ROOT/current" >/dev/null
 
-# Propagate GH_TOKEN into the service environment for self-update.
+# Store the repository credential separately; the service receives only its
+# path, so the relay, cloudflared, and agent subprocesses never inherit it.
 if [ -n "${GH_TOKEN:-}" ] && [ -f "$SCRIPT_DIR/common.sh" ]; then
     . "$SCRIPT_DIR/common.sh"
     ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
@@ -54,8 +55,7 @@ case "$(uname -s)" in
         PLIST="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
         if [ -f "$PLIST" ] && [ -x "$SERVICE_WRAPPER" ]; then
             echo "herdr-mobile-relay: updating service plist to new release..." >&2
-            sed -i '' "s|<string>.*herdr-mobile-relay-service\.sh</string>|<string>$SERVICE_WRAPPER</string>|" "$PLIST"
-            sed -i '' "s|<string>.*herdr-mobile-relay</string>\(.*WorkingDirectory.*\)|<string>$INSTALL_ROOT/current</string>\1|" "$PLIST" 2>/dev/null || true
+            update_launchd_release_paths "$PLIST" "$SERVICE_WRAPPER" "$INSTALL_ROOT/current"
             if launchctl list 2>/dev/null | grep -q "com.herdr-mobile-relay"; then
                 echo "herdr-mobile-relay: restarting existing service..." >&2
                 launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay.service"

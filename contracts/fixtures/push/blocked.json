@@ -1,0 +1,10 @@
+{
+  "title": "my-project blocked",
+  "body": "rm -rf build-cache · myhost",
+  "tag": "herdr-myhost-pane-1",
+  "url": "./#notify=%7B%22host%22%3A%22myhost%22%2C%22pane_id%22%3A%22pane-1%22%2C%22notification_id%22%3A%22evt-1%22%7D",
+  "actions": [{"action": "approve", "title": "Approve once"}],
+  "action_urls": {
+    "approve": "./#notify=%7B%22host%22%3A%22myhost%22%2C%22pane_id%22%3A%22pane-1%22%2C%22notification_id%22%3A%22evt-1%22%2C%22action%22%3A%22approve%22%2C%22index%22%3A0%2C%22total%22%3A3%7D"
+  }
+}

@@ -6,10 +6,34 @@ on:
       - "v*"
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
-  goreleaser:
+  verify:
+    name: Require successful check workflow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify tagged commit passed check.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          count="$(
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow check.yml \
+              --commit "$GITHUB_SHA" \
+              --status success \
+              --json databaseId \
+              --jq 'length'
+          )"
+          test "$count" -gt 0 || {
+            echo "Tagged commit $GITHUB_SHA has no successful check.yml run." >&2
+            exit 1
+          }
+
+  publish:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -29,10 +53,21 @@ jobs:
         run: |
           make cross-build
           version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' herdr-plugin.toml)"
+          test "$version" = "$manifest_version" || {
+            echo "Tag version $version does not match plugin version $manifest_version." >&2
+            exit 1
+          }
           scripts/package-release.sh "$version" "$GITHUB_SHA" dist/release
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: "~> v2"
-          args: release --clean
+          scripts/check-installed-release.sh \
+            "dist/release/herdr-mobile-relay_${version}_linux_amd64.tar.gz"
+      - name: Publish verified complete bundles
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            dist/release/checksums.txt \
+            dist/release/herdr-mobile-relay_*.tar.gz

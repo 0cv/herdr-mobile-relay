@@ -7,8 +7,9 @@ func TestCodexBaseBuiltins(t *testing.T) {
 	if len(catalog.Commands) == 0 {
 		t.Fatal("no commands returned")
 	}
-	if !hasCommand(catalog, "/clear") || !hasCommand(catalog, "/help") ||
-		!hasCommand(catalog, "/model") || !hasCommand(catalog, "/status") {
+	if len(catalog.Commands) != 50 || !hasCommand(catalog, "/clear") ||
+		!hasCommand(catalog, "/apps") || !hasCommand(catalog, "/model") ||
+		!hasCommand(catalog, "/status") {
 		t.Errorf("missing expected codex builtins: %+v", catalog.Commands)
 	}
 }
@@ -28,14 +29,14 @@ func TestCodexNoFilesystemDiscovery(t *testing.T) {
 func TestCodexModelHint(t *testing.T) {
 	catalog := CatalogFor("codex", "/tmp", "/nonexistent")
 	for _, cmd := range catalog.Commands {
-		if cmd.Command == "/model" {
-			if cmd.ArgumentHint != "[model-name]" {
-				t.Errorf("/model argument_hint = %q", cmd.ArgumentHint)
+		if cmd.Command == "/goal" {
+			if cmd.ArgumentHint != "[objective|edit|pause|resume|clear]" {
+				t.Errorf("/goal argument_hint = %q", cmd.ArgumentHint)
 			}
 			return
 		}
 	}
-	t.Error("/model not found")
+	t.Error("/goal not found")
 }
 
 func TestSemverAtLeast(t *testing.T) {

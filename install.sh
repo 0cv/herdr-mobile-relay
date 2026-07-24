@@ -48,21 +48,56 @@ fetch() {
 
 fetch_json() {
     if command -v curl >/dev/null 2>&1; then
-        curl --fail --show-error --silent --location \
-            -H "Authorization: token ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" "$1"
+        if [ -n "${GH_TOKEN:-}" ]; then
+            curl --fail --show-error --silent --location \
+                -H "Authorization: token ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" "$1"
+        else
+            curl --fail --show-error --silent --location \
+                -H "Accept: application/vnd.github+json" "$1"
+        fi
     else
-        wget --quiet --output-document=- \
-            --header="Authorization: token ${GH_TOKEN}" \
-            --header="Accept: application/vnd.github+json" "$1"
+        if [ -n "${GH_TOKEN:-}" ]; then
+            wget --quiet --output-document=- \
+                --header="Authorization: token ${GH_TOKEN}" \
+                --header="Accept: application/vnd.github+json" "$1"
+        else
+            wget --quiet --output-document=- \
+                --header="Accept: application/vnd.github+json" "$1"
+        fi
     fi
 }
 
 resolve_asset_url() {
-    local release_json="$1" asset_name="$2"
-    printf '%s' "$release_json" | tr -d '\n' | sed 's/},/}\n/g' |
-        grep "\"name\" *: *\"$asset_name\"" |
-        sed 's/.*"url" *: *"\(https[^"]*\)".*/\1/' | head -1
+    release_json=$1
+    asset_name=$2
+    # GitHub places the asset API URL before the asset name and nested uploader
+    # URLs after it. Split at every URL key, then select the record whose
+    # following fields contain the exact asset name.
+    printf '%s' "$release_json" |
+        tr -d '\n\r\t ' |
+        sed 's/"url":"/\
+"url":"/g' |
+        awk -v name="\"name\":\"$asset_name\"" '
+            index($0, name) == 0 { next }
+            {
+                line = $0
+                sub(/^"url":"/, "", line)
+                sub(/".*$/, "", line)
+                print line
+                exit
+            }
+        '
+}
+
+resolve_tag_revision() {
+    commit_json=$1
+    printf '%s' "$commit_json" |
+        tr -d '\n\r\t ' |
+        sed 's/"sha":"/\
+"sha":"/' |
+        sed -n 's/^"sha":"\([0-9a-fA-F][0-9a-fA-F]*\)".*/\1/p' |
+        head -1
 }
 
 sha256_file() {
@@ -123,6 +158,13 @@ main() {
     stage="$work_dir/release"
 
     info "Downloading ${BINARY} ${version} (${target})"
+    commit_json=$(fetch_json "https://api.github.com/repos/${REPO}/commits/${tag}") ||
+        fatal "could not resolve release tag from GitHub API"
+    tag_revision=$(resolve_tag_revision "$commit_json")
+    case "$tag_revision" in
+        ????????????????????????????????????????) ;;
+        *) fatal "release tag did not resolve to an exact commit" ;;
+    esac
     if [ -n "${GH_TOKEN:-}" ]; then
         api_url="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
         release_json=$(fetch_json "$api_url") ||
@@ -168,12 +210,19 @@ main() {
     manifest_version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$stage/release-manifest.json" | head -1)
     revision=$(sed -n 's/^[[:space:]]*"revision":[[:space:]]*"\([^"]*\)".*/\1/p' "$stage/release-manifest.json" | head -1)
     [ "$manifest_version" = "$version" ] || fatal "release manifest version mismatch"
-    case "$revision" in
-        ""|*[!0-9A-Za-z._-]*) fatal "release manifest revision is invalid" ;;
-    esac
+    [ "$revision" = "$tag_revision" ] ||
+        fatal "release manifest revision does not match tag commit"
 
     releases_dir="$release_root/releases"
     final_dir="$releases_dir/${version}-${revision}-${os}-${arch}"
+    previous_dir=
+    if [ -L "$release_root/current" ]; then
+        previous_link=$(readlink "$release_root/current")
+        case "$previous_link" in
+            /*) previous_dir=$previous_link ;;
+            *) previous_dir="$release_root/$previous_link" ;;
+        esac
+    fi
     mkdir -p "$releases_dir" "$shim_dir"
     chmod 700 "$release_root" "$releases_dir"
     if [ -e "$final_dir" ]; then
@@ -181,6 +230,13 @@ main() {
             fatal "existing target release directory is invalid"
     else
         mv "$stage" "$final_dir" || fatal "could not install release directory"
+    fi
+    if [ -n "$previous_dir" ]; then
+        "$final_dir/$BINARY" prune-releases "$release_root" "$final_dir" "$previous_dir" ||
+            fatal "could not prune obsolete releases"
+    else
+        "$final_dir/$BINARY" prune-releases "$release_root" "$final_dir" ||
+            fatal "could not prune obsolete releases"
     fi
     "$final_dir/$BINARY" activate-release "$release_root" "$final_dir" ||
         fatal "could not atomically activate the complete release"

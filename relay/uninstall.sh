@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/common.sh"
 
 RELEASE_ROOT="$(relay_release_root)"
-BIN_LINK="$HOME/.local/bin/herdr-mobile-relay"
+BIN_LINK="${HERDR_RELAY_BIN_DIR:-$HOME/.local/bin}/herdr-mobile-relay"
 
 # Resolve config/state directory from the environment the service actually uses.
 resolve_config_dir() {
@@ -52,42 +52,29 @@ canonicalize() {
     fi
 }
 
-# Verify a path is an expected root before removal. Refuses anything that
-# does not exactly match one of the known installation directories.
+# Verify that the exact resolved target stays under HOME and contains relay
+# markers. This supports explicit HERDR_RELEASE_ROOT and XDG paths without
+# allowing an arbitrary directory to be removed.
 verify_removal_target() {
     local canonical="$1" label="$2"
+    local canonical_home expected=""
 
-    # Expected paths are derived from well-known defaults, NOT from the
-    # environment-controlled values being validated.
-    local default_release="$HOME/.local/share/herdr-mobile-relay"
-    local default_config="${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay"
-    local default_cache="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay"
-    local herdr_plugin_config="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins/config/herdr-mobile-relay.events"
-
-    local match=false
+    canonical_home="$(canonicalize "$HOME")"
+    case "$label" in
+        releases) expected="$(canonicalize "$RELEASE_ROOT")" ;;
+        config/state) expected="$(canonicalize "$CONFIG_DIR")" ;;
+        cache) expected="$(canonicalize "$CACHE_DIR")" ;;
+    esac
     case "$canonical" in
-        "$default_release"|"$default_config"|"$default_cache"|"$herdr_plugin_config")
-            match=true
+        "$canonical_home"/*) ;;
+        *)
+            echo "  REFUSING to remove $label outside HOME: $canonical" >&2
+            return 1
             ;;
     esac
-
-    # Also accept XDG_DATA_HOME-based release root if it is under $HOME.
-    if [ "$match" != "true" ] && [ -n "${XDG_DATA_HOME:-}" ]; then
-        case "$XDG_DATA_HOME" in
-            "$HOME"/*)
-                local xdg_release="$XDG_DATA_HOME/herdr-mobile-relay"
-                local canonical_xdg
-                canonical_xdg="$(canonicalize "$xdg_release")"
-                if [ "$canonical" = "$canonical_xdg" ]; then
-                    match=true
-                fi
-                ;;
-        esac
-    fi
-
-    if [ "$match" != "true" ]; then
+    if [ -z "$expected" ] || [ "$canonical" != "$expected" ]; then
         echo "  REFUSING to remove $label: $canonical" >&2
-        echo "  Path does not match any known herdr-mobile-relay installation root." >&2
+        echo "  Path does not match the resolved herdr-mobile-relay $label root." >&2
         return 1
     fi
 
@@ -98,7 +85,10 @@ verify_removal_target() {
            [ ! -f "$canonical/subscriptions.json" ] && \
            [ ! -d "$canonical/push" ] && \
            [ ! -f "$canonical/relay.env" ] && \
-           [ ! -f "$canonical/herdr-mobile-relay.env" ]; then
+           [ ! -f "$canonical/herdr-mobile-relay.env" ] && \
+           [ ! -f "$canonical/activity.jsonl" ] && \
+           [ ! -d "$canonical/claude-history" ] && \
+           [ ! -d "$canonical/uploads" ]; then
             echo "  REFUSING to remove $label: $canonical" >&2
             echo "  Directory exists but contains no herdr-mobile-relay installation marker." >&2
             return 1
@@ -106,6 +96,18 @@ verify_removal_target() {
     fi
 
     return 0
+}
+
+preflight_removal_target() {
+    local target="$1" label="$2"
+    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+        return
+    fi
+    # A symlink is removed as a link only; its destination is never traversed.
+    if [ -L "$target" ]; then
+        return
+    fi
+    verify_removal_target "$(canonicalize "$target")" "$label"
 }
 
 safe_remove_dir() {
@@ -160,6 +162,12 @@ safe_remove_bin_link() {
         echo "  Skipping binary (not a herdr-mobile-relay executable): $target" >&2
     fi
 }
+
+# Validate every directory before stopping the service. A bad custom/XDG path
+# must fail without disrupting a healthy installation.
+preflight_removal_target "$RELEASE_ROOT" "releases"
+preflight_removal_target "$CONFIG_DIR" "config/state"
+preflight_removal_target "$CACHE_DIR" "cache"
 
 echo "Herdr Mobile Relay — full uninstall"
 echo ""

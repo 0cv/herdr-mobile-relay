@@ -205,6 +205,11 @@ func run(args []string) (int, error) {
 			return 1, fmt.Errorf("refusing to activate invalid release: %w", err)
 		}
 		return status(relayupdate.Activate(args[0], args[1]))
+	case "prune-releases":
+		if len(args) < 2 || len(args) > 3 {
+			return 2, errors.New("usage: herdr-mobile-relay prune-releases RELEASE_ROOT CURRENT_RELEASE [PREVIOUS_RELEASE]")
+		}
+		return status(relayupdate.PruneOldReleases(args[0], args[1:]...))
 	case "setup-fragment":
 		if len(args) < 2 || len(args) > 3 {
 			return 2, errors.New("usage: herdr-mobile-relay setup-fragment TOKEN LABEL [RELAY]")
