@@ -153,13 +153,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	pushDir := filepath.Join(s.cfg.RuntimeDir, "push")
-	if pm, err := push.NewManager(pushDir, s.logger); err != nil {
-		s.recordSafeError("push manager unavailable", err)
-		s.logger.Warn("push manager unavailable", "error", err)
-	} else {
-		s.pushM = pm
-		s.transitionPush = pm
+	pm, err := push.NewManager(pushDir, s.logger)
+	if err != nil {
+		return fmt.Errorf("initialize push manager: %w", err)
 	}
+	s.pushM = pm
+	s.transitionPush = pm
 
 	s.state.SetOnTransition(func(paneID, agent, project, status string, revision int64) {
 		s.transitionTasks.Start(func(taskCtx context.Context) {

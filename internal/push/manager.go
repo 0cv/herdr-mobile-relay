@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -96,24 +97,51 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 	privData, privErr := os.ReadFile(privPath)
 	pubData, pubErr := os.ReadFile(pubPath)
 
-	if privErr == nil && pubErr == nil {
-		privKey, err := parseVAPIDPrivate(string(privData))
+	if privErr != nil && !os.IsNotExist(privErr) {
+		return fmt.Errorf("read VAPID private key: %w", privErr)
+	}
+	if pubErr != nil && !os.IsNotExist(pubErr) {
+		return fmt.Errorf("read VAPID public key: %w", pubErr)
+	}
+
+	privMissing := os.IsNotExist(privErr)
+	pubMissing := os.IsNotExist(pubErr)
+	if privMissing && !pubMissing {
+		return fmt.Errorf("VAPID private key is missing while public key exists")
+	}
+	if !privMissing {
+		privateKey, err := parseVAPIDPrivateKey(string(privData))
 		if err != nil {
 			return fmt.Errorf("parse VAPID private key: %w", err)
 		}
-		pubKey, err := parseVAPIDPublic(string(pubData))
-		if err != nil {
-			return fmt.Errorf("parse VAPID public key: %w", err)
+		derivedPublic := deriveVAPIDPublic(privateKey)
+
+		if pubMissing {
+			publicDER, err := x509.MarshalPKIXPublicKey(derivedPublic)
+			if err != nil {
+				return fmt.Errorf("encode derived VAPID public key: %w", err)
+			}
+			publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+			if err := atomicWrite(pubPath, publicPEM, 0o644); err != nil {
+				return fmt.Errorf("write derived VAPID public key: %w", err)
+			}
+			m.logger.Info("derived missing VAPID public key from existing private key")
+		} else {
+			publicKey, err := parseVAPIDPublicKey(string(pubData))
+			if err != nil {
+				return fmt.Errorf("parse VAPID public key: %w", err)
+			}
+			if publicKey.X.Cmp(derivedPublic.X) != 0 || publicKey.Y.Cmp(derivedPublic.Y) != 0 {
+				return fmt.Errorf("VAPID public key does not match private key")
+			}
 		}
-		m.vapidPrivate = privKey
-		m.vapidPublic = pubKey
+
 		if err := os.Chmod(privPath, 0o600); err != nil {
-			return err
+			return fmt.Errorf("protect VAPID private key: %w", err)
 		}
+		m.vapidPrivate = encodeVAPIDPrivate(privateKey)
+		m.vapidPublic = encodeVAPIDPublic(derivedPublic)
 		return nil
-	}
-	if !os.IsNotExist(privErr) || !os.IsNotExist(pubErr) {
-		return fmt.Errorf("VAPID key pair is incomplete or unreadable")
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -137,10 +165,8 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 		return fmt.Errorf("write VAPID public key: %w", err)
 	}
 
-	privateScalar := make([]byte, 32)
-	key.D.FillBytes(privateScalar)
-	m.vapidPrivate = base64.RawURLEncoding.EncodeToString(privateScalar)
-	m.vapidPublic = base64.RawURLEncoding.EncodeToString(elliptic.Marshal(key.Curve, key.X, key.Y))
+	m.vapidPrivate = encodeVAPIDPrivate(key)
+	m.vapidPublic = encodeVAPIDPublic(&key.PublicKey)
 	m.logger.Info("generated new VAPID key pair")
 	return nil
 }
@@ -148,59 +174,112 @@ func (m *Manager) loadOrGenerateVAPIDKeys(pushDir string) error {
 // parseVAPIDPrivate handles both PEM-encoded EC private keys (Python format)
 // and raw base64url scalars (webpush-go format).
 func parseVAPIDPrivate(data string) (string, error) {
+	key, err := parseVAPIDPrivateKey(data)
+	if err != nil {
+		return "", err
+	}
+	return encodeVAPIDPrivate(key), nil
+}
+
+func parseVAPIDPrivateKey(data string) (*ecdsa.PrivateKey, error) {
 	data = strings.TrimSpace(data)
 	if !strings.HasPrefix(data, "-----BEGIN") {
-		return data, nil
+		scalar, err := base64.RawURLEncoding.DecodeString(data)
+		if err != nil {
+			return nil, fmt.Errorf("decode private scalar: %w", err)
+		}
+		curve := elliptic.P256()
+		d := new(big.Int).SetBytes(scalar)
+		if d.Sign() <= 0 || d.Cmp(curve.Params().N) >= 0 {
+			return nil, fmt.Errorf("private scalar is outside the P-256 range")
+		}
+		x, y := curve.ScalarBaseMult(d.Bytes())
+		return &ecdsa.PrivateKey{
+			PublicKey: ecdsa.PublicKey{Curve: curve, X: x, Y: y},
+			D:         d,
+		}, nil
 	}
 
 	block, _ := pem.Decode([]byte(data))
 	if block == nil {
-		return "", fmt.Errorf("invalid PEM block")
+		return nil, fmt.Errorf("invalid PEM block")
 	}
 
 	key, err := x509.ParseECPrivateKey(block.Bytes)
 	if err != nil {
 		pkcs8Key, err2 := x509.ParsePKCS8PrivateKey(block.Bytes)
 		if err2 != nil {
-			return "", fmt.Errorf("parse EC key: %v (pkcs8: %v)", err, err2)
+			return nil, fmt.Errorf("parse EC key: %v (pkcs8: %v)", err, err2)
 		}
 		ecKey, ok := pkcs8Key.(*ecdsa.PrivateKey)
 		if !ok {
-			return "", fmt.Errorf("not an EC private key")
+			return nil, fmt.Errorf("not an EC private key")
 		}
 		key = ecKey
 	}
-
-	privateScalar := make([]byte, 32)
-	key.D.FillBytes(privateScalar)
-	return base64.RawURLEncoding.EncodeToString(privateScalar), nil
+	if key.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("VAPID private key must use P-256")
+	}
+	return key, nil
 }
 
 // parseVAPIDPublic handles both PEM-encoded EC public keys (Python format)
 // and raw base64url points (webpush-go format).
 func parseVAPIDPublic(data string) (string, error) {
+	key, err := parseVAPIDPublicKey(data)
+	if err != nil {
+		return "", err
+	}
+	return encodeVAPIDPublic(key), nil
+}
+
+func parseVAPIDPublicKey(data string) (*ecdsa.PublicKey, error) {
 	data = strings.TrimSpace(data)
 	if !strings.HasPrefix(data, "-----BEGIN") {
-		return data, nil
+		point, err := base64.RawURLEncoding.DecodeString(data)
+		if err != nil {
+			return nil, fmt.Errorf("decode public point: %w", err)
+		}
+		x, y := elliptic.Unmarshal(elliptic.P256(), point)
+		if x == nil || y == nil {
+			return nil, fmt.Errorf("invalid P-256 public point")
+		}
+		return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
 	}
 
 	block, _ := pem.Decode([]byte(data))
 	if block == nil {
-		return "", fmt.Errorf("invalid PEM block")
+		return nil, fmt.Errorf("invalid PEM block")
 	}
 
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return "", fmt.Errorf("parse public key: %w", err)
+		return nil, fmt.Errorf("parse public key: %w", err)
 	}
 
 	ecPub, ok := pub.(*ecdsa.PublicKey)
 	if !ok {
-		return "", fmt.Errorf("not an EC public key")
+		return nil, fmt.Errorf("not an EC public key")
 	}
+	if ecPub.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("VAPID public key must use P-256")
+	}
+	return ecPub, nil
+}
 
-	point := elliptic.Marshal(ecPub.Curve, ecPub.X, ecPub.Y)
-	return base64.RawURLEncoding.EncodeToString(point), nil
+func deriveVAPIDPublic(key *ecdsa.PrivateKey) *ecdsa.PublicKey {
+	x, y := elliptic.P256().ScalarBaseMult(key.D.Bytes())
+	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+}
+
+func encodeVAPIDPrivate(key *ecdsa.PrivateKey) string {
+	privateScalar := make([]byte, 32)
+	key.D.FillBytes(privateScalar)
+	return base64.RawURLEncoding.EncodeToString(privateScalar)
+}
+
+func encodeVAPIDPublic(key *ecdsa.PublicKey) string {
+	return base64.RawURLEncoding.EncodeToString(elliptic.Marshal(elliptic.P256(), key.X, key.Y))
 }
 
 func (m *Manager) load() error {

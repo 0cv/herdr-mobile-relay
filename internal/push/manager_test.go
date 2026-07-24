@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -62,6 +63,152 @@ func TestNewManagerLoadsExistingKeys(t *testing.T) {
 
 	if key1 != key2 {
 		t.Error("keys should be stable across restarts")
+	}
+}
+
+func TestNewManagerDerivesMissingPythonPublicKey(t *testing.T) {
+	dir := t.TempDir()
+	privatePath := filepath.Join(dir, "vapid_private.pem")
+	publicPath := filepath.Join(dir, "vapid_public.pem")
+	subscriptionsPath := filepath.Join(dir, "subscriptions.json")
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
+	subscriptions := []byte(`{"subscriptions":[{"subscription":{"endpoint":"https://push.example.test/legacy","keys":{"p256dh":"legacy-key","auth":"legacy-auth"}},"client_id":"phone","notify_finished":true}]}`)
+	if err := os.WriteFile(privatePath, privatePEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(subscriptionsPath, subscriptions, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := NewManager(dir, testLogger())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	wantPublic := encodeVAPIDPublic(&key.PublicKey)
+	if got := manager.VAPIDPublicKey(); got == "" || got != wantPublic {
+		t.Fatalf("VAPID public key = %q, want derived key %q", got, wantPublic)
+	}
+	assertFileContents(t, privatePath, privatePEM)
+	assertFileContents(t, subscriptionsPath, subscriptions)
+
+	publicPEM, err := os.ReadFile(publicPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedPublic, err := parseVAPIDPublic(string(publicPEM))
+	if err != nil {
+		t.Fatalf("parse derived public key: %v", err)
+	}
+	if parsedPublic != wantPublic {
+		t.Fatalf("persisted public key = %q, want %q", parsedPublic, wantPublic)
+	}
+	if info, err := os.Stat(privatePath); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("private key mode = %o, want 600", info.Mode().Perm())
+	}
+	if info, err := os.Stat(publicPath); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o644 {
+		t.Fatalf("public key mode = %o, want 644", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".vapid_public.pem.") {
+			t.Fatalf("atomic write left temporary file %q", entry.Name())
+		}
+	}
+
+	restarted, err := NewManager(dir, testLogger())
+	if err != nil {
+		t.Fatalf("restart NewManager: %v", err)
+	}
+	if restarted.VAPIDPublicKey() != wantPublic {
+		t.Fatalf("public key changed across restart: got %q, want %q", restarted.VAPIDPublicKey(), wantPublic)
+	}
+	assertFileContents(t, privatePath, privatePEM)
+	assertFileContents(t, subscriptionsPath, subscriptions)
+}
+
+func TestNewManagerRejectsUnsafeVAPIDLayouts(t *testing.T) {
+	t.Run("public only", func(t *testing.T) {
+		dir := t.TempDir()
+		_, publicPEM := testVAPIDKeyPair(t)
+		if err := os.WriteFile(filepath.Join(dir, "vapid_public.pem"), publicPEM, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewManager(dir, testLogger()); err == nil || !strings.Contains(err.Error(), "private key is missing") {
+			t.Fatalf("NewManager error = %v, want missing-private error", err)
+		}
+	})
+
+	t.Run("invalid private only", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "vapid_private.pem"), []byte("not-a-key\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewManager(dir, testLogger()); err == nil || !strings.Contains(err.Error(), "parse VAPID private key") {
+			t.Fatalf("NewManager error = %v, want invalid-private error", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "vapid_public.pem")); !os.IsNotExist(err) {
+			t.Fatalf("public key created for invalid private key: %v", err)
+		}
+	})
+
+	t.Run("mismatched pair", func(t *testing.T) {
+		dir := t.TempDir()
+		privatePEM, _ := testVAPIDKeyPair(t)
+		_, publicPEM := testVAPIDKeyPair(t)
+		if err := os.WriteFile(filepath.Join(dir, "vapid_private.pem"), privatePEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "vapid_public.pem"), publicPEM, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewManager(dir, testLogger()); err == nil || !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("NewManager error = %v, want mismatch error", err)
+		}
+	})
+}
+
+func testVAPIDKeyPair(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
+}
+
+func assertFileContents(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s contents changed", filepath.Base(path))
 	}
 }
 
