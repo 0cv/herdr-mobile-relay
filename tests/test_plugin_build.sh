@@ -18,6 +18,7 @@ FAKE_BIN="$WORK_DIR/bin"
 HEALTH_FILE="$WORK_DIR/health.json"
 CONFIG_RECORD="$WORK_DIR/installer-config-root"
 TOKEN_RECORD="$WORK_DIR/installer-token"
+RESTART_LOG="$WORK_DIR/restarts"
 mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$SOURCE_CONFIG/push" \
     "$SOURCE_CONFIG/cloudflared" \
     "$TARGET_CONFIG/push" "$(dirname "$UNIT_FILE")" "$FAKE_BIN"
@@ -83,6 +84,7 @@ cat > "$FAKE_INSTALLER" <<EOF
 set -eu
 printf '%s\n' "\$HERDR_PLUGIN_CONFIG_DIR" > "$CONFIG_RECORD"
 printf '%s\n' "\${GH_TOKEN:-}" > "$TOKEN_RECORD"
+[ "\${FAIL_INSTALLER:-}" != 1 ] || exit 1
 temp="\$INSTALL_ROOT/.current-install"
 rm -f "\$temp"
 ln -s "$NEW_RELEASE" "\$temp"
@@ -93,8 +95,9 @@ chmod 700 "$FAKE_INSTALLER"
 cat > "$FAKE_BIN/systemctl" <<'EOF'
 #!/bin/sh
 case " $* " in
-    *" is-active "*) exit 0 ;;
+    *" is-active "*) printf 'active\n'; exit 0 ;;
     *" restart "*)
+        printf 'restart\n' >> "$RESTART_LOG"
         if grep -Fx "ExecStart=$SOURCE_CONFIG/herdr-mobile-relay-service.sh" "$UNIT_FILE" >/dev/null; then
             printf '{"status":"ok","instance":"test","version":"0.8.6","protocol":2,"release_version":"0.8.6","revision":"old-revision","bundle_hash":"old-web"}\n' > "$HEALTH_FILE"
         else
@@ -110,16 +113,37 @@ cat > "$FAKE_BIN/curl" <<'EOF'
 #!/bin/sh
 cat "$HEALTH_FILE"
 EOF
-chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl"
+cat > "$FAKE_BIN/herdr" <<'EOF'
+#!/bin/sh
+if [ "$*" = "plugin config-dir herdr-mobile-relay.events" ]; then
+    printf '%s\n' "$TARGET_CONFIG"
+    exit 0
+fi
+exit 1
+EOF
+chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr"
 
-export SOURCE_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION
+export SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
 if HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
-    HERDR_PLUGIN_CONFIG_DIR="$TARGET_CONFIG" \
+    HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+    FAIL_INSTALLER=1 \
+    bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/pre-cutover-output" 2>&1; then
+    echo "plugin migration unexpectedly accepted an installer failure" >&2
+    exit 1
+fi
+test ! -e "$RESTART_LOG"
+diff -qr "$WORK_DIR/target-before" "$TARGET_CONFIG" >/dev/null
+grep -F "previous running service was left untouched" "$WORK_DIR/pre-cutover-output" >/dev/null
+
+if HOME="$TEST_HOME" \
+    PATH="$FAKE_BIN:$PATH" \
+    HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
     HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
     bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/output" 2>&1; then
     echo "plugin migration unexpectedly accepted the wrong replacement identity" >&2
+    cat "$WORK_DIR/output" >&2
     exit 1
 fi
 
@@ -135,7 +159,6 @@ grep -F "previous service recovered successfully" "$WORK_DIR/output" >/dev/null
 if ! HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
-    HERDR_PLUGIN_CONFIG_DIR="$TARGET_CONFIG" \
     HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
     REPLACEMENT_REVISION=new-revision \
     bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/success-output" 2>&1; then

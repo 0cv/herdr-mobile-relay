@@ -21,7 +21,18 @@ VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_DIR/herdr-plugin.toml")
 INSTALL_ROOT=${HERDR_RELEASE_ROOT:-"${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay"}
 BIN_DIR=${HERDR_RELAY_BIN_DIR:-"$HOME/.local/bin"}
 INSTALLER=${HERDR_PLUGIN_INSTALLER:-"$REPO_DIR/install.sh"}
-TARGET_CONFIG_ROOT=${HERDR_PLUGIN_CONFIG_DIR:-"${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay"}
+TARGET_CONFIG_ROOT=${HERDR_PLUGIN_CONFIG_DIR:-}
+if [ -z "$TARGET_CONFIG_ROOT" ] && command -v herdr >/dev/null 2>&1; then
+    TARGET_CONFIG_ROOT="$(herdr plugin config-dir herdr-mobile-relay.events 2>/dev/null || true)"
+fi
+TARGET_CONFIG_ROOT=${TARGET_CONFIG_ROOT:-"${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay"}
+case "$TARGET_CONFIG_ROOT" in
+    /*) ;;
+    *)
+        echo "herdr-mobile-relay: plugin config directory must be absolute: $TARGET_CONFIG_ROOT" >&2
+        exit 1
+        ;;
+esac
 TARGET_ENV="$TARGET_CONFIG_ROOT/relay.env"
 SOURCE_ENV="$(installed_service_env_file)"
 if [ -z "$SOURCE_ENV" ] && [ -n "${HERDR_RELAY_ENV:-}" ] && [ -f "$HERDR_RELAY_ENV" ]; then
@@ -38,12 +49,13 @@ PLATFORM=$(uname -s)
 SERVICE_FILE=
 SERVICE_BACKUP=
 service_was_active=false
+service_cutover_started=false
 case "$PLATFORM" in
     Linux)
         SERVICE_FILE="$HOME/.config/systemd/user/herdr-mobile-relay.service"
-        if systemctl --user is-active --quiet herdr-mobile-relay.service 2>/dev/null; then
-            service_was_active=true
-        fi
+        case "$(systemctl --user is-active herdr-mobile-relay.service 2>/dev/null || true)" in
+            active|activating|reloading) service_was_active=true ;;
+        esac
         ;;
     Darwin)
         SERVICE_FILE="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
@@ -251,6 +263,10 @@ rollback_plugin_migration() {
     fi
     restore_target_config || return 1
 
+    if [ "$service_cutover_started" != true ]; then
+        echo "herdr-mobile-relay: previous running service was left untouched." >&2
+        return 0
+    fi
     if [ "$service_was_active" != true ]; then
         echo "herdr-mobile-relay: previous inactive service definition restored." >&2
         return 0
@@ -357,6 +373,7 @@ case "$PLATFORM" in
         UNIT_FILE="$SERVICE_FILE"
         if [ -f "$UNIT_FILE" ] && [ -x "$SERVICE_WRAPPER" ]; then
             echo "herdr-mobile-relay: updating service unit to new release..." >&2
+            service_cutover_started=true
             sed -i "s|^ExecStart=.*|ExecStart=$SERVICE_WRAPPER|" "$UNIT_FILE"
             sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$INSTALL_ROOT/current|" "$UNIT_FILE"
             sed -i "s|^Environment=HERDR_RELAY_ENV=.*|Environment=HERDR_RELAY_ENV=$TARGET_ENV|" "$UNIT_FILE"
@@ -365,7 +382,7 @@ case "$PLATFORM" in
                 exit 1
             }
             systemctl --user daemon-reload 2>/dev/null || true
-            if systemctl --user is-active --quiet herdr-mobile-relay.service 2>/dev/null; then
+            if [ "$service_was_active" = true ]; then
                 echo "herdr-mobile-relay: restarting existing service..." >&2
                 systemctl --user restart herdr-mobile-relay.service
                 service_restarted=true
@@ -380,6 +397,7 @@ case "$PLATFORM" in
         PLIST="$SERVICE_FILE"
         if [ -f "$PLIST" ] && [ -x "$SERVICE_WRAPPER" ]; then
             echo "herdr-mobile-relay: updating service plist to new release..." >&2
+            service_cutover_started=true
             update_launchd_release_paths \
                 "$PLIST" "$SERVICE_WRAPPER" "$INSTALL_ROOT/current" "$TARGET_ENV"
             if launchctl list 2>/dev/null | grep -q "com.herdr-mobile-relay"; then
