@@ -62,6 +62,21 @@ What parts of the pipeline should the plan cover?
 tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
 `
 
+const codexSingleQuestionView = `
+Question 1/1 (1 unanswered)
+Which hardening priority should lead the implementation plan?
+
+› 1. Security and supply-chain hardening (Recommended)  Add integrity/supply-chain checks, provenance, stricter artifact verification, and secure
+                                                        release gating.
+  2. Reliability/reproducibility hardening              Eliminate flakiness and strengthen deterministic build, verification, and environment
+                                                        checks.
+  3. Balance both with minimal extra runtime            Apply a small, practical set of changes across reliability and security with low CI
+                                                        overhead.
+  4. None of the above                                  Optionally, add details in notes (tab).
+
+tab to add notes | enter to submit answer | esc to interrupt
+`
+
 func TestParseClaudeMultiQuestion(t *testing.T) {
 	interaction := Parse(multiQuestionView, "claude")
 	if interaction == nil {
@@ -129,6 +144,24 @@ func TestParseCodexFinalQuestionSubmitAll(t *testing.T) {
 	}
 }
 
+func TestParseCodexSingleQuestionWithoutNavigationFooter(t *testing.T) {
+	interaction := Parse(codexSingleQuestionView, "codex")
+	if interaction == nil {
+		t.Fatal("single question was not parsed")
+	}
+	if interaction.Kind != "single_select" ||
+		interaction.Question != "Which hardening priority should lead the implementation plan?" ||
+		len(interaction.Options) != 3 ||
+		interaction.Options[0].Description != "Add integrity/supply-chain checks, provenance, stricter artifact verification, and secure release gating." ||
+		interaction.Other.Label != "None of the above" ||
+		interaction.SubmitLabel != "Submit" ||
+		interaction.CanGoBack ||
+		interaction.QuestionIndex != 1 ||
+		interaction.QuestionTotal != 1 {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
 func TestCodexFooterSubmitVariants(t *testing.T) {
 	for _, submitText := range []string{"answer", "answers", "all"} {
 		footer := "tab to add notes | enter to submit " + submitText + " | ←/→ to navigate questions"
@@ -138,6 +171,9 @@ func TestCodexFooterSubmitVariants(t *testing.T) {
 	}
 	if codexFooter("enter to submit all") {
 		t.Fatal("footer without question navigation was recognized")
+	}
+	if !codexSingleFooter("tab to add notes | enter to submit answer | esc to interrupt") {
+		t.Fatal("single-question footer was not recognized")
 	}
 }
 
@@ -152,6 +188,9 @@ Do you want to proceed?
 `
 	if LayoutHint(claudeFirstQuestionView + approval) {
 		t.Fatal("historical question was treated as live")
+	}
+	if LayoutHint(codexSingleQuestionView + "\nPlan complete.") {
+		t.Fatal("historical single Codex question was treated as live")
 	}
 }
 
