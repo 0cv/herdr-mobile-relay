@@ -2,7 +2,7 @@
 # Install one exact, complete Herdr Mobile Relay release. No toolchain needed.
 set -eu
 
-REPO=${HERDR_RELEASE_REPOSITORY:-0cv/herdr-mobile-relay-dev}
+REPO=${HERDR_RELEASE_REPOSITORY:-0cv/herdr-mobile-relay}
 BINARY=herdr-mobile-relay
 
 info() { printf '==> %s\n' "$1" >&2; }

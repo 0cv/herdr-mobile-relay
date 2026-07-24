@@ -22,7 +22,7 @@ import (
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
-const canonicalAPI = "https://api.github.com/repos/0cv/herdr-mobile-relay-dev"
+const canonicalAPI = "https://api.github.com/repos/0cv/herdr-mobile-relay"
 
 var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 

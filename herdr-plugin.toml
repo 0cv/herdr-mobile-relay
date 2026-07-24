@@ -1,5 +1,5 @@
 # herdr-plugin.toml registers Herdr Mobile Relay with herdr as a plugin.
-# Install it with `herdr plugin install 0cv/herdr-mobile-relay-dev` (herdr clones
+# Install it with `herdr plugin install 0cv/herdr-mobile-relay` (herdr clones
 # this repo, runs the [[build]] pre-warm below after confirmation, and
 # registers the entry points), or `herdr plugin link .` from a local checkout.
 #
@@ -15,7 +15,7 @@
 
 id = "herdr-mobile-relay.events"
 name = "Herdr Mobile Relay"
-version = "0.9.11"
+version = "0.9.12"
 # Herdr 0.7.5 introduced the live-agent facade used for atomic starts and prompts.
 min_herdr_version = "0.7.5"
 description = "Remote mobile control for Herdr: approve and monitor agents from your smartphone (Android/iOS) with an installable web app, push notifications, QR pairing, and per-computer Cloudflare tunnels"

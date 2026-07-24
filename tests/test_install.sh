@@ -12,13 +12,13 @@ sed '$d' "$REPO_DIR/install.sh" > "$WORK_DIR/install-functions.sh"
 
 release_json='{
   "assets": [{
-    "url": "https://api.github.com/repos/0cv/herdr-mobile-relay-dev/releases/assets/123",
+    "url": "https://api.github.com/repos/0cv/herdr-mobile-relay/releases/assets/123",
     "name": "herdr-mobile-relay_0.9.0_linux_amd64.tar.gz",
     "uploader": {
       "url": "https://api.github.com/users/0cv"
     }
   }, {
-    "url": "https://api.github.com/repos/0cv/herdr-mobile-relay-dev/releases/assets/124",
+    "url": "https://api.github.com/repos/0cv/herdr-mobile-relay/releases/assets/124",
     "name": "checksums.txt",
     "uploader": {
       "url": "https://api.github.com/users/0cv"
@@ -28,8 +28,8 @@ release_json='{
 
 archive_url=$(resolve_asset_url "$release_json" "herdr-mobile-relay_0.9.0_linux_amd64.tar.gz")
 checksum_url=$(resolve_asset_url "$release_json" "checksums.txt")
-test "$archive_url" = "https://api.github.com/repos/0cv/herdr-mobile-relay-dev/releases/assets/123"
-test "$checksum_url" = "https://api.github.com/repos/0cv/herdr-mobile-relay-dev/releases/assets/124"
+test "$archive_url" = "https://api.github.com/repos/0cv/herdr-mobile-relay/releases/assets/123"
+test "$checksum_url" = "https://api.github.com/repos/0cv/herdr-mobile-relay/releases/assets/124"
 
 commit_json='{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"tree":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}'
 test "$(resolve_tag_revision "$commit_json")" = "0123456789abcdef0123456789abcdef01234567"

@@ -147,7 +147,7 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
 fi
 
 if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ ! -f "$WEB_ENV_FILE" ]; then
-    cp "$REPO_DIR/.env.example" "$WEB_ENV_FILE"
+    install -m 0600 "$REPO_DIR/.env.example" "$WEB_ENV_FILE"
     echo "Created $WEB_ENV_FILE"
 fi
 ensure_relay_env "$ENV_FILE"

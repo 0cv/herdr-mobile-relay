@@ -5,12 +5,8 @@ TryCloudflare tunnel. You need Herdr 0.7.5 or newer, Git, and `curl`.
 
 ## 1. Install
 
-This repository is private during testing:
-
 ```bash
-gh auth setup-git
-export GH_TOKEN=ghp_...
-herdr plugin install 0cv/herdr-mobile-relay-dev
+herdr plugin install 0cv/herdr-mobile-relay
 ```
 
 Choose **Quick Start** when the setup menu opens. If it does not:

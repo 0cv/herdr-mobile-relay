@@ -287,7 +287,7 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
   await expect(page.getByText(/Relay outdated/)).toBeVisible();
   await page.getByRole('button', { name: 'How to update Fedora' }).click();
   const updateHelp = page.getByRole('dialog', { name: 'Update Fedora' });
-  await expect(updateHelp).toContainText('herdr plugin install 0cv/herdr-mobile-relay-dev');
+  await expect(updateHelp).toContainText('herdr plugin install 0cv/herdr-mobile-relay');
   await updateHelp.getByRole('button', { name: 'Close' }).click();
   await page.getByRole('button', { name: 'Remove Fedora' }).click();
   const removeDialog = page.getByRole('dialog', { name: 'Remove Fedora?' });

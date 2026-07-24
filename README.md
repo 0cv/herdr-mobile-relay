@@ -1,12 +1,12 @@
 # Herdr Mobile Relay
 
-[![check](https://github.com/0cv/herdr-mobile-relay-dev/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay-dev/actions/workflows/check.yml)
+[![check](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml)
 
 Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** `0.9.11`
+**Current version:** `0.9.12`
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -15,17 +15,9 @@ into one installable web app.
 
 Requirements: Herdr 0.7.5 or newer, Git, and `curl`.
 
-This repository is private during testing. Let Herdr clone it with your GitHub
-credentials and provide a token with `repo` access for release downloads:
-
 ```bash
-gh auth setup-git
-export GH_TOKEN=ghp_...
-herdr plugin install 0cv/herdr-mobile-relay-dev
+herdr plugin install 0cv/herdr-mobile-relay
 ```
-
-The installer stores the token in a private `0600` credential file. The service
-receives only that file's path, and only the updater reads it.
 
 Choose **Quick Start** from the setup menu. If the menu does not open:
 
@@ -111,7 +103,7 @@ Cloudflare credentials on the deployment-owner computer only.
 ## Local Development
 
 ```bash
-git clone https://github.com/0cv/herdr-mobile-relay-dev.git
+git clone https://github.com/0cv/herdr-mobile-relay.git
 cd herdr-mobile-relay
 make dev-tunnel
 ```
