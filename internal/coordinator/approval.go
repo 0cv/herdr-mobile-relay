@@ -674,10 +674,6 @@ func approvalLedgerKey(paneID, eventID string) string {
 	return "approval\x00" + paneID + "\x00" + eventID
 }
 
-func questionLedgerKey(paneID, interactionID string) string {
-	return "question\x00" + paneID + "\x00" + interactionID
-}
-
 func questionOperationLedgerKey(action, paneID, interactionID, requestID string) string {
 	switch action {
 	case "navigate_question":
@@ -685,7 +681,7 @@ func questionOperationLedgerKey(action, paneID, interactionID, requestID string)
 	case "clarify_question":
 		return "question-clarification\x00" + paneID + "\x00" + interactionID + "\x00" + requestID
 	default:
-		return questionLedgerKey(paneID, interactionID)
+		return "question-answer\x00" + paneID + "\x00" + interactionID + "\x00" + requestID
 	}
 }
 

@@ -249,8 +249,8 @@ func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "claude", Status: "blocked"}}, d.state.RevisionCounter())
 
-	answer := func() {
-		d.Handle(context.Background(), map[string]any{
+	answer := func() *CommandResult {
+		return d.Handle(context.Background(), map[string]any{
 			"action":           "answer_question",
 			"request_id":       "q",
 			"pane_id":          "pane-1",
@@ -261,6 +261,17 @@ func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
 
 	answer() // first submission
 	answer() // duplicate: retry or a second client on the same interaction
+
+	conflict := d.Handle(context.Background(), map[string]any{
+		"action":           "answer_question",
+		"request_id":       "q",
+		"pane_id":          "pane-1",
+		"interaction_id":   interaction.ID,
+		"selected_indices": []any{float64(1)},
+	})
+	if conflict.OK || !strings.Contains(conflict.Error, "different response") {
+		t.Fatalf("same request with different answer = %+v, want conflict", conflict)
+	}
 
 	data, _ := os.ReadFile(record)
 	// Each answer confirms with a single Enter; a deduped answer sends it once.
@@ -381,12 +392,27 @@ func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *te
 	}
 	awaitUpdate("previous-2", "navigated")
 
+	changedAnswer := d.Handle(context.Background(), map[string]any{
+		"action":           "answer_question",
+		"request_id":       "answer-2",
+		"pane_id":          "pane-1",
+		"interaction_id":   first.ID,
+		"selected_indices": []any{float64(1)},
+	})
+	if !changedAnswer.OK || changedAnswer.Phase != "accepted" {
+		t.Fatalf("changed answer after returning to question = %+v", changedAnswer)
+	}
+	awaitUpdate("answer-2", "advanced")
+
 	data, err := os.ReadFile(record)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lefts := strings.Count(string(data), "Left"); lefts != 2 {
 		t.Fatalf("Left dispatches = %d, want 2\n%s", lefts, data)
+	}
+	if enters := strings.Count(string(data), "Enter"); enters != 2 {
+		t.Fatalf("answer dispatches = %d, want 2\n%s", enters, data)
 	}
 }
 
