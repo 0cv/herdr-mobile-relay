@@ -57,6 +57,10 @@ legacy_cache="$legacy_home/.cache/herdr-mobile-relay"
 mkdir -p "$legacy_config/push" "$legacy_cache/claude-history" "$legacy_cache/uploads"
 printf "HERDR_RELAY_TOKEN='legacy-token'\nHERDR_RELAY_INSTANCE_ID='legacy-instance'\n" > "$legacy_config/relay.env"
 printf '[]\n' > "$legacy_config/push/subscriptions.json"
+printf '{"state":"failed"}\n' > "$legacy_config/update-state.json"
+printf '{"state":"idle"}\n' > "$legacy_config/app-deploy-state.json"
+printf 'private-token\n' > "$legacy_config/github-token"
+chmod 600 "$legacy_config/github-token"
 printf '{"id":"legacy"}\n' > "$legacy_cache/activity.jsonl"
 printf '{"history":["preserved"]}\n' > "$legacy_cache/claude-history/pane.json"
 HOME="$legacy_home"
@@ -64,7 +68,19 @@ prepare_install_roots "$legacy_release" "$legacy_config" "$legacy_cache"
 test -f "$legacy_config/.herdr-mobile-relay-installation"
 test -f "$legacy_cache/.herdr-mobile-relay-installation"
 grep -F legacy-token "$legacy_config/relay.env" >/dev/null
+grep -F failed "$legacy_config/update-state.json" >/dev/null
+grep -F idle "$legacy_config/app-deploy-state.json" >/dev/null
 grep -F preserved "$legacy_cache/claude-history/pane.json" >/dev/null
+
+symlink_config="$WORK_DIR/symlink-config"
+mkdir -p "$symlink_config"
+printf "HERDR_RELAY_TOKEN='legacy-token'\n" > "$symlink_config/relay.env"
+ln -s "$legacy_config/relay.env" "$symlink_config/linked.env"
+if (write_install_sentinel "$symlink_config" config) 2>/dev/null; then
+    echo "write_install_sentinel accepted a symlinked legacy config" >&2
+    exit 1
+fi
+test ! -e "$symlink_config/.herdr-mobile-relay-installation"
 
 xdg_home="$WORK_DIR/xdg-home"
 xdg_release="$xdg_home/.local/share/herdr-mobile-relay"

@@ -40,9 +40,11 @@ HERDR_PLIST_BUDDY="$FAKE_PLIST_BUDDY"
 export HERDR_PLIST_BUDDY
 update_launchd_release_paths "$WORK_DIR/service.plist" \
     "$WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh" \
-    "$WORK_DIR/releases/current"
+    "$WORK_DIR/releases/current" \
+    "$WORK_DIR/config/relay.env"
 grep -F "Set :ProgramArguments:0 $WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh" "$PLIST_LOG" >/dev/null
 grep -F "Set :WorkingDirectory $WORK_DIR/releases/current" "$PLIST_LOG" >/dev/null
+grep -F "Set :EnvironmentVariables:HERDR_RELAY_ENV $WORK_DIR/config/relay.env" "$PLIST_LOG" >/dev/null
 
 HEALTH='{"status":"ok","release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
 verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"

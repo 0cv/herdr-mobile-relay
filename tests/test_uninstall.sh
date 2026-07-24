@@ -69,14 +69,21 @@ if printf 'n\n' |
     exit 1
 fi
 
+SOURCE_CHECKOUT="$TEST_HOME/source-checkout"
+mkdir -p "$SOURCE_CHECKOUT/relay"
+printf "HERDR_RELAY_TOKEN='source-token'\n" > "$SOURCE_CHECKOUT/relay/.env"
+printf 'source file\n' > "$SOURCE_CHECKOUT/relay/keep.txt"
+
 printf 'y\n' |
     HOME="$TEST_HOME" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
-    XDG_CONFIG_HOME="$CONFIG_HOME" \
+    HERDR_PLUGIN_CONFIG_DIR="$CONFIG_HOME/herdr-mobile-relay" \
     XDG_CACHE_HOME="$CACHE_HOME" \
     bash "$SCRIPT_DIR/uninstall.sh" >/dev/null
 test ! -e "$RELEASE_ROOT"
 test ! -e "$CONFIG_HOME/herdr-mobile-relay"
 test ! -e "$CACHE_HOME/herdr-mobile-relay"
+test -f "$SOURCE_CHECKOUT/relay/.env"
+test -f "$SOURCE_CHECKOUT/relay/keep.txt"
 
 echo "uninstall shell tests passed"

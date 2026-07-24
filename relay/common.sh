@@ -90,6 +90,7 @@ update_launchd_release_paths() {
     local plist="$1"
     local service_wrapper="$2"
     local work_dir="$3"
+    local env_file="${4:-}"
     local plist_buddy="${HERDR_PLIST_BUDDY:-/usr/libexec/PlistBuddy}"
 
     [ -x "$plist_buddy" ] || {
@@ -98,6 +99,9 @@ update_launchd_release_paths() {
     }
     "$plist_buddy" -c "Set :ProgramArguments:0 $service_wrapper" "$plist"
     "$plist_buddy" -c "Set :WorkingDirectory $work_dir" "$plist"
+    if [ -n "$env_file" ]; then
+        "$plist_buddy" -c "Set :EnvironmentVariables:HERDR_RELAY_ENV $env_file" "$plist"
+    fi
 }
 
 assert_service_env_matches() {
