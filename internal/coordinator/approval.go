@@ -390,123 +390,26 @@ func (d *Dispatcher) executeQuestion(
 		return err
 	}
 
-	switch {
-	case payload.Navigation == "previous":
-		return keys([]string{"Left"})
-	case payload.Navigation == "next":
-		return keys([]string{"Right"})
-	case payload.Clarify:
-		nav := navigationKeys(interaction, question.Focus{Kind: "chat"})
-		return keys(append(nav, "Enter"))
-	}
-
-	if interaction.Agent == "codex" {
-		if len(payload.Selected) > 0 {
-			nav := navigationKeys(interaction, question.Focus{Kind: "option", Index: payload.Selected[0]})
-			return keys(append(nav, "Enter"))
-		}
-		nav := navigationKeys(interaction, question.Focus{Kind: "option", Index: interaction.AllOptionCount - 1})
-		if interaction.NotesActive {
-			nav = nil
-		}
-		if payload.OtherText == "" {
-			return keys(append(nav, "Enter"))
-		}
-		if !interaction.NotesActive {
-			nav = append(nav, "Tab")
-		}
-		nav = append(nav, "Ctrl+U")
-		if err := keys(nav); err != nil {
-			return err
-		}
-		if err := text(payload.OtherText); err != nil {
-			return err
-		}
-		return keys([]string{"Enter"})
-	}
-
-	if interaction.Kind == "single_select" {
-		if len(payload.Selected) > 0 {
-			nav := navigationKeys(interaction, question.Focus{Kind: "option", Index: payload.Selected[0]})
-			return keys(append(nav, "Enter"))
-		}
-		target := question.Focus{Kind: "option", Index: interaction.AllOptionCount - 1}
-		nav := navigationKeys(interaction, target)
-		if err := keys(append(nav, "Ctrl+U")); err != nil {
-			return err
-		}
-		if payload.OtherText != "" {
-			if err := text(payload.OtherText); err != nil {
+	steps := question.PlanInput(interaction, question.InputIntent{
+		Navigation:    payload.Navigation,
+		Clarify:       payload.Clarify,
+		Selected:      payload.Selected,
+		OtherSelected: payload.OtherSelected,
+		OtherText:     payload.OtherText,
+	})
+	for _, step := range steps {
+		if len(step.Keys) > 0 {
+			if err := keys(step.Keys); err != nil {
 				return err
 			}
 		}
-		return keys([]string{"Enter"})
-	}
-
-	current := *interaction
-	for index, option := range current.Options {
-		desired := containsInt(payload.Selected, index)
-		if option.Selected == desired {
-			continue
-		}
-		target := question.Focus{Kind: "option", Index: index}
-		if err := keys(append(navigationKeys(&current, target), "Enter")); err != nil {
-			return err
-		}
-		current.Focus = target
-		current.Options[index].Selected = desired
-	}
-	otherTarget := question.Focus{Kind: "option", Index: current.AllOptionCount - 1}
-	if current.Other.Text != payload.OtherText {
-		if err := keys(append(navigationKeys(&current, otherTarget), "Ctrl+U")); err != nil {
-			return err
-		}
-		current.Focus = otherTarget
-		if payload.OtherText != "" {
-			if err := text(payload.OtherText); err != nil {
+		if step.Text != "" {
+			if err := text(step.Text); err != nil {
 				return err
 			}
 		}
 	}
-	if current.Other.Selected != payload.OtherSelected {
-		if err := keys(append(navigationKeys(&current, otherTarget), "Enter")); err != nil {
-			return err
-		}
-		current.Focus = otherTarget
-	}
-	submit := question.Focus{Kind: "submit"}
-	return keys(append(navigationKeys(&current, submit), "Enter"))
-}
-
-func navigationKeys(interaction *question.Interaction, target question.Focus) []string {
-	position := func(focus question.Focus) int {
-		switch focus.Kind {
-		case "option":
-			return focus.Index
-		case "submit":
-			if interaction.Kind == "multi_select" {
-				return interaction.AllOptionCount
-			}
-		case "chat":
-			position := interaction.AllOptionCount
-			if interaction.Kind == "multi_select" {
-				position++
-			}
-			return position
-		}
-		return 0
-	}
-	distance := position(target) - position(interaction.Focus)
-	key := "Down"
-	if distance < 0 {
-		key = "Up"
-		distance = -distance
-	}
-	keys := make([]string, distance)
-	for index := range keys {
-		keys[index] = key
-	}
-	return keys
+	return nil
 }
 
 func (d *Dispatcher) sendQuestionKeys(ctx context.Context, paneID string, keys []string) error {
@@ -538,15 +441,6 @@ func (d *Dispatcher) sendQuestionKeysForSession(ctx context.Context, token Worke
 		}
 	}
 	return nil
-}
-
-func containsInt(values []int, target int) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func contextDelay(ctx context.Context, delay time.Duration) error {

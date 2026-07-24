@@ -77,6 +77,47 @@ Which hardening priority should lead the implementation plan?
 tab to add notes | enter to submit answer | esc to interrupt
 `
 
+const qoderQuestionView = `
+Asking User · [1m[38;2;42;219;92m[48;2;36;74;50m Vibe [0m > Distance > Activities > Budget > Submit
+────────────────────────────────────────────────────────────
+What type of trip vibe are you going for?
+
+❯ 1. Nature & outdoors
+     Hiking, lakes, forests, national parks
+  2. City & culture
+     Museums, architecture, food scene, nightlife
+  3. Relaxation
+     Spa, slow pace, good food, no tight schedule
+  4. Adventure
+     Mix of activities, road trip, exploring new places
+  5. Type Something
+
+Tab/←→ switch · Enter select · Esc back
+`
+
+const qoderMultiQuestionView = `
+Asking User · Vibe > Distance > [1m[38;2;42;219;92m[48;2;36;74;50m Activities [0m > Budget > Submit
+────────────────────────────────────────────────────────────
+Which activities interest you? (select all that apply)
+(Select all that apply)
+
+  1. [x] Food & wine
+     Local restaurants, wine, breweries, markets
+  2. [ ] Outdoor sports
+     Trails, kayaking, cycling, climbing
+❯ 3. [x] History & culture
+     Castles, old towns, galleries, festivals
+  4. [ ] Beach / water
+     Swimming, sunbathing, boat trips
+  5. [ ] All of the above
+     Select all options
+  6. Next →
+     Continue to submit
+  7. Type Something
+
+Tab/←→ switch · Enter toggle · Esc back
+`
+
 func TestParseClaudeMultiQuestion(t *testing.T) {
 	interaction := Parse(multiQuestionView, "claude")
 	if interaction == nil {
@@ -159,6 +200,65 @@ func TestParseCodexSingleQuestionWithoutNavigationFooter(t *testing.T) {
 		interaction.QuestionIndex != 1 ||
 		interaction.QuestionTotal != 1 {
 		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestParseQoderQuestion(t *testing.T) {
+	interaction := Parse(qoderQuestionView, "qodercli")
+	if interaction == nil {
+		t.Fatal("question was not parsed")
+	}
+	if interaction.Kind != "single_select" ||
+		interaction.Question != "What type of trip vibe are you going for?" ||
+		len(interaction.Options) != 4 ||
+		interaction.Options[0].Label != "Nature & outdoors" ||
+		interaction.Options[0].Description != "Hiking, lakes, forests, national parks" ||
+		interaction.Other.Label != "Type Something" ||
+		interaction.SubmitLabel != "Next" ||
+		interaction.CanGoBack ||
+		interaction.QuestionIndex != 1 ||
+		interaction.QuestionTotal != 4 ||
+		interaction.Agent != "qoder" {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestParseQoderMultiQuestion(t *testing.T) {
+	interaction := Parse(qoderMultiQuestionView, "qodercli")
+	if interaction == nil {
+		t.Fatal("question was not parsed")
+	}
+	if interaction.Kind != "multi_select" ||
+		interaction.Question != "Which activities interest you? (select all that apply)" ||
+		len(interaction.Options) != 5 ||
+		!interaction.Options[0].Selected ||
+		interaction.Options[1].Selected ||
+		!interaction.Options[2].Selected ||
+		interaction.Options[4].Label != "All of the above" ||
+		interaction.Options[4].Description != "Select all options" ||
+		interaction.Other.Label != "Type Something" ||
+		interaction.Focus != (Focus{Kind: "option", Index: 2}) ||
+		interaction.QuestionIndex != 3 ||
+		interaction.QuestionTotal != 4 ||
+		!interaction.CanGoBack {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestQoderHistoricalQuestionIsNotLive(t *testing.T) {
+	if LayoutHint(qoderQuestionView + "\nWorking on your itinerary.") {
+		t.Fatal("historical Qoder question was treated as live")
+	}
+}
+
+func TestQuestionSupportsKnownTerminalAdapters(t *testing.T) {
+	for _, agent := range []string{"claude", "codex", "qoder", "qodercli"} {
+		if !Supports(agent) {
+			t.Errorf("%q is not supported", agent)
+		}
+	}
+	if Supports("opencode") {
+		t.Fatal("unknown keyboard protocol was treated as supported")
 	}
 }
 
