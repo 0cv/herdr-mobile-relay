@@ -132,7 +132,22 @@ validate_archive_paths() {
 
 write_install_sentinel() {
     sentinel_root=$1
-    mkdir -p "$sentinel_root"
+    sentinel="$sentinel_root/.herdr-mobile-relay-installation"
+    if [ -f "$sentinel" ]; then
+        canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
+        grep -Fx 'product=herdr-mobile-relay' "$sentinel" >/dev/null &&
+            grep -Fx "root=$canonical_root" "$sentinel" >/dev/null ||
+            fatal "installation root has a mismatched ownership sentinel: $sentinel_root"
+        return
+    fi
+    if [ -e "$sentinel_root" ]; then
+        [ -d "$sentinel_root" ] ||
+            fatal "installation root is not a directory: $sentinel_root"
+        [ -z "$(find "$sentinel_root" -mindepth 1 -maxdepth 1 -print -quit)" ] ||
+            fatal "refusing to claim nonempty directory without an ownership sentinel: $sentinel_root"
+    else
+        mkdir -p "$sentinel_root"
+    fi
     chmod 700 "$sentinel_root"
     canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
     sentinel_temp="$sentinel_root/.herdr-mobile-relay-installation.$$"
@@ -147,6 +162,7 @@ write_install_sentinel() {
 main() {
     command -v tar >/dev/null 2>&1 || fatal "tar is required"
     command -v awk >/dev/null 2>&1 || fatal "awk is required"
+    command -v find >/dev/null 2>&1 || fatal "find is required"
 
     version=${VERSION:-${1:-}}
     [ -n "$version" ] || fatal "an exact VERSION is required; unpinned latest installs are refused"
@@ -243,11 +259,11 @@ main() {
             *) previous_dir="$release_root/$previous_link" ;;
         esac
     fi
-    mkdir -p "$releases_dir" "$shim_dir"
-    chmod 700 "$release_root" "$releases_dir"
     write_install_sentinel "$release_root"
     write_install_sentinel "$config_root"
     write_install_sentinel "$cache_root"
+    mkdir -p "$releases_dir" "$shim_dir"
+    chmod 700 "$release_root" "$releases_dir"
     if [ -e "$final_dir" ]; then
         "$stage/$BINARY" verify-release --target "$target" "$final_dir" >/dev/null ||
             fatal "existing target release directory is invalid"
@@ -261,13 +277,14 @@ main() {
         "$final_dir/$BINARY" prune-releases "$release_root" "$final_dir" ||
             fatal "could not prune obsolete releases"
     fi
-    "$final_dir/$BINARY" activate-release "$release_root" "$final_dir" ||
-        fatal "could not atomically activate the complete release"
-
     shim_temp="$shim_dir/.${BINARY}.$$"
     rm -f "$shim_temp"
     ln -s "$release_root/current/$BINARY" "$shim_temp"
-    mv -f "$shim_temp" "$shim_dir/$BINARY"
+    mv -f "$shim_temp" "$shim_dir/$BINARY" ||
+        fatal "could not install executable shim"
+
+    "$final_dir/$BINARY" activate-release "$release_root" "$final_dir" ||
+        fatal "could not atomically activate the complete release"
 
     info "Installed ${BINARY} ${version} to $final_dir"
     info "Active release: $release_root/current"

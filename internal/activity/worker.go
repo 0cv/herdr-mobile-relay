@@ -166,11 +166,12 @@ func (w *Worker) run() {
 			return
 		}
 		if request.commit != nil {
-			err := w.journal.Append(request.commit.Entry)
+			entry := NormalizeEntry(request.commit.Entry)
+			err := w.journal.Append(entry)
 			if err != nil {
 				request.reply <- workerReply{event: ActivityCommitFailed{Sequence: request.commit.Sequence, Err: err}}
 			} else {
-				request.reply <- workerReply{event: ActivityCommitted{Sequence: request.commit.Sequence, Entry: request.commit.Entry}}
+				request.reply <- workerReply{event: ActivityCommitted{Sequence: request.commit.Sequence, Entry: entry}}
 			}
 			continue
 		}

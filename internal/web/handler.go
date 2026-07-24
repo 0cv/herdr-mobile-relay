@@ -110,6 +110,11 @@ func canonicalAssetPath(raw string) (string, bool) {
 	if trimmed == "" {
 		return "index.html", true
 	}
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", false
+		}
+	}
 	cleaned := path.Clean(trimmed)
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(trimmed, "/") {
 		return "", false
@@ -122,25 +127,48 @@ func isAllowedAsset(asset string) bool {
 }
 
 func acceptsBrotli(header string) bool {
+	explicit := -1.0
+	wildcard := 0.0
 	for _, item := range strings.Split(header, ",") {
 		parts := strings.Split(strings.TrimSpace(item), ";")
-		if strings.TrimSpace(parts[0]) != "br" {
+		name := strings.ToLower(strings.TrimSpace(parts[0]))
+		if name != "br" && name != "*" {
 			continue
 		}
+		quality := 1.0
 		for _, parameter := range parts[1:] {
-			parameter = strings.TrimSpace(parameter)
-			if strings.HasPrefix(parameter, "q=") && strings.TrimSpace(strings.TrimPrefix(parameter, "q=")) == "0" {
-				return false
+			key, raw, found := strings.Cut(parameter, "=")
+			if !found || !strings.EqualFold(strings.TrimSpace(key), "q") {
+				continue
 			}
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+			if err != nil || parsed < 0 || parsed > 1 {
+				quality = 0
+			} else {
+				quality = parsed
+			}
+			break
 		}
-		return true
+		if name == "br" && quality > explicit {
+			explicit = quality
+		}
+		if name == "*" && quality > wildcard {
+			wildcard = quality
+		}
 	}
-	return false
+	if explicit >= 0 {
+		return explicit > 0
+	}
+	return wildcard > 0
 }
 
 func etagMatches(header, etag string) bool {
 	for _, candidate := range strings.Split(header, ",") {
-		if strings.TrimSpace(candidate) == etag || strings.TrimSpace(candidate) == "*" {
+		candidate = strings.TrimSpace(candidate)
+		if strings.HasPrefix(candidate, "W/") {
+			candidate = strings.TrimSpace(strings.TrimPrefix(candidate, "W/"))
+		}
+		if candidate == etag || candidate == "*" {
 			return true
 		}
 	}
@@ -155,11 +183,7 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' blob: data:; style-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 }
 
-func setCacheHeaders(w http.ResponseWriter, asset string) {
-	if strings.HasPrefix(asset, "assets/") || strings.HasPrefix(asset, "icons/") {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		return
-	}
+func setCacheHeaders(w http.ResponseWriter, _ string) {
 	w.Header().Set("Cache-Control", "no-cache")
 }
 

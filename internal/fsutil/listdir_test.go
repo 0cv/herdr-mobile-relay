@@ -36,6 +36,24 @@ func TestListDirectoriesHome(t *testing.T) {
 	}
 }
 
+func TestListDirectoriesIncludesDirectorySymlink(t *testing.T) {
+	home := t.TempDir()
+	target := filepath.Join(home, "projects", "app")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(home, "app-link")); err != nil {
+		t.Fatal(err)
+	}
+	result := ListDirectories(home, home)
+	for _, entry := range result.Directories {
+		if entry.Name == "app-link" {
+			return
+		}
+	}
+	t.Fatalf("directory symlink missing from listing: %+v", result.Directories)
+}
+
 func TestListDirectoriesSubdir(t *testing.T) {
 	home := t.TempDir()
 	sub := filepath.Join(home, "projects")

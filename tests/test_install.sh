@@ -40,4 +40,14 @@ canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
 grep -Fx 'product=herdr-mobile-relay' "$sentinel_root/.herdr-mobile-relay-installation" >/dev/null
 grep -Fx "root=$canonical_root" "$sentinel_root/.herdr-mobile-relay-installation" >/dev/null
 
+unowned_root="$WORK_DIR/unowned"
+mkdir -p "$unowned_root"
+printf 'personal data\n' > "$unowned_root/keep.txt"
+if (write_install_sentinel "$unowned_root") 2>/dev/null; then
+    echo "write_install_sentinel claimed a nonempty unowned directory" >&2
+    exit 1
+fi
+[ -f "$unowned_root/keep.txt" ]
+[ ! -e "$unowned_root/.herdr-mobile-relay-installation" ]
+
 echo "install shell tests passed"

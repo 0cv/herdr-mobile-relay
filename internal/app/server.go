@@ -229,7 +229,7 @@ func (s *Server) Run(ctx context.Context) error {
 			admitted()
 		}
 
-		ctx := context.Background()
+		commandCtx := ctx
 
 		switch action {
 		case "check_update":
@@ -240,23 +240,23 @@ func (s *Server) Run(ctx context.Context) error {
 			}})
 			updateState := s.updateM.Check(ctx)
 			s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
-			s.sendCommandResult(client, inbound.RequestID, "check_update", true, "completed", "", map[string]any{"update": updateState})
+			s.sendCommandResult(client, inbound.RequestID, "check_update", true, "completed", "", "", map[string]any{"update": updateState})
 		case "install_update":
 			job, updateState, scheduleErr := s.updateM.Schedule(ctx, inbound.ExpectedVersion, inbound.ExpectedRevision)
 			if scheduleErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", scheduleErr.Error(), map[string]any{"update": updateState})
+				s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", scheduleErr.Error(), "", map[string]any{"update": updateState})
 				break
 			}
 			s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
-			s.sendCommandResult(client, inbound.RequestID, "install_update", true, "scheduled", "", map[string]any{"job": job, "update": updateState})
+			s.sendCommandResult(client, inbound.RequestID, "install_update", true, "scheduled", "", "", map[string]any{"job": job, "update": updateState})
 		case "deploy_app_update":
 			job, deployState, scheduleErr := s.appDeployM.Schedule(ctx, inbound.ExpectedVersion, inbound.ExpectedRevision, inbound.ExpectedOrigin)
 			if scheduleErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", false, "failed", scheduleErr.Error(), map[string]any{"app_deploy": deployState})
+				s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", false, "failed", scheduleErr.Error(), "", map[string]any{"app_deploy": deployState})
 				break
 			}
 			s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
-			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", map[string]any{"job": job, "app_deploy": deployState})
+			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
 		case "read_pane":
 			resp := s.dispatcher.HandleReadPane(ctx, msg)
 			paneID, _ := msg["pane_id"].(string)
@@ -283,14 +283,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case "clear_activities":
 			requestID, _ := msg["request_id"].(string)
 			s.dispatcher.HandleClearActivities(requestID, func(result *coordinator.CommandResult) {
-				s.hub.Send(client, map[string]any{
-					"type":       "command_result",
-					"request_id": result.RequestID,
-					"action":     result.Action,
-					"ok":         result.OK,
-					"phase":      result.Phase,
-					"error":      result.Error,
-				})
+				s.hub.Send(client, commandResultMessage(result))
 			})
 		case "upload_image":
 			requestID, _ := msg["request_id"].(string)
@@ -325,23 +318,16 @@ func (s *Server) Run(ctx context.Context) error {
 			path, _ := msg["path"].(string)
 			home, _ := os.UserHomeDir()
 			listing := fsutil.ListDirectories(path, home)
-			s.hub.Send(client, map[string]any{
-				"type":       "command_result",
-				"request_id": requestID,
-				"action":     "list_directories",
-				"ok":         true,
-				"phase":      "completed",
-				"data":       listing,
-			})
+			s.sendCommandResult(client, requestID, "list_directories", true, "completed", "", "", listing)
 		case "list_slash_commands":
 			requestID, _ := msg["request_id"].(string)
 			paneID, _ := msg["pane_id"].(string)
 			if paneID == "" {
-				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent is required", nil)
+				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent is required", paneID, nil)
 				break
 			}
 			if _, ok := s.state.Agent(paneID); !ok {
-				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent pane not found", nil)
+				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent pane not found", paneID, nil)
 				break
 			}
 			generation := s.state.Generation(paneID)
@@ -359,19 +345,12 @@ func (s *Server) Run(ctx context.Context) error {
 					false,
 					"failed",
 					"The agent pane was replaced while commands were being listed",
+					paneID,
 					nil,
 				)
 				break
 			}
-			s.hub.Send(client, map[string]any{
-				"type":       "command_result",
-				"request_id": requestID,
-				"action":     "list_slash_commands",
-				"ok":         true,
-				"phase":      "completed",
-				"pane_id":    paneID,
-				"data":       catalog,
-			})
+			s.sendCommandResult(client, requestID, "list_slash_commands", true, "completed", "", paneID, catalog)
 		case "push_subscribe":
 			ok := false
 			if s.pushM != nil {
@@ -419,20 +398,11 @@ func (s *Server) Run(ctx context.Context) error {
 		default:
 			var result *coordinator.CommandResult
 			if coordinated {
-				result = s.dispatcher.HandleAdmitted(ctx, msg, admitted)
+				result = s.dispatcher.HandleAdmitted(commandCtx, msg, admitted)
 			} else {
-				result = s.dispatcher.Handle(ctx, msg)
+				result = s.dispatcher.Handle(commandCtx, msg)
 			}
-			s.hub.Send(client, map[string]any{
-				"type":       "command_result",
-				"request_id": result.RequestID,
-				"action":     result.Action,
-				"ok":         result.OK,
-				"phase":      result.Phase,
-				"error":      result.Error,
-				"pane_id":    result.PaneID,
-				"data":       result.Data,
-			})
+			s.hub.Send(client, commandResultMessage(result))
 		}
 	})
 
@@ -535,6 +505,13 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
 	mux.HandleFunc("/ws", s.hub.HandleWebSocket)
 	mux.HandleFunc("/", s.handleRoot)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !canonicalHTTPPath(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 
 	ln, err := net.Listen("tcp", s.cfg.Addr())
 	if err != nil {
@@ -542,7 +519,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	srv := &http.Server{
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -597,28 +574,51 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	cancelRun()
 	if s.dispatcher != nil {
 		s.dispatcher.CancelInflight()
 	}
-	_ = srv.Shutdown(shutdownCtx)
-	_ = s.hub.Shutdown(shutdownCtx)
+	httpShutdownCtx, cancelHTTP := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := srv.Shutdown(httpShutdownCtx); runErr == nil && err != nil {
+		runErr = fmt.Errorf("http shutdown: %w", err)
+	}
+	cancelHTTP()
+	hubShutdownCtx, cancelHub := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := s.hub.Shutdown(hubShutdownCtx); runErr == nil && err != nil {
+		runErr = fmt.Errorf("websocket shutdown: %w", err)
+	}
+	cancelHub()
 	if s.udp != nil {
 		_ = s.udp.Close()
 	}
 	bg.Wait()
 	s.drainLifecycleWork()
 	if s.dispatcher != nil {
-		if err := s.dispatcher.Close(shutdownCtx); runErr == nil && err != nil {
+		dispatcherCloseCtx, cancelDispatcher := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.dispatcher.Close(dispatcherCloseCtx); runErr == nil && err != nil {
 			runErr = err
 		}
+		cancelDispatcher()
 	}
 	if s.webH != nil {
 		_ = s.webH.Close()
 	}
 	return runErr
+}
+
+func canonicalHTTPPath(raw string) bool {
+	if raw == "" || raw == "/" {
+		return true
+	}
+	if !strings.HasPrefix(raw, "/") || strings.Contains(raw, "\\") || strings.Contains(raw, "\x00") {
+		return false
+	}
+	for _, segment := range strings.Split(strings.TrimPrefix(raw, "/"), "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) drainLifecycleWork() {
@@ -1052,17 +1052,39 @@ func (s *Server) sendCommandResult(
 	requestID, action string,
 	ok bool,
 	phase, publicError string,
+	paneID string,
 	data any,
 ) {
-	s.hub.Send(client, map[string]any{
+	result := &coordinator.CommandResult{
+		RequestID: requestID,
+		Action:    action,
+		OK:        ok,
+		Phase:     phase,
+		Error:     publicError,
+		PaneID:    paneID,
+		Data:      data,
+	}
+	s.hub.Send(client, commandResultMessage(result))
+}
+
+func commandResultMessage(result *coordinator.CommandResult) map[string]any {
+	message := map[string]any{
 		"type":       "command_result",
-		"request_id": requestID,
-		"action":     action,
-		"ok":         ok,
-		"phase":      phase,
-		"error":      publicError,
-		"data":       data,
-	})
+		"request_id": result.RequestID,
+		"action":     result.Action,
+		"ok":         result.OK,
+		"phase":      result.Phase,
+	}
+	if result.Error != "" {
+		message["error"] = result.Error
+	}
+	if result.PaneID != "" {
+		message["pane_id"] = result.PaneID
+	}
+	if result.Data != nil {
+		message["data"] = result.Data
+	}
+	return message
 }
 
 func (s *Server) watchJobStates(ctx context.Context) {

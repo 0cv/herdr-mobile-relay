@@ -230,7 +230,7 @@ func TestSecurityCacheMIMEAndHEADContract(t *testing.T) {
 	if got := w.Header().Get("Content-Type"); got != "text/javascript; charset=utf-8" {
 		t.Fatalf("JavaScript MIME = %q", got)
 	}
-	if got := w.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+	if got := w.Header().Get("Cache-Control"); got != "no-cache" {
 		t.Fatalf("asset cache control = %q", got)
 	}
 	for _, header := range []string{
@@ -243,6 +243,57 @@ func TestSecurityCacheMIMEAndHEADContract(t *testing.T) {
 		if w.Header().Get(header) == "" {
 			t.Errorf("missing security header %s", header)
 		}
+	}
+}
+
+func TestBrotliQualityWildcardAndCanonicalPathParity(t *testing.T) {
+	root := setupTestWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	for _, header := range []string{"br;q=0.0", "BR;Q=invalid", "*;q=0"} {
+		req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+		req.Header.Set("Accept-Encoding", header)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if got := w.Header().Get("Content-Encoding"); got != "" {
+			t.Errorf("%q selected encoding %q", header, got)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	req.Header.Set("Accept-Encoding", "*;q=0.5")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if got := w.Header().Get("Content-Encoding"); got != "br" {
+		t.Fatalf("wildcard selected encoding %q, want br", got)
+	}
+	for _, requestPath := range []string{"/assets/../index.html", "/assets//app.js", "/assets/./app.js"} {
+		req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%q status = %d, want 404", requestPath, w.Code)
+		}
+	}
+}
+
+func TestWeakETagMatches(t *testing.T) {
+	root := setupTestWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+	req := httptest.NewRequest(http.MethodGet, "/index.html", nil)
+	req.Header.Set("If-None-Match", "W/"+first.Header().Get("ETag"))
+	second := httptest.NewRecorder()
+	h.ServeHTTP(second, req)
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("weak ETag status = %d, want 304", second.Code)
 	}
 }
 

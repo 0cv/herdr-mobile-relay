@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,17 +34,16 @@ func NewResolver(home string) *Resolver {
 }
 
 func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
-	if sessionID == "" {
-		return ""
-	}
-	if !validSessionID(sessionID) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID != "" && !validSessionID(sessionID) {
 		return ""
 	}
 
 	key := agent + "|" + cwd + "|" + sessionID
+	sig := r.sourceSignature(agent, cwd, sessionID)
 
 	r.mu.Lock()
-	if entry, ok := r.cache[key]; ok && time.Now().Before(entry.expires) {
+	if entry, ok := r.cache[key]; ok && entry.sig == sig && time.Now().Before(entry.expires) {
 		r.mu.Unlock()
 		return entry.name
 	}
@@ -60,7 +61,7 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	}
 
 	r.mu.Lock()
-	r.cache[key] = cacheEntry{name: name, expires: time.Now().Add(cacheTTL)}
+	r.cache[key] = cacheEntry{name: name, expires: time.Now().Add(cacheTTL), sig: sig}
 	r.mu.Unlock()
 
 	return name
@@ -74,6 +75,9 @@ func (r *Resolver) projectSessionTitle(projectsDir, cwd, sessionID string) strin
 
 	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
 	if _, err := os.Stat(sessionFile); err != nil {
+		if sessionID != "" {
+			return ""
+		}
 		entries, err := os.ReadDir(projectDir)
 		if err != nil {
 			return ""
@@ -150,7 +154,7 @@ func extractTitle(path string) string {
 	}
 	defer f.Close()
 
-	var lastTitle string
+	found := make(map[string]string)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 	for scanner.Scan() {
@@ -163,13 +167,18 @@ func extractTitle(path string) string {
 			continue
 		}
 		for _, field := range titleFields {
-			if v, ok := record[field].(string); ok && v != "" {
-				lastTitle = v
+			if v, ok := record[field].(string); ok && strings.TrimSpace(v) != "" {
+				found[recType] = strings.TrimSpace(v)
 				break
 			}
 		}
 	}
-	return lastTitle
+	for _, recType := range []string{"custom-title", "ai-title", "summary"} {
+		if found[recType] != "" {
+			return found[recType]
+		}
+	}
+	return ""
 }
 
 func encodePath(path string) string {
@@ -185,7 +194,7 @@ func matchesCwd(dir, cwd string) bool {
 }
 
 func validSessionID(id string) bool {
-	if len(id) > 256 {
+	if len(id) == 0 || len(id) > 128 {
 		return false
 	}
 	for _, c := range id {
@@ -196,5 +205,45 @@ func validSessionID(id string) bool {
 			return false
 		}
 	}
-	return !strings.Contains(id, "..")
+	return true
+}
+
+func (r *Resolver) sourceSignature(agent, cwd, sessionID string) string {
+	agentLower := strings.ToLower(agent)
+	if strings.Contains(agentLower, "codex") {
+		return pathSignature(filepath.Join(r.home, ".codex", "session_index.jsonl"))
+	}
+	var projectsDir string
+	switch {
+	case strings.Contains(agentLower, "qoder"):
+		projectsDir = filepath.Join(r.home, ".qoder", "projects")
+	case strings.Contains(agentLower, "claude"):
+		projectsDir = filepath.Join(r.home, ".claude", "projects")
+	default:
+		return ""
+	}
+	projectDir := r.findProjectDir(projectsDir, cwd)
+	if projectDir == "" {
+		return pathSignature(projectsDir)
+	}
+	if sessionID != "" {
+		return pathSignature(filepath.Join(projectDir, sessionID+".jsonl"))
+	}
+	entries, _ := os.ReadDir(projectDir)
+	var signatures []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
+			signatures = append(signatures, pathSignature(filepath.Join(projectDir, entry.Name())))
+		}
+	}
+	sort.Strings(signatures)
+	return strings.Join(signatures, "|")
+}
+
+func pathSignature(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return path + "|missing"
+	}
+	return path + "|" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10)
 }

@@ -56,7 +56,7 @@ stable-setup:
 stable-teardown:
 	relay/stable-teardown.sh
 
-check: backend-check frontend-check frontend-browser cross-build release-bundle-check
+check: backend-check frontend-check frontend-browser frontend-browser-release cross-build release-bundle-check
 
 go-check:
 	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './frontend/node_modules/*'))"

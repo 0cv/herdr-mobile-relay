@@ -24,6 +24,15 @@ func TestTokenViaBearerHeader(t *testing.T) {
 	}
 }
 
+func TestTokenViaCaseInsensitiveBearerHeader(t *testing.T) {
+	cfg := &config.Config{Token: "secret123"}
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Authorization", "bEaReR secret123")
+	if !Authenticate(cfg, req) {
+		t.Error("expected auth to accept case-insensitive bearer scheme")
+	}
+}
+
 func TestTokenViaQueryParam(t *testing.T) {
 	cfg := &config.Config{Token: "secret123"}
 	req := httptest.NewRequest("GET", "/ws?token=secret123", nil)

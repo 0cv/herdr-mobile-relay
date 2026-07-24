@@ -199,14 +199,22 @@ func (l *Lifecycle) resolveCwd(raw string) (string, error) {
 	if err != nil {
 		return "", errors.New("cwd is invalid")
 	}
-	relative, err := filepath.Rel(home, absolute)
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", errors.New("home directory is unavailable")
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", errors.New("cwd is not an accessible directory inside the home directory")
+	}
+	relative, err := filepath.Rel(resolvedHome, resolved)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return "", errors.New("cwd must be inside the home directory")
 	}
 	if relative == "." {
 		return "", errors.New("cwd must be a project directory below the home directory")
 	}
-	root, err := os.OpenRoot(home)
+	root, err := os.OpenRoot(resolvedHome)
 	if err != nil {
 		return "", errors.New("home directory is unavailable")
 	}
@@ -220,7 +228,7 @@ func (l *Lifecycle) resolveCwd(raw string) (string, error) {
 	if err != nil || !info.IsDir() {
 		return "", errors.New("cwd is not an accessible directory")
 	}
-	return absolute, nil
+	return resolved, nil
 }
 
 // SelectWorkspaceForCwd freezes the label/exclusive/majority heuristic used by

@@ -57,6 +57,7 @@ type Metrics struct {
 type Hub struct {
 	cfg       *config.Config
 	logger    *slog.Logger
+	register  sync.Mutex
 	mu        sync.RWMutex
 	clients   map[string]*ClientConn
 	nextID    int
@@ -123,9 +124,11 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(wsMaxReadBytes)
 
 	ctx, cancel := context.WithCancel(r.Context())
+	h.register.Lock()
 	h.mu.Lock()
 	if h.closing {
 		h.mu.Unlock()
+		h.register.Unlock()
 		cancel()
 		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
 		return
@@ -142,13 +145,22 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		done:   make(chan struct{}),
 	}
 	h.connectionWG.Add(1)
+	defer h.connectionWG.Done()
 	go h.writePump(client)
+	h.mu.Unlock()
 	if h.onConnect != nil {
 		h.onConnect(client)
 	}
+	if client.ctx.Err() != nil {
+		h.register.Unlock()
+		conn.CloseNow()
+		<-client.done
+		return
+	}
+	h.mu.Lock()
 	h.clients[clientID] = client
 	h.mu.Unlock()
-	defer h.connectionWG.Done()
+	h.register.Unlock()
 
 	h.logger.Info("client connected", "client_id", clientID)
 	h.readPump(client)
@@ -281,6 +293,8 @@ func (h *Hub) Broadcast(message any) {
 	if err != nil {
 		return
 	}
+	h.register.Lock()
+	defer h.register.Unlock()
 	h.mu.RLock()
 	clients := make([]*ClientConn, 0, len(h.clients))
 	for _, client := range h.clients {
@@ -304,15 +318,17 @@ func (h *Hub) BroadcastPrepared(message any, prepare func()) {
 	if err != nil {
 		return
 	}
-	h.mu.Lock()
+	h.register.Lock()
+	defer h.register.Unlock()
 	if prepare != nil {
 		prepare()
 	}
+	h.mu.RLock()
 	clients := make([]*ClientConn, 0, len(h.clients))
 	for _, client := range h.clients {
 		clients = append(clients, client)
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 	for _, client := range clients {
 		if !h.push(client, data, kind, replaceable) {
 			h.slowClientEvictions.Add(1)
@@ -392,6 +408,7 @@ func (h *Hub) CloseAll() {
 }
 
 func (h *Hub) Shutdown(ctx context.Context) error {
+	h.register.Lock()
 	h.mu.Lock()
 	h.closing = true
 	clients := make([]*ClientConn, 0, len(h.clients))
@@ -400,6 +417,7 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 		delete(h.clients, client.id)
 	}
 	h.mu.Unlock()
+	h.register.Unlock()
 
 	for _, client := range clients {
 		go func(c *ClientConn) {

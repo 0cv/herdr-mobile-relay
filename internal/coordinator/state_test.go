@@ -59,6 +59,21 @@ func TestCommitInventoryAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestOnlyInitialSnapshotUsesZeroUpdatedAt(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
+	first, _ := s.Agent("p1")
+	if first.UpdatedAt != 0 {
+		t.Fatalf("initial updated_at = %d, want 0", first.UpdatedAt)
+	}
+	s.CommitInventory(nil, s.RevisionCounter())
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Status: "working"}}, s.RevisionCounter())
+	reappeared, _ := s.Agent("p1")
+	if reappeared.UpdatedAt <= 0 {
+		t.Fatalf("reappeared updated_at = %d, want epoch milliseconds", reappeared.UpdatedAt)
+	}
+}
+
 func TestDisplayedStatusUnseenDone(t *testing.T) {
 	s := testState()
 

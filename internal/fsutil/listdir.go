@@ -23,6 +23,9 @@ type DirListing struct {
 
 func ListDirectories(path, home string) DirListing {
 	home = filepath.Clean(home)
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
 	if path == "" {
 		path = home
 	}
@@ -30,6 +33,9 @@ func ListDirectories(path, home string) DirListing {
 	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(home, path)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(path); resolveErr == nil {
+		path = resolved
 	}
 
 	relative, err := filepath.Rel(home, path)
@@ -73,20 +79,19 @@ func ListDirectories(path, home string) DirListing {
 	}
 
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
 		name := e.Name()
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		childRelative := filepath.Join(relative, name)
-		child, err := root.Open(childRelative)
+		childPath, err := filepath.EvalSymlinks(filepath.Join(path, name))
 		if err != nil {
 			continue
 		}
-		childInfo, statErr := child.Stat()
-		_ = child.Close()
+		childRelative, err := filepath.Rel(home, childPath)
+		if err != nil || childRelative == ".." || strings.HasPrefix(childRelative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		childInfo, statErr := os.Stat(childPath)
 		if statErr != nil || !childInfo.IsDir() {
 			continue
 		}

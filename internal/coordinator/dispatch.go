@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -282,7 +283,7 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 		return EffectResult{Result: completed(requestID, "prompt", paneID, nil)}
 	}))
 	if result.OK {
-		d.recordActivity("prompt", "sent", text, paneID, requestID)
+		d.recordActivityWithExtract("prompt", "sent", "Prompt sent", text, paneID, requestID)
 		d.wake()
 	}
 	return result
@@ -326,6 +327,7 @@ func (d *Dispatcher) handleText(ctx context.Context, receivedAt time.Time, reque
 		return EffectResult{Result: completed(requestID, "text", paneID, nil)}
 	}))
 	if result.OK {
+		d.recordActivityWithExtract("text", "sent", "Text inserted", text, paneID, requestID)
 		d.wake()
 	}
 	return result
@@ -382,6 +384,7 @@ func (d *Dispatcher) handleRename(ctx context.Context, receivedAt time.Time, req
 		return EffectResult{Result: completed(requestID, "agent_rename", paneID, nil)}
 	}))
 	if result.OK {
+		d.recordActivity("agent_rename", "renamed", "Renamed agent to "+name, paneID, requestID)
 		d.wake()
 	}
 	return result
@@ -527,6 +530,7 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 		d.state.BumpGeneration(paneID)
 		d.state.MarkTopologyChanged()
 		d.profiles.Forget(paneID)
+		d.recordActivity("agent_clear", "cleared", "Cleared agent", paneID, requestID)
 		d.wake()
 	}
 	return result
@@ -569,6 +573,8 @@ func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runn
 func (d *Dispatcher) fail(requestID, action, paneID, message string) *CommandResult {
 	if action != "" {
 		d.logger.Warn("command failed", "action", action, "request_id", requestID, "pane_id", paneID, "error", message)
+		summary := strings.ReplaceAll(action, "_", " ") + " failed: " + message
+		d.recordActivity(action, "failed", summary, paneID, requestID)
 	}
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: message, PaneID: paneID}
 }
@@ -585,6 +591,10 @@ func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *Comma
 		public = "Command was not sent; retry is safe"
 	}
 	d.logger.Warn("command failed", "action", action, "request_id", requestID, "pane_id", paneID, "phase", phase, "error", err)
+	if action != "" {
+		summary := strings.ReplaceAll(action, "_", " ") + " failed: " + public
+		d.recordActivity(action, "failed", summary, paneID, requestID)
+	}
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: phase, Error: public, PaneID: paneID}
 }
 
@@ -593,12 +603,28 @@ func completed(requestID, action, paneID string, data any) *CommandResult {
 }
 
 func (d *Dispatcher) recordActivity(kind, status, summary, paneID, requestID string) {
+	d.recordActivityWithExtract(kind, status, summary, "", paneID, requestID)
+}
+
+func (d *Dispatcher) recordActivityWithExtract(kind, status, summary, extract, paneID, requestID string) {
 	if d.activityW == nil {
 		return
 	}
 	d.activityOrder.Lock()
 	defer d.activityOrder.Unlock()
-	entry := activity.NewEntry(kind, status, summary, paneID, "", "", requestID)
+	agentState, _ := d.state.Agent(paneID)
+	agent, project, host, session := "", "", "", ""
+	if agentState != nil {
+		agent = agentState.Agent
+		project = agentState.Project
+		host = agentState.Host
+		session = agentState.Session
+	}
+	entry := activity.NewEntry(kind, status, summary, paneID, agent, project, requestID)
+	entry.Host = host
+	entry.Session = session
+	entry.Extract = extract
+	entry.Details = map[string]any{"action": kind}
 	committed, err := d.activityW.Commit(context.Background(), activity.ActivityCommitRequested{
 		Sequence: d.activitySequence.Add(1),
 		Entry:    entry,

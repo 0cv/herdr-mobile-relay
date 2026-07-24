@@ -239,6 +239,7 @@ func (s *State) CommitPoll(agents []*AgentState, token PollToken) bool {
 }
 
 func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
+	initialSnapshot := !s.inventoryReady
 	topologyChanged := len(agents) != len(s.agents)
 	if !topologyChanged {
 		for _, agent := range agents {
@@ -271,16 +272,24 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			cp.Status = existing.Status
 		}
 
+		pendingTimestamp := false
 		if pending, ok := s.pendingEvents[incoming.PaneID]; ok {
 			if time.Now().Before(pending.expiresAt) {
 				cp.Status = pending.status
 				cp.UpdatedAt = pending.updatedAt
+				pendingTimestamp = true
 			}
 			delete(s.pendingEvents, incoming.PaneID)
 		}
 
 		if !exists {
-			cp.UpdatedAt = 0
+			switch {
+			case pendingTimestamp:
+			case initialSnapshot:
+				cp.UpdatedAt = 0
+			default:
+				cp.UpdatedAt = time.Now().UnixMilli()
+			}
 		} else if existing.Status == cp.Status && existing.Name == cp.Name && existing.Cwd == cp.Cwd && existing.Agent == cp.Agent &&
 			existing.PaneRevision == cp.PaneRevision && existing.ScrollMaxOffset == cp.ScrollMaxOffset && existing.ForegroundCwd == cp.ForegroundCwd {
 			cp.UpdatedAt = existing.UpdatedAt

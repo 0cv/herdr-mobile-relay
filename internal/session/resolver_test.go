@@ -98,13 +98,27 @@ func TestCacheTTL(t *testing.T) {
 		t.Fatalf("first call = %q", name1)
 	}
 
-	// Overwrite file — cache should still return old value
+	// Overwrite file — the source signature invalidates the cache immediately.
 	entry2 := map[string]any{"type": "summary", "title": "Second Title"}
 	data2, _ := json.Marshal(entry2)
 	os.WriteFile(filepath.Join(projDir, "s1.jsonl"), append(data2, '\n'), 0o644)
 
 	name2 := r.SessionName("qoder", "/home/user/proj", "s1")
-	if name2 != "First Title" {
-		t.Errorf("cached call = %q, want 'First Title' (cached)", name2)
+	if name2 != "Second Title" {
+		t.Errorf("refreshed call = %q, want 'Second Title'", name2)
+	}
+}
+
+func TestExactSessionIDDoesNotFallBackToOnlyOtherFile(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "home-user-app")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, "other.jsonl"), []byte("{\"type\":\"custom-title\",\"customTitle\":\"Wrong\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", "wanted"); got != "" {
+		t.Fatalf("session name = %q, want empty exact-ID miss", got)
 	}
 }

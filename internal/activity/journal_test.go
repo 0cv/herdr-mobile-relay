@@ -1,6 +1,7 @@
 package activity
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -118,6 +119,53 @@ func TestExtractTruncation(t *testing.T) {
 	recent := j.Recent(1)
 	if len(recent[0].Extract) != maxExtractChars {
 		t.Errorf("extract len = %d, want %d", len(recent[0].Extract), maxExtractChars)
+	}
+}
+
+func TestAppendEnforcesSerializedByteLimit(t *testing.T) {
+	dir := t.TempDir()
+	j, err := OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		entry := NewEntry("test", "ok", "large", "p1", "", "", "")
+		entry.Extract = strings.Repeat(string(rune('a'+i%26)), 100_000)
+		if err := j.Append(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Stat(filepath.Join(dir, "activity.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > maxBytes {
+		t.Fatalf("journal size = %d, want <= %d", info.Size(), maxBytes)
+	}
+	reopened, err := OpenJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(reopened.Recent(maxItems)); got == 0 || got >= 40 {
+		t.Fatalf("retained entries = %d, want a nonempty byte-bounded suffix", got)
+	}
+}
+
+func TestWorkerReturnsPersistedNormalizedEntry(t *testing.T) {
+	j, err := OpenJournal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := NewWorker(j)
+	defer worker.Close(context.Background())
+	entry := NewEntry("prompt", "sent", "Prompt sent", "p1", "", "", "r1")
+	entry.Extract = strings.Repeat("x", maxExtractChars+10)
+	committed, err := worker.Commit(context.Background(), ActivityCommitRequested{Sequence: 1, Entry: entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.Entry.Extract != j.Recent(1)[0].Extract {
+		t.Fatal("worker returned a different entry than the journal persisted")
 	}
 }
 

@@ -120,6 +120,7 @@ func (j *Journal) load() error {
 	scanner := bufio.NewScanner(io.LimitReader(file, maxBytes*4+1))
 	scanner.Buffer(make([]byte, 64*1024), maxBytes)
 	var entries []Entry
+	needsCompact := len(tombstones) > 0 || info.Size() > maxBytes
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -130,21 +131,31 @@ func (j *Journal) load() error {
 			continue
 		}
 		if _, discarded := tombstones[entry.ID]; !discarded {
-			entries = append(entries, entry)
+			normalized := NormalizeEntry(entry)
+			if normalized.Extract != entry.Extract {
+				needsCompact = true
+			}
+			entries = append(entries, normalized)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("scan activity journal: %w", err)
 	}
-	if len(entries) > maxItems {
-		entries = entries[len(entries)-maxItems:]
+	retained, retainedBytes, err := retainWithinLimits(entries)
+	if err != nil {
+		return fmt.Errorf("normalize activity journal: %w", err)
 	}
-	j.entries = entries
-	j.bytes = info.Size()
-	if len(tombstones) > 0 {
+	if len(retained) != len(entries) || retainedBytes != info.Size() {
+		needsCompact = true
+	}
+	j.entries = retained
+	j.bytes = retainedBytes
+	if needsCompact {
 		if err := j.compactLocked(); err != nil {
-			return fmt.Errorf("recover tombstoned activity: %w", err)
+			return fmt.Errorf("compact activity journal: %w", err)
 		}
+	}
+	if len(tombstones) > 0 {
 		if err := j.writeTombstonesLocked(nil); err != nil {
 			return fmt.Errorf("clean recovered activity tombstones: %w", err)
 		}
@@ -155,14 +166,22 @@ func (j *Journal) load() error {
 func (j *Journal) Append(entry Entry) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if len([]rune(entry.Extract)) > maxExtractChars {
-		entry.Extract = string([]rune(entry.Extract)[:maxExtractChars])
-	}
-	data, err := json.Marshal(entry)
+	entry = NormalizeEntry(entry)
+	data, err := encodeEntry(entry)
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
+	if len(data) > maxBytes {
+		return fmt.Errorf("activity entry exceeds %d byte journal limit", maxBytes)
+	}
+	candidate := append(append([]Entry(nil), j.entries...), entry)
+	retained, retainedBytes, err := retainWithinLimits(candidate)
+	if err != nil {
+		return err
+	}
+	if len(retained) != len(candidate) || retainedBytes > maxBytes || len(candidate) > maxItems {
+		return j.compactEntriesLocked(retained)
+	}
 	file, err := os.OpenFile(j.path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open activity journal: %w", err)
@@ -187,13 +206,48 @@ func (j *Journal) Append(entry Entry) error {
 	}
 	j.entries = append(j.entries, entry)
 	j.bytes += int64(len(data))
-	if len(j.entries) > maxItems || j.bytes > maxBytes {
-		if len(j.entries) > maxItems {
-			j.entries = j.entries[len(j.entries)-maxItems:]
-		}
-		return j.compactLocked()
-	}
 	return nil
+}
+
+func NormalizeEntry(entry Entry) Entry {
+	runes := []rune(entry.Extract)
+	if len(runes) > maxExtractChars {
+		entry.Extract = string(runes[:maxExtractChars])
+	}
+	return entry
+}
+
+func encodeEntry(entry Entry) ([]byte, error) {
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+func retainWithinLimits(entries []Entry) ([]Entry, int64, error) {
+	if len(entries) > maxItems {
+		entries = entries[len(entries)-maxItems:]
+	}
+	sizes := make([]int, len(entries))
+	var total int64
+	for i, entry := range entries {
+		data, err := encodeEntry(entry)
+		if err != nil {
+			return nil, 0, err
+		}
+		sizes[i] = len(data)
+		total += int64(len(data))
+	}
+	first := 0
+	for total > maxBytes && first < len(entries)-1 {
+		total -= int64(sizes[first])
+		first++
+	}
+	if total > maxBytes {
+		return nil, 0, fmt.Errorf("activity entry exceeds %d byte journal limit", maxBytes)
+	}
+	return append([]Entry(nil), entries[first:]...), total, nil
 }
 
 func (j *Journal) Clear() error {
@@ -285,12 +339,11 @@ func (j *Journal) compactEntriesLocked(entries []Entry) error {
 	}
 	var bytesWritten int64
 	for _, entry := range entries {
-		data, err := json.Marshal(entry)
+		data, err := encodeEntry(entry)
 		if err != nil {
 			_ = temp.Close()
 			return err
 		}
-		data = append(data, '\n')
 		written, err := temp.Write(data)
 		if err != nil {
 			_ = temp.Close()

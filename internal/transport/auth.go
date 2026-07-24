@@ -44,8 +44,8 @@ func tokenMatches(expected, provided string) bool {
 func requestToken(r *http.Request) string {
 	auth := r.Header.Get("Authorization")
 	if auth != "" {
-		if strings.HasPrefix(auth, "Bearer ") {
-			return strings.TrimPrefix(auth, "Bearer ")
+		if len(auth) >= 7 && strings.EqualFold(auth[:7], "Bearer ") {
+			return auth[7:]
 		}
 		return auth
 	}
