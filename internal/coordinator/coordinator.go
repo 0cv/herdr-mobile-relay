@@ -84,7 +84,7 @@ type completionEvent struct {
 type ledgerPhaseUpdate struct {
 	key        string
 	generation uint64
-	phase      string
+	result     *CommandResult
 	response   chan bool
 }
 
@@ -291,6 +291,14 @@ func (s *Scheduler) ExecuteAdmitted(
 // the scheduler owner. A false return means the operation was invalidated by a
 // generation change, pruned, or the scheduler is closing.
 func (s *Scheduler) UpdateLedgerPhase(key string, generation uint64, phase string) bool {
+	result := &CommandResult{OK: phase == "confirmed", Phase: phase}
+	return s.UpdateLedgerResult(key, generation, result)
+}
+
+// UpdateLedgerResult replaces the accepted ledger result with the complete
+// terminal confirmation result. Replays must preserve data and errors, not only
+// the terminal phase.
+func (s *Scheduler) UpdateLedgerResult(key string, generation uint64, result *CommandResult) bool {
 	if key == "" || s.closed.Load() {
 		return false
 	}
@@ -298,7 +306,7 @@ func (s *Scheduler) UpdateLedgerPhase(key string, generation uint64, phase strin
 	update := ledgerPhaseUpdate{
 		key:        key,
 		generation: generation,
-		phase:      phase,
+		result:     cloneResult(result),
 		response:   response,
 	}
 	select {
@@ -759,10 +767,10 @@ func (s *Scheduler) run() {
 
 		case update := <-s.ledger:
 			entry := ledger[update.key]
-			applied := entry != nil && entry.generation == update.generation && entry.result != nil
+			applied := entry != nil && entry.generation == update.generation &&
+				entry.result != nil && update.result != nil
 			if applied {
-				entry.result.Phase = update.phase
-				entry.result.OK = update.phase == "confirmed"
+				entry.result = cloneResult(update.result)
 			}
 			update.response <- applied
 

@@ -1,0 +1,33 @@
+{
+  "type": "command_result",
+  "request_id": "question-answer-1",
+  "action": "answer_question",
+  "ok": true,
+  "phase": "advanced",
+  "pane_id": "pane-1",
+  "data": {
+    "interaction": {
+      "id": "interaction-2",
+      "kind": "single_select",
+      "question": "Choose the second value",
+      "options": [
+        {
+          "index": 0,
+          "label": "Beta",
+          "description": "",
+          "selected": false
+        }
+      ],
+      "other": {
+        "selected": false,
+        "text": "",
+        "label": "None of the above"
+      },
+      "submit_label": "Submit",
+      "can_chat": false,
+      "can_go_back": true,
+      "question_index": 2,
+      "question_total": 2
+    }
+  }
+}

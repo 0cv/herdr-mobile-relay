@@ -270,6 +270,179 @@ func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
 	}
 }
 
+func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "keys.log")
+	stateFile := filepath.Join(dir, "pane.txt")
+	firstFile := filepath.Join(dir, "first.txt")
+	secondFile := filepath.Join(dir, "second.txt")
+	firstView := "Question 1/2 (1 unanswered)\nChoose the first value\n\n❯ 1. Alpha\n  2. Beta\n  3. None of the above\n\ntab to add notes | enter to submit answer | ←/→ to navigate questions"
+	secondView := "Question 2/2 (1 unanswered)\nChoose the second value\n\n❯ 1. Gamma\n  2. Delta\n  3. None of the above\n\ntab to add notes | enter to submit all | ←/→ to navigate questions"
+	if err := os.WriteFile(firstFile, []byte(firstView), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondFile, []byte(secondView), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFile, []byte(secondView), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
+		"if [ \"$1 $2 $3\" = \"pane read pane-1\" ]; then\n"+
+		"  cat \""+stateFile+"\"\n"+
+		"elif printf '%s' \"$*\" | grep -q 'Left'; then\n"+
+		"  cp \""+firstFile+"\" \""+stateFile+"\"\n"+
+		"  printf '{\"ok\":true}\\n'\n"+
+		"elif printf '%s' \"$*\" | grep -q 'Enter'; then\n"+
+		"  cp \""+secondFile+"\" \""+stateFile+"\"\n"+
+		"  printf '{\"ok\":true}\\n'\n"+
+		"else\n"+
+		"  printf '{\"ok\":true}\\n'\n"+
+		"fi\n")
+
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "codex", Status: "blocked"}}, state.RevisionCounter())
+	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := d.Close(ctx); err != nil {
+			t.Errorf("close dispatcher: %v", err)
+		}
+	})
+	updates := make(chan map[string]any, 8)
+	d.SetBroadcast(func(message any) {
+		if update, ok := message.(map[string]any); ok {
+			updates <- update
+		}
+	})
+	second := question.Parse(secondView, "codex")
+	first := question.Parse(firstView, "codex")
+	if first == nil || second == nil {
+		t.Fatalf("question fixtures did not parse: first=%+v second=%+v", first, second)
+	}
+
+	navigate := func(requestID string, interaction *question.Interaction) *CommandResult {
+		return d.Handle(context.Background(), map[string]any{
+			"action":         "navigate_question",
+			"request_id":     requestID,
+			"pane_id":        "pane-1",
+			"interaction_id": interaction.ID,
+			"direction":      "previous",
+		})
+	}
+	awaitUpdate := func(requestID, phase string) map[string]any {
+		t.Helper()
+		timeout := time.After(2 * time.Second)
+		for {
+			select {
+			case update := <-updates:
+				if update["request_id"] == requestID && update["phase"] == phase {
+					return update
+				}
+			case <-timeout:
+				t.Fatalf("no %s update for %s", phase, requestID)
+			}
+		}
+	}
+
+	if result := navigate("previous-1", second); !result.OK || result.Phase != "accepted" {
+		t.Fatalf("first navigation = %+v", result)
+	}
+	firstUpdate := awaitUpdate("previous-1", "navigated")
+	firstData, _ := firstUpdate["data"].(map[string]any)
+	firstInteraction, _ := firstData["interaction"].(*question.Interaction)
+	if firstInteraction == nil || firstInteraction.QuestionIndex != 1 {
+		t.Fatalf("first navigation data = %#v", firstUpdate["data"])
+	}
+	replay := navigate("previous-1", second)
+	replayedData, _ := replay.Data.(map[string]any)
+	replayedInteraction, _ := replayedData["interaction"].(*question.Interaction)
+	if !replay.OK || replay.Phase != "navigated" || replayedInteraction == nil ||
+		replayedInteraction.QuestionIndex != 1 {
+		t.Fatalf("navigation replay = %+v", replay)
+	}
+
+	answer := d.Handle(context.Background(), map[string]any{
+		"action":           "answer_question",
+		"request_id":       "answer-1",
+		"pane_id":          "pane-1",
+		"interaction_id":   first.ID,
+		"selected_indices": []any{float64(0)},
+	})
+	if !answer.OK || answer.Phase != "accepted" {
+		t.Fatalf("answer = %+v", answer)
+	}
+	awaitUpdate("answer-1", "advanced")
+
+	if result := navigate("previous-2", second); !result.OK || result.Phase != "accepted" {
+		t.Fatalf("second navigation = %+v", result)
+	}
+	awaitUpdate("previous-2", "navigated")
+
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lefts := strings.Count(string(data), "Left"); lefts != 2 {
+		t.Fatalf("Left dispatches = %d, want 2\n%s", lefts, data)
+	}
+}
+
+func TestUnchangedQuestionNavigationReturnsReplayableError(t *testing.T) {
+	dir := t.TempDir()
+	questionView := "Question 2/2 (1 unanswered)\nChoose the second value\n\n❯ 1. Gamma\n  2. Delta\n  3. None of the above\n\ntab to add notes | enter to submit all | ←/→ to navigate questions"
+	interaction := question.Parse(questionView, "codex")
+	if interaction == nil {
+		t.Fatal("question fixture did not parse")
+	}
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"if [ \"$1 $2 $3\" = \"pane read pane-1\" ]; then\n"+
+		"  printf '%s\\n' '"+questionView+"'\n"+
+		"else\n"+
+		"  printf '{\"ok\":true}\\n'\n"+
+		"fi\n")
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "codex", Status: "blocked"}}, state.RevisionCounter())
+	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = d.Close(ctx)
+	})
+	updates := make(chan map[string]any, 1)
+	d.SetBroadcast(func(message any) {
+		if update, ok := message.(map[string]any); ok {
+			updates <- update
+		}
+	})
+	message := map[string]any{
+		"action":         "navigate_question",
+		"request_id":     "unchanged",
+		"pane_id":        "pane-1",
+		"interaction_id": interaction.ID,
+		"direction":      "previous",
+	}
+	if accepted := d.Handle(context.Background(), message); !accepted.OK || accepted.Phase != "accepted" {
+		t.Fatalf("accepted = %+v", accepted)
+	}
+	select {
+	case update := <-updates:
+		if update["ok"] != false || update["phase"] != "unconfirmed" ||
+			!strings.Contains(fmt.Sprint(update["error"]), "still shows the same question") {
+			t.Fatalf("unconfirmed update = %+v", update)
+		}
+	case <-time.After(approvalPollTimeout + 2*time.Second):
+		t.Fatal("unchanged navigation did not fail")
+	}
+	replay := d.Handle(context.Background(), message)
+	if replay.OK || replay.Phase != "unconfirmed" ||
+		!strings.Contains(replay.Error, "still shows the same question") {
+		t.Fatalf("unconfirmed replay = %+v", replay)
+	}
+}
+
 func TestSchedulerEvictsOldCompletedLedgerEntries(t *testing.T) {
 	scheduler := NewScheduler(1, testLogger())
 	t.Cleanup(func() {

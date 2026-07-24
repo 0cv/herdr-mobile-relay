@@ -166,7 +166,7 @@ describe('accessible Svelte interactions', () => {
       other: { label: 'None of the above', placeholder: 'Optional notes', allow_empty: true },
       submit_label: 'Next', can_go_back: true, can_chat: true, question_index: 2, question_total: 4,
     };
-    const answer = vi.spyOn(relayStore, 'answerQuestion').mockResolvedValue({ type: 'command_result', request_id: '1', ok: true, phase: 'submitted' });
+    const answer = vi.spyOn(relayStore, 'answerQuestion').mockResolvedValue({ type: 'command_result', request_id: '1', ok: true, phase: 'confirmed' });
     vi.spyOn(relayStore, 'navigateQuestionPrevious').mockResolvedValue({ type: 'command_result', request_id: '2', ok: true });
     render(QuestionForm, { agent: { ...blockedAgent, interaction }, interaction, responding: false });
     expect(screen.getByRole('group', { name: interaction.question })).toBeInTheDocument();

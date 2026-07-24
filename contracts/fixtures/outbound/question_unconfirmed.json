@@ -1,0 +1,9 @@
+{
+  "type": "command_result",
+  "request_id": "question-nav-3",
+  "action": "navigate_question",
+  "ok": false,
+  "phase": "unconfirmed",
+  "error": "The agent still shows the same question; try again",
+  "pane_id": "pane-1"
+}

@@ -80,6 +80,38 @@ func TestCommandResultFixtureIsExact(t *testing.T) {
 	}
 }
 
+func TestQuestionResultFixturesCoverTerminalProtocol(t *testing.T) {
+	tests := []struct {
+		name    string
+		phase   string
+		ok      bool
+		hasData bool
+	}{
+		{name: "question_navigated.json", phase: "navigated", ok: true, hasData: true},
+		{name: "question_advanced.json", phase: "advanced", ok: true, hasData: true},
+		{name: "question_unconfirmed.json", phase: "unconfirmed", ok: false, hasData: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", test.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct {
+				Type string `json:"type"`
+				coordinator.CommandResult
+			}
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Type != "command_result" || envelope.Phase != test.phase ||
+				envelope.OK != test.ok || (envelope.Data != nil) != test.hasData {
+				t.Fatalf("question result fixture = %+v", envelope)
+			}
+		})
+	}
+}
+
 func TestSlashCommandsFixtureMatchesCompleteClaudeCatalog(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "contracts", "fixtures", "outbound", "slash_commands.json"))
 	if err != nil {

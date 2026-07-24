@@ -981,20 +981,57 @@ test('keeps normal single-select answers across repeated question navigation', a
     ...first, can_go_back: false, other: { ...first.other, selected: true, text: 'Hello' },
   });
   await page.getByRole('button', { name: 'Previous' }).click();
+  await expect(page.getByRole('group', { name: first.question })).toBeVisible();
   await page.getByRole('radio', { name: 'Backoff plus signals' }).click();
   await expect(page.getByRole('textbox', { name: 'Other answer' })).toHaveValue('');
 
   await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), second);
   await page.getByRole('button', { name: 'Next' }).click();
+  await expect(page.getByRole('group', { name: second.question })).toBeVisible();
   await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), {
     ...first,
     options: first.options.map((option) => ({ ...option, selected: option.index === 2 })),
     other: { ...first.other, selected: false, text: '' },
   });
   await page.getByRole('button', { name: 'Previous' }).click();
+  await expect(page.getByRole('group', { name: first.question })).toBeVisible();
   await expect(page.getByRole('radio', { name: 'Backoff plus signals' })).toBeChecked();
   await expect(page.getByRole('radio', { name: 'Other' })).not.toBeChecked();
   await expect(page.getByRole('textbox', { name: 'Other answer' })).toHaveValue('');
+  expect((await commands(page)).filter((command) => command.type === 'navigate_question')).toHaveLength(2);
+});
+
+test('does not report failed question navigation as opened', async ({ page }) => {
+  const second = {
+    id: 'failed-navigation', kind: 'single_select', question: 'Choose release scope',
+    options: [{ index: 0, label: 'Backend' }, { index: 1, label: 'Everything' }],
+    submit_label: 'Submit', can_go_back: true, question_index: 2, question_total: 2,
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'codex',
+      interaction: second, question_layout: true,
+    }],
+  });
+  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
+  await page.evaluate(() => (window as any).__relayAutoCommands(false));
+  await page.getByRole('button', { name: 'Previous' }).click();
+  const navigation = (await commands(page)).find((command) => command.type === 'navigate_question')!;
+  await server(page, 0, {
+    type: 'command_result', request_id: navigation.request_id, action: 'navigate_question',
+    ok: true, phase: 'accepted',
+  });
+  await server(page, 0, {
+    type: 'command_result', request_id: navigation.request_id, action: 'navigate_question',
+    ok: false, phase: 'unconfirmed', error: 'The agent still shows the same question; try again',
+  });
+  await expect(page.getByRole('status').filter({ hasText: 'still shows the same question' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Opened the previous question' })).toBeHidden();
+  await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 });
 
 test('refreshes agents on return home and preserves terminal behavior', async ({ page }) => {

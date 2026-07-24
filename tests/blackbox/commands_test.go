@@ -3,6 +3,9 @@ package blackbox
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -239,6 +242,111 @@ func TestReadAndAnswerStructuredQuestion(t *testing.T) {
 	result := readJSON(t, conn, ctx, 5*time.Second)
 	if result["type"] != "command_result" || result["ok"] != true || result["phase"] != "accepted" {
 		t.Fatalf("question result = %+v", result)
+	}
+}
+
+func TestNavigateStructuredQuestionTwice(t *testing.T) {
+	firstView := "Question 1/2 (1 unanswered)\nChoose the first value\n\n❯ 1. Alpha\n  2. Beta\n  3. None of the above\n\ntab to add notes | enter to submit answer | ←/→ to navigate questions"
+	secondView := "Question 2/2 (1 unanswered)\nChoose the second value\n\n❯ 1. Gamma\n  2. Delta\n  3. None of the above\n\ntab to add notes | enter to submit all | ←/→ to navigate questions"
+	scenario, err := json.Marshal(map[string]any{
+		"panes": []map[string]any{{
+			"pane_id": "pane-1", "agent": "codex", "name": "test",
+			"agent_status": "blocked", "tab_id": "tab-1",
+			"workspace_id": "ws-1", "cwd": "/tmp", "revision": 1,
+		}},
+		"tabs": []map[string]any{{
+			"tab_id": "tab-1", "workspace_id": "ws-1", "label": "main", "number": 1, "cwd": "/tmp",
+		}},
+		"content": map[string]string{"pane-1": secondView},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := setupEnvWithScenario(t, string(scenario))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	read, _ := json.Marshal(map[string]any{
+		"type": "read_pane", "pane_id": "pane-1", "lines": 80, "format": "ansi",
+	})
+	if err := conn.Write(ctx, websocket.MessageText, read); err != nil {
+		t.Fatal(err)
+	}
+	content := readJSON(t, conn, ctx, 5*time.Second)
+	second, ok := content["interaction"].(map[string]any)
+	if !ok || second["question_index"] != float64(2) {
+		t.Fatalf("second interaction = %+v", content["interaction"])
+	}
+
+	for cycle := 1; cycle <= 2; cycle++ {
+		requestID := "navigate-" + string(rune('0'+cycle))
+		navigate, _ := json.Marshal(map[string]any{
+			"type": "navigate_question", "protocol": 2, "request_id": requestID,
+			"pane_id": "pane-1", "interaction_id": second["id"], "direction": "previous",
+		})
+		if err := conn.Write(ctx, websocket.MessageText, navigate); err != nil {
+			t.Fatal(err)
+		}
+		accepted := readJSON(t, conn, ctx, 5*time.Second)
+		if accepted["ok"] != true || accepted["phase"] != "accepted" {
+			t.Fatalf("cycle %d accepted = %+v", cycle, accepted)
+		}
+		setFakePaneContent(t, env, "pane-1", firstView)
+		terminal := readJSON(t, conn, ctx, 5*time.Second)
+		data, _ := terminal["data"].(map[string]any)
+		interaction, _ := data["interaction"].(map[string]any)
+		if terminal["ok"] != true || terminal["phase"] != "navigated" ||
+			interaction["question_index"] != float64(1) {
+			t.Fatalf("cycle %d terminal = %+v", cycle, terminal)
+		}
+		setFakePaneContent(t, env, "pane-1", secondView)
+	}
+	if got := countFakeOperations(t, env.operationsLog, "pane", "send-keys"); got != 2 {
+		t.Fatalf("navigation send-keys operations = %d, want 2", got)
+	}
+}
+
+func setFakePaneContent(t *testing.T, env *TestEnv, paneID, content string) {
+	t.Helper()
+	statePath := filepath.Join(env.tmpDir, "scenario.json.state")
+	lock, err := os.OpenFile(statePath+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	contents, _ := state["content"].(map[string]any)
+	if contents == nil {
+		contents = make(map[string]any)
+		state["content"] = contents
+	}
+	contents[paneID] = content
+	encoded, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary := statePath + ".test-tmp"
+	if err := os.WriteFile(temporary, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(temporary, statePath); err != nil {
+		t.Fatal(err)
 	}
 }
 

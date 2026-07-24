@@ -62,6 +62,7 @@ var (
 	submitPattern      = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?(submit|next)\s*$`)
 	chatPattern        = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?chat about this\s*$`)
 	codexHeaderPattern = regexp.MustCompile(`(?i)^\s*question\s+(\d+)\s*/\s*(\d+)`)
+	codexSubmitPattern = regexp.MustCompile(`(?i)\benter\s+to\s+submit\s+(answer|answers|all)\b`)
 	otherPattern       = regexp.MustCompile(`(?i)^(?:type something\.?|none of the above|other)\b`)
 	selectedPattern    = regexp.MustCompile(`\s*[✓✔]\s*$`)
 	chromePattern      = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
@@ -420,7 +421,7 @@ func parseCodex(text string) *Interaction {
 	lines := make([]string, len(rawLines))
 	headerIndex, current, total := -1, 0, 0
 	for index, raw := range rawLines {
-		lines[index] = cleanLine(raw)
+		lines[index] = cleanCodexLine(raw)
 		if match := codexHeaderPattern.FindStringSubmatch(lines[index]); match != nil {
 			headerIndex = index
 			current, _ = strconv.Atoi(match[1])
@@ -561,6 +562,20 @@ func cleanLine(line string) string {
 	}
 }
 
+func cleanCodexLine(line string) string {
+	line = strings.TrimRight(
+		ansiPattern.ReplaceAllString(strings.ReplaceAll(line, "\r", ""), ""),
+		" \t",
+	)
+	for {
+		next := strings.TrimRight(edgePattern.ReplaceAllString(line, ""), " \t")
+		if next == line {
+			return line
+		}
+		line = next
+	}
+}
+
 func description(lines []string, start, end int) string {
 	var parts []string
 	for _, line := range lines[start+1 : end] {
@@ -628,7 +643,7 @@ func countMarks(value string) int {
 
 func codexFooter(line string) bool {
 	lower := strings.ToLower(line)
-	return strings.Contains(lower, "enter to submit answer") &&
+	return codexSubmitPattern.MatchString(line) &&
 		strings.Contains(lower, "navigate questions")
 }
 

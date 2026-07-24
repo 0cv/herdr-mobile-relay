@@ -49,6 +49,19 @@ const codexQuestionView = `
 [48;2;240;240;240m  tab to add notes | enter to submit answer | ←/→ to navigate questions
 `
 
+const codexFinalQuestionView = `
+Question 2/2 (1 unanswered)
+What parts of the pipeline should the plan cover?
+
+› 1. check + release workflows only (Recommended)  Plan and edits limited to .github workflows and local release scripts used by these workflows.
+  2. Full shipping pipeline including web deploy   Include Pages deploy, app bundle checks, and release orchestration end-to-end.
+  3. Current + future guardrails                   Propose process upgrades too, like changelog, audit policy, branch/publish controls, and release
+                                                   playbooks.
+  4. None of the above                             Optionally, add details in notes (tab).
+
+tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt
+`
+
 func TestParseClaudeMultiQuestion(t *testing.T) {
 	interaction := Parse(multiQuestionView, "claude")
 	if interaction == nil {
@@ -93,6 +106,38 @@ func TestParseCodexQuestion(t *testing.T) {
 		interaction.Other.Label != "None of the above" ||
 		interaction.Agent != "codex" {
 		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestParseCodexFinalQuestionSubmitAll(t *testing.T) {
+	interaction := Parse(codexFinalQuestionView, "codex")
+	if interaction == nil {
+		t.Fatal("question was not parsed")
+	}
+	if interaction.Kind != "single_select" ||
+		interaction.Question != "What parts of the pipeline should the plan cover?" ||
+		len(interaction.Options) != 3 ||
+		interaction.Options[2].Label != "Current + future guardrails" ||
+		interaction.Options[2].Description != "Propose process upgrades too, like changelog, audit policy, branch/publish controls, and release playbooks." ||
+		interaction.Other.Label != "None of the above" ||
+		interaction.SubmitLabel != "Submit" ||
+		!interaction.CanGoBack ||
+		interaction.QuestionIndex != 2 ||
+		interaction.QuestionTotal != 2 ||
+		interaction.AllOptionCount != 4 {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestCodexFooterSubmitVariants(t *testing.T) {
+	for _, submitText := range []string{"answer", "answers", "all"} {
+		footer := "tab to add notes | enter to submit " + submitText + " | ←/→ to navigate questions"
+		if !codexFooter(footer) {
+			t.Errorf("footer with %q was not recognized", submitText)
+		}
+	}
+	if codexFooter("enter to submit all") {
+		t.Fatal("footer without question navigation was recognized")
 	}
 }
 

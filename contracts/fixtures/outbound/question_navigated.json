@@ -1,0 +1,33 @@
+{
+  "type": "command_result",
+  "request_id": "question-nav-2",
+  "action": "navigate_question",
+  "ok": true,
+  "phase": "navigated",
+  "pane_id": "pane-1",
+  "data": {
+    "interaction": {
+      "id": "interaction-1",
+      "kind": "single_select",
+      "question": "Choose the first value",
+      "options": [
+        {
+          "index": 0,
+          "label": "Alpha",
+          "description": "",
+          "selected": true
+        }
+      ],
+      "other": {
+        "selected": false,
+        "text": "",
+        "label": "None of the above"
+      },
+      "submit_label": "Next",
+      "can_chat": false,
+      "can_go_back": false,
+      "question_index": 1,
+      "question_total": 2
+    }
+  }
+}

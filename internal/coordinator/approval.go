@@ -170,7 +170,7 @@ func (d *Dispatcher) watchApproval(parent context.Context, requestID, paneID, ev
 func (d *Dispatcher) handleQuestion(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
 	payload, err := decodeQuestionPayload(message)
 	if err != nil {
-		return d.fail(requestID, "question", paneID, err.Error())
+		return d.fail(requestID, "answer_question", paneID, err.Error())
 	}
 	return d.submitQuestion(ctx, receivedAt, requestID, paneID, payload)
 }
@@ -239,17 +239,18 @@ func decodeQuestionPayload(message map[string]any) (questionPayload, error) {
 
 func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, requestID, paneID string, payload questionPayload) *CommandResult {
 	if paneID == "" {
-		return d.fail(requestID, "question", paneID, "Agent is required")
+		return d.fail(requestID, "answer_question", paneID, "Agent is required")
 	}
-	action := "question"
+	action := "answer_question"
 	if payload.Clarify {
 		action = "clarify_question"
 	}
 	if payload.Navigation != "" {
 		action = "navigate_question"
 	}
-	ledgerKey := questionLedgerKey(paneID, payload.InteractionID)
+	ledgerKey := questionOperationLedgerKey(action, paneID, payload.InteractionID, requestID)
 	payloadHash := hashPayload(payload)
+	var submittedInteraction *question.Interaction
 	replay, found, replayErr := d.scheduler.ReplayLedger(ledgerKey, payloadHash)
 	if errors.Is(replayErr, ErrConflict) {
 		return d.fail(requestID, action, paneID, "A different response was already submitted")
@@ -290,6 +291,8 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 		if err := validateQuestionPayload(payload, interaction); err != nil {
 			return EffectResult{Result: d.fail(requestID, action, paneID, err.Error())}
 		}
+		copy := *interaction
+		submittedInteraction = &copy
 		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
 			return EffectResult{Result: stale}
 		}
@@ -304,10 +307,18 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 		return EffectResult{Result: accepted}
 	}))
 	if result.OK && !result.replayed {
-		d.recordActivity("question", "answered", "Answered question", paneID, requestID)
 		d.wake()
 		d.startWatcher(func(ctx context.Context) {
-			d.watchQuestion(ctx, requestID, action, paneID, payload.InteractionID, uint64(d.state.Generation(paneID)))
+			d.watchQuestion(
+				ctx,
+				ledgerKey,
+				requestID,
+				action,
+				paneID,
+				interactionSnapshot(payload.InteractionID, submittedInteraction),
+				payload.Navigation,
+				uint64(d.state.Generation(paneID)),
+			)
 		})
 	}
 	return result
@@ -551,7 +562,9 @@ func contextDelay(ctx context.Context, delay time.Duration) error {
 
 func (d *Dispatcher) watchQuestion(
 	parent context.Context,
-	requestID, action, paneID, interactionID string,
+	ledgerKey, requestID, action, paneID string,
+	original *question.Interaction,
+	navigation string,
 	generation uint64,
 ) {
 	ctx, cancel := context.WithTimeout(parent, approvalPollTimeout)
@@ -561,14 +574,14 @@ func (d *Dispatcher) watchQuestion(
 	for {
 		select {
 		case <-ctx.Done():
-			d.commitAndBroadcastPhase(
-				questionLedgerKey(paneID, interactionID),
-				generation,
-				requestID,
-				action,
-				paneID,
-				"unconfirmed",
-			)
+			d.commitAndBroadcastResult(ledgerKey, generation, &CommandResult{
+				RequestID: requestID,
+				Action:    action,
+				OK:        false,
+				Phase:     "unconfirmed",
+				Error:     "The agent still shows the same question; try again",
+				PaneID:    paneID,
+			})
 			return
 		case <-ticker.C:
 			if uint64(d.state.Generation(paneID)) != generation {
@@ -576,14 +589,7 @@ func (d *Dispatcher) watchQuestion(
 			}
 			agent, ok := d.state.Agent(paneID)
 			if !ok {
-				d.commitAndBroadcastPhase(
-					questionLedgerKey(paneID, interactionID),
-					generation,
-					requestID,
-					action,
-					paneID,
-					"confirmed",
-				)
+				d.finishQuestionWatch(ledgerKey, generation, requestID, action, paneID, original, navigation, nil)
 				return
 			}
 			content, err := d.herdr.ReadPane(ctx, paneID, 80, "ansi")
@@ -591,18 +597,76 @@ func (d *Dispatcher) watchQuestion(
 				continue
 			}
 			current := question.Parse(string(content), agent.Agent)
-			if current == nil || current.ID != interactionID {
-				d.commitAndBroadcastPhase(
-					questionLedgerKey(paneID, interactionID),
-					generation,
-					requestID,
-					action,
-					paneID,
-					"confirmed",
-				)
+			if current == nil || original == nil || current.ID != original.ID {
+				d.finishQuestionWatch(ledgerKey, generation, requestID, action, paneID, original, navigation, current)
 				return
 			}
 		}
+	}
+}
+
+func interactionSnapshot(interactionID string, stateInteraction *question.Interaction) *question.Interaction {
+	if stateInteraction != nil && stateInteraction.ID == interactionID {
+		copy := *stateInteraction
+		return &copy
+	}
+	return &question.Interaction{ID: interactionID}
+}
+
+func (d *Dispatcher) finishQuestionWatch(
+	ledgerKey string,
+	generation uint64,
+	requestID, action, paneID string,
+	original *question.Interaction,
+	navigation string,
+	current *question.Interaction,
+) {
+	result := &CommandResult{
+		RequestID: requestID,
+		Action:    action,
+		OK:        true,
+		Phase:     "confirmed",
+		PaneID:    paneID,
+	}
+	switch {
+	case navigation != "":
+		expected := original.QuestionIndex
+		if navigation == "previous" {
+			expected--
+		} else {
+			expected++
+		}
+		if current != nil && expected > 0 && current.QuestionIndex == expected {
+			result.Phase = "navigated"
+			result.Data = map[string]any{"interaction": current}
+		} else {
+			result.OK = false
+			result.Phase = "failed"
+			result.Error = "The agent opened an unexpected question; the screen was refreshed"
+			if current != nil {
+				result.Data = map[string]any{"interaction": current}
+			}
+		}
+	case action == "answer_question" && current != nil &&
+		original.QuestionIndex > 0 && current.QuestionIndex == original.QuestionIndex+1:
+		result.Phase = "advanced"
+		result.Data = map[string]any{"interaction": current}
+	case action == "answer_question" && current != nil:
+		result.OK = false
+		result.Phase = "failed"
+		result.Error = "The agent opened an unexpected question; the screen was refreshed"
+		result.Data = map[string]any{"interaction": current}
+	}
+	if !d.commitAndBroadcastResult(ledgerKey, generation, result) || !result.OK {
+		return
+	}
+	switch {
+	case navigation == "previous":
+		d.recordActivity("question", "navigated", "Opened previous question", paneID, requestID)
+	case navigation == "next":
+		d.recordActivity("question", "navigated", "Opened next question", paneID, requestID)
+	case action == "answer_question":
+		d.recordActivity("question", "answered", "Answered question", paneID, requestID)
 	}
 }
 
@@ -614,6 +678,17 @@ func questionLedgerKey(paneID, interactionID string) string {
 	return "question\x00" + paneID + "\x00" + interactionID
 }
 
+func questionOperationLedgerKey(action, paneID, interactionID, requestID string) string {
+	switch action {
+	case "navigate_question":
+		return "question-navigation\x00" + paneID + "\x00" + interactionID + "\x00" + requestID
+	case "clarify_question":
+		return "question-clarification\x00" + paneID + "\x00" + interactionID + "\x00" + requestID
+	default:
+		return questionLedgerKey(paneID, interactionID)
+	}
+}
+
 func (d *Dispatcher) commitAndBroadcastPhase(
 	ledgerKey string,
 	generation uint64,
@@ -622,24 +697,45 @@ func (d *Dispatcher) commitAndBroadcastPhase(
 	paneID string,
 	phase string,
 ) {
-	if !d.scheduler.UpdateLedgerPhase(ledgerKey, generation, phase) {
+	result := &CommandResult{
+		RequestID: requestID,
+		Action:    action,
+		OK:        phase == "confirmed",
+		Phase:     phase,
+		PaneID:    paneID,
+	}
+	if !d.commitAndBroadcastResult(ledgerKey, generation, result) {
 		return
 	}
-	d.broadcastPhase(requestID, action, paneID, phase)
 }
 
-func (d *Dispatcher) broadcastPhase(requestID, action, paneID, phase string) {
+func (d *Dispatcher) commitAndBroadcastResult(ledgerKey string, generation uint64, result *CommandResult) bool {
+	if !d.scheduler.UpdateLedgerResult(ledgerKey, generation, result) {
+		return false
+	}
+	d.broadcastResult(result)
+	return true
+}
+
+func (d *Dispatcher) broadcastResult(result *CommandResult) {
 	if d.broadcast == nil {
 		return
 	}
-	d.broadcast(map[string]any{
+	message := map[string]any{
 		"type":       "command_result",
-		"request_id": requestID,
-		"action":     action,
-		"ok":         phase == "confirmed" || phase == "unconfirmed",
-		"phase":      phase,
-		"pane_id":    paneID,
-	})
+		"request_id": result.RequestID,
+		"action":     result.Action,
+		"ok":         result.OK,
+		"phase":      result.Phase,
+		"pane_id":    result.PaneID,
+	}
+	if result.Error != "" {
+		message["error"] = result.Error
+	}
+	if result.Data != nil {
+		message["data"] = result.Data
+	}
+	d.broadcast(message)
 }
 
 func uniqueInts(values []int) []int {

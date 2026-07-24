@@ -89,6 +89,20 @@
     save(updateQuestionOther(interaction, draft, selected, text));
   }
 
+  function returnedInteraction(result: { data?: Record<string, unknown> }): QuestionInteraction | undefined {
+    const value = result.data?.interaction;
+    if (!value || typeof value !== 'object') return undefined;
+    const candidate = value as QuestionInteraction;
+    if (!candidate.id || !candidate.question || !Array.isArray(candidate.options)) return undefined;
+    return candidate;
+  }
+
+  function unexpectedResult(message: string, fresh?: QuestionInteraction): CommandError {
+    const error = new CommandError(message);
+    if (fresh) error.data = { interaction: fresh };
+    return error;
+  }
+
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (!questionSubmitAllowed(interaction, draft)) {
@@ -99,24 +113,25 @@
       const submittedKey = questionDraftKey(agent, interaction);
       const result = await relayStore.answerQuestion(agent, interaction, draft);
       relayStore.clearResponding(agent.pane_id);
-      dirtyDrafts.delete(submittedKey);
-      drafts.delete(submittedKey);
-      const next = result.data?.interaction as QuestionInteraction | undefined;
+      const next = returnedInteraction(result);
       if (result.phase === 'advanced' && next) {
+        dirtyDrafts.delete(submittedKey);
+        drafts.delete(submittedKey);
         relayStore.applyQuestionInteraction(agent, next);
         relayStore.showToast('Answer saved. Continue with the next question.');
-      } else {
+      } else if (result.phase === 'confirmed') {
+        dirtyDrafts.delete(submittedKey);
+        drafts.delete(submittedKey);
         relayStore.applyQuestionInteraction(agent, null);
         relayStore.showToast('Answers submitted.');
+      } else {
+        throw unexpectedResult('The relay returned an unexpected question result.', next);
       }
     } catch (caught) {
       relayStore.clearResponding(agent.pane_id);
       const error = caught as CommandError;
-      const fresh = error.data?.interaction as QuestionInteraction | undefined;
+      const fresh = returnedInteraction(error);
       if (fresh) {
-        const freshKey = questionDraftKey(agent, fresh);
-        dirtyDrafts.delete(freshKey);
-        drafts.delete(freshKey);
         relayStore.applyQuestionInteraction(agent, fresh);
       }
       relayStore.showToast(error.message, true);
@@ -127,13 +142,21 @@
     try {
       const result = await relayStore.navigateQuestionPrevious(agent, interaction);
       relayStore.clearResponding(agent.pane_id);
-      const prior = result.data?.interaction as QuestionInteraction | undefined;
-      if (result.phase === 'navigated' && prior) relayStore.applyQuestionInteraction(agent, prior);
+      const prior = returnedInteraction(result);
+      if (result.phase !== 'navigated' || !prior) {
+        throw unexpectedResult(
+          result.phase === 'unconfirmed'
+            ? 'The agent still shows the same question; try again.'
+            : 'The relay did not return the previous question.',
+          prior,
+        );
+      }
+      relayStore.applyQuestionInteraction(agent, prior);
       relayStore.showToast('Opened the previous question.');
     } catch (caught) {
       relayStore.clearResponding(agent.pane_id);
       const error = caught as CommandError;
-      const fresh = error.data?.interaction as QuestionInteraction | undefined;
+      const fresh = returnedInteraction(error);
       if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
       relayStore.showToast(error.message, true);
     }
@@ -148,7 +171,7 @@
     } catch (caught) {
       relayStore.clearResponding(agent.pane_id);
       const error = caught as CommandError;
-      const fresh = error.data?.interaction as QuestionInteraction | undefined;
+      const fresh = returnedInteraction(error);
       if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
       relayStore.showToast(error.message, true);
     }
