@@ -69,3 +69,18 @@ func TestPlanQoderMultiSelectCustomAnswerReturnsToNext(t *testing.T) {
 		t.Fatalf("multi-select custom plan = %#v, want %#v", steps, want)
 	}
 }
+
+func TestPlanQoderReviewChoiceAndPrevious(t *testing.T) {
+	interaction := Parse(qoderReviewView, "qodercli")
+	if interaction == nil {
+		t.Fatal("review was not parsed")
+	}
+	cancel := PlanInput(interaction, InputIntent{Selected: []int{1}})
+	if !reflect.DeepEqual(cancel, []InputStep{{Keys: []string{"Down", "Enter"}}}) {
+		t.Fatalf("cancel plan = %#v", cancel)
+	}
+	previous := PlanInput(interaction, InputIntent{Navigation: "previous"})
+	if !reflect.DeepEqual(previous, []InputStep{{Keys: []string{"Left"}}}) {
+		t.Fatalf("previous plan = %#v", previous)
+	}
+}

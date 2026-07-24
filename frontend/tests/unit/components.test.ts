@@ -183,6 +183,34 @@ describe('accessible Svelte interactions', () => {
     vi.restoreAllMocks();
   });
 
+  it('renders a Qoder review without a custom-answer input', async () => {
+    const interaction: QuestionInteraction = {
+      id: 'qoder-review', kind: 'single_select',
+      question: 'Review your answers and choose what to do',
+      options: [
+        { index: 0, label: 'Submit answers', description: 'Vibe: Relaxation · Budget: Mid-range' },
+        { index: 1, label: 'Cancel ask' },
+      ],
+      other: { hidden: true },
+      submit_label: 'Continue', can_go_back: true, question_index: 5, question_total: 5,
+    };
+    const answer = vi.spyOn(relayStore, 'answerQuestion').mockResolvedValue({
+      type: 'command_result', request_id: 'review', ok: true, phase: 'confirmed',
+    });
+    render(QuestionForm, {
+      agent: { ...blockedAgent, interaction }, interaction, responding: false,
+    });
+
+    expect(screen.getByText('Question 5 of 5')).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /Submit answers/ })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /Cancel ask/ })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByRole('radio', { name: /Submit answers/ }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(answer).toHaveBeenCalledOnce();
+    vi.restoreAllMocks();
+  });
+
   it('does not restore Other after selecting a normal answer across navigation', async () => {
     const first: QuestionInteraction = {
       id: 'question-1', kind: 'single_select', question: 'Choose reconnect behavior',

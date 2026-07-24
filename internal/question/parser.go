@@ -22,6 +22,7 @@ type Other struct {
 	Label       string `json:"label,omitempty"`
 	Placeholder string `json:"placeholder,omitempty"`
 	AllowEmpty  bool   `json:"allow_empty,omitempty"`
+	Hidden      bool   `json:"hidden,omitempty"`
 }
 
 type Focus struct {
@@ -64,6 +65,7 @@ var (
 	codexHeaderPattern = regexp.MustCompile(`(?i)^\s*question\s+(\d+)\s*/\s*(\d+)`)
 	codexSubmitPattern = regexp.MustCompile(`(?i)\benter\s+to\s+submit\s+(answer|answers|all)\b`)
 	qoderActivePattern = regexp.MustCompile(`\x1b\[[^m]*48(?:;|:)[^m]*m\s*([^\x1b]+)`)
+	qoderReviewPattern = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(submit answers|cancel ask)\s*$`)
 	otherPattern       = regexp.MustCompile(`(?i)^(?:type something\.?|none of the above|other)\b`)
 	selectedPattern    = regexp.MustCompile(`\s*[✓✔]\s*$`)
 	chromePattern      = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
@@ -575,7 +577,10 @@ func parseQoder(text string) *Interaction {
 		}
 	}
 	if headerIndex < 0 || footerIndex <= headerIndex || current < 1 || total < current {
-		return nil
+		if headerIndex < 0 || footerIndex <= headerIndex {
+			return nil
+		}
+		return parseQoderReview(lines, headerIndex, footerIndex, total)
 	}
 
 	type row struct {
@@ -715,6 +720,58 @@ func parseQoder(text string) *Interaction {
 	return interaction
 }
 
+func parseQoderReview(lines []string, headerIndex, footerIndex, questionTotal int) *Interaction {
+	reviewIndex := -1
+	for index := headerIndex + 1; index < footerIndex; index++ {
+		if strings.EqualFold(strings.TrimSpace(lines[index]), "Review your answers:") {
+			reviewIndex = index
+			break
+		}
+	}
+	if reviewIndex < 0 {
+		return nil
+	}
+
+	var summary []string
+	var options []Option
+	focus := Focus{Kind: "option"}
+	for index := reviewIndex + 1; index < footerIndex; index++ {
+		line := strings.TrimSpace(lines[index])
+		if match := qoderReviewPattern.FindStringSubmatch(line); match != nil {
+			optionIndex := len(options)
+			options = append(options, Option{Index: optionIndex, Label: title(match[2])})
+			if match[1] != "" {
+				focus = Focus{Kind: "option", Index: optionIndex}
+			}
+			continue
+		}
+		if strings.Contains(line, "→") {
+			parts := strings.SplitN(line, "→", 2)
+			summary = append(summary, strings.TrimSpace(parts[0])+": "+strings.TrimSpace(parts[1]))
+		}
+	}
+	if len(options) != 2 {
+		return nil
+	}
+	options[0].Description = compact(strings.Join(summary, " · "), 1000)
+	step := questionTotal + 1
+	interaction := &Interaction{
+		Kind:           "single_select",
+		Question:       "Review your answers and choose what to do",
+		Options:        options,
+		Other:          Other{Hidden: true},
+		SubmitLabel:    "Continue",
+		CanGoBack:      true,
+		QuestionIndex:  step,
+		QuestionTotal:  step,
+		Focus:          focus,
+		AllOptionCount: len(options),
+		Agent:          "qoder",
+	}
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+
 func cleanLines(text string) []string {
 	raw := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	result := make([]string, len(raw))
@@ -832,7 +889,7 @@ func qoderFooter(line string) bool {
 	lower := strings.ToLower(line)
 	return strings.Contains(lower, "switch") &&
 		(strings.Contains(lower, "enter select") || strings.Contains(lower, "enter toggle")) &&
-		strings.Contains(lower, "esc back") &&
+		(strings.Contains(lower, "esc back") || strings.Contains(lower, "esc cancel")) &&
 		(strings.Contains(line, "←") || strings.Contains(lower, "tab/"))
 }
 

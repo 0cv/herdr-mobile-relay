@@ -118,6 +118,24 @@ Which activities interest you? (select all that apply)
 Tab/←→ switch · Enter toggle · Esc back
 `
 
+const qoderReviewView = `
+Asking User · Vibe > Distance > Activities > Budget > [1m[38;2;42;219;92m[48;2;36;74;50m Submit [0m
+────────────────────────────────────────────────────────────
+Review your answers:
+
+Vibe → Relaxation
+Distance → Open to flying
+Activities → Food & wine
+Budget → Mid-range
+
+Ready to submit?
+
+❯ Submit answers
+  Cancel ask
+
+Tab/←→ switch · Enter select · Esc cancel
+`
+
 func TestParseClaudeMultiQuestion(t *testing.T) {
 	interaction := Parse(multiQuestionView, "claude")
 	if interaction == nil {
@@ -241,6 +259,27 @@ func TestParseQoderMultiQuestion(t *testing.T) {
 		interaction.QuestionIndex != 3 ||
 		interaction.QuestionTotal != 4 ||
 		!interaction.CanGoBack {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestParseQoderReview(t *testing.T) {
+	interaction := Parse(qoderReviewView, "qodercli")
+	if interaction == nil {
+		t.Fatal("review was not parsed")
+	}
+	if interaction.Kind != "single_select" ||
+		interaction.Question != "Review your answers and choose what to do" ||
+		len(interaction.Options) != 2 ||
+		interaction.Options[0].Label != "Submit answers" ||
+		interaction.Options[1].Label != "Cancel ask" ||
+		interaction.Options[0].Description != "Vibe: Relaxation · Distance: Open to flying · Activities: Food & wine · Budget: Mid-range" ||
+		!interaction.Other.Hidden ||
+		interaction.SubmitLabel != "Continue" ||
+		!interaction.CanGoBack ||
+		interaction.QuestionIndex != 5 ||
+		interaction.QuestionTotal != 5 ||
+		interaction.Focus != (Focus{Kind: "option", Index: 0}) {
 		t.Fatalf("interaction = %+v", interaction)
 	}
 }

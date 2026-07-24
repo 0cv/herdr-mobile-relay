@@ -343,6 +343,9 @@ func validateQuestionPayload(payload questionPayload, interaction *question.Inte
 	}
 	otherIsChoice := payload.OtherSelected &&
 		(strings.TrimSpace(payload.OtherText) != "" || interaction.Other.AllowEmpty)
+	if interaction.Other.Hidden && payload.OtherSelected {
+		return fmt.Errorf("this question does not accept a custom answer")
+	}
 	if interaction.Kind == "single_select" && len(payload.Selected)+boolInt(otherIsChoice) != 1 {
 		return fmt.Errorf("choose one answer or enter an Other answer")
 	}

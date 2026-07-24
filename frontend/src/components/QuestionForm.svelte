@@ -207,7 +207,7 @@
         </span>
       </label>
     {/each}
-    <div class="question-other">
+    {#if !interaction.other?.hidden}<div class="question-other">
       {#if interaction.kind === 'multi_select'}
         <input
           id="question-other-toggle"
@@ -237,7 +237,7 @@
         onfocus={() => { if (!draft.otherSelected) chooseOther(true); }}
         oninput={(event) => changeOther(event.currentTarget.value)}
       />
-    </div>
+    </div>{/if}
   </fieldset>
   <div class="question-actions">
     {#if interaction.can_go_back}<Button type="button" variant="secondary" disabled={responding} onclick={previous}>← Previous</Button>{/if}
