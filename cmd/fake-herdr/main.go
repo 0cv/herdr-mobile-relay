@@ -253,40 +253,54 @@ func execute(store *stateStore, scenario Scenario, args []string) (string, error
 		if err != nil {
 			return "", err
 		}
-		var created Pane
-		updated, err := store.update(func(s *Scenario) error {
+		var createdPane Pane
+		var createdTab Tab
+		var createdWorkspace Workspace
+		_, err = store.update(func(s *Scenario) error {
 			id := fmt.Sprintf("workspace-%d", s.Sequence)
 			tabID := fmt.Sprintf("tab-%d", s.Sequence)
 			paneID := fmt.Sprintf("pane-%d", s.Sequence)
-			s.Workspaces = append(s.Workspaces, Workspace{ID: id, Label: values["--label"]})
-			s.Tabs = append(s.Tabs, Tab{ID: tabID, WorkspaceID: id, Label: values["--label"], Cwd: values["--cwd"]})
-			created = Pane{ID: paneID, TabID: tabID, WorkspaceID: id, Cwd: values["--cwd"], Status: "idle"}
-			s.Panes = append(s.Panes, created)
+			createdWorkspace = Workspace{ID: id, Label: values["--label"]}
+			createdTab = Tab{ID: tabID, WorkspaceID: id, Label: values["--label"], Cwd: values["--cwd"]}
+			createdPane = Pane{ID: paneID, TabID: tabID, WorkspaceID: id, Cwd: values["--cwd"], Status: "idle"}
+			s.Workspaces = append(s.Workspaces, createdWorkspace)
+			s.Tabs = append(s.Tabs, createdTab)
+			s.Panes = append(s.Panes, createdPane)
 			return nil
 		})
 		if err != nil {
 			return "", err
 		}
-		_ = updated
-		return envelope(map[string]any{"pane_id": created.ID, "tab_id": created.TabID, "workspace_id": created.WorkspaceID}), nil
+		return envelope(map[string]any{
+			"type":      "workspace_created",
+			"workspace": createdWorkspace,
+			"tab":       createdTab,
+			"root_pane": createdPane,
+		}), nil
 	case "tab create":
 		values, err := exactFlags(rest, []string{"--workspace", "--cwd", "--label"}, true)
 		if err != nil {
 			return "", err
 		}
-		var created Pane
+		var createdPane Pane
+		var createdTab Tab
 		_, err = store.update(func(s *Scenario) error {
 			tabID := fmt.Sprintf("tab-%d", s.Sequence)
 			paneID := fmt.Sprintf("pane-%d", s.Sequence)
-			s.Tabs = append(s.Tabs, Tab{ID: tabID, WorkspaceID: values["--workspace"], Label: values["--label"], Cwd: values["--cwd"]})
-			created = Pane{ID: paneID, TabID: tabID, WorkspaceID: values["--workspace"], Cwd: values["--cwd"], Status: "idle"}
-			s.Panes = append(s.Panes, created)
+			createdTab = Tab{ID: tabID, WorkspaceID: values["--workspace"], Label: values["--label"], Cwd: values["--cwd"]}
+			createdPane = Pane{ID: paneID, TabID: tabID, WorkspaceID: values["--workspace"], Cwd: values["--cwd"], Status: "idle"}
+			s.Tabs = append(s.Tabs, createdTab)
+			s.Panes = append(s.Panes, createdPane)
 			return nil
 		})
 		if err != nil {
 			return "", err
 		}
-		return envelope(map[string]any{"pane_id": created.ID, "tab_id": created.TabID, "workspace_id": created.WorkspaceID}), nil
+		return envelope(map[string]any{
+			"type":      "tab_created",
+			"tab":       createdTab,
+			"root_pane": createdPane,
+		}), nil
 	case "tab list":
 		if err := exactLen(rest, 0); err != nil {
 			return "", err
@@ -345,11 +359,13 @@ func execute(store *stateStore, scenario Scenario, args []string) (string, error
 		if _, err := strconv.Atoi(rest[6]); err != nil {
 			return "", errors.New("agent start timeout must be an integer")
 		}
+		var started Agent
 		_, err := store.update(func(s *Scenario) error {
 			if s.Agents == nil {
 				s.Agents = make(map[string]Agent)
 			}
-			s.Agents[rest[4]] = Agent{PaneID: rest[4], Agent: rest[2], Name: rest[0], Status: "idle", Running: true}
+			started = Agent{PaneID: rest[4], Agent: rest[2], Name: rest[0], Status: "idle", Running: true}
+			s.Agents[rest[4]] = started
 			for i := range s.Panes {
 				if s.Panes[i].ID == rest[4] {
 					s.Panes[i].Agent = rest[2]
@@ -358,7 +374,7 @@ func execute(store *stateStore, scenario Scenario, args []string) (string, error
 			}
 			return nil
 		})
-		return envelope(map[string]any{"pane_id": rest[4]}), err
+		return envelope(map[string]any{"type": "agent_started", "agent": started}), err
 	default:
 		return "", fmt.Errorf("unknown command %q", group+" "+command)
 	}

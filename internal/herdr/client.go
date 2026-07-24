@@ -26,6 +26,9 @@ var (
 	ErrDispatchedUnknown = errors.New("herdr: process started but completion is unknown")
 	// ErrNotStarted means no subprocess was created. Retrying is safe.
 	ErrNotStarted = errors.New("herdr: process was not started")
+	// ErrCreatedTargetUnknown means Herdr accepted a create command but its
+	// response did not identify the new root pane.
+	ErrCreatedTargetUnknown = errors.New("herdr: created target response did not identify the root pane")
 )
 
 // OutcomeError preserves the subprocess dispatch boundary without exposing
@@ -129,6 +132,42 @@ type CreateResult struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
+// UnmarshalJSON accepts both the nested Herdr 0.7.5 create responses and the
+// flat result returned by older versions and test fixtures.
+func (r *CreateResult) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		PaneID      string    `json:"pane_id"`
+		TabID       string    `json:"tab_id"`
+		WorkspaceID string    `json:"workspace_id"`
+		RootPane    Pane      `json:"root_pane"`
+		Tab         Tab       `json:"tab"`
+		Workspace   Workspace `json:"workspace"`
+		Agent       AgentInfo `json:"agent"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+
+	r.PaneID = firstNonEmpty(wire.PaneID, wire.RootPane.ID, wire.Agent.PaneID)
+	r.TabID = firstNonEmpty(wire.TabID, wire.RootPane.TabID, wire.Tab.ID)
+	r.WorkspaceID = firstNonEmpty(
+		wire.WorkspaceID,
+		wire.RootPane.WorkspaceID,
+		wire.Tab.WorkspaceID,
+		wire.Workspace.ID,
+	)
+	return nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 type AgentInfo struct {
 	PaneID  string `json:"pane_id"`
 	Agent   string `json:"agent"`
@@ -172,10 +211,16 @@ func (c *Client) WorkspaceCreate(ctx context.Context, cwd, label string) (*Creat
 		"--label", label,
 		"--no-focus",
 	); err != nil {
+		if !errors.Is(err, ErrNotStarted) && !errors.Is(err, ErrDispatchedUnknown) {
+			err = errors.Join(ErrDispatchedUnknown, ErrCreatedTargetUnknown, err)
+		}
 		return nil, fmt.Errorf("herdr workspace create: %w", err)
 	}
 	if result.PaneID == "" {
-		return nil, errors.New("herdr workspace create: response has no pane_id")
+		return nil, fmt.Errorf(
+			"herdr workspace create: %w",
+			errors.Join(ErrDispatchedUnknown, ErrCreatedTargetUnknown),
+		)
 	}
 	return &result, nil
 }
@@ -189,10 +234,16 @@ func (c *Client) TabCreate(ctx context.Context, workspaceID, cwd, label string) 
 		"--label", label,
 		"--no-focus",
 	); err != nil {
+		if !errors.Is(err, ErrNotStarted) && !errors.Is(err, ErrDispatchedUnknown) {
+			err = errors.Join(ErrDispatchedUnknown, ErrCreatedTargetUnknown, err)
+		}
 		return nil, fmt.Errorf("herdr tab create: %w", err)
 	}
 	if result.PaneID == "" {
-		return nil, errors.New("herdr tab create: response has no pane_id")
+		return nil, fmt.Errorf(
+			"herdr tab create: %w",
+			errors.Join(ErrDispatchedUnknown, ErrCreatedTargetUnknown),
+		)
 	}
 	return &result, nil
 }

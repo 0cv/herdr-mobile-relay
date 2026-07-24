@@ -6,6 +6,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,5 +102,29 @@ func TestPostDispatchTimeoutIsDispatchedUnknown(t *testing.T) {
 		t.Fatalf("post-dispatch timeout reported phase %q, want %q "+
 			"(no not_started/dispatched_unknown classification at the dispatch boundary)",
 			res.Phase, "dispatched_unknown")
+	}
+}
+
+func TestUnknownCreatedTargetGetsActionableUnsafeRetryError(t *testing.T) {
+	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := d.Close(ctx); err != nil {
+			t.Fatalf("close dispatcher: %v", err)
+		}
+	})
+
+	result := d.failErr(
+		"request-1",
+		"agent_start",
+		"",
+		errors.Join(herdr.ErrDispatchedUnknown, herdr.ErrCreatedTargetUnknown),
+	)
+	if result.Phase != "dispatched_unknown" {
+		t.Fatalf("phase = %q, want dispatched_unknown", result.Phase)
+	}
+	if result.Error != "Herdr may have created an empty target; review Herdr before retrying" {
+		t.Fatalf("error = %q, want actionable created-target warning", result.Error)
 	}
 }

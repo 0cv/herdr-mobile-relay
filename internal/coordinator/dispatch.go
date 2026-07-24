@@ -673,6 +673,9 @@ func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *Comma
 	phase := "failed"
 	public := "Command failed"
 	switch {
+	case errors.Is(err, herdr.ErrCreatedTargetUnknown):
+		phase = "dispatched_unknown"
+		public = "Herdr may have created an empty target; review Herdr before retrying"
 	case errors.Is(err, herdr.ErrDispatchedUnknown):
 		phase = "dispatched_unknown"
 		public = "Command may have executed; review the agent before retrying"
