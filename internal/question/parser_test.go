@@ -170,10 +170,20 @@ func TestCodexFooterSubmitVariants(t *testing.T) {
 		}
 	}
 	if codexFooter("enter to submit all") {
-		t.Fatal("footer without question navigation was recognized")
+		t.Fatal("plain submit text was recognized as a question control footer")
 	}
-	if !codexSingleFooter("tab to add notes | enter to submit answer | esc to interrupt") {
-		t.Fatal("single-question footer was not recognized")
+	if !codexFooter("tab to add notes | enter to submit answer | esc to interrupt") {
+		t.Fatal("keyboard-driven question footer was not recognized")
+	}
+	withoutNavigation := strings.Replace(
+		codexQuestionView,
+		" | ←/→ to navigate questions",
+		" | esc to interrupt",
+		1,
+	)
+	if interaction := Parse(withoutNavigation, "codex"); interaction == nil ||
+		interaction.QuestionTotal != 3 {
+		t.Fatalf("multi-question keyboard form without navigation hint = %+v", interaction)
 	}
 }
 

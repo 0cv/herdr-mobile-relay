@@ -101,7 +101,6 @@ func LayoutHint(text string) bool {
 	lines := cleanLines(text)
 	hasCheckbox, hasSubmit, hasChat := false, false, false
 	hasCodexHeader, hasCodexFooter := false, false
-	singleCodexQuestion := false
 	lastControl := -1
 	for index, line := range lines {
 		switch {
@@ -116,11 +115,8 @@ func LayoutHint(text string) bool {
 		}
 		if match := codexHeaderPattern.FindStringSubmatch(line); match != nil {
 			hasCodexHeader = true
-			current, _ := strconv.Atoi(match[1])
-			total, _ := strconv.Atoi(match[2])
-			singleCodexQuestion = current == 1 && total == 1
 		}
-		if codexFooter(line) || (singleCodexQuestion && codexSingleFooter(line)) {
+		if codexFooter(line) {
 			hasCodexFooter = true
 			lastControl = index
 		}
@@ -437,8 +433,7 @@ func parseCodex(text string) *Interaction {
 	}
 	footerIndex := -1
 	for index := headerIndex + 1; index < len(lines); index++ {
-		if codexFooter(lines[index]) ||
-			(current == 1 && total == 1 && codexSingleFooter(lines[index])) {
+		if codexFooter(lines[index]) {
 			footerIndex = index
 			break
 		}
@@ -649,13 +644,8 @@ func countMarks(value string) int {
 func codexFooter(line string) bool {
 	lower := strings.ToLower(line)
 	return codexSubmitPattern.MatchString(line) &&
-		strings.Contains(lower, "navigate questions")
-}
-
-func codexSingleFooter(line string) bool {
-	lower := strings.ToLower(line)
-	return codexSubmitPattern.MatchString(line) &&
-		strings.Contains(lower, "tab to add notes")
+		(strings.Contains(lower, "navigate questions") ||
+			strings.Contains(lower, "tab to add notes"))
 }
 
 func codexDescriptionColumn(lines []string, rows []codexRow) int {
