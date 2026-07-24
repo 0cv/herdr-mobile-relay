@@ -3,6 +3,9 @@
 ## Guidelines
 
 - Read the project README and any existing docs before making changes
+- Treat `docs/archive/` as historical context only. Do not read archived plans
+  or use them as implementation requirements unless the user explicitly asks
+  for historical analysis.
 - Run the project's build/test commands before committing (check package.json, Makefile, pyproject.toml, Cargo.toml)
 - Keep changes minimal and focused on the task
 - Prefer early returns over nested conditionals
