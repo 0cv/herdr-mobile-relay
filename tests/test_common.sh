@@ -8,6 +8,24 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
 
+DEV_RELAY_BIN="$WORK_DIR/dev/herdr-mobile-relay"
+mkdir -p "$(dirname "$DEV_RELAY_BIN")"
+printf '#!/bin/sh\nexit 0\n' > "$DEV_RELAY_BIN"
+chmod 700 "$DEV_RELAY_BIN"
+test "$(HERDR_RELAY_BIN="$DEV_RELAY_BIN" relay_binary)" = "$DEV_RELAY_BIN"
+
+PACKAGED_RELEASE="$WORK_DIR/releases/0.0.0-test"
+mkdir -p "$PACKAGED_RELEASE/relay"
+cp "$REPO_DIR/relay/common.sh" "$PACKAGED_RELEASE/relay/common.sh"
+printf '{}\n' > "$PACKAGED_RELEASE/release-manifest.json"
+printf '#!/bin/sh\nexit 0\n' > "$PACKAGED_RELEASE/herdr-mobile-relay"
+chmod 700 "$PACKAGED_RELEASE/herdr-mobile-relay"
+PACKAGED_BINARY="$(
+    HERDR_RELAY_BIN="$DEV_RELAY_BIN" \
+        bash -c '. "$1"; relay_binary' _ "$PACKAGED_RELEASE/relay/common.sh"
+)"
+test "$PACKAGED_BINARY" = "$PACKAGED_RELEASE/herdr-mobile-relay"
+
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"

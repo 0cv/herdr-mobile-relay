@@ -6,7 +6,17 @@ relay_release_root() {
 
 relay_binary() {
     local binary
-    binary="${HERDR_RELAY_BIN:-$(relay_release_root)/current/herdr-mobile-relay}"
+    local common_dir
+    local packaged_binary
+
+    common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+    packaged_binary="$(dirname "$common_dir")/herdr-mobile-relay"
+    if [ -f "$(dirname "$common_dir")/release-manifest.json" ] &&
+       [ -x "$packaged_binary" ]; then
+        binary="$packaged_binary"
+    else
+        binary="${HERDR_RELAY_BIN:-$(relay_release_root)/current/herdr-mobile-relay}"
+    fi
     if [ ! -x "$binary" ]; then
         echo "✗ Verified relay release is unavailable: $binary" >&2
         echo "  Reinstall the exact plugin version; production launchers do not build or fall back." >&2
