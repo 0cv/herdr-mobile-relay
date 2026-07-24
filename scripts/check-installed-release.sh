@@ -45,7 +45,7 @@ EXPECTED_NAME="herdr-mobile-relay_${EXPECTED_VERSION}_${HOST_OS}_${HOST_ARCH}.ta
 
 EXPECTED_HASH=$(
     awk -v name="$ARCHIVE_NAME" '
-        $2 == name { count++; hash = $1 }
+        NF == 2 && $2 == name { count++; hash = $1 }
         END {
             if (count != 1) {
                 exit 1

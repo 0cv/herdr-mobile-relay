@@ -165,11 +165,15 @@ func run(args []string) (int, error) {
 		target := verifyFlags.String("target", release.CurrentTarget(), "expected os/architecture")
 		expectedVersion := verifyFlags.String("version", "", "expected release version")
 		expectedRevision := verifyFlags.String("revision", "", "expected release revision")
+		allowCrossTarget := verifyFlags.Bool("allow-cross-target", false, "allow a build-host tool to verify another target")
 		if err := verifyFlags.Parse(args); err != nil {
 			return 2, err
 		}
+		if *allowCrossTarget && (*expectedVersion != "" || *expectedRevision != "") {
+			return 2, errors.New("--allow-cross-target cannot be combined with --version or --revision candidate checks")
+		}
 		if verifyFlags.NArg() > 1 {
-			return 2, errors.New("usage: herdr-mobile-relay verify-release [--target os/arch] [DIRECTORY]")
+			return 2, errors.New("usage: herdr-mobile-relay verify-release [--target os/arch] [--version VERSION] [--revision REVISION] [--allow-cross-target] [DIRECTORY]")
 		}
 		root := ""
 		if verifyFlags.NArg() == 1 {
@@ -185,7 +189,7 @@ func run(args []string) (int, error) {
 		if err != nil {
 			return 1, err
 		}
-		if err := verifyReleaseIdentity(manifest, *expectedVersion, *expectedRevision); err != nil {
+		if err := verifyReleaseIdentity(manifest, *expectedVersion, *expectedRevision, *target, *allowCrossTarget); err != nil {
 			return 1, err
 		}
 		encoded, _ := json.Marshal(manifest)
@@ -262,18 +266,28 @@ func run(args []string) (int, error) {
 	}
 }
 
-func verifyReleaseIdentity(manifest release.Manifest, expectedVersion, expectedRevision string) error {
+func verifyReleaseIdentity(
+	manifest release.Manifest,
+	expectedVersion, expectedRevision, expectedTarget string,
+	allowCrossTarget bool,
+) error {
 	if expectedVersion != "" && manifest.Version != expectedVersion {
 		return fmt.Errorf("release manifest version %q does not match expected version %q", manifest.Version, expectedVersion)
 	}
 	if expectedRevision != "" && manifest.Revision != expectedRevision {
 		return fmt.Errorf("release manifest revision %q does not match expected revision %q", manifest.Revision, expectedRevision)
 	}
+	if expectedTarget != "" && manifest.Target != expectedTarget {
+		return fmt.Errorf("release manifest target %q does not match expected target %q", manifest.Target, expectedTarget)
+	}
 	if manifest.Version != version {
 		return fmt.Errorf("release manifest version %q does not match binary version %q", manifest.Version, version)
 	}
 	if manifest.Revision != revision {
 		return fmt.Errorf("release manifest revision %q does not match binary revision %q", manifest.Revision, revision)
+	}
+	if !allowCrossTarget && manifest.Target != release.CurrentTarget() {
+		return fmt.Errorf("release manifest target %q does not match binary target %q", manifest.Target, release.CurrentTarget())
 	}
 	return nil
 }

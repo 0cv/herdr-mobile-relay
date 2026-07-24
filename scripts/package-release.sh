@@ -80,7 +80,8 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         cp "$REPO_DIR/relay/$WRAPPER" "$STAGE/relay/$WRAPPER"
     done
     "$WORK_DIR/release-tool" release-manifest "$STAGE" "$VERSION" "$REVISION" "$TARGET" >/dev/null
-    "$WORK_DIR/release-tool" verify-release --target "$TARGET" "$STAGE" >/dev/null
+    # This host tool cannot execute cross-built binaries; native CI verifies each extracted executable.
+    "$WORK_DIR/release-tool" verify-release --allow-cross-target --target "$TARGET" "$STAGE" >/dev/null
     tar -C "$STAGE" -czf "$OUTPUT_DIR/$ARCHIVE" .
 done
 
