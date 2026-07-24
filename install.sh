@@ -136,7 +136,7 @@ legacy_root_entry_allowed() {
     entry_path=$3
     case "$root_kind:$entry_name" in
         config:relay.env|config:.env|config:phone-app-origin|config:stable-setup.json|\
-        config:update-state.json|config:app-deploy-state.json|config:github-token|\
+        config:update-state.json|config:app-deploy-state.json|config:support-state.json|config:github-token|\
         config:update.lock|config:app-deploy.lock)
             [ -f "$entry_path" ] && [ ! -L "$entry_path" ]
             ;;
@@ -146,10 +146,11 @@ legacy_root_entry_allowed() {
         config:push|config:cloudflared)
             [ -d "$entry_path" ] && [ ! -L "$entry_path" ]
             ;;
-        cache:activity.jsonl|cache:post-install.sh|cache:post-install.log)
+        cache:activity.jsonl|cache:activity.tombstones|cache:post-install.sh|cache:post-install.log|\
+        cache:approval-verification*|cache:notification-approval-fix-test-*)
             [ -f "$entry_path" ] && [ ! -L "$entry_path" ]
             ;;
-        cache:claude-history|cache:uploads)
+        cache:claude-history|cache:uploads|cache:push)
             [ -d "$entry_path" ] && [ ! -L "$entry_path" ]
             ;;
         *)
