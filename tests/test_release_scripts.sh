@@ -118,3 +118,20 @@ fi
 printf '%s\n' "$OUTPUT" | grep -q "does not match binary target"
 "$RELEASE_DIR/herdr-mobile-relay" verify-release \
     --allow-cross-target --target "$WRONG_TARGET" "$RELEASE_DIR" >/dev/null
+
+"$RELEASE_DIR/herdr-mobile-relay" release-manifest \
+    "$RELEASE_DIR" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET" >/dev/null
+ARCHIVE="$WORK_DIR/herdr-mobile-relay_${BINARY_VERSION}_${HOST_OS}_${HOST_ARCH}.tar.gz"
+tar -C "$RELEASE_DIR" -czf "$ARCHIVE" .
+if command -v sha256sum >/dev/null 2>&1; then
+    HASH=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+else
+    HASH=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+fi
+printf '%s  %s\n' "$HASH" "${ARCHIVE##*/}" > "$CHECKSUMS"
+
+mkdir "$WORK_DIR/physical-tmp"
+ln -s "$WORK_DIR/physical-tmp" "$WORK_DIR/logical-tmp"
+TMPDIR="$WORK_DIR/logical-tmp" \
+    "$REPO_DIR/scripts/check-installed-release.sh" \
+    "$ARCHIVE" "$CHECKSUMS" "$BINARY_VERSION" "$REVISION" "$HOST_TARGET"

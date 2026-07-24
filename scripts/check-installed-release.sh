@@ -93,6 +93,10 @@ CONFIG_HOME="$WORK_DIR/config"
 CACHE_HOME="$WORK_DIR/cache"
 DATA_HOME="$WORK_DIR/data"
 mkdir -p "$RELEASE_DIR" "$CONFIG_HOME" "$CACHE_HOME" "$DATA_HOME"
+# macOS exposes /var through /private/var, and os.Executable reports the
+# physical path. Use the same canonical directory for extraction, execution,
+# and support-state verification.
+RELEASE_DIR=$(CDPATH='' cd "$RELEASE_DIR" && pwd -P)
 tar -xzf "$ARCHIVE" -C "$RELEASE_DIR"
 
 RELAY="$RELEASE_DIR/herdr-mobile-relay"
@@ -136,8 +140,16 @@ XDG_CONFIG_HOME="$CONFIG_HOME" \
 XDG_CACHE_HOME="$CACHE_HOME" \
 XDG_DATA_HOME="$DATA_HOME" \
 "$RELAY" support >"$WORK_DIR/support.json"
-grep -q '"protocol": 2' "$WORK_DIR/support.json"
-grep -qF "\"release_directory\": \"$RELEASE_DIR\"" "$WORK_DIR/support.json"
+grep -q '"protocol": 2' "$WORK_DIR/support.json" || {
+    echo "installed relay support output does not report protocol 2" >&2
+    sed -n '1,120p' "$WORK_DIR/support.json" >&2
+    exit 1
+}
+grep -qF "\"release_directory\": \"$RELEASE_DIR\"" "$WORK_DIR/support.json" || {
+    echo "installed relay support output does not report the canonical release directory" >&2
+    sed -n '1,120p' "$WORK_DIR/support.json" >&2
+    exit 1
+}
 
 kill -INT "$RELAY_PID"
 wait "$RELAY_PID"
