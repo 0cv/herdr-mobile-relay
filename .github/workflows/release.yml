@@ -59,7 +59,7 @@ jobs:
             exit 1
           }
           scripts/package-release.sh "$version" "$GITHUB_SHA" dist/release
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: release-bundles
           path: dist/release/

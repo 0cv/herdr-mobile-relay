@@ -1,97 +1,61 @@
 # Herdr Mobile Relay
 
-[![check](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml)
+[![check](https://github.com/0cv/herdr-mobile-relay-dev/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay-dev/actions/workflows/check.yml)
 
-A remote control for [Herdr](https://herdr.dev) agents on Linux and macOS: use your smartphone to monitor status, answer prompts, build plans, and manage their lifecycle.
+Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
+computer runs its own relay; the phone connects directly and merges all agents
+into one installable web app.
 
-**Current version:** `0.9.9`
-
-Each computer runs its own local relay. The phone app connects to those relays directly and merges their agents; there is no central broker and the computers do not connect to each other.
-
-## Screenshots
-
-| Agents                                                                                                            | Terminal                                                                                                                                   |
-| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| <img src="images/home.jpeg" alt="Mobile home page showing blocked and idle Herdr agents in one list" width="392"> | <img src="images/terminal.jpeg" alt="Mobile terminal view with agent output, prompt input, attachment, and terminal controls" width="392"> |
-
-| Start Agent                                                                                                                                        | Plan Questions                                                                                                                              |
-| -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| <img src="images/new_agent.jpeg" alt="Mobile Start Agent form with computer, agent, working directory, name, and initial task fields" width="392"> | <img src="images/agent_plan.jpeg" alt="Mobile structured plan question with multiple choices and previous and next navigation" width="392"> |
-
-| Activity                                                                                                     | Relay Settings                                                                                     |
-| ------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| <img src="images/activities.jpeg" alt="Searchable mobile activity history merged across relays" width="392"> | <img src="images/settings_1.jpeg" alt="Mobile relay settings and appearance controls" width="392"> |
-
-| App Preferences                                                                                                                              | Notifications                                                                                        |
-| -------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| <img src="images/settings_2.jpeg" alt="Mobile interface size, push notification, device unlock, and connection status settings" width="392"> | <img src="images/notifications.jpg" alt="Mobile notification for a blocked Herdr agent" width="392"> |
+**Current version:** `0.9.10`
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
 
-## Quick Start
+## Install
 
 Requirements: Herdr 0.7.5 or newer, Git, and `curl`.
 
+This repository is private during testing. Let Herdr clone it with your GitHub
+credentials and provide a token with `repo` access for release downloads:
+
 ```bash
+gh auth setup-git
+export GH_TOKEN=ghp_...
 herdr plugin install 0cv/herdr-mobile-relay-dev
 ```
 
-> [!NOTE]
-> This repository is private during testing. Before installing, configure Git HTTPS credentials so Herdr can clone it:
-> ```bash
-> gh auth setup-git
-> ```
-> Then export a GitHub token with `repo` scope for release downloads and self-update:
-> ```bash
-> export GH_TOKEN=ghp_...
-> ```
-> The token is persisted in a private credential file. The service receives
-> only that file's path, and only the update code reads it.
+The installer stores the token in a private `0600` credential file. The service
+receives only that file's path, and only the updater reads it.
 
-Herdr 0.7.5 stores installed plugins globally for the current user. If this plugin was installed only inside a named Herdr 0.7.3 session, install it once again after upgrading; existing plugin configuration and state remain in place.
-
-The setup menu normally opens after installation. If it does not, run:
+Choose **Quick Start** from the setup menu. If the menu does not open:
 
 ```bash
 herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 ```
 
-Choose **Quick Start**. It installs missing user-level tools with confirmation, starts the relay and phone app, then opens a temporary TryCloudflare tunnel. No Cloudflare account, domain, Python, Node.js, Go toolchain, or separate web deployment is required.
+Quick Start installs missing user-level tools with confirmation, starts the
+relay and bundled app, and opens a temporary TryCloudflare tunnel. Scan its QR
+code on your phone. Keep the pane open; Ctrl-C stops the relay and tunnel.
 
-When the temporary tunnel is ready, choose where its QR should open:
+No Cloudflare account, domain, Python, Node.js, Go toolchain, separate web
+deployment, or `sudo` is required for this trial path. See
+[QUICKSTART.md](QUICKSTART.md) for the short walkthrough.
 
-1. **This temporary relay** is the default and simplest option for trying one relay.
-2. **An existing installed Herdr app** adds the temporary computer to the same app as other relays.
+## Stable Setup
 
-Then scan the printed QR code or open its complete HTTPS setup link on your phone. Keep the setup pane open; Ctrl-C stops both the relay and the temporary tunnel. A later Quick Start gets a new hostname, so use its new setup link.
-
-The setup link contains the relay token in its URL fragment. The fragment is not sent to the server and is removed after import, but the link and QR code must still be kept private.
-
-See [QUICKSTART.md](QUICKSTART.md) for the short walkthrough and troubleshooting.
-
-## Stable Everyday Setup
-
-Quick tunnels are disposable. For a permanent hostname and a background service, first add a domain to a Cloudflare account. Then open the setup menu and choose **Stable Tunnel**, or run:
+For a permanent hostname and background service, add a domain to Cloudflare and
+run:
 
 ```bash
 herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
 ```
 
-The stable wizard:
+The wizard creates or resumes a dedicated tunnel, checks the DNS route, installs
+a user service, verifies the public relay identity, and then prints the private
+phone QR. Run it once per computer with a distinct hostname, then add every QR
+to the same phone app.
 
-1. Logs in to Cloudflare when needed.
-2. Lets you confirm the dedicated tunnel and `relay-<computer>.<domain>` hostname.
-3. Creates or resumes the tunnel and DNS route without overwriting an existing record.
-4. Installs a launchd service on macOS or a user-systemd service on Linux.
-5. Verifies public DNS, HTTPS, and the relay identity before printing the stable QR code.
-6. On the first run, offers this relay as the app origin for a one-relay setup or an existing installed-app address for multi-relay use.
-
-If setup is interrupted or times out, run the exact command it prints. Its private state is resumable and prevents duplicate tunnels.
-
-Run the wizard separately on every computer, with a distinct hostname for each relay. Add every setup link to the same phone app; the app merges them locally.
-
-Useful plugin actions:
+Useful actions:
 
 ```bash
 herdr plugin action invoke setup-link --plugin herdr-mobile-relay.events
@@ -101,210 +65,110 @@ herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
 herdr plugin action invoke uninstall --plugin herdr-mobile-relay.events
 ```
 
-The `setup-link` action safely reprints the private link and QR for the installed stable relay. It follows the configuration recorded in the background service, including services installed from a source checkout.
+Run `stable-teardown` before uninstall if Cloudflare resources should also be
+removed. Full uninstall removes the service, releases, relay state, push
+credentials, cache, and plugin registration.
 
-Teardown is explicit and confirmed. It removes only resources recorded as owned by the wizard. Run it before uninstalling the plugin if you also want the Cloudflare resources removed.
+## What It Does
 
-The `uninstall` action removes the local service, verified releases, relay
-configuration, push credentials, and cache. It does not remove Cloudflare
-resources; run `stable-teardown` first when those should also be removed.
-
-> [!NOTE]
-> `make stable-setup` and `make setup-link` are checkout-development commands. Do not use a checkout's `make setup-link` for a marketplace installation whose service uses the plugin configuration; the command intentionally refuses that configuration mismatch.
-
-## What You Can Do
-
-- Merge agents from several computers into one mobile view.
-- Approve ordinary permission prompts and answer Claude Code or Codex structured questions.
-- View terminal output and send prompts, slash commands with suggestions, terminal keys, screenshots, or photos.
-- Start, rename, clear, and stop detected Codex, Claude Code, and OpenCode agents.
-- Search relay activity and receive blocked-agent or optional completion notifications.
+- Monitor and control agents across several computers.
+- Start, rename, clear, restart, and stop detected agents.
+- Send prompts, terminal keys, slash commands, screenshots, and photos.
+- Answer approvals and structured Claude Code or Codex questions.
+- Search local activity and receive blocked or completion notifications.
 - Require device verification before reconnecting relays.
-- Install the app as a PWA on Android or iOS.
+- Detect Codex, Claude Code, OpenCode, Qoder, and Herdr integrations.
 
-## Phone Setup
+| Agents | Terminal |
+| --- | --- |
+| <img src="images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="images/terminal.jpeg" alt="Mobile terminal and prompt controls" width="392"> |
 
-The QR code adds the relay URL, label, and token automatically. To add one manually, open **Settings** and enter:
+| Plan Questions | Notifications |
+| --- | --- |
+| <img src="images/agent_plan.jpeg" alt="Structured plan question navigation" width="392"> | <img src="images/notifications.jpg" alt="Blocked-agent notification" width="392"> |
 
-- **Relay Name:** a label such as `Mac` or `Fedora`
-- **Relay URL:** the relay's `wss://` URL
-- **Token:** its `HERDR_RELAY_TOKEN`
+The QR imports the relay URL, label, and token. Treat the QR and setup link as
+secrets. Enable notifications in the app's Settings; blocked-agent
+notifications are included, while completion notifications are optional.
 
-Enable notifications from Settings. Blocked-agent notifications are included while push is enabled; completion notifications are optional per device.
+## Updates
 
-To install the PWA, open the HTTPS app in Safari and use **Share → Add to Home Screen**, or use Chrome's **Install app** action. A temporary TryCloudflare hostname is unsuitable for a permanent installation because it changes when restarted.
+The plugin installs a pre-built, checksum- and manifest-verified bundle for the
+exact version in `herdr-plugin.toml`. Users never compile the relay. Updates
+atomically activate the executable, web app, and runtime wrappers, verify their
+exact version, revision, and web hash after restart, and roll back the complete
+release if verification fails.
 
-During guided Stable Tunnel setup, choose **This relay** to use its verified hostname as the phone app, or choose **An existing installed Herdr app** and enter its Site settings domain or URL. You can enter a domain such as `app.example.com`; the wizard adds `https://` automatically and checks for the Herdr app manifest. A temporary reachability failure can be explicitly overridden. The selected origin is shown on later interactive runs and recorded privately beside the relay environment. Later QR codes can then target the same installed app while carrying the selected computer's relay URL in the fragment. There is no shared or built-in app hostname.
+An upgrade from the former 0.8.6 implementation adopts only a validated config
+and cache layout. Relay identity, push subscriptions, activity, history,
+uploads, and private keys are preserved.
 
-An installed PWA also refreshes the private record whenever it connects. If an older relay was removed before either mechanism recorded the installed app origin, provide that origin once when reprinting its checkout QR:
+The relay-hosted app updates with its relay. For a separately hosted Cloudflare
+Pages app, configure exactly one stable relay as deployment owner with the
+`configure-app-deploy` action. That optional role requires Node.js 24 and
+Cloudflare credentials on the deployment-owner computer only.
 
-```bash
-make setup-link APP_URL=app.example.com
-```
-
-Use the HTTPS address shown in the installed app's site settings. After the app reconnects, later `make setup-link` and **Show Phone Setup QR** runs reuse the private record without the override. Android can hand an in-scope link to the installed PWA when supported-link handling is enabled. iOS and iPadOS do not currently capture external links into Safari-installed PWAs; open the installed app and add the relay manually there.
-
-## Updates from the Phone
-
-Marketplace installation downloads the exact version in `herdr-plugin.toml` as a pre-built release bundle. It requires the published `checksums.txt`, verifies the archive and its internal file manifest, then atomically activates the executable, web app, and runtime wrappers together. End-user hosts never compile Go.
-
-An upgrade from the Python 0.8.6 plugin adopts only its validated relay
-configuration and cache layout. Relay identity, push subscriptions, activity,
-Claude history, and uploads are preserved. When `XDG_CACHE_HOME` is customized,
-the legacy Python cache under `~/.cache/herdr-mobile-relay` is moved into the
-active XDG cache root.
-
-Later releases are checked periodically and whenever you tap **Settings → Check** for a relay. An update is offered only for a higher stable semantic version published by the canonical GitHub repository with an exact revision and target bundle. After confirmation, an external supervised worker verifies and installs the complete release, restarts the service, and checks `/healthz` for the exact executable and web identities. A failed post-activation check reactivates and verifies the previous complete release.
-
-Self-update is available only while the service is running from a verified packaged release. A source checkout, modified release, noncanonical build, missing matching service, or incomplete release is reported as blocked instead of being changed. The rollback generation and its exact identity are persisted before activation, so an interrupted worker is recovered by reactivating, restarting, and health-verifying the previous release. Each relay is updated separately.
-
-The **About** card checks both the `version.json` deployed by the app’s current web origin and the published upstream release. It distinguishes an app that is ready to reload from an origin that has not deployed the upstream bundle yet; an old host is never described as the latest version.
-
-If a relay serves the app origin, a verified relay update publishes the bundled app and reloads it automatically. A separately hosted Cloudflare Pages app needs one computer to own its deployment. On that stable relay, install Node.js 24, authenticate Wrangler as the service user (or configure a narrowly scoped Pages API token), then run:
+## Local Development
 
 ```bash
-herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events
-```
-
-The action verifies the selected Pages project and custom domain, records the exact production branch and local tool paths in the private relay environment, restarts the relay, and offers to publish the current app immediately. That first local deployment bootstraps older installed PWAs that do not have the phone-side Deploy button yet.
-
-For later releases, Settings first asks you to update that deployment-owner relay. **Deploy App** then confirms an exact installed version and Git revision, refuses modified release assets, validates the committed `web/` bundle, deploys only to the configured project and `main` branch, verifies the public `version.json`, and reloads the PWA. Cloudflare credentials never go to the phone. Configure only one deployment owner per app origin to avoid competing releases.
-
-## How It Works
-
-- The Go relay listens on `127.0.0.1:8375`, serves the verified app from the active release's `web/` directory, and accepts authenticated WebSocket connections.
-- Cloudflare Tunnel provides the public HTTPS/WSS endpoint without opening an inbound port.
-- The Svelte source lives in `frontend/`; phone relay configuration stays in browser local storage.
-- The Herdr plugin sends local status-change events to UDP port `8376` so blocked and finished states arrive promptly.
-- Runtime data remains local: push state, bounded activity, Claude history, and temporary uploads are kept in the relay's private config or cache directories.
-
-The relay never SSHs into another computer. Each relay invokes only fixed local Herdr operations and exposes only detected supported agent profiles.
-
-## Agent Profiles Configuration
-
-By default the relay detects Codex, Claude Code, and OpenCode. It also automatically advertises any agent installed as a Herdr integration (`herdr integration install qodercli`, for example), so newly integrated agents appear in the phone's Start Agent list without extra configuration. Additional agents (e.g. Pi) can be added with an INI file at `~/.config/herdr/agent-profiles.ini` (respects `$XDG_CONFIG_HOME`).
-
-```ini
-[profiles]
-codex = Codex
-claude = Claude Code
-opencode = OpenCode
-pi = Pi
-```
-
-- Keys in `[profiles]` are **merged** with the built-in defaults. You only need to add new agents or override existing labels.
-- Set `[config] replace_profiles = true` to replace instead of merge. This also suppresses Herdr integration auto-detection, so only the explicitly configured profiles are advertised.
-- Each profile id is also its executable name. Its binary must be on `PATH` for the relay to advertise it. A missing user-added binary prints one warning per relay run.
-
-### Custom Slash-Command Suggestions
-
-Claude Code has its own command discovery and Codex uses built-in suggestions. Other profiles need both skill directories and a known command format. Pi's defaults are `~/.pi/agent/skills` and `skill:{name}`, so its sections below are optional:
-
-```ini
-[skills]
-pi = ~/.pi/agent/skills
-
-[commands]
-pi = skill:{name}
-```
-
-- Keys match profile ids from `[profiles]`. Directories are scanned for `*/SKILL.md` frontmatter (`name`, `description`, optional `argument-hint`).
-- The first configured path is labelled **personal**; subsequent paths are **project**.
-- Paths are `:`-separated on macOS and Linux (`os.pathsep`). Directory names containing `:` are not supported.
-- A command format must contain exactly one `{name}` placeholder. The relay adds the leading `/`, although a configured leading slash is also accepted.
-- Profiles without a built-in or configured command format do not expose skill suggestions. Set a format to `off` or leave it empty to disable suggestions explicitly. Invalid formats print a warning and are disabled instead of interrupting the client connection.
-- `user-invocable: false` in frontmatter hides a skill from suggestions.
-
-### Running Agent Identity
-
-The relay remembers the exact profile id for panes it launches, rather than guessing from the agent name reported by Herdr. For agents that were already running or remain alive across a relay restart, add an exact reported-name alias when the Herdr name differs from the profile id:
-
-```ini
-[aliases]
-pi-coding-agent = pi
-```
-
-Pi's alias above is built in. Configured aliases can extend or override built-in aliases. Alias values must name a configured profile; unmatched agent names are not guessed by substring.
-
-### Hot Reload
-
-Send `SIGHUP` to the relay process to re-read `agent-profiles.ini` without restarting. New client connections receive the updated profile list, and later command-catalog requests use the reloaded skills, formats, and aliases. The phone caches a catalog per agent and working directory, so reconnect or switch directories to refresh a catalog already shown.
-
-## Security
-
-- Treat setup links, QR codes, relay URLs, and tokens as secrets.
-- Public WebSocket control requires the relay token; comparisons are constant-time.
-- The relay binds to loopback by default and refuses an unauthenticated non-loopback bind.
-- Browser origins are checked, uploaded images are limited to 10 MB, and launch requests cannot supply arbitrary executables or shell commands.
-- A connected phone can control the Herdr panes exposed by that relay. Remove an unknown relay from Settings and rotate a leaked token immediately.
-
-Rotate a checkout token with `make rotate-token`. To rotate a marketplace installation from a checkout, select its configuration explicitly:
-
-```bash
-HERDR_RELAY_ENV="$(herdr plugin config-dir herdr-mobile-relay.events)/relay.env" make rotate-token
-```
-
-## Local Checkout
-
-Use a checkout for development or for running without the marketplace plugin:
-
-```bash
-git clone https://github.com/0cv/herdr-mobile-relay.git
+git clone https://github.com/0cv/herdr-mobile-relay-dev.git
 cd herdr-mobile-relay
-make quick-start
+make dev-tunnel
 ```
 
-The checkout stores relay configuration in `relay/.env`.
+`make dev-tunnel` builds the current Go source and frontend, uses isolated ports
+and state under `relay/.dev/`, and opens a temporary tunnel. It never uses the
+installed production relay.
+
+Common targets:
 
 ```bash
-make dev-tunnel        # build frontend/dist, then use isolated ports and a temporary tunnel
-make stable-setup       # provision/resume a named tunnel and service
-make service-status    # inspect the installed service
-make service-logs      # follow service logs
-make stable-teardown   # remove wizard-owned stable resources
+make check             # all backend, frontend, browser, and release checks
+make backend-check     # format, vet, tests, race detector, shell checks
+make web-release       # replace committed web/ with a verified frontend build
+make web-release-check # compare and browser-test the shipped web/ bundle
+make relay-plugin      # link this checkout as a Herdr plugin
+make stable-setup      # install a checkout-managed stable relay
 ```
 
-If you intentionally manage Cloudflare yourself, set `CLOUDFLARED_CONFIG` in the active relay environment before installing the service. The stable wizard validates and reuses a compatible existing configuration without rewriting it.
+Backend development uses Go 1.26.5; frontend development uses Node.js 24.
+Packaged users need neither toolchain.
 
-`make dev-tunnel` requires Node.js 24, keeps its token and push state under ignored `relay/.dev/`, and never reads the production relay configuration. Keep it in the foreground and press Ctrl-C to stop both the relay and tunnel.
+The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
+failure injection, and process-control traces for black-box tests. It is not
+included in release archives.
 
-## Development
+## Runtime and Security
 
-Backend development is pinned to Go 1.26.5. Frontend development is pinned to Node.js 24. Neither toolchain is required by a packaged relay installation.
+The relay binds to `127.0.0.1:8375`; its event hook uses loopback UDP port 8376.
+Cloudflare Tunnel supplies HTTPS/WSS without opening an inbound port. Browser
+origins are checked, tokens use constant-time comparison, uploads are limited,
+and launch requests cannot provide arbitrary executables or shell commands.
 
-```bash
-make backend-check
-npm ci --prefix frontend
-make frontend-check
-make frontend-browser
-make check
-```
+Runtime data stays in the relay's private config and cache roots. The phone
+stores its relay list locally. There is no central broker and relays do not
+connect to one another.
 
-On Fedora, do not use `playwright install-deps`; it attempts to run Ubuntu's `apt-get`. `make frontend-browser` runs Chromium locally and WebKit in Playwright's pinned Podman container.
+Health endpoints:
 
-Normal frontend work builds untracked `frontend/dist/`. Release work alone replaces the committed `web/` bundle:
-
-```bash
-make web-release
-make web-release-check
-```
-
-`make web-deploy` deploys the already committed bundle and never rebuilds it. It targets the `main` production branch by default even when invoked from another local Git branch; use `WEB_BRANCH=<branch>` only for an intentional preview.
+- `GET /health` — process liveness.
+- `GET /healthz` — version, revision, web bundle, instance, and inventory state.
+- `GET /readyz` — HTTP 200 only after a successful Herdr inventory.
 
 ## Troubleshooting
 
-- **No setup menu:** invoke the `setup` plugin action shown above.
-- **Port 8375 is busy:** stop the earlier quick start or installed service before starting another relay.
-- **Temporary link does not open:** keep the Quick Start pane open and rerun it if `cloudflared` exited; every run creates a new hostname.
-- **App opens but does not connect:** reopen the complete setup link, including its `#setup=...` fragment.
-- **Relay connects but agents are unavailable:** inspect `/healthz` for the inventory state. If it reports `protocol_mismatch`, run `herdr server live-handoff`; the relay will recover on its next poll without another restart.
-- **Stable setup stops:** preserve its state and rerun the exact command printed in the error.
-- **Need to add the relay to another phone:** choose **Show Phone Setup QR** or invoke the `setup-link` plugin action.
-- **Stable hostname already exists:** choose another hostname or remove the unrelated DNS record yourself; the wizard never overwrites it.
-- **Need a support snapshot:** run the plugin `status` action.
-
-`GET /health` returns process liveness. `GET /healthz` returns the relay instance, product version, revision, protocol, and active web-bundle identity used by the stable wizard, updater, and Settings diagnostics. Its top-level `status` describes the relay process so an unrelated Herdr inventory problem cannot roll back a valid relay update. `GET /readyz` returns HTTP 200 only after a Herdr pane inventory succeeds; starting or degraded inventory returns HTTP 503.
+- **No setup menu:** invoke the `setup` action shown above.
+- **Port 8375 is busy:** stop the earlier Quick Start or installed service.
+- **Temporary URL fails:** keep the pane open and rerun Quick Start for a new
+  hostname if `cloudflared` stopped.
+- **App opens but stays disconnected:** reopen the complete setup link,
+  including its `#setup=...` fragment.
+- **Agents are unavailable:** inspect `/healthz`; after a Herdr protocol update,
+  run `herdr server live-handoff` and wait for the next relay poll.
+- **Stable setup stops:** keep its state and rerun the exact command printed.
+- **Need the stable QR:** invoke the `setup-link` action.
 
 ## License
 
-Herdr Mobile Relay is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).
+Herdr Mobile Relay is licensed under the
+[GNU Affero General Public License v3.0 or later](LICENSE).

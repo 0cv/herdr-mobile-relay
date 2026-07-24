@@ -1,6 +1,6 @@
 package coordinator
 
-// Regression tests encoding the ADR-001 / §10.3 / §9.8 safety invariants.
+// Regression tests for coordinator ordering and lifecycle safety invariants.
 
 import (
 	"encoding/json"

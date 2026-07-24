@@ -1,6 +1,6 @@
 package coordinator
 
-// Regression tests for per-pane serialization (§10.2 / ADR-001 PaneSlot FIFO).
+// Regression tests for the coordinator's per-pane FIFO serialization.
 // Helpers writeScript/testLogger live in sibling *_test.go files.
 
 import (

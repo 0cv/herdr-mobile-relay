@@ -2,8 +2,8 @@
 
 package herdr
 
-// Regression test for ADR-013: a cancelled Herdr invocation must terminate the
-// whole process group, not just the leader.
+// A cancelled Herdr invocation must terminate the whole process group, not
+// just the leader.
 
 import (
 	"context"
@@ -50,7 +50,7 @@ func TestCancelledCommandDoesNotLeakGroup(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
 
 	if alive(pid) {
-		t.Fatalf("grandchild pid %d survived ADR-013 TERM-to-KILL cancellation", pid)
+		t.Fatalf("grandchild pid %d survived TERM-to-KILL cancellation", pid)
 	}
 }
 

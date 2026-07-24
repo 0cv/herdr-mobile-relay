@@ -1,7 +1,7 @@
 package coordinator
 
-// Regression tests for dispatch-path safety invariants (ADR-001 idempotency,
-// §9.3/§11.2 dispatched_unknown). They drive the real Dispatcher against a
+// Regression tests for dispatch-path idempotency and dispatched-unknown
+// outcomes. They drive the real Dispatcher against a
 // Herdr binary implemented as a tiny inline script.
 
 import (

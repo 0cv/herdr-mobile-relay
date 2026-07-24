@@ -2,11 +2,8 @@
 bin/
 dist/
 *.dmg
-__pycache__/
-*.pyc
 .DS_Store
 .swiftpm/
-.venv/
 node_modules/
 playwright-report/
 test-results/

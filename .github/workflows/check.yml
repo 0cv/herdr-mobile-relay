@@ -65,7 +65,7 @@ jobs:
           scripts/check-installed-release.sh \
             "dist/release/herdr-mobile-relay_${version}_linux_amd64.tar.gz" \
             dist/release/checksums.txt "$version" "$GITHUB_SHA" linux/amd64
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: release-bundles
           path: dist/release/

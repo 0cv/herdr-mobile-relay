@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	WranglerVersion        = "4.112.0"
+	WranglerVersion        = "4.114.0"
 	deploymentStartupGrace = 30 * time.Second
 )
 

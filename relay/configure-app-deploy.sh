@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WRANGLER_VERSION="4.112.0"
+WRANGLER_VERSION="4.114.0"
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"

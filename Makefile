@@ -5,11 +5,11 @@ endif
 
 WEB_PROJECT ?= herdr-mobile-relay
 WEB_BRANCH ?= main
-WRANGLER_VERSION ?= 4.112.0
+WRANGLER_VERSION ?= 4.114.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release test relay-run relay-plugin service-install service-uninstall service-status service-logs macos-service-install macos-service-uninstall macos-service-status macos-service-logs linux-service-install linux-service-uninstall linux-service-status linux-service-logs web-bundle-check web-release web-release-check web-deploy web-preview
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release relay-plugin service-install service-uninstall service-status service-logs web-bundle-check web-release web-release-check web-deploy web-preview
 
 help:
 	@echo "Common targets:"
@@ -28,7 +28,6 @@ help:
 	@echo "  make service-status             Show relay service status"
 	@echo "  make service-logs               Tail relay service logs"
 	@echo "  make service-uninstall          Stop/remove the relay service"
-	@echo "  make relay-run                  Run relay in the foreground"
 	@echo "  make check                      Run backend and frontend checks"
 
 setup:
@@ -70,7 +69,6 @@ shell-check:
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
 	@for script in relay/plugin-on-event.sh; do sh -n "$$script" || exit; done
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done
-	bash -n relay/plugin-setup-terminal.command
 	sh tests/test_install.sh
 	bash tests/test_common.sh
 	bash tests/test_plugin_build.sh
@@ -124,12 +122,6 @@ frontend-browser:
 frontend-browser-release:
 	frontend/scripts/run-browser-tests.sh ../web
 
-test:
-	go test ./...
-
-relay-run:
-	go run ./cmd/herdr-mobile-relay serve
-
 relay-plugin:
 	herdr plugin link .
 
@@ -144,30 +136,6 @@ service-status:
 
 service-logs:
 	relay/service.sh logs
-
-macos-service-install:
-	relay/install-service.sh
-
-macos-service-uninstall:
-	relay/uninstall-service.sh
-
-macos-service-status:
-	launchctl print gui/$$(id -u)/com.herdr-mobile-relay.service
-
-macos-service-logs:
-	tail -f "$$HOME/Library/Logs/herdr-mobile-relay/service.log" "$$HOME/Library/Logs/herdr-mobile-relay/service.err"
-
-linux-service-install:
-	relay/install-systemd-user-service.sh
-
-linux-service-uninstall:
-	relay/uninstall-systemd-user-service.sh
-
-linux-service-status:
-	systemctl --user status herdr-mobile-relay.service
-
-linux-service-logs:
-	journalctl --user -u herdr-mobile-relay.service -f
 
 web-bundle-check:
 	node frontend/scripts/validate-build.mjs web
@@ -189,4 +157,4 @@ web-deploy: web-bundle-check
 	npx --yes wrangler@$(WRANGLER_VERSION) pages deploy web --project-name "$(WEB_PROJECT)" --branch "$(WEB_BRANCH)"
 
 web-preview:
-	npx wrangler pages dev web
+	npx --yes wrangler@$(WRANGLER_VERSION) pages dev web
