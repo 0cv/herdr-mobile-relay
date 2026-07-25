@@ -104,7 +104,11 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 		if stale := d.paneSessionCurrent(token, requestID, "approval"); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		if err := d.herdr.SendKeys(effectCtx, paneID, approvalKeys(payload.Index, payload.Total)); err != nil {
+		if err := d.herdr.SendKeys(
+			effectCtx,
+			paneID,
+			approvalKeys(payload.Index, classification.ApprovalFocus),
+		); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "approval", paneID, err)}
 		}
 		accepted := completed(requestID, "approval", paneID, nil)
@@ -125,16 +129,16 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 	return result
 }
 
-func approvalKeys(index, total int) []string {
-	if index == 0 {
-		return []string{"Enter"}
+func approvalKeys(target, current int) []string {
+	distance := target - current
+	key := "Down"
+	if distance < 0 {
+		key = "Up"
+		distance = -distance
 	}
-	if index == total-1 {
-		return []string{"Escape"}
-	}
-	keys := make([]string, 0, index+1)
-	for range index {
-		keys = append(keys, "Down")
+	keys := make([]string, 0, distance+1)
+	for range distance {
+		keys = append(keys, key)
 	}
 	return append(keys, "Enter")
 }

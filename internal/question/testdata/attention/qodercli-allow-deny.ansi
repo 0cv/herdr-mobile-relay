@@ -1,0 +1,79 @@
+[0m[1m[38;5;6m~/workspace/project[0m on [0m[1m[38;5;3m☁️  (example-region) [0mon [0m[1m[38;5;4m☁️  user@example.com[0m took [0m[1m[38;5;3m24m10s[0m 
+[0m[1m[38;5;2m❯[0m qodercli 
+
+
+ [0m[38;2;39;189;81m  ██████                              [0m[38;2;81;82;81m╭─ [0m[1m[38;2;39;189;81mWhat's new (v1.1.5)[0m[38;2;81;82;81m ────────────────────────────────────────╮[0m
+ [0m[38;2;39;189;81m██      ██                            [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Improved plugin validation and update logic               [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m██  ██  ██  [0m[1m[38;2;238;238;235mQoder CLI[0m[38;2;149;149;143m v1.1.5          [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Improved Ctrl+B shortcut compatibility                    [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m██    ██                              [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Added persistent task management                          [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m  ████  ██  [0m[1m[38;2;238;238;235mSigned in[0m[38;2;149;149;143m Browser Login   [0m[38;2;81;82;81m│ [0m[38;2;149;124;173m/release-notes for more                                     [0m[38;2;81;82;81m │[0m
+                                       [0m[38;2;81;82;81m╰──────────────────────────────────────────────────────────────╯[0m
+
+
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> /permissions[0m[48;2;53;56;56m                                                                                                                                        [0m
+
+ [0m[38;2;239;176;65m● Added ask rule: create a file in this repo[0m
+   [0m[38;2;239;176;65mDeleted ask rule: create a file in this repo[0m
+   [0m[38;2;239;176;65mAdded ask rule: as[0m
+   [0m[38;2;239;176;65mAdded ask rule: testd[0m
+
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> /plan[0m[48;2;53;56;56m                                                                                                                                               [0m
+
+ [0m[38;2;239;176;65m● Switched to Plan Mode.[0m
+
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> [0m[38;2;238;238;235m[48;2;53;56;56mask me about my preferred color. Give me 3 options[0m[48;2;53;56;56m                                                                                                  [0m
+
+ [0m[38;2;115;183;142m▪ [0m[1m[38;2;238;238;235mAskUserQuestion[0m
+   [0m[38;2;81;82;81m└ [0m[1mUser answered:[0m
+       Q: What is your preferred color?
+       Color → Something here
+
+ [0m[38;2;149;149;143m- Request cancelled.[0m
+ 
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> [0m[38;2;238;238;235m[48;2;53;56;56mcreate a file called test.txt[0m[48;2;53;56;56m                                                                                                                       [0m
+
+ [0m[3m[38;2;238;238;235mThinking[0m
+ [0m[38;2;81;82;81m│ [0m[3m[38;2;149;149;143mI'm in plan mode, so I can only create the plan file. Since this is straightforward, I'll write a minimal plan and exit plan mode.[0m
+ [0m[38;2;238;238;235m▪ [0mI'm in plan mode, so I can't create the file yet. Let me write a quick plan and request approval.
+ 
+ [0m[38;2;115;183;142m▪ [0m[1m[38;2;238;238;235mWrite[0m[38;2;212;212;207m(/home/.../gentle-plateau-widgeon.md)[0m
+   [0m[38;2;81;82;81m└ [0m[38;2;115;183;142mAccepted [0m[38;2;212;212;207mgentle-plateau-widgeon.md[0m[38;2;81;82;81m (Ctrl+O to expand)[0m
+ 
+ [0m[38;2;149;149;143m- Request cancelled.[0m
+ 
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> /plan[0m[48;2;53;56;56m                                                                                                                                               [0m
+
+ [0m[38;2;239;176;65m● Exited Plan Mode.[0m
+ 
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> [0m[38;2;238;238;235m[48;2;53;56;56mcreate a file called test.txt[0m[48;2;53;56;56m                                                                                                                       [0m
+
+ [0m[3m[38;2;238;238;235mThinking[0m
+ [0m[38;2;81;82;81m│ [0m[3m[38;2;149;149;143mPlan mode is still active, and the user wants to create test.txt. Since I already have that plan ready, I just need to exit plan mode to get[0m
+ [0m[38;2;81;82;81m│ [0m[3m[38;2;149;149;143mapproval for this straightforward task.[0m
+ [0m[38;2;238;238;235m▪ [0mThe plan file already covers this trivial task, so I'll request approval.
+
+ [0m[1m[38;2;236;91;86mx [0m[1m[38;2;238;238;235mExitPlanMode[0m [0m[38;2;212;212;207mRequesting plan approval[0m                                                                                                     
+   [0m[38;2;81;82;81m└ [0m[38;2;238;238;235mExit Plan Mode tool parameter validation failed: You are not in plan mode. This tool is only for exiting plan mode after writing a plan. If your [0m
+     [0m[38;2;238;238;235mplan was already approved, continue with implementation.[0m
+ 
+ [0m[38;2;238;238;235m▪ [0mPlan mode is already exited — creating the file now.
+
+ [0m[38;2;239;176;65m? [0m[1m[38;2;238;238;235mWrite[0m [0m[38;2;212;212;207m/workspace/project/test.txt[0m
+
+[0m[1m[38;2;238;238;235m Permission Required[0m
+[0m[38;2;81;82;81m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [0m[38;2;149;149;143mTool: [0m[1m[38;2;238;238;235mWrite[0m
+ [0m[38;2;149;149;143mFile: [0m[38;2;238;238;235mtest.txt[0m
+ 
+ [0m[38;2;81;82;81m╭────────────────────────╮[0m
+ [0m[38;2;81;82;81m│[0m                        [0m[38;2;81;82;81m│[0m
+ [0m[38;2;81;82;81m│  [0mNo changes detected.  [0m[38;2;81;82;81m│[0m
+ [0m[38;2;81;82;81m│                        │[0m
+ [0m[38;2;81;82;81m╰────────────────────────╯[0m
+ [0m[38;2;238;238;235mApply this change?[0m
+
+  [0m[38;2;42;219;92m❯ 1. Allow once[0m
+  [0m[38;2;238;238;235m  2. Allow for this session[0m[1m[38;2;239;176;65m [session][0m
+  [0m[38;2;238;238;235m  3. Modify with external editor[0m
+  [0m[38;2;238;238;235m  4. Reject and type something[0m
+  [0m[38;2;238;238;235m  5. No[0m

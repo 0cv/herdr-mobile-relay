@@ -980,7 +980,9 @@ test('keeps the third single choice checked across live pane transitions', async
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Refresh terminal' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Attach image' })).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
   await expect(page.getByRole('radio', { name: /Backoff plus signals/ })).toBeChecked();
 
   await page.evaluate(() => (window as any).__relayAutoCommands(false));

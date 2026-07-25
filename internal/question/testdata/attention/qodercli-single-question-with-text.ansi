@@ -1,0 +1,69 @@
+      --hostname      hostname to listen on                          [string] [default: "127.0.0.1"]
+      --mdns          enable mDNS service discovery (defaults hostname to 0.0.0.0)
+                                                                          [boolean] [default: false]
+      --mdns-domain   custom domain name for mDNS service (default: opencode.local)
+                                                                [string] [default: "opencode.local"]
+      --cors          additional domains to allow for CORS                     [array] [default: []]
+  -m, --model         model to use in the format of provider/model                          [string]
+  -c, --continue      continue the last session                                            [boolean]
+  -s, --session       session id to continue                                                [string]
+      --fork          fork the session when continuing (use with --continue or --session)  [boolean]
+      --prompt        prompt to use                                                         [string]
+      --agent         agent to use                                                          [string]
+      --auto          auto-approve permissions that are not explicitly denied (dangerous!)
+                                                                          [boolean] [default: false]
+      --mini          start the minimal interactive interface             [boolean] [default: false]
+      --no-replay     disable mini session history replay on resume and after resize       [boolean]
+      --replay-limit  cap visible mini replay to the newest N messages                      [number]
+
+[0m[1m[38;5;6m~/workspace/project[0m on [0m[1m[38;5;3m☁️  (example-region) [0mon [0m[1m[38;5;4m☁️  user@example.com[0m 
+[0m[1m[38;5;2m❯[0m opencode --prompt 
+                                   ▄     
+  [0m[38;5;8m█▀▀█[0m [0m[38;5;8m█▀▀█[0m [0m[38;5;8m█▀▀█[0m [0m[38;5;8m█▀▀▄[0m █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+  [0m[38;5;8m█[0m[48;5;235m  [0m[38;5;8m█[0m [0m[38;5;8m█[0m[48;5;235m  [0m[38;5;8m█[0m [0m[38;5;8m█[0m[38;5;8m[48;5;235m▀▀▀[0m [0m[38;5;8m█[0m[48;5;235m  [0m[38;5;8m█[0m █[0m[48;5;238m   [0m █[0m[48;5;238m  [0m█ █[0m[48;5;238m  [0m█ █[0m[48;5;238m▀▀▀[0m
+  [0m[38;5;8m▀▀▀▀[0m [0m[38;5;8m█▀▀▀[0m [0m[38;5;8m▀▀▀▀[0m [0m[38;5;8m▀[0m[38;5;235m▀▀[0m[38;5;8m▀[0m ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+  [0m[38;5;8mSession   [0m[1mInteractive question prompt[0m
+  [0m[38;5;8mContinue  [0m[1mopencode -s ses_example[0m
+
+
+[0m[1m[38;5;6m~/workspace/project[0m on [0m[1m[38;5;3m☁️  (example-region) [0mon [0m[1m[38;5;4m☁️  user@example.com[0m took [0m[1m[38;5;3m24m10s[0m 
+[0m[1m[38;5;2m❯[0m qodercli 
+
+
+ [0m[38;2;39;189;81m  ██████                              [0m[38;2;81;82;81m╭─ [0m[1m[38;2;39;189;81mWhat's new (v1.1.5)[0m[38;2;81;82;81m ────────────────────────────────────────╮[0m
+ [0m[38;2;39;189;81m██      ██                            [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Improved plugin validation and update logic               [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m██  ██  ██  [0m[1m[38;2;238;238;235mQoder CLI[0m[38;2;149;149;143m v1.1.5          [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Improved Ctrl+B shortcut compatibility                    [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m██    ██                              [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Added persistent task management                          [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m  ████  ██  [0m[1m[38;2;238;238;235mSigned in[0m[38;2;149;149;143m Browser Login   [0m[38;2;81;82;81m│ [0m[38;2;149;124;173m/release-notes for more                                     [0m[38;2;81;82;81m │[0m
+                                       [0m[38;2;81;82;81m╰──────────────────────────────────────────────────────────────╯[0m
+
+
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> /permissions[0m[48;2;53;56;56m                                                                                                                                        [0m
+
+ [0m[38;2;239;176;65m● Added ask rule: create a file in this repo[0m
+   [0m[38;2;239;176;65mDeleted ask rule: create a file in this repo[0m
+   [0m[38;2;239;176;65mAdded ask rule: as[0m
+   [0m[38;2;239;176;65mAdded ask rule: testd[0m
+
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> /plan[0m[48;2;53;56;56m                                                                                                                                               [0m
+
+ [0m[38;2;239;176;65m● Switched to Plan Mode.[0m
+
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> [0m[38;2;238;238;235m[48;2;53;56;56mask me about my preferred color. Give me 3 options[0m[48;2;53;56;56m                                                                                                  [0m
+
+ 
+[0m[1m[38;2;238;238;235m Asking User[0m
+[0m[38;2;81;82;81m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [0m[1m[38;2;238;238;235mWhat is your preferred color?[0m
+ 
+  [0m[38;2;238;238;235m [0m [0m[38;2;238;238;235m1.[0m [0m[38;2;238;238;235mBlue[0m
+       [0m[38;2;149;149;143mA calm, cool color often associated with trust and stability.[0m
+  [0m[38;2;238;238;235m  2. Green[0m
+       [0m[38;2;149;149;143mA natural, fresh color associated with growth and balance.[0m
+  [0m[38;2;238;238;235m  3. Red[0m
+       [0m[38;2;149;149;143mA bold, warm color associated with energy and passion.[0m
+  [0m[38;2;42;219;92m❯ 4. Type Something[0m
+       Something here[0m[7m [0m
+
+ [0m[3m[38;2;149;149;143mEnter submit · Esc back[0m

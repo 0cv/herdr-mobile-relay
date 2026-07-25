@@ -20,6 +20,7 @@ type Classification struct {
 	Prompt         string
 	Command        string
 	Options        []string
+	ApprovalFocus  int
 	Interaction    *Interaction
 	QuestionLayout bool
 }
@@ -62,13 +63,14 @@ func Classify(text, agent string) Classification {
 			QuestionLayout: true,
 		}
 	}
-	if options := liveApprovalOptions(text, agent); len(options) > 0 {
+	if options, focus := liveApprovalDetails(text, agent); len(options) > 0 {
 		summaryLines := paneSummaryLines(text)
 		return Classification{
-			Kind:    AttentionApproval,
-			Prompt:  compact(strings.Join(summaryLines, "\n"), 500),
-			Command: compact(approvalCommand(summaryLines), 240),
-			Options: options,
+			Kind:          AttentionApproval,
+			Prompt:        compact(strings.Join(summaryLines, "\n"), 500),
+			Command:       compact(approvalCommand(summaryLines), 240),
+			Options:       options,
+			ApprovalFocus: focus,
 		}
 	}
 	if normalInputPrompt(text, agent) {
@@ -87,8 +89,11 @@ func Classify(text, agent string) Classification {
 	}
 }
 
-func liveApprovalOptions(text, agent string) []string {
+func liveApprovalDetails(text, agent string) ([]string, int) {
 	normalized := strings.ToLower(agent)
+	if strings.Contains(normalized, "opencode") {
+		return nil, 0
+	}
 	lines := cleanLines(text)
 	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	menuLines := make([]string, len(rawLines))
@@ -97,12 +102,12 @@ func liveApprovalOptions(text, agent string) []string {
 	}
 	rows := latestApprovalMenu(menuLines)
 	if len(rows) < 2 || !approvalLabels(rows) {
-		return nil
+		return nil, 0
 	}
 
 	latestCompleted := latestCompletedTurnLine(lines)
 	if rows[0].line <= latestCompleted {
-		return nil
+		return nil, 0
 	}
 
 	headerStart := latestCompleted + 1
@@ -110,19 +115,22 @@ func liveApprovalOptions(text, agent string) []string {
 		headerStart = candidate
 	}
 	header := strings.Join(lines[headerStart:rows[0].line], "\n")
-	footer := strings.Join(lines[rows[len(rows)-1].line+1:], "\n")
-	if !approvalHeader(normalized, header) && !approvalFooterPattern.MatchString(footer) {
-		return nil
+	if !approvalHeader(normalized, header) {
+		return nil, 0
 	}
-	if newerOutputAfterMenu(lines, rows[len(rows)-1].line) {
-		return nil
+	if newerOutputAfterMenu(menuLines, rows[len(rows)-1].line, normalized) {
+		return nil, 0
 	}
 
 	options := make([]string, 0, len(rows))
-	for _, row := range rows {
+	focus := 0
+	for index, row := range rows {
 		options = append(options, row.label)
+		if row.focus {
+			focus = index
+		}
 	}
-	return options
+	return options, focus
 }
 
 func latestApprovalMenu(lines []string) []approvalMenuRow {
@@ -187,6 +195,7 @@ func approvalHeader(agent, header string) bool {
 	case strings.Contains(agent, "codex"):
 		return (strings.Contains(lower, "would you like to") ||
 			strings.Contains(lower, "do you want to") ||
+			strings.Contains(lower, "implement this plan") ||
 			strings.Contains(lower, "approve all pending") ||
 			strings.Contains(lower, "requested permission") ||
 			strings.Contains(lower, "approve") &&
@@ -198,11 +207,17 @@ func approvalHeader(agent, header string) bool {
 				strings.Contains(lower, "permission") ||
 				strings.Contains(lower, "subagent") ||
 				strings.Contains(lower, "agent") ||
+				strings.Contains(lower, "plan") ||
 				strings.Contains(lower, "command") ||
 				strings.Contains(lower, "tool"))
 	case strings.Contains(agent, "claude"):
 		return strings.Contains(lower, "do you want to proceed") ||
 			strings.Contains(lower, "would you like to proceed") ||
+			strings.Contains(lower, "do you want to") &&
+				(strings.Contains(lower, "create") ||
+					strings.Contains(lower, "edit") ||
+					strings.Contains(lower, "delete") ||
+					strings.Contains(lower, "run")) ||
 			strings.Contains(lower, "allow") &&
 				(strings.Contains(lower, "permission") ||
 					strings.Contains(lower, "tool") ||
@@ -215,10 +230,17 @@ func approvalHeader(agent, header string) bool {
 					strings.Contains(lower, "command") ||
 					strings.Contains(lower, "action"))
 	case strings.Contains(agent, "qoder"):
-		return strings.Contains(lower, "allow") &&
-			(strings.Contains(lower, "action") ||
-				strings.Contains(lower, "command") ||
-				strings.Contains(lower, "tool"))
+		return strings.Contains(lower, "permission required") &&
+			(strings.Contains(lower, "apply this change") ||
+				strings.Contains(lower, "tool:") ||
+				strings.Contains(lower, "file:")) ||
+			strings.Contains(lower, "would you like to proceed") &&
+				(strings.Contains(lower, "ready to execute") ||
+					strings.Contains(lower, "plan approval")) ||
+			strings.Contains(lower, "allow") &&
+				(strings.Contains(lower, "action") ||
+					strings.Contains(lower, "command") ||
+					strings.Contains(lower, "tool"))
 	default:
 		return false
 	}
@@ -241,14 +263,30 @@ func latestCompletedTurnLine(lines []string) int {
 	return -1
 }
 
-func newerOutputAfterMenu(lines []string, lastMenuLine int) bool {
+func newerOutputAfterMenu(lines []string, lastMenuLine int, agent string) bool {
 	for _, line := range lines[lastMenuLine+1:] {
 		if line == "" || chromePattern.MatchString(line) || approvalFooterPattern.MatchString(line) {
+			continue
+		}
+		if strings.Contains(agent, "qoder") && qoderApprovalTailLine(line) {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+func qoderApprovalTailLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if strings.EqualFold(trimmed, "Ctrl+X to edit plan") {
+		return true
+	}
+	if !strings.HasPrefix(line, " ") || trimmed == "" {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	return strings.HasPrefix(lower, "reject this plan") &&
+		strings.Contains(lower, "without providing feedback")
 }
 
 func normalInputPrompt(text, agent string) bool {

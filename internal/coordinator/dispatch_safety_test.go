@@ -9,12 +9,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
+	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
 func writeScript(t *testing.T, dir, name, body string) string {
@@ -120,6 +122,95 @@ func TestApprovalRevalidationRejectsCompletedNumberedProse(t *testing.T) {
 	data, _ := os.ReadFile(record)
 	if strings.Contains(string(data), "send-keys") {
 		t.Fatalf("approval keys were sent after chat revalidation:\n%s", data)
+	}
+}
+
+func TestApprovalDispatchNavigatesFromReparsedLiveFocus(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join(
+		"..",
+		"question",
+		"testdata",
+		"attention",
+		"qodercli-permission-required2.ansi",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	classification := question.Classify(string(fixture), "qodercli")
+	if classification.Kind != question.AttentionApproval ||
+		classification.ApprovalFocus != 2 {
+		t.Fatalf("classification = %+v", classification)
+	}
+
+	dir := t.TempDir()
+	panePath := filepath.Join(dir, "pane.ansi")
+	if err := os.WriteFile(panePath, fixture, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := filepath.Join(dir, "invocations.log")
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
+		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
+		"  cat \""+panePath+"\"\n"+
+		"else\n"+
+		"  printf '{\"ok\":true}\\n'\n"+
+		"fi\n")
+
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{
+		PaneID: "pane-1", Agent: "qodercli", Status: "blocked",
+		AttentionKind: question.AttentionApproval,
+		Options:       append([]string(nil), classification.Options...),
+	}}, state.RevisionCounter())
+	d := NewDispatcher(
+		herdr.NewClient(bin, filepath.Join(dir, "sock")),
+		state,
+		nil,
+		testLogger(),
+	)
+	result := d.Handle(context.Background(), map[string]any{
+		"action":     "respond",
+		"request_id": "focus-aware",
+		"pane_id":    "pane-1",
+		"event_id":   blockedEventID(t, d, "pane-1"),
+		"index":      float64(0),
+		"total":      float64(len(classification.Options)),
+	})
+	if !result.OK || result.Phase != "accepted" {
+		t.Fatalf("approval result = %+v", result)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(
+		string(data),
+		"pane send-keys pane-1 Up Up Enter",
+	) {
+		t.Fatalf("focus-aware approval keys were not dispatched:\n%s", data)
+	}
+	if strings.Contains(string(data), "Escape") {
+		t.Fatalf("approval dispatch assumed Escape selected the last row:\n%s", data)
+	}
+}
+
+func TestApprovalKeysNavigateToEveryRowWithEnter(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  int
+		current int
+		want    []string
+	}{
+		{"earlier row", 0, 2, []string{"Up", "Up", "Enter"}},
+		{"current row", 2, 2, []string{"Enter"}},
+		{"later row", 4, 2, []string{"Down", "Down", "Enter"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := approvalKeys(test.target, test.current); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("approval keys = %#v, want %#v", got, test.want)
+			}
+		})
 	}
 }
 

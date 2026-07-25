@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -414,6 +416,159 @@ func TestApprovalRequiresCurrentInventoryEventAndDispatchesOnce(t *testing.T) {
 	if got := countFakeOperations(t, env.operationsLog, "pane", "send-keys"); got != 1 {
 		t.Fatalf("current approval dispatched %d send-keys commands, want 1", got)
 	}
+}
+
+func TestCapturedQoderAttentionFlowsThroughRelay(t *testing.T) {
+	approval := readAttentionCapture(t, "qodercli-permission-required2.ansi")
+	notes := readAttentionCapture(t, "qodercli-multi-questions-and-notes.ansi")
+	scenario, err := json.Marshal(map[string]any{
+		"panes": []map[string]any{
+			{
+				"pane_id": "approval-pane", "agent": "qodercli", "name": "approval",
+				"agent_status": "blocked", "tab_id": "tab-1",
+				"workspace_id": "ws-1", "cwd": "/tmp/qoder-approval", "revision": 1,
+			},
+			{
+				"pane_id": "notes-pane", "agent": "qodercli", "name": "notes",
+				"agent_status": "blocked", "tab_id": "tab-2",
+				"workspace_id": "ws-1", "cwd": "/tmp/qoder-notes", "revision": 1,
+			},
+		},
+		"tabs": []map[string]any{
+			{"tab_id": "tab-1", "workspace_id": "ws-1", "label": "approval", "number": 1, "cwd": "/tmp/qoder-approval"},
+			{"tab_id": "tab-2", "workspace_id": "ws-1", "label": "notes", "number": 2, "cwd": "/tmp/qoder-notes"},
+		},
+		"content": map[string]string{
+			"approval-pane": approval,
+			"notes-pane":    notes,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := setupEnvWithScenario(t, string(scenario))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	var approvalEventID string
+	notesSeen := false
+	deadline := time.After(8 * time.Second)
+	for approvalEventID == "" || !notesSeen {
+		select {
+		case <-deadline:
+			t.Fatalf(
+				"captured states not classified: approval event %q, notes %t",
+				approvalEventID,
+				notesSeen,
+			)
+		default:
+		}
+		message := readNextJSON(t, conn, ctx)
+		var agents []any
+		switch message["type"] {
+		case "agents":
+			agents, _ = message["agents"].([]any)
+		case "blocked":
+			agents = []any{message}
+		default:
+			continue
+		}
+		for _, raw := range agents {
+			agent, _ := raw.(map[string]any)
+			switch agent["pane_id"] {
+			case "approval-pane":
+				options, _ := agent["options"].([]any)
+				if agent["attention_kind"] == "approval" && len(options) == 5 {
+					approvalEventID, _ = agent["event_id"].(string)
+				}
+			case "notes-pane":
+				interaction, _ := agent["interaction"].(map[string]any)
+				other, _ := interaction["other"].(map[string]any)
+				notesSeen = agent["attention_kind"] == "question" &&
+					interaction["question"] == "Who's coming along, and how will you get there?" &&
+					other["text"] == "I typed some notes here..."
+			}
+		}
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"type":       "respond",
+		"protocol":   2,
+		"request_id": "qoder-approval",
+		"pane_id":    "approval-pane",
+		"event_id":   approvalEventID,
+		"index":      0,
+		"total":      5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatal(err)
+	}
+	result := readJSON(t, conn, ctx, 5*time.Second)
+	if result["ok"] != true || result["phase"] != "accepted" {
+		t.Fatalf("approval result = %+v", result)
+	}
+	wantKeys := []string{"pane", "send-keys", "approval-pane", "Up", "Up", "Enter"}
+	if got := findFakeOperation(t, env.operationsLog, "pane", "send-keys"); !reflect.DeepEqual(got, wantKeys) {
+		t.Fatalf("approval operation = %#v, want %#v", got, wantKeys)
+	}
+}
+
+func readAttentionCapture(t *testing.T, name string) string {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(
+		repoRoot(t),
+		"internal",
+		"question",
+		"testdata",
+		"attention",
+		name,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
+}
+
+func findFakeOperation(t *testing.T, path string, want ...string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var operation struct {
+			Argv []string `json:"argv"`
+		}
+		if err := json.Unmarshal([]byte(line), &operation); err != nil {
+			t.Fatalf("decode fake operation: %v", err)
+		}
+		if len(operation.Argv) < len(want) {
+			continue
+		}
+		match := true
+		for index := range want {
+			if operation.Argv[index] != want[index] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return operation.Argv
+		}
+	}
+	return nil
 }
 
 func countFakeOperations(t *testing.T, path string, want ...string) int {

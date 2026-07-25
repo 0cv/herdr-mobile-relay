@@ -1,0 +1,43 @@
+
+ 
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240mbut name it hello_world.txt[0m[48;2;240;240;240m                                                                                                                                       [0m
+ 
+  [0m[38;2;102;102;102mRan [0m[1m[38;2;102;102;102m1[0m[38;2;102;102;102m shell command [0m
+
+[0m[38;2;0;0;0m⏺ [0mRenamed to [0m[38;2;87;105;247mhello_world.txt[0m.
+
+[0m[38;2;102;102;102m✻[0m [0m[38;2;102;102;102mCrunched for 7s[0m
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯[0m[48;2;240;240;240m [0m[38;2;0;0;0m[48;2;240;240;240m/plan let's plan a week-end trip in the alps. Ask me single question and multiple choice questions[0m[48;2;240;240;240m                                                                [0m
+[0m[38;2;102;102;102m  ⎿  [0mEnabled plan mode
+     
+[0m[38;2;102;102;102m⏺ [0mUser declined to answer questions
+[0m[38;2;102;102;102m  ⎿  · Which part of the Alps are you thinking of, or where are you starting from? (French Alps / Swiss Alps / Italian Alps / Not sure / open to suggestions)[0m
+
+[0m[38;2;0;0;0m⏺[0m What would you like to clarify before I ask questions about the trip?
+
+[0m[38;2;102;102;102m✻ Sautéed for 11s[0m
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯[0m[48;2;240;240;240m [0m[38;2;0;0;0m[48;2;240;240;240m/plan let's build a webapp. Ask me some choice of technology, my preferences, etc.[0m[48;2;240;240;240m                                                                                [0m
+[0m[38;2;102;102;102m  ⎿  [0mAlready in plan mode. No plan written yet.
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240mlet's build a webapp. Ask me some choice of technology, my preferences, etc.[0m[48;2;240;240;240m                                                                                      [0m
+
+[0m[38;2;102;102;102m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+←  ☒ App type  ☒ Frontend  ☒ Backend  ☒ Database [0m[38;2;255;255;255m[48;2;87;105;247m ✔ Submit [0m[38;2;102;102;102m →[0m
+
+[0m[1m[38;2;0;0;0mReview your answers[0m
+
+ ● What kind of webapp are you building?
+   [0m[38;2;44;122;57m→ Content/marketing site[0m
+ ● Which frontend approach do you prefer?
+   [0m[38;2;44;122;57m→ Vue[0m
+ ● Do you need a backend/server, and if so what language?
+   [0m[38;2;44;122;57m→ No backend needed[0m
+ ● Do you need a database?
+   [0m[38;2;44;122;57m→ No database needed[0m
+  
+[0m[38;2;102;102;102mReady to submit your answers?[0m
+
+[0m[38;2;87;105;247m❯[0m [0m[38;2;102;102;102m1. [0m[38;2;87;105;247mSubmit answers[0m
+  [0m[38;2;102;102;102m2. [0mCancel

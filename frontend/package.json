@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:browser": "playwright test",
+    "test:browser:attention": "playwright test --config playwright.attention.config.ts",
     "test:browser:release": "HERDR_WEB_ROOT=../web playwright test",
     "size": "node scripts/check-size.mjs dist"
   },

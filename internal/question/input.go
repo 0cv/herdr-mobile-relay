@@ -21,8 +21,14 @@ type InputStep struct {
 func PlanInput(interaction *Interaction, intent InputIntent) []InputStep {
 	switch intent.Navigation {
 	case "previous":
+		if interaction.Agent == "opencode" {
+			return []InputStep{{Keys: []string{"Shift+Tab"}}}
+		}
 		return []InputStep{{Keys: []string{"Left"}}}
 	case "next":
+		if interaction.Agent == "opencode" {
+			return []InputStep{{Keys: []string{"Tab"}}}
+		}
 		return []InputStep{{Keys: []string{"Right"}}}
 	}
 	if intent.Clarify {
@@ -34,6 +40,8 @@ func PlanInput(interaction *Interaction, intent InputIntent) []InputStep {
 		return planCodexInput(interaction, intent)
 	case "qoder":
 		return planQoderInput(interaction, intent)
+	case "opencode":
+		return planOpenCodeInput(interaction, intent)
 	default:
 		return planClaudeInput(interaction, intent)
 	}
@@ -65,6 +73,20 @@ func planCodexInput(interaction *Interaction, intent InputIntent) []InputStep {
 
 func planQoderInput(interaction *Interaction, intent InputIntent) []InputStep {
 	if interaction.Kind == "single_select" {
+		if interaction.NotesActive {
+			steps := []InputStep{{Keys: []string{"Ctrl+U"}}}
+			if intent.OtherSelected && intent.OtherText != "" {
+				steps = append(steps, InputStep{Text: intent.OtherText})
+			}
+			steps = append(steps, InputStep{Keys: []string{"Enter"}})
+			if intent.OtherSelected {
+				return steps
+			}
+			current := *interaction
+			current.Focus = Focus{Kind: "other"}
+			target := Focus{Kind: "option", Index: intent.Selected[0]}
+			return append(steps, InputStep{Keys: append(qoderNavigationKeys(&current, target), "Enter")})
+		}
 		if len(intent.Selected) > 0 {
 			target := Focus{Kind: "option", Index: intent.Selected[0]}
 			return []InputStep{{Keys: append(qoderNavigationKeys(interaction, target), "Enter")}}
@@ -83,6 +105,19 @@ func planQoderInput(interaction *Interaction, intent InputIntent) []InputStep {
 func planQoderMultiInput(interaction *Interaction, intent InputIntent) []InputStep {
 	current := *interaction
 	var steps []InputStep
+	notesHandled := false
+	if current.NotesActive {
+		steps = append(steps, InputStep{Keys: []string{"Ctrl+U"}})
+		if intent.OtherSelected && intent.OtherText != "" {
+			steps = append(steps, InputStep{Text: intent.OtherText})
+		}
+		steps = append(steps, InputStep{Keys: []string{"Enter"}})
+		current.Focus = Focus{Kind: "other"}
+		current.NotesActive = false
+		current.Other.Selected = true
+		current.Other.Text = intent.OtherText
+		notesHandled = true
+	}
 	for index, option := range current.Options {
 		desired := containsInt(intent.Selected, index)
 		if option.Selected == desired {
@@ -94,7 +129,8 @@ func planQoderMultiInput(interaction *Interaction, intent InputIntent) []InputSt
 		current.Options[index].Selected = desired
 	}
 	otherTarget := Focus{Kind: "other"}
-	if intent.OtherSelected {
+	switch {
+	case intent.OtherSelected && !notesHandled:
 		keys := append(qoderNavigationKeys(&current, otherTarget), "Enter", "Ctrl+U")
 		steps = append(steps, InputStep{Keys: keys})
 		if intent.OtherText != "" {
@@ -102,9 +138,105 @@ func planQoderMultiInput(interaction *Interaction, intent InputIntent) []InputSt
 		}
 		steps = append(steps, InputStep{Keys: []string{"Enter"}})
 		current.Focus = otherTarget
+	case !intent.OtherSelected && current.Other.Selected:
+		steps = append(steps, InputStep{
+			Keys: append(qoderNavigationKeys(&current, otherTarget), "Enter"),
+		})
+		current.Focus = otherTarget
 	}
 	submit := Focus{Kind: "submit"}
 	return append(steps, InputStep{Keys: append(qoderNavigationKeys(&current, submit), "Enter")})
+}
+
+func planOpenCodeInput(interaction *Interaction, intent InputIntent) []InputStep {
+	if interaction.Other.Hidden {
+		return []InputStep{{Keys: []string{"Enter"}}}
+	}
+	if interaction.Kind == "multi_select" {
+		return planOpenCodeMultiInput(interaction, intent)
+	}
+	if interaction.NotesActive {
+		if intent.OtherSelected {
+			steps := []InputStep{{Keys: []string{"Ctrl+U"}}}
+			if intent.OtherText != "" {
+				steps = append(steps, InputStep{Text: intent.OtherText})
+			}
+			return append(steps,
+				InputStep{Keys: []string{"Enter"}},
+				InputStep{Keys: []string{"Enter"}},
+			)
+		}
+		current := *interaction
+		current.Focus = Focus{Kind: "other"}
+		target := Focus{Kind: "option", Index: intent.Selected[0]}
+		return []InputStep{
+			{Keys: []string{"Escape"}},
+			{Keys: append(openCodeNavigationKeys(&current, target), "Enter")},
+		}
+	}
+	if len(intent.Selected) > 0 {
+		target := Focus{Kind: "option", Index: intent.Selected[0]}
+		return []InputStep{{Keys: append(openCodeNavigationKeys(interaction, target), "Enter")}}
+	}
+	target := Focus{Kind: "other"}
+	keys := append(openCodeNavigationKeys(interaction, target), "Enter", "Ctrl+U")
+	steps := []InputStep{{Keys: keys}}
+	if intent.OtherText != "" {
+		steps = append(steps, InputStep{Text: intent.OtherText})
+	}
+	return append(steps,
+		InputStep{Keys: []string{"Enter"}},
+		InputStep{Keys: []string{"Enter"}},
+	)
+}
+
+func planOpenCodeMultiInput(interaction *Interaction, intent InputIntent) []InputStep {
+	current := *interaction
+	var steps []InputStep
+	if current.NotesActive {
+		if intent.OtherSelected {
+			steps = append(steps, InputStep{Keys: []string{"Ctrl+U"}})
+			if intent.OtherText != "" {
+				steps = append(steps, InputStep{Text: intent.OtherText})
+			}
+			steps = append(steps, InputStep{Keys: []string{"Enter"}})
+			current.Other.Selected = true
+			current.Other.Text = intent.OtherText
+		} else {
+			steps = append(steps, InputStep{Keys: []string{"Escape"}})
+		}
+		current.Focus = Focus{Kind: "other"}
+		current.NotesActive = false
+	}
+	for index, option := range current.Options {
+		desired := containsInt(intent.Selected, index)
+		if option.Selected == desired {
+			continue
+		}
+		target := Focus{Kind: "option", Index: index}
+		steps = append(steps, InputStep{Keys: append(openCodeNavigationKeys(&current, target), "Enter")})
+		current.Focus = target
+		current.Options[index].Selected = desired
+	}
+
+	otherTarget := Focus{Kind: "other"}
+	switch {
+	case intent.OtherSelected &&
+		(!current.Other.Selected || current.Other.Text != intent.OtherText):
+		keys := append(openCodeNavigationKeys(&current, otherTarget), "Enter", "Ctrl+U")
+		steps = append(steps, InputStep{Keys: keys})
+		if intent.OtherText != "" {
+			steps = append(steps, InputStep{Text: intent.OtherText})
+		}
+		steps = append(steps, InputStep{Keys: []string{"Enter"}})
+		current.Focus = otherTarget
+	case !intent.OtherSelected && current.Other.Selected:
+		steps = append(steps, InputStep{
+			Keys: append(openCodeNavigationKeys(&current, otherTarget), "Enter"),
+		})
+		current.Focus = otherTarget
+	}
+	return append(steps, InputStep{Keys: []string{"Tab"}})
 }
 
 func planClaudeInput(interaction *Interaction, intent InputIntent) []InputStep {
@@ -196,6 +328,26 @@ func qoderNavigationKeys(interaction *Interaction, target Focus) []string {
 			return position
 		}
 		return 0
+	}
+	distance := position(target) - position(interaction.Focus)
+	key := "Down"
+	if distance < 0 {
+		key = "Up"
+		distance = -distance
+	}
+	keys := make([]string, distance)
+	for index := range keys {
+		keys[index] = key
+	}
+	return keys
+}
+
+func openCodeNavigationKeys(interaction *Interaction, target Focus) []string {
+	position := func(focus Focus) int {
+		if focus.Kind == "other" {
+			return len(interaction.Options)
+		}
+		return focus.Index
 	}
 	distance := position(target) - position(interaction.Focus)
 	key := "Down"

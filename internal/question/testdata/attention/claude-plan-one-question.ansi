@@ -1,0 +1,44 @@
+  - [0m[1mFilename[0m: [0m[38;2;87;105;247mhello.txt[0m
+  - [0m[1mContent[0m: [0m[38;2;87;105;247mHello, world![0m
+  - [0m[1mLocation[0m: [0m[38;2;87;105;247m/workspace/example-user/workspace/tmp/hello.txt[0m
+
+  Shall I go ahead and create this?
+
+[0m[38;2;102;102;102m✻ Brewed for 3s[0m
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240myes[0m[48;2;240;240;240m                                                                                                                                                               [0m
+
+[0m[38;2;44;122;57m⏺ [0m[1mWrite[0m(hello.txt)
+[0m[38;2;102;102;102m  ⎿  [0mWrote [0m[1m1 [0mline to [0m[1mhello.txt[0m
+     [0m[2m[38;2;51;51;51m 1 [0m[38;2;51;51;51mHello, world![0m
+  
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240mbut name it hello_world.txt[0m[48;2;240;240;240m                                                                                                                                       [0m
+
+  [0m[38;2;102;102;102mRan [0m[1m[38;2;102;102;102m1[0m[38;2;102;102;102m shell command [0m
+
+[0m[38;2;0;0;0m⏺ [0mRenamed to [0m[38;2;87;105;247mhello_world.txt[0m.
+
+[0m[38;2;102;102;102m✻[0m [0m[38;2;102;102;102mCrunched for 7s[0m
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯[0m[48;2;240;240;240m [0m[38;2;0;0;0m[48;2;240;240;240m/plan let's plan a week-end trip in the alps. Ask me single question and multiple choice questions[0m[48;2;240;240;240m                                                                [0m
+[0m[38;2;102;102;102m  ⎿  [0mEnabled plan mode
+[0m[38;2;102;102;102m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[38;2;102;102;102mPlanning: /workspace/example-user/.claude/plans/sorted-prancing-bumblebee.md[0m
+[0m[38;2;102;102;102m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[38;2;255;255;255m[48;2;87;105;247m ☐ Region [0m
+  
+[0m[1m[38;2;0;0;0mWhich part of the Alps are you thinking of, or where are you starting from?[0m
+
+  [0m[38;2;102;102;102m1. [0mFrench Alps
+     [0m[38;2;102;102;102me.g. Chamonix, Annecy, Grenoble area[0m
+[0m[38;2;87;105;247m❯ [0m[38;2;102;102;102m2. [0m[38;2;87;105;247mSwiss Alps[0m
+     [0m[38;2;102;102;102me.g. Interlaken, Zermatt, Lucerne area[0m
+  [0m[38;2;102;102;102m3.[0m Italian Alps
+     [0m[38;2;102;102;102me.g. Dolomites, Aosta Valley[0m
+  [0m[38;2;102;102;102m4.[0m Not sure / open to suggestions
+     [0m[38;2;102;102;102mRecommend based on other preferences[0m
+  [0m[38;2;102;102;102m5. Type something.[0m
+[0m[38;2;102;102;102m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  6. Chat about this
+
+[0m[38;2;102;102;102mEnter to select · ↑/↓ to navigate · Esc to cancel[0m

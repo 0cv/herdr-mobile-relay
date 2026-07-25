@@ -1,0 +1,44 @@
+
+[0m[1m[38;5;6msample-project[0m on [0m[1m[38;5;5m master[0m is [0m[1m[38;5;208m📦 v1.0.0[0m via [0m[1m[38;5;2m v26.1.0 [0mon [0m[1m[38;5;3m☁️  (example-region) [0mon [0m[1m[38;5;4m☁️  user@example.com[0m 
+[0m[1m[38;5;2m❯[0m qodercli 
+
+
+ [0m[38;2;39;189;81m  ██████                              [0m[38;2;81;82;81m╭─ [0m[1m[38;2;39;189;81mWhat's new (v1.1.5)[0m[38;2;81;82;81m ────────────────────────────────────────╮[0m
+ [0m[38;2;39;189;81m██      ██                            [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Improved plugin validation and update logic               [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m██  ██  ██  [0m[1m[38;2;238;238;235mQoder CLI[0m[38;2;149;149;143m v1.1.5          [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Improved Ctrl+B shortcut compatibility                    [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m██    ██                              [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Added persistent task management                          [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m  ████  ██  [0m[1m[38;2;238;238;235mSigned in[0m[38;2;149;149;143m Browser Login   [0m[38;2;81;82;81m│ [0m[38;2;149;124;173m/release-notes for more                                     [0m[38;2;81;82;81m │[0m
+                                       [0m[38;2;81;82;81m╰──────────────────────────────────────────────────────────────╯[0m
+
+
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> /plan wanna make a week-end trip, ask me about my preference and build a plan on multiple select options[0m[48;2;53;56;56m                                            [0m
+
+ [0m[38;2;239;176;65m● Switched to Plan Mode.[0m
+
+ [0m[3m[38;2;238;238;235mThinking[0m
+ [0m[38;2;81;82;81m│ [0m[3m[38;2;149;149;143mI need to gather some preferences about what they're looking for in a weekend trip, so I'll ask about things like destination type, activities,[0m
+ [0m[38;2;81;82;81m│ [0m[3m[38;2;149;149;143mbudget, and travel style using multi-select options to make it easier for them to share what appeals to them.[0m
+ [0m[38;2;238;238;235m▪ [0mI'd love to help plan your weekend trip! Let me ask a few questions about your preferences.
+ 
+ 
+[0m[1m[38;2;238;238;235m Asking User[0m [0m[38;2;149;149;143m·[0m [0m[38;2;149;149;143m Trip vibe [0m [0m[38;2;149;149;143m>[0m [0m[38;2;149;149;143m Distance [0m [0m[38;2;149;149;143m>[0m [0m[38;2;149;149;143m Budget [0m [0m[38;2;149;149;143m>[0m [0m[1m[38;2;42;219;92m[48;2;36;74;50m Logistics [0m [0m[38;2;149;149;143m>[0m [0m[38;2;149;149;143m Submit [0m
+[0m[38;2;81;82;81m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [0m[1m[38;2;238;238;235mWho's coming along, and how will you get there?[0m
+ [0m[3m[38;2;149;149;143m(Select all that apply)[0m
+
+  [0m[38;2;238;238;235m [0m [0m[38;2;238;238;235m1.[0m [0m[38;2;149;149;143m[ ][0m[38;2;238;238;235m Solo[0m
+       [0m[38;2;149;149;143m Just me[0m
+  [0m[38;2;238;238;235m  2. [0m[38;2;149;149;143m[ ][0m[38;2;238;238;235m Partner / friends[0m
+       [0m[38;2;149;149;143m Traveling with one or more people[0m
+  [0m[38;2;238;238;235m  3. [0m[38;2;149;149;143m[ ][0m[38;2;238;238;235m Have a car[0m
+       [0m[38;2;149;149;143m Can drive anywhere[0m
+  [0m[38;2;238;238;235m  4. [0m[38;2;149;149;143m[ ][0m[38;2;238;238;235m Public transport only[0m
+       [0m[38;2;149;149;143m Train/bus accessible destinations[0m
+  [0m[38;2;238;238;235m  5. [0m[38;2;149;149;143m[ ][0m[38;2;238;238;235m All of the above[0m
+       [0m[38;2;149;149;143m Select all options[0m
+  [0m[38;2;238;238;235m  6. [0m[1m[38;2;238;238;235m Next →[0m
+       [0m[38;2;149;149;143m Continue to submit[0m
+  [0m[38;2;42;219;92m❯ 7. [0m[1m[38;2;42;219;92m Type Something[0m
+       I typed some notes here...[0m[7m [0m
+
+ [0m[3m[38;2;149;149;143mTab/←→ switch · Enter submit · Esc back[0m

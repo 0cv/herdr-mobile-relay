@@ -291,12 +291,12 @@ func TestQoderHistoricalQuestionIsNotLive(t *testing.T) {
 }
 
 func TestQuestionSupportsKnownTerminalAdapters(t *testing.T) {
-	for _, agent := range []string{"claude", "codex", "qoder", "qodercli"} {
+	for _, agent := range []string{"claude", "codex", "opencode", "qoder", "qodercli"} {
 		if !Supports(agent) {
 			t.Errorf("%q is not supported", agent)
 		}
 	}
-	if Supports("opencode") {
+	if Supports("unparsed-agent") {
 		t.Fatal("unknown keyboard protocol was treated as supported")
 	}
 }

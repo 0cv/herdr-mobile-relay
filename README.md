@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** `0.10.4`
+**Current version:** `0.10.5`
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -66,7 +66,8 @@ credentials, cache, and plugin registration.
 - Monitor and control agents across several computers.
 - Start, rename, clear, restart, and stop detected agents.
 - Send prompts, terminal keys, slash commands, screenshots, and photos.
-- Answer approvals and structured Claude Code or Codex questions.
+- Answer verified Codex, Claude Code, and Qoder approvals, plus structured
+  questions from those agents and OpenCode.
 - Search local activity and receive blocked or completion notifications.
 - Require device verification before reconnecting relays.
 - Detect Codex, Claude Code, OpenCode, Qoder, and Herdr integrations.

@@ -1,0 +1,67 @@
+      --hostname      hostname to listen on                          [string] [default: "127.0.0.1"]
+      --mdns          enable mDNS service discovery (defaults hostname to 0.0.0.0)
+                                                                          [boolean] [default: false]
+      --mdns-domain   custom domain name for mDNS service (default: opencode.local)
+                                                                [string] [default: "opencode.local"]
+      --cors          additional domains to allow for CORS                     [array] [default: []]
+  -m, --model         model to use in the format of provider/model                          [string]
+  -c, --continue      continue the last session                                            [boolean]
+  -s, --session       session id to continue                                                [string]
+      --fork          fork the session when continuing (use with --continue or --session)  [boolean]
+      --prompt        prompt to use                                                         [string]
+      --agent         agent to use                                                          [string]
+      --auto          auto-approve permissions that are not explicitly denied (dangerous!)
+                                                                          [boolean] [default: false]
+      --mini          start the minimal interactive interface             [boolean] [default: false]
+      --no-replay     disable mini session history replay on resume and after resize       [boolean]
+      --replay-limit  cap visible mini replay to the newest N messages                      [number]
+
+[0m[1m[38;5;6m~/workspace/project[0m on [0m[1m[38;5;3m☁️  (example-region) [0mon [0m[1m[38;5;4m☁️  user@example.com[0m 
+[0m[1m[38;5;2m❯[0m opencode --prompt 
+                                   ▄     
+  [0m[38;5;8m█▀▀█[0m [0m[38;5;8m█▀▀█[0m [0m[38;5;8m█▀▀█[0m [0m[38;5;8m█▀▀▄[0m █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+  [0m[38;5;8m█[0m[48;5;235m  [0m[38;5;8m█[0m [0m[38;5;8m█[0m[48;5;235m  [0m[38;5;8m█[0m [0m[38;5;8m█[0m[38;5;8m[48;5;235m▀▀▀[0m [0m[38;5;8m█[0m[48;5;235m  [0m[38;5;8m█[0m █[0m[48;5;238m   [0m █[0m[48;5;238m  [0m█ █[0m[48;5;238m  [0m█ █[0m[48;5;238m▀▀▀[0m
+  [0m[38;5;8m▀▀▀▀[0m [0m[38;5;8m█▀▀▀[0m [0m[38;5;8m▀▀▀▀[0m [0m[38;5;8m▀[0m[38;5;235m▀▀[0m[38;5;8m▀[0m ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+  [0m[38;5;8mSession   [0m[1mInteractive question prompt[0m
+  [0m[38;5;8mContinue  [0m[1mopencode -s ses_example[0m
+
+
+[0m[1m[38;5;6m~/workspace/project[0m on [0m[1m[38;5;3m☁️  (example-region) [0mon [0m[1m[38;5;4m☁️  user@example.com[0m took [0m[1m[38;5;3m24m10s[0m 
+[0m[1m[38;5;2m❯[0m qodercli 
+
+
+ [0m[38;2;39;189;81m  ██████                              [0m[38;2;81;82;81m╭─ [0m[1m[38;2;39;189;81mWhat's new (v1.1.5)[0m[38;2;81;82;81m ────────────────────────────────────────╮[0m
+ [0m[38;2;39;189;81m██      ██                            [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Improved plugin validation and update logic               [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m██  ██  ██  [0m[1m[38;2;238;238;235mQoder CLI[0m[38;2;149;149;143m v1.1.5          [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Improved Ctrl+B shortcut compatibility                    [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m██    ██                              [0m[38;2;81;82;81m│ [0m[38;2;149;149;143m- Added persistent task management                          [0m[38;2;81;82;81m │[0m
+ [0m[38;2;39;189;81m  ████  ██  [0m[1m[38;2;238;238;235mSigned in[0m[38;2;149;149;143m Browser Login   [0m[38;2;81;82;81m│ [0m[38;2;149;124;173m/release-notes for more                                     [0m[38;2;81;82;81m │[0m
+                                       [0m[38;2;81;82;81m╰──────────────────────────────────────────────────────────────╯[0m
+
+
+[0m[48;2;53;56;56m [0m[38;2;149;124;173m[48;2;53;56;56m> /permissions[0m[48;2;53;56;56m                                                                                                                                        [0m
+
+[0m[1m[38;2;238;238;235m Permissions[0m [0m[38;2;149;149;143m·[0m [0m[38;2;149;149;143m Allow [0m [0m[38;2;149;149;143m Ask [0m [0m[38;2;149;149;143m Deny [0m [0m[1m[38;2;42;219;92m[48;2;36;74;50m Trust [0m
+[0m[38;2;81;82;81m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [0m[38;2;42;219;92m╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮[0m
+ [0m[38;2;42;219;92m│ [0m[1m[38;2;42;219;92mAdd directory to workspace                                                                                                                        [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│[0m                                                                                                                                                   [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│ [0mEnter an absolute path, a path relative to the current working directory, or one starting with [0m[1m~[0m.                                                 [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│[0m                                                                                                                                                   [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│ [0m[38;2;150;152;150m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│[0m  /dev[0m[7m [0m                                                                                                                                            [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│ [0m[38;2;150;152;150m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│[0m                                                                                                                                                   [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│ [0m [0m[38;2;42;219;92m[48;2;36;74;50m❯ /dev/accel[0m[48;2;36;74;50m                                                                                                                                     [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│[0m  [0m[38;2;149;149;143m  /dev/v4l[0m                                                                                                                                       [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│ [0m [0m[38;2;149;149;143m  /dev/snd [0m                                                                                                                                      [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│[0m  [0m[38;2;149;149;143m  /dev/vfio[0m                                                                                                                                      [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│  [0m[38;2;149;149;143m  /dev/net                                                                                                                                       [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│[0m  [0m[38;2;149;149;143m  /dev/mqueue[0m                                                                                                                                    [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│  [0m[38;2;149;149;143m  /dev/hugepages                                                                                                                                 [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│  [0m[38;2;149;149;143m▼ /dev/block                                                                                                                                     [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m│                                                                                                                                                   │[0m
+ [0m[38;2;42;219;92m│ [0m↓↑ browse · Tab apply · Enter submit · Esc cancel                                                                                                 [0m[38;2;42;219;92m│[0m
+ [0m[38;2;42;219;92m╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[0m
+
+ [0m[3m[38;2;149;149;143mTab/←→ switch · ↑↓ navigate · Enter remove · x remove · Esc back[0m

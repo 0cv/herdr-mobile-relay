@@ -1,0 +1,44 @@
+
+ 
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240mbut name it hello_world.txt[0m[48;2;240;240;240m                                                                                                                                       [0m
+ 
+  [0m[38;2;102;102;102mRan [0m[1m[38;2;102;102;102m1[0m[38;2;102;102;102m shell command [0m
+
+[0m[38;2;0;0;0m⏺ [0mRenamed to [0m[38;2;87;105;247mhello_world.txt[0m.
+
+[0m[38;2;102;102;102m✻[0m [0m[38;2;102;102;102mCrunched for 7s[0m
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯[0m[48;2;240;240;240m [0m[38;2;0;0;0m[48;2;240;240;240m/plan let's plan a week-end trip in the alps. Ask me single question and multiple choice questions[0m[48;2;240;240;240m                                                                [0m
+[0m[38;2;102;102;102m  ⎿  [0mEnabled plan mode
+     
+[0m[38;2;102;102;102m⏺ [0mUser declined to answer questions
+[0m[38;2;102;102;102m  ⎿  · Which part of the Alps are you thinking of, or where are you starting from? (French Alps / Swiss Alps / Italian Alps / Not sure / open to suggestions)[0m
+
+[0m[38;2;0;0;0m⏺[0m What would you like to clarify before I ask questions about the trip?
+
+[0m[38;2;102;102;102m✻ Sautéed for 11s[0m
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯[0m[48;2;240;240;240m [0m[38;2;0;0;0m[48;2;240;240;240m/plan let's build a webapp. Ask me some choice of technology, my preferences, etc.[0m[48;2;240;240;240m                                                                                [0m
+[0m[38;2;102;102;102m  ⎿  [0mAlready in plan mode. No plan written yet.
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240mlet's build a webapp. Ask me some choice of technology, my preferences, etc.[0m[48;2;240;240;240m                                                                                      [0m
+[0m[38;2;102;102;102m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[38;2;102;102;102mPlanning: /workspace/example-user/.claude/plans/sorted-prancing-bumblebee.md[0m
+[0m[38;2;102;102;102m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+←  ☒ App type  ☒ Frontend  ☒ Backend [0m[38;2;255;255;255m[48;2;87;105;247m ☒ Database  [0m✔ Submit  →
+
+[0m[1m[38;2;0;0;0mDo you need a database?[0m
+
+  [0m[38;2;102;102;102m1.[0m Yes, SQL
+     [0m[38;2;102;102;102me.g. PostgreSQL or SQLite[0m
+[0m[38;2;87;105;247m❯[0m [0m[38;2;102;102;102m2.[0m [0m[38;2;87;105;247mYes, NoSQL[0m
+     [0m[38;2;102;102;102me.g. MongoDB[0m
+  [0m[38;2;102;102;102m3.[0m [0m[38;2;44;122;57mNo database needed ✔[0m
+     [0m[38;2;102;102;102mIn-memory or no persistence for now[0m
+  [0m[38;2;102;102;102m4.[0m Not sure
+     [0m[38;2;102;102;102mLet me recommend based on other choices[0m
+  [0m[38;2;102;102;102m5. Type something.[0m
+[0m[38;2;102;102;102m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  6. Chat about this
+
+[0m[38;2;102;102;102mEnter to select · Tab/Arrow keys to navigate · Esc to cancel[0m

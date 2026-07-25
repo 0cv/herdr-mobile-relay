@@ -1,0 +1,42 @@
+
+
+[0m[38;2;44;122;57m⏺ [0m[1mWrite[0m(notes.md)
+[0m[38;2;102;102;102m  ⎿  [0mWrote [0m[1m7[0m lines to [0m[1mnotes.md[0m
+     [0m[2m[38;2;51;51;51m 1 [0m[38;2;51;51;51m# Notes[0m
+     [0m[2m[38;2;51;51;51m 2 [0m
+     [0m[2m[38;2;51;51;51m 3 [0m[38;2;51;51;51m## Overview[0m
+     [0m[2m[38;2;51;51;51m 4 [0m
+     [0m[2m[38;2;51;51;51m 5 [0m[38;2;51;51;51m## Tasks[0m
+     [0m[2m[38;2;51;51;51m 6 [0m 
+     [0m[2m[38;2;51;51;51m 7 [0m[38;2;51;51;51m## Links[0m
+
+[0m[38;2;0;0;0m⏺[0m Created [0m[38;2;87;105;247m/workspace/example-user/workspace/tmp/notes.md[0m with a simple markdown skeleton (Overview, Tasks, Links sections).
+     
+[0m[38;2;102;102;102m✻ Crunched for 9s[0m
+
+[0m[38;2;102;102;102m※[0m [0m[1m[38;2;102;102;102mrecap: [0m[3m[38;2;102;102;102mYou asked me to create a file; I made notes.md with a basic Overview/Tasks/Links skeleton in your tmp directory. Let me know what content you'd like added [0m
+  [0m[3m[38;2;102;102;102mnext. (disable recaps in /config)[0m
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯[0m[48;2;240;240;240m [0m[38;2;0;0;0m[48;2;240;240;240m/plan[0m[48;2;240;240;240m                                                                                                                                                             [0m
+[0m[38;2;102;102;102m  ⎿  [0mEnabled plan mode
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240mAsk me a question where I can select multiple answers on a week-end trip[0m[48;2;240;240;240m                                                                                          [0m
+
+[0m[38;2;102;102;102m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+←  ☒ Trip activities [0m[38;2;255;255;255m[48;2;87;105;247m ✔ Submit [0m[38;2;102;102;102m →[0m
+
+[0m[1m[38;2;0;0;0mReview your answers[0m
+
+ ● Which activities would you like to include on your week-end trip?
+   [0m[38;2;44;122;57m→ Sightseeing, Relaxation, Sport haha!![0m
+
+[0m[38;2;102;102;102mReady to submit your answers?[0m
+  
+[0m[38;2;87;105;247m❯ [0m[38;2;102;102;102m1. [0m[38;2;87;105;247mSubmit answers[0m
+  [0m[38;2;102;102;102m2. [0mCancel
+
+ 
+  
+     
+
+  

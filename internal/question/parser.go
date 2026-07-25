@@ -56,22 +56,29 @@ type codexRow struct {
 }
 
 var (
-	ansiPattern         = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	edgePattern         = regexp.MustCompile(`^[│|]\s*|\s*[│|]$`)
-	checkboxPattern     = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s*\[([^\]]*)\]\s*(.*?)\s*$`)
-	menuPattern         = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s+(.*?)\s*$`)
-	submitPattern       = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?(submit|next)\s*$`)
-	chatPattern         = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?chat about this\s*$`)
-	codexHeaderPattern  = regexp.MustCompile(`(?i)^\s*question\s+(\d+)\s*/\s*(\d+)`)
-	codexSubmitPattern  = regexp.MustCompile(`(?i)\benter\s+to\s+submit\s+(answer|answers|all)\b`)
-	qoderActivePattern  = regexp.MustCompile(`\x1b\[[^m]*48(?:;|:)[^m]*m\s*([^\x1b]+)`)
-	qoderReviewPattern  = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(submit answers|cancel ask)\s*$`)
-	otherPattern        = regexp.MustCompile(`(?i)^(?:type something\.?|none of the above|other)\b`)
-	selectedPattern     = regexp.MustCompile(`\s*[✓✔]\s*$`)
-	chromePattern       = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
-	promptSkipPattern   = regexp.MustCompile(`(?i)^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$`)
-	commandPattern      = regexp.MustCompile(`^\s*[$>❯›]\s+(.+?)\s*$`)
-	turnDurationPattern = regexp.MustCompile(
+	ansiPattern           = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	edgePattern           = regexp.MustCompile(`^[│|]\s*|\s*[│|]$`)
+	checkboxPattern       = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s*\[([^\]]*)\]\s*(.*?)\s*$`)
+	menuPattern           = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s+(.*?)\s*$`)
+	submitPattern         = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?(submit|next)\s*$`)
+	chatPattern           = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?chat about this\s*$`)
+	codexHeaderPattern    = regexp.MustCompile(`(?i)^\s*question\s+(\d+)\s*/\s*(\d+)`)
+	codexSubmitPattern    = regexp.MustCompile(`(?i)\benter\s+to\s+submit\s+(answer|answers|all)\b`)
+	qoderActivePattern    = regexp.MustCompile(`\x1b\[[^m]*48(?:;|:)[^m]*m\s*([^\x1b]+)`)
+	qoderReviewPattern    = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(submit answers|cancel ask)\s*$`)
+	claudeReviewPattern   = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(\d+)\.\s*(submit answers|cancel)\s*$`)
+	openCodeFocusPattern  = regexp.MustCompile(`\x1b\[[^m]*48(?:;|:)2(?:;|:)30(?:;|:)30(?:;|:)30m`)
+	openCodeActivePattern = regexp.MustCompile(
+		`\x1b\[[^m]*48(?:;|:)2(?:;|:)157(?:;|:)124(?:;|:)216m([^\x1b]*)`,
+	)
+	openCodeColumnPattern = regexp.MustCompile(`\s{20,}`)
+	otherPattern          = regexp.MustCompile(`(?i)^(?:type something\.?|type your own answer|none of the above|other)\b`)
+	selectedPattern       = regexp.MustCompile(`\s*[✓✔]\s*$`)
+	columnGapPattern      = regexp.MustCompile(`\s{2,}`)
+	chromePattern         = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
+	promptSkipPattern     = regexp.MustCompile(`(?i)^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$`)
+	commandPattern        = regexp.MustCompile(`^\s*[$>❯›]\s+(.+?)\s*$`)
+	turnDurationPattern   = regexp.MustCompile(
 		`(?i)^[^\p{L}\p{N}]*\p{L}+(?:ed|ing)\s+for\s+(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b`,
 	)
 	responseStartPattern  = regexp.MustCompile(`^\s*[•●]\s+\S`)
@@ -82,6 +89,7 @@ func Supports(agent string) bool {
 	agent = strings.ToLower(agent)
 	return strings.Contains(agent, "claude") ||
 		strings.Contains(agent, "codex") ||
+		strings.Contains(agent, "opencode") ||
 		strings.Contains(agent, "qoder")
 }
 
@@ -99,6 +107,9 @@ func Parse(text, agent string) *Interaction {
 	if strings.Contains(normalized, "qoder") {
 		return parseQoder(text)
 	}
+	if strings.Contains(normalized, "opencode") {
+		return parseOpenCode(text)
+	}
 	if interaction := parseCodex(text); interaction != nil {
 		return interaction
 	}
@@ -109,11 +120,16 @@ func Parse(text, agent string) *Interaction {
 }
 
 func LayoutHint(text string) bool {
+	if openCodeLayoutHint(text) {
+		return true
+	}
 	lines := cleanLines(text)
 	hasCheckbox, hasSubmit, hasChat := false, false, false
 	hasCodexHeader, hasCodexFooter, hasQoderHeader, hasQoderFooter := false, false, false, false
+	hasReview := false
 	lastControl := -1
 	for index, line := range lines {
+		lower := strings.ToLower(line)
 		switch {
 		case checkboxPattern.MatchString(line):
 			hasCheckbox = true
@@ -138,19 +154,23 @@ func LayoutHint(text string) bool {
 			hasQoderFooter = true
 			lastControl = index
 		}
-		if strings.Contains(strings.ToLower(line), "enter to select") &&
-			strings.Contains(line, "↑/↓") {
+		if strings.Contains(lower, "enter to select") &&
+			(strings.Contains(line, "↑/↓") || strings.Contains(lower, "arrow keys")) {
 			lastControl = index
 		}
-		if strings.Contains(strings.ToLower(line), "review your answers") ||
-			strings.Contains(strings.ToLower(line), "submit answers") {
+		if strings.Contains(lower, "review your answers") {
+			hasReview = true
+			lastControl = index
+		}
+		if hasReview && (qoderReviewPattern.MatchString(line) ||
+			claudeReviewPattern.MatchString(line)) {
 			lastControl = index
 		}
 	}
 	hasLayout := (hasCheckbox && (hasSubmit || hasChat)) || hasChat ||
 		(hasCodexHeader && hasCodexFooter) ||
 		(hasQoderHeader && hasQoderFooter) ||
-		strings.Contains(strings.ToLower(strings.Join(lines, "\n")), "review your answers")
+		hasReview
 	if !hasLayout || lastControl < 0 {
 		return false
 	}
@@ -396,7 +416,7 @@ func parseClaude(text string) *Interaction {
 	}
 
 	if chatIndex < 0 {
-		return nil
+		return parseClaudeReview(text, lines)
 	}
 	var rows []row
 	expected := 1
@@ -471,6 +491,81 @@ func parseClaude(text string) *Interaction {
 		AllOptionCount: len(all),
 		Agent:          "claude",
 	}
+	if otherText != "" {
+		interaction.Other.Selected = true
+	}
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+
+func parseClaudeReview(text string, lines []string) *Interaction {
+	reviewIndex := -1
+	for index := len(lines) - 1; index >= 0; index-- {
+		if strings.EqualFold(strings.TrimSpace(lines[index]), "Review your answers") {
+			reviewIndex = index
+			break
+		}
+	}
+	if reviewIndex < 0 {
+		return nil
+	}
+
+	var options []Option
+	focus := Focus{Kind: "option"}
+	for index := reviewIndex + 1; index < len(lines); index++ {
+		match := claudeReviewPattern.FindStringSubmatch(lines[index])
+		if match == nil {
+			continue
+		}
+		number, _ := strconv.Atoi(match[2])
+		if number != len(options)+1 {
+			return nil
+		}
+		optionIndex := len(options)
+		options = append(options, Option{Index: optionIndex, Label: compact(match[3], 500)})
+		if match[1] != "" {
+			focus = Focus{Kind: "option", Index: optionIndex}
+		}
+	}
+	if len(options) != 2 ||
+		!strings.EqualFold(options[0].Label, "Submit answers") ||
+		!strings.EqualFold(options[1].Label, "Cancel") {
+		return nil
+	}
+
+	var summary []string
+	prompt := ""
+	for _, line := range lines[reviewIndex+1:] {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "●"):
+			prompt = strings.TrimSpace(strings.TrimPrefix(trimmed, "●"))
+		case strings.HasPrefix(trimmed, "→") && prompt != "":
+			answer := strings.TrimSpace(strings.TrimPrefix(trimmed, "→"))
+			summary = append(summary, strings.TrimSuffix(prompt, "?")+": "+answer)
+			prompt = ""
+		}
+	}
+	options[0].Description = compact(strings.Join(summary, " · "), 1000)
+
+	current, total := claudePosition(text)
+	if current < 1 || total < current {
+		current = len(summary) + 1
+		total = current
+	}
+	interaction := &Interaction{
+		Kind:           "single_select",
+		Question:       "Review your answers and choose what to do",
+		Options:        options,
+		Other:          Other{Hidden: true},
+		SubmitLabel:    "Continue",
+		CanGoBack:      strings.Contains(text, "←"),
+		QuestionIndex:  current,
+		QuestionTotal:  total,
+		Focus:          focus,
+		AllOptionCount: len(options),
+		Agent:          "claude",
+	}
 	interaction.ID = interactionID(interaction)
 	return interaction
 }
@@ -529,6 +624,19 @@ func parseCodex(text string) *Interaction {
 	if questionText == "" {
 		return nil
 	}
+	notesStart := footerIndex
+	notesActive := strings.Contains(
+		strings.ToLower(lines[footerIndex]),
+		"clear notes",
+	)
+	if notesActive {
+		for index := rows[len(rows)-1].line + 1; index < footerIndex; index++ {
+			if strings.TrimSpace(lines[index]) != "" {
+				notesStart = index
+				break
+			}
+		}
+	}
 	descriptionColumn := codexDescriptionColumn(lines, rows)
 	all := make([]Option, 0, len(rows))
 	focus := Focus{Kind: "option"}
@@ -536,6 +644,8 @@ func parseCodex(text string) *Interaction {
 		end := footerIndex
 		if index+1 < len(rows) {
 			end = rows[index+1].line
+		} else if notesStart < footerIndex {
+			end = notesStart
 		}
 		label, desc := codexParts(lines, item, end, descriptionColumn)
 		if label == "" {
@@ -552,12 +662,11 @@ func parseCodex(text string) *Interaction {
 	otherItem := all[len(all)-1]
 	options := all[:len(all)-1]
 	notes := ""
-	notesActive := false
-	for _, line := range lines[rows[len(rows)-1].line+1 : footerIndex] {
-		trimmed := strings.TrimSpace(strings.TrimPrefix(line, "›"))
-		if trimmed != "" && !strings.Contains(strings.ToLower(trimmed), "tab ") {
+	for _, line := range lines[notesStart:footerIndex] {
+		trimmed := strings.TrimSpace(line)
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "›"))
+		if trimmed != "" {
 			notes = compact(trimmed, 20000)
-			notesActive = true
 		}
 	}
 	if notesActive {
@@ -611,6 +720,9 @@ func parseQoder(text string) *Interaction {
 		if qoderHeader(lines[index]) {
 			headerIndex = index
 			current, total = qoderPosition(raw)
+			if current == 0 && total == 0 {
+				current, total = 1, 1
+			}
 		}
 		if headerIndex >= 0 && qoderFooter(lines[index]) {
 			footerIndex = index
@@ -740,11 +852,28 @@ func parseQoder(text string) *Interaction {
 	if otherRow.focus {
 		focus = Focus{Kind: "other"}
 	}
+	notes := ""
+	notesActive := otherRow.focus &&
+		strings.Contains(strings.ToLower(lines[footerIndex]), "enter submit")
+	if notesActive {
+		var noteLines []string
+		for _, line := range lines[otherRow.line+1 : footerIndex] {
+			if line != "" {
+				noteLines = append(noteLines, strings.TrimSpace(line))
+			}
+		}
+		notes = compact(strings.Join(noteLines, " "), 20000)
+	}
 	interaction := &Interaction{
-		Kind:           kind,
-		Question:       questionText,
-		Options:        options,
-		Other:          Other{Selected: otherRow.selected, Label: otherRow.label, Placeholder: "Type an answer"},
+		Kind:     kind,
+		Question: questionText,
+		Options:  options,
+		Other: Other{
+			Selected:    otherRow.selected || notesActive,
+			Text:        notes,
+			Label:       otherRow.label,
+			Placeholder: "Type an answer",
+		},
 		SubmitLabel:    "Next",
 		CanGoBack:      current > 1,
 		QuestionIndex:  current,
@@ -752,6 +881,7 @@ func parseQoder(text string) *Interaction {
 		Focus:          focus,
 		AllOptionCount: len(options) + 1,
 		Agent:          "qoder",
+		NotesActive:    notesActive,
 	}
 	if current == total {
 		interaction.SubmitLabel = "Submit"
@@ -810,6 +940,313 @@ func parseQoderReview(lines []string, headerIndex, footerIndex, questionTotal in
 	}
 	interaction.ID = interactionID(interaction)
 	return interaction
+}
+
+func parseOpenCode(text string) *Interaction {
+	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	lines := make([]string, len(rawLines))
+	footerIndex := -1
+	for index, raw := range rawLines {
+		lines[index] = cleanOpenCodeLine(raw)
+		if openCodeFooter(lines[index]) {
+			footerIndex = index
+		}
+	}
+	if footerIndex < 0 || !openCodeTailIsEmpty(lines, footerIndex) {
+		return nil
+	}
+
+	current, total := openCodePosition(rawLines, lines, footerIndex)
+	if interaction := parseOpenCodeReview(lines, footerIndex, current, total); interaction != nil {
+		return interaction
+	}
+
+	type row struct {
+		line     int
+		focus    bool
+		label    string
+		selected bool
+	}
+	var runs [][]row
+	var currentRun []row
+	expected := 1
+	flush := func() {
+		if len(currentRun) > 0 {
+			runs = append(runs, currentRun)
+		}
+		currentRun = nil
+		expected = 1
+	}
+	for index := 0; index < footerIndex; index++ {
+		match := checkboxPattern.FindStringSubmatch(lines[index])
+		checkbox := match != nil
+		if match == nil {
+			match = menuPattern.FindStringSubmatch(lines[index])
+		}
+		if match == nil {
+			continue
+		}
+		number, _ := strconv.Atoi(match[2])
+		if number == 1 {
+			flush()
+		}
+		if number != expected {
+			flush()
+			continue
+		}
+		labelIndex := 3
+		selected := false
+		if checkbox {
+			labelIndex = 4
+			selected = strings.TrimSpace(match[3]) != ""
+		}
+		label := compact(match[labelIndex], 500)
+		if selectedPattern.MatchString(label) {
+			selected = true
+			label = strings.TrimSpace(selectedPattern.ReplaceAllString(label, ""))
+		}
+		currentRun = append(currentRun, row{
+			line:     index,
+			focus:    openCodeFocusPattern.MatchString(rawLines[index]),
+			label:    label,
+			selected: selected,
+		})
+		expected++
+	}
+	flush()
+	if len(runs) == 0 {
+		return nil
+	}
+	rows := runs[len(runs)-1]
+	if len(rows) < 2 || !otherPattern.MatchString(rows[len(rows)-1].label) {
+		return nil
+	}
+
+	firstOption := rows[0].line
+	questionText := ""
+	for index := firstOption - 1; index >= 0; index-- {
+		candidate := strings.TrimSpace(lines[index])
+		if candidate == "" {
+			continue
+		}
+		questionText = compact(candidate, 1000)
+		break
+	}
+	if questionText == "" {
+		return nil
+	}
+
+	all := make([]Option, 0, len(rows))
+	focus := Focus{Kind: "option"}
+	for index, item := range rows {
+		end := footerIndex
+		if index+1 < len(rows) {
+			end = rows[index+1].line
+		}
+		all = append(all, Option{
+			Index:       index,
+			Label:       item.label,
+			Description: description(lines, item.line, end),
+			Selected:    item.selected,
+		})
+		if item.focus {
+			focus = Focus{Kind: "option", Index: index}
+		}
+	}
+	otherItem := all[len(all)-1]
+	options := all[:len(all)-1]
+	otherText := otherItem.Description
+	if strings.EqualFold(otherText, otherItem.Label) {
+		otherText = ""
+	}
+	otherItem.Description = ""
+	notesActive := focus == (Focus{Kind: "option", Index: len(all) - 1}) &&
+		!otherItem.Selected
+	if notesActive {
+		focus = Focus{Kind: "other"}
+	}
+
+	kind := "single_select"
+	if checkboxPattern.MatchString(lines[rows[0].line]) {
+		kind = "multi_select"
+	}
+	if current < 1 || total < current {
+		current, total = 1, 1
+	}
+	submitLabel := "Next"
+	if current == total {
+		submitLabel = "Submit"
+	}
+	interaction := &Interaction{
+		Kind:     kind,
+		Question: questionText,
+		Options:  options,
+		Other: Other{
+			Selected:    otherItem.Selected,
+			Text:        otherText,
+			Label:       otherItem.Label,
+			Placeholder: "Type your own answer",
+		},
+		SubmitLabel:    submitLabel,
+		CanGoBack:      current > 1,
+		QuestionIndex:  current,
+		QuestionTotal:  total,
+		Focus:          focus,
+		AllOptionCount: len(all),
+		Agent:          "opencode",
+		NotesActive:    notesActive,
+	}
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+
+func parseOpenCodeReview(
+	lines []string,
+	footerIndex, current, total int,
+) *Interaction {
+	reviewIndex := -1
+	for index := footerIndex - 1; index >= 0; index-- {
+		if strings.EqualFold(strings.TrimSpace(lines[index]), "Review") {
+			reviewIndex = index
+			break
+		}
+	}
+	if reviewIndex < 0 {
+		return nil
+	}
+
+	var summary []string
+	for _, line := range lines[reviewIndex+1 : footerIndex] {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, ":") {
+			continue
+		}
+		summary = append(summary, line)
+	}
+	if len(summary) == 0 {
+		return nil
+	}
+	if total < 1 {
+		total = len(summary)
+	}
+	current = total + 1
+	total = current
+	interaction := &Interaction{
+		Kind:     "single_select",
+		Question: "Review your answers and choose what to do",
+		Options: []Option{{
+			Index:       0,
+			Label:       "Submit answers",
+			Description: compact(strings.Join(summary, " · "), 1000),
+		}},
+		Other:          Other{Hidden: true},
+		SubmitLabel:    "Continue",
+		CanGoBack:      true,
+		QuestionIndex:  current,
+		QuestionTotal:  total,
+		Focus:          Focus{Kind: "option"},
+		AllOptionCount: 1,
+		Agent:          "opencode",
+	}
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+
+func openCodeLayoutHint(text string) bool {
+	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	lines := make([]string, len(rawLines))
+	footerIndex := -1
+	for index, raw := range rawLines {
+		lines[index] = cleanOpenCodeLine(raw)
+		if openCodeFooter(lines[index]) {
+			footerIndex = index
+		}
+	}
+	return footerIndex >= 0 && openCodeTailIsEmpty(lines, footerIndex)
+}
+
+func openCodeTailIsEmpty(lines []string, footerIndex int) bool {
+	for _, line := range lines[footerIndex+1:] {
+		if strings.TrimSpace(line) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func openCodeFooter(line string) bool {
+	lower := strings.ToLower(line)
+	if !strings.Contains(lower, "esc dismiss") {
+		return false
+	}
+	if strings.Contains(lower, "enter submit") {
+		return true
+	}
+	return strings.Contains(lower, "↑↓ select") &&
+		(strings.Contains(lower, "enter confirm") ||
+			strings.Contains(lower, "enter toggle"))
+}
+
+func openCodePosition(rawLines, lines []string, footerIndex int) (int, int) {
+	for index := footerIndex - 1; index >= 0; index-- {
+		if !strings.Contains(strings.ToLower(lines[index]), "confirm") {
+			continue
+		}
+		labels := openCodeTabs(lines[index])
+		if len(labels) < 2 {
+			continue
+		}
+		active := openCodeActiveTab(rawLines[index])
+		if active == "" {
+			return 0, len(labels) - 1
+		}
+		for tabIndex, label := range labels {
+			if strings.EqualFold(active, label) {
+				if strings.EqualFold(label, "confirm") {
+					return len(labels), len(labels) - 1
+				}
+				return tabIndex + 1, len(labels) - 1
+			}
+		}
+	}
+	return 0, 0
+}
+
+func openCodeTabs(line string) []string {
+	var labels []string
+	for _, label := range regexp.MustCompile(`\s{2,}`).Split(strings.TrimSpace(line), -1) {
+		label = strings.TrimSpace(label)
+		if label != "" {
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
+
+func openCodeActiveTab(raw string) string {
+	var parts []string
+	for _, match := range openCodeActivePattern.FindAllStringSubmatch(raw, -1) {
+		if len(match) > 1 {
+			parts = append(parts, match[1])
+		}
+	}
+	return compact(strings.Join(parts, ""), 500)
+}
+
+func cleanOpenCodeLine(line string) string {
+	line = strings.TrimRight(
+		ansiPattern.ReplaceAllString(strings.ReplaceAll(line, "\r", ""), ""),
+		" \t",
+	)
+	trimmed := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmed, "┃") {
+		return ""
+	}
+	trimmed = strings.TrimPrefix(trimmed, "┃")
+	if gap := openCodeColumnPattern.FindStringIndex(trimmed); gap != nil {
+		trimmed = trimmed[:gap[0]]
+	}
+	return strings.TrimSpace(trimmed)
 }
 
 func cleanLines(text string) []string {
@@ -915,11 +1352,15 @@ func codexFooter(line string) bool {
 	lower := strings.ToLower(line)
 	return codexSubmitPattern.MatchString(line) &&
 		(strings.Contains(lower, "navigate questions") ||
-			strings.Contains(lower, "tab to add notes"))
+			strings.Contains(lower, "tab to add notes") ||
+			strings.Contains(lower, "tab or esc to clear notes"))
 }
 
 func qoderHeader(line string) bool {
 	lower := strings.ToLower(line)
+	if strings.EqualFold(strings.TrimSpace(line), "Asking User") {
+		return true
+	}
 	return strings.Contains(lower, "asking user") &&
 		strings.Contains(line, "·") &&
 		strings.Contains(lower, "submit")
@@ -927,8 +1368,16 @@ func qoderHeader(line string) bool {
 
 func qoderFooter(line string) bool {
 	lower := strings.ToLower(line)
+	if strings.Contains(lower, "esc back") &&
+		strings.Contains(lower, "enter") &&
+		(strings.Contains(lower, "navigate") ||
+			strings.Contains(lower, "enter submit")) {
+		return true
+	}
 	return strings.Contains(lower, "switch") &&
-		(strings.Contains(lower, "enter select") || strings.Contains(lower, "enter toggle")) &&
+		(strings.Contains(lower, "enter select") ||
+			strings.Contains(lower, "enter toggle") ||
+			strings.Contains(lower, "enter submit")) &&
 		(strings.Contains(lower, "esc back") || strings.Contains(lower, "esc cancel")) &&
 		(strings.Contains(line, "←") || strings.Contains(lower, "tab/"))
 }
@@ -968,8 +1417,10 @@ func codexDescriptionColumn(lines []string, rows []codexRow) int {
 		if bodyStart < 0 {
 			continue
 		}
-		if gap := regexp.MustCompile(`\s{2,}\S`).FindStringIndex(item.body); gap != nil {
-			counts[bodyStart+gap[1]-1]++
+		if gap := columnGapPattern.FindStringIndex(item.body); gap != nil {
+			prefixColumn := len([]rune(lines[item.line][:bodyStart]))
+			descriptionColumn := prefixColumn + len([]rune(item.body[:gap[1]]))
+			counts[descriptionColumn]++
 		}
 	}
 	best, bestCount := -1, 0
@@ -990,7 +1441,7 @@ func codexParts(lines []string, item codexRow, end, descriptionColumn int) (stri
 		}
 		if index == item.line {
 			left, right := item.body, ""
-			if gap := regexp.MustCompile(`\s{2,}`).FindStringIndex(item.body); gap != nil {
+			if gap := columnGapPattern.FindStringIndex(item.body); gap != nil {
 				left, right = item.body[:gap[0]], item.body[gap[1]:]
 			}
 			if value := strings.TrimSpace(left); value != "" {
@@ -1003,10 +1454,11 @@ func codexParts(lines []string, item codexRow, end, descriptionColumn int) (stri
 		}
 		left, right := line, ""
 		if descriptionColumn >= 0 {
-			if len(line) < descriptionColumn {
+			runes := []rune(line)
+			if len(runes) < descriptionColumn {
 				left = line
 			} else {
-				left, right = line[:descriptionColumn], line[descriptionColumn:]
+				left, right = string(runes[:descriptionColumn]), string(runes[descriptionColumn:])
 			}
 		}
 		if value := strings.TrimSpace(left); value != "" {

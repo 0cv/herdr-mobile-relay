@@ -9,7 +9,7 @@ WRANGLER_VERSION ?= 4.114.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release relay-plugin service-install service-uninstall service-status service-logs web-bundle-check web-release web-release-check web-deploy web-preview
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs web-bundle-check web-release web-release-check web-deploy web-preview
 
 help:
 	@echo "Common targets:"
@@ -122,6 +122,9 @@ frontend-browser:
 frontend-browser-release:
 	frontend/scripts/run-browser-tests.sh ../web
 
+frontend-browser-attention-release:
+	HERDR_WEB_ROOT=../web npm --prefix frontend run test:browser:attention
+
 relay-plugin:
 	herdr plugin link .
 
@@ -152,6 +155,7 @@ web-release:
 web-release-check: web-bundle-check
 	@diff -qr frontend/dist web
 	$(MAKE) frontend-browser-release
+	$(MAKE) frontend-browser-attention-release
 
 web-deploy: web-bundle-check
 	npx --yes wrangler@$(WRANGLER_VERSION) pages deploy web --project-name "$(WEB_PROJECT)" --branch "$(WEB_BRANCH)"

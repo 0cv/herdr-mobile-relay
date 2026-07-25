@@ -1,0 +1,44 @@
+[0m[38;2;215;119;87m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[0m
+
+   Tackle your toughest work with Opus 5. Switch anytime with /model.
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240mCreate a file[0m[48;2;240;240;240m                                                                                                                                                     [0m
+
+[0m[38;2;0;0;0m⏺ [0mThe request is quite generic — I need a bit more detail before creating anything.
+
+[0m[38;2;102;102;102m⏺ [0mUser answered Claude's questions:
+[0m[38;2;102;102;102m  ⎿  · What kind of file would you like me to create? → Text/Markdown note[0m
+
+[0m[38;2;0;0;0m⏺[0m I still need a couple details: what should the file be named, where should it live (I'll default to the current directory,
+  [0m[38;2;87;105;247m/workspace/example-user/workspace/tmp[0m, unless you say otherwise), and what content should it contain?
+   
+[0m[38;2;102;102;102m✻ Baked for 6s[0m
+
+[0m[38;2;175;175;175m[48;2;240;240;240m❯ [0m[38;2;0;0;0m[48;2;240;240;240myes[0m[48;2;240;240;240m                                                                                                                                                               [0m
+
+[0m[38;2;0;0;0m⏺ [0mI need a bit more to go on — "yes" doesn't tell me the filename or content. Let me propose sensible defaults you can just confirm or override.
+
+[0m[38;2;102;102;102m⏺ [0mUser answered Claude's questions:
+[0m[38;2;102;102;102m  ⎿  · What should the file be named, and where should it go? → notes.md in current dir (Recommended)[0m
+     [0m[38;2;102;102;102m· What content should go in the file? → Simple placeholder[0m
+ 
+[0m[38;2;102;102;102m⏺ [0m[1mWrite[0m(notes.md)
+
+[0m[38;2;87;105;247m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [0m[1m[38;2;87;105;247mCreate file[0m
+ [0m[38;2;102;102;102mnotes.md[0m
+[0m[38;2;175;175;175m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[0m
+ [0m[2m[38;2;51;51;51m 1 [0m[38;2;51;51;51m# Notes[0m
+ [0m[2m[38;2;51;51;51m 2 [0m
+ [0m[2m[38;2;51;51;51m 3 [0m[38;2;51;51;51m## Overview[0m
+ [0m[2m[38;2;51;51;51m 4 [0m
+ [0m[2m[38;2;51;51;51m 5 [0m[38;2;51;51;51m## Tasks[0m
+ [0m[2m[38;2;51;51;51m 6 [0m
+ [0m[2m[38;2;51;51;51m 7 [0m[38;2;51;51;51m## Links[0m
+[0m[38;2;175;175;175m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[0m
+ Do you want to create [0m[1mnotes.md[0m?
+ [0m[38;2;87;105;247m❯[0m [0m[38;2;102;102;102m1. [0m[38;2;87;105;247mYes[0m
+   [0m[38;2;102;102;102m2. [0mYes, allow all edits during this session [0m[1m(shift+tab)[0m
+   [0m[38;2;102;102;102m3. [0mNo
+
+ [0m[38;2;102;102;102mEsc to cancel · Tab to amend[0m

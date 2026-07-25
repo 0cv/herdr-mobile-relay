@@ -334,6 +334,27 @@
 >
   {#if questionMode && interaction}
     <QuestionForm {agent} {interaction} responding={responding.has(agent.pane_id)} />
+    <div class="term-keys question-term-keys" aria-label="Terminal fallback keys">
+      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Tab'])}>Tab</Button>
+      <span class="spacer"></span>
+      <div class="arrow-menu">
+        <Button variant="secondary" size="sm" aria-label="Arrow keys" aria-expanded={arrowsOpen} onclick={() => { arrowsOpen = !arrowsOpen; }}>
+          <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M12 2v20M2 12h20"></path>
+            <path d="m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4"></path>
+          </svg>
+        </Button>
+        {#if arrowsOpen}
+          <div class="arrow-popup">
+            <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
+            <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
+            <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
+          </div>
+        {/if}
+      </div>
+      <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
+    </div>
   {:else}
   <div class="terminal-toolbar">
     <Button variant="ghost" size="icon" aria-label="Refresh terminal" onclick={() => relayStore.readPane(agent)}>↻</Button>
