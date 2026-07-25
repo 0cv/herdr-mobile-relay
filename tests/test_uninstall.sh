@@ -32,6 +32,9 @@ for target in "$RELEASE_ROOT" "$CONFIG_HOME/herdr-mobile-relay" "$CACHE_HOME/her
     canonical="$(cd "$target" && pwd -P)"
     printf 'product=herdr-mobile-relay\nroot=%s\n' "$canonical" > "$target/.herdr-mobile-relay-installation"
 done
+mkdir -p "$RELEASE_ROOT/releases/sealed/web"
+printf 'sealed release\n' > "$RELEASE_ROOT/releases/sealed/web/index.html"
+chmod a-w "$RELEASE_ROOT/releases/sealed" "$RELEASE_ROOT/releases/sealed/web"
 
 output="$(
     printf 'n\n' |

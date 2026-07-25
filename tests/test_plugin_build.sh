@@ -121,7 +121,11 @@ if [ "$*" = "plugin config-dir herdr-mobile-relay.events" ]; then
 fi
 exit 1
 EOF
-chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr"
+cat > "$FAKE_BIN/sleep" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr" "$FAKE_BIN/sleep"
 
 export SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
 if HOME="$TEST_HOME" \

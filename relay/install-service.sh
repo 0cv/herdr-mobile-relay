@@ -11,6 +11,8 @@ LOG_DIR="$HOME/Library/Logs/herdr-mobile-relay"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
+require_user_service_context
+
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 
 load_relay_env "$ENV_FILE"
@@ -75,10 +77,7 @@ EOF
 
 launchctl bootout "gui/$UID" "$LEGACY_PLIST" >/dev/null 2>&1 || true
 rm -f "$LEGACY_PLIST"
-launchctl bootout "gui/$UID" "$PLIST" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/$UID" "$PLIST"
-launchctl enable "gui/$UID/$LABEL"
-launchctl kickstart -k "gui/$UID/$LABEL"
+reload_launchd_service_definition "$PLIST" "$LABEL"
 
 echo "Installed and started $LABEL"
 echo "Plist: $PLIST"

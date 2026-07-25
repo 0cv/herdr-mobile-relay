@@ -12,6 +12,8 @@ REPO_DIR=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
+require_user_service_context
+
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_DIR/herdr-plugin.toml")
 [ -n "$VERSION" ] || {
     echo "herdr-mobile-relay: herdr-plugin.toml has no exact version" >&2
@@ -59,7 +61,8 @@ case "$PLATFORM" in
         ;;
     Darwin)
         SERVICE_FILE="$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist"
-        if launchctl list 2>/dev/null | grep -q "com.herdr-mobile-relay"; then
+        if launchd_service_loaded \
+            "gui/$(id -u)/com.herdr-mobile-relay.service"; then
             service_was_active=true
         fi
         ;;
@@ -285,15 +288,20 @@ rollback_plugin_migration() {
     rollback_env="${SOURCE_ENV:-$ENV_FILE}"
     rollback_port="$(env_file_value "$rollback_env" HERDR_RELAY_PORT)"
     rollback_port="${rollback_port:-8375}"
-    rollback_health="$(wait_for_relay_health "$rollback_port" 30 1)" || return 1
     if [ -n "$PREVIOUS_VERSION" ] && [ -n "$PREVIOUS_REVISION" ] && [ -n "$PREVIOUS_WEB_HASH" ]; then
-        verify_relay_release_health \
-            "$rollback_health" "$PREVIOUS_VERSION" "$PREVIOUS_REVISION" "$PREVIOUS_WEB_HASH" ||
-            return 1
+        wait_for_relay_release_health \
+            "$rollback_port" 30 1 \
+            "$PREVIOUS_VERSION" "$PREVIOUS_REVISION" "$PREVIOUS_WEB_HASH" \
+            >/dev/null || return 1
+    else
+        wait_for_relay_health "$rollback_port" 30 1 >/dev/null || return 1
     fi
     case "$PLATFORM" in
         Linux) systemctl --user is-active --quiet herdr-mobile-relay.service || return 1 ;;
-        Darwin) launchctl list 2>/dev/null | grep -q "com.herdr-mobile-relay" || return 1 ;;
+        Darwin)
+            launchd_service_loaded \
+                "gui/$(id -u)/com.herdr-mobile-relay.service" || return 1
+            ;;
     esac
     echo "herdr-mobile-relay: previous service recovered successfully." >&2
 }
@@ -403,7 +411,8 @@ case "$PLATFORM" in
                     "$PLIST" "com.herdr-mobile-relay.service"
                 service_restarted=true
             fi
-        elif launchctl list 2>/dev/null | grep -q "com.herdr-mobile-relay"; then
+        elif launchd_service_loaded \
+            "gui/$(id -u)/com.herdr-mobile-relay.service"; then
             echo "herdr-mobile-relay: restarting existing service..." >&2
             launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay.service"
             service_restarted=true
@@ -415,12 +424,9 @@ if [ "$service_restarted" = true ]; then
     PORT="$(env_file_value "$TARGET_ENV" HERDR_RELAY_PORT)"
     PORT="${PORT:-8375}"
     echo "herdr-mobile-relay: verifying replacement service identity..." >&2
-    if ! HEALTH="$(wait_for_relay_health "$PORT" 30 1)"; then
-        echo "herdr-mobile-relay: replacement service did not become healthy" >&2
-        exit 1
-    fi
-    if ! verify_relay_release_health "$HEALTH" "$VERSION" "$REVISION" "$WEB_HASH"; then
-        echo "herdr-mobile-relay: replacement service reported the wrong release identity" >&2
+    if ! wait_for_relay_release_health \
+        "$PORT" 30 1 "$VERSION" "$REVISION" "$WEB_HASH" >/dev/null; then
+        echo "herdr-mobile-relay: replacement service did not report the expected release identity" >&2
         exit 1
     fi
     case "$PLATFORM" in
@@ -431,7 +437,8 @@ if [ "$service_restarted" = true ]; then
             }
             ;;
         Darwin)
-            launchctl list 2>/dev/null | grep -q "com.herdr-mobile-relay" || {
+            launchd_service_loaded \
+                "gui/$(id -u)/com.herdr-mobile-relay.service" || {
                 echo "herdr-mobile-relay: replacement service is not loaded" >&2
                 exit 1
             }

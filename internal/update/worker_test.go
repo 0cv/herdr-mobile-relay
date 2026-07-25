@@ -200,6 +200,9 @@ func TestPruneOldReleasesKeepsCurrentAndRollbackOnly(t *testing.T) {
 	for _, directory := range []string{current, previous, old} {
 		writeWorkerTestRelease(t, directory, filepath.Base(directory), filepath.Base(directory)+"-revision")
 	}
+	if err := relayrelease.Seal(old); err != nil {
+		t.Fatal(err)
+	}
 	if err := PruneOldReleases(root, current, previous); err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +221,9 @@ func TestWorkerRollsBackPostActivationFailures(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			root := t.TempDir()
 			releaseRoot := filepath.Join(root, "installed")
+			t.Cleanup(func() {
+				_ = makeReleaseDirectoriesWritable(releaseRoot)
+			})
 			previousDir := filepath.Join(releaseRoot, "releases", "previous")
 			nextSource := filepath.Join(root, "next")
 			writeWorkerTestRelease(t, previousDir, "1.0.0", "old-revision")

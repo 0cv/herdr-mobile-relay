@@ -22,6 +22,49 @@ func TestNewerVersion(t *testing.T) {
 	}
 }
 
+func TestManagerReconcilesStaleAvailableStateFromPreviousRuntime(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+		State:             "available",
+		CurrentVersion:    "0.8.6",
+		CurrentRevision:   "old",
+		AvailableVersion:  "0.10.1",
+		AvailableRevision: "new",
+		UpstreamVersion:   "0.10.1",
+		UpstreamRevision:  "new-revision",
+		TargetVersion:     "0.10.1",
+		TargetRevision:    "new-revision",
+		Mode:              "managed",
+		Eligible:          true,
+		CanInstall:        true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(
+		filepath.Join(root, "installed"),
+		runtimeDir,
+		"0.10.1",
+		"new-revision",
+		"service",
+		"http://127.0.0.1:8375/healthz",
+	)
+	state := manager.State()
+	if state.State != "current" || state.CanInstall ||
+		state.CurrentVersion != "0.10.1" ||
+		state.AvailableVersion != "" || state.TargetRevision != "" {
+		t.Fatalf("reconciled state = %#v", state)
+	}
+	if _, scheduled, err := manager.Schedule(
+		context.Background(),
+		"0.10.1",
+		"new-revision",
+	); err == nil || scheduled.State != "current" {
+		t.Fatalf("same-version schedule result = %#v, error = %v", scheduled, err)
+	}
+}
+
 func TestActiveManifestIdentityRequiresExactRevision(t *testing.T) {
 	manifest := relayrelease.Manifest{Version: "1.2.3", Revision: "abcdef"}
 	if ok, reason := activeManifestIdentity(manifest, "1.2.3", "ABCDEF"); !ok || reason != "" {

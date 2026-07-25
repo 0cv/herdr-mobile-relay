@@ -421,6 +421,33 @@ func (m *Manager) loadState() State {
 	}
 	state.CurrentVersion = m.version
 	state.CurrentRevision = m.revision
+	if state.State == "available" || state.State == "blocked" {
+		candidate := state.AvailableVersion
+		if candidate == "" {
+			candidate = state.TargetVersion
+		}
+		if !NewerVersion(candidate, m.version) {
+			upstreamVersion := state.UpstreamVersion
+			if upstreamVersion == "" {
+				upstreamVersion = candidate
+			}
+			upstreamRevision := state.UpstreamRevision
+			if upstreamRevision == "" {
+				upstreamRevision = state.TargetRevision
+			}
+			return State{
+				State:            "current",
+				CurrentVersion:   m.version,
+				CurrentRevision:  m.revision,
+				UpstreamVersion:  upstreamVersion,
+				UpstreamRevision: upstreamRevision,
+				CheckedAt:        state.CheckedAt,
+				Target:           relayrelease.CurrentTarget(),
+				Mode:             state.Mode,
+				Eligible:         state.Eligible,
+			}
+		}
+	}
 	return state
 }
 

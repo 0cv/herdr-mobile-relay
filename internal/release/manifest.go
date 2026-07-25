@@ -150,6 +150,29 @@ func Verify(root, expectedTarget string) (Manifest, error) {
 	return manifest, nil
 }
 
+// Seal removes write permission from a verified release tree. Runtime state
+// belongs outside releases, and keeping installed bundles immutable prevents
+// platform metadata such as Finder's .DS_Store from invalidating the manifest.
+func Seal(root string) error {
+	if _, err := Verify(root, ""); err != nil {
+		return err
+	}
+	return filepath.WalkDir(root, func(filename string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode().Perm() &^ 0o222
+		if err := os.Chmod(filename, mode); err != nil {
+			return fmt.Errorf("seal %s: %w", filename, err)
+		}
+		return nil
+	})
+}
+
 func Build(root, version, revision, target string) (Manifest, error) {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(revision) == "" || strings.TrimSpace(target) == "" {
 		return Manifest{}, errors.New("version, revision, and target are required")

@@ -381,6 +381,8 @@ main() {
     else
         mv "$stage" "$final_dir" || fatal "could not install release directory"
     fi
+    "$final_dir/$BINARY" seal-release "$final_dir" ||
+        fatal "could not seal installed release directory"
     if [ -n "$previous_dir" ]; then
         "$final_dir/$BINARY" prune-releases "$release_root" "$final_dir" "$previous_dir" ||
             fatal "could not prune obsolete releases"

@@ -56,6 +56,48 @@ func TestBuildAndVerifyManifest(t *testing.T) {
 	}
 }
 
+func TestSealMakesVerifiedReleaseTreeReadOnly(t *testing.T) {
+	root := testRelease(t)
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(root, func(filename string, entry os.DirEntry, walkErr error) error {
+			if walkErr == nil && entry.IsDir() {
+				_ = os.Chmod(filename, 0o700)
+			}
+			return nil
+		})
+	})
+	if _, err := Build(root, "1.2.3", "abc123", "linux/amd64"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Seal(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(root, "linux/amd64"); err != nil {
+		t.Fatal(err)
+	}
+	for _, filename := range []string{
+		root,
+		filepath.Join(root, "web"),
+		filepath.Join(root, ManifestName),
+		filepath.Join(root, "herdr-mobile-relay"),
+	} {
+		info, err := os.Stat(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0o222 != 0 {
+			t.Fatalf("%s remains writable with mode %o", filename, info.Mode().Perm())
+		}
+	}
+	binary, err := os.Stat(filepath.Join(root, "herdr-mobile-relay"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binary.Mode().Perm()&0o111 == 0 {
+		t.Fatal("sealed relay binary is not executable")
+	}
+}
+
 func TestVerifyRejectsTamperingAndUnlistedFiles(t *testing.T) {
 	root := testRelease(t)
 	if _, err := Build(root, "1.2.3", "abc123", "linux/amd64"); err != nil {

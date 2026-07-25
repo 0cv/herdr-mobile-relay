@@ -114,18 +114,89 @@ update_launchd_release_paths() {
     fi
 }
 
+require_user_service_context() {
+    if [ "$(id -u)" -ne 0 ]; then
+        return
+    fi
+
+    echo "Refusing to manage the Herdr Mobile Relay user service as root." >&2
+    echo "Run the command again as the signed-in macOS or Linux user, without sudo." >&2
+    return 1
+}
+
+launchd_service_loaded() {
+    local service_target="$1"
+    launchctl print "$service_target" >/dev/null 2>&1
+}
+
 reload_launchd_service_definition() {
     local plist="$1"
     local label="$2"
     local domain="gui/$(id -u)"
+    local service_target="$domain/$label"
+    local attempt
+    local unloaded=false
+    local bootstrapped=false
 
-    # kickstart restarts launchd's cached job definition. A Python-to-Go
-    # migration changes ProgramArguments, WorkingDirectory, and the relay
-    # environment, so the rewritten plist must be bootstrapped again first.
-    launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
-    launchctl bootstrap "$domain" "$plist"
-    launchctl enable "$domain/$label"
-    launchctl kickstart -k "$domain/$label"
+    require_user_service_context || return 1
+    [ -f "$plist" ] && [ ! -L "$plist" ] || {
+        echo "Cannot reload launchd service: plist is not a regular file: $plist" >&2
+        return 1
+    }
+    if command -v plutil >/dev/null 2>&1; then
+        plutil -lint "$plist" >/dev/null || {
+            echo "Cannot reload launchd service: plist validation failed: $plist" >&2
+            return 1
+        }
+    fi
+
+    # A migration changes ProgramArguments, WorkingDirectory, and the relay
+    # environment. Unload the plist using the form used by the legacy service
+    # installer, then wait until launchd has actually removed its cached job.
+    if launchd_service_loaded "$service_target"; then
+        if ! launchctl bootout "$domain" "$plist"; then
+            launchctl bootout "$service_target" || {
+                echo "Could not unload launchd service $service_target" >&2
+                return 1
+            }
+        fi
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if ! launchd_service_loaded "$service_target"; then
+                unloaded=true
+                break
+            fi
+            sleep 1
+        done
+        if [ "$unloaded" != true ]; then
+            echo "Timed out waiting for launchd to unload $service_target" >&2
+            return 1
+        fi
+    fi
+
+    # launchd can briefly reject bootstrap while completing a bootout. Retry
+    # the registration, accepting success only when the exact job is loaded.
+    for attempt in 1 2 3 4 5; do
+        if [ "$attempt" -eq 5 ]; then
+            if launchctl bootstrap "$domain" "$plist"; then
+                bootstrapped=true
+            fi
+        elif launchctl bootstrap "$domain" "$plist" >/dev/null 2>&1; then
+            bootstrapped=true
+        fi
+        if [ "$bootstrapped" = true ] ||
+           launchd_service_loaded "$service_target"; then
+            bootstrapped=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$bootstrapped" != true ]; then
+        echo "Could not bootstrap launchd service $service_target" >&2
+        return 1
+    fi
+
+    launchctl enable "$service_target"
+    launchctl kickstart -k "$service_target"
 }
 
 assert_service_env_matches() {
@@ -389,6 +460,45 @@ verify_relay_release_health() {
         [ "$(json_string_field "$health" release_version)" = "$expected_version" ] &&
         [ "$(json_string_field "$health" revision)" = "$expected_revision" ] &&
         [ "$(json_string_field "$health" bundle_hash)" = "$expected_web_hash" ]
+}
+
+wait_for_relay_release_health() {
+    local port="$1"
+    local attempts="$2"
+    local delay="$3"
+    local expected_version="$4"
+    local expected_revision="$5"
+    local expected_web_hash="$6"
+    local health
+    local attempt
+
+    [ -n "$expected_version" ] &&
+        [ -n "$expected_revision" ] &&
+        [ -n "$expected_web_hash" ] || {
+            echo "Exact release health verification requires version, revision, and web hash." >&2
+            return 1
+        }
+
+    case "$attempts" in
+        ""|*[!0-9]*|0)
+            echo "Health-check attempts must be a positive integer." >&2
+            return 1
+            ;;
+    esac
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if health="$(wait_for_relay_health "$port" 1 0)" &&
+           verify_relay_release_health \
+               "$health" "$expected_version" "$expected_revision" "$expected_web_hash"; then
+            printf '%s\n' "$health"
+            return 0
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then
+            sleep "$delay"
+        fi
+    done
+
+    return 1
 }
 
 host_label() {

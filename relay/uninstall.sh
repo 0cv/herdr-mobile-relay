@@ -122,6 +122,9 @@ safe_remove_dir() {
     if ! verify_removal_target "$canonical" "$label"; then
         return 1
     fi
+    if [ "$label" = "releases" ]; then
+        chmod -R u+w "$canonical"
+    fi
     rm -rf "$canonical"
     echo "  Removed $label: $canonical"
 }

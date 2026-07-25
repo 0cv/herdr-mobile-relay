@@ -224,6 +224,9 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	} else if err := os.Rename(releaseDir, finalDir); err != nil {
 		return fail(job.StatePath, state, fmt.Errorf("install release directory: %w", err))
 	}
+	if err := relayrelease.Seal(finalDir); err != nil {
+		return fail(job.StatePath, state, fmt.Errorf("seal release directory: %w", err))
+	}
 
 	if err := writeState(job.StatePath, state); err != nil {
 		return fmt.Errorf("persist rollback generation: %w", err)
@@ -401,11 +404,33 @@ func PruneOldReleases(releaseRoot string, keep ...string) error {
 		if _, verifyErr := relayrelease.Verify(candidate, relayrelease.CurrentTarget()); verifyErr != nil {
 			continue
 		}
+		if err := makeReleaseDirectoriesWritable(candidate); err != nil {
+			return err
+		}
 		if err := os.RemoveAll(candidate); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func makeReleaseDirectoriesWritable(root string) error {
+	return filepath.WalkDir(root, func(filename string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if err := os.Chmod(filename, info.Mode().Perm()|0o700); err != nil {
+			return fmt.Errorf("make release directory removable: %w", err)
+		}
+		return nil
+	})
 }
 
 func verifyChecksum(archivePath, checksumPath, expectedName string) error {

@@ -8,6 +8,19 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
 
+id() {
+    if [ "${1:-}" = "-u" ]; then
+        printf '0\n'
+        return
+    fi
+    command id "$@"
+}
+if require_user_service_context >/dev/null 2>&1; then
+    echo "user service management unexpectedly accepted root" >&2
+    exit 1
+fi
+unset -f id
+
 DEV_RELAY_BIN="$WORK_DIR/dev/herdr-mobile-relay"
 mkdir -p "$(dirname "$DEV_RELAY_BIN")"
 printf '#!/bin/sh\nexit 0\n' > "$DEV_RELAY_BIN"
@@ -56,6 +69,7 @@ chmod 700 "$FAKE_PLIST_BUDDY"
 export PLIST_LOG
 HERDR_PLIST_BUDDY="$FAKE_PLIST_BUDDY"
 export HERDR_PLIST_BUDDY
+touch "$WORK_DIR/service.plist"
 update_launchd_release_paths "$WORK_DIR/service.plist" \
     "$WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh" \
     "$WORK_DIR/releases/current" \
@@ -66,26 +80,55 @@ grep -F "Set :EnvironmentVariables:HERDR_RELAY_ENV $WORK_DIR/config/relay.env" "
 
 FAKE_LAUNCHCTL_DIR="$WORK_DIR/launchctl-bin"
 LAUNCHCTL_LOG="$WORK_DIR/launchctl.log"
+LAUNCHCTL_STATE="$WORK_DIR/launchctl.state"
+LAUNCHCTL_UNLOAD_PENDING="$WORK_DIR/launchctl-unload-pending"
 mkdir -p "$FAKE_LAUNCHCTL_DIR"
+touch "$LAUNCHCTL_STATE"
 cat > "$FAKE_LAUNCHCTL_DIR/launchctl" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
-[ "$1" != bootout ]
+case "$1" in
+    print)
+        if [ -f "$LAUNCHCTL_UNLOAD_PENDING" ]; then
+            rm -f "$LAUNCHCTL_UNLOAD_PENDING" "$LAUNCHCTL_STATE"
+            exit 0
+        fi
+        [ -f "$LAUNCHCTL_STATE" ]
+        ;;
+    bootout)
+        touch "$LAUNCHCTL_UNLOAD_PENDING"
+        ;;
+    bootstrap)
+        touch "$LAUNCHCTL_STATE"
+        ;;
+esac
 EOF
-chmod 700 "$FAKE_LAUNCHCTL_DIR/launchctl"
-export LAUNCHCTL_LOG
+cat > "$FAKE_LAUNCHCTL_DIR/sleep" <<'EOF'
+#!/bin/sh
+printf 'sleep %s\n' "$*" >> "$LAUNCHCTL_LOG"
+EOF
+chmod 700 "$FAKE_LAUNCHCTL_DIR/launchctl" "$FAKE_LAUNCHCTL_DIR/sleep"
+export LAUNCHCTL_LOG LAUNCHCTL_STATE LAUNCHCTL_UNLOAD_PENDING
 PATH="$FAKE_LAUNCHCTL_DIR:$PATH" reload_launchd_service_definition \
     "$WORK_DIR/service.plist" "com.herdr-mobile-relay.service"
 LAUNCHD_DOMAIN="gui/$(id -u)"
 sed -n '1p' "$LAUNCHCTL_LOG" |
-    grep -Fx "bootout $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
+    grep -Fx "print $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
 sed -n '2p' "$LAUNCHCTL_LOG" |
-    grep -Fx "bootstrap $LAUNCHD_DOMAIN $WORK_DIR/service.plist" >/dev/null
+    grep -Fx "bootout $LAUNCHD_DOMAIN $WORK_DIR/service.plist" >/dev/null
 sed -n '3p' "$LAUNCHCTL_LOG" |
-    grep -Fx "enable $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
+    grep -Fx "print $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
 sed -n '4p' "$LAUNCHCTL_LOG" |
+    grep -Fx "sleep 1" >/dev/null
+sed -n '5p' "$LAUNCHCTL_LOG" |
+    grep -Fx "print $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
+sed -n '6p' "$LAUNCHCTL_LOG" |
+    grep -Fx "bootstrap $LAUNCHD_DOMAIN $WORK_DIR/service.plist" >/dev/null
+sed -n '7p' "$LAUNCHCTL_LOG" |
+    grep -Fx "enable $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
+sed -n '8p' "$LAUNCHCTL_LOG" |
     grep -Fx "kickstart -k $LAUNCHD_DOMAIN/com.herdr-mobile-relay.service" >/dev/null
-test "$(wc -l < "$LAUNCHCTL_LOG" | tr -d ' ')" = "4"
+test "$(wc -l < "$LAUNCHCTL_LOG" | tr -d ' ')" = "8"
 
 HEALTH='{"status":"ok","release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
 verify_relay_release_health "$HEALTH" "0.9.0" "abc123" "web456"
@@ -93,5 +136,29 @@ if verify_relay_release_health "$HEALTH" "0.9.0" "wrong" "web456"; then
     echo "release health accepted the wrong revision" >&2
     exit 1
 fi
+
+HEALTH_ATTEMPTS="$WORK_DIR/health-attempts"
+cat > "$FAKE_LAUNCHCTL_DIR/curl" <<'EOF'
+#!/bin/sh
+attempt=0
+if [ -f "$HEALTH_ATTEMPTS" ]; then
+    attempt="$(cat "$HEALTH_ATTEMPTS")"
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" > "$HEALTH_ATTEMPTS"
+if [ "$attempt" -eq 1 ]; then
+    printf '%s\n' '{"status":"ok","instance":"test","version":"0.8.6","protocol":2,"release_version":"0.8.6","revision":"old","bundle_hash":"old-web"}'
+else
+    printf '%s\n' '{"status":"ok","instance":"test","version":"0.9.0","protocol":2,"release_version":"0.9.0","revision":"abc123","bundle_hash":"web456"}'
+fi
+EOF
+chmod 700 "$FAKE_LAUNCHCTL_DIR/curl"
+export HEALTH_ATTEMPTS
+EXACT_HEALTH="$(
+    PATH="$FAKE_LAUNCHCTL_DIR:$PATH" \
+        wait_for_relay_release_health 8375 3 1 "0.9.0" "abc123" "web456"
+)"
+test "$(json_string_field "$EXACT_HEALTH" release_version)" = "0.9.0"
+test "$(cat "$HEALTH_ATTEMPTS")" = "2"
 
 echo "common shell tests passed"

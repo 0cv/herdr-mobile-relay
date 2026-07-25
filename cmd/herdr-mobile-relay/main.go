@@ -214,6 +214,11 @@ func run(args []string) (int, error) {
 			return 1, fmt.Errorf("refusing to activate invalid release: %w", err)
 		}
 		return status(relayupdate.Activate(args[0], args[1]))
+	case "seal-release":
+		if len(args) != 1 {
+			return 2, errors.New("usage: herdr-mobile-relay seal-release RELEASE_DIRECTORY")
+		}
+		return status(release.Seal(args[0]))
 	case "prune-releases":
 		if len(args) < 2 || len(args) > 3 {
 			return 2, errors.New("usage: herdr-mobile-relay prune-releases RELEASE_ROOT CURRENT_RELEASE [PREVIOUS_RELEASE]")
