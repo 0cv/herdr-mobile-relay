@@ -251,6 +251,11 @@ func TestWebSocketConnectAndReceiveAgents(t *testing.T) {
 			if !ok {
 				t.Fatal("agents field is not an array")
 			}
+			// The on-connect snapshot may precede the first inventory poll.
+			// Wait for the subsequent committed snapshot in that case.
+			if len(agents) == 0 {
+				continue
+			}
 			if len(agents) != 1 {
 				t.Fatalf("agents len = %d, want 1", len(agents))
 			}
