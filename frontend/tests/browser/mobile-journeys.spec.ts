@@ -278,6 +278,37 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
   await expect(page.getByText('@Mac')).toBeVisible();
 });
 
+test('sorts a cold idle snapshot by the latest Herdr activity', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      {
+        pane_id: 'w1:p1',
+        status: 'idle',
+        project: 'herdr-mobile-relay',
+        tab_label: 'codex_dummy',
+        agent: 'codex',
+        updated_at: 0,
+        activity_seq: 735,
+      },
+      {
+        pane_id: 'w1:p2',
+        status: 'idle',
+        project: 'herdr-mobile-relay',
+        tab_label: 'codex_review_bugs',
+        agent: 'codex',
+        updated_at: 0,
+        activity_seq: 794,
+      },
+    ],
+  });
+
+  await expect(page.locator('.agent-card .agent-meta').first()).toContainText('codex_review_bugs');
+});
+
 test('reconnects and blocks mutations for an incompatible relay protocol', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);

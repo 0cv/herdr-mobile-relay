@@ -56,21 +56,26 @@ type codexRow struct {
 }
 
 var (
-	ansiPattern        = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	edgePattern        = regexp.MustCompile(`^[│|]\s*|\s*[│|]$`)
-	checkboxPattern    = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s*\[([^\]]*)\]\s*(.*?)\s*$`)
-	menuPattern        = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s+(.*?)\s*$`)
-	submitPattern      = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?(submit|next)\s*$`)
-	chatPattern        = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?chat about this\s*$`)
-	codexHeaderPattern = regexp.MustCompile(`(?i)^\s*question\s+(\d+)\s*/\s*(\d+)`)
-	codexSubmitPattern = regexp.MustCompile(`(?i)\benter\s+to\s+submit\s+(answer|answers|all)\b`)
-	qoderActivePattern = regexp.MustCompile(`\x1b\[[^m]*48(?:;|:)[^m]*m\s*([^\x1b]+)`)
-	qoderReviewPattern = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(submit answers|cancel ask)\s*$`)
-	otherPattern       = regexp.MustCompile(`(?i)^(?:type something\.?|none of the above|other)\b`)
-	selectedPattern    = regexp.MustCompile(`\s*[✓✔]\s*$`)
-	chromePattern      = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
-	promptSkipPattern  = regexp.MustCompile(`(?i)^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$`)
-	commandPattern     = regexp.MustCompile(`^\s*[$>❯›]\s+(.+?)\s*$`)
+	ansiPattern         = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	edgePattern         = regexp.MustCompile(`^[│|]\s*|\s*[│|]$`)
+	checkboxPattern     = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s*\[([^\]]*)\]\s*(.*?)\s*$`)
+	menuPattern         = regexp.MustCompile(`^\s*([❯›]?)\s*(\d+)\.\s+(.*?)\s*$`)
+	submitPattern       = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?(submit|next)\s*$`)
+	chatPattern         = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(?:\d+\.\s*)?chat about this\s*$`)
+	codexHeaderPattern  = regexp.MustCompile(`(?i)^\s*question\s+(\d+)\s*/\s*(\d+)`)
+	codexSubmitPattern  = regexp.MustCompile(`(?i)\benter\s+to\s+submit\s+(answer|answers|all)\b`)
+	qoderActivePattern  = regexp.MustCompile(`\x1b\[[^m]*48(?:;|:)[^m]*m\s*([^\x1b]+)`)
+	qoderReviewPattern  = regexp.MustCompile(`(?i)^\s*([❯›]?)\s*(submit answers|cancel ask)\s*$`)
+	otherPattern        = regexp.MustCompile(`(?i)^(?:type something\.?|none of the above|other)\b`)
+	selectedPattern     = regexp.MustCompile(`\s*[✓✔]\s*$`)
+	chromePattern       = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
+	promptSkipPattern   = regexp.MustCompile(`(?i)^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$`)
+	commandPattern      = regexp.MustCompile(`^\s*[$>❯›]\s+(.+?)\s*$`)
+	turnDurationPattern = regexp.MustCompile(
+		`(?i)^[^\p{L}\p{N}]*\p{L}+(?:ed|ing)\s+for\s+(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b`,
+	)
+	responseStartPattern  = regexp.MustCompile(`^\s*[•●]\s+\S`)
+	responsePrefixPattern = regexp.MustCompile(`^\s*[•●]\s+`)
 )
 
 var (
@@ -174,6 +179,53 @@ func ApprovalDetails(text string) (string, string, []string) {
 
 func PaneSummary(text string) string {
 	return strings.Join(paneSummaryLines(text), "\n")
+}
+
+// LatestCompletedResponse returns the complete latest Codex or Claude response
+// bounded by the agent's response marker and completed-turn duration line.
+// Unlike PaneSummary, it intentionally does not impose a display-line limit;
+// the activity journal applies its own persisted extract safety limit.
+func LatestCompletedResponse(text string) string {
+	rawLines := strings.Split(strings.ReplaceAll(text, "\r", ""), "\n")
+	lines := make([]string, len(rawLines))
+	for index, line := range rawLines {
+		lines[index] = strings.TrimRight(ansiPattern.ReplaceAllString(line, ""), " \t")
+	}
+
+	end := -1
+	for index := len(lines) - 1; index >= 0; index-- {
+		if turnDurationPattern.MatchString(strings.TrimSpace(lines[index])) {
+			end = index
+			break
+		}
+	}
+	if end < 0 {
+		return ""
+	}
+
+	start := -1
+	for index := end - 1; index >= 0; index-- {
+		if responseStartPattern.MatchString(lines[index]) {
+			start = index
+			break
+		}
+		if turnDurationPattern.MatchString(strings.TrimSpace(lines[index])) {
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+
+	response := append([]string(nil), lines[start:end]...)
+	response[0] = responsePrefixPattern.ReplaceAllString(response[0], "")
+	for index := 1; index < len(response); index++ {
+		response[index] = strings.TrimPrefix(response[index], "  ")
+	}
+	for len(response) > 0 && strings.TrimSpace(response[len(response)-1]) == "" {
+		response = response[:len(response)-1]
+	}
+	return strings.TrimSpace(strings.Join(response, "\n"))
 }
 
 func paneSummaryLines(text string) []string {

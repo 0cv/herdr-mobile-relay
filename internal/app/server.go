@@ -923,10 +923,14 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent string) 
 		return ""
 	}
 	raw := string(content)
+	completionContent := raw
 	if isClaudeLike(agent) && !question.LayoutHint(raw) {
-		s.historyM.Merge(paneID, raw)
+		completionContent = s.historyM.Merge(paneID, raw)
 	}
-	return question.PaneSummary(raw)
+	if response := question.LatestCompletedResponse(completionContent); response != "" {
+		return response
+	}
+	return question.PaneSummary(completionContent)
 }
 
 func isClaudeLike(agent string) bool {

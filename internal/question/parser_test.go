@@ -377,6 +377,63 @@ Do you want to proceed?
 	}
 }
 
+func TestLatestCompletedResponsePreservesFullAnswer(t *testing.T) {
+	content := []string{
+		"• Earlier answer.",
+		"─ Worked for 2s ─",
+		"",
+		"› New question",
+		"",
+		"\x1b[32m• First line of the latest answer.\x1b[0m",
+		"  Second line.",
+		"  Third line.",
+		"  Fourth line.",
+		"  Fifth line.",
+		"  Sixth line.",
+		"  Seventh line.",
+		"  Eighth line.",
+		"  Ninth line.",
+		"  Tenth line.",
+		"  Eleventh line.",
+		"  Twelfth line.",
+		"  Thirteenth line.",
+		"  Fourteenth line.",
+		"",
+		"─ Worked for 2m 19s ─",
+		"",
+		"› Next question",
+	}
+	want := strings.Join([]string{
+		"First line of the latest answer.",
+		"Second line.",
+		"Third line.",
+		"Fourth line.",
+		"Fifth line.",
+		"Sixth line.",
+		"Seventh line.",
+		"Eighth line.",
+		"Ninth line.",
+		"Tenth line.",
+		"Eleventh line.",
+		"Twelfth line.",
+		"Thirteenth line.",
+		"Fourteenth line.",
+	}, "\n")
+	if got := LatestCompletedResponse(strings.Join(content, "\n")); got != want {
+		t.Fatalf("LatestCompletedResponse() = %q, want %q", got, want)
+	}
+}
+
+func TestLatestCompletedResponseRequiresCompletedTurn(t *testing.T) {
+	if got := LatestCompletedResponse("● Still working\n  More output"); got != "" {
+		t.Fatalf("LatestCompletedResponse() = %q, want empty", got)
+	}
+	claude := "● The implementation is ready.\n  It works.\n\n✻ Crunched for 1m 49s\n❯ "
+	if got := LatestCompletedResponse(claude); got != "The implementation is ready.\nIt works." {
+		t.Fatalf("LatestCompletedResponse() = %q, want complete Claude response", got)
+	}
+}
+
 func stringReplace(value, old, replacement string) string {
 	for index := 0; index+len(old) <= len(value); index++ {
 		if value[index:index+len(old)] == old {

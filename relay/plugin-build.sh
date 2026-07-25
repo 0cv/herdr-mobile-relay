@@ -278,10 +278,7 @@ rollback_plugin_migration() {
             ;;
         Darwin)
             label=com.herdr-mobile-relay.service
-            launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
-            launchctl bootstrap "gui/$(id -u)" "$SERVICE_FILE" || return 1
-            launchctl enable "gui/$(id -u)/$label" || return 1
-            launchctl kickstart -k "gui/$(id -u)/$label" || return 1
+            reload_launchd_service_definition "$SERVICE_FILE" "$label" || return 1
             ;;
     esac
 
@@ -400,9 +397,10 @@ case "$PLATFORM" in
             service_cutover_started=true
             update_launchd_release_paths \
                 "$PLIST" "$SERVICE_WRAPPER" "$INSTALL_ROOT/current" "$TARGET_ENV"
-            if launchctl list 2>/dev/null | grep -q "com.herdr-mobile-relay"; then
-                echo "herdr-mobile-relay: restarting existing service..." >&2
-                launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay.service"
+            if [ "$service_was_active" = true ]; then
+                echo "herdr-mobile-relay: reloading existing service..." >&2
+                reload_launchd_service_definition \
+                    "$PLIST" "com.herdr-mobile-relay.service"
                 service_restarted=true
             fi
         elif launchctl list 2>/dev/null | grep -q "com.herdr-mobile-relay"; then

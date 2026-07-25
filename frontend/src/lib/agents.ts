@@ -48,6 +48,11 @@ export function agentUpdatedAt(agent: Partial<Agent> | null | undefined): number
   return Number.isFinite(value) ? value : 0;
 }
 
+export function agentActivitySeq(agent: Partial<Agent> | null | undefined): number {
+  const value = Number(agent?.activity_seq);
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
 export function agentPaneRevision(agent: Partial<Agent> | null | undefined): number {
   const value = Number(agent?.pane_revision);
   return Number.isSafeInteger(value) && value > 0 ? value : 0;
@@ -60,7 +65,10 @@ export function staleAgentRevision(previous: Agent | undefined, next: Agent): bo
 }
 
 export function compareAgentUpdatedAt(a: Agent, b: Agent): number {
-  return agentUpdatedAt(b) - agentUpdatedAt(a);
+  const timestampOrder = agentUpdatedAt(b) - agentUpdatedAt(a);
+  if (timestampOrder) return timestampOrder;
+  if (a.relay_id !== b.relay_id) return 0;
+  return agentActivitySeq(b) - agentActivitySeq(a);
 }
 
 export function sortedAgents(agents: Agent[]): Agent[] {
@@ -168,6 +176,9 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
     tab_number: next.tab_number ?? previous.tab_number,
     workspace_id: next.workspace_id || previous.workspace_id || '',
     updated_at: Math.max(agentUpdatedAt(previous), agentUpdatedAt(next)),
+    activity_seq: Object.prototype.hasOwnProperty.call(next, 'activity_seq')
+      ? next.activity_seq
+      : previous.activity_seq,
     pane_revision: Math.max(agentPaneRevision(previous), agentPaneRevision(next)) || undefined,
     prompt: blocked ? (next.prompt ?? previous.prompt) : next.prompt,
     command: blocked ? (next.command ?? previous.command) : next.command,

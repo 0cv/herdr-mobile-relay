@@ -90,19 +90,20 @@ func NewClient(bin, socketPath string) *Client {
 }
 
 type Pane struct {
-	ID          string `json:"pane_id"`
-	TerminalID  string `json:"terminal_id"`
-	TabID       string `json:"tab_id"`
-	TabLabel    string `json:"tab_label"`
-	TabNumber   int    `json:"tab_number"`
-	WorkspaceID string `json:"workspace_id"`
-	Agent       string `json:"agent"`
-	Name        string `json:"name"`
-	Status      string `json:"agent_status"`
-	Focused     bool   `json:"focused"`
-	Cwd         string `json:"cwd"`
-	Revision    int    `json:"revision"`
-	Scroll      struct {
+	ID             string `json:"pane_id"`
+	TerminalID     string `json:"terminal_id"`
+	TabID          string `json:"tab_id"`
+	TabLabel       string `json:"tab_label"`
+	TabNumber      int    `json:"tab_number"`
+	WorkspaceID    string `json:"workspace_id"`
+	Agent          string `json:"agent"`
+	Name           string `json:"name"`
+	Status         string `json:"agent_status"`
+	Focused        bool   `json:"focused"`
+	Cwd            string `json:"cwd"`
+	Revision       int    `json:"revision"`
+	StateChangeSeq int64  `json:"state_change_seq"`
+	Scroll         struct {
 		MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
 	} `json:"scroll"`
 	ForegroundCwd string `json:"foreground_cwd"`
@@ -182,15 +183,28 @@ type Inventory struct {
 
 func (c *Client) GetInventory(ctx context.Context) (*Inventory, error) {
 	var result struct {
+		Agents []Pane `json:"agents"`
+	}
+	if err := c.runResult(ctx, &result, "agent", "list"); err == nil {
+		for i := range result.Agents {
+			result.Agents[i].Session = result.Agents[i].SessionRaw.Value
+		}
+		return &Inventory{Panes: result.Agents}, nil
+	}
+
+	// Herdr versions predating agent-list inventory do not expose a
+	// state_change_seq. Keep pane-list compatibility; those relays simply use
+	// epoch activity timestamps and the deterministic UI fallback.
+	var legacy struct {
 		Panes []Pane `json:"panes"`
 	}
-	if err := c.runResult(ctx, &result, "pane", "list"); err != nil {
+	if err := c.runResult(ctx, &legacy, "pane", "list"); err != nil {
 		return nil, fmt.Errorf("herdr inventory: %w", err)
 	}
-	for i := range result.Panes {
-		result.Panes[i].Session = result.Panes[i].SessionRaw.Value
+	for i := range legacy.Panes {
+		legacy.Panes[i].Session = legacy.Panes[i].SessionRaw.Value
 	}
-	return &Inventory{Panes: result.Panes}, nil
+	return &Inventory{Panes: legacy.Panes}, nil
 }
 
 func (c *Client) WorkspaceList(ctx context.Context) ([]Workspace, error) {

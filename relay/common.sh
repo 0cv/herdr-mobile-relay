@@ -114,6 +114,20 @@ update_launchd_release_paths() {
     fi
 }
 
+reload_launchd_service_definition() {
+    local plist="$1"
+    local label="$2"
+    local domain="gui/$(id -u)"
+
+    # kickstart restarts launchd's cached job definition. A Python-to-Go
+    # migration changes ProgramArguments, WorkingDirectory, and the relay
+    # environment, so the rewritten plist must be bootstrapped again first.
+    launchctl bootout "$domain/$label" >/dev/null 2>&1 || true
+    launchctl bootstrap "$domain" "$plist"
+    launchctl enable "$domain/$label"
+    launchctl kickstart -k "$domain/$label"
+}
+
 assert_service_env_matches() {
     local resolved_env
     local service_env

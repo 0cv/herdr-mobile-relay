@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { activityForNotification, activityMatchesSearch } from '$lib/activity';
 import {
+  agentActivitySeq,
   agentStatusTone,
   agentUpdatedAt,
   mergeAgentDetails,
@@ -299,11 +300,30 @@ describe('agent state and sorting', () => {
 
   it('sorts activity newest-first with stable host fallback', () => {
     expect(agentUpdatedAt(agent({ updated_at: 'invalid' }))).toBe(0);
+    expect(agentActivitySeq(agent({ activity_seq: 'invalid' }))).toBe(0);
     const sorted = sortedAgents([
       agent({ pane_id: 'relay::old', raw_pane_id: 'old', updated_at: 1 }),
       agent({ pane_id: 'relay::new', raw_pane_id: 'new', updated_at: 3 }),
     ]);
     expect(sorted.map((item) => item.raw_pane_id)).toEqual(['new', 'old']);
+  });
+
+  it('uses the relay activity sequence when a cold snapshot has no timestamps', () => {
+    const sorted = sortedAgents([
+      agent({ pane_id: 'relay::old', raw_pane_id: 'old', updated_at: 0, activity_seq: 10 }),
+      agent({ pane_id: 'relay::current', raw_pane_id: 'current', updated_at: 0, activity_seq: 20 }),
+    ]);
+    expect(sorted.map((item) => item.raw_pane_id)).toEqual(['current', 'old']);
+
+    const otherRelay = agent({
+      relay_id: 'other',
+      relay_label: 'Mac',
+      pane_id: 'other::pane',
+      raw_pane_id: 'pane',
+      updated_at: 0,
+      activity_seq: 999,
+    });
+    expect(sortedAgents([otherRelay, ...sorted])[0].relay_id).toBe('relay');
   });
 
   it('requires two contradictory snapshots before clearing blocked controls', () => {

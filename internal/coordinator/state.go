@@ -28,6 +28,7 @@ type AgentState struct {
 	Host            string                `json:"host"`
 	Session         string                `json:"session"`
 	UpdatedAt       int64                 `json:"updated_at"`
+	ActivitySeq     int64                 `json:"activity_seq,omitempty"`
 	BlockedEventID  string                `json:"event_id,omitempty"`
 	Prompt          string                `json:"prompt,omitempty"`
 	Command         string                `json:"command,omitempty"`
@@ -338,6 +339,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 				cp.UpdatedAt = time.Now().UnixMilli()
 			}
 		} else if existing.Status == cp.Status && existing.Name == cp.Name && existing.Cwd == cp.Cwd && existing.Agent == cp.Agent &&
+			existing.ActivitySeq == cp.ActivitySeq &&
 			existing.PaneRevision == cp.PaneRevision && existing.ScrollMaxOffset == cp.ScrollMaxOffset && existing.ForegroundCwd == cp.ForegroundCwd {
 			cp.UpdatedAt = existing.UpdatedAt
 		} else {
@@ -346,7 +348,8 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 
 		s.applyBlockedCycleLocked(&cp, existing)
 
-		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd || existing.Agent != cp.Agent {
+		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||
+			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq {
 			s.contentRev[incoming.PaneID]++
 		}
 

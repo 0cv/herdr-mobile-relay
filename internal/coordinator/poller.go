@@ -157,6 +157,7 @@ func (p *Poller) poll(ctx context.Context) {
 			Project:         project,
 			Host:            p.hostname,
 			Session:         pane.Session,
+			ActivitySeq:     pane.StateChangeSeq,
 			PaneRevision:    pane.Revision,
 			ScrollMaxOffset: pane.Scroll.MaxOffsetFromBottom,
 			ForegroundCwd:   pane.ForegroundCwd,

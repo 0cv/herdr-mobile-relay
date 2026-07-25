@@ -74,6 +74,28 @@ func TestOnlyInitialSnapshotUsesZeroUpdatedAt(t *testing.T) {
 	}
 }
 
+func TestActivitySequenceAdvancesUpdatedAt(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Status: "idle", ActivitySeq: 10,
+	}}, s.RevisionCounter())
+	first, _ := s.Agent("p1")
+	if first.UpdatedAt != 0 {
+		t.Fatalf("initial updated_at = %d, want 0", first.UpdatedAt)
+	}
+
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Status: "idle", ActivitySeq: 11,
+	}}, s.RevisionCounter())
+	updated, _ := s.Agent("p1")
+	if updated.UpdatedAt <= 0 {
+		t.Fatalf("activity update timestamp = %d, want epoch milliseconds", updated.UpdatedAt)
+	}
+	if updated.ActivitySeq != 11 {
+		t.Fatalf("activity sequence = %d, want 11", updated.ActivitySeq)
+	}
+}
+
 func TestDisplayedStatusUnseenDone(t *testing.T) {
 	s := testState()
 

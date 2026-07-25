@@ -16,17 +16,18 @@ import (
 )
 
 type Pane struct {
-	ID          string `json:"pane_id"`
-	TerminalID  string `json:"terminal_id,omitempty"`
-	TabID       string `json:"tab_id,omitempty"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
-	Agent       string `json:"agent,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Status      string `json:"agent_status,omitempty"`
-	Focused     bool   `json:"focused,omitempty"`
-	Cwd         string `json:"cwd,omitempty"`
-	Revision    int    `json:"revision,omitempty"`
-	Scroll      struct {
+	ID             string `json:"pane_id"`
+	TerminalID     string `json:"terminal_id,omitempty"`
+	TabID          string `json:"tab_id,omitempty"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	Agent          string `json:"agent,omitempty"`
+	Name           string `json:"name,omitempty"`
+	Status         string `json:"agent_status,omitempty"`
+	Focused        bool   `json:"focused,omitempty"`
+	Cwd            string `json:"cwd,omitempty"`
+	Revision       int    `json:"revision,omitempty"`
+	StateChangeSeq int64  `json:"state_change_seq,omitempty"`
+	Scroll         struct {
 		MaxOffsetFromBottom int `json:"max_offset_from_bottom"`
 	} `json:"scroll,omitempty"`
 	ForegroundCwd string `json:"foreground_cwd,omitempty"`
@@ -201,6 +202,17 @@ func execute(store *stateStore, scenario Scenario, args []string) (string, error
 	}
 
 	switch group + " " + command {
+	case "agent list":
+		if err := exactLen(rest, 0); err != nil {
+			return "", err
+		}
+		agents := make([]Pane, 0, len(scenario.Panes))
+		for _, pane := range scenario.Panes {
+			if pane.Agent != "" {
+				agents = append(agents, pane)
+			}
+		}
+		return envelope(map[string]any{"agents": agents}), nil
 	case "pane list":
 		if err := exactLen(rest, 0); err != nil {
 			return "", err
