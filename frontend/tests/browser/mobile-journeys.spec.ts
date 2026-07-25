@@ -149,7 +149,7 @@ async function commandsForSocket(page: Page, index: number) {
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
   await server(page, index, {
     type: 'push_config', protocol: 2, version: 'abc1234', host: index ? 'mac' : 'fedora',
-    capabilities: ['clear_activities', 'directory_browser', 'structured_questions', 'slash_commands'],
+    capabilities: ['attention_classification', 'clear_activities', 'directory_browser', 'structured_questions', 'slash_commands'],
     agent_profiles: [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
     ...overrides,
   });
@@ -264,7 +264,7 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
   await handshake(page, base);
   await handshake(page, base + 1);
   await server(page, base, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Fedora app', agent: 'codex' }] });
-  await server(page, base + 1, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Mac app', agent: 'claude', options: ['Approve once', 'Deny'] }] });
+  await server(page, base + 1, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Mac app', agent: 'claude', options: ['Approve once', 'Deny'] }] });
   const headerBox = await page.getByRole('banner').boundingBox();
   const connectionBox = await page.getByRole('img', { name: /relays connected/ }).boundingBox();
   const settingsBox = await page.getByRole('button', { name: 'Settings' }).boundingBox();
@@ -313,7 +313,7 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, { protocol: 1, version: 'old' });
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Old relay', agent: 'codex', options: ['Approve once', 'Deny'] }] });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Old relay', agent: 'codex', options: ['Approve once', 'Deny'] }] });
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.getByText(/Relay outdated/)).toBeVisible();
   await page.getByRole('button', { name: 'How to update Fedora' }).click();
@@ -332,6 +332,37 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
 
   await page.evaluate(() => (window as any).__relayClose(0));
   await expect.poll(() => socketCount(page)).toBe(2);
+});
+
+test('uses terminal-only fallback for old relays and enables classified chat replies', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['structured_questions', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'blocked', project: 'Old controls', agent: 'opencode',
+      options: ['Approve once', 'Deny'],
+    }],
+  });
+  await expect(page.getByRole('heading', { name: 'Needs inspection' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Approve once' })).toBeHidden();
+  await page.getByRole('button', { name: 'Open Old controls on Fedora' }).click();
+  await expect(page.getByPlaceholder('Needs inspection — use terminal keys')).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Enter' })).toBeEnabled();
+
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'blocked', attention_kind: 'chat',
+      project: 'Chat ready', agent: 'codex',
+    }],
+  });
+  await expect(page.getByPlaceholder('Type a reply…')).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Approve once' })).toBeHidden();
 });
 
 test('shows inventory failure instead of zero agents and recovers without reconnecting', async ({ page }) => {
@@ -516,7 +547,7 @@ test('resets drafts and terminal output when moving to another agent', async ({ 
     type: 'agents',
     agents: [
       { pane_id: 'w1:p1', status: 'working', project: 'Working A', agent: 'codex' },
-      { pane_id: 'w1:p2', status: 'blocked', project: 'Blocked B', agent: 'claude', options: ['Approve once', 'Deny'] },
+      { pane_id: 'w1:p2', status: 'blocked', attention_kind: 'approval', project: 'Blocked B', agent: 'claude', options: ['Approve once', 'Deny'] },
     ],
   });
   await page.getByRole('button', { name: 'Open Working A on Fedora' }).click();
@@ -774,9 +805,9 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await boot(page, [fedora], `/#notify=${target}`);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
   expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', event_id: 'notice-1', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', event_id: 'notice-1', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
   await expect(page.getByRole('main', { name: /Terminal for Approvals/ })).toBeVisible();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(1);
   expect((await commands(page)).find((command) => command.type === 'respond')).toMatchObject({ event_id: 'notice-1' });
@@ -791,7 +822,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
     ...first, id: 'q2', question: 'Choose device coverage', submit_label: 'Submit', can_go_back: true, question_index: 2,
   };
   await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), second);
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', project: 'Approvals', agent: 'claude', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', attention_kind: 'question', project: 'Approvals', agent: 'claude', interaction: first, question_layout: true });
   await expect(page.getByText('Question 1 of 2')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Chat about this' })).toBeHidden();
   await page.getByRole('radio', { name: /Repository/ }).click();
@@ -803,7 +834,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   expect(answer).toMatchObject({ selected_indices: [0], other_selected: false, protocol: 2 });
 
   await server(page, 0, {
-    type: 'blocked', pane_id: 'w1:p1', project: 'Approvals', agent: 'claude',
+    type: 'blocked', pane_id: 'w1:p1', attention_kind: 'approval', project: 'Approvals', agent: 'claude',
     interaction: null, question_layout: false, options: ['Proceed with plan', 'Cancel'],
   });
   await expect(page.getByRole('group', { name: 'Choose device coverage' })).toBeHidden();
@@ -826,7 +857,7 @@ test('rejects stale notification approvals and retries transient failures', asyn
   await handshake(page, 0);
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'blocked', event_id: 'new-event', project: 'Stale approval', agent: 'codex' }],
+    agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', options: ['Approve once', 'Deny'], event_id: 'new-event', project: 'Stale approval', agent: 'codex' }],
   });
   await expect(page.getByRole('status').filter({ hasText: /older approval request/ })).toBeVisible();
   expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
@@ -858,7 +889,7 @@ test('restores structured questions from the cached agent snapshot after reload'
   const snapshot = {
     type: 'agents',
     agents: [{
-      pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude',
+      pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude',
       prompt: interaction.question, command: interaction.question, options: [],
       interaction, question_layout: true,
     }],
@@ -895,19 +926,19 @@ test('restores a confirmed choice after navigating away from an incomplete draft
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude' }] });
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude' }] });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: first, question_layout: true });
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
   await page.getByRole('textbox', { name: 'Other answer' }).focus();
   await expect(page.getByRole('radio', { name: 'Other' })).toBeChecked();
 
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude', interaction: second, question_layout: true });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: second, question_layout: true });
   await expect(page.getByRole('group', { name: 'Choose offline scope' })).toBeVisible();
   const confirmed = {
     ...first,
     options: first.options.map((option) => ({ ...option, selected: option.index === 1 })),
   };
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude', interaction: confirmed, question_layout: true });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: confirmed, question_layout: true });
 
   await expect(page.getByRole('radio', { name: 'Signals' })).toBeChecked();
   await expect(page.getByRole('radio', { name: 'Other' })).not.toBeChecked();
@@ -936,7 +967,7 @@ test('keeps the third single choice checked across live pane transitions', async
     submit_label: 'Next', can_go_back: true,
   };
   const agent = {
-    pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude',
+    pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude',
     interaction: first, question_layout: true,
   };
 
@@ -956,18 +987,18 @@ test('keeps the third single choice checked across live pane transitions', async
   await page.getByRole('button', { name: 'Next' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
   const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', interaction: second, question_layout: true });
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: second, question_layout: true });
   await server(page, 0, { type: 'command_result', request_id: answer.request_id, ok: true, phase: 'advanced', data: { interaction: second } });
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 
   await page.getByRole('button', { name: /Previous/ }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'navigate_question').length).toBe(1);
   const navigation = (await commands(page)).find((command) => command.type === 'navigate_question')!;
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: first, question_layout: true });
   await server(page, 0, { type: 'command_result', request_id: navigation.request_id, ok: true, phase: 'navigated', data: { interaction: first } });
   await server(page, 0, { type: 'agents', agents: [agent] });
   for (let refresh = 0; refresh < 20; refresh += 1) {
-    await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', interaction: first, question_layout: true });
+    await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi', attention_kind: 'question', interaction: first, question_layout: true });
     await page.waitForTimeout(5);
   }
 
@@ -996,8 +1027,8 @@ test('keeps normal single-select answers across repeated question navigation', a
     other: { label: 'Other', placeholder: 'Other answer', selected: false, text: '' },
     submit_label: 'Next', can_go_back: true,
   };
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'claude' }] });
-  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', project: 'Questions', agent: 'claude', interaction: first, question_layout: true });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'claude' }] });
+  await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', attention_kind: 'question', project: 'Questions', agent: 'claude', interaction: first, question_layout: true });
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
   const questionForm = page.getByRole('form', { name: 'Choose reconnect behavior' });
   const formHeight = await questionForm.evaluate((element) => element.getBoundingClientRect().height);
@@ -1044,7 +1075,7 @@ test('does not report failed question navigation as opened', async ({ page }) =>
   await server(page, 0, {
     type: 'agents',
     agents: [{
-      pane_id: 'w1:p1', status: 'blocked', project: 'Questions', agent: 'codex',
+      pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question', project: 'Questions', agent: 'codex',
       interaction: second, question_layout: true,
     }],
   });

@@ -296,6 +296,27 @@ func TestBuildQuestionPayloadMatchesPythonContract(t *testing.T) {
 	assertPayloadFixture(t, payload, "question.json")
 }
 
+func TestBuildUnknownAttentionPayloadHasNoActions(t *testing.T) {
+	payload := BuildAttentionPayload(
+		"OpenCode", "my-project", "Agent needs inspection",
+		"evt-1", "pane-1", "myhost", "unknown", 3,
+	)
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["title"] != "my-project needs inspection" {
+		t.Fatalf("title = %v", decoded["title"])
+	}
+	if actions, ok := decoded["actions"].([]any); !ok || len(actions) != 0 {
+		t.Fatalf("unknown attention actions = %#v", decoded["actions"])
+	}
+	actionURLs, ok := decoded["action_urls"].(map[string]any)
+	if !ok || len(actionURLs) != 0 {
+		t.Fatalf("unknown attention action URLs = %#v", decoded["action_urls"])
+	}
+}
+
 func TestBuildFinishedPayload(t *testing.T) {
 	payload := BuildFinishedPayload("Codex", "app", "pane-1", "myhost", "evt-finished-1")
 	assertPayloadFixture(t, payload, "finished.json")

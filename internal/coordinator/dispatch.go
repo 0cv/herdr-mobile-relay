@@ -763,7 +763,22 @@ func (d *Dispatcher) RecordTransitionActivity(
 		if kind == "finished" {
 			return d.state.CompletionCurrent(paneID, revision)
 		}
-		if kind == "blocked" && len(blockedIdentity) == 2 {
+		if expectedStatus == "blocked" && len(blockedIdentity) == 4 {
+			eventID, eventOK := blockedIdentity[0].(string)
+			generation, generationOK := blockedIdentity[1].(uint64)
+			attentionKind, attentionOK := blockedIdentity[2].(string)
+			attentionRevision, revisionOK := blockedIdentity[3].(int64)
+			if eventOK && generationOK && attentionOK && revisionOK {
+				return d.state.AttentionTransitionCurrent(
+					paneID,
+					eventID,
+					generation,
+					attentionKind,
+					attentionRevision,
+				)
+			}
+		}
+		if expectedStatus == "blocked" && len(blockedIdentity) == 2 {
 			eventID, eventOK := blockedIdentity[0].(string)
 			generation, generationOK := blockedIdentity[1].(uint64)
 			if eventOK && generationOK {

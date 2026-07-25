@@ -12,34 +12,35 @@ import (
 )
 
 type AgentState struct {
-	PaneID          string                `json:"pane_id"`
-	RawPaneID       string                `json:"raw_pane_id"`
-	TerminalID      string                `json:"terminal_id"`
-	TabID           string                `json:"tab_id"`
-	TabLabel        string                `json:"tab_label"`
-	TabNumber       int                   `json:"tab_number"`
-	WorkspaceID     string                `json:"workspace_id"`
-	Agent           string                `json:"agent"`
-	Name            string                `json:"name"`
-	Status          string                `json:"status"`
-	Focused         bool                  `json:"_focused"`
-	Cwd             string                `json:"cwd"`
-	Project         string                `json:"project"`
-	Host            string                `json:"host"`
-	Session         string                `json:"session"`
-	UpdatedAt       int64                 `json:"updated_at"`
-	ActivitySeq     int64                 `json:"activity_seq,omitempty"`
-	BlockedEventID  string                `json:"event_id,omitempty"`
-	Prompt          string                `json:"prompt,omitempty"`
-	Command         string                `json:"command,omitempty"`
-	Options         []string              `json:"options,omitempty"`
-	Interaction     *question.Interaction `json:"interaction,omitempty"`
-	QuestionLayout  bool                  `json:"question_layout,omitempty"`
-	InteractionID   string                `json:"-"`
-	PaneRevision    int                   `json:"-"`
-	StateRevision   int64                 `json:"pane_revision,omitempty"`
-	ScrollMaxOffset int                   `json:"-"`
-	ForegroundCwd   string                `json:"-"`
+	PaneID          string                 `json:"pane_id"`
+	RawPaneID       string                 `json:"raw_pane_id"`
+	TerminalID      string                 `json:"terminal_id"`
+	TabID           string                 `json:"tab_id"`
+	TabLabel        string                 `json:"tab_label"`
+	TabNumber       int                    `json:"tab_number"`
+	WorkspaceID     string                 `json:"workspace_id"`
+	Agent           string                 `json:"agent"`
+	Name            string                 `json:"name"`
+	Status          string                 `json:"status"`
+	Focused         bool                   `json:"_focused"`
+	Cwd             string                 `json:"cwd"`
+	Project         string                 `json:"project"`
+	Host            string                 `json:"host"`
+	Session         string                 `json:"session"`
+	UpdatedAt       int64                  `json:"updated_at"`
+	ActivitySeq     int64                  `json:"activity_seq,omitempty"`
+	BlockedEventID  string                 `json:"event_id,omitempty"`
+	AttentionKind   question.AttentionKind `json:"attention_kind,omitempty"`
+	Prompt          string                 `json:"prompt,omitempty"`
+	Command         string                 `json:"command,omitempty"`
+	Options         []string               `json:"options,omitempty"`
+	Interaction     *question.Interaction  `json:"interaction,omitempty"`
+	QuestionLayout  bool                   `json:"question_layout,omitempty"`
+	InteractionID   string                 `json:"-"`
+	PaneRevision    int                    `json:"-"`
+	StateRevision   int64                  `json:"pane_revision,omitempty"`
+	ScrollMaxOffset int                    `json:"-"`
+	ForegroundCwd   string                 `json:"-"`
 }
 
 type TransitionCallback func(paneID, agent, project, status string, revision int64)
@@ -49,6 +50,7 @@ type State struct {
 	agents             map[string]*AgentState
 	revision           map[string]int64
 	contentRev         map[string]int64
+	attentionRev       map[string]int64
 	prevStatus         map[string]string
 	topologyGen        int64
 	revCounter         int64
@@ -87,6 +89,7 @@ func NewState(logger *slog.Logger) *State {
 		agents:        make(map[string]*AgentState),
 		revision:      make(map[string]int64),
 		contentRev:    make(map[string]int64),
+		attentionRev:  make(map[string]int64),
 		prevStatus:    make(map[string]string),
 		unseenDone:    make(map[string]bool),
 		ackDone:       make(map[string]bool),
@@ -231,11 +234,31 @@ func (s *State) BlockedTransitionCurrent(paneID, eventID string, generation uint
 		uint64(s.generation[paneID]) == generation
 }
 
+func (s *State) AttentionTransitionCurrent(
+	paneID, eventID string,
+	generation uint64,
+	attentionKind string,
+	attentionRevision int64,
+) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	agent := s.agents[paneID]
+	return agent != nil &&
+		agent.Status == "blocked" &&
+		agent.BlockedEventID == eventID &&
+		uint64(s.generation[paneID]) == generation &&
+		string(agent.AttentionKind) == attentionKind &&
+		s.attentionRev[paneID] == attentionRevision
+}
+
 func (s *State) CompletionCurrent(paneID string, revision int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	agent := s.agents[paneID]
-	return agent != nil && !attentionStatuses[agent.Status] && s.completionRev[paneID] == revision
+	return agent != nil &&
+		(!attentionStatuses[agent.Status] ||
+			agent.Status == "blocked" && agent.AttentionKind == question.AttentionChat) &&
+		s.completionRev[paneID] == revision
 }
 
 func (s *State) MarkTopologyChanged() {
@@ -317,6 +340,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		// preserve the event's authoritative status.
 		if exists && s.revision[incoming.PaneID] > baseRev && incoming.Status != existing.Status {
 			cp.Status = existing.Status
+			if existing.Status == "blocked" {
+				copyBlockedDetails(&cp, existing)
+			}
 		}
 
 		pendingTimestamp := false
@@ -347,17 +373,35 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		}
 
 		s.applyBlockedCycleLocked(&cp, existing)
+		attentionChanged := !blockedDetailsEqual(existing, &cp)
 
 		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||
-			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq {
+			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq ||
+			attentionChanged {
 			s.contentRev[incoming.PaneID]++
+		}
+		if attentionChanged {
+			s.attentionRev[incoming.PaneID]++
 		}
 
 		prev := s.prevStatus[incoming.PaneID]
+		previousAttention := question.AttentionKind("")
+		if existing != nil {
+			previousAttention = existing.AttentionKind
+		}
 		s.revision[incoming.PaneID] = s.revCounter
 		s.agents[incoming.PaneID] = &cp
 		s.prevStatus[incoming.PaneID] = cp.Status
-		s.registerTransition(incoming.PaneID, prev, cp.Status)
+		s.registerTransition(incoming.PaneID, prev, cp.Status, previousAttention)
+		if !preservesChatCompletion(prev, cp.Status, previousAttention) {
+			s.syncAttentionCompletionLocked(incoming.PaneID, previousAttention, cp.AttentionKind)
+		}
+		if prev == "blocked" && cp.Status == "blocked" &&
+			(previousAttention != cp.AttentionKind ||
+				attentionChanged && cp.AttentionKind == question.AttentionApproval) &&
+			s.onTransition != nil {
+			s.onTransition(cp.PaneID, cp.Agent, cp.Project, cp.Status, s.revision[cp.PaneID])
+		}
 	}
 
 	for id := range s.agents {
@@ -366,6 +410,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.agents, id)
 			delete(s.revision, id)
 			delete(s.contentRev, id)
+			delete(s.attentionRev, id)
 			delete(s.prevStatus, id)
 			delete(s.unseenDone, id)
 			delete(s.ackDone, id)
@@ -442,7 +487,10 @@ func (s *State) CommitEventForSession(
 	s.revision[paneID] = s.revCounter
 
 	a := agent
+	before := *a
+	before.Options = append([]string(nil), a.Options...)
 	prev := a.Status
+	previousAttention := a.AttentionKind
 	a.Status = status
 	a.UpdatedAt = updatedAt
 	if prev != status {
@@ -450,13 +498,21 @@ func (s *State) CommitEventForSession(
 	}
 	if status == "blocked" {
 		if prev != "blocked" || a.BlockedEventID == "" {
+			clearBlockedDetails(a)
 			a.BlockedEventID = s.newBlockedEventIDLocked()
+			a.AttentionKind = question.AttentionUnknown
 		}
 	} else {
 		clearBlockedDetails(a)
 	}
+	if !blockedDetailsEqual(&before, a) {
+		s.attentionRev[paneID]++
+	}
 	s.prevStatus[paneID] = status
-	s.registerTransition(paneID, prev, status)
+	s.registerTransition(paneID, prev, status, previousAttention)
+	if !preservesChatCompletion(prev, status, previousAttention) {
+		s.syncAttentionCompletionLocked(paneID, previousAttention, a.AttentionKind)
+	}
 	return true
 }
 
@@ -477,6 +533,9 @@ func (s *State) applyBlockedCycleLocked(agent, existing *AgentState) {
 	if agent.Status != "blocked" {
 		clearBlockedDetails(agent)
 		return
+	}
+	if agent.AttentionKind == "" {
+		agent.AttentionKind = question.AttentionUnknown
 	}
 	if agent.BlockedEventID != "" {
 		return
@@ -499,6 +558,7 @@ func (s *State) newBlockedEventIDLocked() string {
 
 func clearBlockedDetails(agent *AgentState) {
 	agent.BlockedEventID = ""
+	agent.AttentionKind = ""
 	agent.Prompt = ""
 	agent.Command = ""
 	agent.Options = nil
@@ -507,15 +567,31 @@ func clearBlockedDetails(agent *AgentState) {
 	agent.InteractionID = ""
 }
 
+func copyBlockedDetails(destination, source *AgentState) {
+	destination.BlockedEventID = source.BlockedEventID
+	destination.AttentionKind = source.AttentionKind
+	destination.Prompt = source.Prompt
+	destination.Command = source.Command
+	destination.Options = append([]string(nil), source.Options...)
+	destination.Interaction = source.Interaction
+	destination.QuestionLayout = source.QuestionLayout
+	destination.InteractionID = source.InteractionID
+}
+
 // registerTransition implements the once-per-cycle notification state machine.
 // Blocked notifications fire only on actual transitions into "blocked" (§16.13).
 // Completion (working/blocked → idle) marks the pane as unseen-done (§9.8).
-func (s *State) registerTransition(paneID, prev, status string) {
+func (s *State) registerTransition(
+	paneID, prev, status string,
+	previousAttention question.AttentionKind,
+) {
 	if attentionStatuses[status] {
-		delete(s.unseenDone, paneID)
-		delete(s.ackDone, paneID)
-		delete(s.finishedNotif, paneID)
-		delete(s.completionRev, paneID)
+		if prev != status {
+			delete(s.unseenDone, paneID)
+			delete(s.ackDone, paneID)
+			delete(s.finishedNotif, paneID)
+			delete(s.completionRev, paneID)
+		}
 		if status == "blocked" && prev != "blocked" && s.onTransition != nil {
 			a := s.agents[paneID]
 			agent, project := "", ""
@@ -547,6 +623,9 @@ func (s *State) registerTransition(paneID, prev, status string) {
 	// §9.8: working/blocked → idle is the common completion path for agents
 	// that don't emit an explicit "done" status.
 	if status == "idle" && attentionStatuses[prev] {
+		if prev == "blocked" && previousAttention == question.AttentionChat {
+			return
+		}
 		delete(s.ackDone, paneID)
 		s.unseenDone[paneID] = true
 		s.completionRev[paneID] = s.revision[paneID]
@@ -559,6 +638,134 @@ func (s *State) registerTransition(paneID, prev, status string) {
 			s.onTransition(paneID, agent, project, status, s.revision[paneID])
 		}
 	}
+}
+
+func (s *State) syncAttentionCompletionLocked(
+	paneID string,
+	previous, current question.AttentionKind,
+) {
+	if current == question.AttentionChat {
+		if previous != question.AttentionChat {
+			delete(s.finishedNotif, paneID)
+			s.completionRev[paneID] = s.revision[paneID]
+		}
+		return
+	}
+	if previous == question.AttentionChat {
+		delete(s.finishedNotif, paneID)
+		delete(s.completionRev, paneID)
+	}
+}
+
+func preservesChatCompletion(
+	previousStatus, currentStatus string,
+	previousAttention question.AttentionKind,
+) bool {
+	return previousStatus == "blocked" &&
+		currentStatus == "idle" &&
+		previousAttention == question.AttentionChat
+}
+
+// CommitAttentionClassification persists pane controls only while the blocked
+// event and pane generation that were read remain current.
+func (s *State) CommitAttentionClassification(
+	paneID, eventID string,
+	generation uint64,
+	contentRevision int64,
+	classification question.Classification,
+) (*AgentState, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	agent := s.agents[paneID]
+	if agent == nil || agent.Status != "blocked" ||
+		agent.BlockedEventID != eventID ||
+		uint64(s.generation[paneID]) != generation ||
+		s.contentRev[paneID] != contentRevision {
+		return nil, false
+	}
+	if classification.Kind == "" {
+		classification.Kind = question.AttentionUnknown
+	}
+	previous := agent.AttentionKind
+	changed := applyAttentionClassification(agent, classification)
+	if changed {
+		s.revCounter++
+		s.revision[paneID] = s.revCounter
+		s.contentRev[paneID]++
+		s.attentionRev[paneID]++
+		s.syncAttentionCompletionLocked(paneID, previous, agent.AttentionKind)
+	}
+	copy := *agent
+	copy.StateRevision = s.revision[paneID]
+	return &copy, true
+}
+
+func applyAttentionClassification(
+	agent *AgentState,
+	classification question.Classification,
+) bool {
+	options := append([]string(nil), classification.Options...)
+	nextInteraction := classification.Interaction
+	nextQuestionLayout := classification.QuestionLayout
+	nextInteractionID := ""
+	if classification.Kind != question.AttentionApproval {
+		options = nil
+	}
+	if classification.Kind != question.AttentionQuestion {
+		nextInteraction = nil
+		nextQuestionLayout = false
+	}
+	if nextInteraction != nil {
+		nextInteractionID = nextInteraction.ID
+	}
+	changed := agent.AttentionKind != classification.Kind ||
+		agent.Prompt != classification.Prompt ||
+		agent.Command != classification.Command ||
+		!stringSlicesEqual(agent.Options, options) ||
+		!interactionsEqual(agent.Interaction, nextInteraction) ||
+		agent.QuestionLayout != nextQuestionLayout ||
+		agent.InteractionID != nextInteractionID
+	agent.AttentionKind = classification.Kind
+	agent.Prompt = classification.Prompt
+	agent.Command = classification.Command
+	agent.Options = options
+	agent.Interaction = nextInteraction
+	agent.QuestionLayout = nextQuestionLayout
+	agent.InteractionID = nextInteractionID
+	return changed
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func blockedDetailsEqual(left, right *AgentState) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.BlockedEventID == right.BlockedEventID &&
+		left.AttentionKind == right.AttentionKind &&
+		left.Prompt == right.Prompt &&
+		left.Command == right.Command &&
+		stringSlicesEqual(left.Options, right.Options) &&
+		interactionsEqual(left.Interaction, right.Interaction) &&
+		left.QuestionLayout == right.QuestionLayout &&
+		left.InteractionID == right.InteractionID
+}
+
+func interactionsEqual(left, right *question.Interaction) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.ID == right.ID
 }
 
 func (s *State) AcknowledgePane(paneID string) bool {
@@ -635,6 +842,12 @@ func (s *State) ContentRevision(paneID string) int64 {
 	return s.contentRev[paneID]
 }
 
+func (s *State) AttentionRevision(paneID string) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.attentionRev[paneID]
+}
+
 func (s *State) AgentCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -666,7 +879,9 @@ func (s *State) RegisterFinishedNotificationForTransition(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	agent := s.agents[paneID]
-	if agent == nil || attentionStatuses[agent.Status] ||
+	if agent == nil ||
+		(attentionStatuses[agent.Status] &&
+			!(agent.Status == "blocked" && agent.AttentionKind == question.AttentionChat)) ||
 		s.completionRev[paneID] != revision || s.finishedNotif[paneID] {
 		return false
 	}

@@ -1,13 +1,39 @@
-import type { Agent, QuestionInteraction } from './types';
+import type { Agent, AttentionKind, QuestionInteraction } from './types';
 import { stripAnsi } from './terminal';
 
 const MENU_LINE_RE = /^\s*[❯›]?\s*\d+\.\s+.+$/;
 const COMMAND_LINE_RE = /^\s*(?:[$>❯›])\s+(.+?)\s*$/;
 const PROMPT_SKIP_RE = /^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$/i;
 
-export function agentStatusGroup(agent: Partial<Agent> | null | undefined): 'blocked' | 'working' | 'done' | 'ready' | 'other' {
+export function rawBlocked(agent: Partial<Agent> | null | undefined): boolean {
   const status = String(agent?.status || 'unknown').trim().toLowerCase().replace(/[_-]+/g, ' ');
-  if (status.includes('blocked')) return 'blocked';
+  return status.includes('blocked');
+}
+
+export function attentionKind(agent: Partial<Agent> | null | undefined): AttentionKind | '' {
+  const kind = String(agent?.attention_kind || '');
+  return ['approval', 'question', 'chat', 'unknown'].includes(kind)
+    ? kind as AttentionKind
+    : '';
+}
+
+export function agentNeedsResponse(agent: Partial<Agent> | null | undefined): boolean {
+  return rawBlocked(agent) && ['approval', 'question'].includes(attentionKind(agent));
+}
+
+export function agentNeedsInspection(agent: Partial<Agent> | null | undefined): boolean {
+  const kind = attentionKind(agent);
+  return rawBlocked(agent) && !['approval', 'question', 'chat'].includes(kind);
+}
+
+export function agentStatusGroup(agent: Partial<Agent> | null | undefined): 'attention' | 'blocked' | 'working' | 'done' | 'ready' | 'other' {
+  const status = String(agent?.status || 'unknown').trim().toLowerCase().replace(/[_-]+/g, ' ');
+  if (status.includes('blocked')) {
+    const kind = attentionKind(agent);
+    if (kind === 'approval' || kind === 'question') return 'blocked';
+    if (kind === 'chat') return 'ready';
+    return 'attention';
+  }
   if (/(working|running|progress|busy)/.test(status)) return 'working';
   if (/(done|complete|finish|success|unread)/.test(status)) return 'done';
   if (status === 'idle' || status === 'ready') return 'ready';
@@ -17,7 +43,7 @@ export function agentStatusGroup(agent: Partial<Agent> | null | undefined): 'blo
 export function agentStatusTone(agent: Partial<Agent> | null | undefined): 'danger' | 'warning' | 'success' | 'muted' {
   const group = agentStatusGroup(agent);
   if (group === 'blocked') return 'danger';
-  if (group === 'working') return 'warning';
+  if (group === 'attention' || group === 'working') return 'warning';
   if (group === 'done') return 'success';
   return 'muted';
 }
@@ -86,12 +112,9 @@ export function normalizeInlineText(text: unknown): string {
 }
 
 export function approvalOptions(agent: Partial<Agent> | null | undefined): string[] {
+  if (!rawBlocked(agent) || agent?.attention_capable !== true || attentionKind(agent) !== 'approval') return [];
   const options = Array.isArray(agent?.options) ? agent.options.filter(Boolean) : [];
-  if (options.length) return options;
-  if (agent?.question_layout) return [];
-  return agentStatusGroup(agent) === 'blocked'
-    ? ['yes, single permission', 'trust, always allow', 'no (tab to edit)']
-    : [];
+  return options.length >= 2 ? options : [];
 }
 
 export function approvalButtonTone(option: string, index: number, total: number): 'approve' | 'trust' | 'deny' {
@@ -117,6 +140,7 @@ export function approvalPromptPreview(agent: Partial<Agent> | null | undefined):
 }
 
 export function questionInteraction(agent: Partial<Agent> | null | undefined): QuestionInteraction | null {
+  if (!rawBlocked(agent) || agent?.attention_capable !== true || attentionKind(agent) !== 'question') return null;
   const interaction = agent?.interaction;
   if (!interaction || typeof interaction !== 'object') return null;
   if (!['single_select', 'multi_select'].includes(interaction.kind)) return null;
@@ -128,15 +152,45 @@ export function clientPaneId(relayId: string, rawPaneId: string): string {
   return `${relayId}::${rawPaneId}`;
 }
 
-export function normalizeAgent(relayId: string, relayLabel: string, agent: Partial<Agent>): Agent {
+export function normalizeAgent(
+  relayId: string,
+  relayLabel: string,
+  agent: Partial<Agent>,
+  attentionCapable = false,
+): Agent {
   const rawPaneId = String(agent.raw_pane_id || agent.pane_id || '');
-  return {
+  return normalizeAgentAttention({
     ...agent,
     relay_id: relayId,
     relay_label: relayLabel,
     raw_pane_id: rawPaneId,
     pane_id: clientPaneId(relayId, rawPaneId),
-  } as Agent;
+  } as Agent, attentionCapable);
+}
+
+export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
+  if (!rawBlocked(agent)) {
+    return {
+      ...agent,
+      attention_capable: capable,
+      attention_kind: undefined,
+      options: undefined,
+      interaction: null,
+      question_layout: false,
+    };
+  }
+  const kind = capable ? attentionKind(agent) || 'unknown' : 'unknown';
+  const next: Agent = {
+    ...agent,
+    attention_capable: capable,
+    attention_kind: kind,
+  };
+  if (kind !== 'approval') next.options = undefined;
+  if (kind !== 'question') {
+    next.interaction = null;
+    next.question_layout = false;
+  }
+  return next;
 }
 
 export function stabilizeBlockedSnapshot(
@@ -146,11 +200,11 @@ export function stabilizeBlockedSnapshot(
   responding: Set<string>,
 ): Agent {
   const paneId = next.pane_id;
-  if (!paneId || agentStatusGroup(next) === 'blocked') {
+  if (!paneId || rawBlocked(next)) {
     if (paneId) misses.delete(paneId);
     return next;
   }
-  if (!previous || agentStatusGroup(previous) !== 'blocked' || responding.has(paneId)) {
+  if (!previous || !rawBlocked(previous) || responding.has(paneId)) {
     misses.delete(paneId);
     return next;
   }
@@ -165,7 +219,8 @@ export function stabilizeBlockedSnapshot(
 
 export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Agent {
   if (!previous) return next;
-  const blocked = next.status === 'blocked';
+  const blocked = rawBlocked(next);
+  const hasAttentionKind = Object.prototype.hasOwnProperty.call(next, 'attention_kind');
   const hasInteraction = Object.prototype.hasOwnProperty.call(next, 'interaction');
   const hasQuestionLayout = Object.prototype.hasOwnProperty.call(next, 'question_layout');
   return {
@@ -180,11 +235,11 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
       ? next.activity_seq
       : previous.activity_seq,
     pane_revision: Math.max(agentPaneRevision(previous), agentPaneRevision(next)) || undefined,
-    prompt: blocked ? (next.prompt ?? previous.prompt) : next.prompt,
-    command: blocked ? (next.command ?? previous.command) : next.command,
-    options: blocked ? (next.options ?? previous.options) : next.options,
-    interaction: blocked && !hasInteraction ? previous.interaction : next.interaction,
-    question_layout: blocked && !hasQuestionLayout ? previous.question_layout : next.question_layout,
+    prompt: blocked && !hasAttentionKind ? (next.prompt ?? previous.prompt) : next.prompt,
+    command: blocked && !hasAttentionKind ? (next.command ?? previous.command) : next.command,
+    options: blocked && !hasAttentionKind ? (next.options ?? previous.options) : next.options,
+    interaction: blocked && !hasAttentionKind && !hasInteraction ? previous.interaction : next.interaction,
+    question_layout: blocked && !hasAttentionKind && !hasQuestionLayout ? previous.question_layout : next.question_layout,
   };
 }
 

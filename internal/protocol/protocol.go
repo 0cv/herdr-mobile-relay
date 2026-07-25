@@ -179,6 +179,7 @@ type PushConfig struct {
 }
 
 var Capabilities = []string{
+	"attention_classification",
 	"clear_activities",
 	"directory_browser",
 	"self_update",

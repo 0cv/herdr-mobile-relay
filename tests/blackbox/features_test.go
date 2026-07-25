@@ -348,7 +348,7 @@ func TestApprovalRequiresCurrentInventoryEventAndDispatchesOnce(t *testing.T) {
 			"tab_id": "tab-1", "workspace_id": "ws-1", "label": "main", "number": 1, "cwd": "/tmp",
 		}},
 		"content": map[string]string{
-			"pane-1": "❯ make release\nDo you want to proceed?\n1. Approve once\n2. Always allow\n3. Reject",
+			"pane-1": "Do you want to proceed?\nBash command\n$ make release\n❯ 1. Approve once\n  2. Always allow\n  3. Reject\nEsc to cancel · Enter to confirm",
 		},
 	})
 	if err != nil {

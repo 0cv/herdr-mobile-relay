@@ -58,10 +58,16 @@ describe('relay command store', () => {
   it('binds approvals to their blocked event and coalesces pane polling', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora',
+      capabilities: ['attention_classification'], agent_profiles: [],
+    });
     socket.message({
       type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'blocked', event_id: 'event-1', agent: 'codex' }],
+      agents: [{
+        pane_id: 'w1:p1', status: 'blocked', event_id: 'event-1', agent: 'codex',
+        attention_kind: 'approval', options: ['Approve once', 'Deny'],
+      }],
     });
     const agent = get(relayStore.agents)[0];
 
@@ -77,6 +83,35 @@ describe('relay command store', () => {
     expect(command).toMatchObject({ pane_id: 'w1:p1', event_id: 'event-1', index: 0, total: 2 });
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(approval).resolves.toBe(true);
+  });
+
+  it('does not trust blocked controls from an old relay', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'old', host: 'fedora',
+      capabilities: ['structured_questions'], agent_profiles: [],
+    });
+    socket.message({
+      type: 'agents',
+      agents: [{
+        pane_id: 'w1:p1', status: 'blocked', event_id: 'event-1', agent: 'codex',
+        options: ['Approve once', 'Deny'],
+        interaction: {
+          id: 'old-question', kind: 'single_select', question: 'Trust this?',
+          options: [{ index: 0, label: 'Yes' }],
+        },
+        question_layout: true,
+      }],
+    });
+    const agent = get(relayStore.agents)[0];
+    expect(agent).toMatchObject({
+      attention_kind: 'unknown',
+      attention_capable: false,
+      interaction: null,
+      question_layout: false,
+    });
+    expect(agent.options).toBeUndefined();
   });
 
   it('deletes persisted activity through its relay and clears the merged view', async () => {

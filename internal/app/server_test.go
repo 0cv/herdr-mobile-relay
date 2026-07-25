@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
+	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
 func testServer() *Server {
@@ -299,6 +301,7 @@ func TestUnchangedPollPreservesBlockedTransitionSideEffects(t *testing.T) {
 	s.transitionEnrich = func(_ context.Context, agent *coordinator.AgentState) {
 		close(enrichStarted)
 		<-enrichRelease
+		agent.AttentionKind = "approval"
 		agent.Command = "Approve deployment"
 		agent.Prompt = "Allow this command?"
 		agent.Options = []string{"Approve", "Reject"}
@@ -366,6 +369,172 @@ func TestBlockedBroadcastDoesNotOvertakeNewerWorkingState(t *testing.T) {
 	case message := <-broadcast.messages:
 		t.Fatalf("stale blocked transition was broadcast after working revision: %#v", message)
 	default:
+	}
+}
+
+func TestApprovalPushCanceledWhenAttentionIsReclassified(t *testing.T) {
+	s := testServer()
+	push := &blockingTransitionPush{
+		started: make(chan struct{}), release: make(chan struct{}), cancel: make(chan struct{}),
+	}
+	broadcast := &recordingTransitionBroadcast{messages: make(chan any, 1)}
+	s.transitionPush = push
+	s.transitionBroadcast = broadcast
+	s.transitionEnrich = func(_ context.Context, agent *coordinator.AgentState) {
+		agent.AttentionKind = question.AttentionApproval
+		agent.Command = "Approve deployment"
+		agent.Prompt = "Allow this command?"
+		agent.Options = []string{"Approve", "Reject"}
+	}
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "codex", Project: "relay", Status: "working",
+	}}, s.state.RevisionCounter())
+	s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli())
+	revision := s.state.Revision("pane-1")
+
+	done := make(chan struct{})
+	go func() {
+		s.handleTransition(context.Background(), "pane-1", "codex", "relay", "blocked", revision)
+		close(done)
+	}()
+	<-push.started
+
+	agent, ok := s.state.Agent("pane-1")
+	if !ok {
+		t.Fatal("blocked agent disappeared")
+	}
+	generation, active := s.state.PaneSession("pane-1")
+	if !active {
+		t.Fatal("blocked pane session disappeared")
+	}
+	if _, committed := s.state.CommitAttentionClassification(
+		"pane-1",
+		agent.BlockedEventID,
+		uint64(generation),
+		s.state.ContentRevision("pane-1"),
+		question.Classification{
+			Kind:   question.AttentionChat,
+			Prompt: "What would you like to work on next?",
+		},
+	); !committed {
+		t.Fatal("chat reclassification was not committed")
+	}
+	select {
+	case <-push.cancel:
+	case <-time.After(time.Second):
+		t.Fatal("reclassified approval push request was not canceled")
+	}
+	<-done
+
+	select {
+	case message := <-broadcast.messages:
+		t.Fatalf("stale approval was broadcast after reclassification: %#v", message)
+	default:
+	}
+}
+
+func TestChatClassificationUsesOneCompletionPath(t *testing.T) {
+	root := t.TempDir()
+	s := testServer()
+	journal, err := activity.OpenJournal(filepath.Join(root, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.dispatcher = coordinator.NewDispatcher(nil, s.state, journal, s.logger)
+	t.Cleanup(func() {
+		_ = s.dispatcher.Close(context.Background())
+	})
+	push := &recordingTransitionPush{messages: make(chan []byte, 3)}
+	broadcast := &recordingTransitionBroadcast{messages: make(chan any, 3)}
+	s.transitionPush = push
+	s.transitionBroadcast = broadcast
+	s.transitionEnrich = func(_ context.Context, agent *coordinator.AgentState) {
+		agent.AttentionKind = "chat"
+		agent.Prompt = "Hello! What would you like to work on next?"
+		agent.Options = []string{"fabricated", "controls"}
+	}
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "codex", Project: "relay", Status: "working",
+	}}, s.state.RevisionCounter())
+	s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli())
+	s.handleTransition(
+		context.Background(), "pane-1", "codex", "relay", "blocked",
+		s.state.Revision("pane-1"),
+	)
+
+	entries := journal.Recent(10)
+	if len(entries) != 1 || entries[0].Kind != "finished" ||
+		entries[0].Extract != "Hello! What would you like to work on next?" {
+		t.Fatalf("chat activities = %+v, want one completion", entries)
+	}
+	if len(push.messages) != 1 {
+		t.Fatalf("chat pushes = %d, want one completion push", len(push.messages))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(<-push.messages, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fmt.Sprint(payload["title"]), "finished") ||
+		len(payload["actions"].([]any)) != 0 {
+		t.Fatalf("chat push = %+v", payload)
+	}
+	message := (<-broadcast.messages).(map[string]any)
+	if fmt.Sprint(message["attention_kind"]) != "chat" {
+		t.Fatalf("chat broadcast = %+v", message)
+	}
+	if options, ok := message["options"].([]string); ok && len(options) != 0 {
+		t.Fatalf("chat broadcast retained controls: %+v", message)
+	}
+
+	s.state.CommitEvent("pane-1", "idle", time.Now().UnixMilli())
+	s.handleTransition(
+		context.Background(), "pane-1", "codex", "relay", "idle",
+		s.state.Revision("pane-1"),
+	)
+	if len(journal.Recent(10)) != 1 || len(push.messages) != 0 {
+		t.Fatal("raw idle duplicated the classified chat completion")
+	}
+}
+
+func TestUnknownClassificationHasNoNotificationActions(t *testing.T) {
+	root := t.TempDir()
+	s := testServer()
+	journal, err := activity.OpenJournal(filepath.Join(root, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.dispatcher = coordinator.NewDispatcher(nil, s.state, journal, s.logger)
+	t.Cleanup(func() {
+		_ = s.dispatcher.Close(context.Background())
+	})
+	push := &recordingTransitionPush{messages: make(chan []byte, 1)}
+	s.transitionPush = push
+	s.transitionBroadcast = &recordingTransitionBroadcast{messages: make(chan any, 1)}
+	s.transitionEnrich = func(_ context.Context, agent *coordinator.AgentState) {
+		agent.AttentionKind = "unknown"
+		agent.Prompt = "Agent needs inspection"
+		agent.Options = []string{"Approve", "Reject"}
+	}
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "opencode", Project: "relay", Status: "working",
+	}}, s.state.RevisionCounter())
+	s.state.CommitEvent("pane-1", "blocked", time.Now().UnixMilli())
+	s.handleTransition(
+		context.Background(), "pane-1", "opencode", "relay", "blocked",
+		s.state.Revision("pane-1"),
+	)
+
+	var payload map[string]any
+	if err := json.Unmarshal(<-push.messages, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fmt.Sprint(payload["title"]), "needs inspection") ||
+		len(payload["actions"].([]any)) != 0 {
+		t.Fatalf("unknown push = %+v", payload)
+	}
+	agent, _ := s.state.Agent("pane-1")
+	if len(agent.Options) != 0 || agent.Interaction != nil {
+		t.Fatalf("unknown classification retained controls: %+v", agent)
 	}
 }
 

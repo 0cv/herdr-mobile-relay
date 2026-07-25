@@ -1,4 +1,5 @@
 export type RelayStatus = 'connecting' | 'connected' | 'disconnected';
+export type AttentionKind = 'approval' | 'question' | 'chat' | 'unknown';
 
 export type AgentInventoryState = 'starting' | 'ready' | 'error';
 
@@ -96,6 +97,8 @@ export interface Agent {
   interaction?: QuestionInteraction | null;
   question_layout?: boolean;
   event_id?: string;
+  attention_kind?: AttentionKind;
+  attention_capable?: boolean;
   tab_id?: string;
   tab_label?: string;
   tab_number?: number;

@@ -14,8 +14,11 @@
   import { activityForNotification } from '$lib/activity';
   import {
     agentContextLabel,
+    agentNeedsInspection,
+    agentNeedsResponse,
     agentStatusGroup,
     agentStatusTone,
+    attentionKind,
     approvalOptions,
     approvalPromptPreview,
     displayName,
@@ -107,7 +110,13 @@
     return {
       tone: agentStatusTone(activeAgent),
       hollow: group === 'ready',
-      label: `Agent ${group === 'ready' ? 'idle' : group === 'other' ? activeAgent.status || 'unknown' : group}`,
+      label: `Agent ${group === 'ready'
+        ? 'idle'
+        : group === 'attention'
+          ? 'needs inspection'
+          : group === 'other'
+            ? activeAgent.status || 'unknown'
+            : group}`,
     };
   });
 
@@ -128,14 +137,15 @@
   });
 
   $effect(() => {
-    const blocked = $agents.filter((agent) => agentStatusGroup(agent) === 'blocked');
+    const blocked = $agents.filter((agent) => agentNeedsResponse(agent) || agentNeedsInspection(agent));
     document.title = blocked.length ? `(${blocked.length}) 🐑 herdr` : '🐑 herdr';
     if (blocked.length && navigator.setAppBadge) void navigator.setAppBadge(blocked.length).catch(() => {});
     else if (navigator.clearAppBadge) void navigator.clearAppBadge().catch(() => {});
-    const added = blocked.filter((agent) => !lastBlocked.has(agent.pane_id));
+    const attentionKey = (agent: Agent) => `${agent.pane_id}:${agent.event_id || ''}:${attentionKind(agent)}`;
+    const added = blocked.filter((agent) => !lastBlocked.has(attentionKey(agent)));
     if (added.length && navigator.vibrate) navigator.vibrate([120, 80, 120]);
     for (const agent of added) void notifyBlockedAgent(agent);
-    lastBlocked = new Set(blocked.map((agent) => agent.pane_id));
+    lastBlocked = new Set(blocked.map(attentionKey));
   });
 
   let notificationFallback: ReturnType<typeof setTimeout> | null = null;
@@ -309,9 +319,14 @@
         relayStore.showToast('This notification action was already handled.');
         return;
       }
-      if (agentStatusGroup(agent) !== 'blocked') {
+      if (!agentNeedsResponse(agent)) {
         rememberNotificationAction(target);
-        relayStore.showToast('The agent is no longer blocked.');
+        relayStore.showToast('The agent is no longer waiting for a response.');
+        return;
+      }
+      if (attentionKind(agent) !== 'approval') {
+        rememberNotificationAction(target);
+        relayStore.showToast('This request must be answered in the app.', true);
         return;
       }
       if (!target.notification_id || target.notification_id !== agent.event_id) {
@@ -320,9 +335,19 @@
         return;
       }
       const options = approvalOptions(agent);
+      if (options.length < 2) {
+        rememberNotificationAction(target);
+        relayStore.showToast('Approval choices are no longer available.', true);
+        return;
+      }
       const index = target.index ?? 0;
-      const total = target.total ?? Math.max(2, options.length);
-      const approved = await relayStore.respond(agent, index, total, options[index] || 'approve once', `Notification: ${target.action}`);
+      const total = target.total ?? options.length;
+      if (total !== options.length || index < 0 || index >= options.length) {
+        rememberNotificationAction(target);
+        relayStore.showToast('This notification belongs to an older approval request.', true);
+        return;
+      }
+      const approved = await relayStore.respond(agent, index, total, options[index], `Notification: ${target.action}`);
       if (approved) rememberNotificationAction(target);
     } finally {
       handlingNotifications.delete(key);
@@ -335,7 +360,8 @@
     const connection = $connections.get(agent.relay_id);
     if (pushOptedIn() && connection && ['sent', 'subscribed'].includes(connection.pushStatus)) return;
     const options = approvalOptions(agent);
-    const total = Math.max(2, options.length);
+    const kind = attentionKind(agent);
+    const total = options.length;
     const target = {
       host: String(agent.host || hostLabel(agent)),
       pane_id: agent.raw_pane_id,
@@ -343,16 +369,28 @@
     };
     const approve = { ...target, action: 'approve', index: 0, total } as NotificationTarget;
     const open = { ...target, action: '', index: null, total: null } as NotificationTarget;
-    await showPageNotification(`${displayName(agent)} blocked`, {
-      body: approvalPromptPreview(agent) || `${agent.agent || 'Agent'} needs approval`,
+    const title = kind === 'approval'
+      ? `${displayName(agent)} blocked`
+      : kind === 'question'
+        ? `${displayName(agent)} needs answers`
+        : `${displayName(agent)} needs inspection`;
+    const fallback = kind === 'approval'
+      ? `${agent.agent || 'Agent'} needs approval`
+      : kind === 'question'
+        ? `${agent.agent || 'Agent'} needs an answer`
+        : `${agent.agent || 'Agent'} needs inspection`;
+    await showPageNotification(title, {
+      body: approvalPromptPreview(agent) || fallback,
       tag: `herdr-${target.host}-${target.pane_id}`,
       renotify: true,
       icon: typeof HERDR_NOTIFICATION_ICON === 'string' ? HERDR_NOTIFICATION_ICON : undefined,
       badge: typeof HERDR_NOTIFICATION_BADGE === 'string' ? HERDR_NOTIFICATION_BADGE : undefined,
-      actions: [{ action: 'approve', title: 'Approve once' }],
+      actions: kind === 'approval' && total >= 2 ? [{ action: 'approve', title: 'Approve once' }] : [],
       data: {
         url: viewUrl({ view: 'notification', target: open }),
-        action_urls: { approve: viewUrl({ view: 'notification', target: approve }) },
+        action_urls: kind === 'approval' && total >= 2
+          ? { approve: viewUrl({ view: 'notification', target: approve }) }
+          : {},
       },
     });
   }

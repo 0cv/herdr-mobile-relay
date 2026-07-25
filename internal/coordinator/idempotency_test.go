@@ -187,12 +187,12 @@ func TestApprovalRetryAfterStatusChangeReturnsStoredPhase(t *testing.T) {
 	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
 		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
 		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  printf 'Run command?\\n1. Approve\\n2. Reject\\n'\n"+
+		"  printf '"+approvalPane+"\\n'\n"+
 		"else\n"+
 		"  printf '{\"ok\":true}\\n'\n"+
 		"fi\n")
 	state := NewState(testLogger())
-	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "blocked"}}, state.RevisionCounter())
+	commitApproval(state, "pane-1")
 	eventID := blockedEventID(t, &Dispatcher{state: state}, "pane-1")
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
 	updates := make(chan map[string]any, 1)

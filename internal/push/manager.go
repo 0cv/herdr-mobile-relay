@@ -564,6 +564,17 @@ func truncateEndpoint(endpoint string) string {
 }
 
 func BuildBlockedPayload(agent, project, command, eventID, paneID, host string, hasApproval bool, approvalTotal int) []byte {
+	kind := "question"
+	if hasApproval {
+		kind = "approval"
+	}
+	return BuildAttentionPayload(agent, project, command, eventID, paneID, host, kind, approvalTotal)
+}
+
+func BuildAttentionPayload(
+	agent, project, command, eventID, paneID, host, kind string,
+	approvalTotal int,
+) []byte {
 	notifyURL := notificationURL(host, paneID, eventID, "", 0, 0)
 
 	if project == "" {
@@ -573,11 +584,13 @@ func BuildBlockedPayload(agent, project, command, eventID, paneID, host string, 
 		project = "agent"
 	}
 	if command == "" {
-		command = "Agent needs approval"
+		command = "Agent needs inspection"
 	}
-	title := fmt.Sprintf("%s blocked", project)
+	title := fmt.Sprintf("%s needs inspection", project)
 	body := fmt.Sprintf("%s · %s", command, host)
-	if !hasApproval {
+	if kind == "approval" && approvalTotal >= 2 {
+		title = fmt.Sprintf("%s blocked", project)
+	} else if kind == "question" {
 		title = fmt.Sprintf("%s needs answers", project)
 	}
 
@@ -589,16 +602,12 @@ func BuildBlockedPayload(agent, project, command, eventID, paneID, host string, 
 		"actions":     []any{},
 		"action_urls": map[string]string{},
 	}
-	if hasApproval {
-		total := approvalTotal
-		if total < 2 {
-			total = 2
-		}
+	if kind == "approval" && approvalTotal >= 2 {
 		payload["actions"] = []map[string]any{
 			{"action": "approve", "title": "Approve once"},
 		}
 		payload["action_urls"] = map[string]string{
-			"approve": notificationURL(host, paneID, eventID, "approve", 0, total),
+			"approve": notificationURL(host, paneID, eventID, "approve", 0, approvalTotal),
 		}
 	}
 	data, _ := json.Marshal(payload)

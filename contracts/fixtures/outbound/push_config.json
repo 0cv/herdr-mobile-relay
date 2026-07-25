@@ -9,6 +9,7 @@
   "update": {"state": "current"},
   "app_deploy": {"state": "idle", "configured": false},
   "capabilities": [
+    "attention_classification",
     "clear_activities",
     "directory_browser",
     "self_update",

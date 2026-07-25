@@ -78,11 +78,6 @@ var (
 	responsePrefixPattern = regexp.MustCompile(`^\s*[•●]\s+`)
 )
 
-var (
-	toolOptions     = []string{"yes, single permission", "trust, always allow", "no (tab to edit)"}
-	subagentOptions = []string{"approve all pending", "configure individually", "exit (cancel subagents)"}
-)
-
 func Supports(agent string) bool {
 	agent = strings.ToLower(agent)
 	return strings.Contains(agent, "claude") ||
@@ -285,14 +280,7 @@ func approvalOptions(lines []string) []string {
 			return append([]string(nil), runs[index]...)
 		}
 	}
-	lower := strings.ToLower(strings.Join(lines, "\n"))
-	if strings.Contains(lower, "yes, single permission") {
-		return append([]string(nil), toolOptions...)
-	}
-	if strings.Contains(lower, "approve all pending") {
-		return append([]string(nil), subagentOptions...)
-	}
-	return append([]string(nil), toolOptions...)
+	return nil
 }
 
 func approvalCommand(lines []string) string {

@@ -84,13 +84,13 @@ func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
 	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
 		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
 		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
-		"  printf 'ordinary approval\\n1. Approve\\n2. Reject\\n'\n"+
+		"  printf '"+approvalPane+"\\n'\n"+
 		"else\n"+
 		"  sleep 30\n"+
 		"fi\n")
 
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
-	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "blocked"}}, d.state.RevisionCounter())
+	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
 
 	approve := func() *CommandResult {

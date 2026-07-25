@@ -2,10 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { activityForNotification, activityMatchesSearch } from '$lib/activity';
 import {
   agentActivitySeq,
+  agentNeedsInspection,
+  agentStatusGroup,
   agentStatusTone,
   agentUpdatedAt,
+  approvalOptions,
   mergeAgentDetails,
   mergeAgentList,
+  normalizeAgent,
   sortedAgents,
   tabName,
 } from '$lib/agents';
@@ -286,7 +290,15 @@ describe('terminal rendering', () => {
 describe('agent state and sorting', () => {
   it('maps active agent states to semantic indicator tones', () => {
     expect(agentStatusTone(agent({ status: 'working' }))).toBe('warning');
-    expect(agentStatusTone(agent({ status: 'blocked' }))).toBe('danger');
+    expect(agentStatusTone(agent({
+      status: 'blocked', attention_kind: 'approval', attention_capable: true,
+    }))).toBe('danger');
+    expect(agentStatusTone(agent({
+      status: 'blocked', attention_kind: 'unknown', attention_capable: true,
+    }))).toBe('warning');
+    expect(agentStatusGroup(agent({
+      status: 'blocked', attention_kind: 'chat', attention_capable: true,
+    }))).toBe('ready');
     expect(agentStatusTone(agent({ status: 'done' }))).toBe('success');
     expect(agentStatusTone(agent({ status: 'idle' }))).toBe('muted');
   });
@@ -345,16 +357,42 @@ describe('agent state and sorting', () => {
       id: 'old-question', kind: 'single_select', question: 'Old question',
       options: [{ index: 0, label: 'First' }],
     };
-    const question = agent({ status: 'blocked', interaction, question_layout: true });
-    const approval = agent({ status: 'blocked', interaction: null, question_layout: false });
+    const question = agent({
+      status: 'blocked', attention_kind: 'question', attention_capable: true,
+      interaction, question_layout: true,
+    });
+    const approval = agent({
+      status: 'blocked', attention_kind: 'approval', attention_capable: true,
+      options: ['Approve', 'Reject'], interaction: null, question_layout: false,
+    });
     expect(mergeAgentDetails(question, approval)).toMatchObject({
-      status: 'blocked', interaction: null, question_layout: false,
+      status: 'blocked', attention_kind: 'approval',
+      options: ['Approve', 'Reject'], interaction: null, question_layout: false,
     });
 
-    const sparse = agent({ status: 'blocked' });
+    const sparse = agent({ status: 'blocked', attention_capable: true });
     expect(mergeAgentDetails(question, sparse)).toMatchObject({
       interaction, question_layout: true,
     });
+  });
+
+  it('uses terminal-only fallback for relays without attention classification', () => {
+    const normalized = normalizeAgent('relay', 'Fedora', {
+      pane_id: 'w1:p1',
+      status: 'blocked',
+      attention_kind: 'approval',
+      options: ['Approve once', 'Deny'],
+    }, false);
+    expect(normalized).toMatchObject({
+      attention_kind: 'unknown',
+      attention_capable: false,
+      question_layout: false,
+    });
+    expect(normalized.options).toBeUndefined();
+    expect(approvalOptions(normalized)).toEqual([]);
+    expect(agentStatusGroup(normalized)).toBe('attention');
+    expect(agentNeedsInspection(normalized)).toBe(true);
+    expect(agentNeedsInspection(agent({ status: 'blocked' }))).toBe(true);
   });
 
   it('clears a previous session title when the relay sends an empty value', () => {

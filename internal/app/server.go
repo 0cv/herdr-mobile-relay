@@ -271,10 +271,15 @@ func (s *Server) Run(ctx context.Context) error {
 			agent, _ := s.agentInfo(paneID)
 			agentLower := strings.ToLower(agent)
 			if content, ok := resp["content"].(string); ok {
-				interaction := question.Parse(content, agent)
-				resp["interaction"] = interaction
-				resp["question_layout"] = question.LayoutHint(content)
-				if interaction == nil && (strings.Contains(agentLower, "claude") || strings.Contains(agentLower, "qoder")) {
+				classification := question.Classify(content, agent)
+				resp["attention_kind"] = classification.Kind
+				resp["prompt"] = classification.Prompt
+				resp["command"] = classification.Command
+				resp["options"] = classification.Options
+				resp["interaction"] = classification.Interaction
+				resp["question_layout"] = classification.QuestionLayout
+				if classification.Interaction == nil &&
+					(strings.Contains(agentLower, "claude") || strings.Contains(agentLower, "qoder")) {
 					resp["content"] = s.historyM.Merge(paneID, content)
 				}
 			}
@@ -432,21 +437,22 @@ func (s *Server) Run(ctx context.Context) error {
 		s.udp.SetOnDirty(func() { s.poller.Wake() })
 		s.udp.SetOnChange(func(agent *coordinator.AgentState) {
 			s.broadcastCommitted(map[string]any{
-				"type":          "agent_update",
-				"pane_id":       agent.PaneID,
-				"raw_pane_id":   agent.RawPaneID,
-				"status":        agent.Status,
-				"agent":         agent.Agent,
-				"tab_id":        agent.TabID,
-				"tab_label":     agent.TabLabel,
-				"tab_number":    agent.TabNumber,
-				"workspace_id":  agent.WorkspaceID,
-				"cwd":           agent.Cwd,
-				"project":       agent.Project,
-				"host":          agent.Host,
-				"updated_at":    agent.UpdatedAt,
-				"event_id":      agent.BlockedEventID,
-				"pane_revision": agent.StateRevision,
+				"type":           "agent_update",
+				"pane_id":        agent.PaneID,
+				"raw_pane_id":    agent.RawPaneID,
+				"status":         agent.Status,
+				"agent":          agent.Agent,
+				"tab_id":         agent.TabID,
+				"tab_label":      agent.TabLabel,
+				"tab_number":     agent.TabNumber,
+				"workspace_id":   agent.WorkspaceID,
+				"cwd":            agent.Cwd,
+				"project":        agent.Project,
+				"host":           agent.Host,
+				"updated_at":     agent.UpdatedAt,
+				"event_id":       agent.BlockedEventID,
+				"attention_kind": agent.AttentionKind,
+				"pane_revision":  agent.StateRevision,
 			})
 			s.poller.Wake()
 		})
@@ -490,21 +496,13 @@ func (s *Server) Run(ctx context.Context) error {
 			if err != nil {
 				s.recordSafeError("blocked pane enrichment failed", err)
 				s.logger.Warn("blocked pane enrichment failed", "pane_id", a.PaneID, "error", err)
-				a.Prompt = "Agent is blocked"
-				_, _, a.Options = question.ApprovalDetails("")
+				setAgentAttention(a, question.Classification{
+					Kind:   question.AttentionUnknown,
+					Prompt: "Agent needs inspection",
+				})
 				continue
 			}
-			raw := string(content)
-			a.QuestionLayout = question.LayoutHint(raw)
-			a.Interaction = question.Parse(raw, a.Agent)
-			a.Prompt, a.Command, a.Options = question.ApprovalDetails(raw)
-			if a.Interaction != nil {
-				a.Command = a.Interaction.Question
-				a.Options = nil
-				a.InteractionID = a.Interaction.ID
-			} else if a.QuestionLayout {
-				a.Options = nil
-			}
+			setAgentAttention(a, question.Classify(string(content), a.Agent))
 		}
 	})
 
@@ -646,9 +644,11 @@ func (s *Server) handleTransition(
 	var session string
 	var blockedEventID string
 	var paneGeneration uint64
+	var blockedContentRevision int64
 	if agentExists {
 		session = agentState.Session
 		blockedEventID = agentState.BlockedEventID
+		blockedContentRevision = s.state.ContentRevision(paneID)
 	}
 	if status == "blocked" {
 		generation, active := s.state.PaneSession(paneID)
@@ -670,76 +670,95 @@ func (s *Server) handleTransition(
 	defer cancel()
 
 	if status == "blocked" {
-		eventID := paneID
-		hasApproval := false
-		approvalTotal := 0
-		command := "Agent needs approval"
-		extract := ""
-		if agentExists {
-			if s.transitionEnrich != nil {
-				s.transitionEnrich(ctx, agentState)
-			} else {
-				s.enrichBlockedTransition(ctx, agentState)
+		if !agentExists {
+			return
+		}
+		if s.transitionEnrich != nil {
+			s.transitionEnrich(ctx, agentState)
+		} else {
+			s.enrichBlockedTransition(ctx, agentState)
+		}
+		if !transitionCurrent() {
+			return
+		}
+		persisted, ok := s.state.CommitAttentionClassification(
+			paneID,
+			blockedEventID,
+			paneGeneration,
+			blockedContentRevision,
+			classificationFromAgent(agentState),
+		)
+		if !ok || !transitionCurrent() {
+			return
+		}
+		agentState = persisted
+		classifiedAttentionRevision := s.state.AttentionRevision(paneID)
+		classifiedCurrent := func() bool {
+			return s.state.AttentionTransitionCurrent(
+				paneID,
+				blockedEventID,
+				paneGeneration,
+				string(agentState.AttentionKind),
+				classifiedAttentionRevision,
+			)
+		}
+		if !classifiedCurrent() {
+			return
+		}
+		if agentState.AttentionKind == question.AttentionChat {
+			s.broadcastBlockedAttention(agentState)
+			s.handleChatCompletion(ctx, agentState)
+			return
+		}
+
+		eventID := agentState.BlockedEventID
+		command := agentState.Command
+		activityKind := "blocked"
+		if command == "" {
+			switch agentState.AttentionKind {
+			case question.AttentionQuestion:
+				command = "Agent needs an answer"
+			case question.AttentionUnknown:
+				command = "Agent needs inspection"
+			default:
+				command = "Agent needs approval"
 			}
-			if !transitionCurrent() {
-				return
-			}
-			if agentState.BlockedEventID != "" {
-				eventID = agentState.BlockedEventID
-			}
-			hasApproval = agentState.Interaction == nil && !agentState.QuestionLayout
-			approvalTotal = len(agentState.Options)
-			if agentState.Command != "" {
-				command = agentState.Command
-			}
-			extract = agentState.Prompt
+		}
+		if agentState.AttentionKind == question.AttentionQuestion {
+			activityKind = "question"
 		}
 		if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
-			"blocked", "attention", command, paneID, status, revision,
-			map[string]any{"event_id": eventID}, agent, project, s.hostname, session, extract,
+			activityKind, "attention", command, paneID, status, agentState.StateRevision,
+			map[string]any{
+				"event_id":       eventID,
+				"attention_kind": agentState.AttentionKind,
+			},
+			agent, project, s.hostname, session, agentState.Prompt,
 			blockedEventID, paneGeneration,
+			string(agentState.AttentionKind), classifiedAttentionRevision,
 		) {
 			return
 		}
-		if !transitionCurrent() {
+		if !classifiedCurrent() {
 			return
 		}
 		if s.transitionPush != nil {
-			payload := push.BuildBlockedPayload(agent, project, command, eventID, paneID, s.hostname, hasApproval, approvalTotal)
-			s.sendTransitionPush(ctx, payload, transitionCurrent)
+			payload := push.BuildAttentionPayload(
+				agent,
+				project,
+				command,
+				eventID,
+				paneID,
+				s.hostname,
+				string(agentState.AttentionKind),
+				len(agentState.Options),
+			)
+			s.sendTransitionPush(ctx, payload, classifiedCurrent)
 		}
-		if !transitionCurrent() {
+		if !classifiedCurrent() {
 			return
 		}
-		if agentExists && s.transitionBroadcast != nil {
-			currentRevision := s.state.Revision(paneID)
-			s.transitionBroadcast.Broadcast(map[string]any{
-				"type":            "blocked",
-				"pane_id":         agentState.PaneID,
-				"raw_pane_id":     agentState.RawPaneID,
-				"terminal_id":     agentState.TerminalID,
-				"tab_id":          agentState.TabID,
-				"tab_label":       agentState.TabLabel,
-				"tab_number":      agentState.TabNumber,
-				"workspace_id":    agentState.WorkspaceID,
-				"agent":           agentState.Agent,
-				"name":            agentState.Name,
-				"status":          "blocked",
-				"cwd":             agentState.Cwd,
-				"project":         agentState.Project,
-				"host":            agentState.Host,
-				"session":         agentState.Session,
-				"updated_at":      agentState.UpdatedAt,
-				"event_id":        eventID,
-				"prompt":          agentState.Prompt,
-				"command":         agentState.Command,
-				"options":         agentState.Options,
-				"interaction":     agentState.Interaction,
-				"interaction_id":  agentState.InteractionID,
-				"question_layout": agentState.QuestionLayout,
-				"pane_revision":   currentRevision,
-			})
-		}
+		s.broadcastBlockedAttention(agentState)
 		return
 	}
 	if !s.state.RegisterFinishedNotificationForTransition(paneID, status, revision) {
@@ -802,27 +821,151 @@ func (s *Server) sendTransitionPush(
 }
 
 func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator.AgentState) {
-	if agent == nil || agent.Prompt != "" {
+	if agent == nil {
 		return
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	content, err := s.herdrC.ReadPane(readCtx, agent.PaneID, 80, "ansi")
 	if err != nil {
-		agent.Prompt = "Agent is blocked"
-		_, _, agent.Options = question.ApprovalDetails("")
+		setAgentAttention(agent, question.Classification{
+			Kind:   question.AttentionUnknown,
+			Prompt: "Agent needs inspection",
+		})
 		return
 	}
-	raw := string(content)
-	agent.QuestionLayout = question.LayoutHint(raw)
-	agent.Interaction = question.Parse(raw, agent.Agent)
-	agent.Prompt, agent.Command, agent.Options = question.ApprovalDetails(raw)
-	if agent.Interaction != nil {
-		agent.Command = agent.Interaction.Question
-		agent.Options = nil
-		agent.InteractionID = agent.Interaction.ID
-	} else if agent.QuestionLayout {
-		agent.Options = nil
+	setAgentAttention(agent, question.Classify(string(content), agent.Agent))
+}
+
+func setAgentAttention(
+	agent *coordinator.AgentState,
+	classification question.Classification,
+) {
+	if classification.Kind == "" {
+		classification.Kind = question.AttentionUnknown
+	}
+	agent.AttentionKind = classification.Kind
+	agent.Prompt = classification.Prompt
+	agent.Command = classification.Command
+	agent.Options = nil
+	agent.Interaction = nil
+	agent.QuestionLayout = false
+	agent.InteractionID = ""
+	switch classification.Kind {
+	case question.AttentionApproval:
+		agent.Options = append([]string(nil), classification.Options...)
+	case question.AttentionQuestion:
+		agent.Interaction = classification.Interaction
+		agent.QuestionLayout = classification.QuestionLayout
+		if agent.Interaction != nil {
+			agent.InteractionID = agent.Interaction.ID
+		}
+	}
+}
+
+func classificationFromAgent(agent *coordinator.AgentState) question.Classification {
+	if agent == nil {
+		return question.Classification{Kind: question.AttentionUnknown}
+	}
+	return question.Classification{
+		Kind:           agent.AttentionKind,
+		Prompt:         agent.Prompt,
+		Command:        agent.Command,
+		Options:        append([]string(nil), agent.Options...),
+		Interaction:    agent.Interaction,
+		QuestionLayout: agent.QuestionLayout,
+	}
+}
+
+func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
+	if agent == nil || s.transitionBroadcast == nil {
+		return
+	}
+	message := map[string]any{
+		"type":            "blocked",
+		"pane_id":         agent.PaneID,
+		"raw_pane_id":     agent.RawPaneID,
+		"terminal_id":     agent.TerminalID,
+		"tab_id":          agent.TabID,
+		"tab_label":       agent.TabLabel,
+		"tab_number":      agent.TabNumber,
+		"workspace_id":    agent.WorkspaceID,
+		"agent":           agent.Agent,
+		"name":            agent.Name,
+		"status":          "blocked",
+		"cwd":             agent.Cwd,
+		"project":         agent.Project,
+		"host":            agent.Host,
+		"session":         agent.Session,
+		"updated_at":      agent.UpdatedAt,
+		"event_id":        agent.BlockedEventID,
+		"attention_kind":  agent.AttentionKind,
+		"prompt":          agent.Prompt,
+		"command":         agent.Command,
+		"options":         agent.Options,
+		"interaction":     agent.Interaction,
+		"interaction_id":  agent.InteractionID,
+		"question_layout": agent.QuestionLayout,
+		"pane_revision":   agent.StateRevision,
+	}
+	if s.transitionBroadcast == s.hub {
+		s.broadcastCommitted(message)
+		return
+	}
+	s.transitionBroadcast.Broadcast(message)
+}
+
+func (s *Server) handleChatCompletion(
+	ctx context.Context,
+	agent *coordinator.AgentState,
+) {
+	if agent == nil {
+		return
+	}
+	revision := agent.StateRevision
+	current := func() bool {
+		return s.state.CompletionCurrent(agent.PaneID, revision)
+	}
+	if !current() ||
+		!s.state.RegisterFinishedNotificationForTransition(agent.PaneID, "blocked", revision) {
+		return
+	}
+	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), agent.PaneID)
+	summary := agent.Agent + " completed"
+	if agent.Agent == "" {
+		summary = "Agent completed"
+	}
+	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
+		"finished",
+		"completed",
+		summary,
+		agent.PaneID,
+		"blocked",
+		revision,
+		map[string]any{
+			"event_id":       eventID,
+			"attention_kind": agent.AttentionKind,
+		},
+		agent.Agent,
+		agent.Project,
+		s.hostname,
+		agent.Session,
+		agent.Prompt,
+	) {
+		return
+	}
+	if !current() {
+		return
+	}
+	if s.transitionPush != nil {
+		payload := push.BuildFinishedPayload(
+			agent.Agent,
+			agent.Project,
+			agent.PaneID,
+			s.hostname,
+			eventID,
+		)
+		s.sendTransitionPush(ctx, payload, current)
 	}
 }
 
@@ -1364,7 +1507,7 @@ func (s *Server) broadcastCommitted(message any) {
 			s.agentView = mergeAgentSnapshot(s.agentView, agents)
 			s.stateViewMu.Unlock()
 		})
-	case "agent_update":
+	case "agent_update", "blocked":
 		paneID, _ := envelope["pane_id"].(string)
 		if paneID == "" {
 			s.recordSafeError("agent update broadcast was malformed", nil)
@@ -1534,6 +1677,54 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 		}
 	}
 	setString("event_id", &agent.BlockedEventID)
+	if value, exists := delta["attention_kind"]; exists {
+		agent.AttentionKind = question.AttentionKind(fmt.Sprint(value))
+	}
+	setString("prompt", &agent.Prompt)
+	setString("command", &agent.Command)
+	if value, exists := delta["options"]; exists {
+		agent.Options = nil
+		switch options := value.(type) {
+		case []string:
+			agent.Options = append([]string(nil), options...)
+		case []any:
+			for _, option := range options {
+				if text, ok := option.(string); ok {
+					agent.Options = append(agent.Options, text)
+				}
+			}
+		}
+	}
+	if value, exists := delta["interaction"]; exists {
+		agent.Interaction = nil
+		if value != nil {
+			if data, err := json.Marshal(value); err == nil {
+				var interaction question.Interaction
+				if json.Unmarshal(data, &interaction) == nil {
+					agent.Interaction = &interaction
+				}
+			}
+		}
+	}
+	if value, exists := delta["question_layout"]; exists {
+		agent.QuestionLayout, _ = value.(bool)
+	}
+	if agent.Status != "blocked" {
+		agent.AttentionKind = ""
+		agent.Prompt = ""
+		agent.Command = ""
+		agent.Options = nil
+		agent.Interaction = nil
+		agent.QuestionLayout = false
+	} else {
+		if agent.AttentionKind != question.AttentionApproval {
+			agent.Options = nil
+		}
+		if agent.AttentionKind != question.AttentionQuestion {
+			agent.Interaction = nil
+			agent.QuestionLayout = false
+		}
+	}
 	if value, exists := delta["tab_number"]; exists {
 		agent.TabNumber = messageInt(value, agent.TabNumber)
 	}

@@ -52,6 +52,11 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 		(agent.BlockedEventID == "" || agent.BlockedEventID != payload.EventID) {
 		return d.fail(requestID, "approval", paneID, "This approval request is no longer current")
 	}
+	if ok && agent.Status == "blocked" &&
+		(agent.AttentionKind != question.AttentionApproval ||
+			len(agent.Options) != payload.Total) {
+		return d.fail(requestID, "approval", paneID, "Approval choices are no longer available")
+	}
 	if !ok || agent.Status != "blocked" {
 		replay, found, replayErr := d.scheduler.ReplayLedger(ledgerKey, payloadHash)
 		switch {
@@ -79,16 +84,22 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if current, ok := d.state.Agent(paneID); !ok || current.Status != "blocked" ||
-			current.BlockedEventID == "" || current.BlockedEventID != payload.EventID {
+		current, ok := d.state.Agent(paneID)
+		if !ok || current.Status != "blocked" ||
+			current.BlockedEventID == "" || current.BlockedEventID != payload.EventID ||
+			current.AttentionKind != question.AttentionApproval ||
+			len(current.Options) != payload.Total {
 			return EffectResult{Result: d.fail(requestID, "approval", paneID, "This approval request is no longer current")}
 		}
 		content, err := d.herdr.ReadPane(effectCtx, paneID, 80, "ansi")
 		if err != nil {
 			return EffectResult{Result: d.failErr(requestID, "approval", paneID, err)}
 		}
-		if question.LayoutHint(string(content)) {
-			return EffectResult{Result: d.fail(requestID, "approval", paneID, "Use the question form for this request")}
+		classification := question.Classify(string(content), current.Agent)
+		if classification.Kind != question.AttentionApproval ||
+			len(classification.Options) != payload.Total ||
+			payload.Index >= len(classification.Options) {
+			return EffectResult{Result: d.fail(requestID, "approval", paneID, "Approval choices are no longer available")}
 		}
 		if stale := d.paneSessionCurrent(token, requestID, "approval"); stale != nil {
 			return EffectResult{Result: stale}
@@ -152,6 +163,18 @@ func (d *Dispatcher) watchApproval(parent context.Context, requestID, paneID, ev
 			}
 			agent, ok := d.state.Agent(paneID)
 			if !ok || agent.Status != "blocked" || agent.BlockedEventID == "" || agent.BlockedEventID != eventID {
+				phase = "confirmed"
+				d.commitAndBroadcastPhase(
+					approvalLedgerKey(paneID, eventID),
+					generation,
+					requestID,
+					"approval",
+					paneID,
+					phase,
+				)
+				return
+			}
+			if agent.AttentionKind != question.AttentionApproval {
 				phase = "confirmed"
 				d.commitAndBroadcastPhase(
 					approvalLedgerKey(paneID, eventID),

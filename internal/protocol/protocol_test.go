@@ -89,6 +89,14 @@ func TestPushConfigFixtureHasRequiredCutoverFields(t *testing.T) {
 		len(fixture.Capabilities) != len(Capabilities) {
 		t.Fatalf("incomplete push_config fixture: %+v", fixture)
 	}
+	foundAttentionClassification := false
+	for _, capability := range fixture.Capabilities {
+		foundAttentionClassification = foundAttentionClassification ||
+			capability == "attention_classification"
+	}
+	if !foundAttentionClassification {
+		t.Fatal("push_config fixture does not advertise attention_classification")
+	}
 }
 
 func TestDecodeFailurePreservesTypeSpecificResponse(t *testing.T) {

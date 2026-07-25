@@ -35,6 +35,19 @@ func blockedEventID(t *testing.T, d *Dispatcher, paneID string) string {
 	return agent.BlockedEventID
 }
 
+const approvalPane = `Would you like to run this command?
+$ make check
+❯ 1. Approve
+  2. Reject
+Enter to select · Esc to cancel`
+
+func commitApproval(state *State, paneID string) {
+	state.CommitInventory([]*AgentState{{
+		PaneID: paneID, Agent: "codex", Status: "blocked",
+		AttentionKind: "approval", Options: []string{"Approve", "Reject"},
+	}}, state.RevisionCounter())
+}
+
 // T7 — §9.6 / §16.7: two clients approving the same (pane, event_id, index)
 // must dispatch the approval keystroke exactly once.
 func TestDuplicateApprovalDispatchesOnce(t *testing.T) {
@@ -43,10 +56,14 @@ func TestDuplicateApprovalDispatchesOnce(t *testing.T) {
 	// Records every invocation's argv, then returns success.
 	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
 		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"printf '{\"ok\":true}\\n'\n")
+		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
+		"  printf '"+approvalPane+"\\n'\n"+
+		"else\n"+
+		"  printf '{\"ok\":true}\\n'\n"+
+		"fi\n")
 
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
-	d.state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "blocked"}}, d.state.RevisionCounter())
+	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
 
 	approve := func(reqID string) {
@@ -70,6 +87,39 @@ func TestDuplicateApprovalDispatchesOnce(t *testing.T) {
 	sends := strings.Count(string(data), "send-keys")
 	if sends != 1 {
 		t.Fatalf("duplicate approval dispatched %d send-keys invocations, want 1\nrecord:\n%s", sends, data)
+	}
+}
+
+func TestApprovalRevalidationRejectsCompletedNumberedProse(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "invocations.log")
+	chatPane := `• Resolution plan
+  1. Add parser fixtures.
+  2. Verify the backend.
+─ Worked for 4s ─
+›`
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
+		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
+		"  printf '"+chatPane+"\\n'\n"+
+		"else\n"+
+		"  printf '{\"ok\":true}\\n'\n"+
+		"fi\n")
+	state := NewState(testLogger())
+	commitApproval(state, "pane-1")
+	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	eventID := blockedEventID(t, d, "pane-1")
+
+	result := d.Handle(context.Background(), map[string]any{
+		"action": "respond", "request_id": "stale", "pane_id": "pane-1",
+		"event_id": eventID, "index": float64(0), "total": float64(2),
+	})
+	if result.OK || result.Error != "Approval choices are no longer available" {
+		t.Fatalf("approval result = %+v", result)
+	}
+	data, _ := os.ReadFile(record)
+	if strings.Contains(string(data), "send-keys") {
+		t.Fatalf("approval keys were sent after chat revalidation:\n%s", data)
 	}
 }
 

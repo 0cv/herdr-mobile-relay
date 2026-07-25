@@ -10,7 +10,9 @@ import type { Agent, QuestionInteraction } from '$lib/types';
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
-  project: 'relay', agent: 'codex', status: 'blocked', command: 'Run make check?', options: ['Approve once', 'Always allow', 'Deny'],
+  project: 'relay', agent: 'codex', status: 'blocked',
+  attention_kind: 'approval', attention_capable: true,
+  command: 'Run make check?', options: ['Approve once', 'Always allow', 'Deny'],
 };
 
 describe('accessible Svelte interactions', () => {
@@ -86,6 +88,43 @@ describe('accessible Svelte interactions', () => {
     await user.click(screen.getByRole('button', { name: /Open relay on Fedora/ }));
     expect(onopen).toHaveBeenCalledWith(blockedAgent);
     respond.mockRestore();
+  });
+
+  it('keeps chat replies enabled and unknown blocked panes terminal-only', () => {
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    const chat: Agent = {
+      ...blockedAgent,
+      attention_kind: 'chat',
+      options: undefined,
+    };
+    const { unmount } = render(TerminalView, {
+      agent: chat,
+      allAgents: [chat],
+      frame: { paneId: chat.pane_id, content: 'Hello!', format: 'plain' },
+      responding: new Set<string>(),
+    });
+    expect(screen.getByRole('combobox', { name: 'Prompt' })).toBeEnabled();
+    expect(screen.getByPlaceholderText('Type a reply…')).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Approve once' })).not.toBeInTheDocument();
+    unmount();
+
+    const unknown: Agent = {
+      ...blockedAgent,
+      attention_kind: 'unknown',
+      options: ['must not render', 'reject'],
+    };
+    const unknownView = render(TerminalView, {
+      agent: unknown,
+      allAgents: [unknown],
+      frame: { paneId: unknown.pane_id, content: 'Inspect this pane', format: 'plain' },
+      responding: new Set<string>(),
+    });
+    expect(screen.getByPlaceholderText('Needs inspection — use terminal keys')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
+    expect(screen.queryByText('must not render')).not.toBeInTheDocument();
+    unknownView.unmount();
+    vi.restoreAllMocks();
   });
 
   it('shows degraded inventory, keeps stale agents visible, and disables approvals', () => {

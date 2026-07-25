@@ -13,6 +13,8 @@ import {
   mergeAgentDetails,
   mergeAgentList,
   normalizeAgent,
+  normalizeAgentAttention,
+  rawBlocked,
   staleAgentRevision,
   stabilizeBlockedSnapshot,
 } from './agents';
@@ -430,6 +432,11 @@ class RelayStore {
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
+      const attentionCapable = connection.capabilities.includes('attention_classification');
+      this.agentsValue = this.agentsValue.map((agent) =>
+        agent.relay_id === relayId ? normalizeAgentAttention(agent, attentionCapable) : agent,
+      );
+      this.agents.set(this.agentsValue);
       connection.agentProfiles = Array.isArray(message.agent_profiles)
         ? message.agent_profiles.filter((profile: any) => profile?.id)
         : [];
@@ -500,8 +507,9 @@ class RelayStore {
         && !connection.inventory.stale
       ) return;
       const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
+      const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
       const incoming = (Array.isArray(message.agents) ? message.agents : [])
-        .map((agent: Partial<Agent>) => normalizeAgent(relayId, label, agent));
+        .map((agent: Partial<Agent>) => normalizeAgent(relayId, label, agent, attentionCapable));
       this.agentsValue = mergeAgentList(
         this.agentsValue,
         relayId,
@@ -515,7 +523,8 @@ class RelayStore {
     }
     if (message.type === 'blocked') {
       const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-      const next = normalizeAgent(relayId, label, { ...message, status: 'blocked' });
+      const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
+      const next = normalizeAgent(relayId, label, { ...message, status: 'blocked' }, attentionCapable);
       const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
       const before = index >= 0 ? this.agentsValue[index] : undefined;
       if (staleAgentRevision(before, next)) return;
@@ -532,7 +541,8 @@ class RelayStore {
     }
     if (message.type === 'agent_update' && message.pane_id) {
       const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
-      const next = normalizeAgent(relayId, label, message);
+      const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
+      const next = normalizeAgent(relayId, label, message, attentionCapable);
       const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
       const before = index >= 0 ? this.agentsValue[index] : undefined;
       if (staleAgentRevision(before, next)) return;
@@ -568,20 +578,26 @@ class RelayStore {
   }
 
   private mergePaneInteraction(paneId: string, message: Record<string, any>): void {
-    if (!Object.prototype.hasOwnProperty.call(message, 'interaction')) return;
+    if (!Object.prototype.hasOwnProperty.call(message, 'attention_kind')
+      && !Object.prototype.hasOwnProperty.call(message, 'interaction')) return;
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
     if (index < 0) return;
     const agent = this.agentsValue[index];
+    if (!rawBlocked(agent)) return;
+    const connection = this.connectionsValue.get(agent.relay_id);
+    const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
     const interaction = (message.interaction || null) as QuestionInteraction | null;
     const questionLayout = Boolean(message.question_layout || interaction);
-    let next: Agent | null = null;
-    if (questionLayout) {
-      this.blockedSnapshotMisses.delete(paneId);
-      next = { ...agent, status: 'blocked', interaction: interaction || agent.interaction || null, question_layout: true };
-    } else if (agentStatusGroup(agent) !== 'blocked') {
-      next = { ...agent, interaction: null, question_layout: false };
-    }
-    if (!next) return;
+    const next = normalizeAgentAttention({
+      ...agent,
+      attention_kind: message.attention_kind,
+      prompt: message.prompt,
+      command: message.command,
+      interaction: questionLayout ? interaction : null,
+      question_layout: questionLayout,
+      options: Array.isArray(message.options) ? message.options : undefined,
+    }, attentionCapable);
+    this.blockedSnapshotMisses.delete(paneId);
     const copy = [...this.agentsValue];
     copy[index] = next;
     this.agentsValue = copy;

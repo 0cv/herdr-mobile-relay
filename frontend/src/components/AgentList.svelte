@@ -42,6 +42,7 @@
   }));
 
   const definitions = [
+    ['attention', 'Needs inspection', 'warning'],
     ['blocked', 'Blocked', 'danger'],
     ['done', 'Done', 'success'],
     ['working', 'Working', 'warning'],
@@ -95,6 +96,7 @@
             {@const interaction = questionInteraction(agent)}
             {@const options = approvalOptions(agent)}
             {@const blocked = group === 'blocked'}
+            {@const needsInspection = group === 'attention'}
             {@const tab = tabName(agent)}
           {@const inventoryReady = !connections.has(agent.relay_id) || connections.get(agent.relay_id)?.inventory.state === 'ready'}
           <article class:blocked class:stale={!inventoryReady} class="agent-card">
@@ -109,7 +111,7 @@
                 <span class="agent-copy">
                   <span class="agent-project">{displayName(agent)} <span class="host-badge">@{hostLabel(agent)}</span></span>
                   <span class="agent-meta">{tab && tab !== displayName(agent) ? `${tab} · ` : ''}{agent.session ? `${agent.session} · ` : ''}{agent.agent || 'agent'}</span>
-                  {#if blocked}
+                  {#if blocked || needsInspection}
                     <span class="prompt-preview">{interaction?.question || approvalPromptPreview(agent)}</span>
                   {/if}
                 </span>

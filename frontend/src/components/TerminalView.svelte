@@ -3,7 +3,9 @@
   import Button from '$components/ui/Button.svelte';
   import QuestionForm from '$components/QuestionForm.svelte';
   import {
-    agentStatusGroup,
+    agentNeedsInspection,
+    agentNeedsResponse,
+    attentionKind,
     approvalButtonTone,
     approvalOptions,
     questionInteraction,
@@ -49,11 +51,14 @@
   let activeSlashIndex = $state(0);
   let dismissedSlashQuery = $state<string | null>(null);
 
-  const blocked = $derived(agentStatusGroup(agent) === 'blocked');
+  const responsePending = $derived(agentNeedsResponse(agent));
+  const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
+  const inspectionMode = $derived(agentNeedsInspection(agent));
+  const inputLocked = $derived(responsePending || inspectionMode);
   const interaction = $derived(questionInteraction(agent));
-  const questionMode = $derived(Boolean(blocked && interaction));
+  const questionMode = $derived(Boolean(responsePending && attentionKind(agent) === 'question' && interaction));
   const options = $derived(approvalOptions(agent));
-  const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentStatusGroup(item) === 'blocked' && item.pane_id !== agent.pane_id))[0]);
+  const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
   const filteredSlashCommands = $derived.by(() => {
     if (slashQuery === null) return [];
@@ -63,7 +68,7 @@
   const effectiveSlashIndex = $derived(filteredSlashCommands.length
     ? Math.min(activeSlashIndex, filteredSlashCommands.length - 1)
     : -1);
-  const slashMenuOpen = $derived(!blocked
+  const slashMenuOpen = $derived(!inputLocked
     && !questionMode
     && slashQuery !== null
     && dismissedSlashQuery !== composer);
@@ -183,7 +188,7 @@
 
   async function sendPrompt() {
     const text = composer.replace(/[\r\n]+$/g, '');
-    if (!text || blocked) return;
+    if (!text || inputLocked) return;
     composer = '';
     try {
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
@@ -322,7 +327,7 @@
 </script>
 
 <main
-  class:has-actions={blocked || nextBlocked}
+  class:has-actions={inputLocked || nextBlocked}
   class:question-only={questionMode}
   class="terminal-view"
   aria-label={`${questionMode ? 'Questions' : 'Terminal'} for ${agent.project || agent.name || agent.agent || 'agent'}`}
@@ -399,20 +404,24 @@
       </section>
     {/if}
     <div class="term-input">
-      <Button variant="ghost" size="icon" disabled={blocked} aria-label="Attach image" onclick={() => fileInput.click()}>
+      <Button variant="ghost" size="icon" disabled={inputLocked} aria-label="Attach image" onclick={() => fileInput.click()}>
         <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
           <rect x="3" y="4" width="18" height="16" rx="2"></rect>
           <circle cx="8.5" cy="9" r="1.5"></circle>
           <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
         </svg>
       </Button>
-      <div class:awaiting-approval={blocked && !composerFocused} class:has-text={Boolean(composer)} class="composer-field">
+      <div class:awaiting-approval={approvalMode && !composerFocused} class:has-text={Boolean(composer)} class="composer-field">
         <textarea
           bind:this={composerElement}
           bind:value={composer}
           rows="1"
-          disabled={blocked && !composerFocused}
-          placeholder={blocked ? 'Approval pending — use buttons' : 'Type…'}
+          disabled={inputLocked && !composerFocused}
+          placeholder={approvalMode
+            ? 'Approval pending — use buttons'
+            : inspectionMode
+              ? 'Needs inspection — use terminal keys'
+              : 'Type a reply…'}
           role="combobox"
           aria-label="Prompt"
           aria-autocomplete="list"
@@ -431,12 +440,12 @@
         ></textarea>
         {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={() => { composer = ''; dismissedSlashQuery = null; activeSlashIndex = 0; }}>×</button>{/if}
       </div>
-      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || blocked} aria-label="Send prompt" onclick={sendPrompt}>➤</Button>
+      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked} aria-label="Send prompt" onclick={sendPrompt}>➤</Button>
       <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
 
-    {#if blocked && !responding.has(agent.pane_id)}
+    {#if approvalMode && !responding.has(agent.pane_id)}
       <div class="quick-actions" aria-label="Approval choices">
         {#each options as option, index (`${index}:${option}`)}
           <Button

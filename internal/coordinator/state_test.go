@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
 func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) {
@@ -333,5 +335,167 @@ func TestBlockedEventIDIsStableOnlyWithinBlockedCycle(t *testing.T) {
 	next, _ := s.Agent("p1")
 	if next.BlockedEventID == "" || next.BlockedEventID == first.BlockedEventID {
 		t.Fatalf("new blocked cycle event ID = %q, want a new non-empty value", next.BlockedEventID)
+	}
+}
+
+func TestBlockedClassificationStartsUnknownAndCommitsUnderEventGuards(t *testing.T) {
+	s := NewState(testLogger())
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, 0)
+	s.CommitEvent("p1", "blocked", 1000)
+	blocked, _ := s.Agent("p1")
+	if blocked.AttentionKind != question.AttentionUnknown ||
+		len(blocked.Options) != 0 || blocked.Interaction != nil {
+		t.Fatalf("initial blocked state = %+v, want unknown without controls", blocked)
+	}
+	generation := uint64(s.Generation("p1"))
+	classification := question.Classification{
+		Kind:    question.AttentionApproval,
+		Command: "make check",
+		Options: []string{"Approve", "Reject"},
+	}
+	current, ok := s.CommitAttentionClassification(
+		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification,
+	)
+	if !ok || current.AttentionKind != question.AttentionApproval ||
+		len(current.Options) != 2 || current.StateRevision == blocked.StateRevision {
+		t.Fatalf("committed classification = %+v, ok=%v", current, ok)
+	}
+
+	s.CommitEvent("p1", "working", 2000)
+	if _, ok := s.CommitAttentionClassification(
+		"p1", blocked.BlockedEventID, generation, s.ContentRevision("p1"), classification,
+	); ok {
+		t.Fatal("stale blocked classification committed after the status changed")
+	}
+	working, _ := s.Agent("p1")
+	if working.AttentionKind != "" || len(working.Options) != 0 ||
+		working.Interaction != nil || working.Command != "" {
+		t.Fatalf("working state retained blocked controls: %+v", working)
+	}
+}
+
+func TestInflightPollPreservesNewerBlockedClassification(t *testing.T) {
+	s := NewState(testLogger())
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, 0)
+	token := s.BeginPoll()
+	s.CommitEvent("p1", "blocked", 1000)
+	blocked, _ := s.Agent("p1")
+	if _, ok := s.CommitAttentionClassification(
+		"p1",
+		blocked.BlockedEventID,
+		uint64(s.Generation("p1")),
+		s.ContentRevision("p1"),
+		question.Classification{
+			Kind:    question.AttentionApproval,
+			Command: "make check",
+			Options: []string{"Approve", "Reject"},
+		},
+	); !ok {
+		t.Fatal("classification setup failed")
+	}
+
+	if !s.CommitPoll([]*AgentState{{
+		PaneID: "p1", Agent: "codex", Status: "working",
+	}}, token) {
+		t.Fatal("stable in-flight poll was rejected")
+	}
+	current, _ := s.Agent("p1")
+	if current.Status != "blocked" ||
+		current.AttentionKind != question.AttentionApproval ||
+		len(current.Options) != 2 {
+		t.Fatalf("in-flight poll overwrote newer classification: %+v", current)
+	}
+}
+
+func TestAttentionRevisionIgnoresUnrelatedPollChanges(t *testing.T) {
+	s := NewState(testLogger())
+	transitions := 0
+	s.SetOnTransition(func(_, _, _, _ string, _ int64) {
+		transitions++
+	})
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Agent: "codex", Status: "blocked",
+		AttentionKind: question.AttentionApproval,
+		Options:       []string{"Approve", "Reject"},
+		ActivitySeq:   1,
+	}}, 0)
+	blocked, _ := s.Agent("p1")
+	generation := uint64(s.Generation("p1"))
+	attentionRevision := s.AttentionRevision("p1")
+
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Agent: "codex", Status: "blocked",
+		AttentionKind: question.AttentionApproval,
+		Options:       []string{"Approve", "Reject"},
+		ActivitySeq:   2,
+	}}, s.RevisionCounter())
+	if !s.AttentionTransitionCurrent(
+		"p1",
+		blocked.BlockedEventID,
+		generation,
+		string(question.AttentionApproval),
+		attentionRevision,
+	) {
+		t.Fatal("unrelated activity sequence invalidated the approval classification")
+	}
+	if transitions != 1 {
+		t.Fatalf("unrelated poll changes emitted %d transitions, want 1", transitions)
+	}
+
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Agent: "codex", Status: "blocked",
+		AttentionKind: question.AttentionApproval,
+		Options:       []string{"Approve once", "Reject"},
+		ActivitySeq:   2,
+	}}, s.RevisionCounter())
+	if s.AttentionTransitionCurrent(
+		"p1",
+		blocked.BlockedEventID,
+		generation,
+		string(question.AttentionApproval),
+		attentionRevision,
+	) {
+		t.Fatal("changed approval controls did not invalidate the classification")
+	}
+	if transitions != 2 {
+		t.Fatalf("changed approval controls emitted %d transitions, want 2", transitions)
+	}
+}
+
+func TestBlockedClassificationChangeTriggersAndChatSuppressesIdleCompletion(t *testing.T) {
+	s := NewState(testLogger())
+	var transitions []string
+	s.SetOnTransition(func(_ string, _ string, _ string, status string, _ int64) {
+		transitions = append(transitions, status)
+	})
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Agent: "codex", Status: "blocked",
+		AttentionKind: question.AttentionApproval,
+		Options:       []string{"Approve", "Reject"},
+	}}, 0)
+	if len(transitions) != 1 {
+		t.Fatalf("initial transitions = %v, want blocked", transitions)
+	}
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Agent: "codex", Status: "blocked",
+		AttentionKind: question.AttentionChat,
+	}}, s.RevisionCounter())
+	if len(transitions) != 2 {
+		t.Fatalf("classification transitions = %v, want blocked reclassification", transitions)
+	}
+	chat, _ := s.Agent("p1")
+	if !s.CompletionCurrent("p1", chat.StateRevision) {
+		t.Fatal("chat classification did not establish a completion transition")
+	}
+	if !s.RegisterFinishedNotificationForTransition("p1", "blocked", chat.StateRevision) {
+		t.Fatal("chat completion could not register its notification")
+	}
+
+	s.CommitEvent("p1", "idle", 3000)
+	if len(transitions) != 2 {
+		t.Fatalf("raw idle duplicated chat completion: transitions = %v", transitions)
+	}
+	if !s.CompletionCurrent("p1", chat.StateRevision) {
+		t.Fatal("raw idle canceled the classified chat completion")
 	}
 }
