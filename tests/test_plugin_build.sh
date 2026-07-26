@@ -95,10 +95,18 @@ chmod 700 "$FAKE_INSTALLER"
 cat > "$FAKE_BIN/systemctl" <<'EOF'
 #!/bin/sh
 case " $* " in
-    *" is-active "*) printf 'active\n'; exit 0 ;;
+    *" is-active "*)
+        if [ "${FORCE_INACTIVE:-}" = 1 ] && [ ! -s "$RESTART_LOG" ]; then
+            printf 'inactive\n'
+            exit 3
+        fi
+        printf 'active\n'
+        exit 0
+        ;;
     *" restart "*)
         printf 'restart\n' >> "$RESTART_LOG"
-        if grep -Fx "ExecStart=$SOURCE_CONFIG/herdr-mobile-relay-service.sh" "$UNIT_FILE" >/dev/null; then
+        if grep -Fx "ExecStart=$SOURCE_CONFIG/herdr-mobile-relay-service.sh" "$UNIT_FILE" >/dev/null ||
+           [ "$(readlink -f "$RELEASE_ROOT/current" 2>/dev/null || true)" = "$OLD_RELEASE" ]; then
             printf '{"status":"ok","instance":"test","version":"0.8.6","protocol":2,"release_version":"0.8.6","revision":"old-revision","bundle_hash":"old-web"}\n' > "$HEALTH_FILE"
         else
             printf '{"status":"ok","instance":"test","version":"%s","protocol":2,"release_version":"%s","revision":"%s","bundle_hash":"new-web"}\n' \
@@ -128,6 +136,7 @@ EOF
 chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr" "$FAKE_BIN/sleep"
 
 export SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
+export RELEASE_ROOT OLD_RELEASE
 if HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
@@ -160,10 +169,13 @@ test "$(cat "$TOKEN_RECORD")" = "persisted-private-token"
 diff -qr "$WORK_DIR/target-before" "$TARGET_CONFIG" >/dev/null
 grep -F "previous service recovered successfully" "$WORK_DIR/output" >/dev/null
 
+rm -f "$RESTART_LOG"
 if ! HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
     HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
     HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+    HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 \
+    FORCE_INACTIVE=1 \
     REPLACEMENT_REVISION=new-revision \
     bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/success-output" 2>&1; then
     cat "$WORK_DIR/success-output" >&2
@@ -187,5 +199,81 @@ grep -F "$TARGET_CONFIG/cloudflared/tunnel-credentials.json" \
     "$TARGET_CONFIG/cloudflared/config.yml" >/dev/null
 test ! -e "$SOURCE_CONFIG/.herdr-mobile-relay-installation"
 test ! -e "$REPO_DIR/relay/.herdr-mobile-relay-installation"
+test "$(cat "$RESTART_LOG")" = "restart"
 
-echo "plugin build migration and rollback tests passed"
+BROKEN_ROOT="$WORK_DIR/deleted-release"
+cat > "$UNIT_FILE" <<EOF
+[Service]
+Environment=HERDR_RELAY_ENV=$BROKEN_ROOT/relay.env
+ExecStart=$BROKEN_ROOT/relay/herdr-mobile-relay-service.sh
+WorkingDirectory=$BROKEN_ROOT
+EOF
+rm -f "$RELEASE_ROOT/current" "$RESTART_LOG"
+mv "$TARGET_CONFIG/relay.env" "$WORK_DIR/persistent-relay.env"
+cp "$UNIT_FILE" "$WORK_DIR/broken-unit-before"
+
+if HOME="$TEST_HOME" \
+    PATH="$FAKE_BIN:$PATH" \
+    HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
+    HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+    FORCE_INACTIVE=1 \
+    REPLACEMENT_REVISION=new-revision \
+    bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/missing-config-output" 2>&1; then
+    echo "broken service recovery unexpectedly ran without persistent config" >&2
+    exit 1
+fi
+diff -q "$WORK_DIR/broken-unit-before" "$UNIT_FILE" >/dev/null
+test ! -e "$RESTART_LOG"
+grep -F "persistent relay environment is unavailable" \
+    "$WORK_DIR/missing-config-output" >/dev/null
+
+mv "$WORK_DIR/persistent-relay.env" "$TARGET_CONFIG/relay.env"
+if ! HOME="$TEST_HOME" \
+    PATH="$FAKE_BIN:$PATH" \
+    HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
+    HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+    FORCE_INACTIVE=1 \
+    REPLACEMENT_REVISION=new-revision \
+    bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/recovery-output" 2>&1; then
+    cat "$WORK_DIR/recovery-output" >&2
+    exit 1
+fi
+
+grep -F "recovering broken service paths from persistent plugin config" \
+    "$WORK_DIR/recovery-output" >/dev/null
+test "$(readlink -f "$RELEASE_ROOT/current")" = "$NEW_RELEASE"
+grep -Fx "ExecStart=$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh" \
+    "$UNIT_FILE" >/dev/null
+grep -Fx "WorkingDirectory=$RELEASE_ROOT/current" "$UNIT_FILE" >/dev/null
+grep -Fx "Environment=HERDR_RELAY_ENV=$TARGET_CONFIG/relay.env" "$UNIT_FILE" >/dev/null
+test "$(cat "$RESTART_LOG")" = "restart"
+grep -F source-token "$TARGET_CONFIG/relay.env" >/dev/null
+
+rm -f "$RELEASE_ROOT/current" "$RESTART_LOG"
+ln -s "releases/0.8.6-old" "$RELEASE_ROOT/current"
+cat > "$UNIT_FILE" <<EOF
+[Service]
+Environment=HERDR_RELAY_ENV=$BROKEN_ROOT/relay.env
+ExecStart=$BROKEN_ROOT/relay/herdr-mobile-relay-service.sh
+WorkingDirectory=$BROKEN_ROOT
+EOF
+if HOME="$TEST_HOME" \
+    PATH="$FAKE_BIN:$PATH" \
+    HERDR_RELEASE_ROOT="$RELEASE_ROOT" \
+    HERDR_PLUGIN_INSTALLER="$FAKE_INSTALLER" \
+    FORCE_INACTIVE=1 \
+    bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/recovery-rollback-output" 2>&1; then
+    echo "broken service recovery unexpectedly accepted the wrong replacement identity" >&2
+    exit 1
+fi
+
+test "$(readlink -f "$RELEASE_ROOT/current")" = "$OLD_RELEASE"
+grep -Fx "ExecStart=$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh" \
+    "$UNIT_FILE" >/dev/null
+grep -Fx "WorkingDirectory=$RELEASE_ROOT/current" "$UNIT_FILE" >/dev/null
+grep -Fx "Environment=HERDR_RELAY_ENV=$TARGET_CONFIG/relay.env" "$UNIT_FILE" >/dev/null
+test "$(wc -l < "$RESTART_LOG")" -eq 2
+grep -F "previous service recovered successfully" \
+    "$WORK_DIR/recovery-rollback-output" >/dev/null
+
+echo "plugin build migration, rollback, and recovery tests passed"

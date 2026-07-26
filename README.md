@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** `0.10.5`
+**Current version:** `0.10.6`
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -91,6 +91,11 @@ exact version in `herdr-plugin.toml`. Users never compile the relay. Updates
 atomically activate the executable, web app, and runtime wrappers, verify their
 exact version, revision, and web hash after restart, and roll back the complete
 release if verification fails.
+
+Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
+to the release commit. The same plugin build hook can restore stale service
+paths from the persistent plugin config, including when no usable local release
+remains.
 
 An upgrade from the former 0.8.6 implementation adopts only a validated config
 and cache layout. Relay identity, push subscriptions, activity, history,

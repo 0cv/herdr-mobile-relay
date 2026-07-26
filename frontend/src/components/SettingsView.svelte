@@ -48,7 +48,7 @@
   } from '$lib/updates';
   import type { RelayConnectionView } from '$lib/types';
 
-  const MANAGED_UPDATE_COMMAND = 'HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes && herdr plugin action invoke install-service --plugin herdr-mobile-relay.events';
+  const MANAGED_UPDATE_COMMAND = 'HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes';
   const CHECKOUT_UPDATE_COMMAND = 'git pull --ff-only && make service-install';
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 

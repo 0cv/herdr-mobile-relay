@@ -124,7 +124,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,
-		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, version, revision, cfg.ServiceName, healthURL),
+		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		startedAt:           time.Now(),
 		refreshClients:      make(map[string]bool),

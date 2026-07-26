@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
@@ -29,9 +28,9 @@ var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1
 type Manager struct {
 	releaseRoot string
 	runtimeDir  string
+	herdrBin    string
 	version     string
 	revision    string
-	serviceName string
 	healthURL   string
 	apiBase     string
 	client      *http.Client
@@ -40,28 +39,18 @@ type Manager struct {
 	mu       sync.Mutex
 	state    State
 	metadata releaseMetadata
-	launch   func(context.Context, string, string) error
+	launch   func(context.Context, string) error
 }
 
 type releaseMetadata struct {
-	Version     string
-	Revision    string
-	ArchiveName string
-	ArchiveURL  string
-	ChecksumURL string
-	ReleaseTag  string
-	PublishedAt string
+	Version  string
+	Revision string
 }
 
 type githubRelease struct {
-	TagName     string `json:"tag_name"`
-	Draft       bool   `json:"draft"`
-	Prerelease  bool   `json:"prerelease"`
-	PublishedAt string `json:"published_at"`
-	Assets      []struct {
-		Name string `json:"name"`
-		URL  string `json:"url"`
-	} `json:"assets"`
+	TagName    string `json:"tag_name"`
+	Draft      bool   `json:"draft"`
+	Prerelease bool   `json:"prerelease"`
 }
 
 type gitObject struct {
@@ -75,13 +64,13 @@ type gitObject struct {
 	} `json:"object,omitempty"`
 }
 
-func NewManager(releaseRoot, runtimeDir, version, revision, serviceName, healthURL string) *Manager {
+func NewManager(releaseRoot, runtimeDir, herdrBin, version, revision, healthURL string) *Manager {
 	manager := &Manager{
 		releaseRoot: releaseRoot,
 		runtimeDir:  runtimeDir,
+		herdrBin:    herdrBin,
 		version:     version,
 		revision:    revision,
-		serviceName: serviceName,
 		healthURL:   healthURL,
 		apiBase:     canonicalAPI,
 		client: &http.Client{
@@ -192,16 +181,11 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 	jobPath := filepath.Join(m.runtimeDir, fmt.Sprintf("update-job-%d.json", time.Now().UnixNano()))
 	job := Job{
 		ReleaseRoot:    m.releaseRoot,
-		DownloadURL:    m.metadata.ArchiveURL,
-		ChecksumURL:    m.metadata.ChecksumURL,
-		ArchiveName:    m.metadata.ArchiveName,
+		HerdrBin:       m.herdrBin,
 		TargetVersion:  m.metadata.Version,
 		TargetRevision: m.metadata.Revision,
-		Target:         relayrelease.CurrentTarget(),
 		StatePath:      m.statePath(),
-		ServiceName:    m.serviceName,
 		HealthURL:      m.healthURL,
-		TokenFile:      m.tokenFile,
 	}
 	if err := writeJSONAtomic(jobPath, job); err != nil {
 		return "", m.publicState(m.state), fmt.Errorf("persist update job: %w", err)
@@ -217,7 +201,7 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 		_ = os.Remove(jobPath)
 		return "", m.publicState(m.state), fmt.Errorf("persist scheduled update: %w", err)
 	}
-	if err := m.launch(ctx, jobPath, m.serviceName); err != nil {
+	if err := m.launch(ctx, jobPath); err != nil {
 		m.state.State = "failed"
 		m.state.Error = safeError(err)
 		_ = writeState(m.statePath(), m.state)
@@ -243,32 +227,9 @@ func (m *Manager) fetchRelease(ctx context.Context) (releaseMetadata, error) {
 	if err != nil {
 		return releaseMetadata{}, err
 	}
-	archiveName := fmt.Sprintf(
-		"herdr-mobile-relay_%s_%s_%s.tar.gz",
-		version,
-		runtime.GOOS,
-		runtime.GOARCH,
-	)
-	var archiveURL, checksumURL string
-	for _, asset := range release.Assets {
-		switch asset.Name {
-		case archiveName:
-			archiveURL = asset.URL
-		case "checksums.txt":
-			checksumURL = asset.URL
-		}
-	}
-	if archiveURL == "" || checksumURL == "" {
-		return releaseMetadata{}, fmt.Errorf("release is missing %s or checksums.txt", archiveName)
-	}
 	return releaseMetadata{
-		Version:     version,
-		Revision:    revision,
-		ArchiveName: archiveName,
-		ArchiveURL:  archiveURL,
-		ChecksumURL: checksumURL,
-		ReleaseTag:  release.TagName,
-		PublishedAt: release.PublishedAt,
+		Version:  version,
+		Revision: revision,
 	}, nil
 }
 
@@ -338,41 +299,20 @@ func (m *Manager) token() string {
 }
 
 func (m *Manager) eligibility() (bool, string, string) {
-	currentTarget, manifest, err := currentRelease(m.releaseRoot)
-	if err != nil {
-		return false, "unsupported", "Self-update requires a verified packaged release"
+	if !semverPattern.MatchString(m.version) || !validRevision(m.revision) {
+		return false, "unsupported", "Managed updates require a released relay build"
 	}
-	if matches, reason := activeManifestIdentity(manifest, m.version, m.revision); !matches {
-		return false, "unsupported", reason
+	if !filepath.IsAbs(m.herdrBin) {
+		return false, "unsupported", "Managed updates require an absolute Herdr executable path"
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		return false, "unsupported", "The running executable could not be identified"
+	info, err := os.Stat(m.herdrBin)
+	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+		return false, "unsupported", "The Herdr executable is unavailable"
 	}
-	resolved, err := filepath.EvalSymlinks(executable)
-	if err != nil {
-		resolved = executable
-	}
-	if filepath.Dir(resolved) != currentTarget {
-		return false, "unsupported", "The service is not running from the active release directory"
-	}
-	return true, "release", ""
+	return true, "plugin", ""
 }
 
-func activeManifestIdentity(
-	manifest relayrelease.Manifest,
-	version, revision string,
-) (bool, string) {
-	if manifest.Version != version {
-		return false, "The running version does not match the active packaged release"
-	}
-	if !strings.EqualFold(manifest.Revision, revision) {
-		return false, "The running revision does not match the active packaged release"
-	}
-	return true, ""
-}
-
-func (m *Manager) launchWorker(ctx context.Context, jobPath, serviceName string) error {
+func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -421,6 +361,20 @@ func (m *Manager) loadState() State {
 	}
 	state.CurrentVersion = m.version
 	state.CurrentRevision = m.revision
+	if transientUpdateState(state.State) &&
+		state.TargetVersion == m.version &&
+		strings.EqualFold(state.TargetRevision, m.revision) {
+		state.State = "succeeded"
+		state.CanInstall = false
+		state.Eligible = true
+		state.Mode = "plugin"
+		state.Error = ""
+		if state.FinishedAt == "" {
+			state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		_ = writeState(m.statePath(), state)
+		return state
+	}
 	if state.State == "available" || state.State == "blocked" {
 		candidate := state.AvailableVersion
 		if candidate == "" {
@@ -457,17 +411,27 @@ func (m *Manager) recoverOrphan(includeScheduled bool) {
 	if err != nil {
 		return
 	}
-	_, startedErr := time.Parse(time.RFC3339, state.StartedAt)
-	recoverScheduled := state.State == "scheduled" &&
-		(scheduledUpdateExpired(state) || (includeScheduled && startedErr != nil))
-	if state.State == "recovering" && startedErr == nil {
-		started, _ := time.Parse(time.RFC3339, state.StartedAt)
-		if time.Since(started) < updateStartupGrace {
-			return
-		}
+	if !transientUpdateState(state.State) {
+		return
 	}
-	if state.State != "installing" && state.State != "restarting" &&
-		state.State != "recovering" && !recoverScheduled {
+	if state.TargetVersion == m.version &&
+		strings.EqualFold(state.TargetRevision, m.revision) {
+		state.State = "succeeded"
+		state.CurrentVersion = m.version
+		state.CurrentRevision = m.revision
+		state.Mode = "plugin"
+		state.Eligible = true
+		state.CanInstall = false
+		state.Error = ""
+		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		_ = writeState(statePath, state)
+		return
+	}
+	started, startedErr := time.Parse(time.RFC3339, state.StartedAt)
+	if startedErr == nil && time.Since(started) < updateStartupGrace {
+		return
+	}
+	if state.State == "scheduled" && !includeScheduled && startedErr != nil {
 		return
 	}
 	if m.releaseRoot == "" || !filepath.IsAbs(m.releaseRoot) {
@@ -480,69 +444,12 @@ func (m *Manager) recoverOrphan(includeScheduled bool) {
 	if err != nil {
 		return
 	}
-	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+	state.State = "failed"
+	state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	state.Error = "Herdr plugin update worker stopped before completion; run the update again"
+	_ = writeState(statePath, state)
 	_ = lock.Close()
-
-	if recoverScheduled || state.RollbackTarget == "" {
-		state.State = "failed"
-		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-		state.Error = "Update worker stopped before completion"
-		_ = writeState(statePath, state)
-		return
-	}
-	jobPath, findErr := m.orphanJob(state)
-	if findErr != nil {
-		state.State = "failed"
-		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-		state.Error = safeError(findErr)
-		_ = writeState(statePath, state)
-		return
-	}
-	state.State = "recovering"
-	state.StartedAt = time.Now().UTC().Format(time.RFC3339)
-	state.Error = "Update worker stopped before verification; restoring the previous release"
-	if err := writeState(statePath, state); err != nil {
-		return
-	}
-	if err := m.launch(context.Background(), jobPath, m.serviceName); err != nil {
-		state.State = "failed"
-		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-		state.Error = safeError(fmt.Errorf("schedule rollback recovery: %w", err))
-		_ = writeState(statePath, state)
-	}
-}
-
-func (m *Manager) orphanJob(state State) (string, error) {
-	matches, err := filepath.Glob(filepath.Join(m.runtimeDir, "update-job-*.json"))
-	if err != nil {
-		return "", err
-	}
-	var selected string
-	for _, candidate := range matches {
-		job, loadErr := loadJob(candidate)
-		if loadErr != nil || filepath.Clean(job.ReleaseRoot) != filepath.Clean(m.releaseRoot) ||
-			filepath.Clean(job.StatePath) != filepath.Clean(m.statePath()) ||
-			job.TargetVersion != state.TargetVersion ||
-			job.TargetRevision != state.TargetRevision {
-			continue
-		}
-		if selected != "" {
-			return "", errors.New("multiple update jobs match the orphaned activation")
-		}
-		selected = candidate
-	}
-	if selected == "" {
-		return "", errors.New("orphaned activation has no matching persisted update job")
-	}
-	return selected, nil
-}
-
-func scheduledUpdateExpired(state State) bool {
-	if state.State != "scheduled" {
-		return false
-	}
-	started, err := time.Parse(time.RFC3339, state.StartedAt)
-	return err == nil && time.Since(started) >= updateStartupGrace
 }
 
 func (m *Manager) publicState(state State) State {
@@ -595,6 +502,15 @@ func validState(value string) bool {
 	switch value {
 	case "current", "checking", "available", "blocked", "scheduled", "installing",
 		"restarting", "recovering", "succeeded", "failed", "rolled_back", "unsupported":
+		return true
+	default:
+		return false
+	}
+}
+
+func transientUpdateState(value string) bool {
+	switch value {
+	case "scheduled", "installing", "restarting", "recovering":
 		return true
 	default:
 		return false

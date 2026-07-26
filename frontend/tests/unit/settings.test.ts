@@ -101,8 +101,8 @@ describe('settings relay status', () => {
     await user.click(await screen.findByRole('button', { name: 'How to update Fedora' }));
     const dialog = screen.getByRole('dialog', { name: 'Update Fedora' });
     expect(dialog).toHaveTextContent('Version 0.7.0 is a one-time manual update.');
-    expect(within(dialog).getByText(/HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install/)).toHaveTextContent(
-      'herdr plugin action invoke install-service --plugin herdr-mobile-relay.events',
+    expect(within(dialog).getByText(/HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install/)).not.toHaveTextContent(
+      'plugin action invoke install-service',
     );
     expect(dialog).toHaveTextContent('preserves the configuration used by an existing stable service');
     expect(dialog).toHaveTextContent('Prefer to keep using a source checkout?');

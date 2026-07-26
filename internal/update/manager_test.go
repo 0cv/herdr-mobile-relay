@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,12 +11,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+)
 
-	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
+const (
+	currentTestRevision = "0123456789abcdef0123456789abcdef01234567"
+	nextTestRevision    = "89abcdef0123456789abcdef0123456789abcdef"
 )
 
 func TestNewerVersion(t *testing.T) {
-	if !NewerVersion("1.2.4", "1.2.3") || NewerVersion("1.2.3", "1.2.3") || NewerVersion("latest", "1.2.3") {
+	if !NewerVersion("1.2.4", "1.2.3") ||
+		NewerVersion("1.2.3", "1.2.3") ||
+		NewerVersion("latest", "1.2.3") {
 		t.Fatal("semantic version comparison failed")
 	}
 }
@@ -28,14 +32,14 @@ func TestManagerReconcilesStaleAvailableStateFromPreviousRuntime(t *testing.T) {
 	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
 		State:             "available",
 		CurrentVersion:    "0.8.6",
-		CurrentRevision:   "old",
+		CurrentRevision:   currentTestRevision,
 		AvailableVersion:  "0.10.1",
-		AvailableRevision: "new",
+		AvailableRevision: nextTestRevision,
 		UpstreamVersion:   "0.10.1",
-		UpstreamRevision:  "new-revision",
+		UpstreamRevision:  nextTestRevision,
 		TargetVersion:     "0.10.1",
-		TargetRevision:    "new-revision",
-		Mode:              "managed",
+		TargetRevision:    nextTestRevision,
+		Mode:              "plugin",
 		Eligible:          true,
 		CanInstall:        true,
 	}); err != nil {
@@ -45,9 +49,9 @@ func TestManagerReconcilesStaleAvailableStateFromPreviousRuntime(t *testing.T) {
 	manager := NewManager(
 		filepath.Join(root, "installed"),
 		runtimeDir,
+		testHerdrBinary(t),
 		"0.10.1",
-		"new-revision",
-		"service",
+		nextTestRevision,
 		"http://127.0.0.1:8375/healthz",
 	)
 	state := manager.State()
@@ -59,66 +63,122 @@ func TestManagerReconcilesStaleAvailableStateFromPreviousRuntime(t *testing.T) {
 	if _, scheduled, err := manager.Schedule(
 		context.Background(),
 		"0.10.1",
-		"new-revision",
+		nextTestRevision,
 	); err == nil || scheduled.State != "current" {
 		t.Fatalf("same-version schedule result = %#v, error = %v", scheduled, err)
 	}
 }
 
-func TestActiveManifestIdentityRequiresExactRevision(t *testing.T) {
-	manifest := relayrelease.Manifest{Version: "1.2.3", Revision: "abcdef"}
-	if ok, reason := activeManifestIdentity(manifest, "1.2.3", "ABCDEF"); !ok || reason != "" {
-		t.Fatalf("matching identity rejected: ok=%v reason=%q", ok, reason)
+func TestManagerEligibilityRequiresReleasedBuildAndHerdr(t *testing.T) {
+	herdrBin := testHerdrBinary(t)
+	manager := &Manager{
+		herdrBin: herdrBin,
+		version:  "1.2.3",
+		revision: currentTestRevision,
 	}
-	if ok, reason := activeManifestIdentity(manifest, "1.2.3", "different"); ok ||
-		!strings.Contains(reason, "revision") {
-		t.Fatalf("revision mismatch accepted: ok=%v reason=%q", ok, reason)
+	if eligible, mode, reason := manager.eligibility(); !eligible || mode != "plugin" || reason != "" {
+		t.Fatalf("eligible build rejected: eligible=%v mode=%q reason=%q", eligible, mode, reason)
+	}
+
+	manager.version = "v1.2.3-dev"
+	if eligible, _, reason := manager.eligibility(); eligible || !strings.Contains(reason, "released") {
+		t.Fatalf("development build accepted: eligible=%v reason=%q", eligible, reason)
+	}
+
+	manager.version = "1.2.3"
+	manager.herdrBin = filepath.Join(t.TempDir(), "missing-herdr")
+	if eligible, _, reason := manager.eligibility(); eligible || !strings.Contains(reason, "unavailable") {
+		t.Fatalf("missing Herdr accepted: eligible=%v reason=%q", eligible, reason)
 	}
 }
 
-func TestFetchReleaseRequiresExactTargetAssetsAndCommit(t *testing.T) {
-	const revision = "0123456789abcdef0123456789abcdef01234567"
+func TestFetchReleaseRequiresExactTagCommit(t *testing.T) {
 	mux := http.NewServeMux()
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	target := strings.ReplaceAll(CurrentTestTarget(), "/", "_")
-	_ = target
-	archive := fmt.Sprintf("herdr-mobile-relay_1.2.4_%s_%s.tar.gz", testGOOS(), testGOARCH())
-	mux.HandleFunc("/releases/latest", func(writer http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("/releases/latest", func(writer http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(writer).Encode(map[string]any{
 			"tag_name": "v1.2.4",
-			"assets": []map[string]string{
-				{"name": archive, "url": server.URL + "/archive"},
-				{"name": "checksums.txt", "url": server.URL + "/checksums"},
-			},
 		})
 	})
-	mux.HandleFunc("/git/ref/tags/v1.2.4", func(writer http.ResponseWriter, request *http.Request) {
+	mux.HandleFunc("/git/ref/tags/v1.2.4", func(writer http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(writer).Encode(map[string]any{
-			"object": map[string]string{"type": "commit", "sha": revision},
+			"object": map[string]string{"type": "commit", "sha": nextTestRevision},
 		})
 	})
-	manager := NewManager(t.TempDir(), t.TempDir(), "1.2.3", "old", "service", "http://127.0.0.1:8375/healthz")
+	manager := NewManager(
+		t.TempDir(),
+		t.TempDir(),
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1:8375/healthz",
+	)
 	manager.apiBase = server.URL
 	manager.client = server.Client()
 	metadata, err := manager.fetchRelease(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Version != "1.2.4" || metadata.Revision != revision || metadata.ArchiveName != archive {
+	if metadata.Version != "1.2.4" || metadata.Revision != nextTestRevision {
 		t.Fatalf("metadata = %#v", metadata)
 	}
 }
 
-// These wrappers keep the expected archive construction explicit in the test.
-func testGOOS() string   { return strings.Split(CurrentTestTarget(), "/")[0] }
-func testGOARCH() string { return strings.Split(CurrentTestTarget(), "/")[1] }
-func CurrentTestTarget() string {
-	return currentTargetForTest()
+func TestManagerSchedulesExactHerdrPluginJob(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "installed")
+	runtimeDir := filepath.Join(root, "runtime")
+	herdrBin := testHerdrBinary(t)
+	manager := NewManager(
+		releaseRoot,
+		runtimeDir,
+		herdrBin,
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1:8375/healthz",
+	)
+	manager.state = State{
+		State:             "available",
+		AvailableVersion:  "1.2.4",
+		AvailableRevision: shortRevision(nextTestRevision),
+		TargetVersion:     "1.2.4",
+		TargetRevision:    nextTestRevision,
+		Mode:              "plugin",
+		Eligible:          true,
+		CanInstall:        true,
+	}
+	manager.metadata = releaseMetadata{Version: "1.2.4", Revision: nextTestRevision}
+	if err := writeState(manager.statePath(), manager.state); err != nil {
+		t.Fatal(err)
+	}
+	var launchedPath string
+	manager.launch = func(_ context.Context, jobPath string) error {
+		launchedPath = jobPath
+		return nil
+	}
+
+	jobID, state, err := manager.Schedule(context.Background(), "1.2.4", nextTestRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.State != "scheduled" || jobID != filepath.Base(launchedPath) {
+		t.Fatalf("schedule result = %q, %#v", jobID, state)
+	}
+	job, err := loadJob(launchedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.HerdrBin != herdrBin ||
+		job.TargetVersion != "1.2.4" ||
+		job.TargetRevision != nextTestRevision ||
+		job.ReleaseRoot != releaseRoot {
+		t.Fatalf("job = %#v", job)
+	}
 }
 
-func TestManagerRecoversOrphanedUpdateState(t *testing.T) {
+func TestManagerRecoversOrphanedPluginUpdateState(t *testing.T) {
 	for _, stateName := range []string{"scheduled", "installing", "restarting"} {
 		t.Run(stateName, func(t *testing.T) {
 			root := t.TempDir()
@@ -128,15 +188,24 @@ func TestManagerRecoversOrphanedUpdateState(t *testing.T) {
 			if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
 				State:          stateName,
 				TargetVersion:  "1.2.4",
-				TargetRevision: "new",
+				TargetRevision: nextTestRevision,
 				StartedAt:      started,
 			}); err != nil {
 				t.Fatal(err)
 			}
 
-			manager := NewManager(releaseRoot, runtimeDir, "1.2.3", "old", "service", "http://127.0.0.1/healthz")
+			manager := NewManager(
+				releaseRoot,
+				runtimeDir,
+				testHerdrBinary(t),
+				"1.2.3",
+				currentTestRevision,
+				"http://127.0.0.1/healthz",
+			)
 			state := manager.State()
-			if state.State != "failed" || state.Error != "Update worker stopped before completion" || state.FinishedAt == "" {
+			if state.State != "failed" ||
+				!strings.Contains(state.Error, "run the update again") ||
+				state.FinishedAt == "" {
 				t.Fatalf("state = %#v", state)
 			}
 		})
@@ -158,13 +227,20 @@ func TestManagerPreservesUpdateStateOwnedByWorker(t *testing.T) {
 	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
 		State:          "installing",
 		TargetVersion:  "1.2.4",
-		TargetRevision: "new",
+		TargetRevision: nextTestRevision,
 		StartedAt:      time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	manager := NewManager(releaseRoot, runtimeDir, "1.2.3", "old", "service", "http://127.0.0.1/healthz")
+	manager := NewManager(
+		releaseRoot,
+		runtimeDir,
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1/healthz",
+	)
 	if state := manager.State(); state.State != "installing" || state.Error != "" {
 		t.Fatalf("state = %#v", state)
 	}
@@ -177,63 +253,51 @@ func TestManagerAllowsScheduledUpdateStartupGrace(t *testing.T) {
 	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
 		State:          "scheduled",
 		TargetVersion:  "1.2.4",
-		TargetRevision: "new",
+		TargetRevision: nextTestRevision,
 		StartedAt:      time.Now().UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	manager := NewManager(releaseRoot, runtimeDir, "1.2.3", "old", "service", "http://127.0.0.1/healthz")
+	manager := NewManager(
+		releaseRoot,
+		runtimeDir,
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1/healthz",
+	)
 	if state := manager.State(); state.State != "scheduled" {
 		t.Fatalf("state = %#v", state)
 	}
 }
 
-func TestManagerSchedulesPersistedRollbackRecovery(t *testing.T) {
+func TestManagerReconcilesCompletedPluginUpdateAfterRestart(t *testing.T) {
 	root := t.TempDir()
-	releaseRoot := filepath.Join(root, "installed")
 	runtimeDir := filepath.Join(root, "runtime")
-	statePath := filepath.Join(runtimeDir, "update-state.json")
-	jobPath := filepath.Join(runtimeDir, "update-job-1.json")
-	state := State{
-		State:            "restarting",
-		TargetVersion:    "1.2.4",
-		TargetRevision:   "new",
-		RollbackTarget:   filepath.Join(releaseRoot, "releases", "previous"),
-		RollbackVersion:  "1.2.3",
-		RollbackRevision: "old",
-	}
-	if err := writeState(statePath, state); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeJSONAtomic(jobPath, Job{
-		ReleaseRoot:    releaseRoot,
-		StatePath:      statePath,
-		TargetVersion:  state.TargetVersion,
-		TargetRevision: state.TargetRevision,
+	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+		State:          "restarting",
+		TargetVersion:  "1.2.4",
+		TargetRevision: nextTestRevision,
+		StartedAt:      time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	manager := &Manager{
-		releaseRoot: releaseRoot,
-		runtimeDir:  runtimeDir,
-		serviceName: "test.service",
-	}
-	var launched string
-	manager.launch = func(_ context.Context, path, service string) error {
-		launched = path + ":" + service
-		return nil
-	}
-	manager.recoverOrphan(false)
-	if launched != jobPath+":test.service" {
-		t.Fatalf("recovery launch = %q", launched)
-	}
-	recovering, err := readState(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recovering.State != "recovering" {
-		t.Fatalf("state = %+v", recovering)
+
+	manager := NewManager(
+		filepath.Join(root, "installed"),
+		runtimeDir,
+		testHerdrBinary(t),
+		"1.2.4",
+		strings.ToUpper(nextTestRevision),
+		"http://127.0.0.1/healthz",
+	)
+	state := manager.State()
+	if state.State != "succeeded" ||
+		state.CurrentVersion != "1.2.4" ||
+		state.CurrentRevision != strings.ToUpper(nextTestRevision) ||
+		state.FinishedAt == "" {
+		t.Fatalf("state = %#v", state)
 	}
 }
 
@@ -249,7 +313,14 @@ func (b blockingRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 }
 
 func TestManagerStateDoesNotBlockOnReleaseCheckNetwork(t *testing.T) {
-	manager := NewManager(t.TempDir(), t.TempDir(), "1.2.3", "old", "service", "http://127.0.0.1:8375/healthz")
+	manager := NewManager(
+		t.TempDir(),
+		t.TempDir(),
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1:8375/healthz",
+	)
 	transport := blockingRoundTripper{started: make(chan struct{}), release: make(chan struct{})}
 	manager.client = &http.Client{Transport: transport}
 	done := make(chan struct{})
@@ -271,4 +342,13 @@ func TestManagerStateDoesNotBlockOnReleaseCheckNetwork(t *testing.T) {
 	}
 	close(transport.release)
 	<-done
+}
+
+func testHerdrBinary(t *testing.T) string {
+	t.Helper()
+	filename := filepath.Join(t.TempDir(), "herdr")
+	if err := os.WriteFile(filename, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filename
 }

@@ -51,6 +51,8 @@ PLATFORM=$(uname -s)
 SERVICE_FILE=
 SERVICE_BACKUP=
 service_was_active=false
+service_should_run=false
+recover_broken_service=false
 service_cutover_started=false
 case "$PLATFORM" in
     Linux)
@@ -67,6 +69,7 @@ case "$PLATFORM" in
         fi
         ;;
 esac
+service_should_run=$service_was_active
 if [ -n "$SERVICE_FILE" ] && [ -f "$SERVICE_FILE" ]; then
     SERVICE_BACKUP=$(mktemp "${TMPDIR:-/tmp}/herdr-service.XXXXXX")
     cp "$SERVICE_FILE" "$SERVICE_BACKUP"
@@ -111,6 +114,60 @@ validate_migration_source() {
                     return 1
                 }
             ;;
+    esac
+}
+
+recognized_service_definition() {
+    case "$PLATFORM" in
+        Linux)
+            grep -E '^Environment=HERDR_RELAY_ENV=/.+' "$SERVICE_FILE" >/dev/null &&
+                grep -E '^ExecStart=.*herdr-(mobile-relay|remote)-service\.sh([[:space:]]|$)' \
+                    "$SERVICE_FILE" >/dev/null
+            ;;
+        Darwin)
+            grep -F '<string>com.herdr-mobile-relay.service</string>' "$SERVICE_FILE" >/dev/null &&
+                grep -F '<key>HERDR_RELAY_ENV</key>' "$SERVICE_FILE" >/dev/null &&
+                grep -E '<string>.*herdr-(mobile-relay|remote)-service\.sh</string>' \
+                    "$SERVICE_FILE" >/dev/null
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+validate_recovery_config() {
+    [ -f "$TARGET_ENV" ] && [ ! -L "$TARGET_ENV" ] || {
+        echo "herdr-mobile-relay: persistent relay environment is unavailable: $TARGET_ENV" >&2
+        return 1
+    }
+    grep -q '^HERDR_RELAY_TOKEN=' "$TARGET_ENV" &&
+        [ -n "$(env_file_value "$TARGET_ENV" HERDR_RELAY_TOKEN)" ] || {
+        echo "herdr-mobile-relay: persistent relay environment has no relay token" >&2
+        return 1
+    }
+}
+
+rewrite_service_release_paths() {
+    local service_file="$1"
+    local service_wrapper="$2"
+    local work_dir="$3"
+    local env_file="$4"
+
+    [ -f "$service_file" ] && [ -x "$service_wrapper" ] || return 1
+    case "$PLATFORM" in
+        Linux)
+            sed -i "s|^ExecStart=.*|ExecStart=$service_wrapper|" "$service_file"
+            sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$work_dir|" "$service_file"
+            sed -i "s|^Environment=HERDR_RELAY_ENV=.*|Environment=HERDR_RELAY_ENV=$env_file|" \
+                "$service_file"
+            grep -Fx "ExecStart=$service_wrapper" "$service_file" >/dev/null &&
+                grep -Fx "WorkingDirectory=$work_dir" "$service_file" >/dev/null &&
+                grep -Fx "Environment=HERDR_RELAY_ENV=$env_file" "$service_file" >/dev/null
+            ;;
+        Darwin)
+            update_launchd_release_paths \
+                "$service_file" "$service_wrapper" "$work_dir" "$env_file"
+            ;;
+        *) return 1 ;;
     esac
 }
 
@@ -210,16 +267,37 @@ migrate_source_config() {
 }
 
 if [ -n "$SERVICE_BACKUP" ]; then
-    [ -n "$SOURCE_ENV" ] || {
-        echo "herdr-mobile-relay: installed service has no recognized relay environment" >&2
+    source_env_missing=false
+    if [ -z "$SOURCE_ENV" ] || [ ! -e "$SOURCE_ENV" ]; then
+        source_env_missing=true
+    fi
+    if [ "$source_env_missing" = true ] && [ -n "$SOURCE_ENV" ] && [ -L "$SOURCE_ENV" ]; then
+        source_env_missing=false
+    fi
+
+    if [ "$source_env_missing" = true ]; then
+        if ! recognized_service_definition; then
+            echo "herdr-mobile-relay: refusing to recover an unrecognized service definition" >&2
+            rm -rf "$CONFIG_BACKUP"
+            rm -f "$SERVICE_BACKUP"
+            exit 1
+        fi
+        if ! validate_recovery_config; then
+            rm -rf "$CONFIG_BACKUP"
+            rm -f "$SERVICE_BACKUP"
+            exit 1
+        fi
+        echo "herdr-mobile-relay: recovering broken service paths from persistent plugin config..." >&2
+        SOURCE_ENV="$TARGET_ENV"
+        recover_broken_service=true
+        service_should_run=true
+    elif ! validate_migration_source "$SOURCE_ENV"; then
         rm -rf "$CONFIG_BACKUP"
         rm -f "$SERVICE_BACKUP"
         exit 1
-    }
-    if ! validate_migration_source "$SOURCE_ENV"; then
-        rm -rf "$CONFIG_BACKUP"
-        rm -f "$SERVICE_BACKUP"
-        exit 1
+    fi
+    if [ "${HERDR_MOBILE_RELAY_NO_AUTO_SETUP:-}" = 1 ]; then
+        service_should_run=true
     fi
 fi
 
@@ -266,11 +344,19 @@ rollback_plugin_migration() {
     fi
     restore_target_config || return 1
 
+    if [ "$recover_broken_service" = true ] &&
+       [ "$service_cutover_started" = true ]; then
+        rollback_wrapper="$INSTALL_ROOT/current/relay/herdr-mobile-relay-service.sh"
+        rewrite_service_release_paths \
+            "$SERVICE_FILE" "$rollback_wrapper" "$INSTALL_ROOT/current" "$TARGET_ENV" ||
+            return 1
+    fi
+
     if [ "$service_cutover_started" != true ]; then
         echo "herdr-mobile-relay: previous running service was left untouched." >&2
         return 0
     fi
-    if [ "$service_was_active" != true ]; then
+    if [ "$service_should_run" != true ]; then
         echo "herdr-mobile-relay: previous inactive service definition restored." >&2
         return 0
     fi
@@ -379,15 +465,13 @@ case "$PLATFORM" in
         if [ -f "$UNIT_FILE" ] && [ -x "$SERVICE_WRAPPER" ]; then
             echo "herdr-mobile-relay: updating service unit to new release..." >&2
             service_cutover_started=true
-            sed -i "s|^ExecStart=.*|ExecStart=$SERVICE_WRAPPER|" "$UNIT_FILE"
-            sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$INSTALL_ROOT/current|" "$UNIT_FILE"
-            sed -i "s|^Environment=HERDR_RELAY_ENV=.*|Environment=HERDR_RELAY_ENV=$TARGET_ENV|" "$UNIT_FILE"
-            grep -F "Environment=HERDR_RELAY_ENV=$TARGET_ENV" "$UNIT_FILE" >/dev/null || {
-                echo "herdr-mobile-relay: service unit has no relay environment entry" >&2
+            rewrite_service_release_paths \
+                "$UNIT_FILE" "$SERVICE_WRAPPER" "$INSTALL_ROOT/current" "$TARGET_ENV" || {
+                echo "herdr-mobile-relay: service unit could not be updated safely" >&2
                 exit 1
             }
             systemctl --user daemon-reload 2>/dev/null || true
-            if [ "$service_was_active" = true ]; then
+            if [ "$service_should_run" = true ]; then
                 echo "herdr-mobile-relay: restarting existing service..." >&2
                 systemctl --user restart herdr-mobile-relay.service
                 service_restarted=true
@@ -403,9 +487,12 @@ case "$PLATFORM" in
         if [ -f "$PLIST" ] && [ -x "$SERVICE_WRAPPER" ]; then
             echo "herdr-mobile-relay: updating service plist to new release..." >&2
             service_cutover_started=true
-            update_launchd_release_paths \
-                "$PLIST" "$SERVICE_WRAPPER" "$INSTALL_ROOT/current" "$TARGET_ENV"
-            if [ "$service_was_active" = true ]; then
+            rewrite_service_release_paths \
+                "$PLIST" "$SERVICE_WRAPPER" "$INSTALL_ROOT/current" "$TARGET_ENV" || {
+                echo "herdr-mobile-relay: service plist could not be updated safely" >&2
+                exit 1
+            }
+            if [ "$service_should_run" = true ]; then
                 echo "herdr-mobile-relay: reloading existing service..." >&2
                 reload_launchd_service_definition \
                     "$PLIST" "com.herdr-mobile-relay.service"
