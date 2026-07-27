@@ -6,6 +6,9 @@ const ANSI_COLORS: Record<number, string> = {
 };
 
 export const TERMINAL_SEPARATOR_TOKEN = '\uE000HERDR_SEPARATOR\uE000';
+const AGENT_CURRENT_UI_TOKEN = '\uE000HERDR_AGENT_CURRENT_UI\uE000';
+const CODEX_PICKER_ITEM_PREFIX = '\uE000HERDR_CODEX_PICKER_ITEM:';
+const CODEX_PICKER_HELP_PREFIX = '\uE000HERDR_CODEX_PICKER_HELP:';
 export const TERMINAL_REPEATED_RUN_LIMIT = 24;
 export const CLAUDE_DESKTOP_FOOTER_LINES = 6;
 export const CLAUDE_DESKTOP_PROMPT_LINES = 2;
@@ -34,7 +37,11 @@ export function trimAnsiLineEnd(line: unknown): string {
 export function reflowTerminalLines(content: unknown): string {
   const output: string[] = [];
   const structural = /^(?:[-*+] |\d+[.)] |[•›⚠✔✖└├┌│─━═]|```)/;
+  let preserveAgentUiLayout = false;
   for (const line of String(content ?? '').split('\n')) {
+    // Agent picker rows use two-space indentation intentionally; they are not
+    // wrapped transcript continuations.
+    if (line === AGENT_CURRENT_UI_TOKEN) preserveAgentUiLayout = true;
     const clean = stripAnsi(line);
     const trimmed = clean.trim();
     const indent = (clean.match(/^ */) || [''])[0].length;
@@ -46,6 +53,7 @@ export function reflowTerminalLines(content: unknown): string {
       && previousTrimmed
       && indent === 2
       && previousIndent <= 2
+      && !preserveAgentUiLayout
       && !structural.test(trimmed)
       && !isSeparatorOnlyLine(line),
     );
@@ -132,30 +140,260 @@ export function claudeMobileTerminalContent(
   return { content, separated: false };
 }
 
+function isPiFooterStatsLine(line: string): boolean {
+  const clean = stripAnsi(line).replace(/\s+/g, ' ').trim();
+  return /(?:\d+(?:\.\d+)?%|\?)\/(?:\d+(?:\.\d+)?[kKmMgGtT]?|\?)(?:\s*\(auto\))?/.test(clean);
+}
+
+function isPiFooterPathLine(line: string): boolean {
+  const clean = stripAnsi(line).trim();
+  return /^(?:~(?:[\\/]|$)|\/|[A-Za-z]:[\\/])/.test(clean);
+}
+
+function piFooterBounds(lines: string[]): { path: number; stats: number } | null {
+  const tailStart = Math.max(0, lines.length - 8);
+  for (let stats = lines.length - 1; stats >= tailStart; stats -= 1) {
+    if (!isPiFooterStatsLine(lines[stats])) continue;
+    let path = stats - 1;
+    while (path >= tailStart && !stripAnsi(lines[path]).trim()) path -= 1;
+    if (path >= tailStart && isPiFooterPathLine(lines[path])) return { path, stats };
+  }
+  return null;
+}
+
+function piAutocompletePrimaryColumn(line: string): string {
+  const clean = stripAnsi(line).replaceAll('\r', '').trimEnd();
+  const columns = clean.match(/^((?:→ | {2}).*?\S)( {2,})(?=\S)/u);
+  if (!columns) return trimAnsiLineEnd(line);
+  return trimAnsiLineEnd(line.slice(0, rawIndexAtVisibleOffset(line, columns[1].length)));
+}
+
+function splitPiFooterStatsLine(line: string): string {
+  const clean = stripAnsi(line).replaceAll('\r', '');
+  const gaps = [...clean.matchAll(/(\S)( {2,})(?=\S)/g)];
+  const gap = gaps.at(-1);
+  if (gap?.index === undefined) return line;
+  const start = gap.index + gap[1].length;
+  const end = start + gap[2].length;
+  const rawStart = rawIndexAtVisibleOffset(line, start);
+  const rawEnd = rawIndexAtVisibleOffset(line, end);
+  const stylePrefix = line.match(/^((?:\x1b\[[0-9;?]*[ -/]*[@-~])*)/)?.[1] || '';
+  return `${trimAnsiLineEnd(line.slice(0, rawStart))}\n${stylePrefix}${line.slice(rawEnd)}`;
+}
+
+interface PiCurrentUi {
+  start: number;
+  end: number;
+  defaultEditor: boolean;
+}
+
+function piCurrentUi(lines: string[], footerPath: number): PiCurrentUi | null {
+  const borderStart = Math.max(0, footerPath - 80);
+  const borders: number[] = [];
+  for (let index = borderStart; index < footerPath; index += 1) {
+    if (isSeparatorOnlyLine(lines[index])) borders.push(index);
+  }
+  if (borders.length < 2) return null;
+
+  const start = borders[borders.length - 2];
+  const end = borders[borders.length - 1];
+  const afterBorder = lines.slice(end + 1, footerPath).some((line) => stripAnsi(line).trim());
+  const editorRows = lines.slice(start + 1, end);
+  const hasCursor = editorRows.some((line) => /\x1b\[7m/.test(line));
+  const selectorHint = editorRows.some((line) => (
+    /(?:Esc|escape)\s+(?:to\s+)?(?:cancel|close|go back)|(?:Enter|Space).*\b(?:change|select|confirm)\b/i
+      .test(stripAnsi(line))
+  ));
+  return { start, end, defaultEditor: afterBorder || (hasCursor && !selectorHint) };
+}
+
+export function piTerminalDraft(content: string): string | null {
+  const lines = String(content ?? '').split('\n');
+  const footer = piFooterBounds(lines);
+  if (!footer) return null;
+  const currentUi = piCurrentUi(lines, footer.path);
+  if (!currentUi?.defaultEditor) return null;
+  return lines.slice(currentUi.start + 1, currentUi.end)
+    .map((line) => stripAnsi(line).replace(/\r/g, '').trimEnd())
+    .join('\n')
+    .replace(/\n+$/g, '');
+}
+
+// The browser composer replaces Pi's native desktop editor. Keep custom Pi
+// selectors interactive and reduce autocomplete to a mobile-sized column.
+export function piMobileTerminalContent(content: string, showStatusLine: boolean): string {
+  const lines = String(content ?? '').split('\n');
+  const footer = piFooterBounds(lines);
+  if (!footer) return content;
+  const currentUi = piCurrentUi(lines, footer.path);
+
+  if (currentUi?.defaultEditor) {
+    const autocomplete = lines.slice(currentUi.end + 1, footer.path).map(piAutocompletePrimaryColumn);
+    const status = showStatusLine ? lines.slice(footer.path) : [];
+    if (showStatusLine) status[footer.stats - footer.path] = splitPiFooterStatsLine(lines[footer.stats]);
+    const mobileUi = [...autocomplete, ...status];
+    return [
+      ...lines.slice(0, currentUi.start),
+      ...(mobileUi.some((line) => stripAnsi(line).trim()) ? [AGENT_CURRENT_UI_TOKEN, ...mobileUi] : []),
+    ].join('\n');
+  }
+
+  if (showStatusLine) lines[footer.stats] = splitPiFooterStatsLine(lines[footer.stats]);
+  else lines.splice(footer.path);
+  if (currentUi) lines.splice(currentUi.start, 0, AGENT_CURRENT_UI_TOKEN);
+  return lines.join('\n');
+}
+
+interface CodexDesktopInput {
+  start: number;
+  end: number;
+  prompt: number;
+}
+
+function isCodexPickerTail(lines: string[]): boolean {
+  return lines.some((line) => (
+    /\benter\s+insert\b.*\besc\s+close\b/i.test(stripAnsi(line))
+    || /^\s*[>›]?\s*\S.*\s(?:Skill|Plugin)\s*$/u.test(stripAnsi(line))
+  ));
+}
+
+function codexDesktopInput(lines: string[]): CodexDesktopInput | null {
+  const tailStart = Math.max(0, lines.length - 60);
+  for (let end = lines.length - 1; end >= tailStart; end -= 1) {
+    if (!hasAnsiBackgroundStyle(lines[end])) continue;
+    let start = end;
+    while (start > tailStart && hasAnsiBackgroundStyle(lines[start - 1])) start -= 1;
+    const promptOffset = lines.slice(start, end + 1)
+      .findIndex((line) => /^\s*[❯›](?:\s|$)/u.test(stripAnsi(line)));
+    if (promptOffset < 0) {
+      end = start;
+      continue;
+    }
+    const after = lines.slice(end + 1);
+    if (after.some(isCodexStatusLine) || isCodexPickerTail(after)) {
+      return { start, end, prompt: start + promptOffset };
+    }
+    end = start;
+  }
+  return null;
+}
+
+export function codexPickerActive(content: string): boolean {
+  const lines = String(content ?? '').split('\n');
+  const input = codexDesktopInput(lines);
+  return Boolean(input && isCodexPickerTail(lines.slice(input.end + 1)));
+}
+
+export function codexTerminalDraft(content: string): string | null {
+  const lines = String(content ?? '').split('\n');
+  const input = codexDesktopInput(lines);
+  if (!input) return null;
+  const promptLine = lines[input.prompt];
+  const cleanPrompt = stripAnsi(promptLine).replace(/\r/g, '');
+  const marker = cleanPrompt.match(/^\s*[❯›]\s?/u);
+  if (!marker) return null;
+  const markerWidth = marker[0].replace(/\s+$/u, '').length;
+  const rawAfterMarker = promptLine.slice(rawIndexAtVisibleOffset(promptLine, markerWidth));
+  if (hasAnsiDimStyle(rawAfterMarker)) return '';
+
+  const rows = lines.slice(input.prompt, input.end + 1)
+    .map((line) => stripAnsi(line).replace(/\r/g, '').trimEnd());
+  rows[0] = rows[0].replace(/^\s*[❯›]\s?/u, '');
+  while (rows.length && !rows[rows.length - 1]) rows.pop();
+  return rows.join('\n');
+}
+
+interface CodexPickerItem {
+  selected: boolean;
+  name: string;
+  description: string;
+  type: string;
+}
+
+interface CodexPickerHelp {
+  instructions: string;
+  modes: Array<{ label: string; active: boolean }>;
+}
+
+function encodeTerminalPayload(prefix: string, payload: CodexPickerItem | CodexPickerHelp): string {
+  return `${prefix}${encodeURIComponent(JSON.stringify(payload))}`;
+}
+
+function decodeTerminalPayload<T>(line: string, prefix: string): T | null {
+  if (!line.startsWith(prefix)) return null;
+  try {
+    return JSON.parse(decodeURIComponent(line.slice(prefix.length))) as T;
+  } catch {
+    return null;
+  }
+}
+
+function compactCodexPickerLine(line: string): string {
+  const clean = stripAnsi(line).replaceAll('\r', '').trimEnd();
+  if (/\benter\s+insert\b.*\besc\s+close\b/i.test(clean)) {
+    const gaps = [...clean.matchAll(/ {3,}/g)];
+    const gap = gaps.sort((left, right) => right[0].length - left[0].length)[0];
+    const splitAt = gap?.index ?? clean.length;
+    const instructions = clean.slice(0, splitAt).trim();
+    const modes = clean.slice(splitAt + (gap?.[0].length ?? 0)).trim()
+      .split(/ {2,}/)
+      .filter(Boolean)
+      .map((mode) => ({
+        label: mode.replace(/^\[|\]$/g, ''),
+        active: mode.startsWith('[') && mode.endsWith(']'),
+      }));
+    return encodeTerminalPayload(CODEX_PICKER_HELP_PREFIX, { instructions, modes });
+  }
+
+  const item = clean.match(/^(> | {2})(.*?\S) {2,}(.*?\S) {2,}(\S+)\s*$/u);
+  if (item) {
+    return encodeTerminalPayload(CODEX_PICKER_ITEM_PREFIX, {
+      selected: item[1] === '> ',
+      name: item[2],
+      description: item[3],
+      type: item[4],
+    });
+  }
+  return trimAnsiLineEnd(line);
+}
+
+function codexMobileTerminalContent(content: string): string {
+  const lines = String(content ?? '').split('\n');
+  const input = codexDesktopInput(lines);
+  if (!input) return content;
+  const tail = lines.slice(input.end + 1);
+  const statusOffset = tail.findIndex(isCodexStatusLine);
+  const pickerEnd = statusOffset >= 0 ? statusOffset : tail.length;
+  const mobileTail = [
+    ...tail.slice(0, pickerEnd).map(compactCodexPickerLine),
+    ...tail.slice(pickerEnd),
+  ];
+  return [
+    ...lines.slice(0, input.start),
+    ...(mobileTail.some((line) => stripAnsi(line).trim()) ? [AGENT_CURRENT_UI_TOKEN, ...mobileTail] : []),
+  ].join('\n');
+}
+
 export function removeCodexDesktopInput(content: string): string {
   const lines = String(content ?? '').split('\n');
-  const tailStart = Math.max(0, lines.length - 8);
-  let statusIndex = -1;
-  for (let index = lines.length - 1; index >= tailStart; index -= 1) {
-    if (!isCodexStatusLine(lines[index])) continue;
-    statusIndex = index;
-    break;
-  }
-
-  let blockEnd = statusIndex >= 0 ? statusIndex - 1 : lines.length - 1;
-  while (blockEnd >= tailStart && !hasAnsiBackgroundStyle(lines[blockEnd])) {
-    if (stripAnsi(lines[blockEnd]).trim()) return content;
-    blockEnd -= 1;
-  }
-  if (blockEnd < tailStart) return content;
-
-  let blockStart = blockEnd;
-  while (blockStart > tailStart && hasAnsiBackgroundStyle(lines[blockStart - 1])) blockStart -= 1;
-  const hasPromptMarker = lines.slice(blockStart, blockEnd + 1)
-    .some((line) => /^\s*[❯›](?:\s|$)/u.test(stripAnsi(line)));
-  if (!hasPromptMarker) return content;
-  lines.splice(blockStart, blockEnd - blockStart + 1);
+  const input = codexDesktopInput(lines);
+  if (!input) return content;
+  lines.splice(input.start, input.end - input.start + 1);
   return lines.join('\n');
+}
+
+function hasAnsiDimStyle(line: string): boolean {
+  for (const match of line.matchAll(/\x1b\[([0-9;]*)m/g)) {
+    const codes = match[1] ? match[1].split(';').map(Number) : [0];
+    for (let position = 0; position < codes.length; position += 1) {
+      const code = codes[position];
+      if (code === 2) return true;
+      if (code !== 38 && code !== 48) continue;
+      if (codes[position + 1] === 2) position += 4;
+      else if (codes[position + 1] === 5) position += 2;
+    }
+  }
+  return false;
 }
 
 function hasAnsiBackgroundStyle(line: string): boolean {
@@ -251,12 +489,26 @@ export function compactSeparatorLines(content: unknown, trimFrameEdges = false):
   const output: string[] = [];
   let pendingBlankLines = 0;
   let previousContentWasSeparator = false;
+  let preserveAgentUiLayout = false;
   const flushBlankLines = () => {
     for (let index = 0; index < Math.min(pendingBlankLines, 2); index += 1) output.push('');
     pendingBlankLines = 0;
   };
   for (const rawLine of String(content ?? '').split('\n')) {
     const line = trimTerminalChrome(rawLine, trimFrameEdges);
+    if (line === AGENT_CURRENT_UI_TOKEN) {
+      flushBlankLines();
+      output.push(line);
+      previousContentWasSeparator = false;
+      preserveAgentUiLayout = true;
+      continue;
+    }
+    if (preserveAgentUiLayout) {
+      if (!stripAnsi(line).trim()) output.push(line);
+      else if (isSeparatorOnlyLine(line)) output.push(TERMINAL_SEPARATOR_TOKEN);
+      else output.push(compactRepeatedCharacterRuns(trimTrailingDecoration(line)));
+      continue;
+    }
     if (!stripAnsi(line).trim()) {
       pendingBlankLines += 1;
       continue;
@@ -286,6 +538,7 @@ export function isAgentTurnDurationLine(line: string): boolean {
 
 export function lastCompletedResponse(content: unknown): string {
   const lines = stripAnsi(content)
+    .replaceAll(AGENT_CURRENT_UI_TOKEN, '')
     .replace(/\r/g, '')
     .split('\n')
     .map((line) => line.replaceAll(TERMINAL_SEPARATOR_TOKEN, '').replace(/[ \t]+$/g, ''));
@@ -550,6 +803,29 @@ export function ansiLineBackgrounds(lines: string[]): string[] {
   return backgrounds;
 }
 
+function codexPickerDisplayLine(line: string): string {
+  const item = decodeTerminalPayload<CodexPickerItem>(line, CODEX_PICKER_ITEM_PREFIX);
+  if (item) return `${item.selected ? '> ' : '  '}${item.name} — ${item.description} (${item.type})`;
+  const help = decodeTerminalPayload<CodexPickerHelp>(line, CODEX_PICKER_HELP_PREFIX);
+  if (!help) return line;
+  const modes = help.modes.map((mode) => mode.active ? `[${mode.label}]` : mode.label).join(' · ');
+  return [help.instructions, modes ? `  ${modes}` : ''].filter(Boolean).join('\n');
+}
+
+function codexPickerHtml(line: string): string | null {
+  const item = decodeTerminalPayload<CodexPickerItem>(line, CODEX_PICKER_ITEM_PREFIX);
+  if (item) {
+    const selected = item.selected ? ' selected' : '';
+    return `<span class="codex-picker-item${selected}"><span class="codex-picker-name">${escapeHtml(item.name)}</span><span class="codex-picker-type">${escapeHtml(item.type)}</span><span class="codex-picker-description">${escapeHtml(item.description)}</span></span>`;
+  }
+  const help = decodeTerminalPayload<CodexPickerHelp>(line, CODEX_PICKER_HELP_PREFIX);
+  if (!help) return null;
+  const modes = help.modes.map((mode) => (
+    `<span class="codex-picker-mode${mode.active ? ' active' : ''}">${escapeHtml(mode.label)}</span>`
+  )).join('');
+  return `<span class="codex-picker-help"><span>${escapeHtml(help.instructions)}</span>${modes ? `<span class="codex-picker-modes" aria-label="Search modes">${modes}</span>` : ''}</span>`;
+}
+
 export function terminalHtml(
   text: string,
   normalizeLightPalette = false,
@@ -561,6 +837,9 @@ export function terminalHtml(
   const backgrounds = ansiLineBackgrounds(lines);
   return lines.map((line, index) => {
     if (line === TERMINAL_SEPARATOR_TOKEN) return '<span class="term-separator" aria-hidden="true"></span>';
+    if (line === AGENT_CURRENT_UI_TOKEN) return '<span class="agent-current-ui-start" aria-hidden="true"></span>';
+    const picker = codexPickerHtml(line);
+    if (picker) return picker;
     const sourceBackground = backgrounds[index];
     const normalizeRow = normalizeLightPalette && isNearWhiteAnsiColor(sourceBackground);
     const normalizeDarkText = normalizeLightPalette && (!sourceBackground || normalizeRow);
@@ -579,16 +858,23 @@ export function renderTerminalContent(
   showStatusLine: boolean,
 ): { display: string; html: string } {
   const claudeChrome = /\bclaude\b/i.test(agentType);
-  const mobileContent = /\bcodex\b/i.test(agentType) ? removeCodexDesktopInput(content) : content;
-  const display = compactSeparatorLines(
+  const codexChrome = /\bcodex\b/i.test(agentType);
+  const piChrome = /\bpi\b/i.test(agentType);
+  let mobileContent = codexChrome ? codexMobileTerminalContent(content) : content;
+  if (piChrome) mobileContent = piMobileTerminalContent(mobileContent, showStatusLine);
+  const markedDisplay = compactSeparatorLines(
     terminalDisplayContent(mobileContent, showStatusLine, claudeChrome),
     claudeChrome,
   );
+  const display = markedDisplay.split('\n')
+    .filter((line) => line !== AGENT_CURRENT_UI_TOKEN)
+    .map(codexPickerDisplayLine)
+    .join('\n');
   if (format !== 'ansi') {
     return { display, html: escapeHtml(display.replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────')) };
   }
   return {
     display,
-    html: terminalHtml(display, true, /\bclaude\b/i.test(agentType)),
+    html: terminalHtml(markedDisplay, true, claudeChrome),
   };
 }

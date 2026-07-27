@@ -56,6 +56,7 @@ createServer(async (request, response) => {
     && encodingQuality(request.headers['accept-encoding'], 'br') > 0;
   const headers = {
     'Cache-Control': 'no-cache',
+    'Content-Security-Policy': "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' blob: data:; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     'Content-Type': types[extname(file)] || 'application/octet-stream',
     Vary: 'Accept-Encoding',
     'X-Content-Type-Options': 'nosniff',

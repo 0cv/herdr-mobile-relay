@@ -306,6 +306,23 @@ textarea { min-height: 6.5rem; resize: vertical; }
 }
 :root[data-interface-size='regular'] .term-content { font-size: .82rem; }
 :root[data-interface-size='large'] .term-content { font-size: .94rem; }
+.term-content.bottom-ui-terminal { display: flex; flex-direction: column; }
+.term-content.bottom-ui-terminal > .ansi-line,
+.term-content.bottom-ui-terminal > .term-separator,
+.term-content.bottom-ui-terminal > .codex-picker-item,
+.term-content.bottom-ui-terminal > .codex-picker-help { flex: 0 0 auto; }
+.agent-current-ui-start { display: block; flex: 0 0 0; margin-top: auto; }
+.codex-picker-item { border-left: 2px solid transparent; display: grid; gap: .08rem .45rem; grid-template-columns: minmax(0, 1fr) auto; padding: .28rem .4rem; white-space: normal; }
+.codex-picker-item + .codex-picker-item { border-top: 1px solid color-mix(in srgb, var(--terminal-text) 10%, transparent); }
+.codex-picker-item.selected { background: color-mix(in srgb, var(--primary) 13%, transparent); border-left-color: var(--primary); }
+.codex-picker-name { font-weight: 650; min-width: 0; overflow-wrap: anywhere; }
+.codex-picker-item.selected .codex-picker-name { color: var(--primary); }
+.codex-picker-type { align-self: start; border: 1px solid color-mix(in srgb, var(--terminal-text) 20%, transparent); border-radius: 999px; color: var(--muted); font-family: system-ui, sans-serif; font-size: .62rem; padding: .04rem .3rem; }
+.codex-picker-description { color: var(--muted); font-family: system-ui, sans-serif; font-size: .7rem; grid-column: 1 / -1; line-height: 1.3; }
+.codex-picker-help { border-top: 1px solid color-mix(in srgb, var(--terminal-text) 18%, transparent); color: var(--muted); display: flex; flex-direction: column; font-family: system-ui, sans-serif; font-size: .66rem; gap: .35rem; margin-top: .25rem; padding: .45rem .4rem .1rem; white-space: normal; }
+.codex-picker-modes { display: flex; flex-wrap: wrap; gap: .3rem; }
+.codex-picker-mode { border: 1px solid color-mix(in srgb, var(--terminal-text) 18%, transparent); border-radius: 999px; padding: .12rem .38rem; }
+.codex-picker-mode.active { background: color-mix(in srgb, var(--primary) 16%, transparent); border-color: var(--primary); color: var(--primary); }
 .ansi-line { display: block; min-height: 1.45em; overflow: hidden; }
 .ansi-line-background { border-radius: .12rem; }
 .term-separator { border-top: 1px solid color-mix(in srgb, var(--terminal-text) 22%, transparent); display: block; margin: .65rem 0; width: 100%; }

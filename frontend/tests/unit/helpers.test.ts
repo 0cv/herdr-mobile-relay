@@ -30,9 +30,12 @@ import {
   ansi256Color,
   ansiToHtml,
   claudeMobileTerminalContent,
+  codexTerminalDraft,
   compactRepeatedCharacterRuns,
   isSeparatorOnlyLine,
   lastCompletedResponse,
+  piMobileTerminalContent,
+  piTerminalDraft,
   removeCodexDesktopInput,
   removeClaudeStatusBlocks,
   renderTerminalContent,
@@ -271,9 +274,82 @@ describe('terminal rendering', () => {
     expect(stripAnsi(renderTerminalContent(content, 'ansi', 'codex', true).display))
       .not.toContain('Review the current diff');
 
+    const actualPromptRow = (text: string) => `\x1b[1;48;2;61;64;64m›\x1b[0m\x1b[48;2;61;64;64m ${text}\x1b[0m`;
+    const picker = [
+      'Completed output', backgroundRow, actualPromptRow('@'), backgroundRow,
+      '> Default templates          Default templates for documents and presentations     Plugin',
+      '  Analytics Dashboard        Create spreadsheets with the dashboard template       Skill',
+      '  enter insert · esc close · ←/→ switch search modes                    [All Results]   Filesystem Only    Plugins',
+    ].join('\n');
+    expect(codexTerminalDraft(picker)).toBe('@');
+    const renderedPicker = renderTerminalContent(picker, 'ansi', 'codex', false);
+    const mobilePicker = stripAnsi(renderedPicker.display);
+    expect(mobilePicker.split('\n')).toEqual(expect.arrayContaining([
+      '> Default templates — Default templates for documents and presentations (Plugin)',
+      '  Analytics Dashboard — Create spreadsheets with the dashboard template (Skill)',
+      'enter insert · esc close · ←/→ switch search modes',
+      '  [All Results] · Filesystem Only · Plugins',
+    ]));
+    expect(renderedPicker.html).toContain('class="codex-picker-item selected"');
+    expect(renderedPicker.html).toContain('class="codex-picker-description"');
+    expect(renderedPicker.html).toContain('class="codex-picker-mode active"');
+
+    const selected = [
+      backgroundRow,
+      actualPromptRow('$openai-templates:artifact-template-analytics-dashboard'),
+      backgroundRow,
+      status,
+    ].join('\n');
+    expect(codexTerminalDraft(selected)).toBe('$openai-templates:artifact-template-analytics-dashboard');
+    expect(codexTerminalDraft(content)).toBe('');
+
     const transcript = `${promptRow('Historical prompt')}\nActual response`;
     expect(removeCodexDesktopInput(transcript)).toBe(transcript);
+    expect(codexTerminalDraft(transcript)).toBeNull();
     expect(removeCodexDesktopInput('› Normal transcript text')).toBe('› Normal transcript text');
+  });
+
+  it('moves the Pi desktop draft into the mobile composer while preserving custom selectors', () => {
+    const rule = '─'.repeat(120);
+    const stats = `\x1b[2m$0.000 (sub) 0.0%/272k (auto)${' '.repeat(50)}gpt-5.6-sol • xhigh\x1b[0m`;
+    const frame = [
+      'Conversation output', '', rule, '@\x1b[7m \x1b[0m', rule,
+      '  .claude/                       .claude',
+      '→ .github/                       .github',
+      '  .qoder/                        .qoder', '  (3/34)',
+      '\x1b[2m~/Development/herdr-mobile-relay (main)\x1b[0m', stats,
+    ].join('\n');
+
+    expect(piTerminalDraft(frame)).toBe('@');
+    const hidden = renderTerminalContent(frame, 'ansi', 'pi', false);
+    expect(stripAnsi(hidden.display)).toContain('Conversation output');
+    expect(stripAnsi(hidden.display).split('\n')).toEqual(expect.arrayContaining([
+      '  .claude/', '→ .github/', '  .qoder/', '  (3/34)',
+    ]));
+    expect(stripAnsi(hidden.display)).not.toContain('.claude/                       .claude');
+    expect(hidden.display).not.toContain(TERMINAL_SEPARATOR_TOKEN);
+    expect(stripAnsi(hidden.display)).not.toContain('~/Development/herdr-mobile-relay');
+    expect(hidden.html.match(/class="agent-current-ui-start"/g)).toHaveLength(1);
+
+    const shown = renderTerminalContent(frame, 'ansi', 'pi-coding-agent', true);
+    expect(stripAnsi(shown.display).split('\n')).toContain('→ .github/');
+    expect(stripAnsi(shown.display)).toContain('~/Development/herdr-mobile-relay (main)');
+    expect(stripAnsi(shown.display)).toContain('0.0%/272k (auto)\ngpt-5.6-sol • xhigh');
+    expect(stripAnsi(shown.display)).not.toContain(' '.repeat(20));
+    expect(shown.html.match(/class="agent-current-ui-start"/g)).toHaveLength(1);
+
+    const selector = [
+      'Conversation output', rule, '> \x1b[7m \x1b[0m', '',
+      '→ Collapse changelog      false',
+      '  Type to search · Enter/Space to change · Esc to cancel',
+      rule, '~/project (main)', stats,
+    ].join('\n');
+    expect(piTerminalDraft(selector)).toBeNull();
+    expect(stripAnsi(renderTerminalContent(selector, 'ansi', 'pi', false).display))
+      .toContain('Collapse changelog');
+
+    expect(piMobileTerminalContent('ordinary output', false)).toBe('ordinary output');
+    expect(renderTerminalContent(frame, 'ansi', 'copilot', false).html).not.toContain('agent-current-ui-start');
   });
 
   it('extracts the latest completed Codex and Claude responses', () => {

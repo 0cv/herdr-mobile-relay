@@ -635,7 +635,67 @@ test('removes the Claude desktop prompt and hides its structural status footer',
   await expect(terminal).not.toContainText('manual mode');
 });
 
-test('removes the styled Codex desktop input from the mobile terminal', async ({ page }) => {
+test('uses the mobile composer for Pi drafts and hides its duplicate desktop editor', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('herdr_show_codex_status_line', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Pi app', agent: 'pi' }],
+  });
+  await page.getByRole('button', { name: 'Open Pi app on Fedora' }).click();
+  const rule = '─'.repeat(120);
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: [
+      '\u001b[38;2;166;227;161mConversation output\u001b[0m', '', rule, '@\u001b[7m \u001b[0m', rule,
+      '  .gitattributes                   .gitattributes',
+      '→ AGENTS.md                        AGENTS.md',
+      '  frontend/                        frontend', '  (4/20)',
+      '\u001b[2m~/Development/herdr-mobile-relay (main)\u001b[0m',
+      `\u001b[2m$0.000 (sub) 0.0%/272k (auto)${' '.repeat(80)}gpt-5.6-sol • xhigh\u001b[0m`,
+    ].join('\n'),
+  });
+
+  const terminal = page.getByRole('log');
+  const prompt = page.getByRole('combobox', { name: 'Prompt' });
+  await expect(terminal).toHaveClass(/bottom-ui-terminal/);
+  await expect(prompt).toHaveValue('@');
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Conversation output' }).locator('span')).toHaveCSS(
+    'color',
+    'rgb(166, 227, 161)',
+  );
+  await expect(terminal.locator('.ansi-line').filter({ hasText: '.gitattributes' })).toHaveText('  .gitattributes');
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'AGENTS.md' })).toHaveText('→ AGENTS.md');
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'frontend/' })).toHaveText('  frontend/');
+  await expect(terminal.locator('.term-separator')).toHaveCount(0);
+  await expect(terminal.locator('.agent-current-ui-start')).toHaveCount(1);
+  await expect(terminal.locator('.ansi-line').filter({ hasText: '0.0%/272k' })).toHaveText('$0.000 (sub) 0.0%/272k (auto)');
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'gpt-5.6-sol' })).toHaveText('gpt-5.6-sol • xhigh');
+
+  const [terminalBox, outputBox, modelBox] = await Promise.all([
+    terminal.boundingBox(),
+    terminal.locator('.ansi-line').filter({ hasText: 'Conversation output' }).boundingBox(),
+    terminal.locator('.ansi-line').filter({ hasText: 'gpt-5.6-sol' }).boundingBox(),
+  ]);
+  expect(terminalBox && outputBox && modelBox).toBeTruthy();
+  expect(outputBox!.y - terminalBox!.y).toBeLessThan(24);
+  expect(modelBox!.y).toBeGreaterThan(terminalBox!.y + terminalBox!.height / 2);
+  expect(terminalBox!.y + terminalBox!.height - (modelBox!.y + modelBox!.height)).toBeLessThan(24);
+
+  await prompt.fill('@AGENTS.md');
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'send_keys')).toMatchObject({
+    pane_id: 'w1:p1', keys: ['ctrl+c'], activity_label: 'Cleared terminal input',
+  });
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'submit_prompt')).toMatchObject({
+    pane_id: 'w1:p1', text: '@AGENTS.md',
+  });
+  await expect(prompt).toHaveValue('');
+});
+
+test('uses the mobile composer for Codex picker selections', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
@@ -644,19 +704,65 @@ test('removes the styled Codex desktop input from the mobile terminal', async ({
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Codex placeholder', agent: 'codex' }],
   });
   await page.getByRole('button', { name: 'Open Codex placeholder on Fedora' }).click();
+  const background = '\u001b[48;2;61;64;64m                    \u001b[0m';
+  const status = 'gpt-5.6-sol xhigh · ~/project · main · Context 30% used';
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
     content: [
-      'Completed output',
-      '\u001b[48;2;61;64;64m                    \u001b[0m',
+      'Completed output', background,
       '\u001b[1;48;2;61;64;64m›\u001b[0m\u001b[2;48;2;61;64;64m Review the current diff\u001b[0m',
-      '\u001b[48;2;61;64;64m                    \u001b[0m',
-      'gpt-5.6-sol xhigh · ~/project · main · Context 30% used',
+      background, status,
     ].join('\n'),
   });
   const terminal = page.getByRole('log');
+  const prompt = page.getByRole('combobox', { name: 'Prompt' });
+  await expect(terminal).toHaveClass(/bottom-ui-terminal/);
   await expect(terminal).toContainText('Completed output');
   await expect(terminal).not.toContainText('Review the current diff');
+  await expect(prompt).toHaveValue('');
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: [
+      'Completed output', background,
+      '\u001b[1;48;2;61;64;64m›\u001b[0m\u001b[48;2;61;64;64m @\u001b[0m',
+      background,
+      '> Default templates          Default templates for documents and presentations       Plugin',
+      '  Analytics Dashboard        Create spreadsheets with the dashboard template         Skill',
+      '  enter insert · esc close · ←/→ switch search modes                      [All Results]   Filesystem Only    Plugins',
+    ].join('\n'),
+  });
+  await expect(prompt).toHaveValue('@');
+  const pickerItems = terminal.locator('.codex-picker-item');
+  await expect(pickerItems).toHaveCount(2);
+  await expect(pickerItems.nth(0)).toContainText('Default templates');
+  await expect(pickerItems.nth(0)).toContainText('Default templates for documents and presentations');
+  await expect(pickerItems.nth(0)).toContainText('Plugin');
+  await expect(pickerItems.nth(1)).toContainText('Create spreadsheets with the dashboard template');
+  await expect(terminal.locator('.codex-picker-modes')).toHaveText('All ResultsFilesystem OnlyPlugins');
+  await expect(page.getByRole('button', { name: 'Previous result' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Next result' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Previous search mode' })).toBeVisible();
+  await page.getByRole('button', { name: 'Next search mode' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => (
+    command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(['Right'])
+  ))).toMatchObject({ pane_id: 'w1:p1', keys: ['Right'] });
+
+  const skill = '$openai-templates:artifact-template-analytics-dashboard';
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: [
+      'Completed output', background,
+      `\u001b[1;48;2;61;64;64m›\u001b[0m\u001b[38;5;6;48;2;61;64;64m ${skill}\u001b[0m`,
+      background, status,
+    ].join('\n'),
+  });
+  await expect(prompt).toHaveValue(skill);
+
+  await prompt.fill(`${skill} summarize the dashboard`);
+  await expect.poll(async () => (await commands(page)).find((command) => (
+    command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(['ctrl+c'])
+  ))).toMatchObject({ pane_id: 'w1:p1', keys: ['ctrl+c'], activity_label: 'Cleared terminal input' });
 });
 
 test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {

@@ -14,7 +14,14 @@
   import { interfaceSize, showAgentStatusLine } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { relayStore, CommandError } from '$lib/store';
-  import { claudeMobileTerminalContent, lastCompletedResponse, renderTerminalContent } from '$lib/terminal';
+  import {
+    claudeMobileTerminalContent,
+    codexPickerActive,
+    codexTerminalDraft,
+    lastCompletedResponse,
+    piTerminalDraft,
+    renderTerminalContent,
+  } from '$lib/terminal';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
   const connections = relayStore.connections;
@@ -50,6 +57,10 @@
   let slashCatalogUnavailable = $state(false);
   let activeSlashIndex = $state(0);
   let dismissedSlashQuery = $state<string | null>(null);
+  let nativeTerminalDraft: string | null = null;
+  let terminalDraftClearPromise: Promise<boolean> | null = null;
+  let suppressTerminalDraft = false;
+  let codexPickerOpen = $state(false);
 
   const responsePending = $derived(agentNeedsResponse(agent));
   const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
@@ -57,6 +68,7 @@
   const inputLocked = $derived(responsePending || inspectionMode);
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(responsePending && attentionKind(agent) === 'question' && interaction));
+  const synchronizedInputTerminal = $derived(/\b(?:codex|pi)\b/i.test(String(agent.agent || '')));
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -82,6 +94,7 @@
       lastFormat = '';
       deferredFrame = undefined;
       jumpVisible = false;
+      codexPickerOpen = false;
       return;
     }
     if (untrack(() => composerFocused)) deferredFrame = next;
@@ -133,6 +146,12 @@
 
   async function applyFrame(next: TerminalFrame, statusLine = $showAgentStatusLine) {
     const agentType = String(agent.agent || '');
+    codexPickerOpen = /\bcodex\b/i.test(agentType) && codexPickerActive(next.content);
+    if (synchronizedInputTerminal) reconcileTerminalDraft(next.content, agentType);
+    else {
+      nativeTerminalDraft = null;
+      suppressTerminalDraft = false;
+    }
     const mobileContent = /\bclaude\b/i.test(agentType)
       ? claudeMobileTerminalContent(
         next.content,
@@ -186,9 +205,45 @@
     });
   }
 
+  function reconcileTerminalDraft(content: string, agentType: string) {
+    const draft = /\bcodex\b/i.test(agentType) ? codexTerminalDraft(content) : piTerminalDraft(content);
+    if (draft === null) {
+      nativeTerminalDraft = null;
+      suppressTerminalDraft = false;
+      return;
+    }
+    if (suppressTerminalDraft) {
+      if (!draft) {
+        nativeTerminalDraft = '';
+        suppressTerminalDraft = false;
+      }
+      return;
+    }
+    if (!composerFocused && (!composer || composer === nativeTerminalDraft)) composer = draft;
+    nativeTerminalDraft = draft;
+  }
+
+  async function clearNativeTerminalDraft(): Promise<boolean> {
+    if (terminalDraftClearPromise) return terminalDraftClearPromise;
+    if (!synchronizedInputTerminal || !nativeTerminalDraft) return true;
+    const previousDraft = nativeTerminalDraft;
+    nativeTerminalDraft = '';
+    suppressTerminalDraft = true;
+    terminalDraftClearPromise = sendKeys(['ctrl+c'], 'Cleared terminal input');
+    const cleared = await terminalDraftClearPromise;
+    terminalDraftClearPromise = null;
+    if (!cleared) {
+      nativeTerminalDraft = previousDraft;
+      suppressTerminalDraft = false;
+    }
+    return cleared;
+  }
+
   async function sendPrompt() {
     const text = composer.replace(/[\r\n]+$/g, '');
     if (!text || inputLocked) return;
+    if (!await clearNativeTerminalDraft()) return;
+    if (composer.replace(/[\r\n]+$/g, '') !== text) return;
     composer = '';
     try {
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
@@ -203,6 +258,14 @@
   function composerInput() {
     if (dismissedSlashQuery !== composer) dismissedSlashQuery = null;
     activeSlashIndex = 0;
+    if (nativeTerminalDraft) void clearNativeTerminalDraft();
+  }
+
+  function clearComposer() {
+    composer = '';
+    dismissedSlashQuery = null;
+    activeSlashIndex = 0;
+    if (nativeTerminalDraft) void clearNativeTerminalDraft();
   }
 
   function resizeComposer() {
@@ -253,13 +316,15 @@
     }
   }
 
-  async function sendKeys(keys: string[], activityLabel = '') {
+  async function sendKeys(keys: string[], activityLabel = ''): Promise<boolean> {
     try {
       await relayStore.sendToAgent(agent, { type: 'send_keys', keys, activity_label: activityLabel });
+      setTimeout(() => relayStore.readPane(agent), 300);
+      return true;
     } catch (error) {
       relayStore.showToast((error as Error).message, true);
+      return false;
     }
-    setTimeout(() => relayStore.readPane(agent), 300);
   }
 
   async function copyResponse() {
@@ -360,6 +425,7 @@
     <Button variant="ghost" size="icon" aria-label="Refresh terminal" onclick={() => relayStore.readPane(agent)}>↻</Button>
   </div>
   <div
+    class:bottom-ui-terminal={synchronizedInputTerminal}
     class="term-content"
     bind:this={terminalElement}
     role="log"
@@ -459,7 +525,7 @@
           onkeydown={keydown}
           onpaste={paste}
         ></textarea>
-        {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={() => { composer = ''; dismissedSlashQuery = null; activeSlashIndex = 0; }}>×</button>{/if}
+        {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
       <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked} aria-label="Send prompt" onclick={sendPrompt}>➤</Button>
       <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
@@ -480,27 +546,37 @@
       <div class="quick-actions"><Button variant="secondary" onclick={openNext}>Next blocked →</Button></div>
     {/if}
 
-    <div class="term-keys">
-      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Tab'])}>Tab</Button>
-      <Button variant="secondary" size="sm" aria-label="Copy last agent response" onclick={copyResponse}>Copy</Button>
-      <span class="spacer"></span>
-      <div class="arrow-menu">
-        <Button variant="secondary" size="sm" aria-label="Arrow keys" aria-expanded={arrowsOpen} onclick={() => { arrowsOpen = !arrowsOpen; }}>
-          <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <path d="M12 2v20M2 12h20"></path>
-            <path d="m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4"></path>
-          </svg>
-        </Button>
-        {#if arrowsOpen}
-          <div class="arrow-popup">
-            <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
-            <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
-            <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
-          </div>
-        {/if}
-      </div>
-      <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
+    <div class:codex-picker-keys={codexPickerOpen} class="term-keys">
+      {#if codexPickerOpen}
+        <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Closed picker')}>Esc</Button>
+        <Button variant="secondary" size="sm" aria-label="Previous result" onclick={() => sendKeys(['Up'])}>↑</Button>
+        <Button variant="secondary" size="sm" aria-label="Next result" onclick={() => sendKeys(['Down'])}>↓</Button>
+        <span class="spacer"></span>
+        <Button variant="secondary" size="sm" aria-label="Previous search mode" onclick={() => sendKeys(['Left'])}>←</Button>
+        <Button variant="secondary" size="sm" aria-label="Next search mode" onclick={() => sendKeys(['Right'])}>→</Button>
+        <Button variant="secondary" size="sm" aria-label="Insert selection" onclick={() => sendKeys(['Enter'])}>Enter</Button>
+      {:else}
+        <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Cancelled prompt')}>Esc</Button>
+        <Button variant="secondary" size="sm" onclick={() => sendKeys(['Tab'])}>Tab</Button>
+        <Button variant="secondary" size="sm" aria-label="Copy last agent response" onclick={copyResponse}>Copy</Button>
+        <span class="spacer"></span>
+        <div class="arrow-menu">
+          <Button variant="secondary" size="sm" aria-label="Arrow keys" aria-expanded={arrowsOpen} onclick={() => { arrowsOpen = !arrowsOpen; }}>
+            <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M12 2v20M2 12h20"></path>
+              <path d="m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4"></path>
+            </svg>
+          </Button>
+          {#if arrowsOpen}
+            <div class="arrow-popup">
+              <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
+              <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
+              <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
+            </div>
+          {/if}
+        </div>
+        <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
+      {/if}
     </div>
   </div>
   {/if}

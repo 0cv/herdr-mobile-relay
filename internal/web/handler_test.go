@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -243,6 +244,10 @@ func TestSecurityCacheMIMEAndHEADContract(t *testing.T) {
 		if w.Header().Get(header) == "" {
 			t.Errorf("missing security header %s", header)
 		}
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "style-src 'self'; style-src-attr 'unsafe-inline'") {
+		t.Fatalf("Content-Security-Policy does not allow sanitized ANSI style attributes: %q", csp)
 	}
 }
 
