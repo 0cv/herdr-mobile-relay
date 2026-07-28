@@ -612,15 +612,49 @@ function hasTerminalBoxCell(line: string): boolean {
   return false;
 }
 
-export function terminalHtml(
+export interface RenderedTerminalRow {
+  html: string;
+  text: string;
+  columns: number;
+  fixedGrid: boolean;
+  separator: boolean;
+}
+
+export interface RenderedTerminalContent {
+  display: string;
+  html: string;
+  rows: RenderedTerminalRow[];
+}
+
+function terminalTextColumns(text: string): number {
+  let column = 0;
+  for (const { segment } of TERMINAL_GRAPHEME_SEGMENTER.segment(text)) {
+    if (segment === '\t') {
+      column += 8 - (column % 8);
+      continue;
+    }
+    column += terminalGraphemeWidth(segment);
+  }
+  return column;
+}
+
+export function terminalHtmlRows(
   text: string,
   normalizeLightPalette = false,
   preserveLineEnds = false,
-): string {
+): RenderedTerminalRow[] {
   const lines = text.split('\n');
   const backgrounds = ansiLineBackgrounds(lines);
   return lines.map((line, index) => {
-    if (line === TERMINAL_SEPARATOR_TOKEN) return '<span class="term-separator" aria-hidden="true"></span>';
+    if (line === TERMINAL_SEPARATOR_TOKEN) {
+      return {
+        html: '<span class="term-separator" aria-hidden="true"></span>',
+        text: '',
+        columns: 0,
+        fixedGrid: false,
+        separator: true,
+      };
+    }
     const renderedLine = preserveLineEnds
       ? (line.endsWith('\r') ? line.slice(0, -1) : line)
       : trimAnsiLineEnd(line);
@@ -628,15 +662,32 @@ export function terminalHtml(
     const normalizeRow = normalizeLightPalette && isNearWhiteAnsiColor(sourceBackground);
     const normalizeDarkText = normalizeLightPalette && (!sourceBackground || normalizeRow);
     const background = normalizedAnsiBackground(sourceBackground, normalizeRow);
+    const fixedGrid = preserveLineEnds && hasTerminalBoxCell(renderedLine);
     const classes = [
       'ansi-line',
       background ? 'ansi-line-background' : '',
-      preserveLineEnds && hasTerminalBoxCell(renderedLine) ? 'terminal-grid-line' : '',
+      fixedGrid ? 'terminal-grid-line' : '',
     ].filter(Boolean).join(' ');
     const style = background ? ` style="${ansiLineBackgroundStyle(renderedLine, background)}"` : '';
     // ansiToHtml escapes every text segment before it emits controlled span markup.
-    return `<span class="${classes}"${style}>${ansiToHtml(renderedLine, normalizeRow, normalizeDarkText, preserveLineEnds)}</span>`;
-  }).join('');
+    return {
+      html: `<span class="${classes}"${style}>${ansiToHtml(renderedLine, normalizeRow, normalizeDarkText, preserveLineEnds)}</span>`,
+      text: stripAnsi(renderedLine),
+      columns: terminalTextColumns(stripAnsi(renderedLine)),
+      fixedGrid,
+      separator: false,
+    };
+  });
+}
+
+export function terminalHtml(
+  text: string,
+  normalizeLightPalette = false,
+  preserveLineEnds = false,
+): string {
+  return terminalHtmlRows(text, normalizeLightPalette, preserveLineEnds)
+    .map((row) => row.html)
+    .join('');
 }
 
 export function renderTerminalContent(
@@ -644,7 +695,7 @@ export function renderTerminalContent(
   format: string,
   preserveLayout = false,
   preserveLineEnds = preserveLayout,
-): { display: string; html: string } {
+): RenderedTerminalContent {
   const markedDisplay = preserveLayout
     ? preservedTerminalDisplayContent(content)
     : compactSeparatorLines(terminalDisplayContent(content));
@@ -652,10 +703,27 @@ export function renderTerminalContent(
     ? markedDisplay.split('\n').map(trimAnsiLineEnd).join('\n')
     : markedDisplay;
   if (format !== 'ansi') {
-    return { display, html: escapeHtml(display.replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────')) };
+    const plainDisplay = display.replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
+    return {
+      display,
+      html: escapeHtml(plainDisplay),
+      rows: plainDisplay.split('\n').map((line) => {
+        const fixedGrid = preserveLayout && hasTerminalBoxCell(line);
+        const classes = `ansi-line${fixedGrid ? ' terminal-grid-line' : ''}`;
+        return {
+          html: `<span class="${classes}">${escapeHtml(line)}</span>`,
+          text: line,
+          columns: terminalTextColumns(line),
+          fixedGrid,
+          separator: false,
+        };
+      }),
+    };
   }
+  const rows = terminalHtmlRows(display, true, preserveLayout);
   return {
     display,
-    html: terminalHtml(display, true, preserveLayout),
+    html: rows.map((row) => row.html).join(''),
+    rows,
   };
 }

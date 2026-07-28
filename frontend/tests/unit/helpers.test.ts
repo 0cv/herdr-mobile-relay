@@ -38,6 +38,7 @@ import {
   terminalHtml,
   trimTrailingDecoration,
 } from '$lib/terminal';
+import { VirtualTerminalIndex } from '$lib/virtual-terminal';
 import type { Agent, QuestionInteraction, RelayConnectionView } from '$lib/types';
 
 function agent(overrides: Partial<Agent>): Agent {
@@ -141,6 +142,8 @@ describe('terminal rendering', () => {
     ].join('\n'));
     expect(rendered.html.match(/class="term-separator"/g)).toHaveLength(1);
     expect(rendered.html.match(/class="ansi-line"/g)).toHaveLength(6);
+    expect(rendered.rows).toHaveLength(7);
+    expect(rendered.rows.filter((row) => row.separator)).toHaveLength(1);
   });
 
   it('caps arbitrary repeated symbols embedded in terminal output', () => {
@@ -168,6 +171,9 @@ describe('terminal rendering', () => {
 
     expect(stripAnsi(readable.display).split('\n')).toHaveLength(2);
     expect(stripAnsi(preserved.display).split('\n')).toEqual(frame.split('\n'));
+    expect(readable.rows).toHaveLength(2);
+    expect(preserved.rows).toHaveLength(4);
+    expect(preserved.rows.every((row) => row.fixedGrid)).toBe(true);
     expect(readable.html).not.toContain('terminal-cell');
     expect(preserved.html).toContain('<span class="terminal-cell terminal-cell-box terminal-cell-arc terminal-cell-arc-down-right">╭</span>');
     expect(preserved.html).toContain(`class="terminal-cell-horizontal terminal-cell-horizontal-single" style="width:40ch">${'─'.repeat(40)}</span>`);
@@ -185,6 +191,12 @@ describe('terminal rendering', () => {
       `└${'─'.repeat(80)}┘`,
     ].join('\n'), 'ansi', true);
     expect(table.html.match(/terminal-grid-line/g)).toHaveLength(3);
+    const plainTable = renderTerminalContent(table.display, 'plain', true);
+    expect(plainTable.rows.every((row) => row.fixedGrid)).toBe(true);
+    expect(plainTable.rows.filter((row) => row.html.includes('terminal-grid-line')))
+      .toHaveLength(3);
+    expect(renderTerminalContent('plain terminal output', 'plain', true).rows[0].fixedGrid)
+      .toBe(false);
     expect(renderTerminalContent('plain terminal output', 'ansi', true).html)
       .not.toContain('terminal-grid-line');
   });
@@ -402,5 +414,38 @@ describe('activity, question drafts, and launch names', () => {
     expect(suggestedLaunchName('/home/me/123.App', 'codex')).toBe('project-123-app-codex');
     expect(validAgentName('project-codex')).toBe(true);
     expect(validAgentName('Project.codex')).toBe(false);
+  });
+});
+
+describe('virtual terminal row index', () => {
+  it('maps variable row heights to bounded visible ranges', () => {
+    const index = new VirtualTerminalIndex();
+    index.reset([10, 20, 30, 40]);
+
+    expect(index.total).toBe(100);
+    expect(index.offset(2)).toBe(30);
+    expect(index.range(30, 20, 0)).toEqual({
+      start: 2,
+      end: 3,
+      top: 30,
+      bottom: 40,
+      total: 100,
+    });
+  });
+
+  it('updates following offsets without rebuilding the index', () => {
+    const index = new VirtualTerminalIndex();
+    index.reset([10, 20, 30, 40]);
+
+    expect(index.update(1, 45)).toBe(25);
+    expect(index.total).toBe(125);
+    expect(index.offset(2)).toBe(55);
+    expect(index.range(55, 30, 5)).toMatchObject({
+      start: 1,
+      end: 4,
+      top: 10,
+      bottom: 0,
+    });
+    expect(index.update(8, 50)).toBe(0);
   });
 });

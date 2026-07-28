@@ -313,9 +313,10 @@ textarea { min-height: 6.5rem; resize: vertical; }
   white-space: pre-wrap;
   word-break: normal;
 }
-.term-screen { display: contents; }
+.term-screen { display: block; min-width: 100%; }
+.terminal-virtual-spacer { display: block; pointer-events: none; width: 1px; }
 .term-content.preserve-layout { overflow-wrap: normal; white-space: pre; }
-.term-content.preserve-layout > .term-screen { display: grid; min-width: 100%; width: max-content; }
+.term-content.preserve-layout > .term-screen { display: grid; min-width: 100%; width: max(100%, var(--terminal-content-width, 100%)); }
 .term-content.preserve-layout.resize-layout > .term-screen { min-width: 0; }
 .term-content.preserve-layout.resize-layout > .term-screen > .ansi-line-background {
   justify-self: start;

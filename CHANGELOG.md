@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-07-28
+
+### Changed
+
+- Virtualize long terminal histories with measured row heights, bounded DOM
+  windows, stable scroll anchors, and a complete copy/accessibility transcript
+  so opening the phone keyboard no longer scales with the configured history.
+
 ## [0.11.0] - 2026-07-28
 
 ### Added
@@ -56,5 +64,6 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.10.7...v0.11.0

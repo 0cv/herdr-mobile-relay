@@ -761,6 +761,374 @@ test('cycles all terminal widths while preserving fixed-grid rendering on older 
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBe('readable');
 });
 
+test('virtualizes variable-height terminal history without truncating copy', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        async writeText(text: string) {
+          Reflect.set(window, '__copiedTerminal', text);
+        },
+      },
+    });
+  });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Long history', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Long history on Fedora' }).click();
+  const content = Array.from({ length: 1_000 }, (_, index) => {
+    const row = `row ${String(index + 1).padStart(4, '0')}`;
+    return index % 50 === 0 ? `${row} ${'wrapped content '.repeat(32).trimEnd()}` : row;
+  }).join('\n');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content,
+  });
+
+  const terminal = page.getByRole('log');
+  const screen = terminal.locator('.term-screen');
+  const mountedRows = screen.locator('[data-terminal-row]');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '1000');
+  await expect(terminal).toContainText('row 1000');
+  expect(await mountedRows.count()).toBeLessThan(250);
+
+  await terminal.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => Number(await mountedRows.first().getAttribute('data-terminal-row'))).toBe(0);
+  const topHeights = await mountedRows.evaluateAll((elements) => elements.slice(0, 2)
+    .map((element) => element.getBoundingClientRect().height));
+  expect(topHeights[0]).toBeGreaterThan(topHeights[1]);
+
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => Number(await mountedRows.first().getAttribute('data-terminal-row')))
+    .toBeGreaterThan(100);
+  expect(await mountedRows.count()).toBeLessThan(250);
+  const middleAnchor = await terminal.evaluate((element) => {
+    const viewportTop = element.getBoundingClientRect().top;
+    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+      .find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    if (!row) return null;
+    return {
+      index: Number(row.dataset.terminalRow),
+      offset: row.getBoundingClientRect().top - viewportTop,
+    };
+  });
+  expect(middleAnchor).not.toBeNull();
+  const updatedContent = `${content}\nrow 1001 updated while scrolled`;
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: updatedContent,
+  });
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '1001');
+  expect(await mountedRows.count()).toBeLessThan(250);
+  await expect.poll(async () => terminal.evaluate((element, expected) => {
+    const viewportTop = element.getBoundingClientRect().top;
+    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+      .find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    return row ? Math.abs(Number(row.dataset.terminalRow) - expected) : Number.POSITIVE_INFINITY;
+  }, middleAnchor?.index || 0)).toBeLessThanOrEqual(1);
+  await expect.poll(async () => terminal.evaluate((element, expected) => {
+    const viewport = element.getBoundingClientRect();
+    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+      .find((candidate) => Number(candidate.dataset.terminalRow) === expected);
+    if (!row) return false;
+    const bounds = row.getBoundingClientRect();
+    return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+  }, middleAnchor?.index || 0)).toBe(true);
+
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => Number(await mountedRows.last().getAttribute('data-terminal-row'))).toBe(1000);
+  const bottomUpdatedContent = `${updatedContent}\nrow 1002 appended at bottom`;
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: bottomUpdatedContent,
+  });
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '1002');
+  await expect.poll(async () => Number(await mountedRows.last().getAttribute('data-terminal-row'))).toBe(1001);
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  const applicationNav = page.getByRole('navigation', { name: 'Application' });
+  const prompt = page.getByRole('combobox', { name: 'Prompt' });
+  const layoutProbe = screen.locator('[data-terminal-row="950"]');
+  const readableProbeHeight = await layoutProbe.evaluate((element) =>
+    element.getBoundingClientRect().height);
+  await prompt.focus();
+  await applicationNav.getByRole('button', {
+    name: 'Terminal width: Fit to Phone. Switch to Original Columns',
+  }).evaluate((element) => {
+    if (element instanceof HTMLButtonElement) element.click();
+  });
+  await expect(prompt).toBeFocused();
+  await expect.poll(async () => layoutProbe.evaluate((element) =>
+    element.getBoundingClientRect().height)).toBeLessThan(readableProbeHeight / 2);
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '1002');
+  await expect.poll(async () => Number(await mountedRows.last().getAttribute('data-terminal-row'))).toBe(1001);
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  expect(await mountedRows.count()).toBeLessThan(250);
+  await applicationNav.getByRole('button', {
+    name: 'Terminal width: Original Columns. Switch to Resize Session',
+  }).click();
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '1002');
+  expect(await mountedRows.count()).toBeLessThan(250);
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(48);
+  await applicationNav.getByRole('button', {
+    name: 'Terminal width: Resize Session. Switch to Fit to Phone',
+  }).click();
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '1002');
+  expect(await mountedRows.count()).toBeLessThan(250);
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(48);
+  await expect.poll(async () => Number(await mountedRows.last().getAttribute('data-terminal-row'))).toBe(1001);
+  const fullTranscript = page.getByRole('textbox', { name: 'Full terminal transcript' });
+  const copyButton = page.getByRole('button', { name: 'Copy', exact: true });
+  await expect(fullTranscript).toHaveValue(bottomUpdatedContent);
+  await copyButton.click();
+  await expect.poll(() => page.evaluate(() =>
+    Reflect.get(window, '__copiedTerminal'))).toBe(bottomUpdatedContent);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  });
+  await copyButton.click();
+  await expect(fullTranscript).toBeFocused();
+  expect(await fullTranscript.evaluate((element) => {
+    if (!(element instanceof HTMLTextAreaElement)) return null;
+    return { start: element.selectionStart, end: element.selectionEnd };
+  })).toEqual({ start: 0, end: bottomUpdatedContent.length });
+});
+
+test('virtualizes large ANSI agent grids without wrapping fixed rows', async ({ page }) => {
+  await boot(page, [fedora], '/', { terminalLayout: 'preserve' });
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'ANSI grid history', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open ANSI grid history on Fedora' }).click();
+  const content = Array.from({ length: 600 }, (_, index) => {
+    if (index % 20 === 0) return `╭${'─'.repeat(98)}╮`;
+    if (index % 20 === 1) {
+      return `\u001b[48;2;61;64;64m${`│ grid row ${index + 1}`.padEnd(99)}│\u001b[0m`;
+    }
+    return `\u001b[38;2;95;175;255mANSI agent row ${index + 1} 🐑\u001b[0m`;
+  }).join('\n');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content,
+  });
+
+  const terminal = page.getByRole('log');
+  const screen = terminal.locator('.term-screen');
+  const mountedRows = screen.locator('[data-terminal-row]');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '600');
+  await expect.poll(async () => Number(await mountedRows.last().getAttribute('data-terminal-row'))).toBe(599);
+  expect(await mountedRows.count()).toBeLessThan(250);
+  expect(await terminal.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+
+  await terminal.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => Number(await mountedRows.first().getAttribute('data-terminal-row'))).toBe(0);
+  const gridGeometry = await terminal.locator('.terminal-grid-line').first().evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
+  }));
+  expect(gridGeometry.height).toBeLessThan(gridGeometry.lineHeight * 2);
+  await expect(terminal.locator('.ansi-line-background').first()).toBeVisible();
+
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => Number(await mountedRows.first().getAttribute('data-terminal-row')))
+    .toBeGreaterThan(100);
+  expect(await mountedRows.count()).toBeLessThan(250);
+});
+
+
+test('preserves the logical anchor across normalized terminal layouts', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Normalized history', agent: 'claude' }],
+  });
+  await page.getByRole('button', { name: 'Open Normalized history on Fedora' }).click();
+  const content = Array.from({ length: 400 }, (_, index) => [
+    `message ${String(index + 1).padStart(4, '0')} anchor text`,
+    `  continuation ${String(index + 1).padStart(4, '0')} details`,
+  ]).flat().join('\n');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content,
+  });
+
+  const terminal = page.getByRole('log');
+  const screen = terminal.locator('.term-screen');
+  const mountedRows = screen.locator('[data-terminal-row]');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '400');
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => terminal.evaluate((element) => {
+    const viewport = element.getBoundingClientRect();
+    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+      .find((candidate) => {
+        const bounds = candidate.getBoundingClientRect();
+        return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+      });
+    return row ? Number(row.dataset.terminalRow) : -1;
+  })).toBeGreaterThan(100);
+  const readableAnchor = await terminal.evaluate((element) => {
+    const viewport = element.getBoundingClientRect();
+    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+      .find((candidate) => {
+        const bounds = candidate.getBoundingClientRect();
+        return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+      });
+    return {
+      index: Number(row?.dataset.terminalRow),
+      text: row?.textContent || '',
+    };
+  });
+  expect(readableAnchor.index).toBeGreaterThan(100);
+  expect(readableAnchor.text).toMatch(/message \d{4}/);
+
+  const prompt = page.getByRole('combobox', { name: 'Prompt' });
+  await prompt.focus();
+  await page.getByRole('navigation', { name: 'Application' }).getByRole('button', {
+    name: 'Terminal width: Fit to Phone. Switch to Original Columns',
+  }).evaluate((element) => {
+    if (element instanceof HTMLButtonElement) element.click();
+  });
+  await expect(prompt).toBeFocused();
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '800');
+  await expect.poll(async () => terminal.evaluate((element, expectedRow) => {
+    const viewport = element.getBoundingClientRect();
+    const firstVisible = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+      .find((row) => {
+        const bounds = row.getBoundingClientRect();
+        return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+      });
+    if (!firstVisible) return Number.POSITIVE_INFINITY;
+    return Math.abs(Number(firstVisible.dataset.terminalRow) - expectedRow);
+  }, readableAnchor.index * 2)).toBeLessThanOrEqual(2);
+  expect(await mountedRows.count()).toBeLessThan(250);
+});
+
+test('restores a non-bottom anchor after the resize placeholder', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize anchor', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Resize anchor on Fedora' }).click();
+  const content = Array.from(
+    { length: 600 },
+    (_, index) => `resize anchor row ${String(index + 1).padStart(4, '0')}`,
+  ).join('\n');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content,
+  });
+
+  const terminal = page.getByRole('log');
+  const screen = terminal.locator('.term-screen');
+  const mountedRows = screen.locator('[data-terminal-row]');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '600');
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => Number(await mountedRows.first().getAttribute('data-terminal-row')))
+    .toBeGreaterThan(100);
+  const widthControls = page.getByRole('navigation', { name: 'Application' });
+  await widthControls.getByRole('button', {
+    name: 'Terminal width: Fit to Phone. Switch to Original Columns',
+  }).click();
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '600');
+  const anchor = await terminal.evaluate((element) => {
+    const viewportTop = element.getBoundingClientRect().top;
+    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+      .find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    return {
+      index: Number(row?.dataset.terminalRow),
+      text: row?.textContent || '',
+    };
+  });
+  expect(anchor.text).toMatch(/^resize anchor row \d{4}$/);
+
+  await setAutoCommands(page, false);
+  await widthControls.getByRole('button', {
+    name: 'Terminal width: Original Columns. Switch to Resize Session',
+  }).click();
+  await expect(terminal).toContainText('Resizing terminal…');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+  const lease = (await commands(page))
+    .find((command) => command.type === 'lease_pane_size')!;
+  const readsBeforeResult = (await commands(page))
+    .filter((command) => command.type === 'read_pane').length;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'lease_pane_size',
+    request_id: lease.request_id,
+    ok: true,
+    data: { columns: lease.columns },
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readsBeforeResult);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content,
+  });
+
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '600');
+  await expect.poll(async () => terminal.evaluate((element, expected) => {
+    const viewportTop = element.getBoundingClientRect().top;
+    const row = [...element.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+      .find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+    if (!row) return Number.POSITIVE_INFINITY;
+    return Math.abs(Number(row.dataset.terminalRow) - expected);
+  }, anchor.index)).toBeLessThanOrEqual(1);
+  await expect(terminal).toContainText(anchor.text);
+});
+
 test('leases measured terminal columns and releases on mode exit and teardown', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -809,7 +1177,7 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
   expect(Number(acquire.columns)).toBeLessThanOrEqual(240);
   await expect(terminal).toHaveClass(/preserve-layout/);
   await expect(terminal).toContainText('Resizing terminal…');
-  await expect(terminal.locator('.ansi-line')).toHaveCount(0);
+  await expect(terminal.locator('.ansi-line')).toHaveCount(1);
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readsBeforeLease);
 
@@ -857,7 +1225,8 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
     format: 'ansi',
     content: storedHistory,
   });
-  await expect(terminal.locator('.ansi-line')).toHaveCount(120);
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
+  await expect(terminal).toContainText('stored resize history row 120');
 
   const viewport = page.viewportSize()!;
   await page.setViewportSize({ width: viewport.width + 200, height: viewport.height });
@@ -872,7 +1241,8 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
     format: 'ansi',
     content: storedHistory,
   });
-  await expect(terminal.locator('.ansi-line')).toHaveCount(120);
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
+  await expect(terminal).toContainText('stored resize history row 120');
 
   await page.getByRole('button', {
     name: 'Terminal width: Resize Session. Switch to Fit to Phone',
@@ -891,9 +1261,16 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
   await page.getByRole('button', {
     name: 'Terminal width: Fit to Phone. Switch to Original Columns',
   }).click();
+  const composer = page.getByRole('combobox', { name: 'Prompt' });
+  await composer.focus();
   await page.getByRole('button', {
     name: 'Terminal width: Original Columns. Switch to Resize Session',
-  }).click();
+  }).evaluate((element) => {
+    if (element instanceof HTMLButtonElement) element.click();
+  });
+  await expect(composer).toBeFocused();
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
+  await expect(terminal).not.toContainText('Resizing terminal…');
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(3);
   await page.getByRole('button', { name: 'Back' }).click();
@@ -908,8 +1285,8 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
   await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(leaseCountBeforeReentry + 1);
-  await expect(terminal.locator('.ansi-line')).toHaveCount(120);
-  await expect(terminal).toContainText('stored resize history row 1');
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
+  await expect(terminal).toContainText('stored resize history row 120');
   await expect(terminal).not.toContainText('Resizing terminal…');
 
   const reentryLease = (await commands(page))
@@ -921,7 +1298,7 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
     ok: true,
     data: { columns: reentryLease.columns },
   });
-  await expect(terminal).toContainText('stored resize history row 1');
+  await expect(terminal).toContainText('stored resize history row 120');
   await expect(terminal).not.toContainText('Resizing terminal…');
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readCountBeforeReentry);
@@ -935,7 +1312,7 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
       (_, index) => `transient viewport row ${index + 1}`,
     ).join('\n'),
   });
-  await expect(terminal).toContainText('stored resize history row 1');
+  await expect(terminal).toContainText('stored resize history row 120');
   await expect(terminal).not.toContainText('Resizing terminal…');
   await expect(terminal).not.toContainText('transient viewport row');
   await page.waitForTimeout(300);
@@ -945,7 +1322,11 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
     format: 'ansi',
     content: storedHistory,
   });
-  await expect(terminal.locator('.ansi-line')).toHaveCount(120);
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
+  await terminal.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
   await expect(terminal).toContainText('stored resize history row 1');
 
   await setAutoCommands(page, true);

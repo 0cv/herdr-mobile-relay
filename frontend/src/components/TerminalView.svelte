@@ -1,11 +1,13 @@
 <script lang="ts" module>
   import type { TerminalFrame as CachedTerminalFrame } from '$lib/types';
+  import type { RenderedTerminalRow } from '$lib/terminal';
 
   interface ResizedTerminalFrame {
     frame: CachedTerminalFrame;
     columns: number;
     display: string;
     html: string;
+    rows: RenderedTerminalRow[];
     historyLines: number;
     interfaceSize: string;
     viewportWidth: number;
@@ -49,6 +51,7 @@
   import { relayStore, CommandError } from '$lib/store';
   import { stripAnsi, TERMINAL_SEPARATOR_TOKEN, renderTerminalContent } from '$lib/terminal';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
+  import { VirtualTerminalIndex } from '$lib/virtual-terminal';
 
   const connections = relayStore.connections;
 
@@ -64,11 +67,18 @@
     responding: Set<string>;
   } = $props();
 
+  interface VirtualTerminalAnchor {
+    index: number;
+    offset: number;
+    text: string;
+  }
+
   let terminalElement = $state<HTMLDivElement>(null!);
   let cellMeasureElement = $state<HTMLSpanElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
   let ctrlInputElement = $state<HTMLInputElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
+  let transcriptElement = $state<HTMLTextAreaElement>(null!);
   let composer = $state('');
   let composerFocused = $state(false);
   let deferredFrame: TerminalFrame | undefined;
@@ -76,6 +86,23 @@
   let showingCachedResizeFrame = false;
   let displayed = $state('');
   let renderedHtml = $state('');
+  let renderedRows = $state<RenderedTerminalRow[]>([]);
+  let virtualHtml = $state('');
+  let virtualTopHeight = $state(0);
+  let virtualBottomHeight = $state(0);
+  let virtualContentColumns = $state(0);
+  let virtualStart = 0;
+  let virtualEnd = 0;
+  let virtualLayoutSignature = '';
+  let virtualStickToBottom = true;
+  let virtualScrollResetPending = false;
+  let pendingResizeAnchor: VirtualTerminalAnchor | null = null;
+  let pendingResizeStick: boolean | null = null;
+  let pendingLayoutStick: boolean | null = null;
+  let virtualWindowFrame = 0;
+  let virtualRowObserver: ResizeObserver | undefined;
+  let virtualHeightCache = new Map<string, number>();
+  const virtualIndex = new VirtualTerminalIndex();
   let lastFormat = '';
   let lastContent = '';
   let lastPreserveLayout = false;
@@ -134,6 +161,19 @@
     && !questionMode
     && slashQuery !== null
     && dismissedSlashQuery !== composer);
+  const terminalPlainText = $derived(
+    stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
+  );
+  const terminalContentStyle = $derived.by(() => {
+    const styles: string[] = [];
+    if (resizeSessionActive && (lastLeasedColumns || renderedResizeColumns)) {
+      styles.push(`--terminal-width: ${lastLeasedColumns || renderedResizeColumns}ch`);
+    }
+    if (virtualContentColumns > 0) {
+      styles.push(`--terminal-content-width: ${virtualContentColumns}ch`);
+    }
+    return styles.length ? styles.join(';') : undefined;
+  });
 
   $effect(() => {
     const next = frame;
@@ -147,8 +187,12 @@
         || next === resizeFrameBaseline)) {
       renderedResizeColumns = cachedResizeFrame.columns;
       showingCachedResizeFrame = true;
-      if (untrack(() => composerFocused)) deferredFrame = cachedResizeFrame.frame;
-      else if (!lastContent) void applyCachedResizeFrame(cachedResizeFrame);
+      const cachedLayoutChanged = !lastPreserveLayout || lastPreserveLineEnds;
+      if (untrack(() => composerFocused) && !cachedLayoutChanged) {
+        deferredFrame = cachedResizeFrame.frame;
+      } else if (cachedLayoutChanged || !lastContent) {
+        untrack(() => { void applyCachedResizeFrame(cachedResizeFrame); });
+      }
       return;
     }
     const incompleteResizeHistory = resizeSessionActive
@@ -166,12 +210,27 @@
         || incompleteResizeHistory);
     if (waitingForResizedFrame && showingCachedResizeFrame) return;
     if (!next || next.paneId !== agent.pane_id || waitingForResizedFrame) {
-      displayed = waitingForResizedFrame ? 'Resizing terminal…' : 'Loading…';
-      renderedHtml = displayed;
-      lastFormat = '';
-      lastContent = '';
-      deferredFrame = undefined;
-      jumpVisible = false;
+      untrack(() => {
+        if (waitingForResizedFrame && pendingResizeStick === null) {
+          pendingResizeStick = virtualStickToBottom;
+          pendingResizeAnchor = virtualStickToBottom
+            ? null
+            : currentVirtualAnchor(terminalElement?.scrollTop || 0);
+        } else if (!waitingForResizedFrame) {
+          pendingResizeStick = null;
+          pendingResizeAnchor = null;
+        }
+        const message = waitingForResizedFrame ? 'Resizing terminal…' : 'Loading…';
+        const rendered = renderTerminalContent(message, 'plain');
+        displayed = rendered.display;
+        renderedHtml = rendered.html;
+        renderedRows = rendered.rows;
+        resetVirtualRows(Number.POSITIVE_INFINITY);
+        lastFormat = '';
+        lastContent = '';
+        deferredFrame = undefined;
+        jumpVisible = false;
+      });
       return;
     }
     showingCachedResizeFrame = false;
@@ -179,8 +238,10 @@
     resizeFrameBaseline = undefined;
     resizeExpectedLines = 0;
     resizeSettleDeadline = 0;
-    if (untrack(() => composerFocused)) deferredFrame = next;
-    else void applyFrame(next, preserve, preserveLineEnds);
+    const layoutChanged = preserve !== lastPreserveLayout
+      || preserveLineEnds !== lastPreserveLineEnds;
+    if (untrack(() => composerFocused) && !layoutChanged) deferredFrame = next;
+    else untrack(() => { void applyFrame(next, preserve, preserveLineEnds); });
   });
 
   $effect(() => {
@@ -220,11 +281,54 @@
     paneSizeLeaseError = '';
     void tick().then(() => requestPaneSizeLease(false));
   });
+  $effect.pre(() => {
+    const layout = $terminalLayout;
+    const interfaceSizeValue = $interfaceSize;
+    void layout;
+    void interfaceSizeValue;
+    if (!terminalElement) return;
+    virtualStickToBottom = terminalElement.scrollHeight
+      - terminalElement.scrollTop
+      - terminalElement.clientHeight < 48;
+    pendingLayoutStick = virtualStickToBottom;
+  });
+
 
   $effect(() => {
     const element = terminalElement;
-    if (!element || !resizeLayout || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(() => requestPaneSizeLease(false));
+    const interfaceSizeValue = $interfaceSize;
+    void interfaceSizeValue;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    let previousWidth = element.clientWidth;
+    untrack(() => {
+      if (!renderedRows.length) return;
+      const stick = virtualStickToBottom;
+      virtualScrollResetPending = true;
+      virtualLayoutSignature = '';
+      const nextTop = resetVirtualRows(stick ? Number.POSITIVE_INFINITY : element.scrollTop);
+      void tick().then(() => {
+        element.scrollTop = stick ? element.scrollHeight : nextTop;
+        if (stick) virtualStickToBottom = true;
+        virtualScrollResetPending = false;
+      });
+    });
+    const observer = new ResizeObserver(() => {
+      const nextWidth = element.clientWidth;
+      if (renderedRows.length && Math.abs(nextWidth - previousWidth) >= 1) {
+        const stick = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+        virtualStickToBottom = stick;
+        virtualScrollResetPending = true;
+        previousWidth = nextWidth;
+        virtualLayoutSignature = '';
+        const nextTop = resetVirtualRows(stick ? Number.POSITIVE_INFINITY : element.scrollTop);
+        void tick().then(() => {
+          element.scrollTop = stick ? element.scrollHeight : nextTop;
+          if (stick) virtualStickToBottom = true;
+          virtualScrollResetPending = false;
+        });
+      } else scheduleVirtualWindow();
+      requestPaneSizeLease(false);
+    });
     observer.observe(element);
     return () => observer.disconnect();
   });
@@ -271,6 +375,8 @@
       clearInterval(refresh);
       clearInterval(refreshPaneSizeLease);
       releasePaneSizeLease(false);
+      virtualRowObserver?.disconnect();
+      if (virtualWindowFrame) cancelAnimationFrame(virtualWindowFrame);
     };
   });
 
@@ -282,37 +388,281 @@
     const layoutChanged = preserve !== lastPreserveLayout
       || preserveLineEnds !== lastPreserveLineEnds;
     if (next.content === lastContent && next.format === lastFormat && !layoutChanged) {
-      rememberCurrentResizeFrame(next, displayed, renderedHtml);
+      rememberCurrentResizeFrame(next, displayed, renderedHtml, renderedRows);
       return;
     }
     const rendered = renderTerminalContent(next.content, next.format, preserve, preserveLineEnds);
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
       && next.format === lastFormat && !layoutChanged) {
-      rememberCurrentResizeFrame(next, rendered.display, rendered.html);
+      rememberCurrentResizeFrame(next, rendered.display, rendered.html, rendered.rows);
       return;
     }
-    const distance = terminalElement
-      ? terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight
-      : 0;
-    const stick = distance < 48;
+    const frameStick = terminalElement
+      ? terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48
+      : virtualStickToBottom;
+    const stick = resizeSessionActive && pendingResizeStick !== null
+      ? pendingResizeStick
+      : layoutChanged && pendingLayoutStick !== null
+        ? pendingLayoutStick
+        : frameStick;
     const previousTop = terminalElement?.scrollTop || 0;
+    const previousAnchor = stick
+      ? null
+      : pendingResizeAnchor || currentVirtualAnchor(previousTop);
+    pendingResizeStick = null;
+    pendingResizeAnchor = null;
+    if (layoutChanged) pendingLayoutStick = null;
+    virtualStickToBottom = stick;
+    virtualScrollResetPending = Boolean(terminalElement);
     displayed = rendered.display;
     renderedHtml = rendered.html;
+    renderedRows = rendered.rows;
     lastFormat = next.format;
     lastPreserveLayout = preserve;
     lastPreserveLineEnds = preserveLineEnds;
-    rememberCurrentResizeFrame(next, rendered.display, rendered.html);
+    const nextTop = resetVirtualRows(
+      stick ? Number.POSITIVE_INFINITY : previousTop,
+      previousAnchor,
+    );
+    rememberCurrentResizeFrame(next, rendered.display, rendered.html, rendered.rows);
     await tick();
-    if (!terminalElement) return;
+    if (!terminalElement) {
+      virtualScrollResetPending = false;
+      return;
+    }
     if (layoutChanged) terminalElement.scrollLeft = 0;
     if (stick) {
       terminalElement.scrollTop = terminalElement.scrollHeight;
       jumpVisible = false;
+      virtualStickToBottom = true;
     } else {
-      terminalElement.scrollTop = previousTop;
+      terminalElement.scrollTop = nextTop;
       jumpVisible = true;
     }
+    virtualScrollResetPending = false;
+    observeVirtualRows();
+  }
+
+  function terminalScreenOffset(): number {
+    return terminalElement?.querySelector<HTMLElement>('.term-screen')?.offsetTop || 0;
+  }
+
+  function currentVirtualAnchor(scrollTop: number): VirtualTerminalAnchor | null {
+    if (!Number.isFinite(scrollTop) || !virtualIndex.length) return null;
+    if (terminalElement) {
+      const viewport = terminalElement.getBoundingClientRect();
+      const element = [...terminalElement.querySelectorAll<HTMLElement>('[data-terminal-row]')]
+        .find((row) => {
+          const bounds = row.getBoundingClientRect();
+          return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+        });
+      const index = Number.parseInt(element?.dataset.terminalRow || '', 10);
+      if (element && Number.isInteger(index)) {
+        return {
+          index,
+          offset: Math.max(0, viewport.top - element.getBoundingClientRect().top),
+          text: renderedRows[index]?.text || '',
+        };
+      }
+    }
+    const contentTop = terminalScreenOffset();
+    const index = virtualIndex.indexAt(Math.max(0, scrollTop - contentTop));
+    return {
+      index,
+      offset: Math.max(0, scrollTop - contentTop - virtualIndex.offset(index)),
+      text: renderedRows[index]?.text || '',
+    };
+  }
+
+  function matchingAnchorIndex(anchor: VirtualTerminalAnchor): number {
+    const fallback = Math.min(anchor.index, Math.max(0, renderedRows.length - 1));
+    const target = anchor.text.trim();
+    if (target.length < 4) return fallback;
+    let bestIndex = fallback;
+    let bestScore = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < renderedRows.length; index += 1) {
+      const candidate = renderedRows[index].text.trim();
+      const score = candidate === target
+        ? 2
+        : target.length >= 8 && (candidate.includes(target) || target.includes(candidate)) ? 1 : 0;
+      const distance = Math.abs(index - anchor.index);
+      if (score > bestScore || (score === bestScore && score > 0 && distance < bestDistance)) {
+        bestIndex = index;
+        bestScore = score;
+        bestDistance = distance;
+      }
+    }
+    return bestIndex;
+  }
+
+  function anchorOffsetLimit(anchor: VirtualTerminalAnchor, anchorIndex: number): number {
+    const target = anchor.text.trim();
+    let height = 0;
+    let matches = 0;
+    let lastSize = 0;
+    for (let index = anchorIndex; index < renderedRows.length; index += 1) {
+      const candidate = renderedRows[index].text.trim();
+      if (!candidate || !target.includes(candidate)) break;
+      lastSize = virtualIndex.size(index);
+      height += lastSize;
+      matches += 1;
+      if (candidate === target) break;
+    }
+    return Math.max(0, matches > 1 ? height - lastSize : height - 1);
+  }
+
+  function resetVirtualRows(
+    scrollTop: number,
+    previousAnchor = currentVirtualAnchor(scrollTop),
+  ) {
+    const width = terminalElement?.clientWidth || Math.round(currentViewportWidth());
+    const layoutSignature = [
+      lastPreserveLayout ? 'preserve' : 'readable',
+      resizeSessionActive ? 'resize' : 'fixed',
+      lastPreserveLineEnds ? 'line-ends' : 'wrapped',
+      lastLeasedColumns || renderedResizeColumns,
+      $interfaceSize,
+      width,
+    ].join(':');
+    if (layoutSignature !== virtualLayoutSignature) {
+      virtualLayoutSignature = layoutSignature;
+      virtualHeightCache.clear();
+    } else if (virtualHeightCache.size > Math.max(2_000, renderedRows.length * 2)) {
+      virtualHeightCache.clear();
+    }
+
+    const style = terminalElement ? getComputedStyle(terminalElement) : null;
+    const parsedLineHeight = Number.parseFloat(style?.lineHeight || '');
+    const lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : 18;
+    const wrappingColumns = measuredPaneColumns()
+      || lastLeasedColumns
+      || renderedResizeColumns
+      || 80;
+    const sizes = renderedRows.map((row) => {
+      const measured = virtualHeightCache.get(row.html);
+      if (measured) return measured;
+      if (row.separator) return lineHeight * 1.2;
+      const wraps = (!lastPreserveLayout || (resizeSessionActive && !row.fixedGrid))
+        ? Math.max(1, Math.ceil(row.columns / wrappingColumns))
+        : 1;
+      return lineHeight * wraps;
+    });
+    virtualIndex.reset(sizes);
+    let nextTop = scrollTop;
+    if (previousAnchor && virtualIndex.length) {
+      const anchorIndex = matchingAnchorIndex(previousAnchor);
+      const anchorOffset = Math.min(
+        Math.max(0, previousAnchor.offset),
+        anchorOffsetLimit(previousAnchor, anchorIndex),
+      );
+      nextTop = terminalScreenOffset() + virtualIndex.offset(anchorIndex) + anchorOffset;
+    }
+
+    if (!lastPreserveLayout) virtualContentColumns = 0;
+    else {
+      let columns = resizeSessionActive ? (lastLeasedColumns || renderedResizeColumns) : 0;
+      for (const row of renderedRows) {
+        if (!resizeSessionActive || row.fixedGrid) columns = Math.max(columns, row.columns);
+      }
+      virtualContentColumns = columns;
+    }
+    renderVirtualWindow(nextTop, true);
+    return nextTop;
+  }
+
+  function mountedVirtualHtml(start: number, end: number): string {
+    let html = '';
+    for (let index = start; index < end; index += 1) {
+      html += renderedRows[index].html.replace(
+        '<span ',
+        `<span data-terminal-row="${index}" `,
+      );
+    }
+    return html;
+  }
+
+  function renderVirtualWindow(scrollTop: number, force = false) {
+    const viewportHeight = terminalElement?.clientHeight || window.innerHeight;
+    const viewportTop = Number.isFinite(scrollTop)
+      ? scrollTop
+      : Math.max(0, virtualIndex.total - viewportHeight);
+    const range = virtualIndex.range(viewportTop, viewportHeight, viewportHeight * 1.5);
+    const unchanged = range.start === virtualStart && range.end === virtualEnd;
+    virtualStart = range.start;
+    virtualEnd = range.end;
+    virtualTopHeight = range.top;
+    virtualBottomHeight = range.bottom;
+    if (force || !unchanged) {
+      virtualHtml = mountedVirtualHtml(range.start, range.end);
+      queueVirtualRowObservation();
+    }
+  }
+
+  function queueVirtualRowObservation() {
+    void tick().then(observeVirtualRows);
+  }
+
+  function observeVirtualRows() {
+    if (!terminalElement || typeof ResizeObserver === 'undefined') return;
+    virtualRowObserver ||= new ResizeObserver(measureVirtualRows);
+    virtualRowObserver.disconnect();
+    for (const row of terminalElement.querySelectorAll<HTMLElement>('[data-terminal-row]')) {
+      virtualRowObserver.observe(row);
+    }
+  }
+
+  function measureVirtualRows(entries: ResizeObserverEntry[]) {
+    if (!terminalElement || !entries.length) return;
+    if (virtualScrollResetPending) return;
+    const previousTop = terminalElement.scrollTop;
+    const wasAtBottom = virtualStickToBottom
+      || terminalElement.scrollHeight - previousTop - terminalElement.clientHeight < 48;
+    const anchor = virtualIndex.indexAt(previousTop);
+    let anchorDelta = 0;
+    let changed = false;
+    for (const entry of entries) {
+      const element = entry.target as HTMLElement;
+      const index = Number.parseInt(element.dataset.terminalRow || '', 10);
+      if (!Number.isInteger(index) || index < 0 || index >= renderedRows.length) continue;
+      const borderSize = Array.isArray(entry.borderBoxSize)
+        ? entry.borderBoxSize[0]
+        : entry.borderBoxSize;
+      let height = borderSize?.blockSize || entry.contentRect.height;
+      if (renderedRows[index].separator) {
+        const style = getComputedStyle(element);
+        height += (Number.parseFloat(style.marginTop) || 0)
+          + (Number.parseFloat(style.marginBottom) || 0);
+      }
+      const delta = virtualIndex.update(index, height);
+      if (!delta) continue;
+      virtualHeightCache.set(renderedRows[index].html, height);
+      if (index < anchor) anchorDelta += delta;
+      changed = true;
+    }
+    if (!changed) return;
+    const nextTop = wasAtBottom ? virtualIndex.total : previousTop + anchorDelta;
+    virtualStickToBottom = wasAtBottom;
+    virtualScrollResetPending = true;
+    renderVirtualWindow(nextTop);
+    void tick().then(() => {
+      if (!terminalElement) {
+        virtualScrollResetPending = false;
+        return;
+      }
+      terminalElement.scrollTop = wasAtBottom ? terminalElement.scrollHeight : nextTop;
+      if (wasAtBottom) virtualStickToBottom = true;
+      virtualScrollResetPending = false;
+    });
+  }
+
+  function scheduleVirtualWindow() {
+    if (virtualWindowFrame) return;
+    virtualWindowFrame = requestAnimationFrame(() => {
+      virtualWindowFrame = 0;
+      if (terminalElement) renderVirtualWindow(terminalElement.scrollTop);
+    });
   }
 
   function focusComposer(event: FocusEvent) {
@@ -420,17 +770,21 @@
   }
 
   async function copyTerminalOutput() {
-    const text = stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
+    const text = terminalPlainText;
     if (!text.trim()) return;
     if (!navigator.clipboard?.writeText) {
-      relayStore.showToast('Clipboard access is unavailable. Select the output manually.', true);
+      transcriptElement.focus({ preventScroll: true });
+      transcriptElement.select();
+      relayStore.showToast('Terminal output selected. Use your browser Copy command.');
       return;
     }
     try {
       await navigator.clipboard.writeText(text);
       relayStore.showToast('Terminal output copied.');
     } catch {
-      relayStore.showToast('Could not copy terminal output. Select it manually.', true);
+      transcriptElement.focus({ preventScroll: true });
+      transcriptElement.select();
+      relayStore.showToast('Terminal output selected. Use your browser Copy command.');
     }
   }
 
@@ -472,12 +826,27 @@
 
 
   function jumpToBottom() {
-    terminalElement.scrollTop = terminalElement.scrollHeight;
-    jumpVisible = false;
+    virtualStickToBottom = true;
+    virtualScrollResetPending = true;
+    renderVirtualWindow(Number.POSITIVE_INFINITY, true);
+    void tick().then(() => {
+      if (!terminalElement) {
+        virtualScrollResetPending = false;
+        return;
+      }
+      terminalElement.scrollTop = terminalElement.scrollHeight;
+      virtualScrollResetPending = false;
+      jumpVisible = false;
+    });
   }
 
   function handleScroll() {
-    if (terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48) jumpVisible = false;
+    if (virtualScrollResetPending) return;
+    virtualStickToBottom = terminalElement.scrollHeight
+      - terminalElement.scrollTop
+      - terminalElement.clientHeight < 48;
+    if (virtualStickToBottom) jumpVisible = false;
+    scheduleVirtualWindow();
   }
 
   function paneSizeLeaseSupported(target: Agent): boolean {
@@ -508,26 +877,51 @@
   }
 
   async function applyCachedResizeFrame(cached: ResizedTerminalFrame) {
+    const stick = pendingResizeStick ?? virtualStickToBottom;
+    const previousTop = terminalElement?.scrollTop || 0;
+    const previousAnchor = stick
+      ? null
+      : pendingResizeAnchor || currentVirtualAnchor(previousTop);
+    pendingResizeStick = null;
+    pendingResizeAnchor = null;
+    virtualStickToBottom = stick;
+    virtualScrollResetPending = Boolean(terminalElement);
     displayed = cached.display;
     renderedHtml = cached.html;
+    renderedRows = cached.rows;
     lastContent = cached.frame.content;
     lastFormat = cached.frame.format;
     lastPreserveLayout = true;
     lastPreserveLineEnds = false;
+    const nextTop = resetVirtualRows(
+      stick ? Number.POSITIVE_INFINITY : previousTop,
+      previousAnchor,
+    );
     await tick();
-    if (!terminalElement) return;
+    if (!terminalElement) {
+      virtualScrollResetPending = false;
+      return;
+    }
     terminalElement.scrollLeft = 0;
-    terminalElement.scrollTop = terminalElement.scrollHeight;
-    jumpVisible = false;
+    terminalElement.scrollTop = stick ? terminalElement.scrollHeight : nextTop;
+    virtualScrollResetPending = false;
+    jumpVisible = !stick;
+    observeVirtualRows();
   }
 
-  function rememberCurrentResizeFrame(next: TerminalFrame, display: string, html: string) {
+  function rememberCurrentResizeFrame(
+    next: TerminalFrame,
+    display: string,
+    html: string,
+    rows: RenderedTerminalRow[],
+  ) {
     if (!resizeSessionActive || lastLeasedColumns < 1) return;
     rememberResizedTerminalFrame(agent.pane_id, {
       frame: next,
       columns: lastLeasedColumns,
       display,
       html,
+      rows,
       historyLines: $terminalHistoryLines,
       interfaceSize: $interfaceSize,
       viewportWidth: currentViewportWidth(),
@@ -737,9 +1131,7 @@
     class:resize-layout={resizeSessionActive}
     class:preserve-layout={preserveLayout}
     class="term-content"
-    style={resizeSessionActive && (lastLeasedColumns || renderedResizeColumns)
-      ? `--terminal-width: ${lastLeasedColumns || renderedResizeColumns}ch`
-      : undefined}
+    style={terminalContentStyle}
     bind:this={terminalElement}
     role="log"
     aria-label="Agent terminal output"
@@ -750,11 +1142,25 @@
       aria-hidden="true"
       style="pointer-events: none; position: absolute; visibility: hidden; white-space: pre;"
     >{CELL_MEASURE_TEXT}</span>
-    <div class="term-screen">
-    <!-- renderTerminalContent escapes relay text before producing controlled ANSI spans. -->
-    {@html renderedHtml}
+    <div class="term-screen" data-terminal-row-count={renderedRows.length}>
+      {#if virtualTopHeight > 0}
+        <span class="terminal-virtual-spacer" style={`height:${virtualTopHeight}px`} aria-hidden="true"></span>
+      {/if}
+      <!-- Normalized rows are escaped before controlled ANSI spans enter this bounded DOM window. -->
+      {@html virtualHtml}
+      {#if virtualBottomHeight > 0}
+        <span class="terminal-virtual-spacer" style={`height:${virtualBottomHeight}px`} aria-hidden="true"></span>
+      {/if}
     </div>
   </div>
+  <textarea
+    class="sr-only"
+    aria-label="Full terminal transcript"
+    readonly
+    tabindex="-1"
+    bind:this={transcriptElement}
+    value={terminalPlainText}
+  ></textarea>
   <div class="terminal-copy">
     <Button variant="secondary" size="sm" onclick={copyTerminalOutput}>Copy</Button>
   </div>
