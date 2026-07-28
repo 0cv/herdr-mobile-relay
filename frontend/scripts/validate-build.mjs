@@ -17,6 +17,8 @@ const required = [
   'version.json',
   'assets/app.js',
   'assets/app.css',
+  'fonts/nerd-symbols-mono-v3.4.0.woff2',
+  'fonts/nerd-symbols-mono-v3.4.0.license.txt',
   'icons/icon.svg',
   'icons/icon-192.png',
   'icons/icon-512.png',

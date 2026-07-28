@@ -34,10 +34,12 @@ type ClientConn struct {
 	closeOne sync.Once
 }
 
-func (c *ClientConn) ID() string { return c.id }
+func (c *ClientConn) ID() string               { return c.id }
+func (c *ClientConn) Context() context.Context { return c.ctx }
 
 type MessageHandler func(client *ClientConn, msg map[string]any, admitted func())
 type ConnectHandler func(client *ClientConn)
+type DisconnectHandler func(client *ClientConn)
 
 type inboundMessage struct {
 	client  *ClientConn
@@ -55,15 +57,16 @@ type Metrics struct {
 }
 
 type Hub struct {
-	cfg       *config.Config
-	logger    *slog.Logger
-	register  sync.Mutex
-	mu        sync.RWMutex
-	clients   map[string]*ClientConn
-	nextID    int
-	handler   MessageHandler
-	onConnect ConnectHandler
-	closing   bool
+	cfg          *config.Config
+	logger       *slog.Logger
+	register     sync.Mutex
+	mu           sync.RWMutex
+	clients      map[string]*ClientConn
+	nextID       int
+	handler      MessageHandler
+	onConnect    ConnectHandler
+	onDisconnect DisconnectHandler
+	closing      bool
 
 	receiptSequence atomic.Uint64
 	receiptMu       sync.Mutex
@@ -395,11 +398,15 @@ func (h *Hub) removeClient(client *ClientConn) {
 		client.cancel()
 		client.buf.Close()
 		h.logger.Info("client disconnected", "client_id", client.id)
+		if h.onDisconnect != nil {
+			h.onDisconnect(client)
+		}
 	})
 }
 
-func (h *Hub) SetHandler(fn MessageHandler)   { h.handler = fn }
-func (h *Hub) SetOnConnect(fn ConnectHandler) { h.onConnect = fn }
+func (h *Hub) SetHandler(fn MessageHandler)         { h.handler = fn }
+func (h *Hub) SetOnConnect(fn ConnectHandler)       { h.onConnect = fn }
+func (h *Hub) SetOnDisconnect(fn DisconnectHandler) { h.onDisconnect = fn }
 
 func (h *Hub) CloseAll() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

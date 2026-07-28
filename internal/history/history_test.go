@@ -35,6 +35,40 @@ func TestTailOverlapAppend(t *testing.T) {
 	}
 }
 
+func TestTailOverlapRefreshesANSIStyle(t *testing.T) {
+	m := NewManager(t.TempDir())
+	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
+	m.Merge("pane-1", "old output\n\x1b[42mDeny\x1b[0m\nshared row"+footers)
+
+	result := m.Merge("pane-1", "\x1b[44mDeny\x1b[0m\nshared row\nnew output"+footers)
+	if !strings.Contains(result, "\x1b[44mDeny") {
+		t.Fatalf("overlapping row retained stale ANSI style: %q", result)
+	}
+	if strings.Contains(result, "\x1b[42mDeny") {
+		t.Fatalf("overlapping row retained old ANSI style: %q", result)
+	}
+}
+
+func TestSequenceMatchRefreshesANSIStyle(t *testing.T) {
+	m := NewManager(t.TempDir())
+	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
+	m.Merge(
+		"pane-1",
+		"context one\ncontext two\n\x1b[42mPermissions\x1b[0m\nold panel one\nold panel two"+footers,
+	)
+
+	result := m.Merge(
+		"pane-1",
+		"context one\ncontext two\n\x1b[44mPermissions\x1b[0m\nnew panel one\nnew panel two"+footers,
+	)
+	if !strings.Contains(result, "\x1b[44mPermissions") {
+		t.Fatalf("matched row retained stale ANSI style: %q", result)
+	}
+	if strings.Contains(result, "\x1b[42mPermissions") {
+		t.Fatalf("matched row retained old ANSI style: %q", result)
+	}
+}
+
 func TestNoOverlapAppendsWhole(t *testing.T) {
 	dir := t.TempDir()
 	m := NewManager(dir)

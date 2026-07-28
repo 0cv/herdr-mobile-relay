@@ -9,14 +9,17 @@ import (
 )
 
 func TestStrictPaneReadSchema(t *testing.T) {
-	valid := []string{"pane-1", "--lines", "80", "--source", "recent-unwrapped", "--format", "ansi"}
-	if err := validatePaneRead(valid); err != nil {
-		t.Fatalf("valid schema rejected: %v", err)
+	for _, source := range []string{"recent", "recent-unwrapped"} {
+		valid := []string{"pane-1", "--lines", "80", "--source", source, "--format", "ansi"}
+		if err := validatePaneRead(valid); err != nil {
+			t.Fatalf("valid %s schema rejected: %v", source, err)
+		}
 	}
 	for _, invalid := range [][]string{
 		{"pane-1", "--format", "ansi", "--lines", "80", "--source", "recent-unwrapped"},
 		{"pane-1", "--lines", "80", "--source", "recent-unwrapped", "--format", "html"},
 		{"pane-1", "--lines", "80", "--source", "recent-unwrapped"},
+		{"pane-1", "--lines", "80", "--source", "visible", "--format", "ansi"},
 	} {
 		if err := validatePaneRead(invalid); err == nil {
 			t.Fatalf("invalid schema accepted: %q", invalid)

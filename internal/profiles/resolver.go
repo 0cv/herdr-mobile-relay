@@ -26,6 +26,9 @@ var defaultCandidates = []Profile{
 	{ID: "codex", Label: "Codex", Kind: "codex"},
 	{ID: "claude", Label: "Claude Code", Kind: "claude"},
 	{ID: "opencode", Label: "OpenCode", Kind: "opencode"},
+	{ID: "pi", Label: "Pi", Kind: "pi"},
+	{ID: "omp", Label: "Oh My Pi", Kind: "omp"},
+	{ID: "kimi", Label: "Kimi", Kind: "kimi"},
 }
 
 var defaultAliases = map[string]string{

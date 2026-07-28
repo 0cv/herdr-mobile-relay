@@ -8,18 +8,21 @@
     APP_VERSION,
     INTERFACE_SIZES,
     TERMINAL_HISTORY_OPTIONS,
+    TERMINAL_LAYOUTS,
+    TERMINAL_LAYOUT_LABELS,
     THEMES,
     type InterfaceSize,
     type TerminalHistoryLines,
+    type TerminalLayout,
     type Theme,
   } from '$lib/config';
   import {
     interfaceSize,
     setInterfaceSize,
-    setShowAgentStatusLine,
+    setTerminalLayout,
     setTerminalHistoryLines,
     setTheme,
-    showAgentStatusLine,
+    terminalLayout,
     terminalHistoryLines,
     theme,
   } from '$lib/preferences';
@@ -432,7 +435,18 @@
       {/each}
     </fieldset>
     <p class="hint">Lines requested per terminal. 5,000–10,000 lines can use substantially more network data and rendering work.</p>
-    <AppSwitch checked={$showAgentStatusLine} label="Show Agent Status Line" onchange={setShowAgentStatusLine} />
+    <fieldset class="choice-grid compact-grid">
+      <legend>Terminal Width</legend>
+      {#each TERMINAL_LAYOUTS as item (item)}
+        <button
+          class:active={$terminalLayout === item}
+          type="button"
+          aria-pressed={$terminalLayout === item}
+          onclick={() => setTerminalLayout(item as TerminalLayout)}
+        >{TERMINAL_LAYOUT_LABELS[item]}</button>
+      {/each}
+    </fieldset>
+    <p class="hint">Resize Session temporarily makes the shared session phone-width, so the laptop view changes too. Fit to Phone wraps desktop output for reading. Original Columns keeps the terminal grid for sideways panning.</p>
   </Card>
 
   <Card>

@@ -20,6 +20,38 @@ func TestDefaultCandidatesFiltered(t *testing.T) {
 	}
 }
 
+func TestDefaultCandidatesIncludePiOhMyPiAndKimi(t *testing.T) {
+	binDir := t.TempDir()
+	for _, name := range []string{"pi", "omp", "kimi"} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+
+	profiles := NewResolver(t.TempDir(), nil).Profiles()
+	for _, want := range []Profile{
+		{ID: "pi", Label: "Pi", Kind: "pi"},
+		{ID: "omp", Label: "Oh My Pi", Kind: "omp"},
+		{ID: "kimi", Label: "Kimi", Kind: "kimi"},
+	} {
+		var got *Profile
+		for index := range profiles {
+			if profiles[index].ID == want.ID {
+				got = &profiles[index]
+				break
+			}
+		}
+		if got == nil {
+			t.Errorf("profile %q was not detected: %+v", want.ID, profiles)
+			continue
+		}
+		if got.Label != want.Label || got.Kind != want.Kind || len(got.Argv) != 1 {
+			t.Errorf("profile %q = %+v, want label %q, kind %q, and one executable", want.ID, *got, want.Label, want.Kind)
+		}
+	}
+}
+
 func TestAgentVersionUsesResolvedProfileExecutable(t *testing.T) {
 	binDir := t.TempDir()
 	codex := filepath.Join(binDir, "codex")

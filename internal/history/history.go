@@ -47,6 +47,15 @@ func NewManager(cacheDir string) *Manager {
 }
 
 func (m *Manager) Merge(paneID string, rawContent string) string {
+	return m.merge(paneID, rawContent, 0)
+}
+
+// MergeLimited retains the complete pane history while returning only its latest lines.
+func (m *Manager) MergeLimited(paneID string, rawContent string, limit int) string {
+	return m.merge(paneID, rawContent, limit)
+}
+
+func (m *Manager) merge(paneID string, rawContent string, limit int) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -54,12 +63,12 @@ func (m *Manager) Merge(paneID string, rawContent string) string {
 
 	body, footer := splitSnapshot(rawContent)
 	if len(body) == 0 {
-		return joinContent(state)
+		return joinContent(state, limit)
 	}
 
 	hash := hashLines(body)
 	if hash == state.LastHash && state.StaleRefusals == 0 {
-		return joinContent(state)
+		return joinContent(state, limit)
 	}
 	state.LastHash = hash
 	state.Footer = footer
@@ -68,8 +77,9 @@ func (m *Manager) Merge(paneID string, rawContent string) string {
 	histNorm := normalizeLines(state.History)
 
 	if overlap := tailOverlap(histNorm, normalized); overlap > 0 {
+		historyStart := len(state.History) - overlap
+		copy(state.History[historyStart:], body[:overlap])
 		state.History = append(state.History, body[overlap:]...)
-		state.StaleRefusals = 0
 	} else if match := sequenceMatch(histNorm, normalized); match.Size >= 2 {
 		m.applyMatch(state, body, match)
 	} else {
@@ -82,7 +92,7 @@ func (m *Manager) Merge(paneID string, rawContent string) string {
 	}
 
 	m.maybeSave(paneID, state)
-	return joinContent(state)
+	return joinContent(state, limit)
 }
 
 func (m *Manager) Content(paneID string, limit int) string {
@@ -90,12 +100,7 @@ func (m *Manager) Content(paneID string, limit int) string {
 	defer m.mu.Unlock()
 
 	state := m.loadState(paneID)
-	content := joinContent(state)
-	lines := strings.Split(content, "\n")
-	if limit > 0 && len(lines) > limit {
-		lines = lines[len(lines)-limit:]
-	}
-	return strings.Join(lines, "\n")
+	return joinContent(state, limit)
 }
 
 func (m *Manager) Discard(paneID string) {
@@ -147,6 +152,7 @@ func (m *Manager) Reconcile(activePaneIDs map[string]bool) {
 func (m *Manager) applyMatch(state *PaneState, body []string, match seqmatch.Match) {
 	historyEnd := match.A + match.Size
 	currentEnd := match.B + match.Size
+	copy(state.History[match.A:historyEnd], body[match.B:currentEnd])
 	currentSuffix := body[currentEnd:]
 	historyTail := len(state.History) - historyEnd
 
@@ -295,13 +301,24 @@ func hashLines(lines []string) string {
 	return fmt.Sprintf("%016x", h)
 }
 
-func joinContent(state *PaneState) string {
-	var parts []string
-	if len(state.History) > 0 {
-		parts = append(parts, strings.Join(state.History, "\n"))
+func joinContent(state *PaneState, limit int) string {
+	historyLines := state.History
+	footerLines := state.Footer
+	if limit > 0 && len(historyLines)+len(footerLines) > limit {
+		if len(footerLines) >= limit {
+			historyLines = nil
+			footerLines = footerLines[len(footerLines)-limit:]
+		} else {
+			historyLines = historyLines[len(historyLines)-(limit-len(footerLines)):]
+		}
 	}
-	if len(state.Footer) > 0 {
-		parts = append(parts, strings.Join(state.Footer, "\n"))
+
+	var parts []string
+	if len(historyLines) > 0 {
+		parts = append(parts, strings.Join(historyLines, "\n"))
+	}
+	if len(footerLines) > 0 {
+		parts = append(parts, strings.Join(footerLines, "\n"))
 	}
 	return strings.Join(parts, "\n")
 }

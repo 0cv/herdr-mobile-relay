@@ -35,6 +35,14 @@ func CatalogFor(agent, cwd, home string) Catalog {
 		profileID = "codex"
 	case "qoder", "qodercli":
 		profileID = "qoder"
+	case "pi", "pi-coding-agent":
+		profileID = "pi"
+	case "omp", "oh my pi", "oh-my-pi":
+		profileID = "omp"
+	case "kimi", "kimi code", "kimi-code", "kimi-cli":
+		profileID = "kimi"
+	case "opencode", "open code", "open-code":
+		profileID = "opencode"
 	}
 	return CatalogForProfile(profileID, agent, cwd, home, nil, "", "")
 }
@@ -65,6 +73,10 @@ func CatalogForProfile(
 			p = resolveProvider("codex")
 		case "qoder", "qodercli":
 			p = resolveProvider("qoder")
+		case "pi", "pi-coding-agent":
+			p = resolveProvider("pi")
+		case "omp", "oh my pi", "oh-my-pi":
+			p = resolveProvider("omp")
 		}
 	}
 

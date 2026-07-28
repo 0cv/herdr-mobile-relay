@@ -203,6 +203,7 @@ export interface AppUpdateStatus {
 export interface CommandResult {
   type: 'command_result';
   request_id: string;
+  action?: string;
   ok: boolean;
   phase?: string;
   error?: string;
@@ -222,8 +223,6 @@ export interface TerminalFrame {
   paneId: string;
   content: string;
   format: string;
-  desktopFooterLines?: number;
-  desktopPromptLines?: number;
 }
 
 export interface ToastMessage {

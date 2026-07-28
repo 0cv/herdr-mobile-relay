@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	defaultTimeout = 15 * time.Second
-	maxOutputBytes = 4 * 1024 * 1024
-	termGrace      = 2 * time.Second
-	waitDelay      = 4 * time.Second
+	defaultTimeout   = 15 * time.Second
+	maxOutputBytes   = 4 * 1024 * 1024
+	termGrace        = 2 * time.Second
+	waitDelay        = 4 * time.Second
+	shiftTabSequence = "\x1b[Z"
 )
 
 var (
@@ -177,6 +178,21 @@ type AgentInfo struct {
 	Running bool   `json:"running"`
 }
 
+type PaneProcess struct {
+	PID     int      `json:"pid"`
+	Name    string   `json:"name"`
+	Cwd     string   `json:"cwd"`
+	Cmdline string   `json:"cmdline"`
+	Argv    []string `json:"argv"`
+}
+
+type PaneProcessInfo struct {
+	PaneID                   string        `json:"pane_id"`
+	ShellPID                 int           `json:"shell_pid"`
+	ForegroundProcessGroupID int           `json:"foreground_process_group_id"`
+	ForegroundProcesses      []PaneProcess `json:"foreground_processes"`
+}
+
 type Inventory struct {
 	Panes []Pane
 }
@@ -301,7 +317,25 @@ func (c *Client) AgentGet(ctx context.Context, paneID string) (*AgentInfo, error
 	return &result, nil
 }
 
+func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProcessInfo, error) {
+	var result struct {
+		ProcessInfo PaneProcessInfo `json:"process_info"`
+	}
+	if err := c.runResult(ctx, &result, "pane", "process-info", "--pane", paneID); err != nil {
+		return nil, fmt.Errorf("herdr pane process info: %w", err)
+	}
+	return &result.ProcessInfo, nil
+}
+
 func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format string) ([]byte, error) {
+	return c.readPane(ctx, paneID, lines, format, "recent-unwrapped")
+}
+
+func (c *Client) ReadPaneRecent(ctx context.Context, paneID string, lines int, format string) ([]byte, error) {
+	return c.readPane(ctx, paneID, lines, format, "recent")
+}
+
+func (c *Client) readPane(ctx context.Context, paneID string, lines int, format, source string) ([]byte, error) {
 	if lines < 1 {
 		lines = 1
 	}
@@ -311,16 +345,33 @@ func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format 
 	return c.runCommand(ctx,
 		"pane", "read", paneID,
 		"--lines", strconv.Itoa(lines),
-		"--source", "recent-unwrapped",
+		"--source", source,
 		"--format", format,
 	)
 }
 
 func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) error {
-	args := []string{"pane", "send-keys", paneID}
-	args = append(args, keys...)
+	if len(keys) == 1 && strings.EqualFold(keys[0], "shift+tab") {
+		return c.SendText(ctx, paneID, shiftTabSequence)
+	}
+	args := make([]string, 0, 3+len(keys))
+	args = append(args, "pane", "send-keys", paneID)
+	for _, key := range keys {
+		args = append(args, normalizeTerminalKey(key))
+	}
 	_, err := c.runCommand(ctx, args...)
 	return err
+}
+
+func normalizeTerminalKey(key string) string {
+	if len(key) != len("ctrl+x") || !strings.EqualFold(key[:len("ctrl+")], "ctrl+") {
+		return key
+	}
+	letter := key[len(key)-1]
+	if letter >= 'A' && letter <= 'Z' {
+		return "ctrl+" + string(letter+'a'-'A')
+	}
+	return key
 }
 
 func (c *Client) SendText(ctx context.Context, paneID, text string) error {

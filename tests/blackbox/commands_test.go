@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -54,6 +55,51 @@ func TestSendPromptAndReceiveResult(t *testing.T) {
 	}
 	if msg["phase"] != "completed" {
 		t.Errorf("phase = %v", msg["phase"])
+	}
+	if operation := findFakeOperation(t, env.operationsLog, "agent", "prompt", "pane-1", "Hello world"); operation == nil {
+		t.Fatal("non-Qoder prompt did not use Herdr agent prompt")
+	}
+	if operation := findFakeOperation(t, env.operationsLog, "pane", "send-keys", "pane-1", "Enter"); operation != nil {
+		t.Fatalf("non-Qoder prompt sent an extra Enter key: %v", operation)
+	}
+
+}
+
+func TestQoderPromptSendsTextAndEnter(t *testing.T) {
+	scenario := `{"panes":[{"pane_id":"pane-1","agent":"qodercli","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
+	env := setupEnvWithScenario(t, scenario)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	prompt, _ := json.Marshal(map[string]any{
+		"type":       "command",
+		"action":     "submit_prompt",
+		"request_id": "qoder-prompt",
+		"protocol":   2,
+		"pane_id":    "pane-1",
+		"text":       "/permissions",
+	})
+	if err := conn.Write(ctx, websocket.MessageText, prompt); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	result := readJSON(t, conn, ctx, 5*time.Second)
+	if result["ok"] != true || result["phase"] != "completed" {
+		t.Fatalf("Qoder prompt result = %v", result)
+	}
+	if operation := findFakeOperation(t, env.operationsLog, "pane", "send-text", "pane-1", "/permissions"); operation == nil {
+		t.Fatal("Qoder prompt did not insert its text")
+	}
+	if operation := findFakeOperation(t, env.operationsLog, "pane", "send-keys", "pane-1", "Enter"); operation == nil {
+		t.Fatal("Qoder prompt did not submit with Enter")
+	}
+	if operation := findFakeOperation(t, env.operationsLog, "agent", "prompt", "pane-1"); operation != nil {
+		t.Fatalf("Qoder prompt used brittle agent integration: %v", operation)
 	}
 }
 
@@ -190,6 +236,66 @@ func TestReadPane(t *testing.T) {
 	content, _ := msg["content"].(string)
 	if content == "" {
 		t.Error("content is empty")
+	}
+}
+
+func TestReadQoderHistoryRespectsRequestedLines(t *testing.T) {
+	firstFrame := strings.Repeat("first history row\n", 99) + "first history row"
+	secondFrame := strings.Repeat("second history row\n", 99) + "second history row"
+	scenario, err := json.Marshal(map[string]any{
+		"panes": []map[string]any{{
+			"pane_id": "pane-1", "agent": "qodercli", "name": "test",
+			"agent_status": "idle", "tab_id": "tab-1",
+			"workspace_id": "ws-1", "cwd": "/tmp", "revision": 1,
+		}},
+		"tabs": []map[string]any{{
+			"tab_id": "tab-1", "workspace_id": "ws-1", "label": "main", "number": 1, "cwd": "/tmp",
+		}},
+		"content": map[string]string{"pane-1": firstFrame},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := setupEnvWithScenario(t, string(scenario))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	readPane := func() map[string]any {
+		t.Helper()
+		read, err := json.Marshal(map[string]any{
+			"type": "read_pane", "pane_id": "pane-1", "lines": 100, "format": "ansi",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.Write(ctx, websocket.MessageText, read); err != nil {
+			t.Fatal(err)
+		}
+		return readJSON(t, conn, ctx, 5*time.Second)
+	}
+
+	readPane()
+	setFakePaneContent(t, env, "pane-1", secondFrame)
+	response := readPane()
+	content, _ := response["content"].(string)
+	if got := len(strings.Split(content, "\n")); got > 100 {
+		t.Fatalf("merged qoder history has %d lines, want at most 100", got)
+	}
+	if !strings.Contains(content, "second history row") {
+		t.Fatalf("merged qoder history does not contain the latest frame: %q", content)
+	}
+	if operation := findFakeOperation(
+		t,
+		env.operationsLog,
+		"pane", "read", "pane-1", "--lines", "100", "--source", "recent",
+	); operation == nil {
+		t.Fatal("Qoder display read did not request current physical terminal rows")
 	}
 }
 

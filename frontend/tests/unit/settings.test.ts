@@ -6,8 +6,8 @@ import {
   APP_ASSET_VERSION,
   APP_VERSION,
   PUSH_ENABLED_KEY,
-  STATUS_LINE_KEY,
   TERMINAL_HISTORY_KEY,
+  TERMINAL_LAYOUT_KEY,
 } from '$lib/config';
 import { relayStore } from '$lib/store';
 import { appUpdateStatus } from '$lib/updates';
@@ -139,11 +139,6 @@ describe('settings relay status', () => {
     await user.click(sizes.getByRole('button', { name: 'Compact' }));
     expect(document.documentElement.dataset.interfaceSize).toBe('compact');
 
-    const statusLine = screen.getByRole('switch', { name: 'Show Agent Status Line' }) as HTMLInputElement;
-    const nextStatusLine = !statusLine.checked;
-    await user.click(statusLine);
-    expect(statusLine.checked).toBe(nextStatusLine);
-    expect(localStorage.getItem(STATUS_LINE_KEY)).toBe(String(nextStatusLine));
   });
 
   it('persists the selected terminal history size', async () => {
@@ -157,6 +152,27 @@ describe('settings relay status', () => {
     expect(localStorage.getItem(TERMINAL_HISTORY_KEY)).toBe('10000');
 
     await user.click(history.getByRole('button', { name: '1000' }));
+  });
+
+  it('persists all three terminal width choices', async () => {
+    const user = userEvent.setup();
+    render(SettingsView);
+    const layouts = within(screen.getByRole('group', { name: 'Terminal Width' }));
+    const fit = layouts.getByRole('button', { name: 'Fit to Phone' });
+    const original = layouts.getByRole('button', { name: 'Original Columns' });
+    const resize = layouts.getByRole('button', { name: 'Resize Session' });
+
+    await user.click(fit);
+    expect(fit).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem(TERMINAL_LAYOUT_KEY)).toBe('readable');
+    await user.click(original);
+    expect(original).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem(TERMINAL_LAYOUT_KEY)).toBe('preserve');
+    await user.click(resize);
+    expect(resize).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem(TERMINAL_LAYOUT_KEY)).toBe('resize');
+    expect(screen.getByText(/Resize Session temporarily/)).toBeInTheDocument();
+    await user.click(fit);
   });
 
   it('enables the finished-agent switch immediately after push is enabled', async () => {

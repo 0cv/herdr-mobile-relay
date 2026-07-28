@@ -301,6 +301,15 @@ func (d *Dispatcher) HandleAdmitted(
 	return result
 }
 
+func isQoderAgent(agent string) bool {
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case "qoder", "qodercli":
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
 	text := stringValue(message, "text")
 	if paneID == "" || text == "" {
@@ -314,13 +323,31 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 		stale.RequestID, stale.Action = requestID, "prompt"
 		return stale
 	}
+	requiresEnter := false
+	if agent, ok := d.state.Agent(paneID); ok {
+		requiresEnter = isQoderAgent(agent.Agent)
+	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandPrompt, paneID, commandDeadline, text),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "prompt"); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		if err := d.herdr.Prompt(effectCtx, paneID, text); err != nil {
+		if !requiresEnter {
+			if err := d.herdr.Prompt(effectCtx, paneID, text); err != nil {
+				return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
+			}
+			return EffectResult{Result: completed(requestID, "prompt", paneID, nil)}
+		}
+		if err := d.herdr.SendText(effectCtx, paneID, text); err != nil {
+			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
+		}
+		if err := d.paneSessionError(token); err != nil {
+			err = errors.Join(herdr.ErrDispatchedUnknown, err)
+			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
+		}
+		if err := d.herdr.SendKeys(effectCtx, paneID, []string{"Enter"}); err != nil {
+			err = errors.Join(herdr.ErrDispatchedUnknown, err)
 			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
 		}
 		return EffectResult{Result: completed(requestID, "prompt", paneID, nil)}
@@ -827,6 +854,40 @@ func (d *Dispatcher) wake() {
 	}
 }
 
+func capPaneContentLines(content []byte, limit int) []byte {
+	if limit < 1 || len(content) == 0 {
+		return content
+	}
+	end := len(content)
+	if content[end-1] == '\n' {
+		end--
+	}
+	remaining := limit
+	for index := end - 1; index >= 0; index-- {
+		if content[index] != '\n' {
+			continue
+		}
+		remaining--
+		if remaining == 0 {
+			return content[index+1:]
+		}
+	}
+	return content
+}
+
+func (d *Dispatcher) readPaneForDisplay(
+	ctx context.Context,
+	paneID string,
+	lines int,
+	format string,
+) ([]byte, error) {
+	agent, ok := d.state.Agent(paneID)
+	if ok && isQoderAgent(agent.Agent) {
+		return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
+	}
+	return d.herdr.ReadPane(ctx, paneID, lines, format)
+}
+
 func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {
 	paneID := stringValue(message, "pane_id")
 	if paneID == "" {
@@ -858,7 +919,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	}
 	d.readMu.Unlock()
 	if owner {
-		call.content, call.err = d.herdr.ReadPane(readCtx, paneID, lines, format)
+		call.content, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format)
 		d.readMu.Lock()
 		delete(d.reads, key)
 		close(call.done)
@@ -880,6 +941,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	if d.state.ContentRevision(paneID) != revision {
 		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent state changed while the pane was being read"}
 	}
+	content = capPaneContentLines(content, lines)
 	return map[string]any{"type": "pane_content", "pane_id": paneID, "content": string(content), "format": format, "interaction": nil, "question_layout": false}
 }
 

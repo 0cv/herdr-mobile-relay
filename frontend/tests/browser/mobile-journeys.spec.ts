@@ -17,11 +17,13 @@ interface RelayFixture {
 
 interface BootOptions {
   standalone?: boolean;
+  terminalLayout?: 'readable' | 'preserve' | 'resize' | null;
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.addInitScript(({ savedRelays, standalone }) => {
+  await page.addInitScript(({ savedRelays, standalone, terminalLayout }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
+    if (terminalLayout) localStorage.setItem('herdr_terminal_layout', terminalLayout);
     if (standalone) {
       const nativeMatchMedia = window.matchMedia.bind(window);
       Object.defineProperty(window, 'matchMedia', {
@@ -104,11 +106,14 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         let data: Record<string, unknown> = {};
         if ((message.type === 'answer_question' || message.type === 'navigate_question') && nextInteraction) data = { interaction: nextInteraction };
         else if (message.type === 'agent_start') data = { pane_id: 'w1:pre-placement' };
+        else if (message.type === 'lease_pane_size') data = { columns: message.columns };
         else if (message.type === 'agent_clear') data = {
           pane_id: 'w1:pre-clear', name: 'clear-codex-123', cwd: '/home/test/Development/relay',
         };
         if (message.type === 'answer_question' || message.type === 'navigate_question') nextInteraction = null;
-        queueMicrotask(() => this.server({ type: 'command_result', request_id: message.request_id, ok: true, phase, data }));
+        queueMicrotask(() => this.server({
+          type: 'command_result', action: message.type, request_id: message.request_id, ok: true, phase, data,
+        }));
       }
       close() { this.readyState = MockSocket.CLOSED; }
       server(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
@@ -125,7 +130,11 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
       __relayNextInteraction(interaction: Record<string, unknown>) { nextInteraction = interaction; },
       __relayAutoCommands(enabled: boolean) { autoCommands = enabled; },
     });
-  }, { savedRelays: relays, standalone: options.standalone ?? false });
+  }, {
+    savedRelays: relays,
+    standalone: options.standalone ?? false,
+    terminalLayout: options.terminalLayout === undefined ? 'readable' : options.terminalLayout,
+  });
   await page.goto(path);
 }
 
@@ -142,8 +151,19 @@ async function commands(page: Page) {
 }
 
 async function commandsForSocket(page: Page, index: number) {
-  return page.evaluate((socketIndex) =>
-    (window as any).__relaySocketCommands(socketIndex) as Record<string, unknown>[], index);
+  return page.evaluate((socketIndex) => {
+    const harnessWindow = window as unknown as {
+      __relaySocketCommands(next: number): Record<string, unknown>[];
+    };
+    return harnessWindow.__relaySocketCommands(socketIndex);
+  }, index);
+}
+
+async function setAutoCommands(page: Page, enabled: boolean) {
+  await page.evaluate((value) => {
+    const harnessWindow = window as unknown as { __relayAutoCommands(next: boolean): void };
+    harnessWindow.__relayAutoCommands(value);
+  }, enabled);
 }
 
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
@@ -604,7 +624,7 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
 });
 
-test('removes the Claude desktop prompt and hides its structural status footer', async ({ page }) => {
+test('keeps Claude desktop prompt and status in the shared terminal output', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
@@ -624,19 +644,419 @@ test('removes the Claude desktop prompt and hides its structural status footer',
       'main ~16',
       '/rc ⏸ manual mode on · ← for agents',
     ].join('\n'),
-    desktop_footer_lines: 6,
-    desktop_prompt_lines: 2,
   });
   const terminal = page.getByRole('log');
   await expect(terminal).toContainText('Conversation output 8');
-  await expect(terminal).not.toContainText('edit Info.plist');
-  await expect(terminal).not.toContainText('Opus 4.8');
-  await expect(terminal).not.toContainText('ctx: -');
-  await expect(terminal).not.toContainText('manual mode');
+  await expect(terminal).toContainText('edit Info.plist');
+  await expect(terminal).toContainText('Opus 4.8');
+  await expect(terminal).toContainText('ctx: -');
+  await expect(terminal).toContainText('manual mode');
 });
 
-test('uses the mobile composer for Pi drafts and hides its duplicate desktop editor', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('herdr_show_codex_status_line', 'true'));
+test('defaults new terminals to Resize Session', async ({ page }) => {
+  await boot(page, [fedora], '/', { terminalLayout: null });
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Default resize app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Default resize app on Fedora' }).click();
+
+  await expect(page.getByRole('button', {
+    name: 'Terminal width: Resize Session. Switch to Fit to Phone',
+  })).toBeVisible();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBeNull();
+});
+
+test('cycles all terminal widths while preserving fixed-grid rendering on older relays', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'OMP app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open OMP app on Fedora' }).click();
+  const border = `╭${'─'.repeat(98)}╮`;
+  const rightBorder = (content: string) => `${content.padEnd(99)}│`;
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: [
+      border,
+      `\u001b[48;2;15;18;22m${rightBorder(' Welcome back!')}\u001b[0m`,
+      rightBorder('  prewalk    Switch model'),
+      rightBorder('  dump       Copy session'),
+    ].join('\n'),
+  });
+
+  const terminal = page.getByRole('log');
+  const lines = terminal.locator('.ansi-line');
+  await expect(lines).toHaveCount(1);
+  const applicationNav = page.getByRole('navigation', { name: 'Application' });
+  const fitWidth = applicationNav.getByRole('button', {
+    name: 'Terminal width: Fit to Phone. Switch to Original Columns',
+  });
+  await expect(fitWidth).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Refresh terminal' })).toHaveCount(0);
+  await expect(page.locator('.terminal-toolbar')).toHaveCount(0);
+  await expect(fitWidth).toHaveAttribute('title', 'Current: Fit to Phone. Switch to Original Columns');
+  await fitWidth.click();
+  await expect(lines).toHaveCount(4);
+  expect(await lines.first().textContent()).toBe(border);
+  await expect(lines.nth(1)).toHaveClass(/ansi-line-background/);
+  const lineWidths = await lines.evaluateAll((elements) => (
+    elements.map((element) => Math.round(element.getBoundingClientRect().width))
+  ));
+  expect(new Set(lineWidths).size).toBe(1);
+  const rightEdges = await lines.evaluateAll((elements) => elements.map((element) => {
+    const cells = element.querySelectorAll<HTMLElement>('.terminal-cell');
+    return cells[cells.length - 1]?.getBoundingClientRect().right || 0;
+  }));
+  expect(Math.max(...rightEdges) - Math.min(...rightEdges)).toBeLessThan(0.1);
+  const borderGeometry = await lines.evaluateAll((elements) => {
+    const corner = elements[0].querySelector<HTMLElement>('.terminal-cell-arc-down-right');
+    const horizontal = elements[0].querySelector<HTMLElement>('.terminal-cell-horizontal');
+    const vertical = elements[1].querySelector<HTMLElement>('.terminal-cell-box');
+    if (!corner || !horizontal || !vertical) return null;
+    const cornerRect = corner.getBoundingClientRect();
+    const horizontalRect = horizontal.getBoundingClientRect();
+    const verticalRect = vertical.getBoundingClientRect();
+    return {
+      horizontalGap: horizontalRect.left - cornerRect.right,
+      horizontalOffset: horizontalRect.top - cornerRect.top,
+      verticalGap: verticalRect.top - cornerRect.bottom,
+      verticalPaint: getComputedStyle(vertical).backgroundImage,
+    };
+  });
+  expect(borderGeometry).not.toBeNull();
+  expect(Math.abs(borderGeometry?.horizontalGap || 0)).toBeLessThan(0.01);
+  expect(Math.abs(borderGeometry?.horizontalOffset || 0)).toBeLessThan(0.01);
+  expect(Math.abs(borderGeometry?.verticalGap || 0)).toBeLessThan(0.01);
+  expect(borderGeometry?.verticalPaint).not.toBe('none');
+  expect(await terminal.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBe('preserve');
+
+  await terminal.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+  await page.getByRole('button', {
+    name: 'Terminal width: Original Columns. Switch to Resize Session',
+  }).click();
+  await expect(lines).toHaveCount(4);
+  expect(await terminal.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBe('resize');
+  await expect(page.getByRole('alert')).toContainText('Original Columns rendering remains active');
+  expect((await commands(page)).filter((command) =>
+    command.type === 'lease_pane_size' || command.type === 'release_pane_size')).toHaveLength(0);
+
+  await page.getByRole('button', {
+    name: 'Terminal width: Resize Session. Switch to Fit to Phone',
+  }).click();
+  await expect(lines).toHaveCount(1);
+  expect(await terminal.evaluate((element) => element.scrollLeft)).toBe(0);
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBe('readable');
+});
+
+test('leases measured terminal columns and releases on mode exit and teardown', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: [
+      `╭${'─'.repeat(98)}╮`,
+      `${' shared terminal'.padEnd(99)}│`,
+      `${' native grid'.padEnd(99)}│`,
+      `╰${'─'.repeat(98)}╯`,
+    ].join('\n'),
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('shared terminal');
+  await page.getByRole('button', {
+    name: 'Terminal width: Fit to Phone. Switch to Original Columns',
+  }).click();
+  const readsBeforeLease = (await commands(page))
+    .filter((command) => command.type === 'read_pane').length;
+  await page.getByRole('button', {
+    name: 'Terminal width: Original Columns. Switch to Resize Session',
+  }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+  const acquire = (await commands(page))
+    .find((command) => command.type === 'lease_pane_size')!;
+  expect(acquire).toMatchObject({
+    type: 'lease_pane_size',
+    pane_id: 'w1:p1',
+    protocol: 2,
+  });
+  expect(acquire.request_id).toEqual(expect.any(String));
+  expect(acquire).not.toHaveProperty('client_id');
+  expect(acquire.columns).toEqual(expect.any(Number));
+  expect(Number(acquire.columns)).toBeGreaterThanOrEqual(40);
+  expect(Number(acquire.columns)).toBeLessThanOrEqual(240);
+  await expect(terminal).toHaveClass(/preserve-layout/);
+  await expect(terminal).toContainText('Resizing terminal…');
+  await expect(terminal.locator('.ansi-line')).toHaveCount(0);
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readsBeforeLease);
+
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: [
+      `\u001b[38;2;80;200;160mhttps://example.test/${'unbroken-token'.repeat(12)}\u001b[0m`,
+      `\u001b[48;2;61;64;64m${'› Summarize recent commits'.padEnd(151)}\u001b[0m`,
+      '  gpt-5.6-sol medium'.padEnd(151),
+    ].join('\n'),
+  });
+  await expect(terminal.locator('.ansi-line')).toHaveCount(3);
+  await expect(terminal.locator('.ansi-line-background')).toHaveText('› Summarize recent commits');
+  const resizeGeometry = await terminal.evaluate((element) => {
+    const screen = element.querySelector<HTMLElement>('.term-screen');
+    const renderedLines = [...element.querySelectorAll<HTMLElement>('.ansi-line')];
+    const background = element.querySelector<HTMLElement>('.ansi-line-background');
+    const firstLine = renderedLines[0];
+    const firstLineStyle = getComputedStyle(firstLine);
+    return {
+      backgroundWidth: background?.getBoundingClientRect().width || 0,
+      clientWidth: element.clientWidth,
+      firstLineHeight: firstLine.getBoundingClientRect().height,
+      lineHeight: Number.parseFloat(firstLineStyle.lineHeight),
+      scrollWidth: element.scrollWidth,
+      screenWidth: screen?.getBoundingClientRect().width || 0,
+      lineLengths: renderedLines.map((line) => line.textContent?.length || 0),
+    };
+  });
+  expect(resizeGeometry.scrollWidth).toBeLessThanOrEqual(resizeGeometry.clientWidth);
+  expect(resizeGeometry.screenWidth).toBeLessThanOrEqual(resizeGeometry.clientWidth);
+  expect(resizeGeometry.backgroundWidth).toBeLessThan(resizeGeometry.clientWidth);
+  expect(resizeGeometry.firstLineHeight).toBeGreaterThan(resizeGeometry.lineHeight * 2);
+  expect(Math.max(...resizeGeometry.lineLengths)).toBeGreaterThan(Number(acquire.columns));
+
+  const storedHistory = Array.from(
+    { length: 120 },
+    (_, index) => `stored resize history row ${index + 1}`,
+  ).join('\n');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: storedHistory,
+  });
+  await expect(terminal.locator('.ansi-line')).toHaveCount(120);
+
+  const viewport = page.viewportSize()!;
+  await page.setViewportSize({ width: viewport.width + 200, height: viewport.height });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
+  const leases = (await commands(page)).filter((command) => command.type === 'lease_pane_size');
+  expect(leases[1].columns).not.toBe(leases[0].columns);
+  await page.waitForTimeout(300);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: storedHistory,
+  });
+  await expect(terminal.locator('.ansi-line')).toHaveCount(120);
+
+  await page.getByRole('button', {
+    name: 'Terminal width: Resize Session. Switch to Fit to Phone',
+  }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'release_pane_size').length).toBe(1);
+  const release = (await commands(page)).find((command) => command.type === 'release_pane_size')!;
+  expect(release).toMatchObject({
+    type: 'release_pane_size',
+    pane_id: 'w1:p1',
+    protocol: 2,
+  });
+  expect(release.request_id).toEqual(expect.any(String));
+  expect(release).not.toHaveProperty('client_id');
+  await expect(terminal).not.toHaveClass(/preserve-layout/);
+  await page.getByRole('button', {
+    name: 'Terminal width: Fit to Phone. Switch to Original Columns',
+  }).click();
+  await page.getByRole('button', {
+    name: 'Terminal width: Original Columns. Switch to Resize Session',
+  }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(3);
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'release_pane_size').length).toBe(2);
+
+  const leaseCountBeforeReentry = (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length;
+  const readCountBeforeReentry = (await commands(page))
+    .filter((command) => command.type === 'read_pane').length;
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(leaseCountBeforeReentry + 1);
+  await expect(terminal.locator('.ansi-line')).toHaveCount(120);
+  await expect(terminal).toContainText('stored resize history row 1');
+  await expect(terminal).not.toContainText('Resizing terminal…');
+
+  const reentryLease = (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').at(-1)!;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'lease_pane_size',
+    request_id: reentryLease.request_id,
+    ok: true,
+    data: { columns: reentryLease.columns },
+  });
+  await expect(terminal).toContainText('stored resize history row 1');
+  await expect(terminal).not.toContainText('Resizing terminal…');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readCountBeforeReentry);
+  await page.waitForTimeout(300);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: Array.from(
+      { length: 46 },
+      (_, index) => `transient viewport row ${index + 1}`,
+    ).join('\n'),
+  });
+  await expect(terminal).toContainText('stored resize history row 1');
+  await expect(terminal).not.toContainText('Resizing terminal…');
+  await expect(terminal).not.toContainText('transient viewport row');
+  await page.waitForTimeout(300);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: storedHistory,
+  });
+  await expect(terminal.locator('.ansi-line')).toHaveCount(120);
+  await expect(terminal).toContainText('stored resize history row 1');
+
+  await setAutoCommands(page, true);
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'release_pane_size').length).toBe(3);
+});
+
+test('keeps historical Qoder grids aligned in Resize Session', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Qoder grid', agent: 'qodercli' }],
+  });
+  await page.getByRole('button', { name: 'Open Qoder grid on Fedora' }).click();
+
+  const table = [
+    `┌${'─'.repeat(118)}┐`,
+    `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(116)}│`,
+    `└${'─'.repeat(118)}┘`,
+  ].join('\n');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: table,
+  });
+  const readsBeforeResize = (await commands(page))
+    .filter((command) => command.type === 'read_pane').length;
+  await page.getByRole('button', {
+    name: 'Terminal width: Fit to Phone. Switch to Original Columns',
+  }).click();
+  await page.getByRole('button', {
+    name: 'Terminal width: Original Columns. Switch to Resize Session',
+  }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readsBeforeResize);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: table,
+  });
+
+  const terminal = page.getByRole('log');
+  const gridLines = terminal.locator('.terminal-grid-line');
+  await expect(gridLines).toHaveCount(3);
+  const geometry = await terminal.evaluate((element) => {
+    const lines = [...element.querySelectorAll<HTMLElement>('.terminal-grid-line')];
+    const lineHeight = Number.parseFloat(getComputedStyle(lines[0]).lineHeight);
+    return {
+      clientWidth: element.clientWidth,
+      documentClientWidth: document.documentElement.clientWidth,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      lineHeight,
+      lineHeights: lines.map((line) => line.getBoundingClientRect().height),
+      scrollWidth: element.scrollWidth,
+    };
+  });
+  expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
+  expect(Math.max(...geometry.lineHeights)).toBeLessThan(geometry.lineHeight * 1.2);
+  expect(geometry.documentScrollWidth).toBeLessThanOrEqual(geometry.documentClientWidth);
+});
+
+test('surfaces one explicit error when a pane-size lease fails', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Lease error app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Lease error app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'native terminal output',
+  });
+  await page.getByRole('button', {
+    name: 'Terminal width: Fit to Phone. Switch to Original Columns',
+  }).click();
+  await setAutoCommands(page, false);
+  await page.getByRole('button', {
+    name: 'Terminal width: Original Columns. Switch to Resize Session',
+  }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+  const acquire = (await commands(page))
+    .find((command) => command.type === 'lease_pane_size')!;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'lease_pane_size',
+    request_id: acquire.request_id,
+    ok: false,
+    error: 'pane resize denied',
+  });
+  await expect(page.getByRole('alert')).toHaveText('Resize Session failed: pane resize denied');
+
+  await setAutoCommands(page, true);
+  await page.getByRole('button', {
+    name: 'Terminal width: Resize Session. Switch to Fit to Phone',
+  }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'release_pane_size').length).toBe(1);
+});
+
+test('keeps the Pi desktop UI separate from the generic mobile composer', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
@@ -660,42 +1080,27 @@ test('uses the mobile composer for Pi drafts and hides its duplicate desktop edi
 
   const terminal = page.getByRole('log');
   const prompt = page.getByRole('combobox', { name: 'Prompt' });
-  await expect(terminal).toHaveClass(/bottom-ui-terminal/);
-  await expect(prompt).toHaveValue('@');
-  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Conversation output' }).locator('span')).toHaveCSS(
-    'color',
-    'rgb(166, 227, 161)',
-  );
-  await expect(terminal.locator('.ansi-line').filter({ hasText: '.gitattributes' })).toHaveText('  .gitattributes');
-  await expect(terminal.locator('.ansi-line').filter({ hasText: 'AGENTS.md' })).toHaveText('→ AGENTS.md');
-  await expect(terminal.locator('.ansi-line').filter({ hasText: 'frontend/' })).toHaveText('  frontend/');
-  await expect(terminal.locator('.term-separator')).toHaveCount(0);
-  await expect(terminal.locator('.agent-current-ui-start')).toHaveCount(1);
-  await expect(terminal.locator('.ansi-line').filter({ hasText: '0.0%/272k' })).toHaveText('$0.000 (sub) 0.0%/272k (auto)');
-  await expect(terminal.locator('.ansi-line').filter({ hasText: 'gpt-5.6-sol' })).toHaveText('gpt-5.6-sol • xhigh');
-
-  const [terminalBox, outputBox, modelBox] = await Promise.all([
-    terminal.boundingBox(),
-    terminal.locator('.ansi-line').filter({ hasText: 'Conversation output' }).boundingBox(),
-    terminal.locator('.ansi-line').filter({ hasText: 'gpt-5.6-sol' }).boundingBox(),
-  ]);
-  expect(terminalBox && outputBox && modelBox).toBeTruthy();
-  expect(outputBox!.y - terminalBox!.y).toBeLessThan(24);
-  expect(modelBox!.y).toBeGreaterThan(terminalBox!.y + terminalBox!.height / 2);
-  expect(terminalBox!.y + terminalBox!.height - (modelBox!.y + modelBox!.height)).toBeLessThan(24);
+  await expect(terminal).not.toHaveClass(/bottom-ui-terminal/);
+  await expect(prompt).toHaveValue('');
+  await expect(terminal).toContainText('Conversation output');
+  await expect(terminal).toContainText('@');
+  await expect(terminal).toContainText('.gitattributes');
+  await expect(terminal).toContainText('AGENTS.md');
+  await expect(terminal).toContainText('~/Development/herdr-mobile-relay');
+  await expect(terminal).toContainText('gpt-5.6-sol');
+  await expect(terminal.locator('.agent-current-ui-start')).toHaveCount(0);
 
   await prompt.fill('@AGENTS.md');
-  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'send_keys')).toMatchObject({
-    pane_id: 'w1:p1', keys: ['ctrl+c'], activity_label: 'Cleared terminal input',
-  });
   await page.getByRole('button', { name: 'Send prompt' }).click();
   await expect.poll(async () => (await commands(page)).find((command) => command.type === 'submit_prompt')).toMatchObject({
     pane_id: 'w1:p1', text: '@AGENTS.md',
   });
-  await expect(prompt).toHaveValue('');
+  expect((await commands(page)).filter((command) => (
+    command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(['ctrl+c'])
+  ))).toHaveLength(0);
 });
 
-test('uses the mobile composer for Codex picker selections', async ({ page }) => {
+test('keeps the Codex picker in the shared terminal with generic controls', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
@@ -705,22 +1110,6 @@ test('uses the mobile composer for Codex picker selections', async ({ page }) =>
   });
   await page.getByRole('button', { name: 'Open Codex placeholder on Fedora' }).click();
   const background = '\u001b[48;2;61;64;64m                    \u001b[0m';
-  const status = 'gpt-5.6-sol xhigh · ~/project · main · Context 30% used';
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
-    content: [
-      'Completed output', background,
-      '\u001b[1;48;2;61;64;64m›\u001b[0m\u001b[2;48;2;61;64;64m Review the current diff\u001b[0m',
-      background, status,
-    ].join('\n'),
-  });
-  const terminal = page.getByRole('log');
-  const prompt = page.getByRole('combobox', { name: 'Prompt' });
-  await expect(terminal).toHaveClass(/bottom-ui-terminal/);
-  await expect(terminal).toContainText('Completed output');
-  await expect(terminal).not.toContainText('Review the current diff');
-  await expect(prompt).toHaveValue('');
-
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
     content: [
@@ -732,37 +1121,23 @@ test('uses the mobile composer for Codex picker selections', async ({ page }) =>
       '  enter insert · esc close · ←/→ switch search modes                      [All Results]   Filesystem Only    Plugins',
     ].join('\n'),
   });
-  await expect(prompt).toHaveValue('@');
-  const pickerItems = terminal.locator('.codex-picker-item');
-  await expect(pickerItems).toHaveCount(2);
-  await expect(pickerItems.nth(0)).toContainText('Default templates');
-  await expect(pickerItems.nth(0)).toContainText('Default templates for documents and presentations');
-  await expect(pickerItems.nth(0)).toContainText('Plugin');
-  await expect(pickerItems.nth(1)).toContainText('Create spreadsheets with the dashboard template');
-  await expect(terminal.locator('.codex-picker-modes')).toHaveText('All ResultsFilesystem OnlyPlugins');
-  await expect(page.getByRole('button', { name: 'Previous result' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Next result' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Previous search mode' })).toBeVisible();
-  await page.getByRole('button', { name: 'Next search mode' }).click();
+
+  const terminal = page.getByRole('log');
+  const prompt = page.getByRole('combobox', { name: 'Prompt' });
+  await expect(terminal).not.toHaveClass(/bottom-ui-terminal/);
+  await expect(terminal).toContainText('Completed output');
+  await expect(terminal).toContainText('Default templates');
+  await expect(terminal).toContainText('Analytics Dashboard');
+  await expect(terminal).toContainText('All Results');
+  await expect(terminal.locator('.codex-picker-item')).toHaveCount(0);
+  await expect(prompt).toHaveValue('');
+  await expect(page.getByRole('button', { name: 'Previous result' })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Arrow keys' }).click();
+  await page.getByRole('button', { name: 'Right' }).click();
   await expect.poll(async () => (await commands(page)).find((command) => (
     command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(['Right'])
   ))).toMatchObject({ pane_id: 'w1:p1', keys: ['Right'] });
-
-  const skill = '$openai-templates:artifact-template-analytics-dashboard';
-  await server(page, 0, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
-    content: [
-      'Completed output', background,
-      `\u001b[1;48;2;61;64;64m›\u001b[0m\u001b[38;5;6;48;2;61;64;64m ${skill}\u001b[0m`,
-      background, status,
-    ].join('\n'),
-  });
-  await expect(prompt).toHaveValue(skill);
-
-  await prompt.fill(`${skill} summarize the dashboard`);
-  await expect.poll(async () => (await commands(page)).find((command) => (
-    command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(['ctrl+c'])
-  ))).toMatchObject({ pane_id: 'w1:p1', keys: ['ctrl+c'], activity_label: 'Cleared terminal input' });
 });
 
 test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
@@ -837,6 +1212,7 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await page.getByRole('button', { name: 'Settings' }).click();
   const sizes = page.getByRole('group', { name: 'Interface Size' });
   const history = page.getByRole('group', { name: 'Terminal History' });
+  const layouts = page.getByRole('group', { name: 'Terminal Width' });
   const heading = page.getByRole('heading', { name: 'Settings', level: 2 });
 
   await sizes.getByRole('button', { name: 'Compact' }).click();
@@ -851,6 +1227,14 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   expect(largeHeadingSize).toBeGreaterThan(compactHeadingSize);
   expect(await page.evaluate(() => document.documentElement.dataset.interfaceSize)).toBe('large');
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_font_size'))).toBe('large');
+  await expect(layouts.getByRole('button', { name: 'Fit to Phone' })).toHaveAttribute('aria-pressed', 'true');
+  await layouts.getByRole('button', { name: 'Original Columns' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBe('preserve');
+  await layouts.getByRole('button', { name: 'Resize Session' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBe('resize');
+  await expect(page.getByText(/Resize Session temporarily/)).toBeVisible();
+  await layouts.getByRole('button', { name: 'Fit to Phone' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBe('readable');
 
   await history.getByRole('button', { name: '10000' }).click();
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_history_lines'))).toBe('10000');
@@ -1084,7 +1468,8 @@ test('keeps the third single choice checked across live pane transitions', async
   await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
   await expect(page.getByRole('main', { name: 'Questions for Questions' })).toBeVisible();
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Refresh terminal' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Refresh terminal' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Terminal width:/ })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Attach image' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
@@ -1204,8 +1589,7 @@ test('does not report failed question navigation as opened', async ({ page }) =>
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 });
 
-test('refreshes agents on return home and preserves terminal behavior', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('herdr_show_codex_status_line', 'true'));
+test('refreshes agents on return home and preserves shared terminal behavior', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
@@ -1215,9 +1599,17 @@ test('refreshes agents on return home and preserves terminal behavior', async ({
   const attachImage = page.getByRole('button', { name: 'Attach image' });
   const arrowKeys = page.getByRole('button', { name: 'Arrow keys' });
   const enterKey = page.getByRole('button', { name: 'Enter' });
+  const ctrlKey = page.getByRole('button', { name: 'Ctrl', exact: true });
+  const ctrlLetter = page.getByRole('textbox', { name: 'Ctrl shortcut letter' });
+  const shiftTabKey = page.getByRole('button', { name: 'Shift+Tab' });
+  const copyOutput = page.getByRole('button', { name: 'Copy', exact: true });
   await expect(attachImage.locator('svg')).toBeVisible();
   await expect(arrowKeys.locator('svg')).toBeVisible();
   await expect(enterKey).toBeVisible();
+  await expect(ctrlKey).toBeVisible();
+  await expect(shiftTabKey).toBeVisible();
+  await expect(copyOutput).toBeVisible();
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
   await expect(attachImage).not.toContainText('▧');
   await expect(arrowKeys).not.toContainText('⌨');
   await arrowKeys.click();
@@ -1227,6 +1619,24 @@ test('refreshes agents on return home and preserves terminal behavior', async ({
   expect((await commands(page)).find((command) => command.type === 'send_keys')).toMatchObject({
     pane_id: 'w1:p1', keys: ['Enter'],
   });
+  await shiftTabKey.click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['Shift+Tab'])).length).toBe(1);
+  await ctrlKey.click();
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(ctrlLetter).toBeFocused();
+  await ctrlLetter.press('c');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['ctrl+c'])).length).toBe(1);
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(ctrlLetter).not.toBeFocused();
+  await ctrlKey.click();
+  await ctrlLetter.press('o');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['ctrl+o'])).length).toBe(1);
   const refreshesBeforeBack = (await commands(page)).filter((command) => command.type === 'refresh_agents').length;
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
@@ -1238,15 +1648,44 @@ test('refreshes agents on return home and preserves terminal behavior', async ({
   const terminal = page.getByRole('log');
   await expect(terminal).toContainText('Safe <img src=x onerror=alert(1)>');
   expect(await terminal.locator('img').count()).toBe(0);
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          (window as typeof window & { __copiedTerminal?: string }).__copiedTerminal = text;
+        },
+      },
+    });
+  });
+  await copyOutput.click();
+  await expect.poll(() => page.evaluate(
+    () => (window as typeof window & { __copiedTerminal?: string }).__copiedTerminal,
+  )).toBe('Safe <img src=x onerror=alert(1)>');
+
+  const permissionHeader = terminal.locator('.ansi-line', { hasText: 'Permissions ·' });
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: 'Permissions ·  \u001b[48;2;36;74;50mAllow\u001b[0m Ask Deny',
+  });
+  await expect(permissionHeader.locator('span', { hasText: 'Allow' }))
+    .toHaveCSS('background-color', 'rgb(36, 74, 50)');
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: 'Permissions ·  Allow Ask \u001b[48;2;36;74;50mDeny\u001b[0m',
+  });
+  await expect(permissionHeader.locator('span', { hasText: 'Deny' }))
+    .toHaveCSS('background-color', 'rgb(36, 74, 50)');
 
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
     content: ['Before', '', '', '', '', '----------------', '', '————————', '', '________________', '', '', '', 'After'].join('\n'),
   });
   expect(await terminal.evaluate((element) => {
+    const rows = element.querySelector('.term-screen')?.children || element.children;
     let blankRun = 0;
     let maximumBlankRun = 0;
-    for (const row of element.children) {
+    for (const row of rows) {
       if (row.classList.contains('ansi-line') && !row.textContent?.trim()) {
         blankRun += 1;
         maximumBlankRun = Math.max(maximumBlankRun, blankRun);
@@ -1281,8 +1720,8 @@ test('refreshes agents on return home and preserves terminal behavior', async ({
       `\u001b[2m${claudeRule} Opus 4.8 | ctx: 20%\u001b[0m`,
     ].join('\n'),
   });
-  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Claude result' })).toHaveText('Claude result');
-  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Opus 4.8' })).toHaveText('Opus 4.8 | ctx: 20%');
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Claude result' })).toContainText('Claude result');
+  await expect(terminal.locator('.ansi-line').filter({ hasText: 'Opus 4.8' })).toContainText('Opus 4.8 | ctx: 20%');
   await expect(terminal.locator('.term-separator')).toHaveCount(1);
 
   await server(page, 0, {
@@ -1371,6 +1810,7 @@ test('ignores a directory result after switching computers', async ({ page }) =>
 
   await page.getByLabel('Computer').selectOption('mac');
   await expect.poll(async () => (await commandsForSocket(page, 1)).filter((command) => command.type === 'list_directories').length).toBe(1);
+  await page.getByLabel('Agent', { exact: true }).selectOption('codex');
   const macDirectory = (await commandsForSocket(page, 1)).find((command) => command.type === 'list_directories')!;
   await server(page, 1, {
     type: 'command_result', request_id: macDirectory.request_id, ok: true, phase: 'completed',
@@ -1402,8 +1842,24 @@ test('ignores a directory result after switching computers', async ({ page }) =>
 test('launches and manages agent lifecycle commands', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await handshake(page, 0, {
+    agent_profiles: [
+      { id: 'qodercli', label: 'Qoder' },
+      { id: 'opencode', label: 'OpenCode' },
+      { id: 'codex', label: 'Codex' },
+      { id: 'pi', label: 'Pi' },
+      { id: 'kimi', label: 'Kimi' },
+      { id: 'claude', label: 'Claude Code' },
+      { id: 'omp', label: 'Oh My Pi' },
+    ],
+  });
   await page.getByRole('button', { name: 'Start agent' }).click();
+  const agentType = page.getByLabel('Agent', { exact: true });
+  await expect(agentType.locator('option')).toHaveText([
+    'Claude Code', 'Codex', 'Kimi', 'Oh My Pi', 'OpenCode', 'Pi', 'Qoder',
+  ]);
+  await expect(agentType).toHaveValue('claude');
+  await agentType.selectOption('codex');
   await expect.poll(async () => (await commands(page)).some((command) => command.type === 'list_directories')).toBe(true);
   const directoryCommand = (await commands(page)).find((command) => command.type === 'list_directories')!;
   await server(page, 0, {

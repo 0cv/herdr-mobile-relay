@@ -269,3 +269,25 @@ func TestUnknownCreatedTargetGetsActionableUnsafeRetryError(t *testing.T) {
 		t.Fatalf("error = %q, want actionable created-target warning", result.Error)
 	}
 }
+
+func TestCapPaneContentLines(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		limit   int
+		want    string
+	}{
+		{name: "within limit", content: "one\ntwo\n", limit: 2, want: "one\ntwo\n"},
+		{name: "without trailing newline", content: "one\ntwo\nthree", limit: 2, want: "two\nthree"},
+		{name: "with trailing newline", content: "one\ntwo\nthree\n", limit: 2, want: "two\nthree\n"},
+		{name: "retains trailing blank line", content: "one\ntwo\n\n", limit: 1, want: "\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := string(capPaneContentLines([]byte(test.content), test.limit))
+			if got != test.want {
+				t.Fatalf("capPaneContentLines() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

@@ -1,7 +1,36 @@
+<script lang="ts" module>
+  import type { TerminalFrame as CachedTerminalFrame } from '$lib/types';
+
+  interface ResizedTerminalFrame {
+    frame: CachedTerminalFrame;
+    columns: number;
+    display: string;
+    html: string;
+    historyLines: number;
+    interfaceSize: string;
+    viewportWidth: number;
+  }
+
+  const MAX_RESIZED_TERMINAL_FRAMES = 8;
+  const resizedTerminalFrames = new Map<string, ResizedTerminalFrame>();
+
+  function rememberResizedTerminalFrame(paneId: string, cached: ResizedTerminalFrame) {
+    resizedTerminalFrames.delete(paneId);
+    resizedTerminalFrames.set(paneId, cached);
+    if (resizedTerminalFrames.size <= MAX_RESIZED_TERMINAL_FRAMES) return;
+    const oldestPaneId = resizedTerminalFrames.keys().next().value;
+    if (oldestPaneId) resizedTerminalFrames.delete(oldestPaneId);
+  }
+</script>
+
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import QuestionForm from '$components/QuestionForm.svelte';
+  import {
+    MAX_PANE_SIZE_COLUMNS,
+    MIN_PANE_SIZE_COLUMNS,
+  } from '$lib/config';
   import {
     agentNeedsInspection,
     agentNeedsResponse,
@@ -11,17 +40,14 @@
     questionInteraction,
     sortedAgents,
   } from '$lib/agents';
-  import { interfaceSize, showAgentStatusLine } from '$lib/preferences';
+  import {
+    interfaceSize,
+    terminalHistoryLines,
+    terminalLayout,
+  } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { relayStore, CommandError } from '$lib/store';
-  import {
-    claudeMobileTerminalContent,
-    codexPickerActive,
-    codexTerminalDraft,
-    lastCompletedResponse,
-    piTerminalDraft,
-    renderTerminalContent,
-  } from '$lib/terminal';
+  import { stripAnsi, TERMINAL_SEPARATOR_TOKEN, renderTerminalContent } from '$lib/terminal';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
 
   const connections = relayStore.connections;
@@ -39,28 +65,49 @@
   } = $props();
 
   let terminalElement = $state<HTMLDivElement>(null!);
+  let cellMeasureElement = $state<HTMLSpanElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
+  let ctrlInputElement = $state<HTMLInputElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
   let composer = $state('');
   let composerFocused = $state(false);
   let deferredFrame: TerminalFrame | undefined;
+  let resizeFrameBaseline: TerminalFrame | undefined;
+  let showingCachedResizeFrame = false;
   let displayed = $state('');
   let renderedHtml = $state('');
   let lastFormat = '';
+  let lastContent = '';
+  let lastPreserveLayout = false;
+  let lastPreserveLineEnds = false;
   let jumpVisible = $state(false);
   let arrowsOpen = $state(false);
+  let ctrlArmed = $state(false);
   let uploadStatus = $state('');
   let uploadError = $state(false);
+  let paneSizeLeaseError = $state('');
   let requestedPaneId = '';
   let slashCatalog = $state<SlashCommandCatalog>({ commands: [], truncated: false });
   let slashCatalogLoading = $state(true);
   let slashCatalogUnavailable = $state(false);
   let activeSlashIndex = $state(0);
   let dismissedSlashQuery = $state<string | null>(null);
-  let nativeTerminalDraft: string | null = null;
-  let terminalDraftClearPromise: Promise<boolean> | null = null;
-  let suppressTerminalDraft = false;
-  let codexPickerOpen = $state(false);
+  const CELL_MEASURE_TEXT = '0000000000';
+  const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
+  const PANE_SIZE_SETTLE_MS = 250;
+  const PANE_SIZE_SETTLE_TIMEOUT_MS = 1_500;
+  const PANE_SIZE_SETTLE_MIN_HISTORY = 100;
+  let componentMounted = false;
+  let leaseGeneration = 0;
+  let leaseInFlight = false;
+  let leaseTarget: Agent | null = null;
+  let lastLeasedColumns = $state(0);
+  let renderedResizeColumns = $state(0);
+  let queuedLease: { columns: number; force: boolean } | null = null;
+  let resizeReadPending = $state(false);
+  let resizeExpectedLines = 0;
+  let resizeSettleDeadline = 0;
+  let resizeReadTimer: ReturnType<typeof setTimeout> | undefined;
 
   const responsePending = $derived(agentNeedsResponse(agent));
   const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
@@ -68,7 +115,10 @@
   const inputLocked = $derived(responsePending || inspectionMode);
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(responsePending && attentionKind(agent) === 'question' && interaction));
-  const synchronizedInputTerminal = $derived(/\b(?:codex|pi)\b/i.test(String(agent.agent || '')));
+  const resizeLayout = $derived($terminalLayout === 'resize');
+  const resizeSessionActive = $derived(resizeLayout
+    && Boolean($connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')));
+  const preserveLayout = $derived($terminalLayout !== 'readable');
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -87,18 +137,50 @@
 
   $effect(() => {
     const next = frame;
-    const statusLine = $showAgentStatusLine;
-    if (!next || next.paneId !== agent.pane_id) {
-      displayed = 'Loading…';
-      renderedHtml = 'Loading…';
-      lastFormat = '';
-      deferredFrame = undefined;
-      jumpVisible = false;
-      codexPickerOpen = false;
+    const preserve = preserveLayout;
+    const preserveLineEnds = preserve && !resizeSessionActive;
+    const cachedResizeFrame = validResizedTerminalFrame(next);
+    if (resizeSessionActive
+      && cachedResizeFrame
+      && (lastLeasedColumns === 0
+        || resizeReadPending
+        || next === resizeFrameBaseline)) {
+      renderedResizeColumns = cachedResizeFrame.columns;
+      showingCachedResizeFrame = true;
+      if (untrack(() => composerFocused)) deferredFrame = cachedResizeFrame.frame;
+      else if (!lastContent) void applyCachedResizeFrame(cachedResizeFrame);
       return;
     }
+    const incompleteResizeHistory = resizeSessionActive
+      && !resizeReadPending
+      && resizeExpectedLines >= PANE_SIZE_SETTLE_MIN_HISTORY
+      && next !== resizeFrameBaseline
+      && terminalFrameLineCount(next) * 2 < resizeExpectedLines
+      && Date.now() < resizeSettleDeadline;
+    if (incompleteResizeHistory) scheduleSettledPaneRead(agent, leaseGeneration);
+    const waitingForResizedFrame = resizeSessionActive
+      && !paneSizeLeaseError
+      && (lastLeasedColumns === 0
+        || resizeReadPending
+        || next === resizeFrameBaseline
+        || incompleteResizeHistory);
+    if (waitingForResizedFrame && showingCachedResizeFrame) return;
+    if (!next || next.paneId !== agent.pane_id || waitingForResizedFrame) {
+      displayed = waitingForResizedFrame ? 'Resizing terminal…' : 'Loading…';
+      renderedHtml = displayed;
+      lastFormat = '';
+      lastContent = '';
+      deferredFrame = undefined;
+      jumpVisible = false;
+      return;
+    }
+    showingCachedResizeFrame = false;
+    if (resizeSessionActive && lastLeasedColumns > 0) renderedResizeColumns = lastLeasedColumns;
+    resizeFrameBaseline = undefined;
+    resizeExpectedLines = 0;
+    resizeSettleDeadline = 0;
     if (untrack(() => composerFocused)) deferredFrame = next;
-    else void applyFrame(next, statusLine);
+    else void applyFrame(next, preserve, preserveLineEnds);
   });
 
   $effect(() => {
@@ -108,9 +190,43 @@
       requestedPaneId = '';
       return;
     }
+    if (resizeSessionActive && !paneSizeLeaseError) return;
     if (paneId === requestedPaneId) return;
     requestedPaneId = paneId;
     relayStore.readPane(agent);
+  });
+
+  $effect(() => {
+    const connection = $connections.get(agent.relay_id);
+    const interfaceSizeValue = $interfaceSize;
+    const paneId = agent.pane_id;
+    void interfaceSizeValue;
+    if (!resizeLayout || questionMode) {
+      releasePaneSizeLease(componentMounted);
+      paneSizeLeaseError = '';
+      return;
+    }
+    if (connection?.status !== 'connected') {
+      discardPaneSizeLease();
+      paneSizeLeaseError = '';
+      return;
+    }
+    if (!connection.capabilities.includes('pane_size_lease')) {
+      discardPaneSizeLease();
+      paneSizeLeaseError = 'Resize Session is unavailable on this relay. Original Columns rendering remains active.';
+      return;
+    }
+    if (leaseTarget && leaseTarget.pane_id !== paneId) releasePaneSizeLease(componentMounted);
+    paneSizeLeaseError = '';
+    void tick().then(() => requestPaneSizeLease(false));
+  });
+
+  $effect(() => {
+    const element = terminalElement;
+    if (!element || !resizeLayout || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => requestPaneSizeLease(false));
+    observer.observe(element);
+    return () => observer.disconnect();
   });
 
   $effect(() => {
@@ -128,6 +244,7 @@
 
   onMount(() => {
     let mounted = true;
+    componentMounted = true;
     void relayStore.loadSlashCommands(agent).then((catalog) => {
       if (!mounted) return;
       slashCatalog = catalog;
@@ -137,36 +254,44 @@
     }).finally(() => {
       if (mounted) slashCatalogLoading = false;
     });
+    const measurePane = () => requestPaneSizeLease(false);
+    window.addEventListener('resize', measurePane);
+    window.visualViewport?.addEventListener('resize', measurePane);
     const refresh = setInterval(() => relayStore.readPane(agent), 3_000);
+    const refreshPaneSizeLease = setInterval(
+      () => requestPaneSizeLease(true),
+      PANE_SIZE_LEASE_REFRESH_MS,
+    );
+    void tick().then(measurePane);
     return () => {
       mounted = false;
+      componentMounted = false;
+      window.removeEventListener('resize', measurePane);
+      window.visualViewport?.removeEventListener('resize', measurePane);
       clearInterval(refresh);
+      clearInterval(refreshPaneSizeLease);
+      releasePaneSizeLease(false);
     };
   });
 
-  async function applyFrame(next: TerminalFrame, statusLine = $showAgentStatusLine) {
-    const agentType = String(agent.agent || '');
-    codexPickerOpen = /\bcodex\b/i.test(agentType) && codexPickerActive(next.content);
-    if (synchronizedInputTerminal) reconcileTerminalDraft(next.content, agentType);
-    else {
-      nativeTerminalDraft = null;
-      suppressTerminalDraft = false;
+  async function applyFrame(
+    next: TerminalFrame,
+    preserve = preserveLayout,
+    preserveLineEnds = preserve && !resizeSessionActive,
+  ) {
+    const layoutChanged = preserve !== lastPreserveLayout
+      || preserveLineEnds !== lastPreserveLineEnds;
+    if (next.content === lastContent && next.format === lastFormat && !layoutChanged) {
+      rememberCurrentResizeFrame(next, displayed, renderedHtml);
+      return;
     }
-    const mobileContent = /\bclaude\b/i.test(agentType)
-      ? claudeMobileTerminalContent(
-        next.content,
-        statusLine,
-        next.desktopFooterLines,
-        next.desktopPromptLines,
-      )
-      : { content: next.content, separated: false };
-    const rendered = renderTerminalContent(
-      mobileContent.content,
-      next.format,
-      agentType,
-      mobileContent.separated ? true : statusLine,
-    );
-    if (rendered.display === displayed && next.format === lastFormat) return;
+    const rendered = renderTerminalContent(next.content, next.format, preserve, preserveLineEnds);
+    lastContent = next.content;
+    if (rendered.display === displayed && rendered.html === renderedHtml
+      && next.format === lastFormat && !layoutChanged) {
+      rememberCurrentResizeFrame(next, rendered.display, rendered.html);
+      return;
+    }
     const distance = terminalElement
       ? terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight
       : 0;
@@ -175,8 +300,12 @@
     displayed = rendered.display;
     renderedHtml = rendered.html;
     lastFormat = next.format;
+    lastPreserveLayout = preserve;
+    lastPreserveLineEnds = preserveLineEnds;
+    rememberCurrentResizeFrame(next, rendered.display, rendered.html);
     await tick();
     if (!terminalElement) return;
+    if (layoutChanged) terminalElement.scrollLeft = 0;
     if (stick) {
       terminalElement.scrollTop = terminalElement.scrollHeight;
       jumpVisible = false;
@@ -205,45 +334,10 @@
     });
   }
 
-  function reconcileTerminalDraft(content: string, agentType: string) {
-    const draft = /\bcodex\b/i.test(agentType) ? codexTerminalDraft(content) : piTerminalDraft(content);
-    if (draft === null) {
-      nativeTerminalDraft = null;
-      suppressTerminalDraft = false;
-      return;
-    }
-    if (suppressTerminalDraft) {
-      if (!draft) {
-        nativeTerminalDraft = '';
-        suppressTerminalDraft = false;
-      }
-      return;
-    }
-    if (!composerFocused && (!composer || composer === nativeTerminalDraft)) composer = draft;
-    nativeTerminalDraft = draft;
-  }
-
-  async function clearNativeTerminalDraft(): Promise<boolean> {
-    if (terminalDraftClearPromise) return terminalDraftClearPromise;
-    if (!synchronizedInputTerminal || !nativeTerminalDraft) return true;
-    const previousDraft = nativeTerminalDraft;
-    nativeTerminalDraft = '';
-    suppressTerminalDraft = true;
-    terminalDraftClearPromise = sendKeys(['ctrl+c'], 'Cleared terminal input');
-    const cleared = await terminalDraftClearPromise;
-    terminalDraftClearPromise = null;
-    if (!cleared) {
-      nativeTerminalDraft = previousDraft;
-      suppressTerminalDraft = false;
-    }
-    return cleared;
-  }
 
   async function sendPrompt() {
     const text = composer.replace(/[\r\n]+$/g, '');
     if (!text || inputLocked) return;
-    if (!await clearNativeTerminalDraft()) return;
-    if (composer.replace(/[\r\n]+$/g, '') !== text) return;
     composer = '';
     try {
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
@@ -258,14 +352,12 @@
   function composerInput() {
     if (dismissedSlashQuery !== composer) dismissedSlashQuery = null;
     activeSlashIndex = 0;
-    if (nativeTerminalDraft) void clearNativeTerminalDraft();
   }
 
   function clearComposer() {
     composer = '';
     dismissedSlashQuery = null;
     activeSlashIndex = 0;
-    if (nativeTerminalDraft) void clearNativeTerminalDraft();
   }
 
   function resizeComposer() {
@@ -327,29 +419,57 @@
     }
   }
 
-  async function copyResponse() {
-    const response = lastCompletedResponse(displayed);
-    if (!response) {
-      relayStore.showToast('No completed response is visible yet.', true);
+  async function copyTerminalOutput() {
+    const text = stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
+    if (!text.trim()) return;
+    if (!navigator.clipboard?.writeText) {
+      relayStore.showToast('Clipboard access is unavailable. Select the output manually.', true);
       return;
     }
     try {
-      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(response);
-      else {
-        const textarea = document.createElement('textarea');
-        textarea.value = response;
-        textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
-        document.body.append(textarea);
-        textarea.select();
-        if (!document.execCommand('copy')) throw new Error('Clipboard API unavailable');
-        textarea.remove();
-      }
-      relayStore.showToast('Last response copied.');
+      await navigator.clipboard.writeText(text);
+      relayStore.showToast('Terminal output copied.');
     } catch {
-      relayStore.showToast('Clipboard access failed. Check browser permissions.', true);
+      relayStore.showToast('Could not copy terminal output. Select it manually.', true);
     }
   }
+
+  function toggleCtrl() {
+    arrowsOpen = false;
+    if (ctrlArmed) {
+      ctrlArmed = false;
+      ctrlInputElement.blur();
+      return;
+    }
+    ctrlArmed = true;
+    ctrlInputElement.value = '';
+    ctrlInputElement.focus();
+  }
+
+  function ctrlInput(event: Event) {
+    const target = event.currentTarget as HTMLInputElement;
+    const letter = target.value.match(/[a-z]/i)?.[0];
+    target.value = '';
+    if (!letter) return;
+    ctrlArmed = false;
+    target.blur();
+    const chord = `ctrl+${letter.toLowerCase()}`;
+    void sendKeys([chord], `Ctrl+${letter.toUpperCase()}`);
+  }
+
+  function ctrlKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    ctrlArmed = false;
+    ctrlInputElement.blur();
+  }
+
+  function ctrlBlur() {
+    setTimeout(() => {
+      if (document.activeElement !== ctrlInputElement) ctrlArmed = false;
+    });
+  }
+
 
   function jumpToBottom() {
     terminalElement.scrollTop = terminalElement.scrollHeight;
@@ -359,6 +479,198 @@
   function handleScroll() {
     if (terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48) jumpVisible = false;
   }
+
+  function paneSizeLeaseSupported(target: Agent): boolean {
+    const connection = $connections.get(target.relay_id);
+    return componentMounted
+      && resizeLayout
+      && !questionMode
+      && connection?.status === 'connected'
+      && connection.capabilities.includes('pane_size_lease');
+  }
+
+  function measuredPaneColumns(): number | null {
+    if (!terminalElement || !cellMeasureElement) return null;
+    const cellWidth = cellMeasureElement.getBoundingClientRect().width / CELL_MEASURE_TEXT.length;
+    const style = getComputedStyle(terminalElement);
+    const horizontalPadding = (Number.parseFloat(style.paddingLeft) || 0)
+      + (Number.parseFloat(style.paddingRight) || 0);
+    const usableWidth = terminalElement.clientWidth - horizontalPadding;
+    if (!Number.isFinite(cellWidth) || cellWidth <= 0 || usableWidth <= 0) return null;
+    return Math.min(
+      MAX_PANE_SIZE_COLUMNS,
+      Math.max(MIN_PANE_SIZE_COLUMNS, Math.floor(usableWidth / cellWidth)),
+    );
+  }
+
+  function currentViewportWidth(): number {
+    return window.visualViewport?.width || window.innerWidth;
+  }
+
+  async function applyCachedResizeFrame(cached: ResizedTerminalFrame) {
+    displayed = cached.display;
+    renderedHtml = cached.html;
+    lastContent = cached.frame.content;
+    lastFormat = cached.frame.format;
+    lastPreserveLayout = true;
+    lastPreserveLineEnds = false;
+    await tick();
+    if (!terminalElement) return;
+    terminalElement.scrollLeft = 0;
+    terminalElement.scrollTop = terminalElement.scrollHeight;
+    jumpVisible = false;
+  }
+
+  function rememberCurrentResizeFrame(next: TerminalFrame, display: string, html: string) {
+    if (!resizeSessionActive || lastLeasedColumns < 1) return;
+    rememberResizedTerminalFrame(agent.pane_id, {
+      frame: next,
+      columns: lastLeasedColumns,
+      display,
+      html,
+      historyLines: $terminalHistoryLines,
+      interfaceSize: $interfaceSize,
+      viewportWidth: currentViewportWidth(),
+    });
+  }
+
+  function validResizedTerminalFrame(value: TerminalFrame | undefined): ResizedTerminalFrame | null {
+    const cached = resizedTerminalFrames.get(agent.pane_id);
+    if (!value
+      || value !== cached?.frame
+      || cached.historyLines !== $terminalHistoryLines
+      || cached.interfaceSize !== $interfaceSize
+      || Math.abs(cached.viewportWidth - currentViewportWidth()) >= 1) return null;
+    return cached;
+  }
+
+  function terminalFrameLineCount(value: TerminalFrame | undefined): number {
+    if (!value?.content) return 0;
+    let lines = 1;
+    for (let index = 0; index < value.content.length; index += 1) {
+      if (value.content.charCodeAt(index) === 10) lines += 1;
+    }
+    return lines;
+  }
+
+  function beginResizeSettling() {
+    if (resizeReadTimer) clearTimeout(resizeReadTimer);
+    resizeReadTimer = undefined;
+    resizeFrameBaseline = frame;
+    resizeExpectedLines = Math.min(terminalFrameLineCount(frame), $terminalHistoryLines);
+    resizeSettleDeadline = Date.now() + PANE_SIZE_SETTLE_TIMEOUT_MS;
+    resizeReadPending = true;
+  }
+
+  function scheduleSettledPaneRead(target: Agent, generation: number) {
+    if (resizeReadTimer) clearTimeout(resizeReadTimer);
+    resizeReadPending = true;
+    resizeReadTimer = setTimeout(() => {
+      resizeReadTimer = undefined;
+      if (generation !== leaseGeneration
+        || leaseTarget?.pane_id !== target.pane_id
+        || !paneSizeLeaseSupported(target)) {
+        resizeReadPending = false;
+        return;
+      }
+      resizeFrameBaseline = frame;
+      resizeReadPending = false;
+      relayStore.readPane(target, true);
+    }, PANE_SIZE_SETTLE_MS);
+  }
+
+  function clearResizeSettling() {
+    if (resizeReadTimer) clearTimeout(resizeReadTimer);
+    resizeReadTimer = undefined;
+    resizeReadPending = false;
+    resizeExpectedLines = 0;
+    resizeSettleDeadline = 0;
+  }
+
+  function discardPaneSizeLease() {
+    leaseGeneration += 1;
+    leaseTarget = null;
+    lastLeasedColumns = 0;
+    resizeFrameBaseline = undefined;
+    clearResizeSettling();
+    queuedLease = null;
+  }
+
+  function releasePaneSizeLease(reportFailure: boolean) {
+    const target = leaseTarget;
+    discardPaneSizeLease();
+    if (!target) return;
+    void relayStore.releasePaneSize(target).catch((error) => {
+      const connection = $connections.get(target.relay_id);
+      if (reportFailure && componentMounted && connection?.status === 'connected') {
+        paneSizeLeaseError = `Resize Session release failed: ${(error as Error).message}`;
+      }
+    });
+  }
+
+  function requestPaneSizeLease(force: boolean) {
+    const target = agent;
+    if (!paneSizeLeaseSupported(target)) return;
+    const columns = measuredPaneColumns();
+    if (columns === null) {
+      if (terminalElement && cellMeasureElement) {
+        paneSizeLeaseError = 'Resize Session could not measure the terminal cell width.';
+      }
+      return;
+    }
+    const sameTarget = leaseTarget?.pane_id === target.pane_id;
+    if (!force && sameTarget && columns === lastLeasedColumns) return;
+    if (queuedLease && queuedLease.columns === columns) {
+      queuedLease = { columns, force: queuedLease.force || force };
+    } else queuedLease = { columns, force };
+    if (!leaseInFlight) void flushPaneSizeLease();
+  }
+
+  async function flushPaneSizeLease() {
+    if (leaseInFlight) return;
+    leaseInFlight = true;
+    try {
+      while (queuedLease) {
+        const request = queuedLease;
+        queuedLease = null;
+        const target = agent;
+        if (!paneSizeLeaseSupported(target)) continue;
+        if (!request.force
+          && leaseTarget?.pane_id === target.pane_id
+          && request.columns === lastLeasedColumns) continue;
+        if (leaseTarget && leaseTarget.pane_id !== target.pane_id) {
+          releasePaneSizeLease(componentMounted);
+        }
+        const generation = leaseGeneration;
+        leaseTarget = target;
+        try {
+          const resizing = request.columns !== lastLeasedColumns;
+          if (resizing) beginResizeSettling();
+          const appliedColumns = await relayStore.leasePaneSize(target, request.columns);
+          if (generation !== leaseGeneration
+            || leaseTarget?.pane_id !== target.pane_id
+            || !paneSizeLeaseSupported(target)) continue;
+          const changed = appliedColumns !== lastLeasedColumns;
+          lastLeasedColumns = appliedColumns;
+          paneSizeLeaseError = '';
+          if (changed) scheduleSettledPaneRead(target, generation);
+        } catch (error) {
+          if (generation === leaseGeneration
+            && leaseTarget?.pane_id === target.pane_id
+            && paneSizeLeaseSupported(target)) {
+            queuedLease = null;
+            lastLeasedColumns = 0;
+            clearResizeSettling();
+            paneSizeLeaseError = `Resize Session failed: ${(error as Error).message}`;
+          }
+        }
+      }
+    } finally {
+      leaseInFlight = false;
+      if (queuedLease) void flushPaneSizeLease();
+    }
+  }
+
 
   async function filesSelected(files: FileList | File[]) {
     for (const file of [...files].filter((item) => item.type.startsWith('image/'))) {
@@ -421,19 +733,30 @@
       <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
     </div>
   {:else}
-  <div class="terminal-toolbar">
-    <Button variant="ghost" size="icon" aria-label="Refresh terminal" onclick={() => relayStore.readPane(agent)}>↻</Button>
-  </div>
   <div
-    class:bottom-ui-terminal={synchronizedInputTerminal}
+    class:resize-layout={resizeSessionActive}
+    class:preserve-layout={preserveLayout}
     class="term-content"
+    style={resizeSessionActive && (lastLeasedColumns || renderedResizeColumns)
+      ? `--terminal-width: ${lastLeasedColumns || renderedResizeColumns}ch`
+      : undefined}
     bind:this={terminalElement}
     role="log"
     aria-label="Agent terminal output"
     onscroll={handleScroll}
   >
+    <span
+      bind:this={cellMeasureElement}
+      aria-hidden="true"
+      style="pointer-events: none; position: absolute; visibility: hidden; white-space: pre;"
+    >{CELL_MEASURE_TEXT}</span>
+    <div class="term-screen">
     <!-- renderTerminalContent escapes relay text before producing controlled ANSI spans. -->
     {@html renderedHtml}
+    </div>
+  </div>
+  <div class="terminal-copy">
+    <Button variant="secondary" size="sm" onclick={copyTerminalOutput}>Copy</Button>
   </div>
   {#if jumpVisible}
     <button class="jump-bottom" aria-label="Jump to latest output" onclick={jumpToBottom}>↓</button>
@@ -531,6 +854,7 @@
       <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
+    {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
 
     {#if approvalMode && !responding.has(agent.pane_id)}
       <div class="quick-actions" aria-label="Approval choices">
@@ -546,37 +870,60 @@
       <div class="quick-actions"><Button variant="secondary" onclick={openNext}>Next blocked →</Button></div>
     {/if}
 
-    <div class:codex-picker-keys={codexPickerOpen} class="term-keys">
-      {#if codexPickerOpen}
-        <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Closed picker')}>Esc</Button>
-        <Button variant="secondary" size="sm" aria-label="Previous result" onclick={() => sendKeys(['Up'])}>↑</Button>
-        <Button variant="secondary" size="sm" aria-label="Next result" onclick={() => sendKeys(['Down'])}>↓</Button>
-        <span class="spacer"></span>
-        <Button variant="secondary" size="sm" aria-label="Previous search mode" onclick={() => sendKeys(['Left'])}>←</Button>
-        <Button variant="secondary" size="sm" aria-label="Next search mode" onclick={() => sendKeys(['Right'])}>→</Button>
-        <Button variant="secondary" size="sm" aria-label="Insert selection" onclick={() => sendKeys(['Enter'])}>Enter</Button>
-      {:else}
-        <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Cancelled prompt')}>Esc</Button>
-        <Button variant="secondary" size="sm" onclick={() => sendKeys(['Tab'])}>Tab</Button>
-        <Button variant="secondary" size="sm" aria-label="Copy last agent response" onclick={copyResponse}>Copy</Button>
-        <span class="spacer"></span>
-        <div class="arrow-menu">
-          <Button variant="secondary" size="sm" aria-label="Arrow keys" aria-expanded={arrowsOpen} onclick={() => { arrowsOpen = !arrowsOpen; }}>
-            <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-              <path d="M12 2v20M2 12h20"></path>
-              <path d="m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4"></path>
-            </svg>
-          </Button>
-          {#if arrowsOpen}
-            <div class="arrow-popup">
-              <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
-              <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
-              <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
-            </div>
-          {/if}
-        </div>
-        <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
-      {/if}
+    <div class="term-keys">
+      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Tab'])}>Tab</Button>
+      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Shift+Tab'], 'Shift+Tab')}>Shift+Tab</Button>
+      <div class="ctrl-menu">
+        <input
+          id="ctrl-key-input"
+          class="ctrl-key-input"
+          bind:this={ctrlInputElement}
+          aria-label="Ctrl shortcut letter"
+          autocomplete="off"
+          autocapitalize="none"
+          maxlength="1"
+          spellcheck="false"
+          oninput={ctrlInput}
+          onkeydown={ctrlKeydown}
+          onblur={ctrlBlur}
+        />
+        <Button
+          variant="secondary"
+          size="sm"
+          aria-controls="ctrl-key-input"
+          aria-pressed={ctrlArmed}
+          title="Press Ctrl, then type a letter"
+          onclick={toggleCtrl}
+        >Ctrl</Button>
+      </div>
+      <span class="spacer"></span>
+      <div class="arrow-menu">
+        <Button
+          variant="secondary"
+          size="sm"
+          aria-label="Arrow keys"
+          aria-expanded={arrowsOpen}
+          onclick={() => {
+            ctrlArmed = false;
+            ctrlInputElement.blur();
+            arrowsOpen = !arrowsOpen;
+          }}
+        >
+          <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M12 2v20M2 12h20"></path>
+            <path d="m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4"></path>
+          </svg>
+        </Button>
+        {#if arrowsOpen}
+          <div class="arrow-popup">
+            <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
+            <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
+            <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
+          </div>
+        {/if}
+      </div>
+      <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
     </div>
   </div>
   {/if}

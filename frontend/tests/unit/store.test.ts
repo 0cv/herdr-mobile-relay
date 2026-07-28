@@ -55,6 +55,63 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
   });
 
+  it('acquires and releases validated pane-size leases for capable relays', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      version: 'abc123',
+      host: 'fedora',
+      capabilities: ['pane_size_lease'],
+      agent_profiles: [],
+    });
+    socket.message({
+      type: 'agents',
+      agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp' }],
+    });
+    const agent = get(relayStore.agents)[0];
+
+    const lease = relayStore.leasePaneSize(agent, 83);
+    const acquire = socket.sent.map((payload) => JSON.parse(payload))
+      .findLast((message) => message.type === 'lease_pane_size');
+    expect(acquire).toMatchObject({
+      type: 'lease_pane_size',
+      pane_id: 'w1:p1',
+      columns: 83,
+      protocol: 2,
+    });
+    expect(acquire.request_id).toBeTruthy();
+    expect(acquire).not.toHaveProperty('client_id');
+    socket.message({
+      type: 'command_result',
+      action: 'lease_pane_size',
+      request_id: acquire.request_id,
+      ok: true,
+      data: { columns: 83 },
+    });
+    await expect(lease).resolves.toBe(83);
+
+    const release = relayStore.releasePaneSize(agent);
+    const releaseCommand = socket.sent.map((payload) => JSON.parse(payload))
+      .findLast((message) => message.type === 'release_pane_size');
+    expect(releaseCommand).toMatchObject({
+      type: 'release_pane_size',
+      pane_id: 'w1:p1',
+      protocol: 2,
+    });
+    expect(releaseCommand.request_id).toBeTruthy();
+    expect(releaseCommand).not.toHaveProperty('client_id');
+    socket.message({
+      type: 'command_result',
+      action: 'release_pane_size',
+      request_id: releaseCommand.request_id,
+      ok: true,
+    });
+    await expect(release).resolves.toBeUndefined();
+    await expect(relayStore.leasePaneSize(agent, 39)).rejects.toThrow(/between 40 and 240/);
+  });
+
   it('binds approvals to their blocked event and coalesces pane polling', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -357,19 +414,27 @@ describe('relay command store', () => {
     ]);
   });
 
-  it('requests the configured number of terminal history lines', () => {
+  it('requests the default and configured numbers of terminal history lines', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     const relayId = get(relayStore.relayConfigs)[0].id;
-    setTerminalHistoryLines(5_000);
-
-    relayStore.readPane({
+    const agent = {
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
       pane_id: `${relayId}::w1:p1`,
+    };
+
+    relayStore.readPane(agent);
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
+      type: 'read_pane',
+      pane_id: 'w1:p1',
+      lines: 1_000,
+      format: 'ansi',
     });
 
+    setTerminalHistoryLines(5_000);
+    relayStore.readPane(agent, true);
     expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
       type: 'read_pane',
       pane_id: 'w1:p1',
@@ -443,7 +508,7 @@ describe('relay command store', () => {
     });
   });
 
-  it('preserves relay-provided desktop footer metadata on terminal frames', () => {
+  it('stores terminal frames without agent-specific relay metadata', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     const relayId = get(relayStore.relayConfigs)[0].id;
     socket.message({
@@ -451,10 +516,10 @@ describe('relay command store', () => {
       desktop_footer_lines: 6, desktop_prompt_lines: 2,
     });
 
-    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)).toMatchObject({
+    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)).toEqual({
+      paneId: `${relayId}::w1:p1`,
       content: 'output',
-      desktopFooterLines: 6,
-      desktopPromptLines: 2,
+      format: 'ansi',
     });
   });
 

@@ -6,8 +6,8 @@ export const THEME_KEY = 'herdr_theme';
 // whole-interface size without resetting users.
 export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
 export const LEGACY_FONT_KEY = 'herdr_home_font_size';
-export const STATUS_LINE_KEY = 'herdr_show_codex_status_line';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
+export const TERMINAL_LAYOUT_KEY = 'herdr_terminal_layout';
 export const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
 export const DEVICE_CREDENTIAL_KEY = 'herdr_device_unlock_credential';
 export const PUSH_ENABLED_KEY = 'herdr_push_enabled';
@@ -26,6 +26,15 @@ export const INTERFACE_SIZES = ['compact', 'regular', 'large'] as const;
 export type InterfaceSize = (typeof INTERFACE_SIZES)[number];
 export const TERMINAL_HISTORY_OPTIONS = [100, 1_000, 5_000, 10_000] as const;
 export type TerminalHistoryLines = (typeof TERMINAL_HISTORY_OPTIONS)[number];
+export const TERMINAL_LAYOUTS = ['readable', 'preserve', 'resize'] as const;
+export type TerminalLayout = (typeof TERMINAL_LAYOUTS)[number];
+export const TERMINAL_LAYOUT_LABELS: Record<TerminalLayout, string> = {
+  readable: 'Fit to Phone',
+  preserve: 'Original Columns',
+  resize: 'Resize Session',
+};
+export const MIN_PANE_SIZE_COLUMNS = 40;
+export const MAX_PANE_SIZE_COLUMNS = 240;
 export const THEME_COLORS: Record<Theme, string> = {
   dark: '#0a0a0a',
   light: '#f5f5f5',

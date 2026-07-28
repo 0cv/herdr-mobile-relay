@@ -394,10 +394,13 @@ func execute(store *stateStore, scenario Scenario, args []string) (string, error
 
 func validatePaneRead(args []string) error {
 	if len(args) != 7 {
-		return errors.New("pane read schema: <pane> --lines <n> --source recent-unwrapped --format <text|ansi>")
+		return errors.New("pane read schema: <pane> --lines <n> --source <recent|recent-unwrapped> --format <text|ansi>")
 	}
-	if args[1] != "--lines" || args[3] != "--source" || args[4] != "recent-unwrapped" || args[5] != "--format" {
+	if args[1] != "--lines" || args[3] != "--source" || args[5] != "--format" {
 		return errors.New("pane read flags are missing, duplicated, or out of order")
+	}
+	if args[4] != "recent" && args[4] != "recent-unwrapped" {
+		return errors.New("pane read source must be recent or recent-unwrapped")
 	}
 	if _, err := strconv.Atoi(args[2]); err != nil {
 		return errors.New("pane read lines must be an integer")

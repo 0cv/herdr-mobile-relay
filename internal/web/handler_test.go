@@ -15,12 +15,14 @@ func setupTestWebRoot(t *testing.T) string {
 
 	os.MkdirAll(filepath.Join(dir, "assets"), 0o755)
 	os.MkdirAll(filepath.Join(dir, "icons"), 0o755)
+	os.MkdirAll(filepath.Join(dir, "fonts"), 0o755)
 
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>hello</html>"), 0o644)
 	os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("console.log('app')"), 0o644)
 	os.WriteFile(filepath.Join(dir, "assets", "app.css"), []byte("body{}"), 0o644)
 	os.WriteFile(filepath.Join(dir, "sw.js"), []byte("// sw"), 0o644)
 	os.WriteFile(filepath.Join(dir, "icons", "icon-192.png"), []byte("png-data"), 0o644)
+	os.WriteFile(filepath.Join(dir, "fonts", "nerd-symbols.woff2"), []byte("font-data"), 0o644)
 	os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("secret"), 0o644)
 
 	// Create a .br sidecar
@@ -188,6 +190,26 @@ func TestServesIconsWildcard(t *testing.T) {
 
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestServesFontWithWebMIME(t *testing.T) {
+	root := setupTestWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/fonts/nerd-symbols.woff2", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("Content-Type"); got != "font/woff2" {
+		t.Fatalf("font MIME = %q", got)
 	}
 }
 

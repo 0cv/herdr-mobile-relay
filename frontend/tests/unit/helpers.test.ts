@@ -29,21 +29,13 @@ import {
 import {
   ansi256Color,
   ansiToHtml,
-  claudeMobileTerminalContent,
-  codexTerminalDraft,
   compactRepeatedCharacterRuns,
   isSeparatorOnlyLine,
-  lastCompletedResponse,
-  piMobileTerminalContent,
-  piTerminalDraft,
-  removeCodexDesktopInput,
-  removeClaudeStatusBlocks,
   renderTerminalContent,
   stripAnsi,
   TERMINAL_REPEATED_RUN_LIMIT,
   TERMINAL_SEPARATOR_TOKEN,
   terminalHtml,
-  trimTerminalChrome,
   trimTrailingDecoration,
 } from '$lib/terminal';
 import type { Agent, QuestionInteraction, RelayConnectionView } from '$lib/types';
@@ -110,26 +102,21 @@ describe('terminal rendering', () => {
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(html).not.toContain('<img');
     expect(html).toContain('font-weight:700');
-    expect(renderTerminalContent('<script>alert(1)</script>', 'plain', 'codex', true).html).toBe('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(renderTerminalContent('<script>alert(1)</script>', 'plain').html).toBe('&lt;script&gt;alert(1)&lt;/script&gt;');
   });
 
   it('normalizes light-origin ANSI colors onto the dark mobile terminal', () => {
-    const blackText = renderTerminalContent('\x1b[38;2;24;24;24mMac text\x1b[0m', 'ansi', 'codex', true);
+    const blackText = renderTerminalContent('\x1b[38;2;24;24;24mMac text\x1b[0m', 'ansi');
     expect(blackText.html).toContain('color:var(--terminal-text)');
 
-    const darkBlue = renderTerminalContent('\x1b[38;2;20;40;80mBlue text\x1b[0m', 'ansi', 'claude', true);
+    const darkBlue = renderTerminalContent('\x1b[38;2;20;40;80mBlue text\x1b[0m', 'ansi');
     expect(darkBlue.html).toContain('color:color-mix(in srgb, rgb(20,40,80) 35%, var(--terminal-text))');
 
-    const lightRow = renderTerminalContent(
-      '\x1b[48;2;250;250;250;38;2;20;20;20mLight terminal row\x1b[0m',
-      'ansi',
-      'codex',
-      true,
-    );
+    const lightRow = renderTerminalContent('\x1b[48;2;250;250;250;38;2;20;20;20mLight terminal row\x1b[0m', 'ansi');
     expect(lightRow.html).toContain('background-color:rgb(61,64,64)');
     expect(lightRow.html).toContain('color:var(--terminal-text)');
 
-    const brightAccent = renderTerminalContent('\x1b[38;2;95;175;255mAccent\x1b[0m', 'ansi', 'codex', true);
+    const brightAccent = renderTerminalContent('\x1b[38;2;95;175;255mAccent\x1b[0m', 'ansi');
     expect(brightAccent.html).toContain('color:rgb(95,175,255)');
   });
 
@@ -148,7 +135,7 @@ describe('terminal rendering', () => {
       'Before', '', '', '', '', '',
       '----------------', '', '————————', '', '  ________________', '', `  ${'▔'.repeat(120)}`,
       '', '', '', '', 'After',
-    ].join('\n'), 'ansi', 'codex', true);
+    ].join('\n'), 'ansi');
     expect(rendered.display).toBe([
       'Before', '', '', TERMINAL_SEPARATOR_TOKEN, '', '', 'After',
     ].join('\n'));
@@ -162,204 +149,70 @@ describe('terminal rendering', () => {
       .toBe(`${'.'.repeat(TERMINAL_REPEATED_RUN_LIMIT)} [29%]`);
     expect(compactRepeatedCharacterRuns('a'.repeat(120))).toBe('a'.repeat(120));
 
-    const rendered = renderTerminalContent(progress, 'ansi', 'codex', true);
+    const rendered = renderTerminalContent(progress, 'ansi');
     expect(stripAnsi(rendered.display))
       .toBe(`${'.'.repeat(TERMINAL_REPEATED_RUN_LIMIT)} [29%]`);
+  });
+
+  it('preserves fixed-grid rows without transcript reflow or border trimming', () => {
+    const border = `╭── omp v17.1.5 ${'─'.repeat(40)}╮`;
+    const frame = [
+      border,
+      '│ Welcome back!                                      │',
+      '  prewalk    Switch model                            │',
+      '  dump       Copy session                            │',
+    ].join('\n');
+
+    const readable = renderTerminalContent(frame, 'ansi');
+    const preserved = renderTerminalContent(frame, 'ansi', true);
+
+    expect(stripAnsi(readable.display).split('\n')).toHaveLength(2);
+    expect(stripAnsi(preserved.display).split('\n')).toEqual(frame.split('\n'));
+    expect(readable.html).not.toContain('terminal-cell');
+    expect(preserved.html).toContain('<span class="terminal-cell terminal-cell-box terminal-cell-arc terminal-cell-arc-down-right">╭</span>');
+    expect(preserved.html).toContain(`class="terminal-cell-horizontal terminal-cell-horizontal-single" style="width:40ch">${'─'.repeat(40)}</span>`);
+    expect(preserved.html).toContain('<span class="terminal-cell terminal-cell-box terminal-cell-arc terminal-cell-arc-down-left">╮</span>');
+    const mixedBorders = renderTerminalContent('╘╿├┤┴', 'ansi', true);
+    expect(stripAnsi(mixedBorders.display)).toBe('╘╿├┤┴');
+    expect(mixedBorders.html.match(/terminal-cell-box/g)).toHaveLength(5);
+    expect(mixedBorders.html).not.toContain('<span class="terminal-cell">');
+  });
+
+  it('marks fixed-grid rows so resized history does not wrap their cells', () => {
+    const table = renderTerminalContent([
+      `┌${'─'.repeat(80)}┐`,
+      `│ ${'Metric'.padEnd(78)}│`,
+      `└${'─'.repeat(80)}┘`,
+    ].join('\n'), 'ansi', true);
+    expect(table.html.match(/terminal-grid-line/g)).toHaveLength(3);
+    expect(renderTerminalContent('plain terminal output', 'ansi', true).html)
+      .not.toContain('terminal-grid-line');
   });
 
   it('removes desktop-width decoration after terminal status text', () => {
     const decorated = `\x1b[2m─ Worked for 1m 46s ${'─'.repeat(120)}\x1b[0m`;
     expect(stripAnsi(trimTrailingDecoration(decorated))).toBe('─ Worked for 1m 46s');
 
-    const rendered = renderTerminalContent(decorated, 'ansi', 'codex', true);
+    const rendered = renderTerminalContent(decorated, 'ansi');
     expect(stripAnsi(rendered.display)).toBe('─ Worked for 1m 46s');
     expect(rendered.html).toContain('Worked for 1m 46s');
     expect(rendered.html).not.toContain('────────');
   });
 
-  it('removes Claude box chrome and leading status decoration', () => {
-    const rule = '─'.repeat(120);
-    expect(isSeparatorOnlyLine(`╰${rule}╯`)).toBe(true);
-    expect(stripAnsi(trimTerminalChrome(`\x1b[36m│\x1b[0m  Result text${' '.repeat(20)}\x1b[36m│\x1b[0m`)))
-      .toBe('Result text');
-    expect(stripAnsi(trimTerminalChrome(`\x1b[2m${rule} Opus 4.8 | ctx: 20%\x1b[0m`)))
-      .toBe('Opus 4.8 | ctx: 20%');
-    expect(stripAnsi(trimTerminalChrome(`\x1b[2m${'§'.repeat(120)} Opus 4.8 | ctx: 20%\x1b[0m`)))
-      .toBe('Opus 4.8 | ctx: 20%');
-
-    const rendered = renderTerminalContent([
-      `\x1b[36m│\x1b[0m  Result text${' '.repeat(20)}\x1b[36m│\x1b[0m`,
-      '\x1b[36m│\x1b[0m',
-      `\x1b[36m╰${rule}╯\x1b[0m`,
-      `\x1b[36m${rule}\x1b[0m`,
-      `\x1b[36m╭${rule}╮\x1b[0m`,
-      `\x1b[2m${rule} Opus 4.8 | ctx: 20%\x1b[0m`,
-    ].join('\n'), 'ansi', 'claude', true);
-    expect(stripAnsi(rendered.display)).toBe([
-      'Result text', '', TERMINAL_SEPARATOR_TOKEN, 'Opus 4.8 | ctx: 20%',
-    ].join('\n'));
-    expect(rendered.html.match(/class="term-separator"/g)).toHaveLength(1);
-  });
-
-  it('hides current multi-row Claude status blocks as one unit', () => {
+  it('keeps agent-specific terminal content in the shared rendering pipeline', () => {
     const frame = [
-      'Answer remains visible.',
-      '› Try "fix typecheck errors"',
-      `${'─'.repeat(100)} Fable 5 |`,
-      '~/Development/sfdc/argenx-patient on infinitus-pa-',
-      'appeal-main | ctx -- | 5h 49% 7d 12% manual mode',
-      'on · PR #804 · ← 1 agent',
-    ].join('\n');
-    const hidden = removeClaudeStatusBlocks(frame);
-    expect(hidden).toContain('Answer remains visible.');
-    expect(hidden).toContain('Try "fix typecheck errors"');
-    expect(hidden).not.toContain('Fable 5');
-    expect(hidden).not.toContain('ctx --');
-    expect(hidden).not.toContain('PR #804');
-
-    const rendered = renderTerminalContent(frame, 'ansi', 'claude', false);
-    expect(stripAnsi(rendered.display)).toContain('Answer remains visible.');
-    expect(stripAnsi(rendered.display)).not.toContain('Fable 5');
-    expect(stripAnsi(rendered.display)).not.toContain('argenx-patient');
-    expect(stripAnsi(rendered.display)).not.toContain('ctx --');
-
-    const shown = renderTerminalContent(frame, 'ansi', 'claude', true);
-    expect(stripAnsi(shown.display)).toContain('Fable 5');
-    expect(stripAnsi(shown.display)).toContain('ctx --');
-
-    const unavailableContext = [
-      '› Try "edit Info.plist to..."',
-      `${'─'.repeat(80)} Opus 4.8 | ctx: - | main ~16 /rc ⏸ manual mode on · ← for agents`,
-    ].join('\n');
-    const hiddenUnavailable = renderTerminalContent(unavailableContext, 'ansi', 'claude', false);
-    expect(stripAnsi(hiddenUnavailable.display)).toContain('edit Info.plist');
-    expect(stripAnsi(hiddenUnavailable.display)).not.toContain('Opus 4.8');
-    expect(stripAnsi(hiddenUnavailable.display)).not.toContain('ctx: -');
-    expect(stripAnsi(hiddenUnavailable.display)).not.toContain('manual mode');
-  });
-
-  it('separates Claude conversation output from desktop prompt and status chrome', () => {
-    const footer = [
-      '❯ Try "edit Info.plist to..."',
-      'separator',
-      'Opus 4.8',
-      'ctx: -',
-      'main ~16',
-      '/rc ⏸ manual mode on · ← for agents',
-    ];
-    const content = [...Array.from({ length: 8 }, (_, index) => `output ${index + 1}`), ...footer].join('\n');
-
-    const hidden = claudeMobileTerminalContent(content, false);
-    expect(hidden.separated).toBe(true);
-    expect(hidden.content).toContain('output 8');
-    expect(hidden.content).not.toContain('Try "edit Info.plist');
-    expect(hidden.content).not.toContain('Opus 4.8');
-
-    const shown = claudeMobileTerminalContent(content, true);
-    expect(shown.separated).toBe(true);
-    expect(shown.content).not.toContain('Try "edit Info.plist');
-    expect(shown.content).not.toContain('separator');
-    expect(shown.content).toContain('Opus 4.8');
-    expect(shown.content).toContain('manual mode');
-  });
-
-  it('removes the final styled Codex desktop input block regardless of its placeholder', () => {
-    const backgroundRow = '\x1b[48;2;61;64;64m                    \x1b[0m';
-    const promptRow = (text: string) => `\x1b[1;48;2;61;64;64m›\x1b[0m\x1b[2;48;2;61;64;64m ${text}\x1b[0m`;
-    const status = 'gpt-5.6-sol xhigh · ~/project · main · Context 30% used';
-    const content = [
-      'Completed output', '', backgroundRow, promptRow('Review the current diff'), backgroundRow, status,
-    ].join('\n');
-    expect(stripAnsi(removeCodexDesktopInput(content))).toBe(`Completed output\n\n${status}`);
-    expect(stripAnsi(renderTerminalContent(content, 'ansi', 'codex', true).display))
-      .not.toContain('Review the current diff');
-
-    const actualPromptRow = (text: string) => `\x1b[1;48;2;61;64;64m›\x1b[0m\x1b[48;2;61;64;64m ${text}\x1b[0m`;
-    const picker = [
-      'Completed output', backgroundRow, actualPromptRow('@'), backgroundRow,
-      '> Default templates          Default templates for documents and presentations     Plugin',
-      '  Analytics Dashboard        Create spreadsheets with the dashboard template       Skill',
-      '  enter insert · esc close · ←/→ switch search modes                    [All Results]   Filesystem Only    Plugins',
-    ].join('\n');
-    expect(codexTerminalDraft(picker)).toBe('@');
-    const renderedPicker = renderTerminalContent(picker, 'ansi', 'codex', false);
-    const mobilePicker = stripAnsi(renderedPicker.display);
-    expect(mobilePicker.split('\n')).toEqual(expect.arrayContaining([
-      '> Default templates — Default templates for documents and presentations (Plugin)',
-      '  Analytics Dashboard — Create spreadsheets with the dashboard template (Skill)',
-      'enter insert · esc close · ←/→ switch search modes',
-      '  [All Results] · Filesystem Only · Plugins',
-    ]));
-    expect(renderedPicker.html).toContain('class="codex-picker-item selected"');
-    expect(renderedPicker.html).toContain('class="codex-picker-description"');
-    expect(renderedPicker.html).toContain('class="codex-picker-mode active"');
-
-    const selected = [
-      backgroundRow,
-      actualPromptRow('$openai-templates:artifact-template-analytics-dashboard'),
-      backgroundRow,
-      status,
-    ].join('\n');
-    expect(codexTerminalDraft(selected)).toBe('$openai-templates:artifact-template-analytics-dashboard');
-    expect(codexTerminalDraft(content)).toBe('');
-
-    const transcript = `${promptRow('Historical prompt')}\nActual response`;
-    expect(removeCodexDesktopInput(transcript)).toBe(transcript);
-    expect(codexTerminalDraft(transcript)).toBeNull();
-    expect(removeCodexDesktopInput('› Normal transcript text')).toBe('› Normal transcript text');
-  });
-
-  it('moves the Pi desktop draft into the mobile composer while preserving custom selectors', () => {
-    const rule = '─'.repeat(120);
-    const stats = `\x1b[2m$0.000 (sub) 0.0%/272k (auto)${' '.repeat(50)}gpt-5.6-sol • xhigh\x1b[0m`;
-    const frame = [
-      'Conversation output', '', rule, '@\x1b[7m \x1b[0m', rule,
-      '  .claude/                       .claude',
-      '→ .github/                       .github',
-      '  .qoder/                        .qoder', '  (3/34)',
-      '\x1b[2m~/Development/herdr-mobile-relay (main)\x1b[0m', stats,
+      '\x1b[1;48;2;61;64;64m› Codex desktop draft\x1b[0m',
+      'Opus 4.8 | ctx: 20% | Claude status',
+      '~/Development/project (main) | Pi status',
     ].join('\n');
 
-    expect(piTerminalDraft(frame)).toBe('@');
-    const hidden = renderTerminalContent(frame, 'ansi', 'pi', false);
-    expect(stripAnsi(hidden.display)).toContain('Conversation output');
-    expect(stripAnsi(hidden.display).split('\n')).toEqual(expect.arrayContaining([
-      '  .claude/', '→ .github/', '  .qoder/', '  (3/34)',
-    ]));
-    expect(stripAnsi(hidden.display)).not.toContain('.claude/                       .claude');
-    expect(hidden.display).not.toContain(TERMINAL_SEPARATOR_TOKEN);
-    expect(stripAnsi(hidden.display)).not.toContain('~/Development/herdr-mobile-relay');
-    expect(hidden.html.match(/class="agent-current-ui-start"/g)).toHaveLength(1);
+    const readable = stripAnsi(renderTerminalContent(frame, 'ansi').display);
+    expect(readable).toContain('Codex desktop draft');
+    expect(readable).toContain('Claude status');
+    expect(readable).toContain('Pi status');
 
-    const shown = renderTerminalContent(frame, 'ansi', 'pi-coding-agent', true);
-    expect(stripAnsi(shown.display).split('\n')).toContain('→ .github/');
-    expect(stripAnsi(shown.display)).toContain('~/Development/herdr-mobile-relay (main)');
-    expect(stripAnsi(shown.display)).toContain('0.0%/272k (auto)\ngpt-5.6-sol • xhigh');
-    expect(stripAnsi(shown.display)).not.toContain(' '.repeat(20));
-    expect(shown.html.match(/class="agent-current-ui-start"/g)).toHaveLength(1);
-
-    const selector = [
-      'Conversation output', rule, '> \x1b[7m \x1b[0m', '',
-      '→ Collapse changelog      false',
-      '  Type to search · Enter/Space to change · Esc to cancel',
-      rule, '~/project (main)', stats,
-    ].join('\n');
-    expect(piTerminalDraft(selector)).toBeNull();
-    expect(stripAnsi(renderTerminalContent(selector, 'ansi', 'pi', false).display))
-      .toContain('Collapse changelog');
-
-    expect(piMobileTerminalContent('ordinary output', false)).toBe('ordinary output');
-    expect(renderTerminalContent(frame, 'ansi', 'copilot', false).html).not.toContain('agent-current-ui-start');
-  });
-
-  it('extracts the latest completed Codex and Claude responses', () => {
-    expect(lastCompletedResponse([
-      '• Earlier answer.', '─ Worked for 2s ─', '', '› New question', '', '• Latest answer.',
-      '  - First detail', '  - Second detail', '', '─ Worked for 8m 05s ─', '', '› Next question',
-    ].join('\n'))).toBe('Latest answer.\n- First detail\n- Second detail');
-    expect(lastCompletedResponse('● The implementation is ready.\n  It works.\n\n✻ Crunched for 1m 49s\n❯ '))
-      .toBe('The implementation is ready.\nIt works.');
-    expect(lastCompletedResponse('● Still working\n')).toBe('');
+    const preserved = stripAnsi(renderTerminalContent(frame, 'ansi', true).display);
+    expect(preserved).toBe(stripAnsi(frame));
   });
 });
 

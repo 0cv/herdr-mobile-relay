@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** `0.10.7`
+**Current version:** [`0.11.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.11.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -64,17 +64,18 @@ credentials, cache, and plugin registration.
 ## What It Does
 
 - Monitor and control agents across several computers.
-- Start, rename, clear, restart, and stop detected agents.
+- Start, rename, clear, restart, and stop agents from relay-provided launch
+  profiles.
 - Send prompts, terminal keys, slash commands, screenshots, and photos.
 - Answer verified Codex, Claude Code, and Qoder approvals, plus structured
   questions from those agents and OpenCode.
 - Search local activity and receive blocked or completion notifications.
 - Require device verification before reconnecting relays.
-- Detect Codex, Claude Code, OpenCode, Qoder, and Herdr integrations.
+- Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
-| Agents | Terminal |
+| Agents | Native Resize |
 | --- | --- |
-| <img src="images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="images/terminal.jpeg" alt="Mobile terminal and prompt controls" width="392"> |
+| <img src="images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="images/native_mobile_resolution.jpeg" alt="OMP terminal rendered at native mobile width" width="392"> |
 
 | Plan Questions | Notifications |
 | --- | --- |
@@ -83,6 +84,30 @@ credentials, cache, and plugin registration.
 The QR imports the relay URL, label, and token. Treat the QR and setup link as
 secrets. Enable notifications in the app's Settings; blocked-agent
 notifications are included, while completion notifications are optional.
+
+## Mobile Terminal
+
+The terminal-width control in the header and Settings offers three modes:
+
+- **Fit to Phone** reflows terminal output into the phone viewport.
+- **Original Columns** preserves the captured terminal grid and allows
+  horizontal scrolling.
+- **Resize Session** temporarily leases the live PTY at the measured mobile
+  width, so full-screen agents redraw for the phone. The relay restores the
+  previous width on mode exit, disconnect, lease expiry, or shutdown.
+
+Terminal History requests 100, 1,000, 5,000, or 10,000 lines per pane; 1,000 is
+the default. The relay enforces the selected limit after any Claude or Qoder
+history merge. Larger histories increase network transfer and rendering work.
+
+Returning to an unchanged Resize Session paints its cached rendered frame
+immediately, then reacquires the lease and reconciles current content in the
+background. Long tokens wrap in responsive output, while fixed-grid table rows
+remain aligned.
+
+The terminal controls send **Esc**, **Tab**, **Shift+Tab**, arrow keys, and
+`Ctrl` plus the next keyboard letter. **Copy** copies the visible terminal
+output without ANSI control sequences.
 
 ## Updates
 
@@ -96,10 +121,6 @@ Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit. The same plugin build hook can restore stale service
 paths from the persistent plugin config, including when no usable local release
 remains.
-
-An upgrade from the former 0.8.6 implementation adopts only a validated config
-and cache layout. Relay identity, push subscriptions, activity, history,
-uploads, and private keys are preserved.
 
 The relay-hosted app updates with its relay. For a separately hosted Cloudflare
 Pages app, configure exactly one stable relay as deployment owner with the

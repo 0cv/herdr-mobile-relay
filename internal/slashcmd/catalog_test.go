@@ -160,14 +160,20 @@ func TestGenericConfiguredSkills(t *testing.T) {
 	}
 
 	catalog := CatalogForProfile("pi", "pi-coding-agent", root, root, []string{first, second}, "skill:{name}", "")
-	if len(catalog.Commands) != 1 {
-		t.Fatalf("commands = %+v", catalog.Commands)
+	if len(catalog.Commands) != len(piBuiltins)+1 {
+		t.Fatalf("command count = %d, want %d: %+v", len(catalog.Commands), len(piBuiltins)+1, catalog.Commands)
 	}
-	command := catalog.Commands[0]
-	if command.Command != "/skill:deploy" || command.Description != "Deploy safely" ||
-		command.ArgumentHint != "target" || command.Source != "personal" {
-		t.Fatalf("command = %+v", command)
+	for _, command := range catalog.Commands {
+		if command.Command != "/skill:deploy" {
+			continue
+		}
+		if command.Description != "Deploy safely" || command.ArgumentHint != "target" ||
+			command.Source != "personal" {
+			t.Fatalf("command = %+v", command)
+		}
+		return
 	}
+	t.Fatal("/skill:deploy not found")
 }
 
 func TestUnknownProfileHasNoClaudeFallback(t *testing.T) {

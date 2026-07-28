@@ -3,6 +3,8 @@ import {
   APP_PROTOCOL_VERSION,
   importQuickSetup,
   loadRelayConfigs,
+  MAX_PANE_SIZE_COLUMNS,
+  MIN_PANE_SIZE_COLUMNS,
   normalizeRelayConfig,
   saveRelayConfigs,
 } from './config';
@@ -32,6 +34,7 @@ import {
 import type {
   Activity,
   Agent,
+  AgentProfile,
   AgentInventoryStatus,
   CommandResult,
   DirectoryListing,
@@ -438,7 +441,20 @@ class RelayStore {
       );
       this.agents.set(this.agentsValue);
       connection.agentProfiles = Array.isArray(message.agent_profiles)
-        ? message.agent_profiles.filter((profile: any) => profile?.id)
+        ? message.agent_profiles
+          .filter((profile: unknown): profile is AgentProfile => {
+            if (!profile || typeof profile !== 'object' || !('id' in profile)) return false;
+            if (typeof profile.id !== 'string' || !profile.id) return false;
+            return !('label' in profile) || profile.label === undefined || typeof profile.label === 'string';
+          })
+          .sort((left, right) => (
+            String(left.label || left.id).localeCompare(
+              String(right.label || right.id),
+              undefined,
+              { sensitivity: 'base' },
+            )
+            || String(left.id).localeCompare(String(right.id), undefined, { sensitivity: 'base' })
+          ))
         : [];
       this.emitConnections();
       this.pushConfigHandler?.(relayId);
@@ -559,18 +575,10 @@ class RelayStore {
     if (message.type === 'pane_content') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
       this.pendingPaneReads.delete(paneId);
-      const desktopFooterLines = Number(message.desktop_footer_lines);
-      const desktopPromptLines = Number(message.desktop_prompt_lines);
       this.terminalFramesValue.set(paneId, {
         paneId,
         content: String(message.content || '(empty)'),
         format: String(message.format || 'plain'),
-        desktopFooterLines: Number.isInteger(desktopFooterLines) && desktopFooterLines > 0
-          ? desktopFooterLines
-          : undefined,
-        desktopPromptLines: Number.isInteger(desktopPromptLines) && desktopPromptLines >= 0
-          ? desktopPromptLines
-          : undefined,
       });
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
@@ -694,12 +702,15 @@ class RelayStore {
       }, timeoutMs);
       this.pendingRequests.set(requestId, { relayId, action: payload.type, resolve, reject, timer });
       try {
-        connection.ws?.send(JSON.stringify({
+        const command: Record<string, unknown> = {
           ...payload,
           request_id: requestId,
-          client_id: pushClientId(),
           protocol: APP_PROTOCOL_VERSION,
-        }));
+        };
+        if (payload.type !== 'lease_pane_size' && payload.type !== 'release_pane_size') {
+          command.client_id = pushClientId();
+        }
+        connection.ws?.send(JSON.stringify(command));
       } catch {
         clearTimeout(timer);
         this.pendingRequests.delete(requestId);
@@ -855,9 +866,43 @@ class RelayStore {
     this.rejectPendingUploads(relayId, message);
   }
 
-  readPane(agent: Agent): void {
+  async leasePaneSize(agent: Agent, columns: number): Promise<number> {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    if (!connection?.capabilities.includes('pane_size_lease')) {
+      throw new CommandError('Resize Session requires a relay with pane-size lease support');
+    }
+    if (!Number.isInteger(columns) || columns < MIN_PANE_SIZE_COLUMNS || columns > MAX_PANE_SIZE_COLUMNS) {
+      throw new CommandError(
+        `Terminal columns must be between ${MIN_PANE_SIZE_COLUMNS} and ${MAX_PANE_SIZE_COLUMNS}`,
+      );
+    }
+    const result = await this.sendToAgent(agent, { type: 'lease_pane_size', columns });
+    if (result.action && result.action !== 'lease_pane_size') {
+      throw new CommandError('Relay returned the wrong pane-size lease confirmation');
+    }
+    const appliedColumns = Number(result.data?.columns);
+    if (!Number.isInteger(appliedColumns)
+      || appliedColumns < MIN_PANE_SIZE_COLUMNS
+      || appliedColumns > MAX_PANE_SIZE_COLUMNS) {
+      throw new CommandError('Relay did not confirm the applied terminal columns');
+    }
+    return appliedColumns;
+  }
+
+  async releasePaneSize(agent: Agent): Promise<void> {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    if (!connection?.capabilities.includes('pane_size_lease')) {
+      throw new CommandError('Resize Session requires a relay with pane-size lease support');
+    }
+    const result = await this.sendToAgent(agent, { type: 'release_pane_size' });
+    if (result.action && result.action !== 'release_pane_size') {
+      throw new CommandError('Relay returned the wrong pane-size release confirmation');
+    }
+  }
+
+  readPane(agent: Agent, force = false): void {
     const requestedAt = this.pendingPaneReads.get(agent.pane_id);
-    if (requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
+    if (!force && requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
     const sent = this.sendRaw(agent.relay_id, {
       type: 'read_pane',
       pane_id: agent.raw_pane_id,

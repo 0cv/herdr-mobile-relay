@@ -31,6 +31,8 @@ var mutatingTypes = map[string]bool{
 	"register_app_origin": true,
 	"deploy_app_update":   true,
 	"install_update":      true,
+	"lease_pane_size":     true,
+	"release_pane_size":   true,
 }
 
 type Inbound struct {
@@ -53,6 +55,7 @@ type Inbound struct {
 	OtherText        string          `json:"other_text,omitempty"`
 	Direction        string          `json:"direction,omitempty"`
 	Lines            int             `json:"lines,omitempty"`
+	Columns          int             `json:"columns,omitempty"`
 	Format           string          `json:"format,omitempty"`
 	Path             string          `json:"path,omitempty"`
 	Filename         string          `json:"filename,omitempty"`
@@ -185,4 +188,5 @@ var Capabilities = []string{
 	"self_update",
 	"structured_questions",
 	"slash_commands",
+	"pane_size_lease",
 }

@@ -16,7 +16,7 @@ func (p *versionCaptureProvider) Discover(ctx DiscoverContext) ([]Command, bool)
 }
 
 func TestResolveProviderExact(t *testing.T) {
-	for _, id := range []string{"claude", "codex", "qoder", "qodercli"} {
+	for _, id := range []string{"claude", "codex", "qoder", "qodercli", "pi", "omp", "kimi", "opencode"} {
 		if resolveProvider(id) == nil {
 			t.Errorf("resolveProvider(%q) = nil", id)
 		}
@@ -52,6 +52,14 @@ func TestCatalogForExactDispatch(t *testing.T) {
 		{"codex", "/clear"},
 		{"qoder", "/clear"},
 		{"qodercli", "/clear"},
+		{"pi", "/model"},
+		{"pi-coding-agent", "/model"},
+		{"omp", "/model"},
+		{"oh my pi", "/model"},
+		{"kimi", "/model"},
+		{"kimi-code", "/model"},
+		{"opencode", "/models"},
+		{"open code", "/models"},
 	}
 	for _, tt := range tests {
 		catalog := CatalogFor(tt.agent, "/tmp", "/nonexistent")

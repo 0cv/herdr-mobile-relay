@@ -3,14 +3,16 @@ import {
   LEGACY_FONT_KEY,
   INTERFACE_SIZE_KEY,
   INTERFACE_SIZES,
-  STATUS_LINE_KEY,
   TERMINAL_HISTORY_KEY,
   TERMINAL_HISTORY_OPTIONS,
+  TERMINAL_LAYOUT_KEY,
+  TERMINAL_LAYOUTS,
   THEME_COLORS,
   THEME_KEY,
   THEMES,
   type InterfaceSize,
   type TerminalHistoryLines,
+  type TerminalLayout,
   type Theme,
 } from './config';
 
@@ -24,11 +26,6 @@ function savedInterfaceSize(): InterfaceSize {
   return INTERFACE_SIZES.includes(value as InterfaceSize) ? value as InterfaceSize : 'compact';
 }
 
-function savedStatusLine(): boolean {
-  const value = localStorage.getItem(STATUS_LINE_KEY);
-  if (value !== null) return value !== 'false';
-  return !window.matchMedia?.('(max-width: 767px)').matches;
-}
 
 function savedTerminalHistoryLines(): TerminalHistoryLines {
   const value = Number(localStorage.getItem(TERMINAL_HISTORY_KEY));
@@ -37,10 +34,15 @@ function savedTerminalHistoryLines(): TerminalHistoryLines {
     : 1_000;
 }
 
+function savedTerminalLayout(): TerminalLayout {
+  const value = localStorage.getItem(TERMINAL_LAYOUT_KEY);
+  return TERMINAL_LAYOUTS.includes(value as TerminalLayout) ? value as TerminalLayout : 'resize';
+}
+
 export const theme = writable<Theme>(savedTheme());
 export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
-export const showAgentStatusLine = writable(savedStatusLine());
 export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
+export const terminalLayout = writable<TerminalLayout>(savedTerminalLayout());
 
 export function setTheme(value: Theme): void {
   localStorage.setItem(THEME_KEY, value);
@@ -55,14 +57,15 @@ export function setInterfaceSize(value: InterfaceSize): void {
   document.documentElement.dataset.interfaceSize = value;
 }
 
-export function setShowAgentStatusLine(value: boolean): void {
-  localStorage.setItem(STATUS_LINE_KEY, value ? 'true' : 'false');
-  showAgentStatusLine.set(value);
-}
 
 export function setTerminalHistoryLines(value: TerminalHistoryLines): void {
   localStorage.setItem(TERMINAL_HISTORY_KEY, String(value));
   terminalHistoryLines.set(value);
+}
+
+export function setTerminalLayout(value: TerminalLayout): void {
+  localStorage.setItem(TERMINAL_LAYOUT_KEY, value);
+  terminalLayout.set(value);
 }
 
 export function initializePreferences(): void {

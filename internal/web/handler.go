@@ -81,7 +81,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if hasCompressed {
 		w.Header().Set("Vary", "Accept-Encoding")
 	}
-	contentType := mime.TypeByExtension(filepath.Ext(requestPath))
+	extension := filepath.Ext(requestPath)
+	contentType := mime.TypeByExtension(extension)
+	if extension == ".woff2" {
+		contentType = "font/woff2"
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -123,7 +127,7 @@ func canonicalAssetPath(raw string) (string, bool) {
 }
 
 func isAllowedAsset(asset string) bool {
-	return allowedAssets[asset] || strings.HasPrefix(asset, "icons/")
+	return allowedAssets[asset] || strings.HasPrefix(asset, "icons/") || strings.HasPrefix(asset, "fonts/")
 }
 
 func acceptsBrotli(header string) bool {

@@ -24,6 +24,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
+	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
@@ -62,6 +63,7 @@ type Server struct {
 	sessions         *session.Resolver
 	webH             *web.Handler
 	herdrC           *herdr.Client
+	paneSizeM        *panesize.Manager
 	dispatcher       *coordinator.Dispatcher
 	updateM          *relayupdate.Manager
 	appDeployM       *appdeploy.Manager
@@ -121,6 +123,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		transitionBroadcast: hub,
 		poller:              poller,
 		herdrC:              herdrClient,
+		paneSizeM:           panesize.NewManager(herdrClient, logger),
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,
@@ -218,6 +221,14 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	})
 
+	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.paneSizeM.ReleaseClient(releaseCtx, client.ID()); err != nil {
+			s.logger.Warn("client pane size leases were not fully restored", "client_id", client.ID(), "error", err)
+		}
+	})
+
 	s.hub.SetHandler(func(client *transport.ClientConn, msg map[string]any, admitted func()) {
 		defer admitted()
 		inbound, err := protocol.DecodeMap(msg)
@@ -265,11 +276,40 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
 			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
+		case "lease_pane_size":
+			columns, leaseErr := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns)
+			if leaseErr != nil {
+				s.sendCommandResult(client, inbound.RequestID, "lease_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
+				break
+			}
+			s.sendCommandResult(
+				client,
+				inbound.RequestID,
+				"lease_pane_size",
+				true,
+				"completed",
+				"",
+				inbound.PaneID,
+				map[string]any{"columns": columns},
+			)
+		case "release_pane_size":
+			leaseErr := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID)
+			if leaseErr != nil {
+				s.sendCommandResult(client, inbound.RequestID, "release_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
+				break
+			}
+			s.sendCommandResult(client, inbound.RequestID, "release_pane_size", true, "completed", "", inbound.PaneID, nil)
 		case "read_pane":
 			resp := s.dispatcher.HandleReadPane(ctx, msg)
 			paneID, _ := msg["pane_id"].(string)
 			agent, _ := s.agentInfo(paneID)
 			agentLower := strings.ToLower(agent)
+			historyLimit := messageInt(msg["lines"], 30)
+			if historyLimit < 1 {
+				historyLimit = 1
+			} else if historyLimit > history.MaxLines {
+				historyLimit = history.MaxLines
+			}
 			if content, ok := resp["content"].(string); ok {
 				classification := question.Classify(content, agent)
 				resp["attention_kind"] = classification.Kind
@@ -280,7 +320,7 @@ func (s *Server) Run(ctx context.Context) error {
 				resp["question_layout"] = classification.QuestionLayout
 				if classification.Interaction == nil &&
 					(strings.Contains(agentLower, "claude") || strings.Contains(agentLower, "qoder")) {
-					resp["content"] = s.historyM.Merge(paneID, content)
+					resp["content"] = s.historyM.MergeLimited(paneID, content, historyLimit)
 				}
 			}
 			s.hub.Send(client, resp)
@@ -553,6 +593,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 	startBackground(func() { s.poller.Run(ctx) })
+	startBackground(func() { s.paneSizeM.Run(ctx) })
 	startBackground(func() { s.captureHistoryLoop(ctx) })
 	profileSignals := make(chan os.Signal, 1)
 	signal.Notify(profileSignals, syscall.SIGHUP)
@@ -585,6 +626,11 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.dispatcher != nil {
 		s.dispatcher.CancelInflight()
 	}
+	paneSizeShutdownCtx, cancelPaneSizes := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := s.paneSizeM.Shutdown(paneSizeShutdownCtx); runErr == nil && err != nil {
+		runErr = fmt.Errorf("pane size lease shutdown: %w", err)
+	}
+	cancelPaneSizes()
 	httpShutdownCtx, cancelHTTP := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := srv.Shutdown(httpShutdownCtx); runErr == nil && err != nil {
 		runErr = fmt.Errorf("http shutdown: %w", err)
@@ -1354,7 +1400,7 @@ func isCoordinatorMutation(action string) bool {
 	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
 		"respond", "answer_question", "navigate_question", "clarify_question",
 		"agent_stop", "agent_rename", "acknowledge_pane", "agent_start",
-		"agent_clear", "agent_restart":
+		"agent_clear", "agent_restart", "lease_pane_size", "release_pane_size":
 		return true
 	default:
 		return false
