@@ -48,6 +48,12 @@ describe('release updates', () => {
     expect(newerBundle({ version: '0.7.0', assets: 99 }, { version: '0.8.0', assets: 0 })).toBe(false);
   });
 
+  it('does not let stale relay metadata downgrade the running app version', () => {
+    expect(get(appUpdateStatus).upstreamVersion).toBe(APP_VERSION);
+    observeAppUpstreamVersion('0.0.1');
+    expect(get(appUpdateStatus).upstreamVersion).toBe(APP_VERSION);
+  });
+
   it('normalizes relay update data without trusting arbitrary states', () => {
     expect(normalizeRelayUpdate({
       state: 'available',

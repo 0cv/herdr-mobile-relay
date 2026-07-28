@@ -26,6 +26,7 @@
     questionInteraction,
   } from '$lib/agents';
   import {
+    APP_VERSION,
     HANDLED_NOTIFICATION_ACTIONS_KEY,
     TERMINAL_LAYOUT_LABELS,
     TERMINAL_LAYOUTS,
@@ -73,6 +74,7 @@
   let previousView = '';
   let terminalUnavailable = $state(false);
   const handlingNotifications = new Set<string>();
+  const automaticUpdateChecks = new Set<string>();
 
   const activeAgent = $derived($currentView.view === 'terminal'
     ? $agents.find((agent) => agent.pane_id === $currentView.paneId) || null
@@ -219,6 +221,18 @@
         notificationFallbackKey = '';
         if (get(currentView).view === 'notification') replaceView({ view: 'terminal', paneId });
       }, 1500);
+    }
+  });
+
+  $effect(() => {
+    for (const [relayId, connection] of $connections) {
+      if (connection.status !== 'connected' || !connection.capabilities.includes('self_update')) continue;
+      const identity = `${relayId}:${connection.releaseVersion}:${connection.revision}:${APP_VERSION}`;
+      if (automaticUpdateChecks.has(identity)) continue;
+      automaticUpdateChecks.add(identity);
+      void relayStore.checkRelayUpdate(relayId).catch(() => {
+        automaticUpdateChecks.delete(identity);
+      });
     }
   });
 

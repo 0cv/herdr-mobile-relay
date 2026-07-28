@@ -423,6 +423,69 @@ test('shows inventory failure instead of zero agents and recovers without reconn
   expect(await socketCount(page)).toBe(1);
 });
 
+test('checks every self-updating relay automatically after connection', async ({ page }) => {
+  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: 'secret' };
+  await boot(page, [fedora, mac]);
+  await setAutoCommands(page, false);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  const staleUpdate = {
+    state: 'current',
+    current_version: '0.0.1',
+    current_revision: 'abc1234',
+    upstream_version: '0.0.1',
+    checked_at: 123,
+    can_install: false,
+    mode: 'local',
+  };
+  await handshake(page, 0, {
+    release_version: '0.0.1',
+    revision: 'abc1234',
+    capabilities: ['directory_browser', 'self_update'],
+    update: staleUpdate,
+  });
+  await handshake(page, 1, {
+    release_version: '0.0.1',
+    revision: 'abc1234',
+    capabilities: ['directory_browser', 'self_update'],
+    update: staleUpdate,
+  });
+
+  await expect.poll(async () => (await commands(page)).filter(
+    (command) => command.type === 'check_update',
+  ).length).toBe(2);
+  for (const index of [0, 1]) {
+    const check = (await commandsForSocket(page, index)).find(
+      (command) => command.type === 'check_update',
+    )!;
+    await server(page, index, {
+      type: 'command_result',
+      request_id: check.request_id,
+      ok: true,
+      phase: 'confirmed',
+      data: {
+        update: {
+          state: 'available',
+          current_version: '0.0.1',
+          current_revision: 'abc1234',
+          available_version: APP_RELEASE,
+          available_revision: 'f'.repeat(12),
+          target_revision: 'f'.repeat(40),
+          upstream_version: APP_RELEASE,
+          checked_at: 124,
+          can_install: true,
+          mode: 'local',
+        },
+      },
+    });
+  }
+
+  await page.getByRole('button', { name: 'Settings, update available' }).click();
+  await expect(page.getByText(`This app matches upstream version ${APP_RELEASE}.`)).toBeVisible();
+  await expect(page.getByText(`Update v${APP_RELEASE} available`)).toHaveCount(2);
+  await expect(page.getByRole('button', { name: `Update Fedora to version ${APP_RELEASE}` })).toBeEnabled();
+  await expect(page.getByRole('button', { name: `Update Mac to version ${APP_RELEASE}` })).toBeEnabled();
+});
+
 test('confirms and tracks one relay update through its verified reconnect', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);

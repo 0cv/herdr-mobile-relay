@@ -26,14 +26,14 @@ export const appUpdateStatus = writable<AppUpdateStatus>({
   currentAssets: APP_ASSET_VERSION,
   deployedVersion: '',
   deployedAssets: 0,
-  upstreamVersion: '',
+  upstreamVersion: APP_VERSION,
   upstreamAssets: 0,
   checkedAt: 0,
   error: '',
 });
 
 let checking: Promise<AppUpdateStatus> | null = null;
-let relayUpstreamVersion = '';
+let relayUpstreamVersion = APP_VERSION;
 
 export function semverTuple(value: string): [number, number, number] | null {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
