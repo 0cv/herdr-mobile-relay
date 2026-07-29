@@ -251,6 +251,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .choice-grid button.active { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
 .compact-grid { grid-template-columns: repeat(3, 1fr); }
 .history-grid { grid-template-columns: repeat(4, 1fr); }
+.refresh-grid button { text-transform: none; }
 .switch-row { align-items: center; display: flex; font-size: .82rem; justify-content: space-between; margin-top: .7rem; }
 .switch-root { appearance: none; background: var(--secondary); border: 1px solid var(--border); border-radius: 999px; cursor: pointer; flex: 0 0 auto; height: 1.55rem; min-height: 1.55rem; padding: .14rem; position: relative; transition: background .15s; width: 2.75rem; }
 .switch-root::before { background: #fff; border-radius: 50%; content: ''; display: block; height: 1.15rem; transform: translateX(0); transition: transform .15s; width: 1.15rem; }

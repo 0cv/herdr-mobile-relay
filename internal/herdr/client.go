@@ -84,10 +84,16 @@ type Client struct {
 	bin        string
 	socketPath string
 	sem        chan struct{}
+	api        *socketAPIClient
 }
 
 func NewClient(bin, socketPath string) *Client {
-	return &Client{bin: bin, socketPath: socketPath, sem: make(chan struct{}, 8)}
+	return &Client{
+		bin:        bin,
+		socketPath: socketPath,
+		sem:        make(chan struct{}, 8),
+		api:        newSocketAPIClient(socketPath),
+	}
 }
 
 type Pane struct {
@@ -342,12 +348,33 @@ func (c *Client) readPane(ctx context.Context, paneID string, lines int, format,
 	if format != "ansi" {
 		format = "text"
 	}
+	if content, err := c.api.readPane(ctx, paneID, lines, format, source); err == nil {
+		return content, nil
+	}
 	return c.runCommand(ctx,
 		"pane", "read", paneID,
 		"--lines", strconv.Itoa(lines),
 		"--source", source,
 		"--format", format,
 	)
+}
+
+func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int, format string) ([]byte, error) {
+	if lines < 1 {
+		lines = 1
+	}
+	if format != "ansi" {
+		format = "text"
+	}
+	return c.api.readPane(ctx, paneID, lines, format, "visible")
+}
+
+func (c *Client) SupportsRealtimePane(ctx context.Context) bool {
+	return c.api.available(ctx)
+}
+
+func (c *Client) Close() error {
+	return c.api.close()
 }
 
 func (c *Client) SendKeys(ctx context.Context, paneID string, keys []string) error {

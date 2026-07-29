@@ -100,6 +100,10 @@ Terminal History requests 100, 1,000, 5,000, or 10,000 lines per pane; 1,000 is
 the default. The relay enforces the selected limit after any Claude or Qoder
 history merge. Larger histories increase network transfer and rendering work.
 
+Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
+250 ms, 500 ms, or 1 second. The 250 ms default balances responsiveness with
+computer and phone CPU use while output is changing.
+
 Returning to an unchanged Resize Session paints its cached rendered frame
 immediately, then reacquires the lease and reconciles current content in the
 background. Long tokens wrap in responsive output, while fixed-grid table rows

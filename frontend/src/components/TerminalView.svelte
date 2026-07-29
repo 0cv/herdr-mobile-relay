@@ -81,7 +81,6 @@
   let transcriptElement = $state<HTMLTextAreaElement>(null!);
   let composer = $state('');
   let composerFocused = $state(false);
-  let deferredFrame: TerminalFrame | undefined;
   let resizeFrameBaseline: TerminalFrame | undefined;
   let showingCachedResizeFrame = false;
   let displayed = $state('');
@@ -121,6 +120,7 @@
   let dismissedSlashQuery = $state<string | null>(null);
   const CELL_MEASURE_TEXT = '0000000000';
   const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
+  const PANE_REALTIME_RESYNC_MS = 15_000;
   const PANE_SIZE_SETTLE_MS = 250;
   const PANE_SIZE_SETTLE_TIMEOUT_MS = 1_500;
   const PANE_SIZE_SETTLE_MIN_HISTORY = 100;
@@ -188,9 +188,7 @@
       renderedResizeColumns = cachedResizeFrame.columns;
       showingCachedResizeFrame = true;
       const cachedLayoutChanged = !lastPreserveLayout || lastPreserveLineEnds;
-      if (untrack(() => composerFocused) && !cachedLayoutChanged) {
-        deferredFrame = cachedResizeFrame.frame;
-      } else if (cachedLayoutChanged || !lastContent) {
+      if (cachedLayoutChanged || !lastContent) {
         untrack(() => { void applyCachedResizeFrame(cachedResizeFrame); });
       }
       return;
@@ -228,7 +226,6 @@
         resetVirtualRows(Number.POSITIVE_INFINITY);
         lastFormat = '';
         lastContent = '';
-        deferredFrame = undefined;
         jumpVisible = false;
       });
       return;
@@ -238,10 +235,7 @@
     resizeFrameBaseline = undefined;
     resizeExpectedLines = 0;
     resizeSettleDeadline = 0;
-    const layoutChanged = preserve !== lastPreserveLayout
-      || preserveLineEnds !== lastPreserveLineEnds;
-    if (untrack(() => composerFocused) && !layoutChanged) deferredFrame = next;
-    else untrack(() => { void applyFrame(next, preserve, preserveLineEnds); });
+    untrack(() => { void applyFrame(next, preserve, preserveLineEnds); });
   });
 
   $effect(() => {
@@ -359,9 +353,31 @@
       if (mounted) slashCatalogLoading = false;
     });
     const measurePane = () => requestPaneSizeLease(false);
+    const visible = () => document.visibilityState === 'visible';
+    const realtimeDeltaEnabled = () => Boolean(
+      $connections.get(agent.relay_id)?.capabilities.includes('pane_realtime_delta'),
+    );
+    let lastRefreshAt = Date.now();
+    const visibilityChanged = () => {
+      if (!visible()) {
+        relayStore.unwatchPane(agent);
+        return;
+      }
+      lastRefreshAt = Date.now();
+      relayStore.readPane(agent, true);
+      relayStore.watchPane(agent);
+    };
     window.addEventListener('resize', measurePane);
     window.visualViewport?.addEventListener('resize', measurePane);
-    const refresh = setInterval(() => relayStore.readPane(agent), 3_000);
+    document.addEventListener('visibilitychange', visibilityChanged);
+    const refresh = setInterval(() => {
+      if (!visible()) return;
+      const refreshInterval = realtimeDeltaEnabled() ? PANE_REALTIME_RESYNC_MS : 3_000;
+      if (Date.now() - lastRefreshAt < refreshInterval) return;
+      lastRefreshAt = Date.now();
+      relayStore.readPane(agent);
+    }, 3_000);
+    if (visible()) relayStore.watchPane(agent);
     const refreshPaneSizeLease = setInterval(
       () => requestPaneSizeLease(true),
       PANE_SIZE_LEASE_REFRESH_MS,
@@ -372,8 +388,10 @@
       componentMounted = false;
       window.removeEventListener('resize', measurePane);
       window.visualViewport?.removeEventListener('resize', measurePane);
+      document.removeEventListener('visibilitychange', visibilityChanged);
       clearInterval(refresh);
       clearInterval(refreshPaneSizeLease);
+      relayStore.unwatchPane(agent);
       releasePaneSizeLease(false);
       virtualRowObserver?.disconnect();
       if (virtualWindowFrame) cancelAnimationFrame(virtualWindowFrame);
@@ -678,9 +696,6 @@
       if (active instanceof HTMLTextAreaElement
         || (active instanceof HTMLInputElement && active.classList.contains('question-other-input'))) return;
       composerFocused = false;
-      const pending = deferredFrame;
-      deferredFrame = undefined;
-      if (pending) void applyFrame(pending);
     });
   }
 

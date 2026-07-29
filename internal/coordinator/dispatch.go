@@ -945,6 +945,30 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	return map[string]any{"type": "pane_content", "pane_id": paneID, "content": string(content), "format": format, "interaction": nil, "question_layout": false}
 }
 
+func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {
+	paneID := stringValue(message, "pane_id")
+	format := stringValue(message, "format")
+	if format != "ansi" {
+		format = "text"
+	}
+	if paneID == "" {
+		return map[string]any{"type": "pane_probe", "pane_id": "", "format": format, "error": "Unable to read the agent pane"}
+	}
+	const lines = 500
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	generation := d.state.Generation(paneID)
+	contentRevision := d.state.ContentRevision(paneID)
+	content, err := d.herdr.ProbePaneVisible(readCtx, paneID, lines, format)
+	if err != nil {
+		return map[string]any{"type": "pane_probe", "pane_id": paneID, "format": format, "error": "Unable to read the agent pane"}
+	}
+	if d.state.Generation(paneID) != generation || d.state.ContentRevision(paneID) != contentRevision {
+		return map[string]any{"type": "pane_probe", "pane_id": paneID, "format": format, "error": "The agent pane changed while it was being read"}
+	}
+	return map[string]any{"type": "pane_probe", "pane_id": paneID, "content": string(content), "format": format}
+}
+
 func (d *Dispatcher) HandleGetActivity(message map[string]any) map[string]any {
 	limit := intValue(message["limit"], 500)
 	if limit < 1 || limit > 500 {

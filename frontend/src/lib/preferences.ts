@@ -5,6 +5,8 @@ import {
   INTERFACE_SIZES,
   TERMINAL_HISTORY_KEY,
   TERMINAL_HISTORY_OPTIONS,
+  TERMINAL_REFRESH_KEY,
+  TERMINAL_REFRESH_OPTIONS,
   TERMINAL_LAYOUT_KEY,
   TERMINAL_LAYOUTS,
   THEME_COLORS,
@@ -12,6 +14,7 @@ import {
   THEMES,
   type InterfaceSize,
   type TerminalHistoryLines,
+  type TerminalRefreshInterval,
   type TerminalLayout,
   type Theme,
 } from './config';
@@ -34,6 +37,13 @@ function savedTerminalHistoryLines(): TerminalHistoryLines {
     : 1_000;
 }
 
+function savedTerminalRefreshInterval(): TerminalRefreshInterval {
+  const value = Number(localStorage.getItem(TERMINAL_REFRESH_KEY));
+  return TERMINAL_REFRESH_OPTIONS.includes(value as TerminalRefreshInterval)
+    ? value as TerminalRefreshInterval
+    : 250;
+}
+
 function savedTerminalLayout(): TerminalLayout {
   const value = localStorage.getItem(TERMINAL_LAYOUT_KEY);
   return TERMINAL_LAYOUTS.includes(value as TerminalLayout) ? value as TerminalLayout : 'resize';
@@ -42,6 +52,7 @@ function savedTerminalLayout(): TerminalLayout {
 export const theme = writable<Theme>(savedTheme());
 export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
 export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
+export const terminalRefreshInterval = writable<TerminalRefreshInterval>(savedTerminalRefreshInterval());
 export const terminalLayout = writable<TerminalLayout>(savedTerminalLayout());
 
 export function setTheme(value: Theme): void {
@@ -61,6 +72,11 @@ export function setInterfaceSize(value: InterfaceSize): void {
 export function setTerminalHistoryLines(value: TerminalHistoryLines): void {
   localStorage.setItem(TERMINAL_HISTORY_KEY, String(value));
   terminalHistoryLines.set(value);
+}
+
+export function setTerminalRefreshInterval(value: TerminalRefreshInterval): void {
+  localStorage.setItem(TERMINAL_REFRESH_KEY, String(value));
+  terminalRefreshInterval.set(value);
 }
 
 export function setTerminalLayout(value: TerminalLayout): void {

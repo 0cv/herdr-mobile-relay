@@ -119,7 +119,11 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify:   true,
+		CompressionMode:      websocket.CompressionNoContextTakeover,
+		CompressionThreshold: 512,
+	})
 	if err != nil {
 		h.logger.Warn("websocket accept failed", "error", err)
 		return

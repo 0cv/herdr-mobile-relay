@@ -124,6 +124,40 @@ func TestDisplayedStatusUnseenDone(t *testing.T) {
 	}
 }
 
+func TestAcknowledgeExplicitDonePersistsAcrossSnapshots(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, s.RevisionCounter())
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "done"}}, s.RevisionCounter())
+
+	if !s.AcknowledgePane("p1") {
+		t.Fatal("explicit done pane was not acknowledged")
+	}
+	if got := s.DisplayedStatus("p1"); got != "idle" {
+		t.Fatalf("displayed after explicit done acknowledgement = %q, want idle", got)
+	}
+	if snapshot := s.Snapshot(); len(snapshot) != 1 || snapshot[0].Status != "idle" {
+		t.Fatalf("snapshot after explicit done acknowledgement = %#v, want one idle pane", snapshot)
+	}
+
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "done"}}, s.RevisionCounter())
+	if got := s.DisplayedStatus("p1"); got != "idle" {
+		t.Fatalf("repeated explicit done snapshot restored %q, want idle", got)
+	}
+
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, s.RevisionCounter())
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "done"}}, s.RevisionCounter())
+	if got := s.DisplayedStatus("p1"); got != "done" {
+		t.Fatalf("new completion after resumed work displayed %q, want done", got)
+	}
+
+	initialDone := testState()
+	initialDone.CommitInventory([]*AgentState{{PaneID: "p2", Agent: "codex", Status: "done"}}, initialDone.RevisionCounter())
+	initialDone.AcknowledgePane("p2")
+	if got := initialDone.DisplayedStatus("p2"); got != "idle" {
+		t.Fatalf("acknowledged initial explicit done displayed %q, want idle", got)
+	}
+}
+
 func TestAttentionClearsUnseen(t *testing.T) {
 	s := testState()
 

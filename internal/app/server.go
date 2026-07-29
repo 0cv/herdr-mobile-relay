@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -83,6 +84,9 @@ type Server struct {
 	refreshMu      sync.Mutex
 	refreshClients map[string]bool
 
+	paneWatchMu sync.Mutex
+	paneWatches map[string]*paneWatch
+
 	historyCaptureMu  sync.Mutex
 	historyInflight   map[string]bool
 	historyLast       map[string]time.Time
@@ -131,6 +135,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		startedAt:           time.Now(),
 		refreshClients:      make(map[string]bool),
+		paneWatches:         make(map[string]*paneWatch),
 		inventoryView:       cloneStringMap(state.InventoryStatus()),
 		historyInflight:     make(map[string]bool),
 		historyLast:         make(map[string]time.Time),
@@ -184,6 +189,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		inventory := s.committedInventoryStatus()
 		capabilities := append([]string(nil), protocol.Capabilities...)
+		if s.herdrC.SupportsRealtimePane(client.Context()) {
+			capabilities = append(capabilities, "pane_realtime_delta")
+		}
 		if s.appDeployM.State().Configured {
 			capabilities = append(capabilities, "app_deploy")
 		}
@@ -222,6 +230,7 @@ func (s *Server) Run(ctx context.Context) error {
 	})
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
+		s.stopPaneWatch(client.ID(), "")
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.paneSizeM.ReleaseClient(releaseCtx, client.ID()); err != nil {
@@ -300,30 +309,19 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			s.sendCommandResult(client, inbound.RequestID, "release_pane_size", true, "completed", "", inbound.PaneID, nil)
 		case "read_pane":
-			resp := s.dispatcher.HandleReadPane(ctx, msg)
-			paneID, _ := msg["pane_id"].(string)
-			agent, _ := s.agentInfo(paneID)
-			agentLower := strings.ToLower(agent)
-			historyLimit := messageInt(msg["lines"], 30)
-			if historyLimit < 1 {
-				historyLimit = 1
-			} else if historyLimit > history.MaxLines {
-				historyLimit = history.MaxLines
-			}
-			if content, ok := resp["content"].(string); ok {
-				classification := question.Classify(content, agent)
-				resp["attention_kind"] = classification.Kind
-				resp["prompt"] = classification.Prompt
-				resp["command"] = classification.Command
-				resp["options"] = classification.Options
-				resp["interaction"] = classification.Interaction
-				resp["question_layout"] = classification.QuestionLayout
-				if classification.Interaction == nil &&
-					(strings.Contains(agentLower, "claude") || strings.Contains(agentLower, "qoder")) {
-					resp["content"] = s.historyM.MergeLimited(paneID, content, historyLimit)
-				}
+			s.stopPaneWatch(client.ID(), inbound.PaneID)
+			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
+			if unchanged := unchangedPaneResponse(msg, resp); unchanged != nil {
+				s.hub.Send(client, unchanged)
+				break
 			}
 			s.hub.Send(client, resp)
+		case "watch_pane":
+			s.startPaneWatch(client, msg)
+		case "unwatch_pane":
+			s.stopPaneWatch(client.ID(), inbound.PaneID)
+		case "pane_applied":
+			s.handlePaneApplied(client, msg)
 		case "get_activity":
 			limit := messageInt(msg["limit"], 500)
 			if limit < 1 || limit > 500 {
@@ -652,6 +650,9 @@ func (s *Server) Run(ctx context.Context) error {
 			runErr = err
 		}
 		cancelDispatcher()
+	}
+	if err := s.herdrC.Close(); runErr == nil && err != nil {
+		runErr = fmt.Errorf("Herdr socket client shutdown: %w", err)
 	}
 	if s.webH != nil {
 		_ = s.webH.Close()
@@ -1313,6 +1314,67 @@ func (s *Server) publicJobState(filename, defaultState string) map[string]any {
 		}
 	}
 	return result
+}
+
+func (s *Server) preparePaneResponse(message, response map[string]any) map[string]any {
+	content, ok := successfulPaneContent(response)
+	if !ok {
+		return response
+	}
+	paneID, _ := message["pane_id"].(string)
+	agent, _ := s.agentInfo(paneID)
+	classification := question.Classify(content, agent)
+	response["attention_kind"] = classification.Kind
+	response["prompt"] = classification.Prompt
+	response["command"] = classification.Command
+	response["options"] = classification.Options
+	response["interaction"] = classification.Interaction
+	response["question_layout"] = classification.QuestionLayout
+	agentLower := strings.ToLower(agent)
+	if classification.Interaction != nil ||
+		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
+		return response
+	}
+	historyLimit := messageInt(message["lines"], 30)
+	if historyLimit < 1 {
+		historyLimit = 1
+	} else if historyLimit > history.MaxLines {
+		historyLimit = history.MaxLines
+	}
+	response["content"] = s.historyM.MergeLimited(paneID, content, historyLimit)
+	return response
+}
+
+func successfulPaneContent(response map[string]any) (string, bool) {
+	if _, failed := response["error"]; failed {
+		return "", false
+	}
+	content, ok := response["content"].(string)
+	return content, ok
+}
+
+func paneFingerprint(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func unchangedPaneResponse(message, response map[string]any) map[string]any {
+	content, ok := successfulPaneContent(response)
+	if !ok {
+		return nil
+	}
+	fingerprint := paneFingerprint(content)
+	response["content_fingerprint"] = fingerprint
+	known, _ := message["content_fingerprint"].(string)
+	if known == "" || known != fingerprint {
+		return nil
+	}
+	paneID, _ := response["pane_id"].(string)
+	return map[string]any{
+		"type":                "pane_unchanged",
+		"pane_id":             paneID,
+		"content_fingerprint": fingerprint,
+	}
 }
 
 func (s *Server) sendCommandResult(

@@ -5,6 +5,23 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Move active terminal watching to the relay, offer 100 ms, 250 ms, 500 ms, and
+  1-second refresh intervals with 250 ms as the default, and send
+  fingerprint-acknowledged deltas without repeated full snapshots or terminal
+  polling from the phone.
+- Negotiate no-context WebSocket compression for messages over 512 bytes,
+  reducing full terminal frames and other large relay updates.
+- Keep complete terminal-history reads on the persistent Herdr socket instead of
+  falling back to a new CLI process for every visible change.
+
+### Fixed
+
+- Keep the live terminal feed refreshing while the prompt input is focused.
+- Keep acknowledged completions in the Idle section even while Herdr continues
+  reporting an explicit completion status.
+
 ## [0.11.2] - 2026-07-28
 
 ### Fixed

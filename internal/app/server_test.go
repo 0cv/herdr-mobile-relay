@@ -166,6 +166,30 @@ func TestRecentSafeErrorsAreBoundedAndSingleLine(t *testing.T) {
 	}
 }
 
+func TestRequestedPaneWatchInterval(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  time.Duration
+	}{
+		{name: "fast", value: float64(100), want: 100 * time.Millisecond},
+		{name: "default", value: float64(250), want: 250 * time.Millisecond},
+		{name: "balanced battery", value: float64(500), want: 500 * time.Millisecond},
+		{name: "slow", value: float64(1_000), want: time.Second},
+		{name: "missing", value: nil, want: defaultPaneWatchInterval},
+		{name: "unsupported", value: float64(333), want: defaultPaneWatchInterval},
+		{name: "fractional", value: 100.5, want: defaultPaneWatchInterval},
+		{name: "wrong type", value: "100", want: defaultPaneWatchInterval},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := requestedPaneWatchInterval(test.value); got != test.want {
+				t.Fatalf("requestedPaneWatchInterval(%v) = %s, want %s", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestCommittedActivityViewTracksLiveCommitAndClear(t *testing.T) {
 	s := testServer()
 	t.Cleanup(func() {
@@ -622,5 +646,39 @@ func TestFirstInventoryReconcilesHistoryFromEarlierProcess(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Fatalf("stale history from earlier process remains: %v", files)
+	}
+}
+
+func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
+	response := map[string]any{
+		"type":    "pane_content",
+		"pane_id": "w1:p1",
+		"content": "unchanged output",
+		"format":  "ansi",
+	}
+	fingerprint := paneFingerprint("unchanged output")
+	unchanged := unchangedPaneResponse(
+		map[string]any{"content_fingerprint": fingerprint},
+		response,
+	)
+	if unchanged == nil {
+		t.Fatal("matching terminal content was not suppressed")
+	}
+	if unchanged["type"] != "pane_unchanged" || unchanged["pane_id"] != "w1:p1" {
+		t.Fatalf("unexpected unchanged response: %#v", unchanged)
+	}
+	if _, included := unchanged["content"]; included {
+		t.Fatalf("unchanged response included terminal content: %#v", unchanged)
+	}
+	if response["content_fingerprint"] != fingerprint {
+		t.Fatalf("full response fingerprint = %v, want %s", response["content_fingerprint"], fingerprint)
+	}
+
+	changed := unchangedPaneResponse(
+		map[string]any{"content_fingerprint": "older"},
+		response,
+	)
+	if changed != nil {
+		t.Fatalf("changed terminal content was suppressed: %#v", changed)
 	}
 }

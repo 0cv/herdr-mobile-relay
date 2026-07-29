@@ -71,7 +71,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         const message = JSON.parse(serialized) as Record<string, unknown>;
         commands.push(message);
         socketCommands[this.index].push(message);
-        if (message.type === 'read_pane' || message.type === 'get_activity' || message.type === 'list_directories' || message.type === 'refresh_agents') return;
+        if (['read_pane', 'watch_pane', 'unwatch_pane', 'pane_applied', 'get_activity', 'list_directories', 'refresh_agents'].includes(String(message.type))) return;
         if (!autoCommands) return;
         if (message.type === 'upload_image') {
           queueMicrotask(() => this.server({
@@ -620,6 +620,70 @@ test('confirms deployment when an authorized relay has the upstream app bundle',
     expected_revision: 'f'.repeat(40),
     expected_origin: 'http://127.0.0.1:4173',
   });
+});
+
+test('applies relay-watched terminal deltas and pauses the watcher when hidden', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_realtime_delta', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Realtime app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Realtime app on Fedora' }).click();
+  await expect.poll(async () =>
+    (await commands(page)).some((command) => command.type === 'read_pane')).toBe(true);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: 'initial terminal output\nstable row\nthird row\n',
+    content_fingerprint: 'content-1',
+  });
+  await expect(page.getByRole('log')).toContainText('initial terminal output');
+
+  await expect.poll(async () =>
+    (await commands(page)).findLast((command) => command.type === 'watch_pane')).toMatchObject({
+    type: 'watch_pane',
+    pane_id: 'w1:p1',
+    content_fingerprint: 'content-1',
+  });
+  await server(page, 0, {
+    type: 'pane_delta',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    base_fingerprint: 'content-1',
+    content_fingerprint: 'content-2',
+    segments: [
+      { copy_lines: 3 },
+      { text: 'fresh terminal output\n' },
+    ],
+  });
+  await expect(page.getByRole('log')).toContainText('fresh terminal output');
+  await expect.poll(async () =>
+    (await commands(page)).findLast((command) => command.type === 'pane_applied')).toMatchObject({
+    type: 'pane_applied',
+    pane_id: 'w1:p1',
+    content_fingerprint: 'content-2',
+  });
+
+  const activeCommandCount = (await commands(page)).length;
+  await page.waitForTimeout(750);
+  expect(await commands(page)).toHaveLength(activeCommandCount);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(async () =>
+    (await commands(page)).findLast((command) => command.type === 'unwatch_pane')).toMatchObject({
+    type: 'unwatch_pane',
+    pane_id: 'w1:p1',
+  });
+  const hiddenCommandCount = (await commands(page)).length;
+  await page.waitForTimeout(750);
+  expect(await commands(page)).toHaveLength(hiddenCommandCount);
 });
 
 test('resets drafts and terminal output when moving to another agent', async ({ page }) => {
@@ -1656,8 +1720,11 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await page.getByRole('button', { name: 'Settings' }).click();
   const sizes = page.getByRole('group', { name: 'Interface Size' });
   const history = page.getByRole('group', { name: 'Terminal History' });
+  const refresh = page.getByRole('group', { name: 'Terminal Refresh' });
   const layouts = page.getByRole('group', { name: 'Terminal Width' });
   const heading = page.getByRole('heading', { name: 'Settings', level: 2 });
+  expect(await refresh.getByRole('button', { name: '250 ms' })
+    .evaluate((element) => getComputedStyle(element).textTransform)).toBe('none');
 
   await sizes.getByRole('button', { name: 'Compact' }).click();
   const compactHeadingSize = await heading.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
@@ -1682,7 +1749,11 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
 
   await history.getByRole('button', { name: '10000' }).click();
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_history_lines'))).toBe('10000');
-  await handshake(page, 0);
+  await refresh.getByRole('button', { name: '100 ms' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_refresh_ms'))).toBe('100');
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_realtime_delta', 'slash_commands'],
+  });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'History app', agent: 'codex' }],
@@ -1691,6 +1762,15 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await page.getByRole('button', { name: 'Open History app on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
     .some((command) => command.type === 'read_pane' && command.lines === 10000)).toBe(true);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    content: 'History output',
+    format: 'ansi',
+    content_fingerprint: 'history-content',
+  });
+  await expect.poll(async () => (await commands(page)).findLast((command) => command.type === 'watch_pane'))
+    .toMatchObject({ pane_id: 'w1:p1', interval_ms: 100 });
 });
 
 test('scales and expands the prompt composer for multiline text', async ({ page }) => {
@@ -2186,9 +2266,10 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await composer.focus();
   await composer.fill('draft prompt');
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'newest live frame' });
-  await expect(page.getByRole('log')).not.toContainText('newest live frame');
-  await composer.evaluate((element) => (element as HTMLTextAreaElement).blur());
   await expect(page.getByRole('log')).toContainText('newest live frame');
+  await expect(composer).toBeFocused();
+  await expect(composer).toHaveValue('draft prompt');
+  await composer.evaluate((element) => (element as HTMLTextAreaElement).blur());
 
   const longFrame = Array.from({ length: 120 }, (_, index) => `terminal line ${index}`).join('\n');
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: longFrame });

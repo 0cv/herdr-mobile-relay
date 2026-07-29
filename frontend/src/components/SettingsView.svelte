@@ -8,11 +8,14 @@
     APP_VERSION,
     INTERFACE_SIZES,
     TERMINAL_HISTORY_OPTIONS,
+    TERMINAL_REFRESH_LABELS,
+    TERMINAL_REFRESH_OPTIONS,
     TERMINAL_LAYOUTS,
     TERMINAL_LAYOUT_LABELS,
     THEMES,
     type InterfaceSize,
     type TerminalHistoryLines,
+    type TerminalRefreshInterval,
     type TerminalLayout,
     type Theme,
   } from '$lib/config';
@@ -21,9 +24,11 @@
     setInterfaceSize,
     setTerminalLayout,
     setTerminalHistoryLines,
+    setTerminalRefreshInterval,
     setTheme,
     terminalLayout,
     terminalHistoryLines,
+    terminalRefreshInterval,
     theme,
   } from '$lib/preferences';
   import { relayVersionMeta } from '$lib/protocol';
@@ -435,6 +440,18 @@
       {/each}
     </fieldset>
     <p class="hint">Lines requested per terminal. 5,000–10,000 lines can use substantially more network data and rendering work.</p>
+    <fieldset class="choice-grid history-grid refresh-grid">
+      <legend>Terminal Refresh</legend>
+      {#each TERMINAL_REFRESH_OPTIONS as item (item)}
+        <button
+          class:active={$terminalRefreshInterval === item}
+          type="button"
+          aria-pressed={$terminalRefreshInterval === item}
+          onclick={() => setTerminalRefreshInterval(item as TerminalRefreshInterval)}
+        >{TERMINAL_REFRESH_LABELS[item]}</button>
+      {/each}
+    </fieldset>
+    <p class="hint">How often the relay checks the visible pane. 250 ms is balanced; faster refresh uses more computer and phone CPU during active output.</p>
     <fieldset class="choice-grid compact-grid">
       <legend>Terminal Width</legend>
       {#each TERMINAL_LAYOUTS as item (item)}

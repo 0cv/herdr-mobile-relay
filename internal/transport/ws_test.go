@@ -62,3 +62,39 @@ func TestOversizedHandshakeEvictsWithoutRegistrationDeadlock(t *testing.T) {
 		t.Fatalf("connected clients = %d, want 0", got)
 	}
 }
+
+func TestHubNegotiatesNoContextTakeoverCompression(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local sockets unavailable: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(hub.HandleWebSocket))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+
+	conn, response, err := websocket.Dial(
+		context.Background(),
+		"ws"+strings.TrimPrefix(server.URL, "http"),
+		&websocket.DialOptions{CompressionMode: websocket.CompressionNoContextTakeover},
+	)
+	if err != nil {
+		t.Fatalf("dial compressed websocket: %v", err)
+	}
+	extension := response.Header.Get("Sec-WebSocket-Extensions")
+	if !strings.Contains(extension, "permessage-deflate") ||
+		!strings.Contains(extension, "client_no_context_takeover") ||
+		!strings.Contains(extension, "server_no_context_takeover") {
+		t.Fatalf("negotiated extensions = %q, want no-context permessage-deflate", extension)
+	}
+	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatalf("close compressed websocket: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := hub.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown compressed hub: %v", err)
+	}
+}

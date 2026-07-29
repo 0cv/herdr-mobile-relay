@@ -1,6 +1,6 @@
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { setTerminalHistoryLines } from '$lib/preferences';
+import { setTerminalHistoryLines, setTerminalRefreshInterval } from '$lib/preferences';
 import { relayStore } from '$lib/store';
 import { pendingRelayUpdate } from '$lib/updates';
 
@@ -29,6 +29,7 @@ describe('relay command store', () => {
     sessionStorage.clear();
     vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
+    setTerminalRefreshInterval(250);
     relayStore.relayConfigs.set([]);
     relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: 'secret' });
   });
@@ -431,6 +432,7 @@ describe('relay command store', () => {
       pane_id: 'w1:p1',
       lines: 1_000,
       format: 'ansi',
+      content_fingerprint: '',
     });
 
     setTerminalHistoryLines(5_000);
@@ -440,8 +442,95 @@ describe('relay command store', () => {
       pane_id: 'w1:p1',
       lines: 5_000,
       format: 'ansi',
+      content_fingerprint: '',
     });
     setTerminalHistoryLines(1_000);
+  });
+
+  it('applies acknowledged terminal deltas and resynchronizes mismatched bases', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      capabilities: ['pane_realtime_delta'],
+      inventory: { state: 'ready' },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId,
+      relay_label: 'Fedora',
+      raw_pane_id: 'w1:p1',
+      pane_id: `${relayId}::w1:p1`,
+    };
+    relayStore.watchPane(agent);
+    socket.message({
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      content: 'one\ntwo\nthree\nfour\n',
+      format: 'ansi',
+      content_fingerprint: 'content-1',
+    });
+
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
+      type: 'watch_pane',
+      pane_id: 'w1:p1',
+      lines: 1_000,
+      interval_ms: 250,
+      format: 'ansi',
+      content_fingerprint: 'content-1',
+    });
+    setTerminalRefreshInterval(100);
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({
+      type: 'watch_pane',
+      pane_id: 'w1:p1',
+      interval_ms: 100,
+      content_fingerprint: 'content-1',
+    });
+    setTerminalRefreshInterval(250);
+    socket.message({
+      type: 'pane_delta',
+      pane_id: 'w1:p1',
+      format: 'ansi',
+      base_fingerprint: 'content-1',
+      content_fingerprint: 'content-2',
+      segments: [
+        { copy_lines: 4 },
+        { text: 'five\n' },
+      ],
+    });
+    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)?.content)
+      .toBe('one\ntwo\nthree\nfour\nfive\n');
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
+      type: 'pane_applied',
+      pane_id: 'w1:p1',
+      content_fingerprint: 'content-2',
+    });
+
+    socket.message({
+      type: 'pane_delta',
+      pane_id: 'w1:p1',
+      base_fingerprint: 'missing-base',
+      content_fingerprint: 'content-3',
+      segments: [{ text: 'invalid' }],
+    });
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({
+      type: 'read_pane',
+      pane_id: 'w1:p1',
+      content_fingerprint: '',
+    });
+    socket.message({
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      content: 'resynchronized\n',
+      format: 'ansi',
+      content_fingerprint: 'content-3',
+    });
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({
+      type: 'watch_pane',
+      pane_id: 'w1:p1',
+      content_fingerprint: 'content-3',
+    });
   });
 
   it('merges agents from independent relays without pane id collisions', () => {

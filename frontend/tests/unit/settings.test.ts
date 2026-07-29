@@ -7,6 +7,7 @@ import {
   APP_VERSION,
   PUSH_ENABLED_KEY,
   TERMINAL_HISTORY_KEY,
+  TERMINAL_REFRESH_KEY,
   TERMINAL_LAYOUT_KEY,
 } from '$lib/config';
 import { relayStore } from '$lib/store';
@@ -152,6 +153,19 @@ describe('settings relay status', () => {
     expect(localStorage.getItem(TERMINAL_HISTORY_KEY)).toBe('10000');
 
     await user.click(history.getByRole('button', { name: '1000' }));
+  });
+
+  it('persists the selected terminal refresh interval', async () => {
+    const user = userEvent.setup();
+    render(SettingsView);
+    const refresh = within(screen.getByRole('group', { name: 'Terminal Refresh' }));
+
+    expect(refresh.getByRole('button', { name: '250 ms' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(refresh.getByRole('button', { name: '100 ms' }));
+    expect(refresh.getByRole('button', { name: '100 ms' })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem(TERMINAL_REFRESH_KEY)).toBe('100');
+
+    await user.click(refresh.getByRole('button', { name: '250 ms' }));
   });
 
   it('persists all three terminal width choices', async () => {

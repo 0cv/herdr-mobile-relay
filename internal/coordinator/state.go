@@ -772,10 +772,11 @@ func (s *State) AcknowledgePane(paneID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.agents[paneID]; !exists {
+	agent, exists := s.agents[paneID]
+	if !exists {
 		return false
 	}
-	if s.unseenDone[paneID] {
+	if s.unseenDone[paneID] || doneStatuses[agent.Status] {
 		delete(s.unseenDone, paneID)
 		s.ackDone[paneID] = true
 	}
@@ -789,6 +790,9 @@ func (s *State) DisplayedStatus(paneID string) string {
 	a, ok := s.agents[paneID]
 	if !ok {
 		return ""
+	}
+	if doneStatuses[a.Status] && s.ackDone[paneID] {
+		return "idle"
 	}
 	if a.Status == "idle" && s.unseenDone[paneID] {
 		return "done"
@@ -804,6 +808,9 @@ func (s *State) Snapshot() []*AgentState {
 	for _, a := range s.agents {
 		cp := *a
 		cp.StateRevision = s.revision[cp.PaneID]
+		if doneStatuses[cp.Status] && s.ackDone[cp.PaneID] {
+			cp.Status = "idle"
+		}
 		if cp.Status == "idle" && s.unseenDone[cp.PaneID] {
 			cp.Status = "done"
 		}

@@ -21,7 +21,7 @@ import {
   stabilizeBlockedSnapshot,
 } from './agents';
 import { relayProtocolError } from './protocol';
-import { terminalHistoryLines } from './preferences';
+import { terminalHistoryLines, terminalRefreshInterval } from './preferences';
 import {
   clearPendingAppDeploy,
   clearPendingRelayUpdate,
@@ -150,6 +150,9 @@ class RelayStore {
   private pendingRequests = new Map<string, PendingRequest>();
   private pendingUploads = new Map<string, PendingUpload>();
   private pendingPaneReads = new Map<string, number>();
+  private paneContentFingerprints = new Map<string, string>();
+  private watchedPanes = new Map<string, Agent>();
+  private paneWatchesStarted = new Set<string>();
   private slashCommandCache = new Map<string, SlashCommandCacheEntry>();
   private pendingSlashCommands = new Map<string, PendingSlashCommands>();
   private respondingTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -157,6 +160,15 @@ class RelayStore {
   private reconnectEnabled = true;
   private toastId = 0;
   private pushConfigHandler: ((relayId: string) => void) | null = null;
+
+  constructor() {
+    let previousRefreshInterval = get(terminalRefreshInterval);
+    terminalRefreshInterval.subscribe((value) => {
+      if (value === previousRefreshInterval) return;
+      previousRefreshInterval = value;
+      this.restartPaneWatches();
+    });
+  }
 
   initialize(connect = true): void {
     let relays = loadRelayConfigs();
@@ -192,6 +204,9 @@ class RelayStore {
     this.slashCommandCache.clear();
     this.pendingSlashCommands.clear();
     this.pendingPaneReads.clear();
+    this.paneContentFingerprints.clear();
+    this.watchedPanes.clear();
+    this.paneWatchesStarted.clear();
   }
 
   setPushConfigHandler(handler: ((relayId: string) => void) | null): void {
@@ -320,6 +335,9 @@ class RelayStore {
     this.clearSlashCommandCacheForRelay(id);
     for (const paneId of this.pendingPaneReads.keys()) {
       if (paneId.startsWith(`${id}::`)) this.pendingPaneReads.delete(paneId);
+    }
+    for (const paneId of this.paneWatchesStarted) {
+      if (paneId.startsWith(`${id}::`)) this.paneWatchesStarted.delete(paneId);
     }
     const connection = this.connectionsValue.get(id);
     if (!connection) return;
@@ -572,16 +590,72 @@ class RelayStore {
       this.agents.set(this.agentsValue);
       return;
     }
+    if (message.type === 'pane_unchanged') {
+      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+      this.pendingPaneReads.delete(paneId);
+      if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
+        this.paneContentFingerprints.set(paneId, message.content_fingerprint);
+      }
+      this.startPaneWatch(paneId);
+      return;
+    }
+    if (message.type === 'pane_resync') {
+      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+      const watched = this.watchedPanes.get(paneId);
+      if (watched) this.readPane(watched, true);
+      return;
+    }
+    if (message.type === 'pane_delta') {
+      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+      const frame = this.terminalFramesValue.get(paneId);
+      const baseFingerprint = this.paneContentFingerprints.get(paneId);
+      const nextContent = frame && baseFingerprint === message.base_fingerprint
+        ? applyPaneDelta(frame.content, message.segments)
+        : null;
+      const watched = this.watchedPanes.get(paneId);
+      if (nextContent === null || typeof message.content_fingerprint !== 'string') {
+        if (watched) this.readPane(watched, true);
+        return;
+      }
+      this.paneContentFingerprints.set(paneId, message.content_fingerprint);
+      this.terminalFramesValue.set(paneId, {
+        paneId,
+        content: nextContent,
+        format: String(message.format || frame?.format || 'plain'),
+      });
+      this.terminalFrames.set(new Map(this.terminalFramesValue));
+      this.mergePaneInteraction(paneId, message);
+      if (watched) {
+        this.sendRaw(watched.relay_id, {
+          type: 'pane_applied',
+          pane_id: watched.raw_pane_id,
+          content_fingerprint: message.content_fingerprint,
+        });
+      }
+      return;
+    }
     if (message.type === 'pane_content') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
       this.pendingPaneReads.delete(paneId);
+      if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
+        this.paneContentFingerprints.set(paneId, message.content_fingerprint);
+      }
       this.terminalFramesValue.set(paneId, {
         paneId,
-        content: String(message.content || '(empty)'),
+        content: typeof message.content === 'string' ? message.content : '(empty)',
         format: String(message.format || 'plain'),
       });
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
+      const watched = this.watchedPanes.get(paneId);
+      if (watched && message.ack_required && message.content_fingerprint) {
+        this.sendRaw(watched.relay_id, {
+          type: 'pane_applied',
+          pane_id: watched.raw_pane_id,
+          content_fingerprint: message.content_fingerprint,
+        });
+      }
+      this.startPaneWatch(paneId);
     }
   }
 
@@ -903,13 +977,56 @@ class RelayStore {
   readPane(agent: Agent, force = false): void {
     const requestedAt = this.pendingPaneReads.get(agent.pane_id);
     if (!force && requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
+    this.paneWatchesStarted.delete(agent.pane_id);
     const sent = this.sendRaw(agent.relay_id, {
       type: 'read_pane',
       pane_id: agent.raw_pane_id,
       lines: get(terminalHistoryLines),
       format: 'ansi',
+      content_fingerprint: force ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
     });
     if (sent) this.pendingPaneReads.set(agent.pane_id, Date.now());
+  }
+
+  watchPane(agent: Agent): void {
+    this.watchedPanes.set(agent.pane_id, agent);
+    this.startPaneWatch(agent.pane_id);
+  }
+
+  unwatchPane(agent: Agent): void {
+    this.watchedPanes.delete(agent.pane_id);
+    this.paneWatchesStarted.delete(agent.pane_id);
+    const connection = this.connectionsValue.get(agent.relay_id);
+    if (!connection?.capabilities.includes('pane_realtime_delta')) return;
+    this.sendRaw(agent.relay_id, {
+      type: 'unwatch_pane',
+      pane_id: agent.raw_pane_id,
+    });
+  }
+
+  private restartPaneWatches(): void {
+    for (const paneId of [...this.paneWatchesStarted]) {
+      this.paneWatchesStarted.delete(paneId);
+      this.startPaneWatch(paneId);
+    }
+  }
+
+  private startPaneWatch(paneId: string): void {
+    const agent = this.watchedPanes.get(paneId);
+    if (!agent || this.paneWatchesStarted.has(paneId) || this.pendingPaneReads.has(paneId)) return;
+    const connection = this.connectionsValue.get(agent.relay_id);
+    if (!connection?.capabilities.includes('pane_realtime_delta')) return;
+    const contentFingerprint = this.paneContentFingerprints.get(paneId);
+    if (!contentFingerprint) return;
+    const sent = this.sendRaw(agent.relay_id, {
+      type: 'watch_pane',
+      pane_id: agent.raw_pane_id,
+      lines: get(terminalHistoryLines),
+      interval_ms: get(terminalRefreshInterval),
+      format: 'ansi',
+      content_fingerprint: contentFingerprint,
+    });
+    if (sent) this.paneWatchesStarted.add(paneId);
   }
 
   requestAgents(): void {
@@ -1248,6 +1365,35 @@ class RelayStore {
       [...this.connectionsValue].map(([relayId, connection]) => [relayId, { ...connection }]),
     ));
   }
+}
+
+function applyPaneDelta(previous: string, value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const boundaries = [0];
+  for (let index = 0; index < previous.length; index += 1) {
+    if (previous.charCodeAt(index) === 10) boundaries.push(index + 1);
+  }
+  if (boundaries.at(-1) !== previous.length) boundaries.push(previous.length);
+  else boundaries.push(previous.length);
+
+  const chunks: string[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== 'object') return null;
+    const segment = candidate as Record<string, unknown>;
+    if (segment.copy_lines !== undefined) {
+      if (!Number.isInteger(segment.copy_lines) || Number(segment.copy_lines) <= 0) return null;
+      const copyLines = Number(segment.copy_lines);
+      const copyStart = segment.copy_start === undefined ? 0 : segment.copy_start;
+      if (!Number.isInteger(copyStart) || Number(copyStart) < 0) return null;
+      const copyEnd = Number(copyStart) + copyLines;
+      if (copyEnd > boundaries.length - 1) return null;
+      chunks.push(previous.slice(boundaries[Number(copyStart)], boundaries[copyEnd]));
+      continue;
+    }
+    if (typeof segment.text !== 'string') return null;
+    chunks.push(segment.text);
+  }
+  return chunks.join('');
 }
 
 function commandRequestId(): string {
