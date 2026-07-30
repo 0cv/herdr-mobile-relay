@@ -33,6 +33,16 @@ No Cloudflare account, domain, Python, Node.js, Go toolchain, separate web
 deployment, or `sudo` is required for this trial path. See
 [QUICKSTART.md](QUICKSTART.md) for the short walkthrough.
 
+## Mobile Onboarding
+
+[Watch the mobile onboarding walkthrough (1:03, MP4).](images/mobile_onboarding.mp4)
+
+The walkthrough follows setup from scanning the relay QR through the agent list,
+terminal controls, and notification settings. The QR imports the relay URL,
+label, and token, so treat the QR and setup link as secrets. Enable
+notifications in the app's Settings; blocked-agent notifications are included,
+while completion notifications are optional.
+
 ## Stable Setup
 
 For a permanent hostname and background service, add a domain to Cloudflare and
@@ -81,9 +91,6 @@ credentials, cache, and plugin registration.
 | --- | --- |
 | <img src="images/agent_plan.jpeg" alt="Structured plan question navigation" width="392"> | <img src="images/notifications.jpg" alt="Blocked-agent notification" width="392"> |
 
-The QR imports the relay URL, label, and token. Treat the QR and setup link as
-secrets. Enable notifications in the app's Settings; blocked-agent
-notifications are included, while completion notifications are optional.
 
 ## Mobile Terminal
 
