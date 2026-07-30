@@ -35,7 +35,7 @@ deployment, or `sudo` is required for this trial path. See
 
 ## Mobile Onboarding
 
-[Watch the mobile onboarding walkthrough (1:03, MP4).](images/mobile_onboarding.mp4)
+https://github.com/user-attachments/assets/e52c4fd0-ef77-4852-bb43-078a7154eae8
 
 The walkthrough follows setup from scanning the relay QR through the agent list,
 terminal controls, and notification settings. The QR imports the relay URL,
