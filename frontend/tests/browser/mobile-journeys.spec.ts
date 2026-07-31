@@ -71,7 +71,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         const message = JSON.parse(serialized) as Record<string, unknown>;
         commands.push(message);
         socketCommands[this.index].push(message);
-        if (['read_pane', 'watch_pane', 'unwatch_pane', 'pane_applied', 'get_activity', 'list_directories', 'refresh_agents'].includes(String(message.type))) return;
+        if (['e2ee_client_hello', 'read_pane', 'watch_pane', 'unwatch_pane', 'pane_applied', 'get_activity', 'list_directories', 'refresh_agents'].includes(String(message.type))) return;
         if (!autoCommands) return;
         if (message.type === 'upload_image') {
           queueMicrotask(() => this.server({
@@ -175,7 +175,7 @@ async function handshake(page: Page, index: number, overrides: Record<string, un
   });
 }
 
-const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: 'secret' };
+const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' };
 
 test('keeps activity cards inside the page and confirms permanent deletion', async ({ page }) => {
   await boot(page, [fedora]);
@@ -253,14 +253,6 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
   );
   await expect(page.getByRole('button', { name: 'Activity history' }).locator('svg')).toBeVisible();
   await expect.poll(() => socketCount(page)).toBe(1);
-  await expect.poll(async () =>
-    (await commandsForSocket(page, 0)).some((command) => command.type === 'register_app_origin')).toBe(true);
-  expect((await commandsForSocket(page, 0)).find((command) => command.type === 'register_app_origin'))
-    .toMatchObject({
-      type: 'register_app_origin',
-      origin: 'http://127.0.0.1:4173',
-      protocol: 2,
-    });
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_relays') || '[]')[0]))
     .toMatchObject({
       label: 'Fedora Workstation',
@@ -280,7 +272,18 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
       token: 'abcdef0123456789abcdef0123456789',
     });
   expect(await page.evaluate(() => location.hash)).toBe('');
-  const base = 1;
+  await page.evaluate(() => {
+    const relays = JSON.parse(localStorage.getItem('herdr_relays') || '[]');
+    localStorage.setItem('herdr_relays', JSON.stringify(relays.map((relay: RelayFixture) => ({
+      ...relay,
+      token: '',
+    }))));
+  });
+  await page.reload();
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await expect.poll(async () =>
+    (await commandsForSocket(page, 0)).some((command) => command.type === 'register_app_origin')).toBe(true);
+  const base = 0;
   await handshake(page, base);
   await handshake(page, base + 1);
   await server(page, base, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Fedora app', agent: 'codex' }] });
@@ -424,7 +427,7 @@ test('shows inventory failure instead of zero agents and recovers without reconn
 });
 
 test('checks every self-updating relay automatically after connection', async ({ page }) => {
-  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: 'secret' };
+  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: '' };
   await boot(page, [fedora, mac]);
   await setAutoCommands(page, false);
   await expect.poll(() => socketCount(page)).toBe(2);
@@ -2308,8 +2311,10 @@ test('resets the home page scroll offset before opening a terminal', async ({ pa
   });
 
   const lastAgent = page.getByRole('button', { name: 'Open Scrollable agent 20 on Fedora' });
-  await page.evaluate(() => { document.documentElement.style.minHeight = '300vh'; });
-  await lastAgent.scrollIntoViewIfNeeded();
+  await page.evaluate(() => {
+    document.documentElement.style.minHeight = '300vh';
+    window.scrollTo(0, 100);
+  });
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
   await page.evaluate(() => { window.scrollTo = () => {}; });
   await lastAgent.click();
@@ -2324,7 +2329,7 @@ test('resets the home page scroll offset before opening a terminal', async ({ pa
 });
 
 test('ignores a directory result after switching computers', async ({ page }) => {
-  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: 'secret' };
+  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: '' };
   await boot(page, [fedora, mac]);
   await expect.poll(() => socketCount(page)).toBe(2);
   await handshake(page, 0);

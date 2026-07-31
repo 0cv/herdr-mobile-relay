@@ -1,105 +1,82 @@
 package transport
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 )
 
-func TestNoTokenRequired(t *testing.T) {
-	cfg := &config.Config{Token: ""}
+func TestTokenlessUpgradeAllowed(t *testing.T) {
+	cfg := &config.Config{}
 	req := httptest.NewRequest("GET", "/ws", nil)
-	if !Authenticate(cfg, req) {
-		t.Error("expected auth to pass with no token configured")
+	if !webSocketUpgradeAllowed(cfg, req) {
+		t.Error("expected tokenless loopback upgrade to pass")
 	}
 }
 
-func TestTokenViaBearerHeader(t *testing.T) {
+func TestEncryptedUpgradeRequiresSubprotocol(t *testing.T) {
 	cfg := &config.Config{Token: "secret123"}
 	req := httptest.NewRequest("GET", "/ws", nil)
-	req.Header.Set("Authorization", "Bearer secret123")
-	if !Authenticate(cfg, req) {
-		t.Error("expected auth to pass with correct bearer token")
+	if webSocketUpgradeAllowed(cfg, req) {
+		t.Error("expected upgrade without encrypted subprotocol to fail")
+	}
+	req.Header.Set("Sec-WebSocket-Protocol", "chat, herdr-e2ee-v1")
+	if !webSocketUpgradeAllowed(cfg, req) {
+		t.Error("expected encrypted subprotocol to pass")
 	}
 }
 
-func TestTokenViaCaseInsensitiveBearerHeader(t *testing.T) {
+func TestEncryptedUpgradeRejectsKeyInRequest(t *testing.T) {
 	cfg := &config.Config{Token: "secret123"}
-	req := httptest.NewRequest("GET", "/ws", nil)
-	req.Header.Set("Authorization", "bEaReR secret123")
-	if !Authenticate(cfg, req) {
-		t.Error("expected auth to accept case-insensitive bearer scheme")
+	for name, req := range map[string]*http.Request{
+		"query":  httptest.NewRequest("GET", "/ws?token=secret123", nil),
+		"header": httptest.NewRequest("GET", "/ws", nil),
+	} {
+		req.Header.Set("Sec-WebSocket-Protocol", e2eeSubprotocol)
+		if name == "header" {
+			req.Header.Set("Authorization", "Bearer secret123")
+		}
+		if webSocketUpgradeAllowed(cfg, req) {
+			t.Errorf("%s credential unexpectedly accepted in HTTP request", name)
+		}
 	}
 }
 
-func TestTokenViaQueryParam(t *testing.T) {
-	cfg := &config.Config{Token: "secret123"}
-	req := httptest.NewRequest("GET", "/ws?token=secret123", nil)
-	if !Authenticate(cfg, req) {
-		t.Error("expected auth to pass with correct query token")
-	}
-}
-
-func TestWrongTokenRejected(t *testing.T) {
-	cfg := &config.Config{Token: "secret123"}
-	req := httptest.NewRequest("GET", "/ws", nil)
-	req.Header.Set("Authorization", "Bearer wrongtoken")
-	if Authenticate(cfg, req) {
-		t.Error("expected auth to fail with wrong token")
-	}
-}
-
-func TestMissingTokenRejected(t *testing.T) {
-	cfg := &config.Config{Token: "secret123"}
-	req := httptest.NewRequest("GET", "/ws", nil)
-	if Authenticate(cfg, req) {
-		t.Error("expected auth to fail with missing token")
-	}
-}
-
-func TestOriginAllowedNoOriginHeader(t *testing.T) {
+func TestEncryptedUpgradeAllowsAnyOriginAfterHandshakeGate(t *testing.T) {
 	cfg := &config.Config{Token: "secret"}
 	req := httptest.NewRequest("GET", "/ws", nil)
-	req.Header.Set("Authorization", "Bearer secret")
-	if !Authenticate(cfg, req) {
-		t.Error("expected auth to pass with no origin header")
-	}
-}
-
-func TestOriginAllowedWithToken(t *testing.T) {
-	cfg := &config.Config{Token: "secret"}
-	req := httptest.NewRequest("GET", "/ws", nil)
-	req.Header.Set("Authorization", "Bearer secret")
 	req.Header.Set("Origin", "https://random-origin.com")
-	if !Authenticate(cfg, req) {
-		t.Error("expected any origin to be allowed when token is configured")
+	req.Header.Set("Sec-WebSocket-Protocol", e2eeSubprotocol)
+	if !webSocketUpgradeAllowed(cfg, req) {
+		t.Error("expected authenticated encrypted handshake to gate arbitrary origin")
 	}
 }
 
 func TestOriginRejectedWithoutToken(t *testing.T) {
-	cfg := &config.Config{Token: "", AllowedOrigins: []string{"https://allowed.com"}}
+	cfg := &config.Config{AllowedOrigins: []string{"https://allowed.com"}}
 	req := httptest.NewRequest("GET", "/ws", nil)
 	req.Header.Set("Origin", "https://evil.com")
-	if Authenticate(cfg, req) {
+	if webSocketUpgradeAllowed(cfg, req) {
 		t.Error("expected origin to be rejected")
 	}
 }
 
 func TestOriginAllowedExplicit(t *testing.T) {
-	cfg := &config.Config{Token: "", AllowedOrigins: []string{"https://allowed.com"}}
+	cfg := &config.Config{AllowedOrigins: []string{"https://allowed.com"}}
 	req := httptest.NewRequest("GET", "/ws", nil)
 	req.Header.Set("Origin", "https://allowed.com")
-	if !Authenticate(cfg, req) {
+	if !webSocketUpgradeAllowed(cfg, req) {
 		t.Error("expected explicit origin to be allowed")
 	}
 }
 
 func TestOriginWildcard(t *testing.T) {
-	cfg := &config.Config{Token: "", AllowedOrigins: []string{"*"}}
+	cfg := &config.Config{AllowedOrigins: []string{"*"}}
 	req := httptest.NewRequest("GET", "/ws", nil)
 	req.Header.Set("Origin", "https://anything.com")
-	if !Authenticate(cfg, req) {
+	if !webSocketUpgradeAllowed(cfg, req) {
 		t.Error("expected wildcard origin to be allowed")
 	}
 }

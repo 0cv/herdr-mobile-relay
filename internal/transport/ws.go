@@ -3,12 +3,14 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 
@@ -27,6 +29,7 @@ type ClientConn struct {
 	id       string
 	conn     *websocket.Conn
 	buf      *sendBuffer
+	secure   *e2eeSession
 	logger   *slog.Logger
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -62,6 +65,7 @@ type Hub struct {
 	register     sync.Mutex
 	mu           sync.RWMutex
 	clients      map[string]*ClientConn
+	pending      map[*websocket.Conn]struct{}
 	nextID       int
 	handler      MessageHandler
 	onConnect    ConnectHandler
@@ -90,6 +94,7 @@ func NewHub(cfg *config.Config, logger *slog.Logger) *Hub {
 		cfg:            cfg,
 		logger:         logger,
 		clients:        make(map[string]*ClientConn),
+		pending:        make(map[*websocket.Conn]struct{}),
 		orderedIngress: make(chan inboundMessage, orderedIngressCapacity),
 		handlerSlots:   make(chan struct{}, handlerCapacity),
 		ingressDone:    make(chan struct{}),
@@ -102,9 +107,9 @@ func NewHub(cfg *config.Config, logger *slog.Logger) *Hub {
 }
 
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	if !Authenticate(h.cfg, r) {
+	if !webSocketUpgradeAllowed(h.cfg, r) {
 		if h.cfg.Token != "" {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			http.Error(w, "Encrypted WebSocket handshake required", http.StatusBadRequest)
 		} else {
 			http.Error(w, "Origin not allowed", http.StatusForbidden)
 		}
@@ -119,25 +124,55 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+	options := &websocket.AcceptOptions{
 		InsecureSkipVerify:   true,
 		CompressionMode:      websocket.CompressionNoContextTakeover,
 		CompressionThreshold: 512,
-	})
+	}
+	if h.cfg.Token != "" {
+		options.Subprotocols = []string{e2eeSubprotocol}
+		options.CompressionMode = websocket.CompressionDisabled
+	}
+	conn, err := websocket.Accept(w, r, options)
 	if err != nil {
 		h.logger.Warn("websocket accept failed", "error", err)
 		return
 	}
 	conn.SetReadLimit(wsMaxReadBytes)
 
+	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		conn.CloseNow()
+		return
+	}
+	h.pending[conn] = struct{}{}
+	h.connectionWG.Add(1)
+	h.mu.Unlock()
+	defer h.connectionWG.Done()
+
+	var secure *e2eeSession
+	if h.cfg.Token != "" {
+		secure, err = performServerE2EEHandshake(r.Context(), conn, h.cfg.Token)
+		if err != nil {
+			h.mu.Lock()
+			delete(h.pending, conn)
+			h.mu.Unlock()
+			h.logger.Debug("encrypted websocket handshake failed", "error", err)
+			conn.CloseNow()
+			return
+		}
+	}
+
 	ctx, cancel := context.WithCancel(r.Context())
 	h.register.Lock()
 	h.mu.Lock()
+	delete(h.pending, conn)
 	if h.closing {
 		h.mu.Unlock()
 		h.register.Unlock()
 		cancel()
-		_ = conn.Close(websocket.StatusGoingAway, "server shutting down")
+		conn.CloseNow()
 		return
 	}
 	h.nextID++
@@ -145,14 +180,13 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	client := &ClientConn{
 		id:     clientID,
 		conn:   conn,
+		secure: secure,
 		buf:    newSendBuffer(clientOutboundMaxItems, clientOutboundMaxBytes),
 		logger: h.logger.With("client_id", clientID),
 		ctx:    ctx,
 		cancel: cancel,
 		done:   make(chan struct{}),
 	}
-	h.connectionWG.Add(1)
-	defer h.connectionWG.Done()
 	go h.writePump(client)
 	h.mu.Unlock()
 	if h.onConnect != nil {
@@ -190,15 +224,30 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (h *Hub) readPump(client *ClientConn) {
 	for {
-		_, data, err := client.conn.Read(client.ctx)
+		messageType, data, err := client.conn.Read(client.ctx)
 		if err != nil {
 			if websocket.CloseStatus(err) == -1 && client.ctx.Err() == nil {
 				client.logger.Debug("read error", "error", err)
 			}
 			return
 		}
-		var message map[string]any
-		if err := json.Unmarshal(data, &message); err != nil {
+		if client.secure != nil {
+			if messageType != websocket.MessageText {
+				client.logger.Debug("non-text encrypted frame rejected")
+				return
+			}
+			data, err = client.secure.open(data)
+			if err != nil {
+				client.logger.Debug("encrypted frame rejected", "error", err)
+				return
+			}
+		}
+		message, err := decodeWebSocketMessage(data)
+		if err != nil {
+			if client.secure != nil {
+				client.logger.Debug("invalid encrypted message rejected")
+				return
+			}
 			continue
 		}
 		h.receiptMu.Lock()
@@ -207,6 +256,20 @@ func (h *Hub) readPump(client *ClientConn) {
 		h.submitMessage(client, message)
 		h.receiptMu.Unlock()
 	}
+}
+
+func decodeWebSocketMessage(data []byte) (map[string]any, error) {
+	if !utf8.Valid(data) {
+		return nil, errors.New("message is not valid UTF-8")
+	}
+	var message map[string]any
+	if err := json.Unmarshal(data, &message); err != nil {
+		return nil, err
+	}
+	if message == nil {
+		return nil, errors.New("message must be a JSON object")
+	}
+	return message, nil
 }
 
 func (h *Hub) submitMessage(client *ClientConn, message map[string]any) {
@@ -259,6 +322,15 @@ func (h *Hub) writePump(client *ClientConn) {
 		data, ok := client.buf.Pop()
 		if !ok {
 			return
+		}
+		if client.secure != nil {
+			var err error
+			data, err = client.secure.seal(data)
+			if err != nil {
+				client.logger.Debug("encrypt failed, evicting", "error", err)
+				h.removeClient(client)
+				return
+			}
 		}
 		ctx, cancel := context.WithTimeout(client.ctx, wsSendTimeout)
 		err := client.conn.Write(ctx, websocket.MessageText, data)
@@ -427,8 +499,16 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 		clients = append(clients, client)
 		delete(h.clients, client.id)
 	}
+	pending := make([]*websocket.Conn, 0, len(h.pending))
+	for conn := range h.pending {
+		pending = append(pending, conn)
+		delete(h.pending, conn)
+	}
 	h.mu.Unlock()
 	h.register.Unlock()
+	for _, conn := range pending {
+		conn.CloseNow()
+	}
 
 	for _, client := range clients {
 		go func(c *ClientConn) {

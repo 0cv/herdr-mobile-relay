@@ -1,21 +1,28 @@
 package transport
 
 import (
-	"crypto/hmac"
 	"net/http"
 	"strings"
 
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 )
 
-func Authenticate(cfg *config.Config, r *http.Request) bool {
+func webSocketUpgradeAllowed(cfg *config.Config, r *http.Request) bool {
 	if !originAllowed(cfg, r) {
 		return false
 	}
 	if cfg.Token == "" {
 		return true
 	}
-	return tokenMatches(cfg.Token, requestToken(r))
+	if r.Header.Get("Authorization") != "" || r.URL.Query().Has("token") {
+		return false
+	}
+	for _, requested := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		if strings.TrimSpace(requested) == e2eeSubprotocol {
+			return true
+		}
+	}
+	return false
 }
 
 func originAllowed(cfg *config.Config, r *http.Request) bool {
@@ -32,22 +39,4 @@ func originAllowed(cfg *config.Config, r *http.Request) bool {
 		}
 	}
 	return false
-}
-
-func tokenMatches(expected, provided string) bool {
-	if expected == "" || provided == "" {
-		return false
-	}
-	return hmac.Equal([]byte(expected), []byte(provided))
-}
-
-func requestToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if auth != "" {
-		if len(auth) >= 7 && strings.EqualFold(auth[:7], "Bearer ") {
-			return auth[7:]
-		}
-		return auth
-	}
-	return r.URL.Query().Get("token")
 }

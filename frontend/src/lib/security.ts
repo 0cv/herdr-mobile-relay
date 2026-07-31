@@ -1,4 +1,5 @@
 import { get, writable } from 'svelte/store';
+import { base64UrlDecode, base64UrlEncode } from './base64url';
 import { DEVICE_CREDENTIAL_KEY, DEVICE_LOCK_KEY } from './config';
 import { relayStore } from './store';
 
@@ -250,16 +251,4 @@ function randomBytes(length: number): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
   return bytes;
-}
-
-function base64UrlEncode(buffer: ArrayBuffer): string {
-  let binary = '';
-  for (const byte of new Uint8Array(buffer)) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-function base64UrlDecode(value: string): ArrayBuffer {
-  const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
-  const binary = atob(padded);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0)).buffer;
 }

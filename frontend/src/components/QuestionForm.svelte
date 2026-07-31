@@ -103,6 +103,14 @@
     return error;
   }
 
+  function handleQuestionError(caught: unknown) {
+    relayStore.clearResponding(agent.pane_id);
+    const error = caught as CommandError;
+    const fresh = returnedInteraction(error);
+    if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
+    relayStore.showToast(error.message, true);
+  }
+
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (!questionSubmitAllowed(interaction, draft)) {
@@ -128,13 +136,7 @@
         throw unexpectedResult('The relay returned an unexpected question result.', next);
       }
     } catch (caught) {
-      relayStore.clearResponding(agent.pane_id);
-      const error = caught as CommandError;
-      const fresh = returnedInteraction(error);
-      if (fresh) {
-        relayStore.applyQuestionInteraction(agent, fresh);
-      }
-      relayStore.showToast(error.message, true);
+      handleQuestionError(caught);
     }
   }
 
@@ -154,11 +156,7 @@
       relayStore.applyQuestionInteraction(agent, prior);
       relayStore.showToast('Opened the previous question.');
     } catch (caught) {
-      relayStore.clearResponding(agent.pane_id);
-      const error = caught as CommandError;
-      const fresh = returnedInteraction(error);
-      if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
-      relayStore.showToast(error.message, true);
+      handleQuestionError(caught);
     }
   }
 
@@ -169,11 +167,7 @@
       relayStore.applyQuestionInteraction(agent, null);
       relayStore.showToast('Question chat opened.');
     } catch (caught) {
-      relayStore.clearResponding(agent.pane_id);
-      const error = caught as CommandError;
-      const fresh = returnedInteraction(error);
-      if (fresh) relayStore.applyQuestionInteraction(agent, fresh);
-      relayStore.showToast(error.message, true);
+      handleQuestionError(caught);
     }
   }
 </script>

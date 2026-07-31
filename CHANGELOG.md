@@ -5,6 +5,32 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-31
+
+### Added
+
+- Encrypt token-authenticated phone-to-relay WebSockets end to end with a
+  key-authenticated ephemeral P-256 handshake, HKDF-SHA-256 session keys, and
+  AES-256-GCM frames. Relay keys no longer travel in WebSocket URLs or HTTP
+  headers, so Cloudflare Tunnel terminates TLS without receiving relay content.
+- Show compact agent logos on the session list for Codex, Claude Code,
+  OpenCode, Pi, Oh My Pi, Kimi, and Qoder, with an accessible fallback for
+  custom agents.
+
+### Changed
+
+- Reduce the phone app's initial payload by removing unused Tailwind-generated
+  CSS and its build integration.
+
+### Security
+
+- Require encrypted client key confirmation before relay registration, so a
+  captured client hello cannot be replayed into a live relay connection.
+- Reject configured relay keys shorter than 16 bytes and document the
+  handshake's offline-guessing boundary.
+- Specify the E2EE wire format byte for byte, validate shared deterministic
+  Go/browser vectors, and fuzz malformed client hellos and encrypted envelopes.
+
 ## [0.12.0] - 2026-07-29
 
 ### Changed
@@ -92,7 +118,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.2...v0.12.0
 [0.11.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.0...v0.11.1

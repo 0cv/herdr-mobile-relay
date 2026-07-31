@@ -176,23 +176,55 @@ describe('accessible Svelte interactions', () => {
     expect(screen.getByText('Loading agents…')).toBeInTheDocument();
   });
 
-  it('shows the Herdr tab name and session in the card meta line', () => {
+  it('shows the Herdr tab name, session, and agent logo in the card', () => {
     const named: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w2:p1', pane_id: 'fedora::w2:p1',
       project: 'relay', agent: 'codex', status: 'working', tab_label: 'my-tab', session: 'my-session',
     };
     const { container } = render(AgentList, { agents: [named], relays: [], responding: new Set<string>(), onopen: vi.fn() });
-    expect(container.querySelector('.agent-meta')?.textContent).toBe('my-tab · my-session · codex');
+    expect(container.querySelector('.agent-meta')?.textContent).toBe('my-tab · my-session');
+    expect(screen.getByRole('img', { name: 'Codex' })).toBeInTheDocument();
     expect(container.querySelector('.agent-project')?.textContent).toContain('relay');
   });
 
-  it('omits the meta name segment when no tab or pane name is set', () => {
+  it('uses the logo instead of an agent text suffix when card metadata is empty', () => {
     const plain: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w2:p2', pane_id: 'fedora::w2:p2',
       project: 'relay', agent: 'codex', status: 'working',
     };
     const { container } = render(AgentList, { agents: [plain], relays: [], responding: new Set<string>(), onopen: vi.fn() });
-    expect(container.querySelector('.agent-meta')?.textContent).toBe('codex');
+    expect(container.querySelector('.agent-meta')).not.toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Codex' })).toBeInTheDocument();
+    expect(screen.queryByText('codex')).not.toBeInTheDocument();
+  });
+
+  it('maps supported agent aliases to logos and labels custom fallbacks', () => {
+    const identities = [
+      ['claude-code', 'Claude Code'],
+      ['codex', 'Codex'],
+      ['open_code', 'OpenCode'],
+      ['pi-coding-agent', 'Pi'],
+      ['oh my pi', 'Oh My Pi'],
+      ['kimi-code', 'Kimi'],
+      ['qodercli', 'Qoder'],
+      ['custom-agent', 'custom-agent'],
+    ] as const;
+    const agents: Agent[] = identities.map(([agent], index) => ({
+      relay_id: 'fedora',
+      relay_label: 'Fedora',
+      raw_pane_id: `w3:p${index}`,
+      pane_id: `fedora::w3:p${index}`,
+      project: `project-${index}`,
+      agent,
+      status: 'working',
+    }));
+    const { container } = render(AgentList, { agents, relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    for (const [, label] of identities) {
+      expect(screen.getByRole('img', { name: label })).toBeInTheDocument();
+    }
+    expect(container.querySelectorAll('.agent-logo')).toHaveLength(identities.length);
+    expect(container.querySelectorAll('.agent-meta')).toHaveLength(1);
+    expect(container.querySelector('.agent-meta')).toHaveTextContent('custom-agent');
   });
 
   it('keeps a structured answer local until Submit', async () => {

@@ -15,6 +15,32 @@ import (
 	"github.com/coder/websocket"
 )
 
+func TestDecodeWebSocketMessageRequiresUTF8JSONObject(t *testing.T) {
+	valid, err := decodeWebSocketMessage([]byte(`{"type":"refresh_agents"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valid["type"] != "refresh_agents" {
+		t.Fatalf("decoded type = %v", valid["type"])
+	}
+
+	for _, test := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "null", data: []byte(`null`)},
+		{name: "array", data: []byte(`[]`)},
+		{name: "malformed", data: []byte(`{`)},
+		{name: "invalid UTF-8", data: []byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := decodeWebSocketMessage(test.data); err == nil {
+				t.Fatal("invalid WebSocket message was accepted")
+			}
+		})
+	}
+}
+
 func TestHubShutdownStopsOrderedIngress(t *testing.T) {
 	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

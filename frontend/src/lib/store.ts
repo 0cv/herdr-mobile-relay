@@ -21,6 +21,12 @@ import {
   stabilizeBlockedSnapshot,
 } from './agents';
 import { relayProtocolError } from './protocol';
+import {
+  createE2EEClientHandshake,
+  E2EE_SUBPROTOCOL,
+  type E2EEClientHandshake,
+  type E2EESession,
+} from './e2ee';
 import { terminalHistoryLines, terminalRefreshInterval } from './preferences';
 import {
   clearPendingAppDeploy,
@@ -52,6 +58,7 @@ const COMMAND_TIMEOUT_MS = 15_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
 const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
 const CONNECTION_HEALTH_TIMEOUT_MS = 10_000;
+const E2EE_HANDSHAKE_TIMEOUT_MS = 10_000;
 const UPDATE_RESTART_RECONNECT_DELAY_MS = 1_000;
 const RECONNECT_BASE_DELAY_MS = 3_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
@@ -97,24 +104,30 @@ interface RelayConnection extends RelayConnectionView {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   healthTimer: ReturnType<typeof setTimeout> | null;
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
+  e2eeHandshake: E2EEClientHandshake | null;
+  e2eeSession: E2EESession | null;
+  e2eeTimer: number | null;
+  e2eeFailed: boolean;
+  sendQueue: Promise<void>;
+  receiveQueue: Promise<void>;
   closed: boolean;
   directoryGeneration: number;
 }
 
-interface PendingRequest {
+interface PendingOperation {
   relayId: string;
-  action: string;
-  resolve: (result: CommandResult) => void;
   reject: (error: CommandError) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
-interface PendingUpload {
-  relayId: string;
+interface PendingRequest extends PendingOperation {
+  action: string;
+  resolve: (result: CommandResult) => void;
+}
+
+interface PendingUpload extends PendingOperation {
   filename: string;
   resolve: (path: string) => void;
-  reject: (error: CommandError) => void;
-  timer: ReturnType<typeof setTimeout>;
 }
 
 interface SlashCommandCacheEntry {
@@ -260,6 +273,12 @@ class RelayStore {
       reconnectTimer: null,
       healthTimer: null,
       updateRestartTimer: null,
+      e2eeHandshake: null,
+      e2eeSession: null,
+      e2eeTimer: null,
+      e2eeFailed: false,
+      sendQueue: Promise.resolve(),
+      receiveQueue: Promise.resolve(),
       closed: false,
       agentProfiles: [],
       capabilities: [],
@@ -280,10 +299,10 @@ class RelayStore {
     };
     this.connectionsValue.set(relay.id, connection);
     this.emitConnections();
-    const separator = relay.url.includes('?') ? '&' : '?';
-    const url = relay.token ? `${relay.url}${separator}token=${encodeURIComponent(relay.token)}` : relay.url;
     try {
-      connection.ws = new WebSocket(url);
+      connection.ws = relay.token
+        ? new WebSocket(relay.url, E2EE_SUBPROTOCOL)
+        : new WebSocket(relay.url);
     } catch {
       if (!this.isCurrentConnection(relay.id, connection)) return;
       connection.status = 'disconnected';
@@ -293,19 +312,30 @@ class RelayStore {
     }
     connection.ws.onopen = () => {
       if (!this.isCurrentConnection(relay.id, connection)) return;
-      connection.status = 'connected';
-      this.emitConnections();
-      if (runningAsInstalledApp()) {
-        this.sendRaw(relay.id, {
-          type: 'register_app_origin',
-          origin: location.origin,
-          protocol: APP_PROTOCOL_VERSION,
-        });
+      if (!relay.token) {
+        this.markConnectionReady(relay.id, connection);
+        return;
       }
-      this.sendRaw(relay.id, { type: 'refresh_agents' });
+      if (typeof connection.ws?.protocol === 'string'
+        && connection.ws.protocol !== E2EE_SUBPROTOCOL) {
+        this.failEncryptedConnection(relay, connection, 'Relay did not negotiate encrypted transport');
+        return;
+      }
+      connection.e2eeTimer = window.setTimeout(() => {
+        this.failEncryptedConnection(relay, connection, 'Encrypted relay handshake timed out');
+      }, E2EE_HANDSHAKE_TIMEOUT_MS);
+      void createE2EEClientHandshake(relay.token).then((handshake) => {
+        if (!this.isCurrentConnection(relay.id, connection)
+          || connection.ws?.readyState !== WebSocket.OPEN) return;
+        connection.e2eeHandshake = handshake;
+        connection.ws.send(JSON.stringify(handshake.hello));
+      }).catch(() => {
+        this.failEncryptedConnection(relay, connection, 'Could not start encrypted relay handshake');
+      });
     };
     connection.ws.onclose = () => {
       if (!this.isCurrentConnection(relay.id, connection)) return;
+      this.clearE2EETimer(connection);
       this.clearHealthTimer(connection);
       connection.status = 'disconnected';
       this.rejectPendingOperations(relay.id, 'Relay disconnected');
@@ -314,6 +344,7 @@ class RelayStore {
     };
     connection.ws.onerror = () => {
       if (!this.isCurrentConnection(relay.id, connection)) return;
+      this.clearE2EETimer(connection);
       connection.status = 'disconnected';
       this.rejectPendingOperations(relay.id, 'Relay connection failed');
       this.emitConnections();
@@ -321,14 +352,79 @@ class RelayStore {
     };
     connection.ws.onmessage = (event) => {
       if (!this.isCurrentConnection(relay.id, connection)) return;
-      this.clearHealthTimer(connection);
-      this.reconnectAttempts.delete(relay.id);
-      try {
-        this.handleMessage(relay.id, JSON.parse(String(event.data)) as Record<string, any>);
-      } catch {
-        // Ignore malformed relay frames without taking down other connections.
+      if (connection.e2eeFailed) return;
+      const rawMessage = String(event.data);
+      if (!relay.token) {
+        this.clearHealthTimer(connection);
+        this.reconnectAttempts.delete(relay.id);
+        try {
+          this.handleMessage(relay.id, JSON.parse(rawMessage) as Record<string, any>);
+        } catch {
+          // Ignore malformed plaintext frames used by tokenless loopback development.
+        }
+        return;
       }
+      connection.receiveQueue = connection.receiveQueue.then(async () => {
+        if (!this.isCurrentConnection(relay.id, connection) || connection.e2eeFailed) return;
+        if (!connection.e2eeSession) {
+          if (!connection.e2eeHandshake) throw new Error('Encrypted server hello arrived before client hello');
+          const completed = await connection.e2eeHandshake.complete(JSON.parse(rawMessage));
+          if (!this.isCurrentConnection(relay.id, connection)
+            || connection.e2eeFailed
+            || connection.ws?.readyState !== WebSocket.OPEN) return;
+          connection.e2eeSession = completed.session;
+          connection.e2eeHandshake = null;
+          connection.ws?.send(completed.finish);
+          this.markConnectionReady(relay.id, connection);
+          return;
+        }
+        const plaintext = await connection.e2eeSession.decrypt(rawMessage);
+        this.handleMessage(relay.id, JSON.parse(plaintext) as Record<string, any>);
+        this.clearHealthTimer(connection);
+        this.reconnectAttempts.delete(relay.id);
+      }).catch(() => {
+        this.failEncryptedConnection(relay, connection, 'Encrypted relay connection failed');
+      });
     };
+  }
+
+  private markConnectionReady(relayId: string, connection: RelayConnection): void {
+    if (!this.isCurrentConnection(relayId, connection)) return;
+    this.clearE2EETimer(connection);
+    connection.status = 'connected';
+    this.emitConnections();
+    if (runningAsInstalledApp()) {
+      this.sendRaw(relayId, {
+        type: 'register_app_origin',
+        origin: location.origin,
+        protocol: APP_PROTOCOL_VERSION,
+      });
+    }
+    this.sendRaw(relayId, { type: 'refresh_agents' });
+  }
+
+  private failEncryptedConnection(
+    relay: RelayConfig,
+    connection: RelayConnection,
+    reason: string,
+  ): void {
+    if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
+    connection.e2eeFailed = true;
+    connection.e2eeHandshake = null;
+    connection.e2eeSession = null;
+    this.clearE2EETimer(connection);
+    this.clearHealthTimer(connection);
+    connection.status = 'disconnected';
+    this.rejectPendingOperations(relay.id, reason);
+    this.emitConnections();
+    connection.ws?.close();
+    this.scheduleReconnect(relay, connection);
+  }
+
+  private clearE2EETimer(connection: RelayConnection): void {
+    if (!connection.e2eeTimer) return;
+    window.clearTimeout(connection.e2eeTimer);
+    connection.e2eeTimer = null;
   }
 
   disconnectRelay(id: string): void {
@@ -344,6 +440,7 @@ class RelayStore {
     connection.closed = true;
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
     this.clearHealthTimer(connection);
+    this.clearE2EETimer(connection);
     this.clearUpdateRestartTimer(connection);
     connection.ws?.close();
     this.rejectPendingOperations(id, 'Relay disconnected');
@@ -367,9 +464,7 @@ class RelayStore {
         connection.healthTimer = null;
         this.connectRelay(relay);
       }, timeoutMs);
-      try {
-        connection.ws.send(JSON.stringify({ type: 'refresh_agents' }));
-      } catch {
+      if (!this.sendRaw(relay.id, { type: 'refresh_agents' })) {
         this.clearHealthTimer(connection);
         this.connectRelay(relay);
       }
@@ -625,13 +720,7 @@ class RelayStore {
       });
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
-      if (watched) {
-        this.sendRaw(watched.relay_id, {
-          type: 'pane_applied',
-          pane_id: watched.raw_pane_id,
-          content_fingerprint: message.content_fingerprint,
-        });
-      }
+      if (watched) this.acknowledgePaneFrame(watched, message.content_fingerprint);
       return;
     }
     if (message.type === 'pane_content') {
@@ -648,15 +737,22 @@ class RelayStore {
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
       const watched = this.watchedPanes.get(paneId);
-      if (watched && message.ack_required && message.content_fingerprint) {
-        this.sendRaw(watched.relay_id, {
-          type: 'pane_applied',
-          pane_id: watched.raw_pane_id,
-          content_fingerprint: message.content_fingerprint,
-        });
+      const contentFingerprint = typeof message.content_fingerprint === 'string'
+        ? message.content_fingerprint
+        : '';
+      if (watched && message.ack_required && contentFingerprint) {
+        this.acknowledgePaneFrame(watched, contentFingerprint);
       }
       this.startPaneWatch(paneId);
     }
+  }
+
+  private acknowledgePaneFrame(agent: Agent, contentFingerprint: string): void {
+    this.sendRaw(agent.relay_id, {
+      type: 'pane_applied',
+      pane_id: agent.raw_pane_id,
+      content_fingerprint: contentFingerprint,
+    });
   }
 
   private mergePaneInteraction(paneId: string, message: Record<string, any>): void {
@@ -746,8 +842,26 @@ class RelayStore {
 
   sendRaw(relayId: string, payload: Record<string, unknown>): boolean {
     const connection = this.connectionsValue.get(relayId);
-    if (!connection?.ws || connection.ws.readyState !== 1) return false;
-    connection.ws.send(JSON.stringify(payload));
+    const socket = connection?.ws;
+    if (!connection || !socket || socket.readyState !== WebSocket.OPEN || connection.status !== 'connected') {
+      return false;
+    }
+    const plaintext = JSON.stringify(payload);
+    if (!connection.relay.token) {
+      socket.send(plaintext);
+      return true;
+    }
+    const session = connection.e2eeSession;
+    if (!session) return false;
+    connection.sendQueue = connection.sendQueue.then(async () => {
+      const encrypted = await session.encrypt(plaintext);
+      if (!this.isCurrentConnection(relayId, connection)
+        || connection.ws !== socket
+        || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(encrypted);
+    }).catch(() => {
+      this.failEncryptedConnection(connection.relay, connection, 'Could not encrypt relay message');
+    });
     return true;
   }
 
@@ -775,17 +889,15 @@ class RelayStore {
         reject(new CommandError('Relay did not confirm the command in time'));
       }, timeoutMs);
       this.pendingRequests.set(requestId, { relayId, action: payload.type, resolve, reject, timer });
-      try {
-        const command: Record<string, unknown> = {
-          ...payload,
-          request_id: requestId,
-          protocol: APP_PROTOCOL_VERSION,
-        };
-        if (payload.type !== 'lease_pane_size' && payload.type !== 'release_pane_size') {
-          command.client_id = pushClientId();
-        }
-        connection.ws?.send(JSON.stringify(command));
-      } catch {
+      const command: Record<string, unknown> = {
+        ...payload,
+        request_id: requestId,
+        protocol: APP_PROTOCOL_VERSION,
+      };
+      if (payload.type !== 'lease_pane_size' && payload.type !== 'release_pane_size') {
+        command.client_id = pushClientId();
+      }
+      if (!this.sendRaw(relayId, command)) {
         clearTimeout(timer);
         this.pendingRequests.delete(requestId);
         reject(new CommandError('Could not send command to relay'));
@@ -917,27 +1029,22 @@ class RelayStore {
     }
   }
 
-  private rejectPendingRequests(relayId: string, message: string): void {
-    for (const [requestId, pending] of this.pendingRequests) {
+  private rejectPending<T extends PendingOperation>(
+    operations: Map<string, T>,
+    relayId: string,
+    message: string,
+  ): void {
+    for (const [requestId, pending] of operations) {
       if (pending.relayId !== relayId) continue;
       clearTimeout(pending.timer);
-      this.pendingRequests.delete(requestId);
-      pending.reject(new CommandError(message));
-    }
-  }
-
-  private rejectPendingUploads(relayId: string, message: string): void {
-    for (const [requestId, pending] of this.pendingUploads) {
-      if (pending.relayId !== relayId) continue;
-      clearTimeout(pending.timer);
-      this.pendingUploads.delete(requestId);
+      operations.delete(requestId);
       pending.reject(new CommandError(message));
     }
   }
 
   private rejectPendingOperations(relayId: string, message: string): void {
-    this.rejectPendingRequests(relayId, message);
-    this.rejectPendingUploads(relayId, message);
+    this.rejectPending(this.pendingRequests, relayId, message);
+    this.rejectPending(this.pendingUploads, relayId, message);
   }
 
   async leasePaneSize(agent: Agent, columns: number): Promise<number> {
@@ -1157,8 +1264,8 @@ class RelayStore {
   }
 
   requestActivities(): void {
-    for (const connection of this.connectionsValue.values()) {
-      if (connection.ws?.readyState === 1) connection.ws.send(JSON.stringify({ type: 'get_activity', limit: 500 }));
+    for (const relayId of this.connectionsValue.keys()) {
+      this.sendRaw(relayId, { type: 'get_activity', limit: 500 });
     }
   }
 
@@ -1299,10 +1406,8 @@ class RelayStore {
     if (protocolError) throw new CommandError(protocolError);
     const requestId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const data = await readFileAsDataUrl(file);
-    const uploadSocket = connection.ws;
     if (!this.isCurrentConnection(agent.relay_id, connection)
-      || !uploadSocket
-      || uploadSocket.readyState !== WebSocket.OPEN) {
+      || connection.ws?.readyState !== WebSocket.OPEN) {
       throw new CommandError('Relay disconnected before the image could be uploaded.');
     }
     return new Promise((resolve, reject) => {
@@ -1317,18 +1422,16 @@ class RelayStore {
         reject,
         timer,
       });
-      try {
-        uploadSocket.send(JSON.stringify({
-          type: 'upload_image',
-          protocol: APP_PROTOCOL_VERSION,
-          request_id: requestId,
-          client_id: pushClientId(),
-          pane_id: agent.raw_pane_id,
-          filename: file.name || 'image',
-          mime: file.type || 'application/octet-stream',
-          data,
-        }));
-      } catch {
+      if (!this.sendRaw(agent.relay_id, {
+        type: 'upload_image',
+        protocol: APP_PROTOCOL_VERSION,
+        request_id: requestId,
+        client_id: pushClientId(),
+        pane_id: agent.raw_pane_id,
+        filename: file.name || 'image',
+        mime: file.type || 'application/octet-stream',
+        data,
+      })) {
         clearTimeout(timer);
         this.pendingUploads.delete(requestId);
         reject(new CommandError('Could not send image to relay.'));

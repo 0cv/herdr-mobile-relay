@@ -444,6 +444,19 @@ export function ansi256Color(index: number): string {
   return `rgb(${gray},${gray},${gray})`;
 }
 
+function ansiExtendedColor(codes: number[], position: number): { color: string; consumed: number } {
+  if (codes[position + 1] === 2 && codes.length > position + 4) {
+    return {
+      color: `rgb(${codes[position + 2]},${codes[position + 3]},${codes[position + 4]})`,
+      consumed: 4,
+    };
+  }
+  if (codes[position + 1] === 5 && codes.length > position + 2) {
+    return { color: ansi256Color(codes[position + 2]), consumed: 2 };
+  }
+  return { color: '', consumed: 0 };
+}
+
 function ansiStyleName(name: string): string {
   return ({
     fontWeight: 'font-weight',
@@ -495,20 +508,12 @@ export function ansiToHtml(
       else if (code === 39) delete styles.color;
       else if (code === 49) delete styles.backgroundColor;
       else if (code === 38 || code === 48) {
-        let color = '';
-        let consumed = 0;
-        if (codes[position + 1] === 2 && codes.length > position + 4) {
-          color = `rgb(${codes[position + 2]},${codes[position + 3]},${codes[position + 4]})`;
-          consumed = 4;
-        } else if (codes[position + 1] === 5 && codes.length > position + 2) {
-          color = ansi256Color(codes[position + 2]);
-          consumed = 2;
+        const extended = ansiExtendedColor(codes, position);
+        if (extended.color) {
+          if (code === 38) styles.color = normalizedAnsiForeground(extended.color, normalizeNearBlackForeground);
+          else styles.backgroundColor = normalizedAnsiBackground(extended.color, normalizeNearWhiteBackground);
         }
-        if (color) {
-          if (code === 38) styles.color = normalizedAnsiForeground(color, normalizeNearBlackForeground);
-          else styles.backgroundColor = normalizedAnsiBackground(color, normalizeNearWhiteBackground);
-          position += consumed;
-        }
+        position += extended.consumed;
       } else if (ANSI_COLORS[code]) {
         styles.color = normalizedAnsiForeground(ANSI_COLORS[code], normalizeNearBlackForeground);
       } else if (ANSI_COLORS[code - 10]) {
@@ -542,17 +547,12 @@ export function ansiLineBackground(line: string): string {
     for (let position = 0; position < codes.length; position += 1) {
       const code = codes[position];
       if (code === 38) {
-        if (codes[position + 1] === 2 && codes.length > position + 4) position += 4;
-        else if (codes[position + 1] === 5 && codes.length > position + 2) position += 2;
+        position += ansiExtendedColor(codes, position).consumed;
       } else if (code === 49) background = '';
       else if (code === 48) {
-        if (codes[position + 1] === 2 && codes.length > position + 4) {
-          background = `rgb(${codes[position + 2]},${codes[position + 3]},${codes[position + 4]})`;
-          position += 4;
-        } else if (codes[position + 1] === 5 && codes.length > position + 2) {
-          background = ansi256Color(codes[position + 2]);
-          position += 2;
-        }
+        const extended = ansiExtendedColor(codes, position);
+        if (extended.color) background = extended.color;
+        position += extended.consumed;
       } else if (ANSI_COLORS[code - 10]) background = ANSI_COLORS[code - 10];
     }
   }
@@ -571,8 +571,7 @@ export function ansiLineBackgroundIndent(line: string): number {
     for (let position = 0; position < codes.length; position += 1) {
       const code = codes[position];
       if (code === 38) {
-        if (codes[position + 1] === 2 && codes.length > position + 4) position += 4;
-        else if (codes[position + 1] === 5 && codes.length > position + 2) position += 2;
+        position += ansiExtendedColor(codes, position).consumed;
         continue;
       }
       if (code === 48 || ANSI_COLORS[code - 10]) {

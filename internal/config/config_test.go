@@ -39,6 +39,15 @@ func TestLoadRejectsTokenlessNonLoopback(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsShortRelayKey(t *testing.T) {
+	t.Setenv("HERDR_RELAY_TOKEN", "predictable")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for relay key shorter than 16 bytes")
+	}
+}
+
 func TestLoadAllowedOrigins(t *testing.T) {
 	t.Setenv("HERDR_ALLOWED_ORIGINS", "https://a.com, https://b.com ,")
 

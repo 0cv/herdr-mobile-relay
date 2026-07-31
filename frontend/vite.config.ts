@@ -1,6 +1,5 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
-import tailwindcss from '@tailwindcss/vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
@@ -81,7 +80,7 @@ function stableReleaseAssets(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [tailwindcss(), svelte(), stableReleaseAssets()],
+  plugins: [svelte(), stableReleaseAssets()],
   resolve: {
     alias: {
       $lib: fileURLToPath(new URL('./src/lib', import.meta.url)),

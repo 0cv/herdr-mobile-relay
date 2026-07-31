@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AgentLogo, { hasAgentLogo } from '$components/AgentLogo.svelte';
   import Button from '$components/ui/Button.svelte';
   import {
     agentStatusGroup,
@@ -53,6 +54,16 @@
   async function respond(agent: Agent, index: number, total: number, option: string) {
     await relayStore.respond(agent, index, total, option);
   }
+
+  function agentMeta(agent: Agent): string {
+    const tab = tabName(agent);
+    const labels = [
+      tab && tab !== displayName(agent) ? tab : '',
+      agent.session || '',
+    ].filter(Boolean);
+    if (agent.agent && !hasAgentLogo(agent.agent)) labels.push(agent.agent);
+    return labels.join(' · ');
+  }
 </script>
 
 <main class="agent-list" aria-label="Agents">
@@ -97,7 +108,7 @@
             {@const options = approvalOptions(agent)}
             {@const blocked = group === 'blocked'}
             {@const needsInspection = group === 'attention'}
-            {@const tab = tabName(agent)}
+            {@const meta = agentMeta(agent)}
           {@const inventoryReady = !connections.has(agent.relay_id) || connections.get(agent.relay_id)?.inventory.state === 'ready'}
           <article class:blocked class:stale={!inventoryReady} class="agent-card">
               <button
@@ -107,10 +118,13 @@
                 title={!inventoryReady ? 'This cached agent is unavailable until Herdr inventory recovers.' : undefined}
                 onclick={() => onopen(agent)}
               >
-                <span class={`status-dot status-${tone}`} class:hollow={group === 'ready'}></span>
+                <span class="agent-identity">
+                  <AgentLogo agent={agent.agent} />
+                  <span class={`status-dot status-${tone}`} class:hollow={group === 'ready'} aria-hidden="true"></span>
+                </span>
                 <span class="agent-copy">
                   <span class="agent-project">{displayName(agent)} <span class="host-badge">@{hostLabel(agent)}</span></span>
-                  <span class="agent-meta">{tab && tab !== displayName(agent) ? `${tab} · ` : ''}{agent.session ? `${agent.session} · ` : ''}{agent.agent || 'agent'}</span>
+                  {#if meta}<span class="agent-meta">{meta}</span>{/if}
                   {#if blocked || needsInspection}
                     <span class="prompt-preview">{interaction?.question || approvalPromptPreview(agent)}</span>
                   {/if}

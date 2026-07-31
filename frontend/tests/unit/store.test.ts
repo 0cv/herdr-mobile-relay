@@ -15,7 +15,7 @@ class MockWebSocket {
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
-  constructor(readonly url: string) { MockWebSocket.instances.push(this); }
+  constructor(readonly url: string, readonly protocols?: string | string[]) { MockWebSocket.instances.push(this); }
   send(payload: string) { this.sent.push(payload); }
   close() { this.readyState = MockWebSocket.CLOSED; }
   open() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
@@ -31,7 +31,7 @@ describe('relay command store', () => {
     relayStore.destroy();
     setTerminalRefreshInterval(250);
     relayStore.relayConfigs.set([]);
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: 'secret' });
+    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
   });
 
   afterEach(() => {
@@ -42,9 +42,9 @@ describe('relay command store', () => {
     vi.unstubAllGlobals();
   });
 
-  it('preserves auth URLs, protocol v2 command shapes, and confirmations', async () => {
+  it('preserves relay URLs, protocol v2 command shapes, and confirmations', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
-    expect(socket.url).toBe('wss://fedora.example?token=secret');
+    expect(socket.url).toBe('wss://fedora.example');
     socket.open();
     socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
@@ -54,6 +54,28 @@ describe('relay command store', () => {
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
+  });
+
+  it('keeps relay keys out of the WebSocket URL and waits for encrypted authentication', async () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    relayStore.addRelay({
+      label: 'Fedora',
+      url: 'wss://fedora.example/ws?region=test',
+      token: '0123456789abcdef0123456789abcdef',
+    });
+    const socket = MockWebSocket.instances.at(-1)!;
+    expect(socket.url).toBe('wss://fedora.example/ws?region=test');
+    expect(socket.protocols).toBe('herdr-e2ee-v1');
+    socket.open();
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    const hello = JSON.parse(socket.sent[0]);
+    expect(hello).toMatchObject({ type: 'e2ee_client_hello', version: 1 });
+    expect(socket.sent[0]).not.toContain('0123456789abcdef0123456789abcdef');
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    expect(get(relayStore.connections).get(relayId)?.status).toBe('connecting');
+    expect(relayStore.sendRaw(relayId, { type: 'refresh_agents' })).toBe(false);
   });
 
   it('acquires and releases validated pane-size leases for capable relays', async () => {
@@ -399,7 +421,7 @@ describe('relay command store', () => {
       removeListener: vi.fn(),
       dispatchEvent: vi.fn(),
     })));
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: 'secret' });
+    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
 
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -534,7 +556,7 @@ describe('relay command store', () => {
   });
 
   it('merges agents from independent relays without pane id collisions', () => {
-    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: 'secret' });
+    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });
     const [fedora, mac] = MockWebSocket.instances.slice(-2);
     fedora.open();
     mac.open();

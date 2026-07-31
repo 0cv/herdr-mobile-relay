@@ -287,6 +287,17 @@
     pendingLayoutStick = virtualStickToBottom;
   });
 
+  function resetVirtualScroll(element: HTMLElement, stick: boolean) {
+    virtualScrollResetPending = true;
+    virtualLayoutSignature = '';
+    const nextTop = resetVirtualRows(stick ? Number.POSITIVE_INFINITY : element.scrollTop);
+    void tick().then(() => {
+      element.scrollTop = stick ? element.scrollHeight : nextTop;
+      if (stick) virtualStickToBottom = true;
+      virtualScrollResetPending = false;
+    });
+  }
+
 
   $effect(() => {
     const element = terminalElement;
@@ -297,29 +308,15 @@
     untrack(() => {
       if (!renderedRows.length) return;
       const stick = virtualStickToBottom;
-      virtualScrollResetPending = true;
-      virtualLayoutSignature = '';
-      const nextTop = resetVirtualRows(stick ? Number.POSITIVE_INFINITY : element.scrollTop);
-      void tick().then(() => {
-        element.scrollTop = stick ? element.scrollHeight : nextTop;
-        if (stick) virtualStickToBottom = true;
-        virtualScrollResetPending = false;
-      });
+      resetVirtualScroll(element, stick);
     });
     const observer = new ResizeObserver(() => {
       const nextWidth = element.clientWidth;
       if (renderedRows.length && Math.abs(nextWidth - previousWidth) >= 1) {
         const stick = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
         virtualStickToBottom = stick;
-        virtualScrollResetPending = true;
         previousWidth = nextWidth;
-        virtualLayoutSignature = '';
-        const nextTop = resetVirtualRows(stick ? Number.POSITIVE_INFINITY : element.scrollTop);
-        void tick().then(() => {
-          element.scrollTop = stick ? element.scrollHeight : nextTop;
-          if (stick) virtualStickToBottom = true;
-          virtualScrollResetPending = false;
-        });
+        resetVirtualScroll(element, stick);
       } else scheduleVirtualWindow();
       requestPaneSizeLease(false);
     });
@@ -1112,6 +1109,23 @@
   }
 </script>
 
+{#snippet arrowIcon()}
+  <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M12 2v20M2 12h20"></path>
+    <path d="m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4"></path>
+  </svg>
+{/snippet}
+
+{#snippet arrowPopup()}
+  {#if arrowsOpen}
+    <div class="arrow-popup">
+      <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
+      <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
+      <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
+    </div>
+  {/if}
+{/snippet}
+
 <main
   class:has-actions={inputLocked || nextBlocked}
   class:question-only={questionMode}
@@ -1126,18 +1140,9 @@
       <span class="spacer"></span>
       <div class="arrow-menu">
         <Button variant="secondary" size="sm" aria-label="Arrow keys" aria-expanded={arrowsOpen} onclick={() => { arrowsOpen = !arrowsOpen; }}>
-          <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <path d="M12 2v20M2 12h20"></path>
-            <path d="m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4"></path>
-          </svg>
+          {@render arrowIcon()}
         </Button>
-        {#if arrowsOpen}
-          <div class="arrow-popup">
-            <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
-            <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
-            <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
-          </div>
-        {/if}
+        {@render arrowPopup()}
       </div>
       <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
     </div>
@@ -1331,18 +1336,9 @@
             arrowsOpen = !arrowsOpen;
           }}
         >
-          <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <path d="M12 2v20M2 12h20"></path>
-            <path d="m8 6 4-4 4 4M8 18l4 4 4-4M6 8l-4 4 4 4M18 8l4 4-4 4"></path>
-          </svg>
+          {@render arrowIcon()}
         </Button>
-        {#if arrowsOpen}
-          <div class="arrow-popup">
-            <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
-            <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
-            <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
-          </div>
-        {/if}
+        {@render arrowPopup()}
       </div>
       <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
     </div>

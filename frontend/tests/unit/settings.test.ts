@@ -60,7 +60,7 @@ describe('settings relay status', () => {
       checkedAt: 123,
       error: '',
     });
-    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: 'secret' });
+    relayStore.addRelay({ label: 'Fedora', url: 'wss://fedora.example', token: '' });
   });
 
   afterEach(() => {

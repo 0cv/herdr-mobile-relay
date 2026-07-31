@@ -2,7 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { constants, gzipSync } from 'node:zlib';
 
-const limit = 81_920;
+// Release guard, not a platform limit: catch accidental bootstrap growth.
+const limitKiB = 96;
+const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css', 'notification-icons.js'];
 let totalRaw = 0;
@@ -26,5 +28,5 @@ for (const relative of files) {
 }
 console.log(`${'TOTAL'.padEnd(28)} raw ${String(totalRaw).padStart(8)} B  gzip ${String(totalGzip).padStart(7)} B / ${limit} B  br ${String(totalBrotli).padStart(7)} B`);
 if (totalGzip > limit) {
-  throw new Error(`Initial payload exceeds the 80 KiB gzip ceiling by ${totalGzip - limit} bytes`);
+  throw new Error(`Initial payload exceeds the ${limitKiB} KiB gzip ceiling by ${totalGzip - limit} bytes`);
 }

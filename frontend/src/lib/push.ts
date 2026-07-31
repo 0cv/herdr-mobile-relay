@@ -1,4 +1,5 @@
 import { get, writable } from 'svelte/store';
+import { base64UrlDecode, base64UrlEncode } from './base64url';
 import {
   APP_PROTOCOL_VERSION,
   PUSH_ENABLED_KEY,
@@ -109,21 +110,10 @@ export async function showPageNotification(title: string, options: NotificationO
   }
 }
 
-function urlBase64ToUint8Array(value: string): Uint8Array<ArrayBuffer> {
-  const padding = '='.repeat((4 - value.length % 4) % 4);
-  const raw = atob((value + padding).replace(/-/g, '+').replace(/_/g, '/'));
-  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
-}
-
-function uint8ArrayToUrlBase64(bytes: Uint8Array): string {
-  let raw = '';
-  for (const byte of bytes) raw += String.fromCharCode(byte);
-  return btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
 
 function subscriptionApplicationServerKey(subscription: PushSubscription): string {
   const key = subscription.options.applicationServerKey;
-  return key ? uint8ArrayToUrlBase64(new Uint8Array(key)) : '';
+  return key ? base64UrlEncode(new Uint8Array(key)) : '';
 }
 
 async function legacyPushEndpoint(): Promise<string> {
@@ -168,13 +158,13 @@ export async function registerPushSubscription(relayId: string): Promise<boolean
     if (!subscription) {
       subscription = await registration.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(connection.vapidPublicKey),
+        applicationServerKey: base64UrlDecode(connection.vapidPublicKey),
       });
     }
     const legacy = await legacyPushEndpoint();
     if (legacy) replaced.push(legacy);
     localStorage.setItem(relayVapidStorageKey(relayId), connection.vapidPublicKey);
-    connection.ws.send(JSON.stringify({
+    if (!relayStore.sendRaw(relayId, {
       type: 'push_subscribe',
       protocol: APP_PROTOCOL_VERSION,
       subscription: subscription.toJSON(),
@@ -182,7 +172,7 @@ export async function registerPushSubscription(relayId: string): Promise<boolean
       replace_endpoints: [...new Set(replaced)],
       notify_finished: finishedNotificationsEnabled(),
       user_agent: navigator.userAgent,
-    }));
+    })) throw new Error('Relay disconnected before push subscription sync');
     relayStore.setPushStatus(relayId, 'sent');
     return true;
   } catch {
@@ -232,12 +222,12 @@ async function unsubscribePushSubscription(relayId: string): Promise<boolean> {
     // Relay-side cleanup still proceeds for any endpoint we could collect.
   }
   if (connection?.ws?.readyState === 1 && !relayProtocolError(connection)) {
-    connection.ws.send(JSON.stringify({
+    relayStore.sendRaw(relayId, {
       type: 'push_unsubscribe',
       protocol: APP_PROTOCOL_VERSION,
       client_id: `${pushClientId()}:${relayId}`,
       endpoints: [...new Set(endpoints)],
-    }));
+    });
   }
   localStorage.removeItem(relayVapidStorageKey(relayId));
   relayStore.setPushStatus(relayId, '');

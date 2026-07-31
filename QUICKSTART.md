@@ -27,7 +27,8 @@ Wait for the temporary tunnel, then choose:
 - **An existing installed Herdr app** to add this computer to an existing app.
 
 Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
-the relay token in the URL fragment. The app removes that fragment after import.
+the relay encryption key in the URL fragment. The fragment is not sent in the
+HTTP request, and the app removes it after import.
 
 Keep the Quick Start pane open. Ctrl-C stops both processes, and the next run
 creates a new hostname and setup link.

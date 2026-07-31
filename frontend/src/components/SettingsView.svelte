@@ -347,7 +347,7 @@
       <input id="relay-label" bind:value={relayLabel} placeholder="Fedora" />
       <label for="relay-url">Relay URL</label>
       <input id="relay-url" bind:value={relayUrl} type="url" required placeholder="wss://relay-fedora.example.com" />
-      <label for="relay-token">Token</label>
+      <label for="relay-token">Relay key</label>
       <input id="relay-token" bind:value={relayToken} type="password" placeholder="HERDR_RELAY_TOKEN" />
       <div class="form-actions">
         <Button type="submit">Add Relay</Button>
@@ -411,7 +411,7 @@
         </article>
       {/each}
     </div>
-    <p class="hint">Use one relay URL per computer. Relay tokens remain in this browser’s local storage.</p>
+    <p class="hint">Use one relay URL per computer. Relay keys stay in this browser’s local storage and encrypt relay messages end to end.</p>
   </Card>
 
   <Card>
