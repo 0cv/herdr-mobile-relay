@@ -29,12 +29,10 @@ import {
 } from './e2ee';
 import { terminalHistoryLines, terminalRefreshInterval } from './preferences';
 import {
-  clearPendingAppDeploy,
   clearPendingRelayUpdate,
   normalizeAppDeployment,
   normalizeRelayUpdate,
   observeAppUpstreamVersion,
-  rememberPendingAppDeploy,
   rememberPendingRelayUpdate,
 } from './updates';
 import type {
@@ -588,7 +586,6 @@ class RelayStore {
       this.syncUpdateRestartReconnect(relayId, connection);
       if (['failed', 'rolled_back'].includes(connection.update.state)) {
         clearPendingRelayUpdate(relayId);
-        clearPendingAppDeploy(relayId);
       }
       this.emitConnections();
       return;
@@ -944,6 +941,7 @@ class RelayStore {
         type: 'install_update',
         expected_version: update.available_version,
         expected_revision: update.target_revision,
+        expected_origin: location.origin,
       }, 30_000, true);
       if (result.data?.update && connection === this.connectionsValue.get(relayId)) {
         connection.update = normalizeRelayUpdate(
@@ -957,7 +955,6 @@ class RelayStore {
     } catch (error) {
       if (error instanceof CommandError && error.data?.update) {
         clearPendingRelayUpdate(relayId);
-        clearPendingAppDeploy(relayId);
         if (connection === this.connectionsValue.get(relayId)) {
           connection.update = normalizeRelayUpdate(
             error.data.update,
@@ -972,18 +969,6 @@ class RelayStore {
     }
   }
 
-  // Update the deployment-owner relay and, once it reconnects at the target
-  // version, deploy the app from it (continued in App.svelte on reconnect via
-  // the pending-app-deploy marker). Lets the phone drive both steps with one tap.
-  async updateRelayAndDeploy(relayId: string, targetVersion: string): Promise<void> {
-    rememberPendingAppDeploy(relayId, targetVersion);
-    try {
-      await this.installRelayUpdate(relayId);
-    } catch (error) {
-      clearPendingAppDeploy(relayId);
-      throw error;
-    }
-  }
 
   async deployAppUpdate(relayId: string, expectedVersion: string): Promise<void> {
     const connection = this.connectionsValue.get(relayId);

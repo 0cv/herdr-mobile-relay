@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	relayprotocol "github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"io"
 	"io/fs"
 	"os"
@@ -22,12 +23,14 @@ const (
 )
 
 type Manifest struct {
-	Schema   int               `json:"schema"`
-	Version  string            `json:"version"`
-	Revision string            `json:"revision"`
-	Target   string            `json:"target"`
-	WebHash  string            `json:"web_hash,omitempty"`
-	Files    map[string]string `json:"files"`
+	Schema          int               `json:"schema"`
+	Version         string            `json:"version"`
+	Revision        string            `json:"revision"`
+	Target          string            `json:"target"`
+	WebHash         string            `json:"web_hash,omitempty"`
+	AppTransports   []string          `json:"app_transports,omitempty"`
+	RelayTransports []string          `json:"relay_transports,omitempty"`
+	Files           map[string]string `json:"files"`
 }
 
 func CurrentTarget() string {
@@ -214,11 +217,13 @@ func Build(root, version, revision, target string) (Manifest, error) {
 		return Manifest{}, err
 	}
 	manifest := Manifest{
-		Schema:   ManifestSchema,
-		Version:  version,
-		Revision: revision,
-		Target:   target,
-		Files:    files,
+		Schema:          ManifestSchema,
+		Version:         version,
+		Revision:        revision,
+		Target:          target,
+		AppTransports:   []string{relayprotocol.EncryptedWebSocketSubprotocol},
+		RelayTransports: []string{relayprotocol.EncryptedWebSocketSubprotocol},
+		Files:           files,
 	}
 	manifest.WebHash = hashFileMap(files, "web/")
 	if err := writeManifest(root, manifest); err != nil {

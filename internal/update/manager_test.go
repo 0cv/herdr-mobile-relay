@@ -64,6 +64,8 @@ func TestManagerReconcilesStaleAvailableStateFromPreviousRuntime(t *testing.T) {
 		context.Background(),
 		"0.10.1",
 		nextTestRevision,
+		false,
+		"",
 	); err == nil || scheduled.State != "current" {
 		t.Fatalf("same-version schedule result = %#v, error = %v", scheduled, err)
 	}
@@ -159,7 +161,13 @@ func TestManagerSchedulesExactHerdrPluginJob(t *testing.T) {
 		return nil
 	}
 
-	jobID, state, err := manager.Schedule(context.Background(), "1.2.4", nextTestRevision)
+	jobID, state, err := manager.Schedule(
+		context.Background(),
+		"1.2.4",
+		nextTestRevision,
+		true,
+		"https://app.example.test",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +181,9 @@ func TestManagerSchedulesExactHerdrPluginJob(t *testing.T) {
 	if job.HerdrBin != herdrBin ||
 		job.TargetVersion != "1.2.4" ||
 		job.TargetRevision != nextTestRevision ||
-		job.ReleaseRoot != releaseRoot {
+		job.ReleaseRoot != releaseRoot ||
+		!job.DeployAppFirst ||
+		job.ExpectedAppOrigin != "https://app.example.test" {
 		t.Fatalf("job = %#v", job)
 	}
 }

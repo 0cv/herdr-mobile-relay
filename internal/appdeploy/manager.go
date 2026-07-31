@@ -43,6 +43,7 @@ type Manager struct {
 	npxPath    string
 	nodeDir    string
 	reason     string
+	required   bool
 
 	mu     sync.Mutex
 	launch func(context.Context, string) error
@@ -50,15 +51,18 @@ type Manager struct {
 
 func NewManager(runtimeDir, webRoot, version, revision string) *Manager {
 	recoverAppDeployState(runtimeDir, true)
+	originValue := strings.TrimSpace(os.Getenv("HERDR_APP_DEPLOY_ORIGIN"))
+	projectValue := strings.TrimSpace(os.Getenv("HERDR_CLOUDFLARE_PAGES_PROJECT"))
 	manager := &Manager{
 		runtimeDir: runtimeDir,
 		webRoot:    webRoot,
 		version:    version,
 		revision:   revision,
-		project:    strings.ToLower(strings.TrimSpace(os.Getenv("HERDR_CLOUDFLARE_PAGES_PROJECT"))),
+		project:    strings.ToLower(projectValue),
 		branch:     strings.TrimSpace(os.Getenv("HERDR_CLOUDFLARE_PAGES_BRANCH")),
 		npxPath:    strings.TrimSpace(os.Getenv("HERDR_APP_DEPLOY_NPX")),
 		nodeDir:    strings.TrimSpace(os.Getenv("HERDR_APP_DEPLOY_NODE_DIR")),
+		required:   originValue != "" || projectValue != "",
 	}
 	manifest, manifestErr := release.Load(filepath.Dir(webRoot))
 	if manifestErr != nil {
@@ -72,7 +76,7 @@ func NewManager(runtimeDir, webRoot, version, revision string) *Manager {
 		manager.branch = "main"
 	}
 	var originReason string
-	manager.origin, originReason = configuredOrigin(os.Getenv("HERDR_APP_DEPLOY_ORIGIN"))
+	manager.origin, originReason = configuredOrigin(originValue)
 	if manager.reason == "" {
 		manager.reason = originReason
 	}
@@ -97,10 +101,51 @@ func NewManager(runtimeDir, webRoot, version, revision string) *Manager {
 	return manager
 }
 
+// Required reports whether this relay owns a separately deployed phone app.
+// Invalid partial configuration remains required so relay updates fail closed
+// instead of upgrading past an app that could not be deployed first.
+func (m *Manager) Required() bool {
+	return m.required
+}
+
+// ValidateOrigin pins a phone-triggered deployment to this relay's configured
+// public app origin.
+func (m *Manager) ValidateOrigin(expected string) error {
+	if m.reason != "" {
+		return errors.New(m.reason)
+	}
+	if expected == "" || expected != m.origin {
+		return errors.New("The requested app deployment does not match the configured origin")
+	}
+	return nil
+}
+
 func RunConfigured(ctx context.Context, runtimeDir, webRoot, version, revision string) error {
+	return runConfigured(ctx, runtimeDir, webRoot, version, revision, "")
+}
+
+func RunConfiguredAtOrigin(
+	ctx context.Context,
+	runtimeDir, webRoot, version, revision, expectedOrigin string,
+) error {
+	if expectedOrigin == "" {
+		return errors.New("The expected app origin is required")
+	}
+	return runConfigured(ctx, runtimeDir, webRoot, version, revision, expectedOrigin)
+}
+
+func runConfigured(
+	ctx context.Context,
+	runtimeDir, webRoot, version, revision, expectedOrigin string,
+) error {
 	manager := NewManager(runtimeDir, webRoot, version, revision)
 	if manager.reason != "" {
 		return errors.New(manager.reason)
+	}
+	if expectedOrigin != "" {
+		if err := manager.ValidateOrigin(expectedOrigin); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		return err

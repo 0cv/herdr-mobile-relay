@@ -47,6 +47,12 @@ func TestBuildAndVerifyManifest(t *testing.T) {
 	if manifest.WebHash == "" {
 		t.Fatal("web hash is empty")
 	}
+	if len(manifest.AppTransports) != 1 ||
+		manifest.AppTransports[0] != "herdr-e2ee-v1" ||
+		len(manifest.RelayTransports) != 1 ||
+		manifest.RelayTransports[0] != "herdr-e2ee-v1" {
+		t.Fatalf("transport capabilities = app %v, relay %v", manifest.AppTransports, manifest.RelayTransports)
+	}
 	verified, err := Verify(root, "linux/amd64")
 	if err != nil {
 		t.Fatal(err)

@@ -18,10 +18,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
+
+	relayprotocol "github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 const (
-	e2eeSubprotocol             = "herdr-e2ee-v1"
+	e2eeSubprotocol             = relayprotocol.EncryptedWebSocketSubprotocol
 	e2eeVersion                 = 1
 	e2eeHandshakeTimeout        = 10 * time.Second
 	e2eeNonceBytes              = 32

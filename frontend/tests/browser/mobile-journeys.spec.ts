@@ -524,6 +524,7 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
   expect(install).toMatchObject({
     expected_version: '0.8.0',
     expected_revision: 'f'.repeat(40),
+    expected_origin: 'http://127.0.0.1:4173',
     protocol: 2,
   });
   await server(page, 0, {
@@ -623,6 +624,50 @@ test('confirms deployment when an authorized relay has the upstream app bundle',
     expected_revision: 'f'.repeat(40),
     expected_origin: 'http://127.0.0.1:4173',
   });
+});
+
+test('deploys a Pages app before updating its owner relay', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    release_version: '8.0.0',
+    revision: 'abc1234',
+    capabilities: ['directory_browser', 'self_update', 'app_deploy'],
+    update: {
+      state: 'available',
+      current_version: '8.0.0',
+      current_revision: 'abc1234',
+      available_version: '9.0.0',
+      available_revision: 'f'.repeat(12),
+      target_revision: 'f'.repeat(40),
+      upstream_version: '9.0.0',
+      can_install: true,
+      mode: 'plugin',
+    },
+    app_deploy: {
+      configured: true,
+      origin: 'http://127.0.0.1:4173',
+      project: 'herdr-app',
+      branch: 'main',
+      revision: 'abc1234',
+      state: 'idle',
+    },
+  });
+
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: 'Deploy app & update relay' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Deploy app & update relay' });
+  await expect(dialog).toContainText('The current relay remains available while Pages deploys.');
+  await dialog.getByRole('button', { name: 'Deploy & Update' }).click();
+
+  await expect.poll(async () =>
+    (await commands(page)).some((command) => command.type === 'install_update')).toBe(true);
+  expect((await commands(page)).find((command) => command.type === 'install_update')).toMatchObject({
+    expected_version: '9.0.0',
+    expected_revision: 'f'.repeat(40),
+    expected_origin: 'http://127.0.0.1:4173',
+  });
+  expect((await commands(page)).some((command) => command.type === 'deploy_app_update')).toBe(false);
 });
 
 test('applies relay-watched terminal deltas and pauses the watcher when hidden', async ({ page }) => {

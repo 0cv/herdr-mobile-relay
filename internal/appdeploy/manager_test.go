@@ -58,6 +58,15 @@ func TestManagerRejectsPhoneOverrides(t *testing.T) {
 	if !manager.State().Configured {
 		t.Fatalf("state = %#v", manager.State())
 	}
+	if !manager.Required() {
+		t.Fatal("configured app deployment was not marked as required")
+	}
+	if err := manager.ValidateOrigin("https://app.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ValidateOrigin("https://other.example.test"); err == nil {
+		t.Fatal("phone origin override passed validation")
+	}
 	if _, _, err := manager.Schedule(context.Background(), "1.2.3", "abc", "https://other.example.test"); err == nil {
 		t.Fatal("phone origin override was accepted")
 	}

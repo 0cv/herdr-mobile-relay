@@ -295,4 +295,62 @@ describe('settings relay status', () => {
       expected_origin: location.origin,
     });
   });
+  it('deploys the owner app before updating its relay', async () => {
+    const user = userEvent.setup();
+    appUpdateStatus.set({
+      state: 'deployment-required',
+      currentVersion: APP_VERSION,
+      currentAssets: APP_ASSET_VERSION,
+      deployedVersion: APP_VERSION,
+      deployedAssets: APP_ASSET_VERSION,
+      upstreamVersion: '9.0.0',
+      upstreamAssets: 999,
+      checkedAt: 123,
+      error: '',
+    });
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config',
+      protocol: 2,
+      release_version: '8.0.0',
+      revision: 'abc123',
+      capabilities: ['self_update', 'app_deploy'],
+      agent_profiles: [],
+      update: {
+        state: 'available',
+        current_version: '8.0.0',
+        current_revision: 'abc123',
+        available_version: '9.0.0',
+        available_revision: 'f'.repeat(12),
+        target_revision: 'f'.repeat(40),
+        can_install: true,
+        mode: 'plugin',
+      },
+      app_deploy: {
+        configured: true,
+        origin: location.origin,
+        project: 'herdr-app',
+        branch: 'main',
+        revision: 'abc123',
+        state: 'idle',
+      },
+    });
+
+    await user.click(await screen.findByRole('button', { name: 'Deploy app & update relay' }));
+    const dialog = screen.getByRole('dialog', { name: 'Deploy app & update relay' });
+    expect(dialog).toHaveTextContent('The current relay remains available while Pages deploys.');
+    await user.click(within(dialog).getByRole('button', { name: 'Deploy & Update' }));
+    const commands = socket.sent.map((payload) => JSON.parse(payload));
+    const command = commands.find((message) => message.type === 'install_update');
+
+    expect(command).toMatchObject({
+      expected_version: '9.0.0',
+      expected_revision: 'f'.repeat(40),
+      expected_origin: location.origin,
+    });
+    expect(commands.some((message) => message.type === 'deploy_app_update')).toBe(false);
+  });
+
 });

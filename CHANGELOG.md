@@ -5,6 +5,23 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-31
+
+### Changed
+
+- From relays running this release onward, deploy and publicly verify a
+  separately hosted Cloudflare Pages phone app before installing its
+  deployment-owner relay update. Download, compatibility, or deployment
+  failures leave the current relay running.
+
+### Security
+
+- Declare phone-app and relay transport capabilities in verified release
+  manifests, and refuse upgrades that cannot preserve connectivity in both
+  app-first and relay-first rollout windows without a bridge release. This
+  release retains E2EE v1 for compatibility with the previous app during the
+  upgrade into it.
+
 ## [0.13.0] - 2026-07-31
 
 ### Added
@@ -118,7 +135,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.2...v0.12.0
 [0.11.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.1...v0.11.2

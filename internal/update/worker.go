@@ -16,6 +16,7 @@ import (
 	"time"
 
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 )
 
 const (
@@ -26,12 +27,14 @@ const (
 var ErrConcurrent = errors.New("another update is already running")
 
 type Job struct {
-	ReleaseRoot    string `json:"release_root"`
-	HerdrBin       string `json:"herdr_bin"`
-	TargetVersion  string `json:"target_version"`
-	TargetRevision string `json:"target_revision"`
-	StatePath      string `json:"state_path"`
-	HealthURL      string `json:"health_url"`
+	ReleaseRoot       string `json:"release_root"`
+	HerdrBin          string `json:"herdr_bin"`
+	TargetVersion     string `json:"target_version"`
+	TargetRevision    string `json:"target_revision"`
+	StatePath         string `json:"state_path"`
+	HealthURL         string `json:"health_url"`
+	DeployAppFirst    bool   `json:"deploy_app_first,omitempty"`
+	ExpectedAppOrigin string `json:"expected_app_origin,omitempty"`
 }
 
 type State struct {
@@ -54,8 +57,14 @@ type State struct {
 	Reason            string `json:"reason,omitempty"`
 	Error             string `json:"error,omitempty"`
 }
+type stagedRelease struct {
+	Root     string
+	Manifest relayrelease.Manifest
+}
 
 type Worker struct {
+	Prepare func(context.Context, Job) (stagedRelease, error)
+	Deploy  func(context.Context, Job, stagedRelease) error
 	Install func(context.Context, Job) error
 	Verify  func(context.Context, string, relayrelease.Manifest) error
 }
@@ -103,6 +112,33 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 		_ = lock.Close()
 	}()
+	state.State = "preparing"
+	if err := writeState(job.StatePath, state); err != nil {
+		return fmt.Errorf("write preparing state: %w", err)
+	}
+	prepare := w.Prepare
+	if prepare == nil {
+		prepare = prepareTargetRelease
+	}
+	staged, prepareErr := prepare(ctx, job)
+	if prepareErr != nil {
+		return fail(job.StatePath, state, fmt.Errorf("prepare target release: %w", prepareErr))
+	}
+	defer os.RemoveAll(staged.Root)
+
+	if job.DeployAppFirst {
+		state.State = "deploying_app"
+		if err := writeState(job.StatePath, state); err != nil {
+			return fmt.Errorf("write app deployment state: %w", err)
+		}
+		deploy := w.Deploy
+		if deploy == nil {
+			deploy = deployStagedApp
+		}
+		if err := deploy(ctx, job, staged); err != nil {
+			return fail(job.StatePath, state, fmt.Errorf("deploy target app before relay: %w", err))
+		}
+	}
 
 	state.State = "installing"
 	if err := writeState(job.StatePath, state); err != nil {
@@ -124,10 +160,7 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 	if verify == nil {
 		verify = verifyHealth
 	}
-	expected := relayrelease.Manifest{
-		Version:  job.TargetVersion,
-		Revision: job.TargetRevision,
-	}
+	expected := staged.Manifest
 	if err := verify(ctx, job.HealthURL, expected); err != nil {
 		return fail(job.StatePath, state, fmt.Errorf("verify Herdr plugin update: %w", err))
 	}
@@ -200,6 +233,14 @@ func validateJob(job Job) error {
 	}
 	if job.StatePath == "" || !filepath.IsAbs(job.StatePath) {
 		return errors.New("state_path must be absolute")
+	}
+	if job.DeployAppFirst {
+		origin, originErr := setuphelper.NormalizeOrigin(job.ExpectedAppOrigin, false)
+		if originErr != nil || origin != job.ExpectedAppOrigin {
+			return errors.New("expected_app_origin must be a canonical HTTPS origin")
+		}
+	} else if job.ExpectedAppOrigin != "" {
+		return errors.New("expected_app_origin requires an app-first update")
 	}
 	health, err := url.Parse(job.HealthURL)
 	if err != nil || health.Scheme != "http" || !isLoopback(health.Hostname()) {
@@ -315,13 +356,15 @@ func verifyHealth(ctx context.Context, healthURL string, manifest relayrelease.M
 				Status         string `json:"status"`
 				ReleaseVersion string `json:"release_version"`
 				Revision       string `json:"revision"`
+				BundleHash     string `json:"bundle_hash"`
 			}
 			decodeErr := json.NewDecoder(io.LimitReader(response.Body, 64*1024)).Decode(&health)
 			response.Body.Close()
 			if decodeErr == nil && response.StatusCode == http.StatusOK &&
 				health.Status == "ok" &&
 				health.ReleaseVersion == manifest.Version &&
-				strings.EqualFold(health.Revision, manifest.Revision) {
+				strings.EqualFold(health.Revision, manifest.Revision) &&
+				(manifest.WebHash == "" || strings.EqualFold(health.BundleHash, manifest.WebHash)) {
 				return nil
 			}
 		}

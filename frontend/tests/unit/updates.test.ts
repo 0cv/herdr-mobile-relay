@@ -5,16 +5,13 @@ import {
   appUpdateAvailable,
   appUpdateStatus,
   checkAppUpdate,
-  clearPendingAppDeploy,
   clearPendingRelayUpdate,
   newerBundle,
   newerVersion,
   normalizeAppDeployment,
   normalizeRelayUpdate,
   observeAppUpstreamVersion,
-  pendingAppDeploy,
   pendingRelayUpdate,
-  rememberPendingAppDeploy,
   rememberPendingRelayUpdate,
   semverTuple,
 } from '$lib/updates';
@@ -67,6 +64,8 @@ describe('release updates', () => {
       available_version: '0.8.0',
       can_install: true,
     });
+    expect(normalizeRelayUpdate({ state: 'preparing' }).state).toBe('preparing');
+    expect(normalizeRelayUpdate({ state: 'deploying_app' }).state).toBe('deploying_app');
     expect(normalizeRelayUpdate({ state: 'anything' }).state).toBe('unsupported');
   });
 
@@ -166,11 +165,4 @@ describe('release updates', () => {
     expect(pendingRelayUpdate('fedora')).toBeNull();
   });
 
-  it('remembers a queued app deploy across a relay update reconnect', () => {
-    rememberPendingAppDeploy('fedora', '0.8.3');
-    expect(pendingAppDeploy('fedora')).toBe('0.8.3');
-    expect(pendingAppDeploy('other')).toBeNull();
-    clearPendingAppDeploy('fedora');
-    expect(pendingAppDeploy('fedora')).toBeNull();
-  });
 });

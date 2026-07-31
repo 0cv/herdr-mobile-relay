@@ -151,7 +151,12 @@ func (m *Manager) Check(ctx context.Context) State {
 	return m.publicState(m.state)
 }
 
-func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevision string) (string, State, error) {
+func (m *Manager) Schedule(
+	ctx context.Context,
+	expectedVersion, expectedRevision string,
+	deployAppFirst bool,
+	expectedAppOrigin string,
+) (string, State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current := m.loadState()
@@ -180,12 +185,14 @@ func (m *Manager) Schedule(ctx context.Context, expectedVersion, expectedRevisio
 	}
 	jobPath := filepath.Join(m.runtimeDir, fmt.Sprintf("update-job-%d.json", time.Now().UnixNano()))
 	job := Job{
-		ReleaseRoot:    m.releaseRoot,
-		HerdrBin:       m.herdrBin,
-		TargetVersion:  m.metadata.Version,
-		TargetRevision: m.metadata.Revision,
-		StatePath:      m.statePath(),
-		HealthURL:      m.healthURL,
+		ReleaseRoot:       m.releaseRoot,
+		HerdrBin:          m.herdrBin,
+		TargetVersion:     m.metadata.Version,
+		TargetRevision:    m.metadata.Revision,
+		StatePath:         m.statePath(),
+		HealthURL:         m.healthURL,
+		DeployAppFirst:    deployAppFirst,
+		ExpectedAppOrigin: expectedAppOrigin,
 	}
 	if err := writeJSONAtomic(jobPath, job); err != nil {
 		return "", m.publicState(m.state), fmt.Errorf("persist update job: %w", err)
@@ -500,8 +507,9 @@ func parseSemver(value string) ([3]int, bool) {
 
 func validState(value string) bool {
 	switch value {
-	case "current", "checking", "available", "blocked", "scheduled", "installing",
-		"restarting", "recovering", "succeeded", "failed", "rolled_back", "unsupported":
+	case "current", "checking", "available", "blocked", "scheduled", "preparing",
+		"deploying_app", "installing", "restarting", "recovering", "succeeded",
+		"failed", "rolled_back", "unsupported":
 		return true
 	default:
 		return false
@@ -510,7 +518,7 @@ func validState(value string) bool {
 
 func transientUpdateState(value string) bool {
 	switch value {
-	case "scheduled", "installing", "restarting", "recovering":
+	case "scheduled", "preparing", "deploying_app", "installing", "restarting", "recovering":
 		return true
 	default:
 		return false

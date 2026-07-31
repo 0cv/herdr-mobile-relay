@@ -151,6 +151,8 @@ export type RelayUpdateState =
   | 'available'
   | 'blocked'
   | 'scheduled'
+  | 'preparing'
+  | 'deploying_app'
   | 'installing'
   | 'restarting'
   | 'succeeded'

@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.13.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.13.0) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.13.1`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.13.1) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -135,8 +135,17 @@ remains.
 
 The relay-hosted app updates with its relay. For a separately hosted Cloudflare
 Pages app, configure exactly one stable relay as deployment owner with the
-`configure-app-deploy` action. That optional role requires Node.js 24 and
-Cloudflare credentials on the deployment-owner computer only.
+`configure-app-deploy` action. From relays running this release onward, the
+worker downloads and verifies the target release without activating it, checks
+that the current and target apps and relays share a transport, deploys the
+target web bundle, and verifies the public Pages version. Only then does it
+install and restart the relay. A failed download, compatibility check,
+deployment, or public-origin check leaves the current relay running.
+Transport-breaking changes require a bridge release that supports both
+transports. This release retains the existing E2EE v1 transport, so the upgrade
+into it remains compatible with the previous phone app. The optional
+deployment-owner role requires Node.js 24 and Cloudflare credentials on that
+computer only.
 
 ## Local Development
 

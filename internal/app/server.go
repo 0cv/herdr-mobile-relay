@@ -270,7 +270,22 @@ func (s *Server) Run(ctx context.Context) error {
 			s.hub.Broadcast(map[string]any{"type": "update_status", "update": updateState})
 			s.sendCommandResult(client, inbound.RequestID, "check_update", true, "completed", "", "", map[string]any{"update": updateState})
 		case "install_update":
-			job, updateState, scheduleErr := s.updateM.Schedule(ctx, inbound.ExpectedVersion, inbound.ExpectedRevision)
+			deployAppFirst := s.appDeployM.Required()
+			expectedAppOrigin := ""
+			if deployAppFirst {
+				if originErr := s.appDeployM.ValidateOrigin(inbound.ExpectedOrigin); originErr != nil {
+					s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", originErr.Error(), "", map[string]any{"update": s.updateM.State()})
+					break
+				}
+				expectedAppOrigin = inbound.ExpectedOrigin
+			}
+			job, updateState, scheduleErr := s.updateM.Schedule(
+				ctx,
+				inbound.ExpectedVersion,
+				inbound.ExpectedRevision,
+				deployAppFirst,
+				expectedAppOrigin,
+			)
 			if scheduleErr != nil {
 				s.sendCommandResult(client, inbound.RequestID, "install_update", false, "failed", scheduleErr.Error(), "", map[string]any{"update": updateState})
 				break

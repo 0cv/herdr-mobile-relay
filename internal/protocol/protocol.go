@@ -5,7 +5,10 @@ import (
 	"fmt"
 )
 
-const Version = 2
+const (
+	Version                       = 2
+	EncryptedWebSocketSubprotocol = "herdr-e2ee-v1"
+)
 
 var mutatingTypes = map[string]bool{
 	"answer_question":     true,

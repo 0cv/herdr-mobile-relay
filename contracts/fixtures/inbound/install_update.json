@@ -2,5 +2,6 @@
   "type": "install_update",
   "request_id": "req-install-update",
   "expected_version": "0.9.0",
-  "expected_revision": "0123456789abcdef0123456789abcdef01234567"
+  "expected_revision": "0123456789abcdef0123456789abcdef01234567",
+  "expected_origin": "https://app.example.test"
 }

@@ -103,7 +103,7 @@
     && connection.appDeploy.origin === location.origin
   )));
   // The owner relay is behind the released app version but can self-update to
-  // exactly that version, so a single action can update it and then deploy.
+  // exactly that version, so one action can deploy the app before updating it.
   const ownerUpdateReady = $derived.by(() => {
     const connection = appDeploymentOwner?.connection;
     if (!connection || connection.releaseVersion === $appUpdate.upstreamVersion) return false;
@@ -182,11 +182,20 @@
         warning: true,
       };
     }
-    if (['scheduled', 'installing', 'restarting'].includes(update.state)) {
-      const label = update.state === 'scheduled'
-        ? 'Update scheduled…'
-        : update.state === 'installing' ? 'Installing update…' : 'Restarting relay…';
-      return { label, detail: 'The phone connection may briefly disconnect.', warning: true };
+    if (update.state === 'scheduled') {
+      return { label: 'Update scheduled…', detail: 'Preparing the verified release.', warning: true };
+    }
+    if (update.state === 'preparing') {
+      return { label: 'Verifying update…', detail: 'Checking release identity and transport compatibility.', warning: true };
+    }
+    if (update.state === 'deploying_app') {
+      return { label: 'Deploying phone app…', detail: 'The relay updates only after the public app is verified.', warning: true };
+    }
+    if (update.state === 'installing') {
+      return { label: 'Installing update…', detail: 'The phone connection may briefly disconnect.', warning: true };
+    }
+    if (update.state === 'restarting') {
+      return { label: 'Restarting relay…', detail: 'The phone connection may briefly disconnect.', warning: true };
     }
     if (update.state === 'succeeded') {
       return { label: 'Update installed', detail: `Running v${update.current_version}`, warning: false };
@@ -296,8 +305,8 @@
     if (!owner || !$appUpdate.upstreamVersion) return;
     busyRelayId = owner.relay.id;
     try {
-      await relayStore.updateRelayAndDeploy(owner.relay.id, $appUpdate.upstreamVersion);
-      relayStore.showToast(`Updating ${owner.relay.label}; the app will deploy once it reconnects.`);
+      await relayStore.installRelayUpdate(owner.relay.id);
+      relayStore.showToast(`Deploying the app, then updating ${owner.relay.label}.`);
     } catch (error) {
       relayStore.showToast((error as Error).message, true);
     } finally {
@@ -386,7 +395,7 @@
               <Button
                 variant="secondary"
                 size="sm"
-                disabled={connectionStatus !== 'connected' || busyRelayId === relay.id || ['scheduled', 'installing', 'restarting'].includes(connection.update.state)}
+                disabled={connectionStatus !== 'connected' || busyRelayId === relay.id || ['scheduled', 'preparing', 'deploying_app', 'installing', 'restarting'].includes(connection.update.state)}
                 aria-label={`Check ${relay.label} for updates`}
                 onclick={() => checkRelayUpdate(relay.id)}
               >Check</Button>
@@ -502,15 +511,17 @@
         Version {$appUpdate.upstreamVersion} is released, but this app origin still serves {$appUpdate.deployedVersion}.
       </p>
       {#if appDeploymentOwner}
-        {#if ['scheduled', 'deploying'].includes(appDeploymentOwner.connection?.appDeploy.state || '')}
+        {#if ['scheduled', 'preparing', 'deploying_app', 'installing', 'restarting'].includes(appDeploymentOwner.connection?.update.state || '')}
+          <p class="hint" role="status">Safe update in progress: Pages is verified before the relay restarts.</p>
+        {:else if ['scheduled', 'deploying'].includes(appDeploymentOwner.connection?.appDeploy.state || '')}
           <p class="hint" role="status">Deploying from {appDeploymentOwner.relay.label}…</p>
         {:else if appDeploymentOwner.connection?.appDeploy.state === 'failed'}
           <p class="warning" role="status">Deployment failed: {appDeploymentOwner.connection.appDeploy.error}</p>
         {:else if appDeploymentOwner.connection?.releaseVersion !== $appUpdate.upstreamVersion}
           {#if ownerUpdateReady}
-            <p class="hint">{appDeploymentOwner.relay.label} can update to {$appUpdate.upstreamVersion} and deploy in one step.</p>
+            <p class="hint">{appDeploymentOwner.relay.label} can deploy the app and update to {$appUpdate.upstreamVersion} in one safe step.</p>
           {:else}
-            <p class="hint">Update {appDeploymentOwner.relay.label} to {$appUpdate.upstreamVersion} first, then deploy the app.</p>
+            <p class="hint">No installable v{$appUpdate.upstreamVersion} relay update is available from {appDeploymentOwner.relay.label} yet.</p>
           {/if}
         {:else}
           <p class="hint">{appDeploymentOwner.relay.label} is authorized to deploy this app origin.</p>
@@ -537,7 +548,7 @@
         <Button
           disabled={busyRelayId === appDeploymentOwner?.relay.id}
           onclick={requestUpdateAndDeploy}
-        >Update relay &amp; deploy</Button>
+        >Deploy app &amp; update relay</Button>
       {/if}
       <Button disabled={$appUpdate.state !== 'reload-ready'} onclick={reloadApp}>Reload App</Button>
     </div>
@@ -548,14 +559,14 @@
 <AppDialog
   id="update-and-deploy-dialog"
   bind:open={updateDeployOpen}
-  title="Update relay &amp; deploy"
+  title="Deploy app &amp; update relay"
   description={appDeploymentOwner
-    ? `Update ${appDeploymentOwner.relay.label} to v${$appUpdate.upstreamVersion || 'unknown'}, then deploy the app to ${appDeploymentOwner.connection?.appDeploy.origin || 'the configured origin'}?`
+    ? `Deploy v${$appUpdate.upstreamVersion || 'unknown'} to ${appDeploymentOwner.connection?.appDeploy.origin || 'the configured origin'}, verify it, then update ${appDeploymentOwner.relay.label}?`
     : 'The deployment relay is unavailable.'}
 >
-  <p class="hint">The phone disconnects briefly while the relay updates and restarts. Once it reconnects at v{$appUpdate.upstreamVersion}, the app deploys automatically and Herdr reloads after the public origin is verified.</p>
+  <p class="hint">The current relay remains available while Pages deploys. Herdr verifies the public origin before installing and restarting the relay.</p>
   <div class="dialog-actions">
-    <Button disabled={!appDeploymentOwner} onclick={updateRelayAndDeploy}>Update &amp; Deploy</Button>
+    <Button disabled={!appDeploymentOwner} onclick={updateRelayAndDeploy}>Deploy &amp; Update</Button>
     <Button variant="ghost" onclick={() => { updateDeployOpen = false; }}>Cancel</Button>
   </div>
 </AppDialog>

@@ -344,6 +344,7 @@ describe('relay command store', () => {
       type: 'install_update',
       expected_version: '0.8.0',
       expected_revision: 'f'.repeat(40),
+      expected_origin: location.origin,
       protocol: 2,
     });
     socket.message({
