@@ -23,6 +23,14 @@ import (
 
 const canonicalAPI = "https://api.github.com/repos/0cv/herdr-mobile-relay"
 
+var appDeployEnvironmentKeys = [...]string{
+	"HERDR_APP_DEPLOY_ORIGIN",
+	"HERDR_CLOUDFLARE_PAGES_PROJECT",
+	"HERDR_CLOUDFLARE_PAGES_BRANCH",
+	"HERDR_APP_DEPLOY_NPX",
+	"HERDR_APP_DEPLOY_NODE_DIR",
+}
+
 var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
 type Manager struct {
@@ -319,27 +327,50 @@ func (m *Manager) eligibility() (bool, string, string) {
 	return true, "plugin", ""
 }
 
+type workerLaunch struct {
+	application string
+	args        []string
+}
+
+func updateWorkerLaunch(
+	goos, label, executable, jobPath string,
+	lookupEnv func(string) (string, bool),
+) workerLaunch {
+	assignments := make([]string, 0, len(appDeployEnvironmentKeys))
+	for _, key := range appDeployEnvironmentKeys {
+		value, present := lookupEnv(key)
+		if present && strings.TrimSpace(value) != "" {
+			assignments = append(assignments, key+"="+value)
+		}
+	}
+
+	worker := []string{executable, "update-worker", jobPath}
+	if goos == "darwin" {
+		args := []string{"submit", "-l", label, "--"}
+		if len(assignments) > 0 {
+			args = append(args, "/usr/bin/env")
+			args = append(args, assignments...)
+		}
+		args = append(args, worker...)
+		return workerLaunch{application: "launchctl", args: args}
+	}
+
+	args := []string{"--user", "--collect", "--unit=" + label}
+	for _, assignment := range assignments {
+		args = append(args, "--setenv="+assignment)
+	}
+	args = append(args, worker...)
+	return workerLaunch{application: "systemd-run", args: args}
+}
+
 func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	label := fmt.Sprintf("herdr-mobile-relay-update-%d", time.Now().Unix())
-	var command *exec.Cmd
-	if runtime.GOOS == "darwin" {
-		command = exec.CommandContext(ctx, "launchctl", "submit", "-l", label, "--", executable, "update-worker", jobPath)
-	} else {
-		command = exec.CommandContext(
-			ctx,
-			"systemd-run",
-			"--user",
-			"--collect",
-			"--unit="+label,
-			executable,
-			"update-worker",
-			jobPath,
-		)
-	}
+	launch := updateWorkerLaunch(runtime.GOOS, label, executable, jobPath, os.LookupEnv)
+	command := exec.CommandContext(ctx, launch.application, launch.args...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("schedule update worker: %s: %s", err, compact(string(output), 300))

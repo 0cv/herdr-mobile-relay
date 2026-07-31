@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.3] - 2026-07-31
+
+### Fixed
+
+- Preserve separately hosted app deployment settings when the managed updater
+  hands off to its detached worker, so app-first relay updates no longer fail
+  after their release bundle is verified.
+
 ## [0.13.2] - 2026-07-31
 
 ### Changed
@@ -151,7 +159,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.3...HEAD
+[0.13.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.12.0...v0.13.0

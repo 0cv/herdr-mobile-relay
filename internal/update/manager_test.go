@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,46 @@ func TestNewerVersion(t *testing.T) {
 		NewerVersion("1.2.3", "1.2.3") ||
 		NewerVersion("latest", "1.2.3") {
 		t.Fatal("semantic version comparison failed")
+	}
+}
+
+func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
+	values := map[string]string{
+		"HERDR_APP_DEPLOY_ORIGIN":        "https://app.example.test",
+		"HERDR_CLOUDFLARE_PAGES_PROJECT": "relay-app",
+		"HERDR_CLOUDFLARE_PAGES_BRANCH":  "main",
+		"HERDR_APP_DEPLOY_NPX":           "/opt/node/bin/npx",
+		"HERDR_APP_DEPLOY_NODE_DIR":      "/opt/node/bin",
+		"CLOUDFLARE_API_TOKEN":           "must-not-be-forwarded",
+	}
+	lookup := func(key string) (string, bool) {
+		value, found := values[key]
+		return value, found
+	}
+	assignments := []string{
+		"HERDR_APP_DEPLOY_ORIGIN=https://app.example.test",
+		"HERDR_CLOUDFLARE_PAGES_PROJECT=relay-app",
+		"HERDR_CLOUDFLARE_PAGES_BRANCH=main",
+		"HERDR_APP_DEPLOY_NPX=/opt/node/bin/npx",
+		"HERDR_APP_DEPLOY_NODE_DIR=/opt/node/bin",
+	}
+
+	linux := updateWorkerLaunch("linux", "relay-update", "/opt/relay", "/tmp/job.json", lookup)
+	linuxArgs := []string{"--user", "--collect", "--unit=relay-update"}
+	for _, assignment := range assignments {
+		linuxArgs = append(linuxArgs, "--setenv="+assignment)
+	}
+	linuxArgs = append(linuxArgs, "/opt/relay", "update-worker", "/tmp/job.json")
+	if linux.application != "systemd-run" || !slices.Equal(linux.args, linuxArgs) {
+		t.Fatalf("linux launch = %#v, want application systemd-run args %#v", linux, linuxArgs)
+	}
+
+	darwin := updateWorkerLaunch("darwin", "relay-update", "/opt/relay", "/tmp/job.json", lookup)
+	darwinArgs := []string{"submit", "-l", "relay-update", "--", "/usr/bin/env"}
+	darwinArgs = append(darwinArgs, assignments...)
+	darwinArgs = append(darwinArgs, "/opt/relay", "update-worker", "/tmp/job.json")
+	if darwin.application != "launchctl" || !slices.Equal(darwin.args, darwinArgs) {
+		t.Fatalf("darwin launch = %#v, want application launchctl args %#v", darwin, darwinArgs)
 	}
 }
 
