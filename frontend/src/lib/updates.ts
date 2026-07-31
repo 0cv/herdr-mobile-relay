@@ -5,6 +5,7 @@ import type { AppDeploymentStatus, AppUpdateStatus, RelayUpdateStatus } from './
 const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const APP_RECHECK_INTERVAL_MS = 60 * 1_000;
 const PENDING_RELAY_UPDATES_KEY = 'herdr_pending_relay_updates';
+const UPDATE_PROGRESS_KEY = 'herdr_update_progress';
 const AUTO_RELOAD_VERSION_KEY = 'herdr_auto_reload_version';
 const RELAY_UPDATE_STATES = new Set([
   'checking',
@@ -21,6 +22,16 @@ const RELAY_UPDATE_STATES = new Set([
   'rolled_back',
 ]);
 
+export interface UpdateProgressPlan {
+  targetVersion: string;
+  relayIds: string[];
+  startedRelayIds: string[];
+  relayStartedAt: Record<string, number>;
+  appRelayId: string;
+  errors: Record<string, string>;
+  startedAt: number;
+}
+
 export const appUpdateStatus = writable<AppUpdateStatus>({
   state: 'checking',
   currentVersion: APP_VERSION,
@@ -32,6 +43,8 @@ export const appUpdateStatus = writable<AppUpdateStatus>({
   checkedAt: 0,
   error: '',
 });
+
+export const updateProgressPlan = writable<UpdateProgressPlan | null>(null);
 
 let checking: Promise<AppUpdateStatus> | null = null;
 let relayUpstreamVersion = APP_VERSION;
@@ -262,4 +275,109 @@ export async function reloadUpdatedSameOriginApp(version: string): Promise<boole
 
 export function reloadApp(): void {
   location.reload();
+}
+
+function saveUpdateProgress(plan: UpdateProgressPlan | null): void {
+  updateProgressPlan.set(plan);
+  try {
+    if (plan) sessionStorage.setItem(UPDATE_PROGRESS_KEY, JSON.stringify(plan));
+    else sessionStorage.removeItem(UPDATE_PROGRESS_KEY);
+  } catch {
+    // The in-memory screen still works when storage is unavailable.
+  }
+}
+
+function normalizeUpdateProgress(value: unknown): UpdateProgressPlan | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  const targetVersion = String(candidate.targetVersion || '');
+  if (!semverTuple(targetVersion)) return null;
+  const relayIds = Array.isArray(candidate.relayIds)
+    ? [...new Set(candidate.relayIds.map(String).filter(Boolean))].slice(0, 32)
+    : [];
+  if (!relayIds.length) return null;
+  const startedRelayIds = Array.isArray(candidate.startedRelayIds)
+    ? [...new Set(candidate.startedRelayIds.map(String).filter((id) => relayIds.includes(id)))].slice(0, 32)
+    : [];
+  const startedAt = Number.isFinite(Number(candidate.startedAt)) ? Number(candidate.startedAt) : Date.now();
+  const rawRelayStartedAt = candidate.relayStartedAt && typeof candidate.relayStartedAt === 'object'
+    ? candidate.relayStartedAt as Record<string, unknown>
+    : {};
+  const relayStartedAt = Object.fromEntries(startedRelayIds.map((relayId) => {
+    const timestamp = Number(rawRelayStartedAt[relayId]);
+    return [relayId, Number.isFinite(timestamp) ? timestamp : startedAt];
+  }));
+  const rawErrors = candidate.errors && typeof candidate.errors === 'object'
+    ? candidate.errors as Record<string, unknown>
+    : {};
+  const errors = Object.fromEntries(
+    Object.entries(rawErrors)
+      .filter(([relayId]) => relayIds.includes(relayId))
+      .map(([relayId, error]) => [relayId, String(error).slice(0, 500)]),
+  );
+  const appRelayId = relayIds.includes(String(candidate.appRelayId || ''))
+    ? String(candidate.appRelayId)
+    : '';
+  return {
+    targetVersion,
+    relayIds,
+    startedRelayIds,
+    relayStartedAt,
+    appRelayId,
+    errors,
+    startedAt,
+  };
+}
+
+export function restoreUpdateProgress(): void {
+  try {
+    saveUpdateProgress(normalizeUpdateProgress(JSON.parse(sessionStorage.getItem(UPDATE_PROGRESS_KEY) || 'null')));
+  } catch {
+    saveUpdateProgress(null);
+  }
+}
+
+export function beginUpdateProgress(
+  targetVersion: string,
+  relayIds: string[],
+  startedRelayId: string,
+  appRelayId = '',
+): void {
+  const plan = normalizeUpdateProgress({
+    targetVersion,
+    relayIds,
+    startedRelayIds: [startedRelayId],
+    relayStartedAt: { [startedRelayId]: Date.now() },
+    appRelayId,
+    errors: {},
+    startedAt: Date.now(),
+  });
+  if (plan) saveUpdateProgress(plan);
+}
+
+export function markUpdateProgressRelayStarted(relayId: string): void {
+  const plan = get(updateProgressPlan);
+  if (!plan || !plan.relayIds.includes(relayId)) return;
+  saveUpdateProgress({
+    ...plan,
+    startedRelayIds: [...new Set([...plan.startedRelayIds, relayId])],
+    relayStartedAt: { ...plan.relayStartedAt, [relayId]: Date.now() },
+    errors: Object.fromEntries(Object.entries(plan.errors).filter(([id]) => id !== relayId)),
+  });
+}
+
+export function setUpdateProgressError(relayId: string, error: unknown): void {
+  const plan = get(updateProgressPlan);
+  if (!plan || !plan.relayIds.includes(relayId)) return;
+  saveUpdateProgress({
+    ...plan,
+    errors: {
+      ...plan.errors,
+      [relayId]: error instanceof Error ? error.message : String(error || 'Update command failed'),
+    },
+  });
+}
+
+export function clearUpdateProgress(): void {
+  saveUpdateProgress(null);
 }

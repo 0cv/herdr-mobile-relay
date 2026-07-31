@@ -169,7 +169,7 @@ async function setAutoCommands(page: Page, enabled: boolean) {
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
   await server(page, index, {
     type: 'push_config', protocol: 2, version: 'abc1234', host: index ? 'mac' : 'fedora',
-    capabilities: ['attention_classification', 'clear_activities', 'directory_browser', 'structured_questions', 'slash_commands'],
+    capabilities: ['attention_classification', 'clear_activities', 'directory_browser', 'self_update', 'structured_questions', 'slash_commands'],
     agent_profiles: [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
     ...overrides,
   });
@@ -335,9 +335,13 @@ test('sorts a cold idle snapshot by the latest Herdr activity', async ({ page })
 test('reconnects and blocks mutations for an incompatible relay protocol', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, { protocol: 1, version: 'old' });
+  await handshake(page, 0, {
+    protocol: 1,
+    version: 'old',
+    capabilities: ['attention_classification', 'clear_activities', 'directory_browser', 'structured_questions', 'slash_commands'],
+  });
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Old relay', agent: 'codex', options: ['Approve once', 'Deny'] }] });
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Settings, relay update needs attention' }).click();
   await expect(page.getByText(/Relay outdated/)).toBeVisible();
   await page.getByRole('button', { name: 'How to update Fedora' }).click();
   const updateHelp = page.getByRole('dialog', { name: 'Update Fedora' });
@@ -482,15 +486,17 @@ test('checks every self-updating relay automatically after connection', async ({
     });
   }
 
-  await page.getByRole('button', { name: 'Settings, update available' }).click();
-  await expect(page.getByText(`This app matches upstream version ${APP_RELEASE}.`)).toBeVisible();
+  await page.getByRole('button', { name: 'Settings, relay update available' }).click();
+  await expect(page.getByText(`Phone app is current at v${APP_RELEASE}.`)).toBeVisible();
+  await expect(page.getByText('2 relay updates are available.')).toBeVisible();
   await expect(page.getByText(`Update v${APP_RELEASE} available`)).toHaveCount(2);
-  await expect(page.getByRole('button', { name: `Update Fedora to version ${APP_RELEASE}` })).toBeEnabled();
-  await expect(page.getByRole('button', { name: `Update Mac to version ${APP_RELEASE}` })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Update Relays' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: /^Update (Fedora|Mac)/ })).toHaveCount(0);
 });
 
 test('confirms and tracks one relay update through its verified reconnect', async ({ page }) => {
   await boot(page, [fedora]);
+  const origin = new URL(page.url()).origin;
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
     release_version: '0.7.0',
@@ -509,14 +515,15 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
     },
   });
 
-  await page.getByRole('button', { name: 'Settings, update available' }).click();
+  await page.getByRole('button', { name: 'Settings, relay update available' }).click();
   await expect(page.getByText('Update v0.8.0 available')).toBeVisible();
   await expect(page.getByText(`Phone app version ${APP_RELEASE}`)).toBeVisible();
-  await page.getByRole('button', { name: 'Update Fedora to version 0.8.0' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Update Relay' });
-  await expect(dialog).toContainText('Update Fedora from v0.7.0 to v0.8.0?');
-  await page.evaluate(() => (window as any).__relayAutoCommands(false));
-  await dialog.getByRole('button', { name: 'Update Relay' }).click();
+  await page.getByRole('button', { name: 'Update Relays' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Update Relays' });
+  await expect(dialog).toContainText('Update Fedora first');
+  await setAutoCommands(page, false);
+  await dialog.getByRole('button', { name: 'Start Update' }).click();
+  const progress = page.getByRole('dialog', { name: 'Updating Herdr' });
 
   await expect.poll(async () =>
     (await commands(page)).filter((command) => command.type === 'install_update').length).toBe(1);
@@ -524,7 +531,7 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
   expect(install).toMatchObject({
     expected_version: '0.8.0',
     expected_revision: 'f'.repeat(40),
-    expected_origin: 'http://127.0.0.1:4173',
+    expected_origin: origin,
     protocol: 2,
   });
   await server(page, 0, {
@@ -554,7 +561,7 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
       },
     },
   });
-  await expect(page.getByText('Update scheduled…')).toBeVisible();
+  await expect(progress).toContainText('Update scheduled…');
 
   await server(page, 0, {
     type: 'update_status',
@@ -567,7 +574,7 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
       mode: 'local',
     },
   });
-  await expect(page.getByText('Restarting relay…')).toBeVisible();
+  await expect(progress).toContainText('Restarting relay…');
   await expect.poll(() => socketCount(page)).toBe(2);
   await handshake(page, 1, {
     host: 'fedora',
@@ -584,12 +591,183 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
     },
   });
 
-  await expect(page.getByRole('status').filter({ hasText: 'Fedora updated to v0.8.0.' })).toBeVisible();
-  await expect(page.getByText('Update installed')).toBeVisible();
+  const complete = page.getByRole('dialog', { name: 'Update complete' });
+  await expect(complete).toContainText('Updated to v0.8.0');
+  await expect(complete.getByRole('button', { name: 'Close' })).toBeVisible();
+});
+
+test('resumes fleet progress and updates the second relay automatically', async ({ page }) => {
+  const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: '' };
+  const previousVersion = '0.12.0';
+  const availableUpdate = {
+    state: 'available',
+    current_version: previousVersion,
+    current_revision: 'abc1234',
+    available_version: APP_RELEASE,
+    available_revision: 'f'.repeat(40),
+    target_revision: 'f'.repeat(40),
+    upstream_version: APP_RELEASE,
+    can_install: true,
+    mode: 'plugin',
+  };
+  await boot(page, [fedora, mac]);
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await setAutoCommands(page, true);
+  await handshake(page, 0, {
+    release_version: previousVersion,
+    capabilities: ['directory_browser', 'self_update'],
+    update: availableUpdate,
+  });
+  await handshake(page, 1, {
+    release_version: previousVersion,
+    capabilities: ['directory_browser', 'self_update'],
+    update: availableUpdate,
+  });
+
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: 'Update Relays' }).click();
+  const confirmation = page.getByRole('dialog', { name: 'Update Relays' });
+  await expect(confirmation).toContainText('Update Fedora first');
+  await confirmation.getByRole('button', { name: 'Start Update' }).click();
+
+  let progress = page.getByRole('dialog', { name: 'Updating Herdr' });
+  await expect(progress).toContainText('Starting update…');
+  await expect(progress).toContainText('Verify release');
+  await expect(progress).toContainText('Install relay');
+  await expect(progress).toContainText('Reconnect');
+  await expect(progress.getByRole('button', { name: 'Finish Later' })).toHaveCount(0);
+  expect((await commandsForSocket(page, 0)).find((command) => command.type === 'install_update')).toMatchObject({
+    expected_version: APP_RELEASE,
+    expected_revision: 'f'.repeat(40),
+  });
+
+  await server(page, 0, {
+    type: 'update_status',
+    update: { ...availableUpdate, state: 'preparing' },
+  });
+  await expect(progress).toContainText('Verifying release…');
+  await server(page, 0, {
+    type: 'update_status',
+    update: { ...availableUpdate, state: 'restarting' },
+  });
+  await expect(progress).toContainText('Restarting relay…');
+  await page.evaluate(() => {
+    const relayWindow = window as unknown as { __relayClose(index: number): void };
+    relayWindow.__relayClose(0);
+  });
+  await expect.poll(() => socketCount(page)).toBe(3);
+  await handshake(page, 2, {
+    release_version: APP_RELEASE,
+    revision: 'f'.repeat(40),
+    capabilities: ['directory_browser', 'self_update'],
+    update: {
+      state: 'succeeded',
+      current_version: APP_RELEASE,
+      current_revision: 'f'.repeat(40),
+      can_install: false,
+      mode: 'plugin',
+    },
+  });
+
+  await expect.poll(async () =>
+    (await commandsForSocket(page, 1)).some((command) => command.type === 'install_update')).toBe(true);
+  progress = page.getByRole('dialog', { name: 'Updating Herdr' });
+  await expect(progress).toContainText(`Updated to v${APP_RELEASE}`);
+  await expect(progress).toContainText('Mac');
+  await expect(progress.getByRole('button', { name: 'Update', exact: true })).toHaveCount(0);
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect.poll(() => socketCount(page)).toBe(2);
+  await setAutoCommands(page, true);
+  await handshake(page, 0, {
+    release_version: APP_RELEASE,
+    revision: 'f'.repeat(40),
+    capabilities: ['directory_browser', 'self_update'],
+    update: {
+      state: 'succeeded',
+      current_version: APP_RELEASE,
+      current_revision: 'f'.repeat(40),
+      can_install: false,
+      mode: 'plugin',
+    },
+  });
+  await handshake(page, 1, {
+    release_version: previousVersion,
+    capabilities: ['directory_browser', 'self_update'],
+    update: availableUpdate,
+  });
+
+  progress = page.getByRole('dialog', { name: 'Updating Herdr' });
+  await expect(progress).toContainText('updates relays one at a time');
+  await server(page, 1, {
+    type: 'update_status',
+    update: { ...availableUpdate, state: 'installing' },
+  });
+  await expect(progress).toContainText('Installing relay…');
+  await handshake(page, 1, {
+    release_version: APP_RELEASE,
+    revision: 'f'.repeat(40),
+    capabilities: ['directory_browser', 'self_update'],
+    update: {
+      state: 'succeeded',
+      current_version: APP_RELEASE,
+      current_revision: 'f'.repeat(40),
+      can_install: false,
+      mode: 'plugin',
+    },
+  });
+
+  progress = page.getByRole('dialog', { name: 'Update complete' });
+  await expect(progress).toContainText('2 of 2 update items complete');
+  await progress.getByRole('button', { name: 'Close' }).click();
+  await expect(progress).toHaveCount(0);
+});
+
+test('keeps a failed relay online and offers an explicit close action', async ({ page }) => {
+  const availableUpdate = {
+    state: 'available',
+    current_version: '0.12.0',
+    current_revision: 'abc1234',
+    available_version: APP_RELEASE,
+    available_revision: 'f'.repeat(40),
+    target_revision: 'f'.repeat(40),
+    upstream_version: APP_RELEASE,
+    can_install: true,
+    mode: 'plugin',
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await setAutoCommands(page, true);
+  await handshake(page, 0, {
+    release_version: '0.12.0',
+    capabilities: ['directory_browser', 'self_update'],
+    update: availableUpdate,
+  });
+
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: 'Update Relays' }).click();
+  await page.getByRole('dialog', { name: 'Update Relays' }).getByRole('button', { name: 'Start Update' }).click();
+  await expect(page.getByRole('dialog', { name: 'Updating Herdr' })).toBeVisible();
+  await server(page, 0, {
+    type: 'update_status',
+    update: {
+      ...availableUpdate,
+      state: 'failed',
+      error: 'Release signature did not match; the current relay is still running.',
+    },
+  });
+
+  const progress = page.getByRole('dialog', { name: 'Update needs attention' });
+  await expect(progress.getByRole('alert')).toContainText('Release signature did not match; the current relay is still running.');
+  await expect(progress.getByRole('button', { name: 'Close' })).toBeVisible();
+  await progress.getByRole('button', { name: 'Close' }).click();
+  await expect(progress).toHaveCount(0);
+  await expect(page.getByRole('img', { name: 'Fedora relay connected' })).toBeVisible();
 });
 
 test('confirms deployment when an authorized relay has the upstream app bundle', async ({ page }) => {
   await boot(page, [fedora]);
+  const origin = new URL(page.url()).origin;
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
     release_version: '9.0.0',
@@ -602,7 +780,7 @@ test('confirms deployment when an authorized relay has the upstream app bundle',
     },
     app_deploy: {
       configured: true,
-      origin: 'http://127.0.0.1:4173',
+      origin,
       project: 'herdr-app',
       branch: 'main',
       revision: 'f'.repeat(40),
@@ -612,22 +790,39 @@ test('confirms deployment when an authorized relay has the upstream app bundle',
 
   await page.getByRole('button', { name: /Settings/ }).click();
   await expect(page.getByText(`Version 9.0.0 is released, but this app origin still serves ${APP_RELEASE}.`)).toBeVisible();
-  await page.getByRole('button', { name: 'Deploy App' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Deploy Phone App' });
-  await expect(dialog).toContainText('Deploy app version 9.0.0 from Fedora');
-  await dialog.getByRole('button', { name: 'Deploy App' }).click();
+  await page.getByRole('button', { name: 'Update Herdr' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Update Herdr' });
+  await expect(dialog).toContainText('Publish the phone app from Fedora');
+  await dialog.getByRole('button', { name: 'Start Update' }).click();
 
   await expect.poll(async () =>
     (await commands(page)).some((command) => command.type === 'deploy_app_update')).toBe(true);
   expect((await commands(page)).find((command) => command.type === 'deploy_app_update')).toMatchObject({
     expected_version: '9.0.0',
     expected_revision: 'f'.repeat(40),
-    expected_origin: 'http://127.0.0.1:4173',
+    expected_origin: origin,
   });
+  const publishing = 'Publishing v9.0.0 from Fedora and waiting for this app origin to update. This can take up to two minutes.';
+  for (const state of ['scheduled', 'deploying']) {
+    await server(page, 0, {
+      type: 'app_deploy_status',
+      app_deploy: {
+        configured: true,
+        origin,
+        project: 'herdr-app',
+        branch: 'main',
+        revision: 'f'.repeat(40),
+        state,
+        target_version: '9.0.0',
+      },
+    });
+    await expect(page.getByText(publishing)).toBeVisible();
+  }
 });
 
 test('deploys a Pages app before updating its owner relay', async ({ page }) => {
   await boot(page, [fedora]);
+  const origin = new URL(page.url()).origin;
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
     release_version: '8.0.0',
@@ -646,7 +841,7 @@ test('deploys a Pages app before updating its owner relay', async ({ page }) => 
     },
     app_deploy: {
       configured: true,
-      origin: 'http://127.0.0.1:4173',
+      origin,
       project: 'herdr-app',
       branch: 'main',
       revision: 'abc1234',
@@ -655,17 +850,17 @@ test('deploys a Pages app before updating its owner relay', async ({ page }) => 
   });
 
   await page.getByRole('button', { name: /Settings/ }).click();
-  await page.getByRole('button', { name: 'Deploy app & update relay' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Deploy app & update relay' });
-  await expect(dialog).toContainText('The current relay remains available while Pages deploys.');
-  await dialog.getByRole('button', { name: 'Deploy & Update' }).click();
+  await page.getByRole('button', { name: 'Update Herdr' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Update Herdr' });
+  await expect(dialog).toContainText('Publish the phone app first, then update Fedora');
+  await dialog.getByRole('button', { name: 'Start Update' }).click();
 
   await expect.poll(async () =>
     (await commands(page)).some((command) => command.type === 'install_update')).toBe(true);
   expect((await commands(page)).find((command) => command.type === 'install_update')).toMatchObject({
     expected_version: '9.0.0',
     expected_revision: 'f'.repeat(40),
-    expected_origin: 'http://127.0.0.1:4173',
+    expected_origin: origin,
   });
   expect((await commands(page)).some((command) => command.type === 'deploy_app_update')).toBe(false);
 });

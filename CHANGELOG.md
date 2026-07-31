@@ -5,6 +5,22 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-07-31
+
+### Changed
+
+- Replace competing app and per-relay update controls with one source-specific
+  safe update action, and distinguish current phone-app status from available
+  relay updates. The persistent progress screen publishes the phone app first
+  when required, updates relays one at a time, survives reloads, and shows
+  terminal errors with an explicit close action.
+
+### Fixed
+
+- Keep Cloudflare Pages deployments in progress while the public app origin
+  converges on the verified bundle, instead of reporting a stale edge response
+  as a failed deployment that succeeds when retried.
+
 ## [0.13.1] - 2026-07-31
 
 ### Changed
@@ -135,7 +151,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.11.2...v0.12.0

@@ -3,22 +3,29 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { APP_ASSET_VERSION, APP_VERSION } from '$lib/config';
 import {
   appUpdateAvailable,
+  beginUpdateProgress,
   appUpdateStatus,
   checkAppUpdate,
   clearPendingRelayUpdate,
+  clearUpdateProgress,
   newerBundle,
   newerVersion,
   normalizeAppDeployment,
   normalizeRelayUpdate,
+  markUpdateProgressRelayStarted,
   observeAppUpstreamVersion,
   pendingRelayUpdate,
   rememberPendingRelayUpdate,
   semverTuple,
+  restoreUpdateProgress,
+  setUpdateProgressError,
+  updateProgressPlan,
 } from '$lib/updates';
 
 describe('release updates', () => {
   afterEach(() => {
     sessionStorage.clear();
+    clearUpdateProgress();
     vi.restoreAllMocks();
   });
 
@@ -163,6 +170,31 @@ describe('release updates', () => {
     });
     clearPendingRelayUpdate('fedora');
     expect(pendingRelayUpdate('fedora')).toBeNull();
+  });
+
+  it('persists fleet update progress across reloads with per-relay start times', () => {
+    beginUpdateProgress('1.2.3', ['fedora', 'mac'], 'fedora', 'fedora');
+    const first = get(updateProgressPlan)!;
+    expect(first).toMatchObject({
+      targetVersion: '1.2.3',
+      relayIds: ['fedora', 'mac'],
+      startedRelayIds: ['fedora'],
+      appRelayId: 'fedora',
+      errors: {},
+    });
+    expect(first.relayStartedAt.fedora).toEqual(expect.any(Number));
+
+    markUpdateProgressRelayStarted('mac');
+    setUpdateProgressError('mac', new Error('network unavailable'));
+    const started = get(updateProgressPlan)!;
+    expect(started.startedRelayIds).toEqual(['fedora', 'mac']);
+    expect(started.relayStartedAt.fedora).toBe(first.relayStartedAt.fedora);
+    expect(started.relayStartedAt.mac).toEqual(expect.any(Number));
+    expect(started.errors.mac).toBe('network unavailable');
+
+    updateProgressPlan.set(null);
+    restoreUpdateProgress();
+    expect(get(updateProgressPlan)).toEqual(started);
   });
 
 });

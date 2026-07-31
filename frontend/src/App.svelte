@@ -9,6 +9,7 @@
   import ManageDialog from '$components/ManageDialog.svelte';
   import SettingsView from '$components/SettingsView.svelte';
   import TerminalView from '$components/TerminalView.svelte';
+  import UpdateProgressDialog from '$components/UpdateProgressDialog.svelte';
   import Button from '$components/ui/Button.svelte';
   import Toast from '$components/ui/Toast.svelte';
   import { activityForNotification } from '$lib/activity';
@@ -86,10 +87,26 @@
   const inventoryLoading = $derived([...$connections.values()].filter(
     (connection) => connection.status === 'connected' && connection.inventory.state === 'starting',
   ).length);
-  const updateAvailable = $derived(
-    ['reload-ready', 'deployment-required'].includes($appUpdates.state)
-      || [...$connections.values()].some((connection) => ['available', 'blocked'].includes(connection.update.state)),
+  const appUpdateAvailable = $derived(['reload-ready', 'deployment-required'].includes($appUpdates.state));
+  const relayUpdateAvailable = $derived(
+    [...$connections.values()].some((connection) => connection.update.state === 'available'),
   );
+  const relayUpdateNeedsAttention = $derived(
+    [...$connections.values()].some((connection) => connection.update.state === 'blocked'
+      || (connection.status === 'connected' && !connection.capabilities.includes('self_update'))),
+  );
+  const updateAvailable = $derived(appUpdateAvailable || relayUpdateAvailable || relayUpdateNeedsAttention);
+  const settingsLabel = $derived(appUpdateAvailable
+    ? relayUpdateAvailable
+      ? 'Settings, phone app and relay updates available'
+      : relayUpdateNeedsAttention
+        ? 'Settings, phone app update available and relay update needs attention'
+        : 'Settings, phone app update available'
+    : relayUpdateAvailable
+      ? 'Settings, relay update available'
+      : relayUpdateNeedsAttention
+        ? 'Settings, relay update needs attention'
+        : 'Settings');
   const terminalQuestionMode = $derived(Boolean(
     activeAgent
       && agentNeedsResponse(activeAgent)
@@ -473,7 +490,7 @@
         <Button
           variant="ghost"
           size="icon"
-          aria-label={updateAvailable ? 'Settings, update available' : 'Settings'}
+          aria-label={settingsLabel}
           onclick={() => toggle('settings')}
         >⚙</Button>
         {#if updateAvailable}<span class="nav-update-badge" aria-hidden="true"></span>{/if}
@@ -512,6 +529,7 @@
   {/if}
 </div>
 
+<UpdateProgressDialog />
 <ManageDialog bind:open={manageOpen} agent={activeAgent} />
 <LockScreen />
 <Toast />

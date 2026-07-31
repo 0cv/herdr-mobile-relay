@@ -230,9 +230,10 @@ describe('settings relay status', () => {
       },
     });
 
-    await user.click(await screen.findByRole('button', { name: 'Update Fedora to version 0.8.0' }));
-    expect(screen.getByRole('dialog', { name: 'Update Relay' })).toBeInTheDocument();
-    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Update Relay' }));
+    await user.click(await screen.findByRole('button', { name: 'Update Relays' }));
+    expect(screen.getByRole('dialog', { name: 'Update Relays' })).toHaveTextContent('Update Fedora first');
+    expect(screen.queryByRole('button', { name: 'Update Fedora to version 0.8.0' })).not.toBeInTheDocument();
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Start Update' }));
     const command = socket.sent.map((payload) => JSON.parse(payload))
       .find((message) => message.type === 'install_update');
 
@@ -282,10 +283,10 @@ describe('settings relay status', () => {
       },
     });
 
-    await user.click(await screen.findByRole('button', { name: 'Deploy App' }));
-    const dialog = screen.getByRole('dialog', { name: 'Deploy Phone App' });
-    expect(dialog).toHaveTextContent(`Deploy app version 9.0.0 from Fedora to ${location.origin}?`);
-    await user.click(within(dialog).getByRole('button', { name: 'Deploy App' }));
+    await user.click(await screen.findByRole('button', { name: 'Update Herdr' }));
+    const dialog = screen.getByRole('dialog', { name: 'Update Herdr' });
+    expect(dialog).toHaveTextContent('Publish the phone app from Fedora');
+    await user.click(within(dialog).getByRole('button', { name: 'Start Update' }));
     const command = socket.sent.map((payload) => JSON.parse(payload))
       .find((message) => message.type === 'deploy_app_update');
 
@@ -294,6 +295,39 @@ describe('settings relay status', () => {
       expected_revision: 'f'.repeat(40),
       expected_origin: location.origin,
     });
+    socket.server({
+      type: 'command_result',
+      request_id: command.request_id,
+      ok: true,
+      phase: 'scheduled',
+      data: {
+        app_deploy: {
+          configured: true,
+          origin: location.origin,
+          project: 'herdr-app',
+          branch: 'main',
+          revision: 'f'.repeat(40),
+          state: 'scheduled',
+          target_version: '9.0.0',
+        },
+      },
+    });
+    const publishing = /Publishing v9\.0\.0 from Fedora and waiting for this app origin to update\. This can take up to two minutes\./;
+    expect(await screen.findByText(publishing)).toBeInTheDocument();
+
+    socket.server({
+      type: 'app_deploy_status',
+      app_deploy: {
+        configured: true,
+        origin: location.origin,
+        project: 'herdr-app',
+        branch: 'main',
+        revision: 'f'.repeat(40),
+        state: 'deploying',
+        target_version: '9.0.0',
+      },
+    });
+    await waitFor(() => expect(screen.getByText(publishing)).toBeInTheDocument());
   });
   it('deploys the owner app before updating its relay', async () => {
     const user = userEvent.setup();
@@ -338,10 +372,10 @@ describe('settings relay status', () => {
       },
     });
 
-    await user.click(await screen.findByRole('button', { name: 'Deploy app & update relay' }));
-    const dialog = screen.getByRole('dialog', { name: 'Deploy app & update relay' });
-    expect(dialog).toHaveTextContent('The current relay remains available while Pages deploys.');
-    await user.click(within(dialog).getByRole('button', { name: 'Deploy & Update' }));
+    await user.click(await screen.findByRole('button', { name: 'Update Herdr' }));
+    const dialog = screen.getByRole('dialog', { name: 'Update Herdr' });
+    expect(dialog).toHaveTextContent('Publish the phone app first, then update Fedora');
+    await user.click(within(dialog).getByRole('button', { name: 'Start Update' }));
     const commands = socket.sent.map((payload) => JSON.parse(payload));
     const command = commands.find((message) => message.type === 'install_update');
 

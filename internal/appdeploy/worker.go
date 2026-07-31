@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,14 +21,17 @@ import (
 )
 
 const (
-	WranglerVersion        = "4.114.0"
-	deploymentStartupGrace = 30 * time.Second
+	WranglerVersion           = "4.114.0"
+	deploymentStartupGrace    = 30 * time.Second
+	publicVerificationTimeout = 2 * time.Minute
+	publicRequestTimeout      = 20 * time.Second
 )
 
 var (
-	projectPattern  = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
-	branchPattern   = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,118}[A-Za-z0-9])?$`)
-	errDeployLocked = errors.New("another app deployment is already running")
+	projectPattern          = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
+	branchPattern           = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,118}[A-Za-z0-9])?$`)
+	errDeployLocked         = errors.New("another app deployment is already running")
+	errPublicOriginRedirect = errors.New("public version check redirected to another origin")
 )
 
 type Job struct {
@@ -218,36 +222,100 @@ func verifyWebBundle(job Job) error {
 }
 
 func verifyPublic(ctx context.Context, job Job) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, job.Origin+"/version.json", nil)
-	if err != nil {
-		return err
-	}
+	verifyCtx, cancel := context.WithTimeout(ctx, publicVerificationTimeout)
+	defer cancel()
 	client := &http.Client{
-		Timeout: 20 * time.Second,
+		Timeout: publicRequestTimeout,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if request.URL.Scheme+"://"+request.URL.Host != job.Origin {
-				return errors.New("public version check redirected to another origin")
+				return errPublicOriginRedirect
 			}
 			return nil
 		},
 	}
+	return verifyPublicWith(verifyCtx, job, client, publicRetryDelay)
+}
+
+func verifyPublicWith(
+	ctx context.Context,
+	job Job,
+	client *http.Client,
+	retryDelay func(int) time.Duration,
+) error {
+	nonce := time.Now().UnixNano()
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		retryable, err := checkPublicVersion(ctx, job, client, nonce, attempt)
+		if err == nil {
+			return nil
+		}
+		if !retryable {
+			return err
+		}
+		lastErr = err
+
+		timer := time.NewTimer(retryDelay(attempt))
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("public app did not publish the expected bundle before timeout: %w", lastErr)
+			}
+			return fmt.Errorf("verify public app: %w", ctx.Err())
+		}
+	}
+}
+
+func checkPublicVersion(
+	ctx context.Context,
+	job Job,
+	client *http.Client,
+	nonce int64,
+	attempt int,
+) (bool, error) {
+	cacheBust := url.QueryEscape(fmt.Sprintf("%s-%d-%d", job.Revision, nonce, attempt))
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		job.Origin+"/version.json?herdr_deploy_check="+cacheBust,
+		nil,
+	)
+	if err != nil {
+		return false, err
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Cache-Control", "no-cache, no-store")
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("verify public app: %w", err)
+		if errors.Is(err, errPublicOriginRedirect) {
+			return false, err
+		}
+		return true, fmt.Errorf("verify public app: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("verify public app: HTTP %d", response.StatusCode)
+		retryable := response.StatusCode == http.StatusNotFound ||
+			response.StatusCode == http.StatusRequestTimeout ||
+			response.StatusCode == http.StatusTooEarly ||
+			response.StatusCode == http.StatusTooManyRequests ||
+			response.StatusCode >= http.StatusInternalServerError
+		return retryable, fmt.Errorf("verify public app: HTTP %d", response.StatusCode)
 	}
 	var identity map[string]any
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64*1024)).Decode(&identity); err != nil {
-		return fmt.Errorf("decode public version: %w", err)
+		return true, fmt.Errorf("decode public version: %w", err)
 	}
 	data, _ := json.Marshal(identity)
 	if err := verifyVersion(data, job.Version, job.Revision); err != nil {
-		return fmt.Errorf("public web bundle identity: %w", err)
+		return true, fmt.Errorf("public web bundle identity: %w", err)
 	}
-	return nil
+	return false, nil
+}
+
+func publicRetryDelay(attempt int) time.Duration {
+	delay := time.Duration(attempt+1) * time.Second
+	return min(delay, 5*time.Second)
 }
 
 func verifyVersion(data []byte, version, revision string) error {

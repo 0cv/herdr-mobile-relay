@@ -1,12 +1,17 @@
 package appdeploy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 )
@@ -177,5 +182,79 @@ func TestCommandEnvironmentPinsOneNodeFirstPath(t *testing.T) {
 	}
 	if pathCount != 1 {
 		t.Fatalf("PATH entries = %d, want 1", pathCount)
+	}
+}
+
+func TestVerifyPublicRetriesUntilExpectedIdentityIsPublished(t *testing.T) {
+	var requests atomic.Int32
+	cacheBusters := make(chan string, 2)
+	cacheControls := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempt := requests.Add(1)
+		cacheBusters <- request.URL.Query().Get("herdr_deploy_check")
+		cacheControls <- request.Header.Get("Cache-Control")
+		writer.Header().Set("Content-Type", "application/json")
+		if attempt == 1 {
+			_, _ = writer.Write([]byte(`{"release_version":"1.2.2","revision":"old"}`))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"release_version":"1.2.3","revision":"abc"}`))
+	}))
+	defer server.Close()
+
+	job := Job{Origin: server.URL, Version: "1.2.3", Revision: "abc"}
+	err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration { return 0 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests = %d, want 2", requests.Load())
+	}
+	firstCacheBust, secondCacheBust := <-cacheBusters, <-cacheBusters
+	if firstCacheBust == "" || secondCacheBust == "" || firstCacheBust == secondCacheBust {
+		t.Fatalf("cache busters = %q, %q", firstCacheBust, secondCacheBust)
+	}
+	for range 2 {
+		if cacheControl := <-cacheControls; cacheControl != "no-cache, no-store" {
+			t.Fatalf("Cache-Control = %q", cacheControl)
+		}
+	}
+}
+
+func TestVerifyPublicTimesOutWithLastObservedIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"release_version":"1.2.2","revision":"old"}`))
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	job := Job{Origin: server.URL, Version: "1.2.3", Revision: "abc"}
+	err := verifyPublicWith(ctx, job, server.Client(), func(int) time.Duration { return time.Minute })
+	if err == nil || !strings.Contains(err.Error(), "before timeout") ||
+		!strings.Contains(err.Error(), "got 1.2.2 (old)") {
+		t.Fatalf("verifyPublicWith() error = %v", err)
+	}
+}
+
+func TestVerifyPublicDoesNotRetryPermanentHTTPFailure(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(writer, "forbidden", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	job := Job{Origin: server.URL, Version: "1.2.3", Revision: "abc"}
+	err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration {
+		t.Fatal("permanent failure was retried")
+		return 0
+	})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("verifyPublicWith() error = %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests = %d, want 1", requests.Load())
 	}
 }
