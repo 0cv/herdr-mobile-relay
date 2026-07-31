@@ -16,6 +16,7 @@ import {
   observeAppUpstreamVersion,
   pendingRelayUpdate,
   rememberPendingRelayUpdate,
+  relayNeedsManualBootstrap,
   semverTuple,
   restoreUpdateProgress,
   setUpdateProgressError,
@@ -51,6 +52,37 @@ describe('release updates', () => {
     expect(newerBundle({ version: '0.8.0', assets: 4 }, { version: '0.8.0', assets: 4 })).toBe(false);
     expect(newerBundle({ version: '0.7.0', assets: 99 }, { version: '0.8.0', assets: 0 })).toBe(false);
   });
+  it('routes legacy app deployment owners through the one-time Terminal bootstrap', () => {
+    const connection = {
+      capabilities: ['self_update', 'app_deploy'],
+      releaseVersion: '0.13.2',
+      appDeploy: normalizeAppDeployment({ configured: true }),
+      update: normalizeRelayUpdate({ state: 'available' }),
+    };
+    connection.capabilities = [];
+    connection.releaseVersion = '0.13.3';
+    expect(relayNeedsManualBootstrap(connection)).toBe(true);
+    connection.capabilities = ['self_update', 'app_deploy'];
+    connection.releaseVersion = '0.13.2';
+
+
+    expect(relayNeedsManualBootstrap(connection)).toBe(true);
+    connection.releaseVersion = '0.13.3';
+    expect(relayNeedsManualBootstrap(connection)).toBe(false);
+    connection.releaseVersion = '0.13.2';
+    connection.appDeploy = normalizeAppDeployment({
+      configured: false,
+      reason: 'No HTTPS app deployment origin is configured',
+    });
+    expect(relayNeedsManualBootstrap(connection)).toBe(true);
+    connection.appDeploy = normalizeAppDeployment({ configured: false });
+    expect(relayNeedsManualBootstrap(
+      connection,
+      'deploy target app before relay: No HTTPS app deployment origin is configured',
+    )).toBe(true);
+    expect(relayNeedsManualBootstrap(connection, 'Release signature did not match')).toBe(false);
+  });
+
 
   it('does not let stale relay metadata downgrade the running app version', () => {
     expect(get(appUpdateStatus).upstreamVersion).toBe(APP_VERSION);

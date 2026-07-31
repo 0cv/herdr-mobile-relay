@@ -1,12 +1,15 @@
 import { get, writable } from 'svelte/store';
 import { APP_ASSET_VERSION, APP_VERSION } from './config';
-import type { AppDeploymentStatus, AppUpdateStatus, RelayUpdateStatus } from './types';
+import type { AppDeploymentStatus, AppUpdateStatus, RelayConnectionView, RelayUpdateStatus } from './types';
 
 const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const APP_RECHECK_INTERVAL_MS = 60 * 1_000;
 const PENDING_RELAY_UPDATES_KEY = 'herdr_pending_relay_updates';
 const UPDATE_PROGRESS_KEY = 'herdr_update_progress';
 const AUTO_RELOAD_VERSION_KEY = 'herdr_auto_reload_version';
+const APP_DEPLOY_SELF_UPDATE_MIN_VERSION = '0.13.3';
+export const MANAGED_UPDATE_COMMAND = 'HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes';
+export const CHECKOUT_UPDATE_COMMAND = 'git pull --ff-only && make service-install';
 const RELAY_UPDATE_STATES = new Set([
   'checking',
   'current',
@@ -64,6 +67,20 @@ export function newerVersion(candidate: string, current: string): boolean {
   }
   return false;
 }
+export function relayNeedsManualBootstrap(
+  connection: Pick<RelayConnectionView, 'appDeploy' | 'capabilities' | 'releaseVersion' | 'update'>,
+  failure = '',
+): boolean {
+  if (!connection.capabilities.includes('self_update')) return true;
+  const legacyVersion = newerVersion(APP_DEPLOY_SELF_UPDATE_MIN_VERSION, connection.releaseVersion);
+  if (!legacyVersion) return false;
+  if (connection.appDeploy.configured) return true;
+  const error = (failure || connection.update.error || connection.appDeploy.reason).toLowerCase();
+  return (error.includes('deploy target app before relay')
+    && error.includes('app deployment origin'))
+    || error.includes('no https app deployment origin is configured');
+}
+
 
 export function newerBundle(
   candidate: { version: string; assets: number },

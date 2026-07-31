@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-07-31
+
+### Fixed
+
+- Route app deployment owners running releases older than 0.13.3 through the
+  one-time Terminal bootstrap before scheduling an update. Restored failures
+  show the copyable recovery command instead of an update retry loop.
+
+
 ## [0.13.3] - 2026-07-31
 
 ### Fixed
@@ -159,7 +168,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.3...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.4...HEAD
+[0.13.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.0...v0.13.1

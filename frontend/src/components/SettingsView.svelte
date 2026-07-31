@@ -51,15 +51,16 @@
   import { relayStore } from '$lib/store';
   import {
     appUpdateStatus,
+    CHECKOUT_UPDATE_COMMAND,
     beginUpdateProgress,
     checkAppUpdate,
+    MANAGED_UPDATE_COMMAND,
+    relayNeedsManualBootstrap,
     reloadApp,
     setUpdateProgressError,
   } from '$lib/updates';
   import type { RelayConnectionView } from '$lib/types';
 
-  const MANAGED_UPDATE_COMMAND = 'HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes';
-  const CHECKOUT_UPDATE_COMMAND = 'git pull --ff-only && make service-install';
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
   type SafeUpdateAction =
@@ -117,7 +118,9 @@
   // exactly that version, so one action can deploy the app before updating it.
   const ownerUpdateReady = $derived.by(() => {
     const connection = appDeploymentOwner?.connection;
-    if (!connection || connection.releaseVersion === $appUpdate.upstreamVersion) return false;
+    if (!connection
+      || connection.releaseVersion === $appUpdate.upstreamVersion
+      || relayNeedsManualBootstrap(connection)) return false;
     const update = connection.update;
     return connection.capabilities.includes('self_update')
       && update.state === 'available'
@@ -161,6 +164,7 @@
     const installable = relayRows.filter(({ connection }) => (
       connection?.status === 'connected'
       && connection.capabilities.includes('self_update')
+      && !relayNeedsManualBootstrap(connection)
       && connection.update.state === 'available'
       && connection.update.can_install
       && Boolean(connection.update.target_revision)
@@ -183,7 +187,7 @@
   ).length);
   const manualRelayUpdateCount = $derived(relayRows.filter(
     ({ connection }) => connection?.status === 'connected'
-      && !connection.capabilities.includes('self_update'),
+      && relayNeedsManualBootstrap(connection),
   ).length);
   const updatePending = $derived(
     $appUpdate.state === 'deployment-required'
@@ -243,10 +247,10 @@
         warning: false,
       };
     }
-    if (!connection?.capabilities.includes('self_update')) {
+    if (relayNeedsManualBootstrap(connection)) {
       return {
         label: 'Manual update required',
-        detail: 'Open Update Help for the one-time setup.',
+        detail: 'Open Update Help for the one-time Terminal bootstrap.',
         warning: true,
       };
     }
@@ -433,6 +437,7 @@
         {@const connectionStatus = connection?.status || 'disconnected'}
         {@const version = relayVersionMeta(connection)}
         {@const update = relayUpdateMeta(connection)}
+        {@const manualUpdate = Boolean(connection && relayNeedsManualBootstrap(connection))}
         <article class="relay-row">
           <span
             class={`status-dot status-${connectionStatus === 'connected' && connection?.inventory.state === 'ready' ? 'success' : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'warning' : 'danger'}`}
@@ -455,7 +460,14 @@
             {#if update.detail}<small class:warning={update.warning} title={update.detail}>{update.detail}</small>{/if}
           </div>
           <div class="relay-actions">
-            {#if connection?.capabilities.includes('self_update')}
+            {#if connectionStatus === 'connected' && manualUpdate}
+              <Button
+                variant="secondary"
+                size="sm"
+                aria-label={`How to update ${relay.label}`}
+                onclick={() => showManualUpdate(relay.id)}
+              >Update Help</Button>
+            {:else if connection?.capabilities.includes('self_update')}
               <Button
                 variant="secondary"
                 size="sm"
@@ -463,13 +475,6 @@
                 aria-label={`Check ${relay.label} for updates`}
                 onclick={() => checkRelayUpdate(relay.id)}
               >Check</Button>
-            {:else if connectionStatus === 'connected'}
-              <Button
-                variant="secondary"
-                size="sm"
-                aria-label={`How to update ${relay.label}`}
-                onclick={() => showManualUpdate(relay.id)}
-              >Update Help</Button>
             {/if}
             <Button variant="danger" size="sm" aria-label={`Remove ${relay.label}`} onclick={() => requestRelayRemoval(relay.id)}>Remove</Button>
           </div>
@@ -574,7 +579,9 @@
         {:else if appDeploymentOwner.connection?.appDeploy.state === 'failed'}
           <p class="warning" role="status">Deployment failed: {appDeploymentOwner.connection.appDeploy.error}</p>
         {:else if appDeploymentOwner.connection?.releaseVersion !== $appUpdate.upstreamVersion}
-          {#if ownerUpdateReady}
+          {#if appDeploymentOwner.connection && relayNeedsManualBootstrap(appDeploymentOwner.connection)}
+            <p class="warning" role="status">{appDeploymentOwner.relay.label} needs the one-time Terminal bootstrap shown in Update Help before it can deploy this app version.</p>
+          {:else if ownerUpdateReady}
             <p class="hint">{appDeploymentOwner.relay.label} can deploy the app and update to {$appUpdate.upstreamVersion} in one safe step.</p>
           {:else}
             <p class="hint">No installable v{$appUpdate.upstreamVersion} relay update is available from {appDeploymentOwner.relay.label} yet.</p>
@@ -633,7 +640,7 @@
   id="manual-relay-update-dialog"
   bind:open={manualOpen}
   title={manualRow ? `Update ${manualRow.relay.label}` : 'Update Relay'}
-  description="Version 0.7.0 is a one-time manual update. Later relay updates can be installed from this screen."
+  description="This relay needs a one-time Terminal update before phone-driven updates can continue."
 >
   <p>On the computer running this relay, open Terminal and run:</p>
   <pre class="update-command"><code>{MANAGED_UPDATE_COMMAND}</code></pre>

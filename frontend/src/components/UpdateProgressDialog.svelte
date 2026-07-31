@@ -7,8 +7,10 @@
   import {
     appUpdateStatus,
     clearUpdateProgress,
+    MANAGED_UPDATE_COMMAND,
     markUpdateProgressRelayStarted,
     newerVersion,
+    relayNeedsManualBootstrap,
     restoreUpdateProgress,
     setUpdateProgressError,
     updateProgressPlan,
@@ -112,6 +114,19 @@
     ));
     if (next) void startRelayUpdate(next);
   });
+  async function copyManualCommand(): Promise<void> {
+    if (!navigator.clipboard?.writeText) {
+      relayStore.showToast('Clipboard access is unavailable. Select the command manually.', true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(MANAGED_UPDATE_COMMAND);
+      relayStore.showToast('Update command copied.');
+    } catch {
+      relayStore.showToast('Could not copy the command. Select it manually.', true);
+    }
+  }
+
 
   function relayAtTarget(connection: RelayConnectionView | undefined, targetVersion: string): boolean {
     const current = connection?.releaseVersion || connection?.update.current_version || '';
@@ -139,7 +154,18 @@
     }
     const clientError = currentPlan.errors[relayId];
     if (clientError) {
-      return { ...base, label: 'Update could not start', detail: clientError, tone: 'danger', score: 0, canStart: Boolean(connection?.capabilities.includes('self_update')), manual: false };
+      const manual = Boolean(connection && relayNeedsManualBootstrap(connection, clientError));
+      return {
+        ...base,
+        label: manual ? 'Manual update required' : 'Update could not start',
+        detail: manual
+          ? 'Run the one-time Terminal command below. It preserves agents and configuration, restarts the relay, and enables phone-driven updates.'
+          : clientError,
+        tone: 'danger',
+        score: 0,
+        canStart: !manual && Boolean(connection?.capabilities.includes('self_update')),
+        manual,
+      };
     }
     const started = currentPlan.startedRelayIds.includes(relayId);
     if (!connection || connection.status !== 'connected') {
@@ -156,12 +182,12 @@
         manual: false,
       };
     }
-    if (!connection.capabilities.includes('self_update') || connection.update.state === 'unsupported') {
+    if (relayNeedsManualBootstrap(connection)) {
       return {
         ...base,
         label: 'Manual update required',
-        detail: 'Close this screen and use Update Help for this relay in Settings.',
-        tone: 'pending',
+        detail: 'Run the one-time Terminal command below. It preserves agents and configuration, restarts the relay, and enables phone-driven updates.',
+        tone: 'danger',
         score: 0,
         canStart: false,
         manual: true,
@@ -331,6 +357,10 @@
               <strong>{row.relay?.label || 'Unknown relay'}</strong>
               <span>{row.label}</span>
               <small>{row.detail}</small>
+              {#if row.manual}
+                <pre class="update-command"><code>{MANAGED_UPDATE_COMMAND}</code></pre>
+                <Button size="sm" onclick={copyManualCommand}>Copy Update Command</Button>
+              {/if}
             </div>
             {#if row.canStart && !active && row.tone === 'danger'}
               <Button size="sm" disabled={Boolean(busyRelayId)} onclick={() => startRelayUpdate(row)}>Try Again</Button>

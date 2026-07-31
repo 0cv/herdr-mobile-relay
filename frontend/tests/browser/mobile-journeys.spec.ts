@@ -764,6 +764,51 @@ test('keeps a failed relay online and offers an explicit close action', async ({
   await expect(progress).toHaveCount(0);
   await expect(page.getByRole('img', { name: 'Fedora relay connected' })).toBeVisible();
 });
+test('offers the one-time Terminal bootstrap instead of retrying a legacy deploy-first failure', async ({ page }) => {
+  const availableUpdate = {
+    state: 'available',
+    current_version: '0.13.1',
+    current_revision: 'abc1234',
+    available_version: APP_RELEASE,
+    available_revision: 'f'.repeat(40),
+    target_revision: 'f'.repeat(40),
+    upstream_version: APP_RELEASE,
+    can_install: true,
+    mode: 'plugin',
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await setAutoCommands(page, true);
+  await handshake(page, 0, {
+    release_version: '0.13.1',
+    capabilities: ['directory_browser', 'self_update', 'app_deploy'],
+    update: availableUpdate,
+    app_deploy: {
+      configured: false,
+      state: 'idle',
+    },
+  });
+
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: 'Update Relays' }).click();
+  await page.getByRole('dialog', { name: 'Update Relays' }).getByRole('button', { name: 'Start Update' }).click();
+  await expect(page.getByRole('dialog', { name: 'Updating Herdr' })).toBeVisible();
+  await server(page, 0, {
+    type: 'update_status',
+    update: {
+      ...availableUpdate,
+      state: 'failed',
+      error: 'deploy target app before relay: No HTTPS app deployment origin is configured',
+    },
+  });
+
+  const progress = page.getByRole('dialog', { name: 'Update needs attention' });
+  await expect(progress).toContainText('Manual update required');
+  await expect(progress).toContainText('HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install');
+  await expect(progress.getByRole('button', { name: 'Copy Update Command' })).toBeVisible();
+  await expect(progress.getByRole('button', { name: 'Try Again' })).toHaveCount(0);
+});
+
 
 test('confirms deployment when an authorized relay has the upstream app bundle', async ({ page }) => {
   await boot(page, [fedora]);
