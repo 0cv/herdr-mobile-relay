@@ -57,6 +57,27 @@ func TestQoderLeadingDashSessionName(t *testing.T) {
 	}
 }
 
+func TestPiSessionName(t *testing.T) {
+	home := t.TempDir()
+	sessionDir := filepath.Join(home, ".pi", "agent", "sessions", "--home-user-app--")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(sessionDir, "2026-08-01T09-26-04-302Z_session.jsonl")
+	data := []byte(
+		"{\"type\":\"session\",\"version\":3,\"cwd\":\"/home/user/app\"}\n" +
+			"{\"type\":\"session_info\",\"name\":\"Pi initial\"}\n" +
+			"{\"type\":\"session_info\",\"name\":\"Pi renamed\"}\n",
+	)
+	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("pi", "/home/user/app", sessionPath); got != "Pi renamed" {
+		t.Fatalf("session name = %q, want %q", got, "Pi renamed")
+	}
+}
+
 func TestClaudeSessionName(t *testing.T) {
 	home := t.TempDir()
 	projDir := filepath.Join(home, ".claude", "projects", "home-user-app")

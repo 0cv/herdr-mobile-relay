@@ -8,6 +8,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Resolve Qoder session names stored under leading-dash project paths, so
   renamed Qoder sessions appear by name instead of blank.
+- Resolve Pi `session_info` names for literal Pi agents, so renamed Pi
+  sessions show their user-set name instead of the session-file path.
 
 ## [0.13.4] - 2026-07-31
 

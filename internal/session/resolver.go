@@ -35,7 +35,14 @@ func NewResolver(home string) *Resolver {
 
 func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
-	if sessionID != "" && !validSessionID(sessionID) {
+	agentLower := strings.ToLower(agent)
+	sessionPath := ""
+	if isPiSessionAgent(agentLower) {
+		sessionPath = r.piSessionPath(sessionID)
+		if sessionPath == "" {
+			return ""
+		}
+	} else if sessionID != "" && !validSessionID(sessionID) {
 		return ""
 	}
 
@@ -50,8 +57,9 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	r.mu.Unlock()
 
 	var name string
-	agentLower := strings.ToLower(agent)
 	switch {
+	case isPiSessionAgent(agentLower):
+		name = extractPiSessionTitle(sessionPath)
 	case strings.Contains(agentLower, "qoder"):
 		name = r.projectSessionTitle(filepath.Join(r.home, ".qoder", "projects"), cwd, sessionID)
 	case strings.Contains(agentLower, "claude"):
@@ -64,6 +72,66 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	r.cache[key] = cacheEntry{name: name, expires: time.Now().Add(cacheTTL), sig: sig}
 	r.mu.Unlock()
 
+	return name
+}
+
+func isPiSessionAgent(agent string) bool {
+	return strings.EqualFold(strings.TrimSpace(agent), "pi")
+}
+
+func (r *Resolver) piSessionPath(sessionID string) string {
+	if !filepath.IsAbs(sessionID) || filepath.Ext(sessionID) != ".jsonl" {
+		return ""
+	}
+	root, err := filepath.Abs(filepath.Join(r.home, ".pi", "agent", "sessions"))
+	if err != nil {
+		return ""
+	}
+	path, err := filepath.Abs(filepath.Clean(sessionID))
+	if err != nil {
+		return ""
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return ""
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return path
+}
+
+func extractPiSessionTitle(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var name string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+	for scanner.Scan() {
+		var record struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &record) != nil {
+			continue
+		}
+		if record.Type == "session_info" {
+			name = strings.TrimSpace(record.Name)
+		}
+	}
 	return name
 }
 
@@ -211,6 +279,12 @@ func validSessionID(id string) bool {
 
 func (r *Resolver) sourceSignature(agent, cwd, sessionID string) string {
 	agentLower := strings.ToLower(agent)
+	if isPiSessionAgent(agentLower) {
+		if path := r.piSessionPath(sessionID); path != "" {
+			return pathSignature(path)
+		}
+		return ""
+	}
 	if strings.Contains(agentLower, "codex") {
 		return pathSignature(filepath.Join(r.home, ".codex", "session_index.jsonl"))
 	}
