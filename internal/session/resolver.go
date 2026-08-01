@@ -105,8 +105,9 @@ func (r *Resolver) findProjectDir(projectsDir, cwd string) string {
 	}
 
 	encoded := encodePath(cwd)
+	leadingDashEncoded := "-" + encoded
 	for _, e := range entries {
-		if e.IsDir() && e.Name() == encoded {
+		if e.IsDir() && (e.Name() == encoded || e.Name() == leadingDashEncoded) {
 			return filepath.Join(projectsDir, e.Name())
 		}
 	}

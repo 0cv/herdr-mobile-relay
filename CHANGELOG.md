@@ -4,6 +4,10 @@ Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+
+- Resolve Qoder session names stored under leading-dash project paths, so
+  renamed Qoder sessions appear by name instead of blank.
 
 ## [0.13.4] - 2026-07-31
 

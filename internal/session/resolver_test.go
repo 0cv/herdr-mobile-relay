@@ -33,6 +33,30 @@ func TestQoderSessionName(t *testing.T) {
 	}
 }
 
+func TestQoderLeadingDashSessionName(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".qoder", "projects", "-home-user-myapp")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := map[string]any{
+		"type":        "custom-title",
+		"sessionId":   "sess-renamed",
+		"customTitle": "Renamed Qoder session",
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, "sess-renamed.jsonl"), append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("qodercli", "/home/user/myapp", "sess-renamed"); got != "Renamed Qoder session" {
+		t.Fatalf("session name = %q, want %q", got, "Renamed Qoder session")
+	}
+}
+
 func TestClaudeSessionName(t *testing.T) {
 	home := t.TempDir()
 	projDir := filepath.Join(home, ".claude", "projects", "home-user-app")
