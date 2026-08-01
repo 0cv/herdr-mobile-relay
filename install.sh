@@ -24,22 +24,82 @@ detect_arch() {
     esac
 }
 
+run_with_timeout() {
+    herdr_timeout_seconds=$1
+    shift
+    "$@" &
+    herdr_command_pid=$!
+    herdr_elapsed=0
+    while kill -0 "$herdr_command_pid" 2>/dev/null; do
+        if [ "$herdr_elapsed" -ge "$herdr_timeout_seconds" ]; then
+            kill -9 "$herdr_command_pid" 2>/dev/null || true
+            wait "$herdr_command_pid" 2>/dev/null || true
+            herdr_command_pid=
+            return 124
+        fi
+        sleep 1
+        herdr_elapsed=$((herdr_elapsed + 1))
+    done
+    if wait "$herdr_command_pid"; then
+        herdr_status=0
+    else
+        herdr_status=$?
+    fi
+    herdr_command_pid=
+    return "$herdr_status"
+}
+
+terminate_active_command() {
+    herdr_signal=$1
+    if [ -z "${herdr_command_pid:-}" ]; then
+        return 0
+    fi
+    kill "$herdr_signal" "$herdr_command_pid" 2>/dev/null || true
+    herdr_signal_elapsed=0
+    while kill -0 "$herdr_command_pid" 2>/dev/null; do
+        if [ "$herdr_signal_elapsed" -ge 2 ]; then
+            kill -KILL "$herdr_command_pid" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+        herdr_signal_elapsed=$((herdr_signal_elapsed + 1))
+    done
+    wait "$herdr_command_pid" 2>/dev/null || true
+    herdr_command_pid=
+}
+
+on_install_exit() {
+    terminate_active_command -TERM
+    if [ -n "${work_dir:-}" ]; then
+        rm -rf "$work_dir"
+    fi
+}
+
+on_install_signal() {
+    herdr_signal=$1
+    herdr_exit_status=$2
+    terminate_active_command "$herdr_signal"
+    exit "$herdr_exit_status"
+}
+
 fetch() {
     if command -v curl >/dev/null 2>&1; then
         if [ -n "${GH_TOKEN:-}" ]; then
-            curl --fail --show-error --silent --location --output "$2" \
+            run_with_timeout 120 curl --fail --show-error --silent --location \
+                --connect-timeout 10 --max-time 120 --output "$2" \
                 -H "Authorization: token ${GH_TOKEN}" \
                 -H "Accept: application/octet-stream" "$1"
         else
-            curl --fail --show-error --silent --location --output "$2" "$1"
+            run_with_timeout 120 curl --fail --show-error --silent --location \
+                --connect-timeout 10 --max-time 120 --output "$2" "$1"
         fi
     elif command -v wget >/dev/null 2>&1; then
         if [ -n "${GH_TOKEN:-}" ]; then
-            wget --quiet --output-document="$2" \
+            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document="$2" \
                 --header="Authorization: token ${GH_TOKEN}" \
                 --header="Accept: application/octet-stream" "$1"
         else
-            wget --quiet --output-document="$2" "$1"
+            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document="$2" "$1"
         fi
     else
         fatal "curl or wget is required"
@@ -49,20 +109,22 @@ fetch() {
 fetch_json() {
     if command -v curl >/dev/null 2>&1; then
         if [ -n "${GH_TOKEN:-}" ]; then
-            curl --fail --show-error --silent --location \
+            run_with_timeout 120 curl --fail --show-error --silent --location \
+                --connect-timeout 10 --max-time 120 \
                 -H "Authorization: token ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" "$1"
         else
-            curl --fail --show-error --silent --location \
+            run_with_timeout 120 curl --fail --show-error --silent --location \
+                --connect-timeout 10 --max-time 120 \
                 -H "Accept: application/vnd.github+json" "$1"
         fi
     else
         if [ -n "${GH_TOKEN:-}" ]; then
-            wget --quiet --output-document=- \
+            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document=- \
                 --header="Authorization: token ${GH_TOKEN}" \
                 --header="Accept: application/vnd.github+json" "$1"
         else
-            wget --quiet --output-document=- \
+            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document=- \
                 --header="Accept: application/vnd.github+json" "$1"
         fi
     fi
@@ -301,14 +363,18 @@ main() {
     cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay"
 
     work_dir=$(mktemp -d "${TMPDIR:-/tmp}/herdr-install.XXXXXX")
-    trap 'rm -rf "$work_dir"' EXIT INT TERM
+    trap 'on_install_exit' EXIT
+    trap 'on_install_signal -INT 130' INT
+    trap 'on_install_signal -TERM 143' TERM
     archive_path="$work_dir/$archive"
     checksums_path="$work_dir/checksums.txt"
     stage="$work_dir/release"
+    commit_json_path="$work_dir/commit.json"
 
     info "Downloading ${BINARY} ${version} (${target})"
-    commit_json=$(fetch_json "https://api.github.com/repos/${REPO}/commits/${tag}") ||
+    fetch_json "https://api.github.com/repos/${REPO}/commits/${tag}" > "$commit_json_path" ||
         fatal "could not resolve release tag from GitHub API"
+    commit_json=$(awk '{ printf "%s", $0 }' "$commit_json_path")
     tag_revision=$(resolve_tag_revision "$commit_json")
     case "$tag_revision" in
         ????????????????????????????????????????) ;;
@@ -316,8 +382,10 @@ main() {
     esac
     if [ -n "${GH_TOKEN:-}" ]; then
         api_url="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
-        release_json=$(fetch_json "$api_url") ||
+        release_json_path="$work_dir/release.json"
+        fetch_json "$api_url" > "$release_json_path" ||
             fatal "could not fetch release metadata from GitHub API"
+        release_json=$(awk '{ printf "%s", $0 }' "$release_json_path")
         archive_url=$(resolve_asset_url "$release_json" "$archive")
         checksum_url=$(resolve_asset_url "$release_json" "checksums.txt")
         [ -n "$archive_url" ] || fatal "release has no asset named $archive"

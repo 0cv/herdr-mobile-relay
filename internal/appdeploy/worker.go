@@ -1,6 +1,7 @@
 package appdeploy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,9 @@ const (
 	deploymentStartupGrace    = 30 * time.Second
 	publicVerificationTimeout = 2 * time.Minute
 	publicRequestTimeout      = 20 * time.Second
+	deploymentTimeout         = 15 * time.Minute
+	processTermGrace          = 2 * time.Second
+	processWaitDelay          = 4 * time.Second
 )
 
 var (
@@ -57,6 +61,8 @@ type State struct {
 }
 
 func Run(ctx context.Context, jobPath string) error {
+	ctx, cancel := context.WithTimeout(ctx, deploymentTimeout)
+	defer cancel()
 	job, err := loadJob(jobPath)
 	if err != nil {
 		return err
@@ -116,8 +122,7 @@ func Run(ctx context.Context, jobPath string) error {
 		write("failed", err)
 		return err
 	}
-	command := exec.CommandContext(
-		ctx,
+	command := exec.Command(
 		job.NPXPath,
 		"--yes",
 		"wrangler@"+WranglerVersion,
@@ -129,10 +134,19 @@ func Run(ctx context.Context, jobPath string) error {
 		"--branch",
 		job.Branch,
 	)
-	command.Env = commandEnvironment(job.NodeDir, os.Environ())
-	output, err := command.CombinedOutput()
+	environment, credentialErr := commandEnvironmentWithCloudflareCredentials(job.NodeDir, os.Environ())
+	if credentialErr != nil {
+		deployErr := fmt.Errorf("read Cloudflare credentials: %w", credentialErr)
+		write("failed", deployErr)
+		return deployErr
+	}
+	command.Env = environment
+	output, err := runCommandContext(ctx, command)
 	if err != nil {
-		deployErr := fmt.Errorf("Wrangler deployment failed: %s", compact(string(output), 500))
+		deployErr := fmt.Errorf("Wrangler deployment failed: %w", err)
+		if diagnostic := compact(string(output), 500); diagnostic != "" {
+			deployErr = fmt.Errorf("Wrangler deployment failed: %w: %s", err, diagnostic)
+		}
 		write("failed", deployErr)
 		return deployErr
 	}
@@ -143,6 +157,374 @@ func Run(ctx context.Context, jobPath string) error {
 	write("succeeded", nil)
 	_ = os.Remove(jobPath)
 	return nil
+}
+
+func runCommandContext(ctx context.Context, command *exec.Cmd) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.WaitDelay = processWaitDelay
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- command.Wait()
+	}()
+	select {
+	case err := <-waitCh:
+		return combinedCommandOutput(stdout, stderr), err
+	case <-ctx.Done():
+		terminateProcessGroup(command.Process.Pid, waitCh)
+		return nil, ctx.Err()
+	}
+}
+
+func combinedCommandOutput(stdout, stderr *bytes.Buffer) []byte {
+	output := make([]byte, 0, stdout.Len()+stderr.Len())
+	output = append(output, stdout.Bytes()...)
+	return append(output, stderr.Bytes()...)
+}
+
+func terminateProcessGroup(pgid int, waitCh <-chan error) {
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	timer := time.NewTimer(processTermGrace)
+	defer timer.Stop()
+	leaderDone := false
+	select {
+	case <-waitCh:
+		leaderDone = true
+		if !processGroupAlive(pgid) {
+			return
+		}
+		<-timer.C
+	case <-timer.C:
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+
+	if !leaderDone {
+		select {
+		case <-waitCh:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for processGroupAlive(pgid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func processGroupAlive(pgid int) bool {
+	err := syscall.Kill(-pgid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+var cloudflareCredentialKeys = [...]string{
+	"CLOUDFLARE_API_TOKEN",
+	"CLOUDFLARE_ACCOUNT_ID",
+}
+
+func commandEnvironmentWithCloudflareCredentials(nodeDir string, environment []string) ([]string, error) {
+	result := commandEnvironment(nodeDir, environment)
+	filename := strings.TrimSpace(os.Getenv("HERDR_RELAY_ENV"))
+	if filename == "" {
+		if directory := strings.TrimSpace(os.Getenv("HERDR_PLUGIN_CONFIG_DIR")); directory != "" {
+			filename = filepath.Join(directory, "relay.env")
+		}
+	}
+	values, err := readCloudflareCredentials(filename, result)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range cloudflareCredentialKeys {
+		value := strings.TrimSpace(values[key])
+		if value == "" {
+			continue
+		}
+		existing, present := environmentValue(result, key)
+		if present && strings.TrimSpace(existing) != "" {
+			continue
+		}
+		result = replaceEnvironmentValue(result, key, value)
+	}
+	return result, nil
+}
+
+func readCloudflareCredentials(filename string, environment []string) (map[string]string, error) {
+	values := make(map[string]string, len(cloudflareCredentialKeys))
+	if filename == "" {
+		return values, nil
+	}
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return values, nil
+	}
+	assignments := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if !isShellVariableName(key) {
+			continue
+		}
+		assignments[key] = value
+	}
+	resolver := &shellVariableResolver{
+		assignments: assignments,
+		environment: environmentValues(environment),
+		states:      make(map[string]uint8),
+		values:      make(map[string]string),
+	}
+	for _, key := range cloudflareCredentialKeys {
+		value, err := resolver.resolve(key)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
+		values[key] = value
+	}
+	return values, nil
+}
+
+type shellVariableResolver struct {
+	assignments map[string]string
+	environment map[string]string
+	states      map[string]uint8
+	values      map[string]string
+}
+
+func (r *shellVariableResolver) resolve(name string) (string, error) {
+	if value, ok := r.values[name]; ok {
+		return value, nil
+	}
+	if r.states[name] == 1 {
+		return "", fmt.Errorf("cyclic relay environment variable %q", name)
+	}
+	raw, ok := r.assignments[name]
+	if !ok {
+		value := r.environment[name]
+		r.values[name] = value
+		return value, nil
+	}
+	r.states[name] = 1
+	value, err := parseShellEnvironmentValue(raw, r.resolve)
+	if err != nil {
+		delete(r.states, name)
+		return "", err
+	}
+	r.states[name] = 2
+	r.values[name] = value
+	return value, nil
+}
+
+func environmentValues(environment []string) map[string]string {
+	values := make(map[string]string, len(environment))
+	for _, item := range environment {
+		key, value, ok := strings.Cut(item, "=")
+		if ok && isShellVariableName(key) {
+			values[key] = value
+		}
+	}
+	return values
+}
+
+func isShellVariableName(value string) bool {
+	if value == "" || !isShellVariableNameStart(value[0]) {
+		return false
+	}
+	for index := range len(value) - 1 {
+		if !isShellVariableNamePart(value[index+1]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isShellVariableNameStart(value byte) bool {
+	return value == '_' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+func isShellVariableNamePart(value byte) bool {
+	return isShellVariableNameStart(value) || value >= '0' && value <= '9'
+}
+
+func shellVariableReference(value string, index int) (string, int, bool) {
+	if index+1 >= len(value) {
+		return "", index + 1, false
+	}
+	if value[index+1] == '{' {
+		closing := strings.IndexByte(value[index+2:], '}')
+		if closing < 0 {
+			return "", index + 1, false
+		}
+		closing += index + 2
+		name := value[index+2 : closing]
+		if !isShellVariableName(name) {
+			return "", closing + 1, false
+		}
+		return name, closing + 1, true
+	}
+	if !isShellVariableNameStart(value[index+1]) {
+		return "", index + 1, false
+	}
+	end := index + 2
+	for end < len(value) && isShellVariableNamePart(value[end]) {
+		end++
+	}
+	return value[index+1 : end], end, true
+}
+
+func parseShellEnvironmentValue(value string, resolve func(string) (string, error)) (string, error) {
+	return unquoteShellWord(strings.TrimSpace(stripShellInlineComment(value)), resolve)
+}
+
+func stripShellInlineComment(value string) string {
+	quote := byte(0)
+	escaped := false
+	escapedWhitespace := false
+	for index := range len(value) {
+		char := value[index]
+		if escaped {
+			escaped = false
+			escapedWhitespace = char == ' ' || char == '\t'
+			continue
+		}
+		if char == '\\' && quote != '\'' {
+			escaped = true
+			escapedWhitespace = false
+			continue
+		}
+		if quote != 0 {
+			if char == quote {
+				quote = 0
+			}
+			escapedWhitespace = false
+			continue
+		}
+		if char == '\'' || char == '"' {
+			quote = char
+			escapedWhitespace = false
+			continue
+		}
+		if char == '#' && index > 0 &&
+			(value[index-1] == ' ' || value[index-1] == '\t') &&
+			!escapedWhitespace {
+			return value[:index]
+		}
+		escapedWhitespace = false
+	}
+	return value
+}
+
+func unquoteShellWord(value string, resolve func(string) (string, error)) (string, error) {
+	var result strings.Builder
+	quote := byte(0)
+	escaped := false
+	for index := 0; index < len(value); {
+		char := value[index]
+		if escaped {
+			if quote == '"' && char != '$' && char != '`' && char != '"' && char != '\\' {
+				result.WriteByte('\\')
+			}
+			result.WriteByte(char)
+			escaped = false
+			index++
+			continue
+		}
+		if char == '$' && quote != '\'' {
+			name, next, ok := shellVariableReference(value, index)
+			if !ok || resolve == nil {
+				return "", errors.New("unsupported shell variable expansion in relay.env")
+			}
+			expanded, err := resolve(name)
+			if err != nil {
+				return "", err
+			}
+			result.WriteString(expanded)
+			index = next
+			continue
+		}
+		if char == '`' && quote != '\'' {
+			return "", errors.New("unsupported command substitution in relay.env")
+		}
+		if quote == 0 {
+			switch char {
+			case ' ', '\t':
+				return "", errors.New("unquoted whitespace in relay.env value")
+			case ';', '&', '|', '<', '>', '(', ')', '*', '?', '[', '~':
+				return "", fmt.Errorf("unsupported shell syntax %q in relay.env value", char)
+			}
+		}
+		if quote == '\'' {
+			if char == '\'' {
+				quote = 0
+			} else {
+				result.WriteByte(char)
+			}
+			index++
+			continue
+		}
+		if quote == '"' {
+			if char == '\\' {
+				escaped = true
+			} else if char == '"' {
+				quote = 0
+			} else {
+				result.WriteByte(char)
+			}
+			index++
+			continue
+		}
+		if char == '\\' {
+			escaped = true
+		} else if char == '\'' || char == '"' {
+			quote = char
+		} else {
+			result.WriteByte(char)
+		}
+		index++
+	}
+	if escaped {
+		return "", errors.New("unterminated shell escape in relay.env value")
+	}
+	if quote != 0 {
+		return "", errors.New("unterminated shell quote in relay.env value")
+	}
+	return result.String(), nil
+}
+
+func environmentValue(environment []string, key string) (string, bool) {
+	prefix := key + "="
+	for _, value := range environment {
+		if strings.HasPrefix(value, prefix) {
+			return strings.TrimPrefix(value, prefix), true
+		}
+	}
+	return "", false
+}
+
+func replaceEnvironmentValue(environment []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(environment)+1)
+	for _, item := range environment {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		result = append(result, item)
+	}
+	return append(result, key+"="+value)
 }
 
 func commandEnvironment(nodeDir string, environment []string) []string {

@@ -105,4 +105,145 @@ grep -F migrated "$new_cache/claude-history/pane.json" >/dev/null
 grep -F 'legacy waiter' "$new_cache/post-install.log" >/dev/null
 test -f "$new_cache/.herdr-mobile-relay-installation"
 
+timeout_started=$(date +%s)
+if run_with_timeout 1 sleep 3; then
+    echo "run_with_timeout did not time out" >&2
+    exit 1
+fi
+timeout_finished=$(date +%s)
+test "$((timeout_finished - timeout_started))" -lt 3
+
+signal_downloader="$WORK_DIR/signal-downloader"
+for signal_kind in wget curl; do
+    signal_bin="$WORK_DIR/signal-bin-$signal_kind"
+    mkdir -p "$signal_bin"
+    for signal_command in awk dirname find head mktemp rm sed sleep tar tr uname; do
+        ln -s "$(command -v "$signal_command")" "$signal_bin/$signal_command"
+    done
+    ln -s "$signal_downloader" "$signal_bin/$signal_kind"
+done
+cat > "$signal_downloader" <<'EOF'
+#!/bin/sh
+output=-
+url=
+case "${0##*/}" in
+    wget)
+        for arg do
+            case "$arg" in
+                --output-document=*) output=${arg#--output-document=} ;;
+                *) url=$arg ;;
+            esac
+        done
+        ;;
+    curl)
+        expect_output=0
+        for arg do
+            if [ "$expect_output" -eq 1 ]; then
+                output=$arg
+                expect_output=0
+                continue
+            fi
+            case "$arg" in
+                --output) expect_output=1 ;;
+                --output=*) output=${arg#--output=} ;;
+                *) url=$arg ;;
+            esac
+        done
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+hang() {
+    printf '%s\n' "$$" > "$DOWNLOAD_PID_FILE"
+    trap 'exit 143' INT TERM
+    while :; do
+        sleep 1
+    done
+}
+case "$url" in
+    *commits/*)
+        if [ "$DOWNLOAD_HANG_STAGE" = commits ]; then
+            hang
+        fi
+        data='{"sha":"0123456789abcdef0123456789abcdef01234567"}'
+        ;;
+    *checksums.txt)
+        data='placeholder'
+        ;;
+    *tar.gz)
+        if [ "$DOWNLOAD_HANG_STAGE" = archive ]; then
+            hang
+        fi
+        data=placeholder
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+if [ "$output" = "-" ]; then
+    printf '%s' "$data"
+else
+    printf '%s\n' "$data" > "$output"
+fi
+EOF
+chmod 700 "$signal_downloader"
+
+run_signal_install() {
+    signal_kind=$1
+    signal_stage=$2
+    signal_root="$WORK_DIR/signal-$signal_kind-$signal_stage"
+    signal_bin="$WORK_DIR/signal-bin-$signal_kind"
+    signal_tmp="$signal_root/tmp"
+    signal_home="$signal_root/home"
+    signal_pid_file="$signal_root/downloader.pid"
+    signal_log="$signal_root/install.log"
+    mkdir -p "$signal_tmp" "$signal_home"
+    (
+        PATH="$signal_bin" \
+        HOME="$signal_home" \
+        TMPDIR="$signal_tmp" \
+        VERSION=1.2.3 \
+        DOWNLOAD_HANG_STAGE="$signal_stage" \
+        DOWNLOAD_PID_FILE="$signal_pid_file" \
+        /bin/sh "$REPO_DIR/install.sh" >"$signal_log" 2>&1
+    ) &
+    signal_installer_pid=$!
+    signal_wait=0
+    while [ ! -s "$signal_pid_file" ] && [ "$signal_wait" -lt 10 ]; do
+        sleep 1
+        signal_wait=$((signal_wait + 1))
+    done
+    if [ ! -s "$signal_pid_file" ]; then
+        cat "$signal_log" >&2 || true
+        kill "$signal_installer_pid" 2>/dev/null || true
+        wait "$signal_installer_pid" 2>/dev/null || true
+        echo "installer signal test did not reach $signal_kind $signal_stage download" >&2
+        return 1
+    fi
+    signal_downloader_pid=$(cat "$signal_pid_file")
+    kill -TERM "$signal_installer_pid"
+    if wait "$signal_installer_pid"; then
+        signal_status=0
+    else
+        signal_status=$?
+    fi
+    if [ "$signal_status" -ne 143 ]; then
+        cat "$signal_log" >&2 || true
+        echo "installer did not exit with SIGTERM status: $signal_status" >&2
+        return 1
+    fi
+    if kill -0 "$signal_downloader_pid" 2>/dev/null; then
+        kill -KILL "$signal_downloader_pid" 2>/dev/null || true
+        echo "installer left the $signal_kind downloader running" >&2
+        return 1
+    fi
+    test -z "$(find "$signal_tmp" -mindepth 1 -maxdepth 1 -print -quit)"
+}
+
+run_signal_install wget commits
+run_signal_install wget archive
+run_signal_install curl commits
+run_signal_install curl archive
+
 echo "install shell tests passed"

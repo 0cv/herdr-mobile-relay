@@ -263,27 +263,55 @@ func (m *Manager) public(state State) PublicState {
 	}
 }
 
+type workerLaunch struct {
+	application string
+	args        []string
+}
+
+var workerEnvironmentKeys = [...]string{
+	"HERDR_RELAY_ENV",
+	"HERDR_PLUGIN_CONFIG_DIR",
+}
+
+func appDeployWorkerLaunch(
+	goos, label, executable, jobPath string,
+	lookupEnv func(string) (string, bool),
+) workerLaunch {
+	assignments := make([]string, 0, len(workerEnvironmentKeys))
+	for _, key := range workerEnvironmentKeys {
+		value, present := lookupEnv(key)
+		if present && strings.TrimSpace(value) != "" {
+			assignments = append(assignments, key+"="+value)
+		}
+	}
+
+	worker := []string{executable, "app-deploy-worker", jobPath}
+	if goos == "darwin" {
+		args := []string{"submit", "-l", label, "--"}
+		if len(assignments) > 0 {
+			args = append(args, "/usr/bin/env")
+			args = append(args, assignments...)
+		}
+		args = append(args, worker...)
+		return workerLaunch{application: "launchctl", args: args}
+	}
+
+	args := []string{"--user", "--collect", "--unit=" + label}
+	for _, assignment := range assignments {
+		args = append(args, "--setenv="+assignment)
+	}
+	args = append(args, worker...)
+	return workerLaunch{application: "systemd-run", args: args}
+}
+
 func (m *Manager) launchWorker(ctx context.Context, jobPath string) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	label := fmt.Sprintf("herdr-mobile-relay-app-deploy-%d", time.Now().Unix())
-	var command *exec.Cmd
-	if runtime.GOOS == "darwin" {
-		command = exec.CommandContext(ctx, "launchctl", "submit", "-l", label, "--", executable, "app-deploy-worker", jobPath)
-	} else {
-		command = exec.CommandContext(
-			ctx,
-			"systemd-run",
-			"--user",
-			"--collect",
-			"--unit="+label,
-			executable,
-			"app-deploy-worker",
-			jobPath,
-		)
-	}
+	launch := appDeployWorkerLaunch(runtime.GOOS, label, executable, jobPath, os.LookupEnv)
+	command := exec.CommandContext(ctx, launch.application, launch.args...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("schedule app deployment worker: %s: %s", err, compact(string(output), 300))

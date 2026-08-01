@@ -110,6 +110,40 @@ func TestCodexSessionName(t *testing.T) {
 	}
 }
 
+func TestOMPSessionName(t *testing.T) {
+	home := t.TempDir()
+	sessionDir := filepath.Join(home, ".omp", "agent", "sessions", "-home-user-app")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(sessionDir, "2026-08-01T07-51-16-639Z_session.jsonl")
+	data := []byte(
+		"{\"type\":\"title\",\"title\":\"initial\"}\n" +
+			"{\"type\":\"session\",\"version\":3,\"cwd\":\"/home/user/app\"}\n" +
+			"{\"type\":\"title_change\",\"title\":\"session_fix\"}\n",
+	)
+	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := NewResolver(home)
+	if got := resolver.SessionName("omp", "/home/user/app", sessionPath); got != "session_fix" {
+		t.Fatalf("session name = %q, want %q", got, "session_fix")
+	}
+
+	data = []byte(
+		"{\"type\":\"title\",\"title\":\"initial\"}\n" +
+			"{\"type\":\"session\",\"version\":3,\"cwd\":\"/home/user/app\"}\n" +
+			"{\"type\":\"title_change\",\"title\":\"session_fix_renamed\"}\n",
+	)
+	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolver.SessionName("omp", "/home/user/app", sessionPath); got != "session_fix_renamed" {
+		t.Fatalf("updated session name = %q, want %q", got, "session_fix_renamed")
+	}
+}
+
 func TestEmptySessionID(t *testing.T) {
 	home := t.TempDir()
 	r := NewResolver(home)

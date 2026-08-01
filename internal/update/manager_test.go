@@ -34,6 +34,8 @@ func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
 		"HERDR_CLOUDFLARE_PAGES_BRANCH":  "main",
 		"HERDR_APP_DEPLOY_NPX":           "/opt/node/bin/npx",
 		"HERDR_APP_DEPLOY_NODE_DIR":      "/opt/node/bin",
+		"HERDR_RELAY_ENV":                "/home/cv/.config/herdr-mobile-relay/relay.env",
+		"HERDR_PLUGIN_CONFIG_DIR":        "/home/cv/.config/herdr-mobile-relay",
 		"CLOUDFLARE_API_TOKEN":           "must-not-be-forwarded",
 	}
 	lookup := func(key string) (string, bool) {
@@ -46,6 +48,8 @@ func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
 		"HERDR_CLOUDFLARE_PAGES_BRANCH=main",
 		"HERDR_APP_DEPLOY_NPX=/opt/node/bin/npx",
 		"HERDR_APP_DEPLOY_NODE_DIR=/opt/node/bin",
+		"HERDR_RELAY_ENV=/home/cv/.config/herdr-mobile-relay/relay.env",
+		"HERDR_PLUGIN_CONFIG_DIR=/home/cv/.config/herdr-mobile-relay",
 	}
 
 	linux := updateWorkerLaunch("linux", "relay-update", "/opt/relay", "/tmp/job.json", lookup)
@@ -64,6 +68,78 @@ func TestUpdateWorkerLaunchForwardsAppDeploymentConfiguration(t *testing.T) {
 	darwinArgs = append(darwinArgs, "/opt/relay", "update-worker", "/tmp/job.json")
 	if darwin.application != "launchctl" || !slices.Equal(darwin.args, darwinArgs) {
 		t.Fatalf("darwin launch = %#v, want application launchctl args %#v", darwin, darwinArgs)
+	}
+}
+
+func TestManagerCheckPreservesActiveUpdateState(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "installed")
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+		State:          "installing",
+		TargetVersion:  "1.2.4",
+		TargetRevision: nextTestRevision,
+		StartedAt:      time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(
+		releaseRoot,
+		runtimeDir,
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1:8375/healthz",
+	)
+	transport := blockingRoundTripper{started: make(chan struct{}), release: make(chan struct{})}
+	manager.client = &http.Client{Transport: transport}
+	state := manager.Check(context.Background())
+	if state.State != "installing" || state.TargetVersion != "1.2.4" {
+		t.Fatalf("state = %#v", state)
+	}
+	select {
+	case <-transport.started:
+		t.Fatal("release check ran while an update was active")
+	default:
+	}
+}
+
+func TestManagerCheckRecoversStaleWorkerState(t *testing.T) {
+	root := t.TempDir()
+	releaseRoot := filepath.Join(root, "installed")
+	runtimeDir := filepath.Join(root, "runtime")
+	manager := NewManager(
+		releaseRoot,
+		runtimeDir,
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1:8375/healthz",
+	)
+	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+		State:          "installing",
+		TargetVersion:  "1.2.4",
+		TargetRevision: nextTestRevision,
+		StartedAt:      time.Now().Add(-updateStartupGrace - time.Second).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	transport := blockingRoundTripper{started: make(chan struct{}), release: make(chan struct{})}
+	manager.client = &http.Client{Transport: transport}
+	done := make(chan State, 1)
+	go func() {
+		done <- manager.Check(context.Background())
+	}()
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("release check did not run after stale worker recovery")
+	}
+	close(transport.release)
+	state := <-done
+	if state.State != "failed" || !strings.Contains(state.Error, "injected network failure") {
+		t.Fatalf("state = %#v", state)
 	}
 }
 
@@ -348,6 +424,65 @@ func TestManagerReconcilesCompletedPluginUpdateAfterRestart(t *testing.T) {
 		state.CurrentVersion != "1.2.4" ||
 		state.CurrentRevision != strings.ToUpper(nextTestRevision) ||
 		state.FinishedAt == "" {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestManagerReconcilesFailedInstalledPluginUpdate(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+		State:          "failed",
+		TargetVersion:  "1.2.4",
+		TargetRevision: nextTestRevision,
+		StartedAt:      time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		Error:          "relay health verification timed out",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(
+		filepath.Join(root, "installed"),
+		runtimeDir,
+		testHerdrBinary(t),
+		"1.2.4",
+		nextTestRevision,
+		"http://127.0.0.1/healthz",
+	)
+	state := manager.State()
+	if state.State != "succeeded" ||
+		state.CurrentVersion != "1.2.4" ||
+		state.CurrentRevision != nextTestRevision ||
+		state.Error != "" {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestManagerPreservesFailedPluginUpdateError(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "runtime")
+	const originalError = "relay health verification timed out"
+	if err := writeState(filepath.Join(runtimeDir, "update-state.json"), State{
+		State:          "failed",
+		TargetVersion:  "1.2.4",
+		TargetRevision: nextTestRevision,
+		StartedAt:      time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+		FinishedAt:     time.Now().Add(-30 * time.Second).UTC().Format(time.RFC3339),
+		Error:          originalError,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(
+		filepath.Join(root, "installed"),
+		runtimeDir,
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1/healthz",
+	)
+	state := manager.State()
+	if state.State != "failed" || state.Error != originalError {
 		t.Fatalf("state = %#v", state)
 	}
 }

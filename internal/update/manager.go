@@ -29,6 +29,8 @@ var appDeployEnvironmentKeys = [...]string{
 	"HERDR_CLOUDFLARE_PAGES_BRANCH",
 	"HERDR_APP_DEPLOY_NPX",
 	"HERDR_APP_DEPLOY_NODE_DIR",
+	"HERDR_RELAY_ENV",
+	"HERDR_PLUGIN_CONFIG_DIR",
 }
 
 var semverPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -108,6 +110,19 @@ func (m *Manager) State() State {
 
 func (m *Manager) Check(ctx context.Context) State {
 	m.mu.Lock()
+	m.recoverOrphan(false)
+	current := m.loadState()
+	if transientUpdateState(current.State) {
+		m.state = current
+		state := m.publicState(m.state)
+		m.mu.Unlock()
+		return state
+	}
+	m.state = current
+	m.state.StartedAt = ""
+	m.state.FinishedAt = ""
+	m.state.TargetVersion = ""
+	m.state.TargetRevision = ""
 	m.state.State = "checking"
 	m.state.Error = ""
 	m.state.CurrentVersion = m.version
@@ -118,6 +133,12 @@ func (m *Manager) Check(ctx context.Context) State {
 	metadata, err := m.fetchRelease(ctx)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.recoverOrphan(false)
+	current = m.loadState()
+	if transientUpdateState(current.State) {
+		m.state = current
+		return m.publicState(m.state)
+	}
 	if err != nil {
 		m.state.State = "failed"
 		m.state.CanInstall = false
@@ -399,10 +420,10 @@ func (m *Manager) loadState() State {
 	}
 	state.CurrentVersion = m.version
 	state.CurrentRevision = m.revision
-	if transientUpdateState(state.State) &&
+	if (transientUpdateState(state.State) ||
+		(state.State == "failed" && state.StartedAt != "")) &&
 		state.TargetVersion == m.version &&
 		strings.EqualFold(state.TargetRevision, m.revision) {
-		state.State = "succeeded"
 		state.CanInstall = false
 		state.Eligible = true
 		state.Mode = "plugin"
@@ -449,7 +470,9 @@ func (m *Manager) recoverOrphan(includeScheduled bool) {
 	if err != nil {
 		return
 	}
-	if !transientUpdateState(state.State) {
+	reconcilable := transientUpdateState(state.State) ||
+		(state.State == "failed" && state.StartedAt != "")
+	if !reconcilable {
 		return
 	}
 	if state.TargetVersion == m.version &&
@@ -463,6 +486,9 @@ func (m *Manager) recoverOrphan(includeScheduled bool) {
 		state.Error = ""
 		state.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 		_ = writeState(statePath, state)
+		return
+	}
+	if state.State == "failed" {
 		return
 	}
 	started, startedErr := time.Parse(time.RFC3339, state.StartedAt)

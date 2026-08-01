@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -69,6 +70,39 @@ func TestManagerRejectsPhoneOverrides(t *testing.T) {
 	}
 	if _, _, err := manager.Schedule(context.Background(), "1.2.3", "abc", "https://other.example.test"); err == nil {
 		t.Fatal("phone origin override was accepted")
+	}
+}
+
+func TestAppDeployWorkerLaunchForwardsRelayEnvironmentPaths(t *testing.T) {
+	values := map[string]string{
+		"HERDR_RELAY_ENV":         "/home/cv/.config/herdr-mobile-relay/relay.env",
+		"HERDR_PLUGIN_CONFIG_DIR": "/home/cv/.config/herdr-mobile-relay",
+	}
+	lookup := func(key string) (string, bool) {
+		value, found := values[key]
+		return value, found
+	}
+	assignments := []string{
+		"HERDR_RELAY_ENV=/home/cv/.config/herdr-mobile-relay/relay.env",
+		"HERDR_PLUGIN_CONFIG_DIR=/home/cv/.config/herdr-mobile-relay",
+	}
+
+	linux := appDeployWorkerLaunch("linux", "app-deploy", "/opt/relay", "/tmp/job.json", lookup)
+	linuxArgs := []string{"--user", "--collect", "--unit=app-deploy"}
+	for _, assignment := range assignments {
+		linuxArgs = append(linuxArgs, "--setenv="+assignment)
+	}
+	linuxArgs = append(linuxArgs, "/opt/relay", "app-deploy-worker", "/tmp/job.json")
+	if linux.application != "systemd-run" || !slices.Equal(linux.args, linuxArgs) {
+		t.Fatalf("linux launch = %#v, want application systemd-run args %#v", linux, linuxArgs)
+	}
+
+	darwin := appDeployWorkerLaunch("darwin", "app-deploy", "/opt/relay", "/tmp/job.json", lookup)
+	darwinArgs := []string{"submit", "-l", "app-deploy", "--", "/usr/bin/env"}
+	darwinArgs = append(darwinArgs, assignments...)
+	darwinArgs = append(darwinArgs, "/opt/relay", "app-deploy-worker", "/tmp/job.json")
+	if darwin.application != "launchctl" || !slices.Equal(darwin.args, darwinArgs) {
+		t.Fatalf("darwin launch = %#v, want application launchctl args %#v", darwin, darwinArgs)
 	}
 }
 

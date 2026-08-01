@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,8 +21,11 @@ import (
 )
 
 const (
-	updateStartupGrace = 30 * time.Second
-	updateRepository   = "0cv/herdr-mobile-relay"
+	updateStartupGrace  = 30 * time.Second
+	updateWorkerTimeout = 15 * time.Minute
+	processTermGrace    = 2 * time.Second
+	processWaitDelay    = 4 * time.Second
+	updateRepository    = "0cv/herdr-mobile-relay"
 )
 
 var ErrConcurrent = errors.New("another update is already running")
@@ -70,6 +74,8 @@ type Worker struct {
 }
 
 func Run(ctx context.Context, jobPath string) error {
+	ctx, cancel := context.WithTimeout(ctx, updateWorkerTimeout)
+	defer cancel()
 	worker := Worker{}
 	return worker.Run(ctx, jobPath)
 }
@@ -179,8 +185,7 @@ func (w Worker) Run(ctx context.Context, jobPath string) error {
 }
 
 func installPlugin(ctx context.Context, job Job) error {
-	command := exec.CommandContext(
-		ctx,
+	command := exec.Command(
 		job.HerdrBin,
 		"plugin",
 		"install",
@@ -190,7 +195,7 @@ func installPlugin(ctx context.Context, job Job) error {
 		"--yes",
 	)
 	command.Env = environmentWith("HERDR_MOBILE_RELAY_NO_AUTO_SETUP", "1")
-	output, err := command.CombinedOutput()
+	output, err := runCommandContext(ctx, command)
 	if err != nil {
 		return fmt.Errorf(
 			"Herdr plugin install failed: %s: %s",
@@ -199,6 +204,76 @@ func installPlugin(ctx context.Context, job Job) error {
 		)
 	}
 	return nil
+}
+
+func runCommandContext(ctx context.Context, command *exec.Cmd) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.WaitDelay = processWaitDelay
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- command.Wait()
+	}()
+	select {
+	case err := <-waitCh:
+		return combinedCommandOutput(stdout, stderr), err
+	case <-ctx.Done():
+		if terminateProcessGroup(command.Process.Pid, waitCh) {
+			return combinedCommandOutput(stdout, stderr), ctx.Err()
+		}
+		return nil, ctx.Err()
+	}
+}
+
+func combinedCommandOutput(stdout, stderr *bytes.Buffer) []byte {
+	output := make([]byte, 0, stdout.Len()+stderr.Len())
+	output = append(output, stdout.Bytes()...)
+	return append(output, stderr.Bytes()...)
+}
+
+func terminateProcessGroup(pgid int, waitCh <-chan error) bool {
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	timer := time.NewTimer(processTermGrace)
+	defer timer.Stop()
+	waitCompleted := false
+	select {
+	case <-waitCh:
+		waitCompleted = true
+		if !processGroupAlive(pgid) {
+			return true
+		}
+		<-timer.C
+	case <-timer.C:
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+
+	if !waitCompleted {
+		select {
+		case <-waitCh:
+			waitCompleted = true
+		case <-time.After(processWaitDelay):
+		}
+	}
+	deadline := time.Now().Add(processTermGrace)
+	for processGroupAlive(pgid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return waitCompleted
+}
+
+func processGroupAlive(pgid int) bool {
+	err := syscall.Kill(-pgid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func environmentWith(key, value string) []string {

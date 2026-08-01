@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -165,6 +169,48 @@ func TestRunDoesNotOverwriteStateOwnedByAnotherWorker(t *testing.T) {
 	}
 }
 
+func TestRunCommandContextTerminatesProcessGroup(t *testing.T) {
+	root := t.TempDir()
+	pidFile := filepath.Join(root, "child.pid")
+	scriptPath := filepath.Join(root, "spawn-child.sh")
+	script := fmt.Sprintf(
+		"#!/bin/sh\ntrap '' TERM\nsleep 30 &\nchild=$!\nprintf '%%s\\n' \"$child\" > %q\nwait\n",
+		pidFile,
+	)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	_, err := runCommandContext(ctx, exec.Command("/bin/sh", scriptPath))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runCommandContext() error = %v, want deadline exceeded", err)
+	}
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(childPID, syscall.SIGKILL)
+	})
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := syscall.Kill(childPID, 0)
+		if err != nil && !errors.Is(err, syscall.EPERM) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("child process %d survived process-group cancellation", childPID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestCommandEnvironmentPinsOneNodeFirstPath(t *testing.T) {
 	environment := commandEnvironment("/opt/pinned-node", []string{
 		"HOME=/tmp/home",
@@ -182,6 +228,82 @@ func TestCommandEnvironmentPinsOneNodeFirstPath(t *testing.T) {
 	}
 	if pathCount != 1 {
 		t.Fatalf("PATH entries = %d, want 1", pathCount)
+	}
+}
+
+func TestCommandEnvironmentLoadsOnlyCloudflareCredentials(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "relay.env")
+	if err := os.WriteFile(envFile, []byte(
+		"CF_TOKEN='api token'\n"+
+			"CF_ACCOUNT_ID='account-id # inside value'\n"+
+			"CLOUDFLARE_API_TOKEN=\"$CF_TOKEN\" # trailing comment\n"+
+			"CLOUDFLARE_ACCOUNT_ID=\"${CF_ACCOUNT_ID}\" # trailing comment\n"+
+			"HERDR_RELAY_TOKEN='relay-secret'\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_RELAY_ENV", envFile)
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "")
+
+	environment, err := commandEnvironmentWithCloudflareCredentials("/opt/pinned-node", []string{"PATH=/usr/bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token, present := environmentValue(environment, "CLOUDFLARE_API_TOKEN"); !present || token != "api token" {
+		t.Fatalf("Cloudflare API token = %q, present = %v", token, present)
+	}
+	if account, present := environmentValue(environment, "CLOUDFLARE_ACCOUNT_ID"); !present || account != "account-id # inside value" {
+		t.Fatalf("Cloudflare account ID = %q, present = %v", account, present)
+	}
+	if _, present := environmentValue(environment, "HERDR_RELAY_TOKEN"); present {
+		t.Fatal("relay token was imported into Wrangler environment")
+	}
+}
+func TestCommandEnvironmentRejectsUnsupportedExpansion(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "relay.env")
+	if err := os.WriteFile(envFile, []byte("CLOUDFLARE_API_TOKEN=$(printf bad)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_RELAY_ENV", envFile)
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "")
+
+	if _, err := commandEnvironmentWithCloudflareCredentials("/opt/pinned-node", []string{"PATH=/usr/bin"}); err == nil {
+		t.Fatal("unsupported command substitution was accepted")
+	}
+}
+
+func TestUnquoteShellWord(t *testing.T) {
+	tests := map[string]struct {
+		value string
+		want  string
+	}{
+		"escaped_space": {
+			value: `api\ token # comment`,
+			want:  "api token",
+		},
+		"escaped_double_quote": {
+			value: `"api\"token" # comment`,
+			want:  `api"token`,
+		},
+		"hash_inside_quotes": {
+			value: `"api # token"`,
+			want:  "api # token",
+		},
+		"single_quotes_keep_backslash": {
+			value: `'api\ token'`,
+			want:  `api\ token`,
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := parseShellEnvironmentValue(test.value, nil)
+			if err != nil {
+				t.Fatalf("parseShellEnvironmentValue(%q) error = %v", test.value, err)
+			}
+			if got != test.want {
+				t.Fatalf("parseShellEnvironmentValue(%q) = %q, want %q", test.value, got, test.want)
+			}
+		})
 	}
 }
 

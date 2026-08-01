@@ -4,12 +4,18 @@ Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.13.5] - 2026-08-01
+
 ### Fixed
 
-- Resolve Qoder session names stored under leading-dash project paths, so
-  renamed Qoder sessions appear by name instead of blank.
-- Resolve Pi `session_info` names for literal Pi agents, so renamed Pi
-  sessions show their user-set name instead of the session-file path.
+- Preserve app-deployment credentials and settings across detached workers,
+  bound their process trees, and keep failures actionable.
+- Recover stale relay update state after interrupted workers and terminate
+  update subprocess trees without leaving inherited output pipes behind.
+- Stop and reap installer `curl`/`wget` downloads on cancellation, including
+  metadata downloads, before cleaning temporary files.
+- Resolve renamed Qoder, Pi, and Oh My Pi sessions using their stored names.
 
 ## [0.13.4] - 2026-07-31
 
@@ -174,7 +180,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.4...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.5...HEAD
+[0.13.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.4...v0.13.5
 [0.13.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.1...v0.13.2

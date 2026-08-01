@@ -37,7 +37,12 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
 	agentLower := strings.ToLower(agent)
 	sessionPath := ""
-	if isPiSessionAgent(agentLower) {
+	if isOMPSessionAgent(agentLower) {
+		sessionPath = r.ompSessionPath(sessionID)
+		if sessionPath == "" {
+			return ""
+		}
+	} else if isPiSessionAgent(agentLower) {
 		sessionPath = r.piSessionPath(sessionID)
 		if sessionPath == "" {
 			return ""
@@ -58,6 +63,8 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 
 	var name string
 	switch {
+	case isOMPSessionAgent(agentLower):
+		name = extractOMPSessionTitle(sessionPath)
 	case isPiSessionAgent(agentLower):
 		name = extractPiSessionTitle(sessionPath)
 	case strings.Contains(agentLower, "qoder"):
@@ -75,8 +82,82 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	return name
 }
 
+func isOMPSessionAgent(agent string) bool {
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case "omp", "oh-my-pi", "oh my pi", "ohmypi":
+		return true
+	default:
+		return false
+	}
+}
+
 func isPiSessionAgent(agent string) bool {
 	return strings.EqualFold(strings.TrimSpace(agent), "pi")
+}
+
+func (r *Resolver) ompSessionPath(sessionID string) string {
+	if !filepath.IsAbs(sessionID) || filepath.Ext(sessionID) != ".jsonl" {
+		return ""
+	}
+	root, err := filepath.Abs(filepath.Join(r.home, ".omp", "agent", "sessions"))
+	if err != nil {
+		return ""
+	}
+	path, err := filepath.Abs(filepath.Clean(sessionID))
+	if err != nil {
+		return ""
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return ""
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return path
+}
+
+func extractOMPSessionTitle(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var sessionTitle string
+	var latestTitle string
+	hasTitleEvent := false
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+	for scanner.Scan() {
+		var record struct {
+			Type  string `json:"type"`
+			Title string `json:"title"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &record) != nil {
+			continue
+		}
+		switch record.Type {
+		case "session":
+			sessionTitle = strings.TrimSpace(record.Title)
+		case "title", "title_change":
+			hasTitleEvent = true
+			latestTitle = strings.TrimSpace(record.Title)
+		}
+	}
+	if hasTitleEvent {
+		return latestTitle
+	}
+	return sessionTitle
 }
 
 func (r *Resolver) piSessionPath(sessionID string) string {
@@ -279,12 +360,19 @@ func validSessionID(id string) bool {
 
 func (r *Resolver) sourceSignature(agent, cwd, sessionID string) string {
 	agentLower := strings.ToLower(agent)
+	if isOMPSessionAgent(agentLower) {
+		if path := r.ompSessionPath(sessionID); path != "" {
+			return pathSignature(path)
+		}
+		return ""
+	}
 	if isPiSessionAgent(agentLower) {
 		if path := r.piSessionPath(sessionID); path != "" {
 			return pathSignature(path)
 		}
 		return ""
 	}
+
 	if strings.Contains(agentLower, "codex") {
 		return pathSignature(filepath.Join(r.home, ".codex", "session_index.jsonl"))
 	}
