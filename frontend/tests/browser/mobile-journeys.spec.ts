@@ -1176,7 +1176,7 @@ test('cycles all terminal widths while preserving fixed-grid rendering on older 
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBe('readable');
 });
 
-test('virtualizes variable-height terminal history without truncating copy', async ({ page }) => {
+test('virtualizes variable-height terminal history and copies the latest response', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -1314,21 +1314,88 @@ test('virtualizes variable-height terminal history without truncating copy', asy
   await expect.poll(async () => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(48);
   await expect.poll(async () => Number(await mountedRows.last().getAttribute('data-terminal-row'))).toBe(1001);
+  const finalResponseContent = [
+    bottomUpdatedContent,
+    '',
+    '• Final response line one.',
+    '  Second line.',
+    '',
+    '─ Worked for 2m 19s ─',
+    '› Next question',
+  ].join('\n');
+  const finalResponse = 'Final response line one.\nSecond line.';
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: finalResponseContent,
+  });
+  await expect(screen).toContainText('Final response line one.');
   const fullTranscript = page.getByRole('textbox', { name: 'Full terminal transcript' });
+  const responseTranscript = page.getByRole('textbox', { name: 'Latest final response' });
   const copyButton = page.getByRole('button', { name: 'Copy', exact: true });
-  await expect(fullTranscript).toHaveValue(bottomUpdatedContent);
+  await expect(fullTranscript).toHaveValue(/Final response line one\./);
+  await expect(responseTranscript).toHaveValue(finalResponse);
   await copyButton.click();
   await expect.poll(() => page.evaluate(() =>
-    Reflect.get(window, '__copiedTerminal'))).toBe(bottomUpdatedContent);
+    Reflect.get(window, '__copiedTerminal'))).toBe(finalResponse);
+  await expect(page.getByRole('status').filter({ hasText: 'Final response copied.' })).toBeVisible();
   await page.evaluate(() => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
   });
   await copyButton.click();
+  await expect(responseTranscript).toBeFocused();
+  expect(await responseTranscript.evaluate((element) => {
+    if (!(element instanceof HTMLTextAreaElement)) return null;
+    return { start: element.selectionStart, end: element.selectionEnd };
+  })).toEqual({ start: 0, end: finalResponse.length });
+  await expect(page.getByRole('status').filter({ hasText: 'Final response selected.' })).toBeVisible();
+});
+
+test('copies visible terminal output when no completed response is available', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        async writeText(text: string) {
+          Reflect.set(window, '__copiedTerminal', text);
+        },
+      },
+    });
+  });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Shell output', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Shell output on Fedora' }).click();
+  const visibleOutput = 'shell output\nsecond line';
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: visibleOutput,
+  });
+  const fullTranscript = page.getByRole('textbox', { name: 'Full terminal transcript' });
+  const responseTranscript = page.getByRole('textbox', { name: 'Latest final response' });
+  await expect(fullTranscript).toHaveValue(visibleOutput);
+  await expect(responseTranscript).toHaveValue('');
+  await page.getByRole('button', { name: 'Copy', exact: true }).click();
+  await expect.poll(() => page.evaluate(() =>
+    Reflect.get(window, '__copiedTerminal'))).toBe(visibleOutput);
+  await expect(page.getByRole('status').filter({ hasText: 'Copied the visible terminal output.' })).toBeVisible();
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  });
+  await page.getByRole('button', { name: 'Copy', exact: true }).click();
   await expect(fullTranscript).toBeFocused();
   expect(await fullTranscript.evaluate((element) => {
     if (!(element instanceof HTMLTextAreaElement)) return null;
     return { start: element.selectionStart, end: element.selectionEnd };
-  })).toEqual({ start: 0, end: bottomUpdatedContent.length });
+  })).toEqual({ start: 0, end: visibleOutput.length });
+  await expect(page.getByRole('status').filter({ hasText: 'Visible terminal output selected.' })).toBeVisible();
 });
 
 test('virtualizes large ANSI agent grids without wrapping fixed rows', async ({ page }) => {
@@ -2456,7 +2523,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'codex' }] });
   await expect(page.getByRole('heading', { name: 'Working' })).toBeVisible();
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '\u001b[38;5;6mSafe\u001b[0m <img src=x onerror=alert(1)>' });
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '\u001b[38;5;6m• Safe <img src=x onerror=alert(1)>\u001b[0m\n  Details\n\n─ Worked for 1s ─\n› Next question' });
   const terminal = page.getByRole('log');
   await expect(terminal).toContainText('Safe <img src=x onerror=alert(1)>');
   expect(await terminal.locator('img').count()).toBe(0);
@@ -2473,7 +2540,25 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await copyOutput.click();
   await expect.poll(() => page.evaluate(
     () => (window as typeof window & { __copiedTerminal?: string }).__copiedTerminal,
-  )).toBe('Safe <img src=x onerror=alert(1)>');
+  )).toBe('Safe <img src=x onerror=alert(1)>\nDetails');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: [
+      '⟨Wall: 0.08s⟩',
+      '',
+      'Updated the canonical plan to:',
+      '',
+      '- Final plan consistency assertions pass.',
+      '',
+      '※ recap: Goal: implement the strategy.',
+    ].join('\n'),
+  });
+  await copyOutput.click();
+  await expect.poll(() => page.evaluate(
+    () => (window as typeof window & { __copiedTerminal?: string }).__copiedTerminal,
+  )).toBe('Updated the canonical plan to:\n\n- Final plan consistency assertions pass.');
 
   const permissionHeader = terminal.locator('.ansi-line', { hasText: 'Permissions ·' });
   await server(page, 0, {

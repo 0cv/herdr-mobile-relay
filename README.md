@@ -117,8 +117,9 @@ background. Long tokens wrap in responsive output, while fixed-grid table rows
 remain aligned.
 
 The terminal controls send **Esc**, **Tab**, **Shift+Tab**, arrow keys, and
-`Ctrl` plus the next keyboard letter. **Copy** copies the visible terminal
-output without ANSI control sequences.
+`Ctrl` plus the next keyboard letter. **Copy** copies the latest completed
+agent response without ANSI control sequences when available; otherwise it
+copies the visible terminal output.
 
 ## Updates
 

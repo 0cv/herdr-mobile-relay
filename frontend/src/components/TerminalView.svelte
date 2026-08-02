@@ -49,7 +49,7 @@
   } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { relayStore, CommandError } from '$lib/store';
-  import { stripAnsi, TERMINAL_SEPARATOR_TOKEN, renderTerminalContent } from '$lib/terminal';
+  import { latestCompletedResponse, stripAnsi, TERMINAL_SEPARATOR_TOKEN, renderTerminalContent } from '$lib/terminal';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
   import { VirtualTerminalIndex } from '$lib/virtual-terminal';
 
@@ -79,6 +79,7 @@
   let ctrlInputElement = $state<HTMLInputElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
   let transcriptElement = $state<HTMLTextAreaElement>(null!);
+  let responseElement = $state<HTMLTextAreaElement>(null!);
   let composer = $state('');
   let composerFocused = $state(false);
   let resizeFrameBaseline: TerminalFrame | undefined;
@@ -164,6 +165,7 @@
   const terminalPlainText = $derived(
     stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
+  const terminalCopyText = $derived(latestCompletedResponse(frame?.content || ''));
   const terminalContentStyle = $derived.by(() => {
     const styles: string[] = [];
     if (resizeSessionActive && (lastLeasedColumns || renderedResizeColumns)) {
@@ -782,21 +784,32 @@
   }
 
   async function copyTerminalOutput() {
-    const text = terminalPlainText;
-    if (!text.trim()) return;
+    const hasCompletedResponse = Boolean(terminalCopyText.trim());
+    const text = hasCompletedResponse ? terminalCopyText : terminalPlainText;
+    if (!text.trim()) {
+      relayStore.showToast('No terminal output is available to copy.', true);
+      return;
+    }
+    const target = hasCompletedResponse ? responseElement : transcriptElement;
+    const copiedMessage = hasCompletedResponse
+      ? 'Final response copied.'
+      : 'Copied the visible terminal output.';
+    const selectedMessage = hasCompletedResponse
+      ? 'Final response selected. Use your browser Copy command.'
+      : 'Visible terminal output selected. Use your browser Copy command.';
     if (!navigator.clipboard?.writeText) {
-      transcriptElement.focus({ preventScroll: true });
-      transcriptElement.select();
-      relayStore.showToast('Terminal output selected. Use your browser Copy command.');
+      target.focus({ preventScroll: true });
+      target.select();
+      relayStore.showToast(selectedMessage);
       return;
     }
     try {
       await navigator.clipboard.writeText(text);
-      relayStore.showToast('Terminal output copied.');
+      relayStore.showToast(copiedMessage);
     } catch {
-      transcriptElement.focus({ preventScroll: true });
-      transcriptElement.select();
-      relayStore.showToast('Terminal output selected. Use your browser Copy command.');
+      target.focus({ preventScroll: true });
+      target.select();
+      relayStore.showToast(selectedMessage);
     }
   }
 
@@ -1180,6 +1193,14 @@
     tabindex="-1"
     bind:this={transcriptElement}
     value={terminalPlainText}
+  ></textarea>
+  <textarea
+    class="sr-only"
+    aria-label="Latest final response"
+    readonly
+    tabindex="-1"
+    bind:this={responseElement}
+    value={terminalCopyText}
   ></textarea>
   <div class="terminal-copy">
     <Button variant="secondary" size="sm" onclick={copyTerminalOutput}>Copy</Button>

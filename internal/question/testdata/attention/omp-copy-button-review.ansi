@@ -1,0 +1,23 @@
+[0m[38;2;107;114;128m[48;2;15;18;22m│[0m[48;2;15;18;22m [0m[38;2;107;114;128m[48;2;15;18;22m⟨Wall: 0.12s | Timeout: 30s | Artifact: 254⟩[0m[48;2;15;18;22m                                                                                                        [0m[38;2;107;114;128m[48;2;15;18;22m│[0m
+ Implemented and verified the copy-button review fixes.                                                                                                
+                                                                                                                                                       
+ Changes:                                                                                                                                              
+ [0m[38;2;0;180;255m- [0mReplaced lexical tool-name filtering with structural detection using indented [0m[38;2;0;255;136m⎿[0m/[0m[38;2;0;255;136m└[0m continuation markers plus explicit system/tool phrases.           
+ [0m[38;2;0;180;255m- [0mPreserved legitimate prose beginning with words such as “Read”, “Write”, “Ran”, and “Update”.                                                       
+ [0m[38;2;0;180;255m- [0mPreserved nested [0m[38;2;0;255;136m•[0m Markdown list items when the response marker is [0m[38;2;0;255;136m⏺[0m.                                                                               
+ [0m[38;2;0;180;255m- [0mPrevented indented Codex question prompts from being merged into completed plans.                                                                   
+ [0m[38;2;0;180;255m- [0mAdded regression coverage for Claude fixtures, Codex plans, prose collisions, unknown tools, and Markdown lists.                                    
+ [0m[38;2;0;180;255m- [0mAdded browser assertions for both copy-toast paths and removed test formatting noise.                                                               
+ [0m[38;2;0;180;255m- [0mUpdated [0m[38;2;0;255;136mREADME.md[0m and [0m[38;2;0;255;136mCHANGELOG.md[0m.                                                                                                                 
+                                                                                                                                                       
+ Verification:                                                                                                                                         
+ [0m[38;2;0;180;255m- [0m[38;2;0;255;136mmake frontend-check[0m — lint clean, svelte-check: 454 files / 0 errors / 0 warnings, 121 unit tests passed, production build and size validation      
+   passed.                                                                                                                                             
+ [0m[38;2;0;180;255m- [0m[38;2;0;255;136mmake frontend-browser[0m — 44 Chromium tests passed and 44 WebKit tests passed.                                                                        
+ [0m[38;2;0;180;255m- [0mFocused copy browser tests — 3 passed.                                                                                                              
+ [0m[38;2;0;180;255m- [0m[38;2;0;255;136mgit diff --check[0m — clean.                                                                                                                           
+                                                                                                                                                       
+ Left unrelated untracked review artifacts untouched: [0m[38;2;0;255;136mCOPY_BUTTON_REVIEW.md[0m, [0m[38;2;0;255;136mCOPY_BUTTON_REVIEW_2.md[0m, and [0m[38;2;0;255;136mWATCHDOG.yml[0m.                                
+
+ [0m[3m[38;2;107;114;128m※ recap: Implement the copy button so it copies the latest completed agent response, with visible terminal output as fallback. The implementation and [0m
+ [0m[3m[38;2;107;114;128mtests are complete; next action is to review or merge the verified changes.[0m                                                                           

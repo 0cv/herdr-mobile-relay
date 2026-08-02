@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { activityForNotification, activityMatchesSearch } from '$lib/activity';
 import {
@@ -31,6 +34,7 @@ import {
   ansiToHtml,
   compactRepeatedCharacterRuns,
   isSeparatorOnlyLine,
+  latestCompletedResponse,
   renderTerminalContent,
   stripAnsi,
   TERMINAL_REPEATED_RUN_LIMIT,
@@ -45,6 +49,12 @@ function agent(overrides: Partial<Agent>): Agent {
   return {
     relay_id: 'relay', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'relay::w1:p1', ...overrides,
   };
+}
+
+const TEST_DIRECTORY = dirname(fileURLToPath(import.meta.url));
+
+function attentionFixture(name: string): string {
+  return readFileSync(resolve(TEST_DIRECTORY, '..', '..', '..', 'internal', 'question', 'testdata', 'attention', name), 'utf8');
 }
 
 describe('protocol and setup parsing', () => {
@@ -104,6 +114,210 @@ describe('terminal rendering', () => {
     expect(html).not.toContain('<img');
     expect(html).toContain('font-weight:700');
     expect(renderTerminalContent('<script>alert(1)</script>', 'plain').html).toBe('&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
+  it('extracts the latest completed agent response for copy', () => {
+    const content = [
+      '• Earlier answer.',
+      '─ Worked for 2s ─',
+      '',
+      '• Latest answer.',
+      '  Second line.',
+      '\x1b[32m  Third line.\x1b[0m',
+      '',
+      '─ Worked for 2m 19s ─',
+      '› Next question',
+    ].join('\n');
+
+    expect(latestCompletedResponse(content)).toBe('Latest answer.\nSecond line.\nThird line.');
+    const omp = [
+      '│ ⟨Wall: 0.08s | Exit: 0⟩ │',
+      '╰────────────────────────────────╯',
+      '',
+      'Updated the canonical plan to:',
+      '',
+      '- Final plan consistency assertions pass.',
+      '',
+      '│ ※ recap: Goal: implement the strategy. │',
+      '╭── terminal prompt ──╮',
+    ].join('\n');
+    expect(latestCompletedResponse(omp)).toBe(
+      'Updated the canonical plan to:\n\n- Final plan consistency assertions pass.',
+    );
+
+    expect(latestCompletedResponse(attentionFixture('omp-copy-button-review.ansi'))).toBe([
+      'Implemented and verified the copy-button review fixes.',
+      '',
+      'Changes:',
+      '- Replaced lexical tool-name filtering with structural detection using indented ⎿/└ continuation markers plus explicit system/tool phrases.',
+      '- Preserved legitimate prose beginning with words such as “Read”, “Write”, “Ran”, and “Update”.',
+      '- Preserved nested • Markdown list items when the response marker is ⏺.',
+      '- Prevented indented Codex question prompts from being merged into completed plans.',
+      '- Added regression coverage for Claude fixtures, Codex plans, prose collisions, unknown tools, and Markdown lists.',
+      '- Added browser assertions for both copy-toast paths and removed test formatting noise.',
+      '- Updated README.md and CHANGELOG.md.',
+      '',
+      'Verification:',
+      '- make frontend-check — lint clean, svelte-check: 454 files / 0 errors / 0 warnings, 121 unit tests passed, production build and size validation',
+      '  passed.',
+      '- make frontend-browser — 44 Chromium tests passed and 44 WebKit tests passed.',
+      '- Focused copy browser tests — 3 passed.',
+      '- git diff --check — clean.',
+      '',
+      'Left unrelated untracked review artifacts untouched: COPY_BUTTON_REVIEW.md, COPY_BUTTON_REVIEW_2.md, and WATCHDOG.yml.',
+    ].join('\n'));
+    expect(latestCompletedResponse('• Still working')).toBe('');
+    expect(latestCompletedResponse('※ recap: without a command result')).toBe('');
+  });
+
+  it('extracts captured Qoder, Kimi, and OpenCode responses', () => {
+    const qoderResponse = [
+      'This is Herdr Mobile Relay — a Herdr plugin that lets you control Herdr agents from your phone.',
+      '',
+      '- What it does: each Linux/macOS machine runs a relay; a phone connects directly (via Cloudflare tunnel) and merges all agents into one installable',
+      'web app. You can start/stop/rename agents, send prompts, terminal keys, screenshots, and answer Codex/Claude Code/Qoder approvals, with push',
+      'notifications.',
+      '- Stack: Go backend (cmd/, internal/, relay/), Svelte frontend (frontend/), Makefile build, contracts and Playwright/unit tests.',
+      '- Setup paths: Quick Start (temporary TryCloudflare tunnel + QR) or stable install with your own Cloudflare domain and a user service.',
+      '- Current version: 0.13.5.',
+      '',
+      'There are uncommitted changes touching TerminalView.svelte, terminal.ts, tests, plus untracked review docs (COPY_BUTTON_REVIEW*.md, WATCHDOG.yml) —',
+      'looks like in-progress copy-button work.',
+    ].join('\n');
+    expect(latestCompletedResponse(attentionFixture('qodercli-repo-summary.ansi'))).toBe(qoderResponse);
+    expect(latestCompletedResponse(attentionFixture('qodercli-repo-summary-no-second-thinking.ansi'))).toBe(qoderResponse);
+
+    const kimi = [
+      '• Earlier answer.',
+      'Thought for 2s · 10 tokens',
+      '',
+      '• Latest Kimi answer.',
+      '  Second line.',
+      'Thought for 4s · 12 tokens',
+      '>',
+    ].join('\n');
+    expect(latestCompletedResponse(kimi)).toBe('Latest Kimi answer.\nSecond line.');
+
+    const opencode = [
+      '     ┃  Previous request',
+      '     + Thought: 2.5s',
+      '     ▣ Build · model · 2.5s',
+      '     ┃  Latest request',
+      '     + Thought: 1.4s',
+      '     → Read README.md',
+      '     + Thought: 3.2s',
+      '     Latest OpenCode answer.',
+      '     Second line.',
+      '     ▣ Build · model · 4.5s',
+    ].join('\n');
+    expect(latestCompletedResponse(opencode)).toBe('Latest OpenCode answer.\nSecond line.');
+    expect(latestCompletedResponse(attentionFixture('opencode-many-questions-confirm.ansi'))).toBe(
+      'This directory contains a few .ansi terminal output files and a text file. Would you like me to look\n'
+      + "at any of them, or do you have a different project you'd like to explore?",
+    );
+  });
+
+  it('extracts Claude responses from the captured terminal fixtures', () => {
+    const createdResponse = 'Created /workspace/example-user/workspace/tmp/notes.md with a simple markdown skeleton (Overview, Tasks, Links sections).';
+    for (const fixture of [
+      'claude-multi-select.ansi',
+      'claude-multi-select-with-free-text.ansi',
+      'claude-multi-select-submit-end.ansi',
+    ]) {
+      expect(latestCompletedResponse(attentionFixture(fixture))).toBe(createdResponse);
+    }
+
+    for (const fixture of ['claude-plan-one-question.ansi', 'claude-plan-one-question-notes.ansi']) {
+      expect(latestCompletedResponse(attentionFixture(fixture))).toBe('Renamed to hello_world.txt.');
+    }
+
+    for (const fixture of ['claude-plan-multi-question.ansi', 'claude-plan-submit-answers.ansi']) {
+      expect(latestCompletedResponse(attentionFixture(fixture)))
+        .toBe('What would you like to clarify before I ask questions about the trip?');
+    }
+
+    expect(latestCompletedResponse(attentionFixture('claude-single-approval.ansi'))).toBe(
+      'I still need a couple details: what should the file be named, where should it live (I\'ll default to the current directory,\n'
+      + '/workspace/example-user/workspace/tmp, unless you say otherwise), and what content should it contain?',
+    );
+    expect(latestCompletedResponse(attentionFixture('claude-single-question.ansi'))).toBe('');
+  });
+
+  it('keeps indented Codex question prompts out of the completed plan', () => {
+    const response = latestCompletedResponse(attentionFixture('codex-implement-plan.ansi'));
+    expect(response).toMatch(/^Proposed Plan\n\n\n# Create a New File/u);
+    expect(response).not.toContain('Please confirm exact file spec now');
+  });
+
+  it('rejects in-progress, tool-only, and unbounded response markers', () => {
+    expect(latestCompletedResponse([
+      '• Partial streaming text',
+      'Thinking for 8s (esc to interrupt)',
+    ].join('\n'))).toBe('');
+
+    expect(latestCompletedResponse([
+      '• Here is my answer.',
+      '  Detail line.',
+      '',
+      '• Read(src/app.ts)',
+      '  ⎿ Read 40 lines',
+      '─ Worked for 30s ─',
+    ].join('\n'))).toBe('Here is my answer.\nDetail line.');
+
+    for (const prose of [
+      'Ran the full suite; all 120 tests pass.',
+      'Explored the repository and found the stale guide.',
+      'Read the updated guide before starting.',
+      'Write access is required for that directory.',
+      'Edit the config before retrying.',
+      'Update the cache before rerunning.',
+      'Delete the stale lockfile before rerunning.',
+      'Create a backup before changing anything.',
+    ]) {
+      expect(latestCompletedResponse([
+        '⏺ Earlier answer.',
+        `⏺ ${prose}`,
+        '✻ Crunched for 9s',
+      ].join('\n'))).toBe(`Earlier answer.\n${prose}`);
+    }
+
+    expect(latestCompletedResponse([
+      '⏺ Here is my answer.',
+      '  Detail line.',
+      '⏺ Bash(npm test)',
+      '  ⎿ 120 passed',
+      '✻ Crunched for 9s',
+    ].join('\n'))).toBe('Here is my answer.\nDetail line.');
+
+    expect(latestCompletedResponse([
+      '⏺ Next steps:',
+      '',
+      '• Read the migration guide',
+      '• Update the config',
+      '✻ Crunched for 9s',
+    ].join('\n'))).toBe('Next steps:\n\n• Read the migration guide\n• Update the config');
+
+    expect(latestCompletedResponse([
+      '⏺ Answer inside a box.',
+      '│   Second line.',
+      '✻ Worked for 30s',
+    ].join('\n'))).toBe('Answer inside a box.\nSecond line.');
+
+    expect(latestCompletedResponse([
+      'old transcript line one',
+      'old transcript line two',
+      '  ▣ Build · model · 4.5s',
+    ].join('\n'))).toBe('');
+  });
+
+  it('accepts OpenCode hour-based completion durations', () => {
+    for (const duration of ['1h', '1h 2m', '1h 2m 3s']) {
+      expect(latestCompletedResponse([
+        '     + Thought: 1.4s',
+        '     Latest OpenCode answer.',
+        `     ▣ Build · model · ${duration}`,
+      ].join('\n'))).toBe('Latest OpenCode answer.');
+    }
   });
 
   it('normalizes light-origin ANSI colors onto the dark mobile terminal', () => {

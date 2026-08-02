@@ -4,6 +4,10 @@ Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+### Fixed
+
+- Copy the latest completed agent response when available, with visible
+  terminal output preserved as a fallback.
 
 ## [0.13.5] - 2026-08-01
 
