@@ -4,6 +4,9 @@ Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+## [0.13.6] - 2026-08-01
+
 ### Fixed
 
 - Copy the latest completed agent response when available, with visible
@@ -184,7 +187,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.5...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.6...HEAD
+[0.13.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.4...v0.13.5
 [0.13.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.2...v0.13.3
