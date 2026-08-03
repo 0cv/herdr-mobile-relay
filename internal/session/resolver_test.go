@@ -73,8 +73,10 @@ func TestPiSessionName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := NewResolver(home).SessionName("pi", "/home/user/app", sessionPath); got != "Pi renamed" {
-		t.Fatalf("session name = %q, want %q", got, "Pi renamed")
+	for _, agent := range []string{"pi", "pi-coding-agent"} {
+		if got := NewResolver(home).SessionName(agent, "/home/user/app", sessionPath); got != "Pi renamed" {
+			t.Errorf("agent %q session name = %q, want %q", agent, got, "Pi renamed")
+		}
 	}
 }
 
@@ -118,9 +120,9 @@ func TestOMPSessionName(t *testing.T) {
 	}
 	sessionPath := filepath.Join(sessionDir, "2026-08-01T07-51-16-639Z_session.jsonl")
 	data := []byte(
-		"{\"type\":\"title\",\"title\":\"initial\"}\n" +
+		"{\"type\":\"title\",\"title\":\"session_fix\"}\n" +
 			"{\"type\":\"session\",\"version\":3,\"cwd\":\"/home/user/app\"}\n" +
-			"{\"type\":\"title_change\",\"title\":\"session_fix\"}\n",
+			"{\"type\":\"title_change\",\"title\":\"historical_title\"}\n",
 	)
 	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
 		t.Fatal(err)
@@ -132,15 +134,35 @@ func TestOMPSessionName(t *testing.T) {
 	}
 
 	data = []byte(
-		"{\"type\":\"title\",\"title\":\"initial\"}\n" +
+		"{\"type\":\"title\",\"title\":\"session_fix_renamed\"}\n" +
 			"{\"type\":\"session\",\"version\":3,\"cwd\":\"/home/user/app\"}\n" +
-			"{\"type\":\"title_change\",\"title\":\"session_fix_renamed\"}\n",
+			"{\"type\":\"title_change\",\"title\":\"session_fix\"}\n",
 	)
 	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got := resolver.SessionName("omp", "/home/user/app", sessionPath); got != "session_fix_renamed" {
 		t.Fatalf("updated session name = %q, want %q", got, "session_fix_renamed")
+	}
+}
+
+func TestOMPSessionNameFallsBackToHistoricalTitleChange(t *testing.T) {
+	home := t.TempDir()
+	sessionDir := filepath.Join(home, ".omp", "agent", "sessions", "-home-user-app")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(sessionDir, "legacy.jsonl")
+	data := []byte(
+		"{\"type\":\"session\",\"version\":3,\"cwd\":\"/home/user/app\"}\n" +
+			"{\"type\":\"title_change\",\"title\":\"legacy_title\"}\n",
+	)
+	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("omp", "/home/user/app", sessionPath); got != "legacy_title" {
+		t.Fatalf("legacy session name = %q, want %q", got, "legacy_title")
 	}
 }
 

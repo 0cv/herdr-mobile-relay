@@ -92,7 +92,12 @@ func isOMPSessionAgent(agent string) bool {
 }
 
 func isPiSessionAgent(agent string) bool {
-	return strings.EqualFold(strings.TrimSpace(agent), "pi")
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case "pi", "pi-coding-agent":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Resolver) ompSessionPath(sessionID string) string {
@@ -134,6 +139,8 @@ func extractOMPSessionTitle(path string) string {
 	defer f.Close()
 
 	var sessionTitle string
+	var headerTitle string
+	hasHeaderTitle := false
 	var latestTitle string
 	hasTitleEvent := false
 	scanner := bufio.NewScanner(f)
@@ -147,12 +154,22 @@ func extractOMPSessionTitle(path string) string {
 			continue
 		}
 		switch record.Type {
+		case "title":
+			// OMP rewrites the first title record in place. Later
+			// title_change records are history, not the current name.
+			if !hasHeaderTitle {
+				hasHeaderTitle = true
+				headerTitle = strings.TrimSpace(record.Title)
+			}
 		case "session":
 			sessionTitle = strings.TrimSpace(record.Title)
-		case "title", "title_change":
+		case "title_change":
 			hasTitleEvent = true
 			latestTitle = strings.TrimSpace(record.Title)
 		}
+	}
+	if hasHeaderTitle {
+		return headerTitle
 	}
 	if hasTitleEvent {
 		return latestTitle
