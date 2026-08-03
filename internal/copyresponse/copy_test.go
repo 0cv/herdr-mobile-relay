@@ -84,7 +84,7 @@ func TestRunCopiesConfirmedResponseAndRestoresClipboard(t *testing.T) {
 			return nil
 		},
 		1,
-		func(context.Context, string) (int64, error) { return 2, nil },
+		func(context.Context, string) (int64, error) { return 1, nil },
 	)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -348,32 +348,7 @@ func TestRunRejectsUnchangedPreviousConfirmationAfterRepeat(t *testing.T) {
 	}
 }
 
-func TestRunRejectsBusyComposerBeforeMutatingClipboard(t *testing.T) {
-	pane := &fakePane{snapshots: []string{"❯ drafting"}}
-	profile, _ := slashcmd.CopyProfileFor("claude", "")
-	writes := 0
-	_, err := Run(
-		context.Background(),
-		"pane-1",
-		profile,
-		pane,
-		func(context.Context) ([]byte, error) { return []byte("before"), nil },
-		func(context.Context, []byte) error {
-			writes++
-			return nil
-		},
-		1,
-		nil,
-	)
-	if !errors.Is(err, ErrComposerBusy) {
-		t.Fatalf("Run() error = %v, want ErrComposerBusy", err)
-	}
-	if writes != 0 || len(pane.texts) != 0 {
-		t.Fatalf("busy composer mutated pane or clipboard: texts=%v writes=%d", pane.texts, writes)
-	}
-}
-
-func TestRunRestoresClipboardAndEscapesAfterStaleConfirmation(t *testing.T) {
+func TestRunRejectsRegressedPaneRevisionAndRestoresClipboard(t *testing.T) {
 	pane := &fakePane{snapshots: []string{
 		"❯ ",
 		"Copied to clipboard (5 characters, 1 line)",
@@ -399,7 +374,7 @@ func TestRunRestoresClipboardAndEscapesAfterStaleConfirmation(t *testing.T) {
 			return nil
 		},
 		7,
-		func(context.Context, string) (int64, error) { return 7, nil },
+		func(context.Context, string) (int64, error) { return 6, nil },
 	)
 	if !errors.Is(err, ErrStaleOutput) {
 		t.Fatalf("Run() error = %v, want ErrStaleOutput", err)
@@ -409,6 +384,54 @@ func TestRunRestoresClipboardAndEscapesAfterStaleConfirmation(t *testing.T) {
 	}
 	if len(writes) != 2 || string(writes[1]) != "before" {
 		t.Fatalf("clipboard writes = %q, want restored original", writes)
+	}
+}
+func TestRunPreservesBusyComposer(t *testing.T) {
+	response := []byte("Codex response")
+	pane := &fakePane{snapshots: []string{
+		"› Summarize recent commits",
+		"› /copy",
+		"Copied last message to clipboard\n› ",
+	}}
+	profile, ok := slashcmd.CopyProfileFor("codex", "")
+	if !ok {
+		t.Fatal("missing Codex copy profile")
+	}
+	reads := 0
+	var writes [][]byte
+	result, err := Run(
+		context.Background(),
+		"pane-codex-prompt",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) {
+			reads++
+			if reads == 1 {
+				return []byte("before"), nil
+			}
+			return response, nil
+		},
+		func(_ context.Context, data []byte) error {
+			writes = append(writes, append([]byte(nil), data...))
+			return nil
+		},
+		1,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Text != string(response) || result.Source != "clipboard" {
+		t.Fatalf("Run() result = %+v, want copied response", result)
+	}
+	if !reflect.DeepEqual(pane.texts, []string{"/copy", "Summarize recent commits"}) {
+		t.Fatalf("sent text = %v, want copy command and restored prompt", pane.texts)
+	}
+	if !reflect.DeepEqual(pane.keys, [][]string{{"Escape"}, {"Enter"}}) {
+		t.Fatalf("sent keys = %v, want composer clear and command submission", pane.keys)
+	}
+	if len(writes) != 2 || string(writes[1]) != "before" {
+		t.Fatalf("clipboard writes = %q, want sentinel then original", writes)
 	}
 }
 
@@ -790,7 +813,7 @@ func TestRunUsesRecordedOmpPicker(t *testing.T) {
 		},
 		func(context.Context, []byte) error { return nil },
 		1,
-		nil,
+		func(context.Context, string) (int64, error) { return 1, nil },
 	)
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)

@@ -77,7 +77,14 @@ func Run(
 	if profile.MenuOpen(initialState) || profile.PickerOpen(initialState) {
 		return Result{}, ErrPickerOpen
 	}
-	if !profile.ComposerReady(initialState) {
+	// Preserve a pending prompt instead of rejecting the copy or appending /copy
+	// to it. The prompt is restored after the response-copy transaction finishes.
+	composer, foundComposer := profile.ComposerText(initialState)
+	composerNeedsRestore := foundComposer && composer != ""
+	if profile.IdleLayout != nil && !profile.IdleLayout.MatchString(initialState) {
+		return Result{}, ErrComposerBusy
+	}
+	if !composerNeedsRestore && !profile.ComposerReady(initialState) {
 		return Result{}, ErrComposerBusy
 	}
 	var secondaryBefore []byte
@@ -113,6 +120,28 @@ func Run(
 			err = errors.Join(err, fmt.Errorf("restore clipboard: %w", restoreErr))
 		}
 	}()
+	var composerCleared bool
+	if composerNeedsRestore {
+		if err := pane.SendKeys(ctx, paneID, []string{"Escape"}); err != nil {
+			return Result{}, fmt.Errorf("clear agent composer: %w", err)
+		}
+		composerCleared = true
+		defer func() {
+			if !composerCleared {
+				return
+			}
+			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recoveryTimeout)
+			defer cancel()
+			if restoreErr := pane.SendText(restoreCtx, paneID, composer); restoreErr != nil {
+				if err == nil {
+					result = Result{}
+					err = fmt.Errorf("restore agent composer: %w", restoreErr)
+					return
+				}
+				err = errors.Join(err, fmt.Errorf("restore agent composer: %w", restoreErr))
+			}
+		}()
+	}
 
 	submitted := false
 	abort := func(cause error) (Result, error) {
@@ -139,7 +168,10 @@ func Run(
 		if revisionErr != nil {
 			return abort(fmt.Errorf("check copy revision: %w", revisionErr))
 		}
-		if revision <= initialRevision {
+		// Herdr revisions are not guaranteed to advance for terminal-only updates
+		// (Claude keeps a stable revision while its rendered pane changes). A
+		// regression still proves that the snapshot came from an older pane.
+		if revision < initialRevision {
 			return abort(ErrStaleOutput)
 		}
 	}

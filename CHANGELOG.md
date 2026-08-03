@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-08-03
+
+### Fixed
+
+- Allow response copying when terminal-only updates keep the pane revision stable.
+- Preserve pending agent prompts while running response-copy commands.
+
 ## [0.13.7] - 2026-08-03
 
 ### Fixed
