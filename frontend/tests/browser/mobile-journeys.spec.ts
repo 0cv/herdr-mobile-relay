@@ -568,7 +568,8 @@ test('keeps update controls steady while app and relay checks are in flight', as
   });
   await checkButton.click();
   await expect(checkButton).toBeDisabled();
-  await expect(checkButton).toHaveText('Checking…');
+  await expect(checkButton).toHaveAttribute('aria-busy', 'true');
+  await expect(checkButton).toHaveText('Check for Updates');
   expect(await checkButton.evaluate((button) => getComputedStyle(button).opacity)).toBe('1');
 
   const duringButton = await checkButton.boundingBox();

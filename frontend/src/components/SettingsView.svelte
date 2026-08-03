@@ -639,7 +639,7 @@
         aria-busy={appUpdateChecking}
         disabled={appUpdateChecking}
         onclick={checkAppAndRelays}
-      >{appUpdateChecking ? 'Checking…' : 'Check for Updates'}</Button>
+      >Check for Updates</Button>
       {#if updatePending}
         <Button disabled={!safeUpdateAction || Boolean(busyRelayId)} onclick={requestSafeUpdate}>
           {updateActionLabel(safeUpdateAction)}
