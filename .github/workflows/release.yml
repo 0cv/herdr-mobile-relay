@@ -14,23 +14,39 @@ jobs:
     name: Require successful check workflow
     runs-on: ubuntu-latest
     steps:
-      - name: Verify tagged commit passed check.yml
+      - name: Require successful check workflow
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          count="$(
-            gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow check.yml \
-              --commit "$GITHUB_SHA" \
-              --status success \
-              --json databaseId \
-              --jq 'length'
-          )"
-          test "$count" -gt 0 || {
-            echo "Tagged commit $GITHUB_SHA has no successful check.yml run." >&2
-            exit 1
-          }
+          deadline=$((SECONDS + 1800))
+          while (( SECONDS < deadline )); do
+            state="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow check.yml \
+                --commit "$GITHUB_SHA" \
+                --limit 20 \
+                --json status,conclusion \
+                --jq '
+                  if any(.[]; .conclusion == "success") then "success"
+                  elif length == 0 or any(.[]; .status != "completed") then "pending"
+                  else "failed"
+                  end
+                '
+            )"
+            case "$state" in
+              success)
+                exit 0
+                ;;
+              failed)
+                echo "Tagged commit $GITHUB_SHA has no successful check.yml run." >&2
+                exit 1
+                ;;
+            esac
+            sleep 15
+          done
+          echo "Timed out waiting for check.yml on tagged commit $GITHUB_SHA." >&2
+          exit 1
 
   build:
     needs: verify
