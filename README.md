@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.13.8`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.13.8) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.13.9`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.13.9) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -142,6 +142,11 @@ that the current and target apps and relays share a transport, deploys the
 target web bundle, and verifies the public Pages version. Only then does it
 install and restart the relay. A failed download, compatibility check,
 deployment, or public-origin check leaves the current relay running.
+
+Release checks use the GitHub API and fall back to the public GitHub Atom
+release and commit feeds when an unauthenticated API request is rate-limited.
+Loading a newly deployed phone app uses a versioned navigation, so a sleeping
+browser or installed PWA does not have to reuse a stale document.
 Transport-breaking changes require a bridge release that supports both
 transports. This release retains the existing E2EE v1 transport, so the upgrade
 into it remains compatible with the previous phone app. The optional
@@ -223,6 +228,14 @@ Health endpoints:
   hostname if `cloudflared` stopped.
 - **App opens but stays disconnected:** reopen the complete setup link,
   including its `#setup=...` fragment.
+- **Update operation failed with `read canonical release: HTTP 403`:** an older
+  relay's unauthenticated GitHub release check was rate-limited. Run
+  `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes`
+  once on that computer as the signed-in user; current releases retry through
+  GitHub's public release feeds.
+- **Updated app still shows the previous version:** open Settings, choose
+  **Check for Updates**, then **Load Update**. Current releases use a fresh
+  versioned navigation and preserve the saved relay list.
 - **Agents are unavailable:** inspect `/healthz`; after a Herdr protocol update,
   run `herdr server live-handoff` and wait for the next relay poll.
 - **Stable setup stops:** keep its state and rerun the exact command printed.

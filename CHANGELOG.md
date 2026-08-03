@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.9] - 2026-08-03
+
+### Fixed
+
+- Retry rate-limited GitHub release checks through public Atom feeds.
+- Reload deployed phone-app bundles with a cache-busted navigation after sleep.
+- Reduce the Markdown response preview font size on mobile.
+
 ## [0.13.8] - 2026-08-03
 
 ### Fixed
@@ -204,7 +212,9 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.7...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.9...HEAD
+[0.13.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.8...v0.13.9
+[0.13.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.7...v0.13.8
 [0.13.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.6...v0.13.7
 [0.13.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.4...v0.13.5

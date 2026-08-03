@@ -305,7 +305,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .agent-response-preview { background: var(--card); border-top: 1px solid var(--border); padding: .5rem; }
 .agent-response-preview-header { align-items: center; display: flex; gap: .5rem; justify-content: space-between; margin-bottom: .35rem; }
 .agent-response-preview-actions { display: flex; gap: .35rem; }
-.agent-response-preview textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; max-height: min(30dvh, 16rem); min-height: 5rem; width: 100%; }
+.agent-response-preview textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; line-height: 1.45; max-height: min(30dvh, 16rem); min-height: 5rem; width: 100%; }
 .term-content {
   background: var(--terminal);
   color: var(--terminal-text);

@@ -447,6 +447,27 @@ test('shows inventory failure instead of zero agents and recovers without reconn
   expect(await socketCount(page)).toBe(1);
 });
 
+test('loads a deployed phone app through a cache-busted navigation', async ({ page }) => {
+  const deployedAssets = APP_METADATA.assets + 1;
+  await page.route('**/version.json?*', async (route) => {
+    await route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ version: APP_RELEASE, assets: deployedAssets }),
+    });
+  });
+  await boot(page);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const loadUpdate = page.getByRole('button', { name: 'Load Update', exact: true }).first();
+  await expect(loadUpdate).toBeEnabled();
+  await loadUpdate.click();
+  const dialog = page.getByRole('dialog', { name: 'Load Update' });
+  await dialog.getByRole('button', { name: 'Load Update', exact: true }).click();
+
+  await expect.poll(() => new URL(page.url()).searchParams.get('herdr_reload'))
+    .toMatch(new RegExp(`^${APP_RELEASE.replaceAll('.', '\\.')}-\\d+$`));
+});
+
 test('checks every self-updating relay automatically after connection', async ({ page }) => {
   const mac = { id: 'mac', label: 'Mac', url: 'wss://mac.example', token: '' };
   await boot(page, [fedora, mac]);

@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 )
 
 const canonicalAPI = "https://api.github.com/repos/0cv/herdr-mobile-relay"
+const canonicalWeb = "https://github.com/0cv/herdr-mobile-relay"
 
 var appDeployEnvironmentKeys = [...]string{
 	"HERDR_APP_DEPLOY_ORIGIN",
@@ -43,6 +45,7 @@ type Manager struct {
 	revision    string
 	healthURL   string
 	apiBase     string
+	webBase     string
 	client      *http.Client
 	tokenFile   string
 
@@ -61,6 +64,15 @@ type githubRelease struct {
 	TagName    string `json:"tag_name"`
 	Draft      bool   `json:"draft"`
 	Prerelease bool   `json:"prerelease"`
+}
+
+type githubAtomFeed struct {
+	Entries []githubAtomEntry `xml:"entry"`
+}
+
+type githubAtomEntry struct {
+	ID    string `xml:"id"`
+	Title string `xml:"title"`
 }
 
 type gitObject struct {
@@ -83,6 +95,7 @@ func NewManager(releaseRoot, runtimeDir, herdrBin, version, revision, healthURL 
 		revision:    revision,
 		healthURL:   healthURL,
 		apiBase:     canonicalAPI,
+		webBase:     canonicalWeb,
 		client: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -249,17 +262,50 @@ func (m *Manager) Schedule(
 
 func (m *Manager) fetchRelease(ctx context.Context) (releaseMetadata, error) {
 	var release githubRelease
-	if err := m.getJSON(ctx, m.apiBase+"/releases/latest", &release); err != nil {
-		return releaseMetadata{}, fmt.Errorf("read canonical release: %w", err)
+	apiErr := m.getJSON(ctx, m.apiBase+"/releases/latest", &release)
+	if apiErr == nil {
+		metadata, err := m.releaseMetadataForTag(ctx, release.TagName, release.Draft, release.Prerelease)
+		if err == nil {
+			return metadata, nil
+		}
+		apiErr = err
 	}
-	if release.Draft || release.Prerelease {
+	if !githubAPIRateLimited(apiErr) {
+		return releaseMetadata{}, fmt.Errorf("read canonical release: %w", apiErr)
+	}
+
+	// GitHub's unauthenticated API is limited per public IP. The web Atom
+	// feeds are independently rate-limited and still expose the published tag
+	// and exact commit needed to verify a release.
+	metadata, feedErr := m.fetchReleaseFromFeeds(ctx)
+	if feedErr == nil {
+		return metadata, nil
+	}
+	return releaseMetadata{}, fmt.Errorf("read canonical release: %v; Atom fallback: %w", apiErr, feedErr)
+}
+
+func githubAPIRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "HTTP 403") || strings.Contains(message, "HTTP 429")
+}
+
+func (m *Manager) releaseMetadataForTag(
+	ctx context.Context,
+	tag string,
+	draft bool,
+	prerelease bool,
+) (releaseMetadata, error) {
+	if draft || prerelease {
 		return releaseMetadata{}, errors.New("canonical latest release is not a stable published release")
 	}
-	version := strings.TrimPrefix(release.TagName, "v")
+	version := strings.TrimPrefix(tag, "v")
 	if !semverPattern.MatchString(version) {
-		return releaseMetadata{}, fmt.Errorf("release tag %q is not semantic versioned", release.TagName)
+		return releaseMetadata{}, fmt.Errorf("release tag %q is not semantic versioned", tag)
 	}
-	revision, err := m.fetchTagRevision(ctx, release.TagName)
+	revision, err := m.fetchTagRevision(ctx, tag)
 	if err != nil {
 		return releaseMetadata{}, err
 	}
@@ -267,6 +313,49 @@ func (m *Manager) fetchRelease(ctx context.Context) (releaseMetadata, error) {
 		Version:  version,
 		Revision: revision,
 	}, nil
+}
+
+func (m *Manager) fetchReleaseFromFeeds(ctx context.Context) (releaseMetadata, error) {
+	var releaseFeed githubAtomFeed
+	feedURL := strings.TrimRight(m.webBase, "/") + "/releases.atom"
+	if err := m.getXML(ctx, feedURL, &releaseFeed); err != nil {
+		return releaseMetadata{}, fmt.Errorf("read release feed: %w", err)
+	}
+	for _, entry := range releaseFeed.Entries {
+		tag := strings.TrimSpace(entry.Title)
+		version := strings.TrimPrefix(tag, "v")
+		if !semverPattern.MatchString(version) {
+			continue
+		}
+		if !strings.HasPrefix(tag, "v") {
+			tag = "v" + version
+		}
+		revision, err := m.fetchFeedTagRevision(ctx, tag)
+		if err != nil {
+			return releaseMetadata{}, fmt.Errorf("resolve release tag %s: %w", tag, err)
+		}
+		return releaseMetadata{Version: version, Revision: revision}, nil
+	}
+	return releaseMetadata{}, errors.New("release feed contains no stable semantic-version release")
+}
+
+func (m *Manager) fetchFeedTagRevision(ctx context.Context, tag string) (string, error) {
+	var commitFeed githubAtomFeed
+	feedURL := strings.TrimRight(m.webBase, "/") + "/commits/" + url.PathEscape(tag) + ".atom"
+	if err := m.getXML(ctx, feedURL, &commitFeed); err != nil {
+		return "", fmt.Errorf("read commit feed: %w", err)
+	}
+	for _, entry := range commitFeed.Entries {
+		id := strings.TrimSpace(entry.ID)
+		revision := id
+		if slash := strings.LastIndexByte(id, '/'); slash >= 0 {
+			revision = id[slash+1:]
+		}
+		if validRevision(revision) {
+			return strings.ToLower(revision), nil
+		}
+	}
+	return "", errors.New("commit feed did not contain an exact revision")
 }
 
 func (m *Manager) fetchTagRevision(ctx context.Context, tag string) (string, error) {
@@ -320,6 +409,24 @@ func (m *Manager) getJSON(ctx context.Context, endpoint string, destination any)
 		return fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 	return json.NewDecoder(io.LimitReader(response.Body, 2*1024*1024)).Decode(destination)
+}
+
+func (m *Manager) getXML(ctx context.Context, endpoint string, destination any) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Accept", "application/atom+xml, application/xml")
+	request.Header.Set("User-Agent", "herdr-mobile-relay-update-check")
+	response, err := m.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", response.StatusCode)
+	}
+	return xml.NewDecoder(io.LimitReader(response.Body, 2*1024*1024)).Decode(destination)
 }
 
 func (m *Manager) token() string {

@@ -281,17 +281,27 @@ export function relayServesCurrentOrigin(relayUrl: string): boolean {
   }
 }
 
+export function cacheBustedAppUrl(currentUrl: string, version: string, nonce = Date.now()): string {
+  const url = new URL(currentUrl);
+  const cacheKey = version || 'current';
+  url.searchParams.set('herdr_reload', `${cacheKey}-${nonce}`);
+  return url.toString();
+}
+
 export async function reloadUpdatedSameOriginApp(version: string): Promise<boolean> {
   if (sessionStorage.getItem(AUTO_RELOAD_VERSION_KEY) === version) return false;
   const status = await checkAppUpdate();
   if (status.state !== 'reload-ready' || status.deployedVersion !== version) return false;
   sessionStorage.setItem(AUTO_RELOAD_VERSION_KEY, version);
-  location.reload();
+  reloadApp(version);
   return true;
 }
 
-export function reloadApp(): void {
-  location.reload();
+export function reloadApp(version = ''): void {
+  // A versioned navigation bypasses a stale document retained by a sleeping
+  // PWA or the back-forward cache. Replace avoids leaving that document behind
+  // as the Back destination.
+  location.replace(cacheBustedAppUrl(location.href, version || get(appUpdateStatus).deployedVersion));
 }
 
 function saveUpdateProgress(plan: UpdateProgressPlan | null): void {

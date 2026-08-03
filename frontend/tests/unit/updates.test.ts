@@ -5,6 +5,7 @@ import {
   appUpdateAvailable,
   beginUpdateProgress,
   appUpdateStatus,
+  cacheBustedAppUrl,
   checkAppUpdate,
   clearPendingRelayUpdate,
   clearUpdateProgress,
@@ -175,6 +176,17 @@ describe('release updates', () => {
       error: '',
     });
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('cache-busts update reloads without dropping the current route', () => {
+    const next = new URL(cacheBustedAppUrl(
+      'https://app.example.test/?setup=preserved#settings',
+      '0.13.8',
+      42,
+    ));
+    expect(next.searchParams.get('setup')).toBe('preserved');
+    expect(next.searchParams.get('herdr_reload')).toBe('0.13.8-42');
+    expect(next.hash).toBe('#settings');
   });
 
   it('normalizes app deployment metadata without exposing unknown fields', () => {

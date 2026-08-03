@@ -245,6 +245,47 @@ func TestFetchReleaseRequiresExactTagCommit(t *testing.T) {
 	}
 }
 
+func TestFetchReleaseFallsBackToAtomFeedsAfterAPIFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	mux.HandleFunc("/releases/latest", func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "rate limited", http.StatusForbidden)
+	})
+	mux.HandleFunc("/releases.atom", func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>v1.2.4</title></entry>
+</feed>`))
+	})
+	mux.HandleFunc("/commits/v1.2.4.atom", func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>tag:github.com,2008:Grit::Commit/` + nextTestRevision + `</id></entry>
+</feed>`))
+	})
+	manager := NewManager(
+		t.TempDir(),
+		t.TempDir(),
+		testHerdrBinary(t),
+		"1.2.3",
+		currentTestRevision,
+		"http://127.0.0.1:8375/healthz",
+	)
+	manager.apiBase = server.URL
+	manager.webBase = server.URL
+	manager.client = server.Client()
+
+	metadata, err := manager.fetchRelease(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Version != "1.2.4" || metadata.Revision != nextTestRevision {
+		t.Fatalf("metadata = %#v", metadata)
+	}
+}
+
 func TestManagerSchedulesExactHerdrPluginJob(t *testing.T) {
 	root := t.TempDir()
 	releaseRoot := filepath.Join(root, "installed")
