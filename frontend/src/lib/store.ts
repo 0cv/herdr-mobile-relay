@@ -77,6 +77,7 @@ const INVENTORY_REQUIRED_COMMANDS = new Set([
   'agent_restart',
   'acknowledge_pane',
   'upload_image',
+  'copy_agent_response',
 ]);
 
 function normalizeAgentInventory(

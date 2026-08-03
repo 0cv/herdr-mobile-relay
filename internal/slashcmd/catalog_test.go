@@ -119,8 +119,8 @@ func TestDiscoverSkills(t *testing.T) {
 
 func TestClaudeBuiltinCatalogIsComplete(t *testing.T) {
 	catalog := CatalogFor("claude", "/tmp", "/nonexistent")
-	if len(catalog.Commands) != 50 {
-		t.Fatalf("Claude builtins = %d, want 50", len(catalog.Commands))
+	if len(catalog.Commands) != 51 {
+		t.Fatalf("Claude builtins = %d, want 51", len(catalog.Commands))
 	}
 }
 

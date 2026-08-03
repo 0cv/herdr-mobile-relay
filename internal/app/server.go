@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -20,8 +21,10 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
+	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
+	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
@@ -38,6 +41,17 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/upload"
 	"github.com/0cv/herdr-mobile-relay/internal/web"
 )
+
+type copyResponseRunner func(
+	context.Context,
+	string,
+	slashcmd.CopyProfile,
+	copyresponse.Pane,
+	copyresponse.ClipboardReader,
+	copyresponse.ClipboardWriter,
+	int64,
+	copyresponse.RevisionReader,
+) (copyresponse.Result, error)
 
 type Server struct {
 	cfg      *config.Config
@@ -59,11 +73,15 @@ type Server struct {
 		Broadcast(any)
 	}
 	transitionEnrich func(context.Context, *coordinator.AgentState)
+	sessions         *session.Resolver
 	historyM         *history.Manager
 	profiles         *profiles.Resolver
-	sessions         *session.Resolver
 	webH             *web.Handler
 	herdrC           *herdr.Client
+	clipboardRead    func(context.Context) ([]byte, error)
+	clipboardWrite   func(context.Context, []byte) error
+	copyRunner       copyResponseRunner
+	copyMu           sync.Mutex
 	paneSizeM        *panesize.Manager
 	dispatcher       *coordinator.Dispatcher
 	updateM          *relayupdate.Manager
@@ -100,7 +118,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	state := coordinator.NewState(logger)
 	hub := transport.NewHub(cfg, logger)
 	herdrClient := herdr.NewClient(cfg.HerdrBin, cfg.SocketPath)
-
+	_, clipboardRead, _ := clipboard.Reader()
 	pollInterval := time.Duration(cfg.PollInterval * float64(time.Second))
 	poller := coordinator.NewPoller(herdrClient, state, pollInterval, logger)
 
@@ -126,6 +144,9 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		hub:                 hub,
 		transitionBroadcast: hub,
 		poller:              poller,
+		clipboardRead:       clipboardRead,
+		clipboardWrite:      clipboard.Write,
+		copyRunner:          copyresponse.Run,
 		herdrC:              herdrClient,
 		paneSizeM:           panesize.NewManager(herdrClient, logger),
 		profiles:            profResolver,
@@ -189,6 +210,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		inventory := s.committedInventoryStatus()
 		capabilities := append([]string(nil), protocol.Capabilities...)
+		if s.clipboardRead != nil {
+			capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
+		}
 		if s.herdrC.SupportsRealtimePane(client.Context()) {
 			capabilities = append(capabilities, "pane_realtime_delta")
 		}
@@ -417,6 +441,10 @@ func (s *Server) Run(ctx context.Context) error {
 				break
 			}
 			s.sendCommandResult(client, requestID, "list_slash_commands", true, "completed", "", paneID, catalog)
+		case "copy_agent_response":
+			requestID, _ := msg["request_id"].(string)
+			paneID, _ := msg["pane_id"].(string)
+			s.copyAgentResponse(client, requestID, paneID)
 		case "push_subscribe":
 			ok := false
 			if s.pushM != nil {
@@ -1243,6 +1271,115 @@ func (s *Server) pruneUploads(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, paneID string) {
+	if paneID == "" {
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent is required", paneID, nil)
+		return
+	}
+	agent, ok := s.state.Agent(paneID)
+	if !ok {
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent pane not found", paneID, nil)
+		return
+	}
+	if agent.Status == "working" {
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent is still working; wait for the current turn to finish", paneID, nil)
+		return
+	}
+	if message := copyBlockedMessage(agent); message != "" {
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", message, paneID, nil)
+		return
+	}
+	if s.clipboardRead == nil || s.clipboardWrite == nil {
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Host clipboard is unavailable", paneID, nil)
+		return
+	}
+	generation := s.state.Generation(paneID)
+	agentName, _ := s.agentInfo(paneID)
+	profileID := s.profiles.ResolvePane(paneID, agentName)
+	profile, ok := slashcmd.CopyProfileFor(profileID, agentName)
+	if !ok {
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent does not support response copying", paneID, nil)
+		return
+	}
+	s.copyMu.Lock()
+	defer s.copyMu.Unlock()
+	ctx, cancel := context.WithTimeout(client.Context(), 10*time.Second)
+	defer cancel()
+	runCopy := s.copyRunner
+	if runCopy == nil {
+		runCopy = copyresponse.Run
+	}
+	result, err := runCopy(
+		ctx,
+		paneID,
+		profile,
+		s.herdrC,
+		s.clipboardRead,
+		s.clipboardWrite,
+		int64(agent.PaneRevision),
+		s.currentPaneRevision,
+	)
+	if err != nil {
+		s.logger.Warn("agent response copy failed", "pane_id", paneID, "error", err)
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", copyResponseError(err), paneID, nil)
+		return
+	}
+	if s.state.Generation(paneID) != generation {
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "The agent pane was replaced while the response was being copied", paneID, nil)
+		return
+	}
+	s.sendCommandResult(client, requestID, "copy_agent_response", true, "completed", "", paneID, map[string]any{
+		"text":   result.Text,
+		"source": result.Source,
+		"chars":  result.Chars,
+		"lines":  result.Lines,
+	})
+}
+
+func copyBlockedMessage(agent *coordinator.AgentState) string {
+	if agent == nil || agent.Status != "blocked" {
+		return ""
+	}
+	switch agent.AttentionKind {
+	case question.AttentionQuestion:
+		return "Agent is waiting for an answer"
+	case question.AttentionApproval:
+		return "Agent is waiting for approval"
+	default:
+		return ""
+	}
+}
+
+func copyResponseError(err error) string {
+	switch {
+	case errors.Is(err, copyresponse.ErrComposerBusy):
+		return "The agent composer is busy; finish or clear the current prompt first"
+	case errors.Is(err, copyresponse.ErrPickerOpen):
+		return "The agent already has a copy menu open; close it and try again"
+	case errors.Is(err, copyresponse.ErrStaleOutput):
+		return "The copied response changed before it could be read; try again"
+	case errors.Is(err, copyresponse.ErrNoCopy):
+		return "The agent did not confirm a copied response; try again"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "Copying the agent response timed out; try again"
+	default:
+		return "Could not copy the agent response; try again"
+	}
+}
+
+func (s *Server) currentPaneRevision(ctx context.Context, paneID string) (int64, error) {
+	inventory, err := s.herdrC.GetInventory(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, pane := range inventory.Panes {
+		if pane.ID == paneID {
+			return int64(pane.Revision), nil
+		}
+	}
+	return 0, fmt.Errorf("pane %q was not found", paneID)
 }
 
 func (s *Server) agentInfo(paneID string) (agent, cwd string) {

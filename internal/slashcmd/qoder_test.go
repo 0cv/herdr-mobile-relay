@@ -11,7 +11,7 @@ func TestQoderBuiltins(t *testing.T) {
 	if len(catalog.Commands) == 0 {
 		t.Fatal("no commands returned")
 	}
-	for _, expected := range []string{"/clear", "/help", "/status", "/compact", "/model"} {
+	for _, expected := range []string{"/clear", "/copy", "/help", "/status", "/compact", "/model"} {
 		if !hasCommand(catalog, expected) {
 			t.Errorf("missing qoder builtin %q", expected)
 		}

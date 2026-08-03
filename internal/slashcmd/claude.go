@@ -19,6 +19,7 @@ var claudeBuiltins = []Command{
 	{"/branch", "Fork an earlier conversation", "builtin", "[session]"},
 	{"/clear", "Start a fresh conversation", "builtin", ""},
 	{"/compact", "Summarize the conversation to free context", "builtin", "[instructions]"},
+	{"/copy", "Copy Claude's last response to clipboard (or /copy N for the Nth-latest)", "builtin", "[N]"},
 	{"/config", "Open Claude Code settings", "builtin", ""},
 	{"/context", "Show context-window usage", "builtin", ""},
 	{"/debug", "Troubleshoot the current Claude Code session", "builtin", "[description]"},

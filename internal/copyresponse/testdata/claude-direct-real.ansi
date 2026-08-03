@@ -1,0 +1,46 @@
+     [0m[38;2;80;200;80m[48;2;2;40;0m 302 +[0m[38;2;248;248;242m[48;2;2;40;0m   the original parser bug. Real captures are what stop it recurring.                                                                [0m
+     [0m[38;2;80;200;80m[48;2;2;40;0m 303 +[0m[38;2;248;248;242m[48;2;2;40;0m4. **Then** surface relay failures instead of swallowing them, and only after all six agents                                         [0m
+     [0m[38;2;80;200;80m[48;2;2;40;0m 304 +[0m[38;2;248;248;242m[48;2;2;40;0m   are verified, trim the parser to its OpenCode path.                                                                               [0m
+     [0m[38;2;80;200;80m[48;2;2;40;0m 305 +[0m[38;2;248;248;242m[48;2;2;40;0m                                                                                                                                     [0m
+     [0m[38;2;80;200;80m[48;2;2;40;0m 306 +[0m[38;2;248;248;242m[48;2;2;40;0mSteps 1–3 are the ones that block shipping. Step 4 is cleanup that is safe only once the                                             [0m
+     [0m[38;2;80;200;80m[48;2;2;40;0m 307 +[0m[38;2;248;248;242m[48;2;2;40;0mpreceding steps are done.                                                                                                            [0m
+
+[0m[38;2;255;255;255m● [0mReview updated. Your correction actually sharpens the main diagnosis:
+
+  [0m[1mThe silent fallback is what hid both blockers.[0m [0m[38;2;177;185;249mcopyTerminalOutput[0m swallows every relay failure with a bare [0m[38;2;177;185;249mcatch {}[0m and quietly serves parser output
+  — which is exactly why a feature that never once succeeds for Qoder, and fails on any Claude response containing an em-dash, passes CI and looks fine
+  by hand. Removing the fallback is right, and it makes those failures visible. But only [0m[3mafter [0mthey're fixed, or Copy goes from silently-degraded to
+  visibly broken.
+
+  [0m[1mWhat changed in the review:[0m
+
+  - [0m[1mH1 promoted to blocking.[0m With no fallback behind them, the missing codex/omp/pi/kimi profiles aren't a degraded experience — those four agents have
+  no working Copy at all. omp is the one with genuinely new behaviour (the post-submission picker), and its machinery currently only executes in a
+  test that synthesises [0m[38;2;177;185;249mPostSubmission [0mbecause no shipped profile sets it.
+  - [0m[1mNew dead-code section[0m, since that was part of what you asked me to look for. The copy-parser block is 213 lines; OpenCode needs
+  [0m[38;2;177;185;249mlatestOpenCodeResponse [0m(~27 lines), two patterns, and the shared helpers. The Claude/codex/Kimi bullet machinery, [0m[38;2;177;185;249mlatestOmpResponse[0m, and
+  [0m[38;2;177;185;249mlatestQoderResponse[0m all become dead — roughly 150 lines plus their tests. Worth knowing it's dead [0m[3min effect[0m, not unreachable: [0m[38;2;177;185;249mlatestCompletedResponse[0m
+  still runs its main path on OpenCode input and simply never matches, so it won't surface as unreferenced, and the [0m[38;2;177;185;249mhelpers.test.ts[0m cases for
+  Claude/codex/Qoder/OMP will keep passing while covering paths no user reaches.
+  - [0m[1mSequenced recommendation.[0m Fix B1/B2 → add the four profiles → replace synthetic fixtures with real captures → [0m[3mthen[0m surface errors and trim the
+  parser. Deleting the fallback first turns every remaining defect into a hard failure with nothing behind it.
+
+  One factual consequence I'd flag rather than decide for you: on a [0m[1mheadless relay [0mthere's no clipboard reader, so the capability is never advertised
+  and [0m[38;2;177;185;249m/copy[0m can't be read back by any route. If the parser stops covering non-OpenCode agents there, Copy stops working entirely for that deployment.
+  Keeping it as a headless-only path costs nothing, since the code has to exist for OpenCode anyway — but that's your call, and it doesn't block the
+  change either way.
+
+[0m[38;2;153;153;153m✻ Worked for 1m 59s[0m
+
+[0m[38;2;153;153;153m※ [0m[1m[38;2;153;153;153mrecap: [0m[3m[38;2;153;153;153mGoal is copying an agent's response from the phone via each agent's own /copy, with the terminal parser kept only for OpenCode. I reviewed the[0m
+  [0m[3m[38;2;153;153;153mimplementation and found it blocked; next is fixing the byte-vs-character count check and Qoder's composer-busy false positive.[0m
+
+[0m[38;2;80;80;80m[48;2;55;55;55m❯[0m[48;2;55;55;55m [0m[38;2;255;255;255m[48;2;55;55;55m/copy[0m[48;2;55;55;55m                                                                                                                                                [0m
+[0m[38;2;153;153;153m  ⎿  [0mCopied to clipboard (2333 characters, 13 lines)
+     Also written to /tmp/claude-1000/response.md
+  
+[0m[38;2;8;145;178m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m[38;2;0;0;0m[48;2;8;145;178m copy-button-review [0m[38;2;8;145;178m──[0m
+❯ 
+[0m[38;2;8;145;178m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;5;5mOpus 5[0m[38;2;153;153;153m  |  [0m[38;5;2mctx: 31%[0m[38;2;153;153;153m  |  5h: 61% (resets 4h 14m)  7d: 25% (resets 1d 4h)  |  [0m[38;5;6mmain[0m[38;2;153;153;153m [0m[38;5;3m ~18 ?8[0m
+  [0m[38;2;255;193;7m⏵⏵ auto mode on[0m[38;2;153;153;153m (shift+tab to cycle) · ← 1 agent[0m

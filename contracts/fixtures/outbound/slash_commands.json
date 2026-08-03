@@ -15,6 +15,7 @@
       {"command": "/branch", "description": "Fork an earlier conversation", "source": "builtin", "argument_hint": "[session]"},
       {"command": "/clear", "description": "Start a fresh conversation", "source": "builtin"},
       {"command": "/compact", "description": "Summarize the conversation to free context", "source": "builtin", "argument_hint": "[instructions]"},
+      {"command": "/copy", "description": "Copy Claude's last response to clipboard (or /copy N for the Nth-latest)", "source": "builtin", "argument_hint": "[N]"},
       {"command": "/config", "description": "Open Claude Code settings", "source": "builtin"},
       {"command": "/context", "description": "Show context-window usage", "source": "builtin"},
       {"command": "/debug", "description": "Troubleshoot the current Claude Code session", "source": "builtin", "argument_hint": "[description]"},

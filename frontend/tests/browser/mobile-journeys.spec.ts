@@ -86,6 +86,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
             data: {
               commands: [
                 { command: '/help', description: 'Show the full command reference and explain every available action', source: 'builtin' },
+                { command: '/copy', description: 'Copy the latest agent response', source: 'builtin' },
                 { command: '/model', description: 'Choose the active model', source: 'builtin' },
                 { command: '/plan', description: 'Enter plan mode', argument_hint: '[prompt]', source: 'builtin' },
                 ...Array.from({ length: 18 }, (_, index) => ({
@@ -95,6 +96,22 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
                 })),
               ],
               truncated: false,
+            },
+          }));
+          return;
+        }
+        if (message.type === 'copy_agent_response') {
+          queueMicrotask(() => this.server({
+            type: 'command_result',
+            action: message.type,
+            request_id: message.request_id,
+            ok: true,
+            phase: 'completed',
+            data: {
+              text: '# Remote markdown response\n\n- Exact copied output',
+              source: 'clipboard',
+              chars: 49,
+              lines: 3,
             },
           }));
           return;
@@ -1192,7 +1209,7 @@ test('virtualizes variable-height terminal history and copies the latest respons
   await handshake(page, 0);
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Long history', agent: 'codex' }],
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Long history', agent: 'opencode' }],
   });
   await page.getByRole('button', { name: 'Open Long history on Fedora' }).click();
   const content = Array.from({ length: 1_000 }, (_, index) => {
@@ -1317,11 +1334,11 @@ test('virtualizes variable-height terminal history and copies the latest respons
   const finalResponseContent = [
     bottomUpdatedContent,
     '',
-    '• Final response line one.',
-    '  Second line.',
-    '',
-    '─ Worked for 2m 19s ─',
-    '› Next question',
+    '     + Thought: 1.0s',
+    '     Final response line one.',
+    '     Second line.',
+    '     ▣ Build · model · 2m 19s',
+    '     Next question',
   ].join('\n');
   const finalResponse = 'Final response line one.\nSecond line.';
   await server(page, 0, {
@@ -1396,6 +1413,77 @@ test('copies visible terminal output when no completed response is available', a
     return { start: element.selectionStart, end: element.selectionEnd };
   })).toEqual({ start: 0, end: visibleOutput.length });
   await expect(page.getByRole('status').filter({ hasText: 'Visible terminal output selected.' })).toBeVisible();
+});
+
+test('uses relay response copy before parser and surfaces failures', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        async writeText(text: string) {
+          Reflect.set(window, '__copiedTerminal', text);
+        },
+      },
+    });
+  });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: [
+      'attention_classification',
+      'clear_activities',
+      'directory_browser',
+      'self_update',
+      'structured_questions',
+      'slash_commands',
+      'agent_response_copy',
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Remote copy', agent: 'claude' }],
+  });
+  await page.getByRole('button', { name: 'Open Remote copy on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: '     + Thought: 0.1s\n     Parsed terminal response.\n     ▣ Build · model · 1s',
+  });
+  const copyButton = page.getByRole('button', { name: 'Copy', exact: true });
+  const responseTranscript = page.getByRole('textbox', { name: 'Latest final response' });
+  await expect(responseTranscript).toHaveValue('Parsed terminal response.');
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(1);
+  await setAutoCommands(page, false);
+
+  await copyButton.click();
+  await expect(page.getByRole('button', { name: 'Copying…', exact: true })).toBeDisabled();
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'copy_agent_response')).toHaveLength(1);
+  const failedCopyCommand = (await commandsForSocket(page, 0))
+    .find((command) => command.type === 'copy_agent_response') as Record<string, unknown>;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'copy_agent_response',
+    request_id: failedCopyCommand.request_id,
+    ok: false,
+    phase: 'failed',
+    error: 'Agent did not confirm a copied response',
+  });
+  await expect(copyButton).toHaveText('Copy');
+  await expect(page.getByRole('status').filter({ hasText: 'Agent did not confirm a copied response' })).toBeVisible();
+  expect(await page.evaluate(() => Reflect.get(window, '__copiedTerminal'))).toBeUndefined();
+
+  await setAutoCommands(page, true);
+  await copyButton.click();
+  await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedTerminal')))
+    .toBe('# Remote markdown response\n\n- Exact copied output');
+  await expect(responseTranscript).toHaveValue('Parsed terminal response.');
+  await expect(page.getByRole('region', { name: 'Copied agent response' })).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Copied agent response markdown' }))
+    .toHaveValue('# Remote markdown response\n\n- Exact copied output');
+  await expect(page.getByRole('status').filter({ hasText: 'Agent response copied.' })).toBeVisible();
 });
 
 test('virtualizes large ANSI agent grids without wrapping fixed rows', async ({ page }) => {
@@ -2033,7 +2121,7 @@ test('discovers slash commands per terminal and fills them before sending', asyn
   expect(composerBox!.height).toBeCloseTo(restingComposerBox!.height, 0);
   expect(popoverBox!.y + popoverBox!.height).toBeLessThan(composerBox!.y);
   expect(popoverBox!.height).toBeLessThanOrEqual(viewport.height * 0.5);
-  await expect(popover.getByRole('option')).toHaveCount(21);
+  await expect(popover.getByRole('option')).toHaveCount(22);
   const description = popover.getByText('Show the full command reference and explain every available action');
   await expect(description).toBeVisible();
   expect(await description.evaluate((element) => ({
@@ -2210,6 +2298,16 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await expect(page.getByRole('button', { name: 'Proceed with plan' })).toBeVisible();
   const composer = page.getByRole('combobox', { name: 'Prompt' });
   await expect(composer).toBeDisabled();
+
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Proceed with plan' }).click();
+  await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeDisabled();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(2);
+  const approvalResponse = (await commands(page)).filter((command) => command.type === 'respond').at(-1)!;
+  await server(page, 0, {
+    type: 'command_result', request_id: approvalResponse.request_id, action: 'respond', ok: true, phase: 'accepted',
+  });
+  await setAutoCommands(page, true);
 
   const working = { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Approvals', agent: 'claude' }] };
   await server(page, 0, working);
@@ -2472,7 +2570,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'codex' }] });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode' }] });
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
   await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
   const attachImage = page.getByRole('button', { name: 'Attach image' });
@@ -2520,10 +2618,10 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
     .toBe(refreshesBeforeBack + 1);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'codex' }] });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode' }] });
   await expect(page.getByRole('heading', { name: 'Working' })).toBeVisible();
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '\u001b[38;5;6m• Safe <img src=x onerror=alert(1)>\u001b[0m\n  Details\n\n─ Worked for 1s ─\n› Next question' });
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '     + Thought: 1.0s\n\u001b[38;5;6m     Safe <img src=x onerror=alert(1)>\u001b[0m\n     Details\n     ▣ Build · model · 1s' });
   const terminal = page.getByRole('log');
   await expect(terminal).toContainText('Safe <img src=x onerror=alert(1)>');
   expect(await terminal.locator('img').count()).toBe(0);
@@ -2546,13 +2644,12 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
     pane_id: 'w1:p1',
     format: 'plain',
     content: [
-      '⟨Wall: 0.08s⟩',
+      '     + Thought: 0.08s',
+      '     Updated the canonical plan to:',
       '',
-      'Updated the canonical plan to:',
-      '',
-      '- Final plan consistency assertions pass.',
-      '',
-      '※ recap: Goal: implement the strategy.',
+      '     - Final plan consistency assertions pass.',
+      '     ▣ Build · model · 0.08s',
+      '     ※ recap: Goal: implement the strategy.',
     ].join('\n'),
   });
   await copyOutput.click();
@@ -2664,6 +2761,86 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await composer.fill('send this');
   await page.getByRole('button', { name: 'Send prompt' }).click();
   expect((await commands(page)).find((command) => command.type === 'submit_prompt')).toMatchObject({ text: 'send this', pane_id: 'w1:p1' });
+});
+
+test('uses relay response copy and allows dismissing the markdown preview', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: [
+      'attention_classification', 'clear_activities', 'directory_browser', 'self_update',
+      'structured_questions', 'slash_commands', 'agent_response_copy',
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Terminal app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'remote copy fixture',
+  });
+  const copied = '# Remote markdown response\n\n- Exact copied output';
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: async (text: string) => {
+          (window as typeof window & { __copiedTerminal?: string }).__copiedTerminal = text;
+        },
+      },
+    });
+  });
+  const copyOutput = page.getByRole('button', { name: 'Copy', exact: true });
+  await expect(copyOutput).toBeVisible();
+  await copyOutput.click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'copy_agent_response')).toHaveLength(1);
+  await expect.poll(() => page.evaluate(
+    () => (window as typeof window & { __copiedTerminal?: string }).__copiedTerminal,
+  )).toBe(copied);
+  const preview = page.getByRole('region', { name: 'Copied agent response' });
+  await expect(preview).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Copied agent response markdown' })).toHaveValue(copied);
+  await page.getByRole('button', { name: 'Dismiss' }).click();
+  await expect(preview).toBeHidden();
+});
+
+test('surfaces relay response-copy failures instead of parsing terminal output', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: [
+      'attention_classification', 'clear_activities', 'directory_browser', 'self_update',
+      'structured_questions', 'slash_commands', 'agent_response_copy',
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Terminal app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'parser fallback must not run',
+  });
+  await setAutoCommands(page, false);
+  const copyOutput = page.getByRole('button', { name: 'Copy', exact: true });
+  await expect(copyOutput).toBeVisible();
+  await copyOutput.click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'copy_agent_response')).toHaveLength(1);
+  const command = (await commands(page)).find((entry) => entry.type === 'copy_agent_response')!;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'copy_agent_response',
+    request_id: command.request_id,
+    ok: false,
+    phase: 'failed',
+    error: 'The agent did not confirm a copied response; try again',
+  });
+  await expect(page.getByRole('status').filter({
+    hasText: 'The agent did not confirm a copied response; try again',
+  })).toBeVisible();
 });
 
 test('resets the home page scroll offset before opening a terminal', async ({ page }) => {

@@ -80,6 +80,8 @@
   let composerElement = $state<HTMLTextAreaElement>(null!);
   let transcriptElement = $state<HTMLTextAreaElement>(null!);
   let responseElement = $state<HTMLTextAreaElement>(null!);
+  let agentResponsePreviewElement = $state<HTMLTextAreaElement>(null!);
+  let copiedAgentResponseText = $state('');
   let composer = $state('');
   let composerFocused = $state(false);
   let resizeFrameBaseline: TerminalFrame | undefined;
@@ -112,6 +114,7 @@
   let ctrlArmed = $state(false);
   let uploadStatus = $state('');
   let uploadError = $state(false);
+  let copyingAgentResponse = $state(false);
   let paneSizeLeaseError = $state('');
   let requestedPaneId = '';
   let slashCatalog = $state<SlashCommandCatalog>({ commands: [], truncated: false });
@@ -125,6 +128,14 @@
   const PANE_SIZE_SETTLE_MS = 250;
   const PANE_SIZE_SETTLE_TIMEOUT_MS = 1_500;
   const PANE_SIZE_SETTLE_MIN_HISTORY = 100;
+  const RESPONSE_COPY_AGENT_IDS = new Set([
+    'claude', 'claudecode', 'codex', 'openaicodex', 'kimi', 'kimicode',
+    'omp', 'ohmypi', 'pi', 'picodingagent', 'qoder', 'qodercli',
+  ]);
+  function responseCopyProfileSupported(agentName: unknown): boolean {
+    const normalized = String(agentName || '').trim().toLocaleLowerCase().replace(/\s+/g, '').replace(/-/g, '');
+    return RESPONSE_COPY_AGENT_IDS.has(normalized);
+  }
   let componentMounted = false;
   let leaseGeneration = 0;
   let leaseInFlight = false;
@@ -165,6 +176,13 @@
   const terminalPlainText = $derived(
     stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
+  const agentResponseCopySupported = $derived.by(() => {
+    const connection = $connections.get(agent.relay_id);
+    return Boolean(
+      connection?.capabilities.includes('agent_response_copy')
+      && responseCopyProfileSupported(agent.agent),
+    );
+  });
   const terminalCopyText = $derived(latestCompletedResponse(frame?.content || ''));
   const terminalContentStyle = $derived.by(() => {
     const styles: string[] = [];
@@ -784,20 +802,50 @@
   }
 
   async function copyTerminalOutput() {
-    const hasCompletedResponse = Boolean(terminalCopyText.trim());
-    const text = hasCompletedResponse ? terminalCopyText : terminalPlainText;
+    copiedAgentResponseText = '';
+    let text = '';
+    let copiedAgentResponse = false;
+    if (agentResponseCopySupported) {
+      copyingAgentResponse = true;
+      try {
+        const result = await relayStore.sendToAgent(agent, { type: 'copy_agent_response' }, 15_000);
+        const remoteText = String(result.data?.text || '');
+        if (!remoteText.trim()) {
+          relayStore.showToast('The agent returned no response to copy.', true);
+          return;
+        }
+        text = remoteText;
+        copiedAgentResponse = true;
+        copiedAgentResponseText = remoteText;
+      } catch (error) {
+        const message = error instanceof Error && error.message
+          ? error.message
+          : 'Could not copy the agent response.';
+        relayStore.showToast(message, true);
+        return;
+      } finally {
+        copyingAgentResponse = false;
+      }
+    }
+    if (!text) text = terminalCopyText || terminalPlainText;
     if (!text.trim()) {
       relayStore.showToast('No terminal output is available to copy.', true);
       return;
     }
+    const hasCompletedResponse = copiedAgentResponse || Boolean(terminalCopyText.trim());
     const target = hasCompletedResponse ? responseElement : transcriptElement;
-    const copiedMessage = hasCompletedResponse
-      ? 'Final response copied.'
-      : 'Copied the visible terminal output.';
-    const selectedMessage = hasCompletedResponse
-      ? 'Final response selected. Use your browser Copy command.'
-      : 'Visible terminal output selected. Use your browser Copy command.';
+    const copiedMessage = copiedAgentResponse
+      ? 'Agent response copied.'
+      : hasCompletedResponse
+        ? 'Final response copied.'
+        : 'Copied the visible terminal output.';
+    const selectedMessage = copiedAgentResponse
+      ? 'Agent response selected. Use your browser Copy command.'
+      : hasCompletedResponse
+        ? 'Final response selected. Use your browser Copy command.'
+        : 'Visible terminal output selected. Use your browser Copy command.';
     if (!navigator.clipboard?.writeText) {
+      target.value = text;
       target.focus({ preventScroll: true });
       target.select();
       relayStore.showToast(selectedMessage);
@@ -807,12 +855,35 @@
       await navigator.clipboard.writeText(text);
       relayStore.showToast(copiedMessage);
     } catch {
+      target.value = text;
       target.focus({ preventScroll: true });
       target.select();
       relayStore.showToast(selectedMessage);
     }
   }
 
+  async function copyDisplayedAgentResponse() {
+    const text = copiedAgentResponseText;
+    if (!text.trim()) return;
+    if (!navigator.clipboard?.writeText) {
+      agentResponsePreviewElement.focus({ preventScroll: true });
+      agentResponsePreviewElement.select();
+      relayStore.showToast('Agent response selected. Use your browser Copy command.');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      relayStore.showToast('Agent response copied.');
+    } catch {
+      agentResponsePreviewElement.focus({ preventScroll: true });
+      agentResponsePreviewElement.select();
+      relayStore.showToast('Agent response selected. Use your browser Copy command.');
+    }
+  }
+
+  function dismissCopiedAgentResponse() {
+    copiedAgentResponseText = '';
+  }
   function toggleCtrl() {
     arrowsOpen = false;
     if (ctrlArmed) {
@@ -1202,8 +1273,30 @@
     bind:this={responseElement}
     value={terminalCopyText}
   ></textarea>
+  {#if copiedAgentResponseText}
+    <section class="agent-response-preview" aria-label="Copied agent response">
+      <div class="agent-response-preview-header">
+        <strong>Markdown response</strong>
+        <div class="agent-response-preview-actions">
+          <Button variant="secondary" size="sm" onclick={copyDisplayedAgentResponse}>Copy markdown</Button>
+          <Button variant="ghost" size="sm" onclick={dismissCopiedAgentResponse}>Dismiss</Button>
+        </div>
+      </div>
+      <textarea
+        aria-label="Copied agent response markdown"
+        readonly
+        bind:this={agentResponsePreviewElement}
+        value={copiedAgentResponseText}
+      ></textarea>
+    </section>
+  {/if}
   <div class="terminal-copy">
-    <Button variant="secondary" size="sm" onclick={copyTerminalOutput}>Copy</Button>
+    <Button
+      variant="secondary"
+      size="sm"
+      disabled={copyingAgentResponse || responding.has(agent.pane_id)}
+      onclick={copyTerminalOutput}
+    >{copyingAgentResponse ? 'Copying…' : 'Copy'}</Button>
   </div>
   {#if jumpVisible}
     <button class="jump-bottom" aria-label="Jump to latest output" onclick={jumpToBottom}>↓</button>

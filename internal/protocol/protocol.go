@@ -184,6 +184,8 @@ type PushConfig struct {
 	AgentProfiles  any      `json:"agent_profiles"`
 }
 
+const AgentResponseCopyCapability = "agent_response_copy"
+
 var Capabilities = []string{
 	"attention_classification",
 	"clear_activities",

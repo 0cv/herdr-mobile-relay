@@ -1,0 +1,34 @@
+ Final lock state:                                                                                                                                     
+                                                                                                                                                       
+ [0m[38;2;157;122;255m- [0mStatistical specification SHA-256:                                                                                                                  
+   [0m[38;2;157;122;255m460ff3ff3e04f7475fef3cee6f028bfd0b6fc4269b9ca125a85428a7167acd9c[0m                                                                                    
+ [0m[38;2;157;122;255m- [0mSample-lock SHA-256:                                                                                                                                
+   [0m[38;2;157;122;255m6d4ac899e2e002fc7da57ac0bb945085e315c5a0425ac376cc24bb0c5af02e83[0m                                                                                    
+ [0m[38;2;157;122;255m- [0mSample lock ID:                                                                                                                                     
+   [0m[38;2;157;122;255m43da7b69e2953012f881c2a37bcd26ee62c0acff342a3897f8423de857ebd404[0m                                                                                    
+ [0m[38;2;157;122;255m- [0mPacket aggregate hash unchanged:                                                                                                                    
+   [0m[38;2;157;122;255m172c3959a484344a3a948036aa031d51f2738c46d2db21177c619009fa29feb8[0m                                                                                    
+ [0m[38;2;157;122;255m- [0mSelected rows remain: 417.                                                                                                                          
+                                                                                                                                                       
+ Verification passed:                                                                                                                                  
+                                                                                                                                                       
+ [0m[38;2;43;40;37m```text[0m                                                                                                                                               
+verify_scorer_adequacy_sample.py
+status: independently_verified
+
+scorer_adequacy_workflow.py verify
+status: verified
+ [0m[38;2;43;40;37m```[0m                                                                                                                                                   
+                                                                                                                                                       
+ No labels have been analyzed and no adequacy gate has been evaluated yet. The lock now freezes the statistical interpretation before packets leave    
+ the controlled workflow.                                                                                                                              
+
+ [0m[38;2;74;70;66mCopied last message to clipboard[0m                                                                                                                      
+
+╭──     GPT-5.6-Luna · 󰪥 xhi   ~/demo-project   feature/copy-response *6 ?45   46.8%/272K 󰁨  $0.33 (sub) 0m╰─                                                                                                                                                   ─╯
+[0m[38;2;248;160;119m╰─ [0m/copy                                                                                                                                            [0m[38;2;248;160;119m ─╯[0m
+[0m[38;2;157;122;255m copy        Pick text or code from the conversation to copy[0m
+  dump[0m[38;2;43;40;37m        Copy session transcript to clipboard (and write LLM request JSON to tmp)[0m
+  fast[0m[38;2;43;40;37m        Fast: off[0m
+  memory[0m[38;2;43;40;37m      Inspect and operate memory maintenance[0m
+  security[0m[38;2;43;40;37m    Plan, run, inspect, import, and compare OMP-native security scans[0m

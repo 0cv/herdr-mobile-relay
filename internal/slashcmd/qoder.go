@@ -18,6 +18,7 @@ type qoderProjectScope struct {
 var qoderBuiltins = []Command{
 	{"/clear", "Start a fresh conversation", "builtin", ""},
 	{"/compact", "Summarize and compact conversation history", "builtin", "[instructions]"},
+	{"/copy", "Copy the last assistant response to clipboard, or /copy N for the Nth-latest", "builtin", "[N]"},
 	{"/config", "View or modify configuration", "builtin", "[key] [value]"},
 	{"/cost", "Show token usage and cost", "builtin", ""},
 	{"/help", "Show available commands", "builtin", ""},

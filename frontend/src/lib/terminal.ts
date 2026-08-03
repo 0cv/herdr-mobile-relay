@@ -247,109 +247,18 @@ export function stripAnsi(text: unknown): string {
 }
 
 const COMPLETION_DURATION_PATTERN = String.raw`(?:\d+h(?:\s+\d+m)?(?:\s+\d+(?:\.\d+)?s)?|\d+m(?:\s+\d+(?:\.\d+)?s)?|\d+(?:\.\d+)?s)`;
-const COMPLETED_TURN_PATTERN = new RegExp(
-  String.raw`^(?:[^\p{L}\p{N}]*\p{L}+ed\s+for\s+${COMPLETION_DURATION_PATTERN}|[^\p{L}\p{N}]*Thought\s+for\s+${COMPLETION_DURATION_PATTERN})\b`,
-  'u',
-);
-const RESPONSE_START_PATTERN = /^\s*[•●▪⏺]\s+\S/u;
-const RESPONSE_PREFIX_PATTERN = /^\s*[•●▪⏺]\s+/u;
 const OPEN_CODE_COMPLETED_PATTERN = new RegExp(
   String.raw`^\s*▣\s+\S+(?:\s+·.*)?\s+${COMPLETION_DURATION_PATTERN}\b`,
   'u',
 );
 const OPEN_CODE_ACTIVITY_PATTERN = /^\s*(?:┃(?:\s|$)|\+\s|→\s)/u;
-const TOOL_RESPONSE_PHRASE_PATTERN = /^(?:AskUserQuestion|ExitPlanMode(?:\s|$)|Asked\s+\d+\s+questions\b|Questions?\s+\d+\/\d+\s+answered\b|User\s+(?:answered|declined)\b|Switched to Plan Mode\.|Exited Plan Mode\.|(?:Added|Deleted) ask rule:)/u;
-const OMP_COMMAND_RESULT_PATTERN = /^\s*⟨Wall:.*⟩\s*$/u;
-const OMP_RESPONSE_END_PATTERN = /^\s*※\s+recap:/u;
-const QODER_COMPLETION_PATTERN = /^\s*(?:Next\s+\d+\s+|Interaction Summary\s*$)/u;
-const QODER_THINKING_PATTERN = /^\s*Thinking\s*$/u;
-
-function isCopyChromeLine(line: string): boolean {
-  const trimmed = line.trim();
-  return !trimmed
-    || isSeparatorOnlyLine(trimmed)
-    || /^[╭╰].*[╮╯]$/u.test(trimmed);
-}
-
-function hasToolContinuation(lines: string[], index: number): boolean {
-  for (let next = index + 1; next < lines.length; next += 1) {
-    if (!lines[next].trim()) continue;
-    return /^\s+[⎿└](?:\s|$)/u.test(lines[next]);
-  }
-  return false;
-}
-
-function isToolResponseLine(lines: string[], index: number): boolean {
-  const text = lines[index].replace(RESPONSE_PREFIX_PATTERN, '').trim();
-  return TOOL_RESPONSE_PHRASE_PATTERN.test(text) || hasToolContinuation(lines, index);
-}
 
 export function latestCompletedResponse(content: unknown): string {
   const lines = String(content ?? '')
     .replace(/\r/g, '')
     .split('\n')
     .map((line) => stripAnsi(trimTerminalChrome(line, true)).replace(/[ \t]+$/u, ''));
-
-  let end = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (COMPLETED_TURN_PATTERN.test(lines[index].trim())) {
-      end = index;
-      break;
-    }
-  }
-  if (end < 0) return latestOpenCodeResponse(lines) || latestOmpResponse(lines) || latestQoderResponse(lines);
-
-  let start = -1;
-  for (let index = end - 1; index >= 0; index -= 1) {
-    if (RESPONSE_START_PATTERN.test(lines[index])) {
-      if (!isToolResponseLine(lines, index)) {
-        start = index;
-        break;
-      }
-      continue;
-    }
-    if (COMPLETED_TURN_PATTERN.test(lines[index].trim())) break;
-  }
-  if (start < 0) return latestOpenCodeResponse(lines) || latestOmpResponse(lines) || latestQoderResponse(lines);
-  const responseIndent = lines[start].match(/^\s*/u)?.[0] || '';
-  let previousIndex = start - 1;
-  while (previousIndex >= 0) {
-    const previous = lines[previousIndex];
-    if (COMPLETED_TURN_PATTERN.test(previous.trim()) || /^\s+[⎿└](?:\s|$)/u.test(previous)) break;
-    if (RESPONSE_START_PATTERN.test(previous)) {
-      const previousIndent = previous.match(/^\s*/u)?.[0] || '';
-      if (previousIndent !== responseIndent || isToolResponseLine(lines, previousIndex)) break;
-      start = previousIndex;
-      previousIndex -= 1;
-      continue;
-    }
-    if (!previous.trim() || previous.startsWith('  ')) {
-      previousIndex -= 1;
-      continue;
-    }
-    break;
-  }
-
-  let responseEnd = end;
-  for (let index = start + 1; index < end; index += 1) {
-    if (RESPONSE_START_PATTERN.test(lines[index]) && isToolResponseLine(lines, index)) {
-      responseEnd = index;
-      break;
-    }
-  }
-
-  const response = lines.slice(start, responseEnd);
-  const responseMarker = response[0].match(/^\s*([•●▪⏺])\s+/u)?.[1] || '';
-  const responsePrefix = responseMarker
-    ? new RegExp(`^\\s*${responseMarker}\\s+`, 'u')
-    : null;
-  if (responsePrefix) response[0] = response[0].replace(responsePrefix, '');
-  for (let index = 0; index < response.length; index += 1) {
-    if (index > 0 && responsePrefix) response[index] = response[index].replace(responsePrefix, '');
-    response[index] = response[index].replace(/^ {1,2}/u, '');
-  }
-  while (response.length && !response.at(-1)?.trim()) response.pop();
-  return response.join('\n').trim();
+  return latestOpenCodeResponse(lines);
 }
 
 function latestOpenCodeResponse(lines: string[]): string {
@@ -375,85 +284,6 @@ function latestOpenCodeResponse(lines: string[]): string {
   const response = lines
     .slice(start, end)
     .map((line) => completionPrefix && line.startsWith(completionPrefix) ? line.slice(completionIndent) : line);
-  while (response.length && !response.at(-1)?.trim()) response.pop();
-  return response.join('\n').trim();
-}
-
-function latestOmpResponse(lines: string[]): string {
-  let end = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (OMP_RESPONSE_END_PATTERN.test(lines[index])) {
-      end = index;
-      break;
-    }
-  }
-  if (end < 0) return '';
-
-  let start = -1;
-  for (let index = end - 1; index >= 0; index -= 1) {
-    if (OMP_COMMAND_RESULT_PATTERN.test(lines[index])) {
-      start = index + 1;
-      break;
-    }
-  }
-  if (start < 0) return '';
-  const response = lines.slice(start, end);
-  while (response.length && isCopyChromeLine(response[0])) response.shift();
-  const leftMargin = response.find((line) => line.trim())?.match(/^ */u)?.[0].length || 0;
-  if (leftMargin) {
-    const margin = ' '.repeat(leftMargin);
-    for (let index = 0; index < response.length; index += 1) {
-      if (response[index].startsWith(margin)) response[index] = response[index].slice(leftMargin);
-    }
-  }
-  while (response.length && isCopyChromeLine(response.at(-1)!)) response.pop();
-  return response.join('\n').trim();
-}
-
-function latestQoderResponse(lines: string[]): string {
-  let end = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (QODER_COMPLETION_PATTERN.test(lines[index])) {
-      end = index;
-      break;
-    }
-  }
-  if (end < 0) return '';
-
-  let thinking = -1;
-  for (let index = end - 1; index >= 0; index -= 1) {
-    if (QODER_THINKING_PATTERN.test(lines[index])) {
-      thinking = index;
-      break;
-    }
-  }
-  if (thinking < 0) return '';
-
-  let start = -1;
-  for (let index = end - 1; index > thinking; index -= 1) {
-    if (RESPONSE_START_PATTERN.test(lines[index]) && !isToolResponseLine(lines, index)) {
-      start = index;
-      break;
-    }
-  }
-  if (start < 0) return '';
-
-  let responseEnd = end;
-  for (let index = start + 1; index < end; index += 1) {
-    if (RESPONSE_START_PATTERN.test(lines[index]) && isToolResponseLine(lines, index)) {
-      responseEnd = index;
-      break;
-    }
-  }
-
-  const response = lines.slice(start, responseEnd);
-  const responsePrefix = response[0].match(/^\s*[▪]\s+/u)
-    ? /^\s*[▪]\s+/u
-    : null;
-  if (responsePrefix) response[0] = response[0].replace(responsePrefix, '');
-  for (let index = 1; index < response.length; index += 1) {
-    response[index] = response[index].replace(/^ {1,3}/u, '');
-  }
   while (response.length && !response.at(-1)?.trim()) response.pop();
   return response.join('\n').trim();
 }
