@@ -5,6 +5,16 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-08-03
+
+### Fixed
+
+- Prevent response-copy actions from interrupting active agent turns.
+- Handle native copy menus, repeated uncounted confirmations, and empty
+  clipboards without accepting stale responses.
+- Keep relay response copying independent of slash-command catalog loading and
+  correct OMP/Pi session-title resolution.
+
 ## [0.13.6] - 2026-08-01
 
 ### Fixed
@@ -187,7 +197,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.6...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.7...HEAD
+[0.13.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.6...v0.13.7
 [0.13.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.4...v0.13.5
 [0.13.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.3...v0.13.4
