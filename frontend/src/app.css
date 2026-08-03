@@ -200,6 +200,10 @@ input, select, textarea {
 }
 textarea { min-height: 6.5rem; resize: vertical; }
 .form-actions, .dialog-actions { display: grid; gap: .5rem; grid-template-columns: 1fr 1fr; margin-top: .35rem; }
+.app-update-status { position: relative; }
+.app-update-status-hidden { visibility: hidden; }
+.app-update-status-checking { inset: 0 0 auto; margin-top: .45rem; position: absolute; }
+.update-check-button:disabled { cursor: wait; filter: none; opacity: 1; }
 .hint, .form-status, .question-status { color: var(--muted); font-size: .74rem; line-height: 1.45; margin: .45rem 0 0; }
 .form-status.error, .upload-status.error { color: var(--danger); }
 .optional { font-weight: 400; }

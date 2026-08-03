@@ -532,6 +532,72 @@ test('checks every self-updating relay automatically after connection', async ({
   await expect(page.getByRole('button', { name: /^Update (Fedora|Mac)/ })).toHaveCount(0);
 });
 
+test('keeps update controls steady while app and relay checks are in flight', async ({ page }) => {
+  const availableUpdate = {
+    state: 'available',
+    current_version: '0.12.0',
+    current_revision: 'abc1234',
+    available_version: APP_RELEASE,
+    available_revision: 'f'.repeat(12),
+    target_revision: 'f'.repeat(40),
+    upstream_version: APP_RELEASE,
+    checked_at: 124,
+    can_install: true,
+    mode: 'local',
+  };
+  await boot(page, [fedora]);
+  await setAutoCommands(page, false);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { update: availableUpdate });
+
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await expect(page.getByText(`Phone app is current at v${APP_RELEASE}.`)).toBeVisible();
+  await expect(page.getByText(`Update v${APP_RELEASE} available`)).toBeVisible();
+
+  const checkButton = page.locator('button.update-check-button');
+  const aboutCard = page.locator('section.card').filter({ has: checkButton });
+  await checkButton.scrollIntoViewIfNeeded();
+  const beforeButton = await checkButton.boundingBox();
+  const beforeCard = await aboutCard.boundingBox();
+  expect(beforeButton).not.toBeNull();
+  expect(beforeCard).not.toBeNull();
+
+  await page.route('**/version.json?*', async (route) => {
+    await page.waitForTimeout(250);
+    await route.continue();
+  });
+  await checkButton.click();
+  await expect(checkButton).toBeDisabled();
+  await expect(checkButton).toHaveText('Checking…');
+  expect(await checkButton.evaluate((button) => getComputedStyle(button).opacity)).toBe('1');
+
+  const duringButton = await checkButton.boundingBox();
+  const duringCard = await aboutCard.boundingBox();
+  expect(duringButton).not.toBeNull();
+  expect(duringCard).not.toBeNull();
+  expect(duringButton!.x).toBeCloseTo(beforeButton!.x, 1);
+  expect(duringButton!.y).toBeCloseTo(beforeButton!.y, 1);
+  expect(duringButton!.width).toBeCloseTo(beforeButton!.width, 1);
+  expect(duringButton!.height).toBeCloseTo(beforeButton!.height, 1);
+  expect(duringCard!.x).toBeCloseTo(beforeCard!.x, 1);
+  expect(duringCard!.y).toBeCloseTo(beforeCard!.y, 1);
+  expect(duringCard!.width).toBeCloseTo(beforeCard!.width, 1);
+  expect(duringCard!.height).toBeCloseTo(beforeCard!.height, 1);
+
+  const check = (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'check_update')
+    .at(-1)!;
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: check.request_id,
+    ok: true,
+    phase: 'confirmed',
+    data: { update: availableUpdate },
+  });
+  await expect(checkButton).toBeEnabled();
+  await expect(checkButton).toHaveText('Check for Updates');
+});
+
 test('confirms and tracks one relay update through its verified reconnect', async ({ page }) => {
   await boot(page, [fedora]);
   const origin = new URL(page.url()).origin;

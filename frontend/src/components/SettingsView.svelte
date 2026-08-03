@@ -59,7 +59,7 @@
     reloadApp,
     setUpdateProgressError,
   } from '$lib/updates';
-  import type { RelayConnectionView } from '$lib/types';
+  import type { AppUpdateStatus, RelayConnectionView } from '$lib/types';
 
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
@@ -82,6 +82,16 @@
   const agents = relayStore.agents;
   const notificationBusy = relayStore.notificationBusy;
   const appUpdate = appUpdateStatus;
+  let previousAppUpdate = $state<AppUpdateStatus | null>(null);
+  let checkingUpdates = $state(false);
+  const appUpdateChecking = $derived(checkingUpdates || $appUpdate.state === 'checking');
+  const appUpdateForLayout = $derived(
+    appUpdateChecking && previousAppUpdate ? previousAppUpdate : $appUpdate,
+  );
+
+  $effect(() => {
+    if (!appUpdateChecking) previousAppUpdate = $appUpdate;
+  });
 
   onMount(refreshPushPreferences);
 
@@ -129,6 +139,7 @@
       && update.available_version === $appUpdate.upstreamVersion;
   });
   const safeUpdateAction = $derived.by((): SafeUpdateAction | null => {
+    if (appUpdateChecking || $appUpdate.state === 'failed') return null;
     const targetVersion = $appUpdate.upstreamVersion;
     if ($appUpdate.state === 'reload-ready') {
       return {
@@ -137,7 +148,6 @@
         description: `Load the verified phone app v${$appUpdate.deployedVersion}.`,
       };
     }
-    if ($appUpdate.state === 'checking' || $appUpdate.state === 'failed') return null;
     if ($appUpdate.state === 'deployment-required') {
       const owner = appDeploymentOwner;
       if (!owner?.connection || !targetVersion) return null;
@@ -312,16 +322,22 @@
   }
 
   async function checkAppAndRelays() {
-    const checks: Promise<unknown>[] = [checkAppUpdate()];
-    for (const { relay, connection } of relayRows) {
-      if (connection?.status === 'connected' && connection.capabilities.includes('self_update')) {
-        checks.push(relayStore.checkRelayUpdate(relay.id));
+    if (checkingUpdates) return;
+    checkingUpdates = true;
+    try {
+      const checks: Promise<unknown>[] = [checkAppUpdate()];
+      for (const { relay, connection } of relayRows) {
+        if (connection?.status === 'connected' && connection.capabilities.includes('self_update')) {
+          checks.push(relayStore.checkRelayUpdate(relay.id));
+        }
       }
-    }
-    const results = await Promise.allSettled(checks);
-    const failure = results.find((result) => result.status === 'rejected');
-    if (failure?.status === 'rejected') {
-      relayStore.showToast((failure.reason as Error).message, true);
+      const results = await Promise.allSettled(checks);
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure?.status === 'rejected') {
+        relayStore.showToast((failure.reason as Error).message, true);
+      }
+    } finally {
+      checkingUpdates = false;
     }
   }
 
@@ -565,52 +581,65 @@
   <Card>
     <h3>About</h3>
     <p>Phone app version {APP_VERSION}</p>
-    {#if $appUpdate.state === 'reload-ready'}
-      <p class="warning" role="status">Version {$appUpdate.deployedVersion} is deployed to this app origin and ready to load.</p>
-    {:else if $appUpdate.state === 'deployment-required'}
-      <p class="warning" role="status">
-        Version {$appUpdate.upstreamVersion} is released, but this app origin still serves {$appUpdate.deployedVersion}.
-      </p>
-      {#if appDeploymentOwner}
-        {#if ['scheduled', 'preparing', 'deploying_app', 'installing', 'restarting'].includes(appDeploymentOwner.connection?.update.state || '')}
-          <p class="hint" role="status">Publishing v{$appUpdate.upstreamVersion} and waiting for this app origin to update. This can take up to two minutes; the relay remains online.</p>
-        {:else if ['scheduled', 'deploying'].includes(appDeploymentOwner.connection?.appDeploy.state || '')}
-          <p class="hint" role="status">Publishing v{$appUpdate.upstreamVersion} from {appDeploymentOwner.relay.label} and waiting for this app origin to update. This can take up to two minutes.</p>
-        {:else if appDeploymentOwner.connection?.appDeploy.state === 'failed'}
-          <p class="warning" role="status">Deployment failed: {appDeploymentOwner.connection.appDeploy.error}</p>
-        {:else if appDeploymentOwner.connection?.releaseVersion !== $appUpdate.upstreamVersion}
-          {#if appDeploymentOwner.connection && relayNeedsManualBootstrap(appDeploymentOwner.connection)}
-            <p class="warning" role="status">{appDeploymentOwner.relay.label} needs the one-time Terminal bootstrap shown in Update Help before it can deploy this app version.</p>
-          {:else if ownerUpdateReady}
-            <p class="hint">{appDeploymentOwner.relay.label} can deploy the app and update to {$appUpdate.upstreamVersion} in one safe step.</p>
+    <div class="app-update-status" aria-busy={appUpdateChecking}>
+      <div class:app-update-status-hidden={appUpdateChecking} aria-hidden={appUpdateChecking}>
+        {#if appUpdateForLayout.state === 'reload-ready'}
+          <p class="warning" role="status">Version {appUpdateForLayout.deployedVersion} is deployed to this app origin and ready to load.</p>
+        {:else if appUpdateForLayout.state === 'deployment-required'}
+          <p class="warning" role="status">
+            Version {appUpdateForLayout.upstreamVersion} is released, but this app origin still serves {appUpdateForLayout.deployedVersion}.
+          </p>
+          {#if appDeploymentOwner}
+            {#if ['scheduled', 'preparing', 'deploying_app', 'installing', 'restarting'].includes(appDeploymentOwner.connection?.update.state || '')}
+              <p class="hint" role="status">Publishing v{appUpdateForLayout.upstreamVersion} and waiting for this app origin to update. This can take up to two minutes; the relay remains online.</p>
+            {:else if ['scheduled', 'deploying'].includes(appDeploymentOwner.connection?.appDeploy.state || '')}
+              <p class="hint" role="status">Publishing v{appUpdateForLayout.upstreamVersion} from {appDeploymentOwner.relay.label} and waiting for this app origin to update. This can take up to two minutes.</p>
+            {:else if appDeploymentOwner.connection?.appDeploy.state === 'failed'}
+              <p class="warning" role="status">Deployment failed: {appDeploymentOwner.connection.appDeploy.error}</p>
+            {:else if appDeploymentOwner.connection?.releaseVersion !== appUpdateForLayout.upstreamVersion}
+              {#if appDeploymentOwner.connection && relayNeedsManualBootstrap(appDeploymentOwner.connection)}
+                <p class="warning" role="status">{appDeploymentOwner.relay.label} needs the one-time Terminal bootstrap shown in Update Help before it can deploy this app version.</p>
+              {:else if ownerUpdateReady}
+                <p class="hint">{appDeploymentOwner.relay.label} can deploy the app and update to {appUpdateForLayout.upstreamVersion} in one safe step.</p>
+              {:else}
+                <p class="hint">No installable v{appUpdateForLayout.upstreamVersion} relay update is available from {appDeploymentOwner.relay.label} yet.</p>
+              {/if}
+            {:else}
+              <p class="hint">{appDeploymentOwner.relay.label} is authorized to deploy this app origin.</p>
+            {/if}
           {:else}
-            <p class="hint">No installable v{$appUpdate.upstreamVersion} relay update is available from {appDeploymentOwner.relay.label} yet.</p>
+            <p class="hint">This is a separately hosted app. Configure one relay as its deployment owner:</p>
+            <pre class="update-command"><code>{APP_DEPLOY_SETUP_COMMAND}</code></pre>
           {/if}
+        {:else if appUpdateForLayout.state === 'checking'}
+          <p class="hint" role="status">Checking this app origin and the upstream release…</p>
+        {:else if appUpdateForLayout.state === 'failed'}
+          <p class="hint" role="status">Could not verify app updates: {appUpdateForLayout.error}</p>
         {:else}
-          <p class="hint">{appDeploymentOwner.relay.label} is authorized to deploy this app origin.</p>
+          <p class="hint" role="status">Phone app is current at v{appUpdateForLayout.upstreamVersion || APP_VERSION}.</p>
+          {#if relayUpdateCount}
+            <p class="warning" role="status">{relayUpdateCount} {relayUpdateCount === 1 ? 'relay update is' : 'relay updates are'} available.</p>
+          {/if}
+          {#if blockedRelayUpdateCount}
+            <p class="warning" role="status">{blockedRelayUpdateCount} {blockedRelayUpdateCount === 1 ? 'relay update needs' : 'relay updates need'} attention.</p>
+          {/if}
+          {#if manualRelayUpdateCount}
+            <p class="warning" role="status">{manualRelayUpdateCount} {manualRelayUpdateCount === 1 ? 'relay requires' : 'relays require'} a one-time manual update.</p>
+          {/if}
         {/if}
-      {:else}
-        <p class="hint">This is a separately hosted app. Configure one relay as its deployment owner:</p>
-        <pre class="update-command"><code>{APP_DEPLOY_SETUP_COMMAND}</code></pre>
+      </div>
+      {#if appUpdateChecking}
+        <p class="hint app-update-status-checking" role="status">Checking this app origin and the upstream release…</p>
       {/if}
-    {:else if $appUpdate.state === 'checking'}
-      <p class="hint" role="status">Checking this app origin and the upstream release…</p>
-    {:else if $appUpdate.state === 'failed'}
-      <p class="hint" role="status">Could not verify app updates: {$appUpdate.error}</p>
-    {:else}
-      <p class="hint" role="status">Phone app is current at v{$appUpdate.upstreamVersion || APP_VERSION}.</p>
-      {#if relayUpdateCount}
-        <p class="warning" role="status">{relayUpdateCount} {relayUpdateCount === 1 ? 'relay update is' : 'relay updates are'} available.</p>
-      {/if}
-      {#if blockedRelayUpdateCount}
-        <p class="warning" role="status">{blockedRelayUpdateCount} {blockedRelayUpdateCount === 1 ? 'relay update needs' : 'relay updates need'} attention.</p>
-      {/if}
-      {#if manualRelayUpdateCount}
-        <p class="warning" role="status">{manualRelayUpdateCount} {manualRelayUpdateCount === 1 ? 'relay requires' : 'relays require'} a one-time manual update.</p>
-      {/if}
-    {/if}
+    </div>
     <div class="form-actions">
-      <Button variant="secondary" disabled={$appUpdate.state === 'checking'} onclick={checkAppAndRelays}>Check for Updates</Button>
+      <Button
+        class="update-check-button"
+        variant="secondary"
+        aria-busy={appUpdateChecking}
+        disabled={appUpdateChecking}
+        onclick={checkAppAndRelays}
+      >{appUpdateChecking ? 'Checking…' : 'Check for Updates'}</Button>
       {#if updatePending}
         <Button disabled={!safeUpdateAction || Boolean(busyRelayId)} onclick={requestSafeUpdate}>
           {updateActionLabel(safeUpdateAction)}
