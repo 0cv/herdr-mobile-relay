@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.11] - 2026-08-03
+
+### Fixed
+
+- Keep the **Check for Updates** controls stable while app and relay checks are in flight.
+- Make the cross-browser regression coverage independent of viewport scroll adjustments.
+
 ## [0.13.10] - 2026-08-03
 
 ### Fixed
@@ -218,7 +225,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.10...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.11...HEAD
+[0.13.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.10...v0.13.11
 [0.13.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.9...v0.13.10
 [0.13.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.7...v0.13.8
 [0.13.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.6...v0.13.7

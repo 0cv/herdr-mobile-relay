@@ -575,12 +575,12 @@ test('keeps update controls steady while app and relay checks are in flight', as
   const duringCard = await aboutCard.boundingBox();
   expect(duringButton).not.toBeNull();
   expect(duringCard).not.toBeNull();
+  // Browser engines may adjust page scroll when the focused control changes.
   expect(duringButton!.x).toBeCloseTo(beforeButton!.x, 1);
-  expect(duringButton!.y).toBeCloseTo(beforeButton!.y, 1);
+  expect(duringButton!.y - duringCard!.y).toBeCloseTo(beforeButton!.y - beforeCard!.y, 1);
   expect(duringButton!.width).toBeCloseTo(beforeButton!.width, 1);
   expect(duringButton!.height).toBeCloseTo(beforeButton!.height, 1);
   expect(duringCard!.x).toBeCloseTo(beforeCard!.x, 1);
-  expect(duringCard!.y).toBeCloseTo(beforeCard!.y, 1);
   expect(duringCard!.width).toBeCloseTo(beforeCard!.width, 1);
   expect(duringCard!.height).toBeCloseTo(beforeCard!.height, 1);
 
