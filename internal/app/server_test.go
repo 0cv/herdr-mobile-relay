@@ -26,10 +26,15 @@ import (
 )
 
 func testServer() *Server {
+	return testServerWithCacheDir("")
+}
+
+func testServerWithCacheDir(cacheDir string) *Server {
 	cfg := &config.Config{
 		Host:       "127.0.0.1",
 		Port:       8375,
 		InstanceID: "test-instance",
+		CacheDir:   cacheDir,
 	}
 	return New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
@@ -49,6 +54,48 @@ func TestHealth(t *testing.T) {
 	}
 	if inst := w.Header().Get("X-Herdr-Relay-Instance"); inst != "test-instance" {
 		t.Errorf("instance header = %q, want test-instance", inst)
+	}
+}
+
+func TestPaneDeltaResponsePreservesTruncation(t *testing.T) {
+	delta := paneDeltaResponse(
+		map[string]any{
+			"type":      "pane_content",
+			"content":   "new output",
+			"truncated": true,
+			"format":    "ansi",
+		},
+		"content-1",
+		nil,
+	)
+	if delta["truncated"] != true {
+		t.Fatalf("delta truncation = %#v, want true", delta["truncated"])
+	}
+	if _, ok := delta["content"]; ok {
+		t.Fatal("delta unexpectedly included full content")
+	}
+}
+
+func TestPreparePaneResponseReportsOnlyActualHistoryClipping(t *testing.T) {
+	s := testServerWithCacheDir(t.TempDir())
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Status: "idle",
+	}}, s.state.RevisionCounter())
+
+	message := map[string]any{"pane_id": "pane-1", "lines": 2}
+	response := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": "line1\nline2", "format": "ansi", "truncated": false,
+	}
+	s.preparePaneResponse(message, response)
+	if response["truncated"] != false {
+		t.Fatalf("exact history truncation = %#v, want false", response["truncated"])
+	}
+
+	message["lines"] = 1
+	s.preparePaneResponse(message, response)
+	if response["truncated"] != true {
+		t.Fatalf("limited history truncation = %#v, want true", response["truncated"])
 	}
 }
 

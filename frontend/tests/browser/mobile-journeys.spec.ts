@@ -1015,6 +1015,35 @@ test('deploys a Pages app before updating its owner relay', async ({ page }) => 
   expect((await commands(page)).some((command) => command.type === 'deploy_app_update')).toBe(false);
 });
 
+test('reports when Herdr clips older terminal history', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Clipped app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Clipped app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: 'visible recent output',
+    truncated: true,
+  });
+  const clippedNotice = page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' });
+  await expect(clippedNotice).toBeVisible();
+
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: 'complete output',
+    truncated: false,
+  });
+  await expect(clippedNotice).toBeHidden();
+});
+
 test('applies relay-watched terminal deltas and pauses the watcher when hidden', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -2093,6 +2122,59 @@ test('surfaces one explicit error when a pane-size lease fails', async ({ page }
   }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'release_pane_size').length).toBe(1);
+});
+
+test('does not repopulate prompts after an unsafe dispatch failure', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Unsafe retry app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Unsafe retry app on Fedora' }).click();
+  const prompt = page.getByRole('combobox', { name: 'Prompt' });
+  await prompt.fill('run this only once');
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  await expect.poll(async () => (await commands(page)).some((entry) => entry.type === 'submit_prompt')).toBe(true);
+  const command = (await commands(page)).find((entry) => entry.type === 'submit_prompt')!;
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: (command as Record<string, unknown>).request_id,
+    action: 'submit_prompt',
+    ok: false,
+    phase: 'dispatched_unknown',
+    error: 'Command may have executed; review the agent before retrying',
+    data: { dispatched_unknown: true },
+  });
+  await expect(prompt).toHaveValue('');
+});
+
+test('preserves unsafe prompt state for older relays without error data', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Legacy retry app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Legacy retry app on Fedora' }).click();
+  const prompt = page.getByRole('combobox', { name: 'Prompt' });
+  await prompt.fill('run this only once');
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  await expect.poll(async () => (await commands(page)).some((entry) => entry.type === 'submit_prompt')).toBe(true);
+  const command = (await commands(page)).find((entry) => entry.type === 'submit_prompt')!;
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: (command as Record<string, unknown>).request_id,
+    action: 'submit_prompt',
+    ok: false,
+    phase: 'dispatched_unknown',
+    error: 'Command may have executed; review the agent before retrying',
+  });
+  await expect(prompt).toHaveValue('');
 });
 
 test('keeps the Pi desktop UI separate from the generic mobile composer', async ({ page }) => {

@@ -35,6 +35,20 @@ func TestTailOverlapAppend(t *testing.T) {
 	}
 }
 
+func TestMergeLimitedReportsActualClipping(t *testing.T) {
+	m := NewManager(t.TempDir())
+
+	exact, clipped := m.MergeLimited("pane-1", "line1\nline2", 2)
+	if clipped || exact != "line1\nline2" {
+		t.Fatalf("exact result = %q, clipped = %v, want exact two-line output", exact, clipped)
+	}
+
+	limited, clipped := m.MergeLimited("pane-1", "line1\nline2", 1)
+	if !clipped || limited != "line2" {
+		t.Fatalf("limited result = %q, clipped = %v, want clipped final line", limited, clipped)
+	}
+}
+
 func TestTailOverlapRefreshesANSIStyle(t *testing.T) {
 	m := NewManager(t.TempDir())
 	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"

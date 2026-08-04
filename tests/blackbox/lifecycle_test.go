@@ -50,8 +50,9 @@ func startRelayBrokenHerdr(t *testing.T) string {
 		"HERDR_RELAY_TOKEN=",
 		"HERDR_RELAY_INSTANCE_ID=broken-test",
 		"HERDR_BIN=/bin/false", // every herdr call exits 1 → inventory never ready
-		fmt.Sprintf("HERDR_WEB_ROOT=%s", webDir),
+		fmt.Sprintf("HERDR_SOCKET_PATH=%s", filepath.Join(tmpDir, "missing.sock")),
 		"HERDR_RELAY_POLL_INTERVAL=0.5",
+		fmt.Sprintf("HERDR_WEB_ROOT=%s", webDir),
 		fmt.Sprintf("XDG_CONFIG_HOME=%s", filepath.Join(tmpDir, "config")),
 	)
 	cmd.Stdout = os.Stdout

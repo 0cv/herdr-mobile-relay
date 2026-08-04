@@ -46,16 +46,18 @@ func NewManager(cacheDir string) *Manager {
 	}
 }
 
+// Merge appends the latest pane snapshot to its stored history.
 func (m *Manager) Merge(paneID string, rawContent string) string {
-	return m.merge(paneID, rawContent, 0)
+	content, _ := m.merge(paneID, rawContent, 0)
+	return content
 }
 
 // MergeLimited retains the complete pane history while returning only its latest lines.
-func (m *Manager) MergeLimited(paneID string, rawContent string, limit int) string {
+func (m *Manager) MergeLimited(paneID string, rawContent string, limit int) (string, bool) {
 	return m.merge(paneID, rawContent, limit)
 }
 
-func (m *Manager) merge(paneID string, rawContent string, limit int) string {
+func (m *Manager) merge(paneID string, rawContent string, limit int) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -100,7 +102,8 @@ func (m *Manager) Content(paneID string, limit int) string {
 	defer m.mu.Unlock()
 
 	state := m.loadState(paneID)
-	return joinContent(state, limit)
+	content, _ := joinContent(state, limit)
+	return content
 }
 
 func (m *Manager) Discard(paneID string) {
@@ -301,10 +304,11 @@ func hashLines(lines []string) string {
 	return fmt.Sprintf("%016x", h)
 }
 
-func joinContent(state *PaneState, limit int) string {
+func joinContent(state *PaneState, limit int) (string, bool) {
 	historyLines := state.History
 	footerLines := state.Footer
-	if limit > 0 && len(historyLines)+len(footerLines) > limit {
+	truncated := limit > 0 && len(historyLines)+len(footerLines) > limit
+	if truncated {
 		if len(footerLines) >= limit {
 			historyLines = nil
 			footerLines = footerLines[len(footerLines)-limit:]
@@ -320,5 +324,5 @@ func joinContent(state *PaneState, limit int) string {
 	if len(footerLines) > 0 {
 		parts = append(parts, strings.Join(footerLines, "\n"))
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), truncated
 }

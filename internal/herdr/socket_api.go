@@ -21,12 +21,18 @@ type socketAPIClient struct {
 	seq    uint64
 }
 
+type PaneRead struct {
+	Content   []byte
+	Truncated bool
+}
+
 type socketAPIResponse struct {
 	ID     string `json:"id"`
 	Result struct {
 		Type string `json:"type"`
 		Read struct {
-			Text string `json:"text"`
+			Text      string `json:"text"`
+			Truncated bool   `json:"truncated"`
 		} `json:"read"`
 	} `json:"result"`
 	Error *struct {
@@ -56,9 +62,9 @@ func (c *socketAPIClient) readPane(
 	lines int,
 	format string,
 	source string,
-) ([]byte, error) {
+) (PaneRead, error) {
 	if c == nil || c.path == "" {
-		return nil, errors.New("Herdr socket path is unavailable")
+		return PaneRead{}, errors.New("Herdr socket path is unavailable")
 	}
 	if source == "recent-unwrapped" {
 		source = "recent_unwrapped"
@@ -67,7 +73,7 @@ func (c *socketAPIClient) readPane(
 	defer c.mu.Unlock()
 
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		if err := c.connect(ctx); err != nil {
 			lastErr = err
 			break
@@ -79,7 +85,7 @@ func (c *socketAPIClient) readPane(
 		lastErr = err
 		_ = c.closeLocked()
 	}
-	return nil, lastErr
+	return PaneRead{}, lastErr
 }
 
 func (c *socketAPIClient) connect(ctx context.Context) error {
@@ -101,13 +107,13 @@ func (c *socketAPIClient) readPaneConnected(
 	lines int,
 	format string,
 	source string,
-) ([]byte, error) {
+) (PaneRead, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(defaultTimeout)
 	}
 	if err := c.conn.SetDeadline(deadline); err != nil {
-		return nil, fmt.Errorf("set Herdr socket API deadline: %w", err)
+		return PaneRead{}, fmt.Errorf("set Herdr socket API deadline: %w", err)
 	}
 
 	c.seq++
@@ -125,30 +131,33 @@ func (c *socketAPIClient) readPaneConnected(
 	}
 	payload, err := json.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("encode Herdr socket API request: %w", err)
+		return PaneRead{}, fmt.Errorf("encode Herdr socket API request: %w", err)
 	}
 	payload = append(payload, '\n')
 	if _, err := c.conn.Write(payload); err != nil {
-		return nil, fmt.Errorf("write Herdr socket API request: %w", err)
+		return PaneRead{}, fmt.Errorf("write Herdr socket API request: %w", err)
 	}
 	line, err := readSocketAPILine(c.reader)
 	if err != nil {
-		return nil, fmt.Errorf("read Herdr socket API response: %w", err)
+		return PaneRead{}, fmt.Errorf("read Herdr socket API response: %w", err)
 	}
 	var response socketAPIResponse
 	if err := json.Unmarshal(line, &response); err != nil {
-		return nil, fmt.Errorf("decode Herdr socket API response: %w", err)
+		return PaneRead{}, fmt.Errorf("decode Herdr socket API response: %w", err)
 	}
 	if response.ID != requestID {
-		return nil, errors.New("Herdr socket API response ID mismatch")
+		return PaneRead{}, errors.New("Herdr socket API response ID mismatch")
 	}
 	if response.Error != nil {
-		return nil, fmt.Errorf("Herdr socket API %s: %s", response.Error.Code, response.Error.Message)
+		return PaneRead{}, fmt.Errorf("Herdr socket API %s: %s", response.Error.Code, response.Error.Message)
 	}
 	if response.Result.Type != "pane_read" {
-		return nil, fmt.Errorf("Herdr socket API returned %q for pane.read", response.Result.Type)
+		return PaneRead{}, fmt.Errorf("Herdr socket API returned %q for pane.read", response.Result.Type)
 	}
-	return []byte(response.Result.Read.Text), nil
+	return PaneRead{
+		Content:   []byte(response.Result.Read.Text),
+		Truncated: response.Result.Read.Truncated,
+	}, nil
 }
 
 func readSocketAPILine(reader *bufio.Reader) ([]byte, error) {

@@ -75,9 +75,9 @@ type paneSessionAdmission struct {
 }
 
 type paneRead struct {
-	done    chan struct{}
-	content []byte
-	err     error
+	done chan struct{}
+	read herdr.PaneRead
+	err  error
 }
 
 func NewDispatcher(client *herdr.Client, state *State, journal *activity.Journal, logger *slog.Logger) *Dispatcher {
@@ -343,11 +343,11 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
 		}
 		if err := d.paneSessionError(token); err != nil {
-			err = errors.Join(herdr.ErrDispatchedUnknown, err)
+			err = partiallyApplied("prompt text was already delivered", err)
 			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
 		}
 		if err := d.herdr.SendKeys(effectCtx, paneID, []string{"Enter"}); err != nil {
-			err = errors.Join(herdr.ErrDispatchedUnknown, err)
+			err = partiallyApplied("prompt text was already delivered", err)
 			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
 		}
 		return EffectResult{Result: completed(requestID, "prompt", paneID, nil)}
@@ -696,16 +696,38 @@ func (d *Dispatcher) fail(requestID, action, paneID, message string) *CommandRes
 	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: message, PaneID: paneID}
 }
 
+// partiallyApplied marks a multi-step mutation whose earlier steps already
+// reached the agent. It keeps ErrDispatchedUnknown in the chain for existing
+// callers while letting failErr outrank any safe-to-retry classification the
+// failing step alone would produce.
+func partiallyApplied(reason string, err error) error {
+	return fmt.Errorf("%w: %w: %s: %w", herdr.ErrDispatchedUnknown, herdr.ErrPartiallyApplied, reason, err)
+}
+
 func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *CommandResult {
 	phase := "failed"
 	public := "Command failed"
+	var data any
+	var cliErr *herdr.CLIError
 	switch {
+	// Must precede the server_not_running case: a started subprocess always
+	// carries ErrDispatchedUnknown, so an earlier applied step would otherwise
+	// be advertised as safe to retry and duplicate the input that landed.
+	case errors.Is(err, herdr.ErrPartiallyApplied):
+		phase = "dispatched_unknown"
+		public = "Part of the command already reached the agent; review it before retrying"
+		data = map[string]any{"dispatched_unknown": true}
+	case errors.As(err, &cliErr) && cliErr.Code == "server_not_running":
+		phase = "not_started"
+		public = "Command was not sent; retry is safe"
 	case errors.Is(err, herdr.ErrCreatedTargetUnknown):
 		phase = "dispatched_unknown"
 		public = "Herdr may have created an empty target; review Herdr before retrying"
+		data = map[string]any{"dispatched_unknown": true}
 	case errors.Is(err, herdr.ErrDispatchedUnknown):
 		phase = "dispatched_unknown"
 		public = "Command may have executed; review the agent before retrying"
+		data = map[string]any{"dispatched_unknown": true}
 	case errors.Is(err, herdr.ErrNotStarted), errors.Is(err, context.DeadlineExceeded):
 		phase = "not_started"
 		public = "Command was not sent; retry is safe"
@@ -715,7 +737,7 @@ func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *Comma
 		summary := strings.ReplaceAll(action, "_", " ") + " failed: " + public
 		d.recordActivity(action, "failed", summary, paneID, requestID)
 	}
-	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: phase, Error: public, PaneID: paneID}
+	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: phase, Error: public, PaneID: paneID, Data: data}
 }
 
 func completed(requestID, action, paneID string, data any) *CommandResult {
@@ -880,7 +902,7 @@ func (d *Dispatcher) readPaneForDisplay(
 	paneID string,
 	lines int,
 	format string,
-) ([]byte, error) {
+) (herdr.PaneRead, error) {
 	agent, ok := d.state.Agent(paneID)
 	if ok && isQoderAgent(agent.Agent) {
 		return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
@@ -919,7 +941,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	}
 	d.readMu.Unlock()
 	if owner {
-		call.content, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format)
+		call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format)
 		d.readMu.Lock()
 		delete(d.reads, key)
 		close(call.done)
@@ -931,7 +953,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 			return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}
 		}
 	}
-	content, err := call.content, call.err
+	read, err := call.read, call.err
 	if err != nil {
 		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "Unable to read the agent pane"}
 	}
@@ -941,8 +963,8 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	if d.state.ContentRevision(paneID) != revision {
 		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent state changed while the pane was being read"}
 	}
-	content = capPaneContentLines(content, lines)
-	return map[string]any{"type": "pane_content", "pane_id": paneID, "content": string(content), "format": format, "interaction": nil, "question_layout": false}
+	content := capPaneContentLines(read.Content, lines)
+	return map[string]any{"type": "pane_content", "pane_id": paneID, "content": string(content), "format": format, "truncated": read.Truncated, "interaction": nil, "question_layout": false}
 }
 
 func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {

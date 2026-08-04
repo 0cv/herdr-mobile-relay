@@ -52,7 +52,10 @@ func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 				"id": request.ID,
 				"result": map[string]any{
 					"type": "pane_read",
-					"read": map[string]any{"text": fmt.Sprintf("frame %d", index)},
+					"read": map[string]any{
+						"text":      fmt.Sprintf("frame %d", index),
+						"truncated": index == 1,
+					},
 				},
 			}
 			if encodeErr := encoder.Encode(response); encodeErr != nil {
@@ -73,8 +76,11 @@ func TestReadPaneReusesSocketAPIConnection(t *testing.T) {
 		if readErr != nil {
 			t.Fatalf("read %d: %v", index, readErr)
 		}
-		if got, want := string(content), fmt.Sprintf("frame %d", index); got != want {
+		if got, want := string(content.Content), fmt.Sprintf("frame %d", index); got != want {
 			t.Fatalf("read %d content = %q, want %q", index, got, want)
+		}
+		if got, want := content.Truncated, index == 1; got != want {
+			t.Fatalf("read %d truncated = %v, want %v", index, got, want)
 		}
 	}
 	if serverErr := <-serverResult; serverErr != nil {

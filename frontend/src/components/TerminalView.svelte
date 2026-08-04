@@ -48,7 +48,7 @@
     terminalLayout,
   } from '$lib/preferences';
   import { replaceView } from '$lib/router';
-  import { relayStore, CommandError } from '$lib/store';
+  import { relayStore } from '$lib/store';
   import { latestCompletedResponse, stripAnsi, TERMINAL_SEPARATOR_TOKEN, renderTerminalContent } from '$lib/terminal';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
   import { VirtualTerminalIndex } from '$lib/virtual-terminal';
@@ -725,7 +725,14 @@
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
       relayStore.showToast('Prompt sent.');
     } catch (error) {
-      if (!composer && !(error as CommandError).data?.dispatched_unknown) composer = text;
+      const dispatchedUnknown = typeof error === 'object'
+        && error !== null
+        && 'data' in error
+        && typeof error.data === 'object'
+        && error.data !== null
+        && 'dispatched_unknown' in error.data
+        && error.data.dispatched_unknown === true;
+      if (!composer && !dispatchedUnknown) composer = text;
       relayStore.showToast((error as Error).message, true);
     }
     setTimeout(() => relayStore.readPane(agent), 500);
@@ -1395,6 +1402,7 @@
     </div>
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
+    {#if frame?.truncated}<p class="upload-status" role="status">Older terminal history is not shown; this pane response was limited.</p>{/if}
 
     {#if approvalMode && !responding.has(agent.pane_id)}
       <div class="quick-actions" aria-label="Approval choices">

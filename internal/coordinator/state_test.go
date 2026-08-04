@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -26,6 +27,19 @@ func TestInventoryFailureClearsReadinessAndPreservesStaleSnapshot(t *testing.T) 
 	}
 	if state.AgentCount() != 1 {
 		t.Fatal("failed poll discarded the last known snapshot")
+	}
+}
+
+func TestInventoryFailureReportsServerNotRunning(t *testing.T) {
+	state := testState()
+	state.MarkInventoryFailure(&herdr.CLIError{
+		Code:    "server_not_running",
+		Message: "no Herdr server",
+	})
+	status := state.InventoryStatus()
+	if status["error_code"] != "server_not_running" ||
+		status["message"] != "Herdr is not running on this computer. Start it with `herdr`." {
+		t.Fatalf("inventory status = %+v, want actionable server-not-running message", status)
 	}
 }
 
@@ -438,6 +452,39 @@ func TestInflightPollPreservesNewerBlockedClassification(t *testing.T) {
 		current.AttentionKind != question.AttentionApproval ||
 		len(current.Options) != 2 {
 		t.Fatalf("in-flight poll overwrote newer classification: %+v", current)
+	}
+}
+
+func TestTopologyCommitPreservesCurrentStatusAndAttention(t *testing.T) {
+	s := NewState(testLogger())
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, 0)
+	s.CommitEvent("p1", "blocked", 1000)
+	blocked, _ := s.Agent("p1")
+	if _, ok := s.CommitAttentionClassification(
+		"p1",
+		blocked.BlockedEventID,
+		uint64(s.Generation("p1")),
+		s.ContentRevision("p1"),
+		question.Classification{
+			Kind:    question.AttentionApproval,
+			Options: []string{"Approve", "Reject"},
+		},
+	); !ok {
+		t.Fatal("classification setup failed")
+	}
+
+	s.CommitTopology([]*AgentState{{
+		PaneID: "p1",
+		Agent:  "codex",
+		Name:   "renamed",
+		Status: "idle",
+	}}, s.RevisionCounter())
+	current, _ := s.Agent("p1")
+	if current.Status != "blocked" ||
+		current.AttentionKind != question.AttentionApproval ||
+		len(current.Options) != 2 ||
+		current.Name != "renamed" {
+		t.Fatalf("topology commit overwrote current state: %+v", current)
 	}
 }
 

@@ -15,7 +15,6 @@ import (
 const (
 	idlePollInterval          = 15 * time.Second
 	maxImmediateTopologyPolls = 3
-	pollFailureBackoffAfter   = 3
 )
 
 type Poller struct {
@@ -29,8 +28,8 @@ type Poller struct {
 	enrich              func(context.Context, []*AgentState)
 	hostname            string
 	topologyRetries     int
-	pollFailures        int
 	consecutiveFailures atomic.Int32
+	eventsActive        atomic.Bool
 }
 
 func NewPoller(client *herdr.Client, state *State, interval time.Duration, logger *slog.Logger) *Poller {
@@ -103,39 +102,55 @@ func (p *Poller) poll(ctx context.Context) {
 
 	inv, err := p.client.GetInventory(ctx)
 	if err != nil {
-		p.pollFailures++
-		p.consecutiveFailures.Store(int32(p.pollFailures))
+		p.consecutiveFailures.Add(1)
 		p.state.MarkInventoryFailure(err)
 		p.notifyStatusChange(previousStatus)
 		p.logger.Warn("inventory poll failed", "error", err)
 		return
 	}
-	p.pollFailures = 0
 	p.consecutiveFailures.Store(0)
 
-	agents := make([]*AgentState, 0, len(inv.Panes))
-
 	tabs, tabErr := p.client.TabList(ctx)
-	var tabByID map[string]herdr.Tab
-	if tabErr == nil {
-		tabByID = make(map[string]herdr.Tab, len(tabs))
-		for i, tab := range tabs {
-			if tab.Number == 0 {
-				tab.Number = i + 1
-			}
-			tabByID[tab.ID] = tab
-		}
+	if tabErr != nil {
+		tabs = nil
+	}
+	agents := p.agentsFromTopology(inv.Panes, tabs)
+
+	if p.enrich != nil {
+		p.enrich(ctx, agents)
 	}
 
-	for _, pane := range inv.Panes {
+	if !p.state.CommitPoll(agents, token) {
+		p.logger.Debug("discarded topology-stale inventory sample")
+		p.handleTopologyStale(previousStatus)
+		return
+	}
+	p.topologyRetries = 0
+	p.notifyStatusChange(previousStatus)
+	p.logger.Debug("inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
+
+	if p.onChange != nil {
+		p.onChange(p.state.Snapshot())
+	}
+}
+
+func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*AgentState {
+	tabByID := make(map[string]herdr.Tab, len(tabs))
+	for index, tab := range tabs {
+		if tab.Number == 0 {
+			tab.Number = index + 1
+		}
+		tabByID[tab.ID] = tab
+	}
+
+	agents := make([]*AgentState, 0, len(panes))
+	for _, pane := range panes {
 		if pane.Agent == "" {
 			continue
 		}
-		if tabByID != nil {
-			if tab, ok := tabByID[pane.TabID]; ok {
-				pane.TabLabel = tab.Label
-				pane.TabNumber = tab.Number
-			}
+		if tab, ok := tabByID[pane.TabID]; ok {
+			pane.TabLabel = tab.Label
+			pane.TabNumber = tab.Number
 		}
 		project := ""
 		if pane.Cwd != "" {
@@ -163,22 +178,103 @@ func (p *Poller) poll(ctx context.Context) {
 			ForegroundCwd:   pane.ForegroundCwd,
 		})
 	}
+	return agents
+}
 
+func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
+	if events == nil {
+		return
+	}
+	defer p.eventsActive.Store(false)
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		baseRevision := p.state.RevisionCounter()
+		stream, snapshot, buffered, err := events.Bootstrap(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			// The reconcile poll is the only freshness source until the stream
+			// is back, so let it run at the configured interval again.
+			p.eventsActive.Store(false)
+			p.logger.Warn("Herdr events stream unavailable", "error", err)
+			if !waitForEventReconnect(ctx) {
+				return
+			}
+			continue
+		}
+		p.eventsActive.Store(true)
+
+		cache := herdr.NewSessionCache(snapshot)
+		p.commitEventTopology(ctx, cache.Snapshot(), baseRevision)
+		reconnect := false
+		for _, event := range buffered {
+			if !p.applyTopologyEvent(ctx, cache, event) {
+				reconnect = true
+				break
+			}
+		}
+		for !reconnect {
+			event, err := stream.Next(ctx)
+			if err != nil {
+				if ctx.Err() != nil {
+					_ = stream.Close()
+					return
+				}
+				p.logger.Warn("Herdr events stream dropped", "error", err)
+				reconnect = true
+				break
+			}
+			if !p.applyTopologyEvent(ctx, cache, event) {
+				reconnect = true
+			}
+		}
+		p.eventsActive.Store(false)
+		_ = stream.Close()
+		if !waitForEventReconnect(ctx) {
+			return
+		}
+	}
+}
+
+func (p *Poller) applyTopologyEvent(ctx context.Context, cache *herdr.SessionCache, event herdr.Event) bool {
+	changed, err := cache.Apply(event)
+	if err != nil {
+		p.logger.Warn("Herdr topology event decode failed", "event", event.Event, "error", err)
+		return false
+	}
+	if !changed {
+		return true
+	}
+	p.commitEventTopology(ctx, cache.Snapshot(), p.state.RevisionCounter())
+	return true
+}
+
+func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.TopologySnapshot, baseRevision int64) {
+	previousStatus := p.state.InventoryStatus()
+	agents := p.agentsFromTopology(topology.Panes, topology.Tabs)
 	if p.enrich != nil {
 		p.enrich(ctx, agents)
 	}
-
-	if !p.state.CommitPoll(agents, token) {
-		p.logger.Debug("discarded topology-stale inventory sample")
-		p.handleTopologyStale(previousStatus)
-		return
-	}
-	p.topologyRetries = 0
+	p.consecutiveFailures.Store(0)
+	p.state.CommitTopology(agents, baseRevision)
 	p.notifyStatusChange(previousStatus)
-	p.logger.Debug("inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
-
+	p.logger.Debug("event inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
 	if p.onChange != nil {
 		p.onChange(p.state.Snapshot())
+	}
+}
+
+func waitForEventReconnect(ctx context.Context) bool {
+	timer := time.NewTimer(idlePollInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -209,22 +305,14 @@ func inventoryStatusChanged(previous, current map[string]any) bool {
 	return false
 }
 
+// currentInterval keeps the reconcile poll slow while the event stream is
+// healthy. When events are unavailable the poll is the only freshness source
+// again, so the operator-configured interval is honoured.
 func (p *Poller) currentInterval() time.Duration {
-	if p.pollFailures >= pollFailureBackoffAfter {
+	if p.eventsActive.Load() {
 		return idlePollInterval
 	}
-	if p.state.AgentCount() == 0 {
-		return idlePollInterval
-	}
-	snap := p.state.Snapshot()
-	allIdle := true
-	for _, a := range snap {
-		if attentionStatuses[a.Status] {
-			allIdle = false
-			break
-		}
-	}
-	if allIdle {
+	if p.interval <= 0 || p.interval > idlePollInterval {
 		return idlePollInterval
 	}
 	return p.interval

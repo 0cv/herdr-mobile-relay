@@ -270,6 +270,61 @@ func TestUnknownCreatedTargetGetsActionableUnsafeRetryError(t *testing.T) {
 	}
 }
 
+func TestServerNotRunningIsSafeRetry(t *testing.T) {
+	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := d.Close(ctx); err != nil {
+			t.Fatalf("close dispatcher: %v", err)
+		}
+	})
+
+	// The realistic shape: the subprocess started, so OutcomeError.Unwrap puts
+	// ErrDispatchedUnknown in the chain alongside the CLIError.
+	result := d.failErr(
+		"request-1",
+		"submit_prompt",
+		"pane-1",
+		&herdr.OutcomeError{Started: true, Err: &herdr.CLIError{Code: "server_not_running", Message: "no server"}},
+	)
+	if result.Phase != "not_started" || result.Error != "Command was not sent; retry is safe" {
+		t.Fatalf("result = %+v, want safe retry classification", result)
+	}
+}
+
+// A later step failing with server_not_running must never be advertised as safe
+// to retry once an earlier step already reached the agent: retrying would
+// duplicate the input that landed.
+func TestPartiallyAppliedOutranksServerNotRunning(t *testing.T) {
+	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := d.Close(ctx); err != nil {
+			t.Fatalf("close dispatcher: %v", err)
+		}
+	})
+
+	stepErr := &herdr.OutcomeError{Started: true, Err: &herdr.CLIError{Code: "server_not_running", Message: "no server"}}
+	result := d.failErr(
+		"request-1",
+		"answer_question",
+		"pane-1",
+		partiallyApplied("earlier question input was already applied", stepErr),
+	)
+	if result.Phase != "dispatched_unknown" {
+		t.Fatalf("phase = %q, want dispatched_unknown for a partially applied mutation", result.Phase)
+	}
+	if result.Error != "Part of the command already reached the agent; review it before retrying" {
+		t.Fatalf("error = %q, want partially-applied warning", result.Error)
+	}
+	data, _ := result.Data.(map[string]any)
+	if data["dispatched_unknown"] != true {
+		t.Fatalf("data = %+v, want dispatched_unknown flag for the client retry guard", result.Data)
+	}
+}
+
 func TestCapPaneContentLines(t *testing.T) {
 	tests := []struct {
 		name    string

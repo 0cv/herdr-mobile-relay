@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.13.11`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.13.11) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.13.12`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.13.12) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -71,6 +71,19 @@ Run `stable-teardown` before uninstall if Cloudflare resources should also be
 removed. Full uninstall removes the service, releases, relay state, push
 credentials, cache, and plugin registration.
 
+## Herdr 0.8.0
+
+Herdr 0.8.0 and newer can resume restored agent sessions without a TUI
+attached ([#2064](https://github.com/herdrdev/herdr/issues/2064)) and keep the
+desktop user's focus when a background workspace closes
+([#1328](https://github.com/herdrdev/herdr/issues/1328),
+[#1621](https://github.com/herdrdev/herdr/issues/1621)). These upstream
+behaviors keep relay startup and phone-driven workspace management
+non-disruptive. Phone-driven **Stop** still cascades a single-tab workspace
+away; the workspace then reports `workspace_not_found`.
+
+The relay continues to support Herdr 0.7.5 or newer.
+
 ## What It Does
 
 - Monitor and control agents across several computers.
@@ -106,6 +119,9 @@ The terminal-width control in the header and Settings offers three modes:
 Terminal History requests 100, 1,000, 5,000, or 10,000 lines per pane; 1,000 is
 the default. The relay enforces the selected limit after any Claude or Qoder
 history merge. Larger histories increase network transfer and rendering work.
+When older rows are left out — either because Herdr clipped the pane's
+scrollback or because the selected line limit did — the terminal reports that
+older history is not shown.
 
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second. The 250 ms default balances responsiveness with
@@ -236,6 +252,7 @@ Health endpoints:
 - **Updated app still shows the previous version:** open Settings, choose
   **Check for Updates**, then **Load Update**. Current releases use a fresh
   versioned navigation and preserve the saved relay list.
+- **Herdr is not running:** start it with `herdr`, then retry the operation.
 - **Agents are unavailable:** inspect `/healthz`; after a Herdr protocol update,
   run `herdr server live-handoff` and wait for the next relay poll.
 - **Stable setup stops:** keep its state and rerun the exact command printed.

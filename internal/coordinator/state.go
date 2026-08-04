@@ -3,11 +3,13 @@ package coordinator
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -147,13 +149,21 @@ func (s *State) MarkInventoryFailure(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastAttemptAt = time.Now().UTC()
-	s.inventoryReady = false
-	s.inventoryErrorCode = "command_failed"
-	s.inventoryMessage = "Unable to read the current Herdr agent inventory."
 	if err == nil {
+		s.inventoryReady = false
 		s.inventoryErrorCode = ""
 		s.inventoryMessage = ""
+		return
 	}
+	s.inventoryReady = false
+	var cliErr *herdr.CLIError
+	if errors.As(err, &cliErr) && cliErr.Code == "server_not_running" {
+		s.inventoryErrorCode = "server_not_running"
+		s.inventoryMessage = "Herdr is not running on this computer. Start it with `herdr`."
+		return
+	}
+	s.inventoryErrorCode = "command_failed"
+	s.inventoryMessage = "Unable to read the current Herdr agent inventory."
 }
 
 func (s *State) MarkTopologyDegraded() {
@@ -276,6 +286,34 @@ func (s *State) CommitInventory(agents []*AgentState, baseRev int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.commitInventoryLocked(agents, baseRev)
+}
+
+// CommitTopology applies a topology snapshot without allowing its sampled
+// agent status to overwrite the current status stream for an existing pane.
+// Topology events carry pane metadata; UDP status events and the reconcile poll
+// remain authoritative for status and attention details.
+func (s *State) CommitTopology(agents []*AgentState, baseRev int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	topology := make([]*AgentState, len(agents))
+	for index, incoming := range agents {
+		if incoming == nil {
+			continue
+		}
+		existing, exists := s.agents[incoming.PaneID]
+		if !exists || paneSessionReplaced(existing, incoming) {
+			topology[index] = incoming
+			continue
+		}
+		cp := *incoming
+		cp.Status = existing.Status
+		if existing.Status == "blocked" {
+			copyBlockedDetails(&cp, existing)
+		}
+		topology[index] = &cp
+	}
+	s.commitInventoryLocked(topology, baseRev)
 }
 
 func (s *State) CommitPoll(agents []*AgentState, token PollToken) bool {

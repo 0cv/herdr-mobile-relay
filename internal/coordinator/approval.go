@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 )
 
@@ -91,11 +90,11 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 			len(current.Options) != payload.Total {
 			return EffectResult{Result: d.fail(requestID, "approval", paneID, "This approval request is no longer current")}
 		}
-		content, err := d.herdr.ReadPane(effectCtx, paneID, 80, "ansi")
+		read, err := d.herdr.ReadPane(effectCtx, paneID, 80, "ansi")
 		if err != nil {
 			return EffectResult{Result: d.failErr(requestID, "approval", paneID, err)}
 		}
-		classification := question.Classify(string(content), current.Agent)
+		classification := question.Classify(string(read.Content), current.Agent)
 		if classification.Kind != question.AttentionApproval ||
 			len(classification.Options) != payload.Total ||
 			payload.Index >= len(classification.Options) {
@@ -307,11 +306,11 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 		if !ok || (current.Status != "blocked" && current.Status != "done") {
 			return EffectResult{Result: d.fail(requestID, action, paneID, "The question changed before the answer was applied")}
 		}
-		content, err := d.herdr.ReadPane(effectCtx, paneID, 80, "ansi")
+		read, err := d.herdr.ReadPane(effectCtx, paneID, 80, "ansi")
 		if err != nil {
 			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
-		interaction := question.Parse(string(content), current.Agent)
+		interaction := question.Parse(string(read.Content), current.Agent)
 		if interaction == nil || interaction.ID != payload.InteractionID {
 			return EffectResult{Result: d.fail(requestID, action, paneID, "The question changed before the answer was applied")}
 		}
@@ -400,8 +399,8 @@ func (d *Dispatcher) executeQuestion(
 			dispatched = true
 			return nil
 		}
-		if dispatched && !errors.Is(err, herdr.ErrDispatchedUnknown) {
-			return fmt.Errorf("%w: earlier question input was already applied: %w", herdr.ErrDispatchedUnknown, err)
+		if dispatched {
+			return partiallyApplied("earlier question input was already applied", err)
 		}
 		return err
 	}
@@ -414,8 +413,8 @@ func (d *Dispatcher) executeQuestion(
 			dispatched = true
 			return nil
 		}
-		if dispatched && !errors.Is(err, herdr.ErrDispatchedUnknown) {
-			return fmt.Errorf("%w: earlier question input was already applied: %w", herdr.ErrDispatchedUnknown, err)
+		if dispatched {
+			return partiallyApplied("earlier question input was already applied", err)
 		}
 		return err
 	}
@@ -454,19 +453,19 @@ func (d *Dispatcher) sendQuestionKeysForSession(ctx context.Context, token Worke
 	for index, key := range keys {
 		if err := d.paneSessionError(token); err != nil {
 			if index > 0 {
-				return fmt.Errorf("%w: question input was only partially applied: %w", herdr.ErrDispatchedUnknown, err)
+				return partiallyApplied("question input was only partially applied", err)
 			}
 			return err
 		}
 		if err := d.herdr.SendKeys(ctx, paneID, []string{key}); err != nil {
-			if index > 0 && !errors.Is(err, herdr.ErrDispatchedUnknown) {
-				return fmt.Errorf("%w: question input was only partially applied: %w", herdr.ErrDispatchedUnknown, err)
+			if index > 0 {
+				return partiallyApplied("question input was only partially applied", err)
 			}
 			return err
 		}
 		if index+1 < len(keys) {
 			if err := contextDelay(ctx, questionKeyDelay); err != nil {
-				return fmt.Errorf("%w: question input was only partially applied: %w", herdr.ErrDispatchedUnknown, err)
+				return partiallyApplied("question input was only partially applied", err)
 			}
 		}
 	}
@@ -516,11 +515,11 @@ func (d *Dispatcher) watchQuestion(
 				d.finishQuestionWatch(ledgerKey, generation, requestID, action, paneID, original, navigation, nil)
 				return
 			}
-			content, err := d.herdr.ReadPane(ctx, paneID, 80, "ansi")
+			read, err := d.herdr.ReadPane(ctx, paneID, 80, "ansi")
 			if err != nil {
 				continue
 			}
-			current := question.Parse(string(content), agent.Agent)
+			current := question.Parse(string(read.Content), agent.Agent)
 			if current == nil || original == nil || current.ID != original.ID {
 				d.finishQuestionWatch(ledgerKey, generation, requestID, action, paneID, original, navigation, current)
 				return

@@ -62,15 +62,15 @@
     },
     "s2c": {
       "sequence": 0,
-      "plaintext": "{\"type\":\"pane_content\",\"content\":\"deterministic server vector\"}",
+      "plaintext": "{\"type\":\"pane_content\",\"content\":\"deterministic server vector\",\"truncated\":false}",
       "nonce": "AAAAAAAAAAAAAAAA",
       "aad": "aGVyZHItZTJlZS12MSBzMmMAAAAAAAAAAAA",
-      "ciphertext": "l20Fn3-KH7agAp_P9qiLqz-yx9vuehLjAfdQc9FlaMLPd8FSXaWQNZpYul3GziUBt2dzZhVxoLR6aJ0FTa2c0GXc7DpHeBgSRzVbgFr9rg",
+      "ciphertext": "l20Fn3-KH7agAp_P9qiLqz-yx9vuehLjAfdQc9FlaMLPd8FSXaWQNZpYul3GziUBt2dzZhVxoLR6aJ0FTa3Nng3CkhpGjpKmxhXHkPotfVp4BtfI1lqsaVYKB4eFGrutfQ",
       "frame": {
         "type": "e2ee",
         "version": 1,
         "sequence": 0,
-        "ciphertext": "l20Fn3-KH7agAp_P9qiLqz-yx9vuehLjAfdQc9FlaMLPd8FSXaWQNZpYul3GziUBt2dzZhVxoLR6aJ0FTa2c0GXc7DpHeBgSRzVbgFr9rg"
+        "ciphertext": "l20Fn3-KH7agAp_P9qiLqz-yx9vuehLjAfdQc9FlaMLPd8FSXaWQNZpYul3GziUBt2dzZhVxoLR6aJ0FTa3Nng3CkhpGjpKmxhXHkPotfVp4BtfI1lqsaVYKB4eFGrutfQ"
       }
     }
   }

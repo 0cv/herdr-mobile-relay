@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 )
 
@@ -33,7 +34,7 @@ var (
 )
 
 type Pane interface {
-	ReadPane(context.Context, string, int, string) ([]byte, error)
+	ReadPane(context.Context, string, int, string) (herdr.PaneRead, error)
 	SendText(context.Context, string, string) error
 	SendKeys(context.Context, string, []string) error
 }
@@ -262,16 +263,21 @@ func waitForFreshConfirmation(
 			if composer, found := profile.ComposerText(delta); found && composer == "/copy" {
 				action = "submit copy command"
 			}
-		}
-		if action == "" {
-			if fresh, ok := freshConfirmation(profile, baseline, state); ok && clipboardReady(state) {
-				return []byte(fresh), nil
-			}
-			if confirmationAppeared && !profile.MenuOpen(state) && !profile.PickerOpen(state) {
-				composer, found := profile.ComposerText(state)
-				if confirmationAfterAction || !found || composer != "/copy" {
-					if clipboardReady(state) {
-						return []byte(state), nil
+			chars, lines, matched := profile.ConfirmationCounts(state)
+			if action == "" {
+				if confirmationAfterAction && matched && chars < 0 && lines < 0 && clipboardReady(state) {
+					return []byte(state), nil
+				}
+				if fresh, ok := freshConfirmation(profile, baseline, state); ok && clipboardReady(state) {
+					return []byte(fresh), nil
+				}
+				if confirmationAppeared && matched &&
+					!profile.MenuOpen(state) && !profile.PickerOpen(state) {
+					composer, found := profile.ComposerText(state)
+					if confirmationAfterAction || !found || composer != "/copy" {
+						if clipboardReady(state) && chars < 0 && lines < 0 {
+							return []byte(state), nil
+						}
 					}
 				}
 			}
@@ -423,11 +429,11 @@ func snapshotDelta(before, after string) (string, bool) {
 }
 
 func readPane(ctx context.Context, pane Pane, paneID string) (string, error) {
-	content, err := pane.ReadPane(ctx, paneID, paneReadLines, "ansi")
+	read, err := pane.ReadPane(ctx, paneID, paneReadLines, "ansi")
 	if err != nil {
 		return "", err
 	}
-	return string(content), nil
+	return string(read.Content), nil
 }
 
 func recoverPane(ctx context.Context, pane Pane, paneID string, profile slashcmd.CopyProfile) {

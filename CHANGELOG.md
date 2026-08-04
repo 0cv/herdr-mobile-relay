@@ -5,6 +5,28 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.12] - 2026-08-04
+
+### Added
+
+- Stream agent topology updates from Herdr with a 15-second reconciliation
+  backstop.
+- Report when older terminal history is left out of a pane view, whether Herdr
+  clipped the scrollback or the selected line limit did.
+
+### Fixed
+
+- Classify `server_not_running` command failures as safe-to-retry
+  `not_started` results and show the actionable Herdr startup message.
+- Keep a multi-step prompt or question answer whose earlier input already
+  reached the agent marked as unsafe to retry, so a later `server_not_running`
+  failure can no longer invite a duplicate send.
+- Preserve unsafe prompt handling for older relays that report
+  `dispatched_unknown` without an error payload.
+- Keep honouring `HERDR_RELAY_POLL_INTERVAL` while the Herdr event stream is
+  unavailable, instead of always falling back to the 15-second reconcile.
+- Keep response copying from interrupting an agent's in-flight turn.
+
 ## [0.13.11] - 2026-08-03
 
 ### Fixed
@@ -225,7 +247,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.11...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.12...HEAD
+[0.13.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.11...v0.13.12
 [0.13.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.10...v0.13.11
 [0.13.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.9...v0.13.10
 [0.13.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.7...v0.13.8

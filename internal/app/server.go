@@ -572,7 +572,7 @@ func (s *Server) Run(ctx context.Context) error {
 				continue
 			}
 			readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			content, err := s.herdrC.ReadPane(readCtx, a.PaneID, 80, "ansi")
+			read, err := s.herdrC.ReadPane(readCtx, a.PaneID, 80, "ansi")
 			cancel()
 			if err != nil {
 				s.recordSafeError("blocked pane enrichment failed", err)
@@ -583,7 +583,7 @@ func (s *Server) Run(ctx context.Context) error {
 				})
 				continue
 			}
-			setAgentAttention(a, question.Classify(string(content), a.Agent))
+			setAgentAttention(a, question.Classify(string(read.Content), a.Agent))
 		}
 	})
 
@@ -634,8 +634,10 @@ func (s *Server) Run(ctx context.Context) error {
 		}()
 	}
 	startBackground(func() { s.poller.Run(ctx) })
-	startBackground(func() { s.paneSizeM.Run(ctx) })
+	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
+	startBackground(func() { s.poller.RunEvents(ctx, eventClient) })
 	startBackground(func() { s.captureHistoryLoop(ctx) })
+	startBackground(func() { s.paneSizeM.Run(ctx) })
 	profileSignals := make(chan os.Signal, 1)
 	signal.Notify(profileSignals, syscall.SIGHUP)
 	defer signal.Stop(profileSignals)
@@ -916,7 +918,7 @@ func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	content, err := s.herdrC.ReadPane(readCtx, agent.PaneID, 80, "ansi")
+	read, err := s.herdrC.ReadPane(readCtx, agent.PaneID, 80, "ansi")
 	if err != nil {
 		setAgentAttention(agent, question.Classification{
 			Kind:   question.AttentionUnknown,
@@ -924,7 +926,7 @@ func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator
 		})
 		return
 	}
-	setAgentAttention(agent, question.Classify(string(content), agent.Agent))
+	setAgentAttention(agent, question.Classify(string(read.Content), agent.Agent))
 }
 
 func setAgentAttention(
@@ -1098,7 +1100,8 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 		}()
 		readCtx, cancel := context.WithTimeout(taskCtx, 3*time.Second)
 		defer cancel()
-		content, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
+		read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
+		content := read.Content
 		if err != nil || len(content) == 0 || question.LayoutHint(string(content)) {
 			return
 		}
@@ -1151,7 +1154,8 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent string) string {
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	content, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
+	read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
+	content := read.Content
 	if err != nil || len(content) == 0 {
 		return ""
 	}
@@ -1493,7 +1497,10 @@ func (s *Server) preparePaneResponse(message, response map[string]any) map[strin
 	} else if historyLimit > history.MaxLines {
 		historyLimit = history.MaxLines
 	}
-	response["content"] = s.historyM.MergeLimited(paneID, content, historyLimit)
+	herdrTruncated, _ := response["truncated"].(bool)
+	merged, historyTruncated := s.historyM.MergeLimited(paneID, content, historyLimit)
+	response["content"] = merged
+	response["truncated"] = herdrTruncated || historyTruncated
 	return response
 }
 

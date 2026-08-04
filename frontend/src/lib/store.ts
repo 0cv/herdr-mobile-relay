@@ -715,6 +715,7 @@ class RelayStore {
         paneId,
         content: nextContent,
         format: String(message.format || frame?.format || 'plain'),
+        truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
       });
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
@@ -727,11 +728,13 @@ class RelayStore {
       if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
         this.paneContentFingerprints.set(paneId, message.content_fingerprint);
       }
-      this.terminalFramesValue.set(paneId, {
+      const nextFrame: TerminalFrame = {
         paneId,
         content: typeof message.content === 'string' ? message.content : '(empty)',
         format: String(message.format || 'plain'),
-      });
+      };
+      if (message.truncated === true) nextFrame.truncated = true;
+      this.terminalFramesValue.set(paneId, nextFrame);
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
       const watched = this.watchedPanes.get(paneId);
@@ -1011,6 +1014,9 @@ class RelayStore {
     else {
       const error = new CommandError(result.error || 'Command failed');
       error.data = result.data;
+      if (result.phase === 'dispatched_unknown') {
+        error.data = { ...(result.data || {}), dispatched_unknown: true };
+      }
       pending.reject(error);
     }
   }

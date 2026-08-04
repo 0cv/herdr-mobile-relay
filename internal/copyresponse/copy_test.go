@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 )
 
@@ -22,9 +23,9 @@ type fakePane struct {
 	onSendKeys func()
 }
 
-func (p *fakePane) ReadPane(ctx context.Context, _ string, _ int, _ string) ([]byte, error) {
+func (p *fakePane) ReadPane(ctx context.Context, _ string, _ int, _ string) (herdr.PaneRead, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return herdr.PaneRead{}, err
 	}
 	index := p.reads
 	p.reads++
@@ -32,9 +33,9 @@ func (p *fakePane) ReadPane(ctx context.Context, _ string, _ int, _ string) ([]b
 		index = len(p.snapshots) - 1
 	}
 	if index < 0 {
-		return nil, errors.New("no pane snapshots")
+		return herdr.PaneRead{}, errors.New("no pane snapshots")
 	}
-	return []byte(p.snapshots[index]), nil
+	return herdr.PaneRead{Content: []byte(p.snapshots[index])}, nil
 }
 
 func (p *fakePane) SendText(ctx context.Context, _ string, text string) error {
@@ -242,6 +243,47 @@ func TestRunPollsPastStaleConfirmationAfterRepeat(t *testing.T) {
 	}
 	if len(clipboardReads) != 5 || string(sentinel) == string(response) || writes != 2 {
 		t.Fatalf("clipboard exchange = reads %q, sentinel %q, writes %d", clipboardReads, sentinel, writes)
+	}
+	if !reflect.DeepEqual(pane.keys, [][]string{{"Enter"}}) {
+		t.Fatalf("keys = %v, want one composer submission", pane.keys)
+	}
+}
+
+func TestRunAcceptsUncountedConfirmationAfterScroll(t *testing.T) {
+	response := []byte("same response")
+	pane := &fakePane{snapshots: []string{
+		"• Copied last message to clipboard\n› ",
+		"› /copy",
+		"• Copied last message to clipboard\n› ",
+	}}
+	profile, ok := slashcmd.CopyProfileFor("codex", "")
+	if !ok {
+		t.Fatal("missing Codex copy profile")
+	}
+	writes := 0
+	result, err := Run(
+		context.Background(),
+		"pane-1",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) {
+			if writes > 0 {
+				return response, nil
+			}
+			return []byte("before"), nil
+		},
+		func(_ context.Context, _ []byte) error {
+			writes++
+			return nil
+		},
+		1,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Text != string(response) || result.Chars != len(response) || result.Lines != 1 {
+		t.Fatalf("Run() result = %+v, want copied response", result)
 	}
 	if !reflect.DeepEqual(pane.keys, [][]string{{"Enter"}}) {
 		t.Fatalf("keys = %v, want one composer submission", pane.keys)

@@ -225,6 +225,7 @@ export interface TerminalFrame {
   paneId: string;
   content: string;
   format: string;
+  truncated?: boolean;
 }
 
 export interface ToastMessage {

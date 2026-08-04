@@ -30,21 +30,32 @@ func TestTopologyStaleRepollsAreBounded(t *testing.T) {
 	}
 }
 
-func TestSustainedPollFailuresBackOffAndSuccessResets(t *testing.T) {
+// While the event stream is healthy the poll is only a reconcile backstop, but
+// when events are unavailable it is the sole freshness source and must honour
+// the operator-configured interval again.
+func TestPollerIntervalTracksEventStreamHealth(t *testing.T) {
 	state := testState()
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, 0)
 	poller := NewPoller(nil, state, time.Second, testLogger())
 
-	poller.pollFailures = pollFailureBackoffAfter - 1
 	if got := poller.currentInterval(); got != time.Second {
-		t.Fatalf("interval before threshold = %v, want %v", got, time.Second)
+		t.Fatalf("interval with events down = %v, want the configured 1s", got)
 	}
-	poller.pollFailures++
+
+	poller.eventsActive.Store(true)
 	if got := poller.currentInterval(); got != idlePollInterval {
-		t.Fatalf("interval after sustained failures = %v, want %v", got, idlePollInterval)
+		t.Fatalf("interval with events up = %v, want %v", got, idlePollInterval)
 	}
-	poller.pollFailures = 0
+
+	poller.eventsActive.Store(false)
 	if got := poller.currentInterval(); got != time.Second {
-		t.Fatalf("interval after success = %v, want %v", got, time.Second)
+		t.Fatalf("interval after events dropped = %v, want the configured 1s", got)
+	}
+}
+
+func TestPollerIntervalClampsToReconcileCeiling(t *testing.T) {
+	poller := NewPoller(nil, testState(), time.Hour, testLogger())
+	if got := poller.currentInterval(); got != idlePollInterval {
+		t.Fatalf("interval = %v, want it clamped to %v", got, idlePollInterval)
 	}
 }

@@ -30,6 +30,11 @@ var (
 	// ErrCreatedTargetUnknown means Herdr accepted a create command but its
 	// response did not identify the new root pane.
 	ErrCreatedTargetUnknown = errors.New("herdr: created target response did not identify the root pane")
+	// ErrPartiallyApplied means an earlier step of a multi-step mutation already
+	// reached the agent before a later step failed. It outranks any
+	// safe-to-retry classification derived from the failing step alone,
+	// because retrying would duplicate the input that already landed.
+	ErrPartiallyApplied = errors.New("herdr: earlier step of the mutation was already applied")
 )
 
 // OutcomeError preserves the subprocess dispatch boundary without exposing
@@ -44,6 +49,33 @@ func (e *OutcomeError) Error() string {
 		return "herdr command failed"
 	}
 	return e.Err.Error()
+}
+
+// CLIError is a machine-readable failure returned by the Herdr CLI.
+type CLIError struct {
+	Code    string
+	Message string
+}
+
+func (e *CLIError) Error() string {
+	if e == nil {
+		return "herdr CLI command failed"
+	}
+	if e.Code == "" {
+		return e.Message
+	}
+	if e.Message == "" {
+		return e.Code
+	}
+	return e.Code + ": " + e.Message
+}
+
+type cliErrorEnvelope struct {
+	ID    string `json:"id"`
+	Error *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 func (e *OutcomeError) Unwrap() error {
@@ -333,15 +365,15 @@ func (c *Client) PaneProcessInfo(ctx context.Context, paneID string) (*PaneProce
 	return &result.ProcessInfo, nil
 }
 
-func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format string) ([]byte, error) {
+func (c *Client) ReadPane(ctx context.Context, paneID string, lines int, format string) (PaneRead, error) {
 	return c.readPane(ctx, paneID, lines, format, "recent-unwrapped")
 }
 
-func (c *Client) ReadPaneRecent(ctx context.Context, paneID string, lines int, format string) ([]byte, error) {
+func (c *Client) ReadPaneRecent(ctx context.Context, paneID string, lines int, format string) (PaneRead, error) {
 	return c.readPane(ctx, paneID, lines, format, "recent")
 }
 
-func (c *Client) readPane(ctx context.Context, paneID string, lines int, format, source string) ([]byte, error) {
+func (c *Client) readPane(ctx context.Context, paneID string, lines int, format, source string) (PaneRead, error) {
 	if lines < 1 {
 		lines = 1
 	}
@@ -351,12 +383,18 @@ func (c *Client) readPane(ctx context.Context, paneID string, lines int, format,
 	if content, err := c.api.readPane(ctx, paneID, lines, format, source); err == nil {
 		return content, nil
 	}
-	return c.runCommand(ctx,
+	// The CLI fallback prints bare text and does not expose the socket API's
+	// truncation metadata, so Truncated remains false when this path is used.
+	content, err := c.runCommand(ctx,
 		"pane", "read", paneID,
 		"--lines", strconv.Itoa(lines),
 		"--source", source,
 		"--format", format,
 	)
+	if err != nil {
+		return PaneRead{}, err
+	}
+	return PaneRead{Content: content}, nil
 }
 
 func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int, format string) ([]byte, error) {
@@ -366,7 +404,11 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 	if format != "ansi" {
 		format = "text"
 	}
-	return c.api.readPane(ctx, paneID, lines, format, "visible")
+	read, err := c.api.readPane(ctx, paneID, lines, format, "visible")
+	if err != nil {
+		return nil, err
+	}
+	return read.Content, nil
 }
 
 func (c *Client) SupportsRealtimePane(ctx context.Context) bool {
@@ -536,6 +578,19 @@ func commandResult(stdout, stderr *limitedBuffer, waitErr error) ([]byte, error)
 		return nil, &OutcomeError{Started: true, Err: waitErr}
 	}
 	diagnostic := strings.TrimSpace(stderr.String())
+	if !stderr.truncated && diagnostic != "" {
+		var envelope cliErrorEnvelope
+		if err := json.Unmarshal([]byte(diagnostic), &envelope); err == nil &&
+			envelope.Error != nil && envelope.Error.Code != "" {
+			return nil, &OutcomeError{
+				Started: true,
+				Err: &CLIError{
+					Code:    envelope.Error.Code,
+					Message: envelope.Error.Message,
+				},
+			}
+		}
+	}
 	if diagnostic == "" {
 		diagnostic = exitErr.Error()
 	}
