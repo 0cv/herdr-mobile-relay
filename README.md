@@ -86,7 +86,9 @@ The relay continues to support Herdr 0.7.5 or newer.
 
 ## What It Does
 
-- Monitor and control agents across several computers.
+- Monitor and control agents across several computers, with new, closed, and
+  renamed agents, workspaces, and tabs reflected within seconds through a
+  live Herdr event stream (15-second reconciliation backstop).
 - Start, rename, clear, restart, and stop agents from relay-provided launch
   profiles.
 - Send prompts, terminal keys, slash commands, screenshots, and photos.
@@ -133,9 +135,12 @@ background. Long tokens wrap in responsive output, while fixed-grid table rows
 remain aligned.
 
 The terminal controls send **Esc**, **Tab**, **Shift+Tab**, arrow keys, and
-`Ctrl` plus the next keyboard letter. **Copy** copies the latest completed
-agent response without ANSI control sequences when available; otherwise it
-copies the visible terminal output.
+`Ctrl` plus the next keyboard letter. **Copy** runs the agent's own copy
+command (Claude Code, Codex, Kimi, OMP, Pi, and Qoder) to capture its latest
+completed response without ANSI control sequences, falling back to the
+visible terminal output for other agents such as OpenCode. Copy is disabled
+while the agent is still working, so it can no longer interrupt an in-flight
+turn.
 
 ## Updates
 
