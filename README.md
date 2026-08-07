@@ -134,9 +134,15 @@ immediately, then reacquires the lease and reconciles current content in the
 background. Long tokens wrap in responsive output, while fixed-grid table rows
 remain aligned.
 
-The terminal controls send **Esc**, **Tab**, **Shift+Tab**, arrow keys, and
-`Ctrl` plus the next keyboard letter. **Copy** runs the agent's own copy
-command (Claude Code, Codex, Kimi, OMP, Pi, and Qoder) to capture its latest
+The terminal controls send **Esc**, **Tab**, arrow keys, and combinable
+**Shift**/**Ctrl** modifiers: tap either (or both) to arm it, then type a
+letter or tap **Tab** to send the combined chord (`shift+tab`, `ctrl+c`,
+`ctrl+shift+c`, and so on). The modifier keyboard stays open for repeated
+presses and closes only when focus moves to the composer, terminal, or
+**Enter**/**Send**.
+
+**Copy** runs the agent's own copy command (Claude Code, Codex, Kimi, OMP, Pi,
+and Qoder) to capture its latest
 completed response without ANSI control sequences, falling back to the
 visible terminal output for other agents such as OpenCode. Copy is disabled
 while the agent is still working, so it can no longer interrupt an in-flight

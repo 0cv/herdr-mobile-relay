@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Replace the **Shift+Tab** button with combinable **Shift** and **Ctrl**
+  modifier keys: tap either (or both) to arm it, then type a letter or tap
+  **Tab** to send the combined chord.
+- Keep the terminal's modifier keyboard open across repeated key sends
+  instead of closing it after every press; it now closes only when focus
+  moves to the composer, terminal, or **Enter**/**Send**.
+
 ## [0.13.12] - 2026-08-04
 
 ### Added

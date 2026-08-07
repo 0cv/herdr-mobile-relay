@@ -473,9 +473,9 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .quick-actions .button { flex: 1; }
 .term-keys { align-items: center; border-top: 1px solid var(--border); display: flex; gap: .35rem; padding: .4rem .55rem; }
 .term-keys .spacer { flex: 1; }
-.ctrl-menu, .arrow-menu { position: relative; }
-.ctrl-key-input { border: 0; height: 1px; left: 50%; opacity: 0; padding: 0; pointer-events: none; position: absolute; width: 1px; }
-.ctrl-menu .button[aria-pressed='true'] { background: var(--primary); color: var(--primary-foreground); }
+.modifier-menu, .arrow-menu { position: relative; }
+.modifier-key-input { border: 0; height: 1px; left: 50%; opacity: 0; padding: 0; pointer-events: none; position: absolute; width: 1px; }
+.modifier-menu .button[aria-pressed='true'] { background: var(--primary); color: var(--primary-foreground); }
 .arrow-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(3, 2.3rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
 .arrow-popup button { background: var(--secondary); border: 0; border-radius: .4rem; color: var(--foreground); height: 2.3rem; }
 

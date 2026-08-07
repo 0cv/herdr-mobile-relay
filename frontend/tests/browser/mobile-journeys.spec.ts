@@ -2746,17 +2746,19 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   const attachImage = page.getByRole('button', { name: 'Attach image' });
   const arrowKeys = page.getByRole('button', { name: 'Arrow keys' });
   const enterKey = page.getByRole('button', { name: 'Enter' });
+  const tabKey = page.getByRole('button', { name: 'Tab', exact: true });
   const ctrlKey = page.getByRole('button', { name: 'Ctrl', exact: true });
-  const ctrlLetter = page.getByRole('textbox', { name: 'Ctrl shortcut letter' });
-  const shiftTabKey = page.getByRole('button', { name: 'Shift+Tab' });
+  const shiftKey = page.getByRole('button', { name: 'Shift', exact: true });
+  const modifierLetter = page.getByRole('textbox', { name: 'Shift or Ctrl shortcut letter' });
   const copyOutput = page.getByRole('button', { name: 'Copy', exact: true });
   await expect(attachImage.locator('svg')).toBeVisible();
   await expect(arrowKeys.locator('svg')).toBeVisible();
   await expect(enterKey).toBeVisible();
   await expect(ctrlKey).toBeVisible();
-  await expect(shiftTabKey).toBeVisible();
+  await expect(shiftKey).toBeVisible();
   await expect(copyOutput).toBeVisible();
   await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
   await expect(attachImage).not.toContainText('▧');
   await expect(arrowKeys).not.toContainText('⌨');
   await arrowKeys.click();
@@ -2766,24 +2768,75 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   expect((await commands(page)).find((command) => command.type === 'send_keys')).toMatchObject({
     pane_id: 'w1:p1', keys: ['Enter'],
   });
-  await shiftTabKey.click();
+  await shiftKey.click();
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await modifierLetter.press('c');
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'send_keys'
-      && JSON.stringify(command.keys) === JSON.stringify(['Shift+Tab'])).length).toBe(1);
+      && JSON.stringify(command.keys) === JSON.stringify(['shift+c'])).length).toBe(1);
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await modifierLetter.press('d');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['shift+d'])).length).toBe(1);
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
   await ctrlKey.click();
   await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
-  await expect(ctrlLetter).toBeFocused();
-  await ctrlLetter.press('c');
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await modifierLetter.press('c');
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'send_keys'
-      && JSON.stringify(command.keys) === JSON.stringify(['ctrl+c'])).length).toBe(1);
-  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
-  await expect(ctrlLetter).not.toBeFocused();
-  await ctrlKey.click();
-  await ctrlLetter.press('o');
+      && JSON.stringify(command.keys) === JSON.stringify(['ctrl+shift+c'])).length).toBe(1);
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await shiftKey.click();
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await modifierLetter.press('o');
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'send_keys'
       && JSON.stringify(command.keys) === JSON.stringify(['ctrl+o'])).length).toBe(1);
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
+  await ctrlKey.click();
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(modifierLetter).not.toBeFocused();
+  await tabKey.click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['Tab'])).length).toBe(1);
+  await shiftKey.click();
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await tabKey.click();
+  await tabKey.click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['shift+tab'])).length).toBe(2);
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await ctrlKey.click();
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
+  await tabKey.click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['ctrl+shift+tab'])).length).toBe(1);
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await enterKey.click();
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(modifierLetter).not.toBeFocused();
+  await shiftKey.click();
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await page.getByRole('combobox', { name: 'Prompt' }).focus();
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(modifierLetter).not.toBeFocused();
   const refreshesBeforeBack = (await commands(page)).filter((command) => command.type === 'refresh_agents').length;
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)

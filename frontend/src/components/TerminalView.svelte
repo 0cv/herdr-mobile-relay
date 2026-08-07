@@ -76,7 +76,7 @@
   let terminalElement = $state<HTMLDivElement>(null!);
   let cellMeasureElement = $state<HTMLSpanElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
-  let ctrlInputElement = $state<HTMLInputElement>(null!);
+  let modifierInputElement = $state<HTMLInputElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
   let transcriptElement = $state<HTMLTextAreaElement>(null!);
   let responseElement = $state<HTMLTextAreaElement>(null!);
@@ -112,6 +112,7 @@
   let jumpVisible = $state(false);
   let arrowsOpen = $state(false);
   let ctrlArmed = $state(false);
+  let shiftArmed = $state(false);
   let uploadStatus = $state('');
   let uploadError = $state(false);
   let copyingAgentResponse = $state(false);
@@ -891,39 +892,74 @@
   function dismissCopiedAgentResponse() {
     copiedAgentResponseText = '';
   }
-  function toggleCtrl() {
+  function toggleModifier(which: 'ctrl' | 'shift') {
     arrowsOpen = false;
-    if (ctrlArmed) {
-      ctrlArmed = false;
-      ctrlInputElement.blur();
-      return;
+    if (which === 'ctrl') ctrlArmed = !ctrlArmed;
+    else shiftArmed = !shiftArmed;
+    if (ctrlArmed || shiftArmed) {
+      modifierInputElement.value = '';
+      modifierInputElement.focus();
+    } else {
+      modifierInputElement.blur();
     }
-    ctrlArmed = true;
-    ctrlInputElement.value = '';
-    ctrlInputElement.focus();
   }
 
-  function ctrlInput(event: Event) {
+  function toggleCtrl() {
+    toggleModifier('ctrl');
+  }
+
+  function toggleShift() {
+    toggleModifier('shift');
+  }
+
+  function modifierChord(key: string): { chord: string; label: string } | null {
+    const parts: string[] = [];
+    const labels: string[] = [];
+    if (ctrlArmed) { parts.push('ctrl'); labels.push('Ctrl'); }
+    if (shiftArmed) { parts.push('shift'); labels.push('Shift'); }
+    if (!parts.length) return null;
+    parts.push(key.toLowerCase());
+    labels.push(key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1).toLowerCase());
+    return { chord: parts.join('+'), label: labels.join('+') };
+  }
+
+  function disarmModifiers() {
+    ctrlArmed = false;
+    shiftArmed = false;
+    modifierInputElement.blur();
+  }
+
+  function modifierInput(event: Event) {
     const target = event.currentTarget as HTMLInputElement;
     const letter = target.value.match(/[a-z]/i)?.[0];
     target.value = '';
     if (!letter) return;
-    ctrlArmed = false;
-    target.blur();
-    const chord = `ctrl+${letter.toLowerCase()}`;
-    void sendKeys([chord], `Ctrl+${letter.toUpperCase()}`);
+    const result = modifierChord(letter);
+    if (!result) return;
+    void sendKeys([result.chord], result.label);
   }
 
-  function ctrlKeydown(event: KeyboardEvent) {
+  function sendTab() {
+    const result = modifierChord('tab');
+    if (!result) {
+      void sendKeys(['Tab']);
+      return;
+    }
+    void sendKeys([result.chord], result.label);
+  }
+
+  function modifierKeydown(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
-    ctrlArmed = false;
-    ctrlInputElement.blur();
+    disarmModifiers();
   }
 
-  function ctrlBlur() {
+  function modifierBlur() {
     setTimeout(() => {
-      if (document.activeElement !== ctrlInputElement) ctrlArmed = false;
+      if (document.activeElement !== modifierInputElement) {
+        ctrlArmed = false;
+        shiftArmed = false;
+      }
     });
   }
 
@@ -1420,28 +1456,38 @@
 
     <div class="term-keys">
       <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Tab'])}>Tab</Button>
-      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Shift+Tab'], 'Shift+Tab')}>Shift+Tab</Button>
-      <div class="ctrl-menu">
+      <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>Tab</Button>
+      <div class="modifier-menu">
         <input
-          id="ctrl-key-input"
-          class="ctrl-key-input"
-          bind:this={ctrlInputElement}
-          aria-label="Ctrl shortcut letter"
+          id="modifier-key-input"
+          class="modifier-key-input"
+          bind:this={modifierInputElement}
+          aria-label="Shift or Ctrl shortcut letter"
           autocomplete="off"
           autocapitalize="none"
           maxlength="1"
           spellcheck="false"
-          oninput={ctrlInput}
-          onkeydown={ctrlKeydown}
-          onblur={ctrlBlur}
+          oninput={modifierInput}
+          onkeydown={modifierKeydown}
+          onblur={modifierBlur}
         />
         <Button
           variant="secondary"
           size="sm"
-          aria-controls="ctrl-key-input"
+          aria-controls="modifier-key-input"
+          aria-pressed={shiftArmed}
+          aria-label="Shift"
+          title="Press Shift, then type a letter — combine with Ctrl"
+          onpointerdown={(event) => event.preventDefault()}
+          onclick={toggleShift}
+        >⇧</Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          aria-controls="modifier-key-input"
           aria-pressed={ctrlArmed}
-          title="Press Ctrl, then type a letter"
+          title="Press Ctrl, then type a letter — combine with Shift"
+          onpointerdown={(event) => event.preventDefault()}
           onclick={toggleCtrl}
         >Ctrl</Button>
       </div>
@@ -1454,7 +1500,8 @@
           aria-expanded={arrowsOpen}
           onclick={() => {
             ctrlArmed = false;
-            ctrlInputElement.blur();
+            shiftArmed = false;
+            modifierInputElement.blur();
             arrowsOpen = !arrowsOpen;
           }}
         >
