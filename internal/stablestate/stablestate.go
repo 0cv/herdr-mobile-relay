@@ -120,9 +120,9 @@ func Run(args []string, stdout, stderr *os.File) error {
 		if err != nil {
 			return err
 		}
-		items, ok := value.([]any)
-		if !ok {
-			return errors.New("Cloudflare tunnel list output was not a JSON list")
+		items, err := tunnelList(value)
+		if err != nil {
+			return err
 		}
 		var matches []map[string]any
 		for _, item := range items {
@@ -146,9 +146,9 @@ func Run(args []string, stdout, stderr *os.File) error {
 		if err != nil {
 			return err
 		}
-		items, ok := value.([]any)
-		if !ok {
-			return errors.New("Cloudflare tunnel list output was not a JSON list")
+		items, err := tunnelList(value)
+		if err != nil {
+			return err
 		}
 		expected := strings.ToLower(args[1])
 		for _, item := range items {
@@ -301,6 +301,17 @@ func readJSON(filename string) (any, error) {
 		return nil, fmt.Errorf("cannot read valid JSON from %s: %w", filename, err)
 	}
 	return value, nil
+}
+
+func tunnelList(value any) ([]any, error) {
+	if value == nil {
+		return nil, nil
+	}
+	items, ok := value.([]any)
+	if !ok {
+		return nil, errors.New("Cloudflare tunnel list output was not a JSON list")
+	}
+	return items, nil
 }
 
 func uuidFrom(value any) string {

@@ -82,7 +82,7 @@ case "$args" in
         if [ -n "${STUB_LIST_JSON:-}" ] && [ -f "$STUB_LIST_JSON" ]; then
             cat "$STUB_LIST_JSON"
         else
-            echo '[]'
+            echo 'null'
         fi
         exit 0
         ;;
@@ -335,6 +335,23 @@ test_login_guidance() {
     pass "desktop and headless Cloudflare login guidance remain explicit"
 }
 
+test_malformed_tunnel_list_stops_before_prompt() {
+    new_case
+    unset HERDR_STABLE_HOSTNAME
+    STUB_LIST_JSON="$CASE_DIR/tunnels.json"
+    printf '{}\n' > "$STUB_LIST_JSON"
+    export STUB_LIST_JSON
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "malformed tunnel list should fail"
+    assert_contains "$OUTPUT" 'Cloudflare tunnel list output was not a JSON list'
+    [ "$(grep -Fc -- 'Cloudflare tunnel list output was not a JSON list' "$OUTPUT")" -eq 1 ] \
+        || fail "malformed tunnel list error should be reported once"
+    assert_not_contains "$OUTPUT" 'Public hostname'
+    assert_not_contains "$STUB_LOG" ' tunnel create '
+    assert_not_contains "$STUB_LOG" ' route dns '
+    pass "malformed tunnel lists stop setup before prompting or creating resources"
+}
+
 test_zone_failure_preserves_state() {
     new_case
     export STUB_ROUTE_FAIL=1
@@ -459,12 +476,13 @@ test_teardown_ownership_and_dns_retention() {
     pass "teardown refuses foreign ownership and retains diagnosis when DNS remains"
 }
 
-echo "1..12"
+echo "1..13"
 test_success_and_alternate_port
 test_existing_phone_app_origin
 test_creation_confirmation
 test_existing_config_reuse
 test_login_guidance
+test_malformed_tunnel_list_stops_before_prompt
 test_zone_failure_preserves_state
 test_occupied_hostname
 test_interrupted_route_resume

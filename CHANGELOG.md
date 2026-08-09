@@ -5,6 +5,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Let stable setup create the first Cloudflare tunnel when `cloudflared`
+  reports `null` for an account with no tunnels.
+
 ## [0.14.0] - 2026-08-07
 
 ### Changed

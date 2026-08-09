@@ -242,25 +242,22 @@ list_tunnels() {
     local output="$WORK_DIR/tunnels.json"
     local error="$WORK_DIR/tunnels.err"
 
-    if cloudflared tunnel list --output json > "$output" 2> "$error"; then
-        state_command tunnel-id-by-name "$output" "__herdr_validation_only__" >/dev/null
-        LIST_FILE="$output"
-        LIST_READY=true
-        return
-    fi
-
-    cat "$error" >&2
-    print_login_guidance
-    if ! cloudflared tunnel login; then
-        echo "✗ Cloudflare login did not complete." >&2
-        return 1
-    fi
     if ! cloudflared tunnel list --output json > "$output" 2> "$error"; then
         cat "$error" >&2
-        echo "✗ Cloudflare authorization is still unavailable after login." >&2
+        print_login_guidance
+        if ! cloudflared tunnel login; then
+            echo "✗ Cloudflare login did not complete." >&2
+            return 1
+        fi
+        if ! cloudflared tunnel list --output json > "$output" 2> "$error"; then
+            cat "$error" >&2
+            echo "✗ Cloudflare authorization is still unavailable after login." >&2
+            return 1
+        fi
+    fi
+    if ! state_command tunnel-id-by-name "$output" "__herdr_validation_only__" >/dev/null; then
         return 1
     fi
-    state_command tunnel-id-by-name "$output" "__herdr_validation_only__" >/dev/null
     LIST_FILE="$output"
     LIST_READY=true
 }
