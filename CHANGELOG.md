@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-08-10
+
+### Fixed
+
+- Preserve configured terminal scrollback depth in **Resize Session** while
+  continuing to discard stale desktop-width rows.
+
 ## [0.14.4] - 2026-08-10
 
 ### Fixed
@@ -286,7 +293,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.4...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.5...HEAD
+[0.14.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.4...v0.14.5
 [0.14.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.3...v0.14.4
 [0.14.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.1...v0.14.2
