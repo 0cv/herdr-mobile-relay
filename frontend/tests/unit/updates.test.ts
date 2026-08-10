@@ -19,6 +19,7 @@ import {
   pendingRelayUpdate,
   rememberPendingRelayUpdate,
   relayNeedsManualBootstrap,
+  reloadUpdatedSameOriginApp,
   semverTuple,
   restoreUpdateProgress,
   setUpdateProgressError,
@@ -245,6 +246,16 @@ describe('release updates', () => {
     updateProgressPlan.set(null);
     restoreUpdateProgress();
     expect(get(updateProgressPlan)).toEqual(started);
+  });
+
+  it('does not poll again for an already loaded deployment target', async () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+
+    await expect(reloadUpdatedSameOriginApp(APP_VERSION)).resolves.toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
   });
 
   it('waits for the deployed origin bundle to converge before reloading', async () => {

@@ -959,6 +959,35 @@ test('offers the one-time Terminal bootstrap instead of retrying a legacy deploy
 });
 
 
+test('does not poll the app origin after its deployment target is loaded', async ({ page }) => {
+  const versionRequests: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/version.json') versionRequests.push(request.url());
+  });
+  await boot(page, [fedora]);
+  const origin = new URL(page.url()).origin;
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    release_version: APP_RELEASE,
+    capabilities: ['directory_browser', 'self_update', 'app_deploy'],
+    app_deploy: {
+      configured: true,
+      origin,
+      project: 'herdr-app',
+      branch: 'main',
+      revision: 'f'.repeat(40),
+      state: 'succeeded',
+      target_version: APP_RELEASE,
+    },
+  });
+  await page.waitForTimeout(300);
+  const settledRequestCount = versionRequests.length;
+
+  await page.waitForTimeout(2_200);
+
+  expect(versionRequests).toHaveLength(settledRequestCount);
+});
+
 test('confirms deployment when an authorized relay has the upstream app bundle', async ({ page }) => {
   await boot(page, [fedora]);
   const origin = new URL(page.url()).origin;

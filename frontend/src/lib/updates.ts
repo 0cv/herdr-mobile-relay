@@ -316,7 +316,7 @@ export async function waitForDeployedApp(
     new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds)));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     const status = await checkAppUpdate(fetcher);
-    if (status.state === 'reload-ready' && !newerVersion(version, status.deployedVersion)) return status;
+    if (semverTuple(status.deployedVersion) && !newerVersion(version, status.deployedVersion)) return status;
     if (attempt + 1 < attempts) await sleep(intervalMs);
   }
   return null;
@@ -325,6 +325,7 @@ export async function waitForDeployedApp(
 let automaticReload: Promise<boolean> | null = null;
 
 export function reloadUpdatedSameOriginApp(version: string): Promise<boolean> {
+  if (!newerVersion(version, APP_VERSION)) return Promise.resolve(false);
   if (automaticReload) return automaticReload;
   automaticReload = (async () => {
     const status = await waitForDeployedApp(version);
