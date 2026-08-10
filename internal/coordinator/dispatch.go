@@ -1022,11 +1022,11 @@ func (d *Dispatcher) readPaneForDisplay(
 	paneID string,
 	lines int,
 	format string,
-	visibleRows bool,
+	resized bool,
 ) (herdr.PaneRead, error) {
 	agent, ok := d.state.Agent(paneID)
-	if visibleRows {
-		return d.herdr.ReadPaneVisible(ctx, paneID, lines, format)
+	if resized {
+		return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
 	}
 	if ok && isQoderAgent(agent.Agent) {
 		return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)

@@ -3,6 +3,7 @@ package coordinator
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,18 +44,30 @@ func TestFilterOverwidePaneRowsPreservesANSIAndTerminalCells(t *testing.T) {
 	}
 }
 
-func TestHandleReadPaneUsesVisibleRowsAndFiltersActiveLeaseWidth(t *testing.T) {
+func TestHandleReadPaneKeepsResizedScrollbackAndFiltersStaleWideRows(t *testing.T) {
 	dir := t.TempDir()
-	record := filepath.Join(dir, "invocations.log")
-	panePath := filepath.Join(dir, "pane.ansi")
-	pane := "\x1b[32mcorrect row\x1b[0m\n" +
-		"narrow text" + strings.Repeat(" ", 9) + "stale desktop-width suffix\n"
-	if err := os.WriteFile(panePath, []byte(pane), 0o600); err != nil {
+	visiblePath := filepath.Join(dir, "visible.ansi")
+	recentPath := filepath.Join(dir, "recent.ansi")
+	historyLines := make([]string, 120)
+	for index := range historyLines {
+		historyLines[index] = fmt.Sprintf("history row %03d", index)
+	}
+	visible := strings.Join(historyLines[len(historyLines)-46:], "\n") + "\n"
+	recentLines := append([]string{}, historyLines[:60]...)
+	recentLines = append(recentLines, "stale desktop-width row"+strings.Repeat(" ", 20))
+	recentLines = append(recentLines, historyLines[60:]...)
+	recent := strings.Join(recentLines, "\n") + "\n"
+	if err := os.WriteFile(visiblePath, []byte(visible), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recentPath, []byte(recent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
-		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
-		"cat \""+panePath+"\"\n")
+		"case \" $* \" in\n"+
+		"  *\" --source visible \"*) cat \""+visiblePath+"\" ;;\n"+
+		"  *) cat \""+recentPath+"\" ;;\n"+
+		"esac\n")
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "omp", Status: "idle"}}, state.RevisionCounter())
 	dispatcher := NewDispatcher(
@@ -65,22 +78,16 @@ func TestHandleReadPaneUsesVisibleRowsAndFiltersActiveLeaseWidth(t *testing.T) {
 	)
 
 	response := dispatcher.HandleReadPane(context.Background(), map[string]any{
-		"pane_id": "pane-1", "lines": float64(20), "format": "ansi", "terminal_columns": float64(20),
+		"pane_id": "pane-1", "lines": float64(150), "format": "ansi", "terminal_columns": float64(20),
 	})
-	if response["content"] != "\x1b[32mcorrect row\x1b[0m\n" {
-		t.Fatalf("pane content = %q", response["content"])
+	want := strings.Join(historyLines, "\n") + "\n"
+	if response["content"] != want {
+		t.Fatalf("pane content has %d lines, want complete %d-line scrollback",
+			strings.Count(response["content"].(string), "\n"),
+			len(historyLines),
+		)
 	}
 	if response["truncated"] != true {
 		t.Fatalf("pane truncation = %#v, want true after filtering", response["truncated"])
-	}
-	invocations, err := os.ReadFile(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(invocations), "--source visible --format ansi") {
-		t.Fatalf("pane read did not request visible rows: %s", invocations)
-	}
-	if strings.Contains(string(invocations), "recent-unwrapped") || strings.Contains(string(invocations), "--source recent ") {
-		t.Fatalf("pane read requested scrollback rows during a size lease: %s", invocations)
 	}
 }
