@@ -222,6 +222,8 @@ export async function checkAppUpdate(
 }
 
 export function initializeAppUpdates(): () => void {
+  const normalizedUrl = normalizeReloadedAppUrl(location.href);
+  if (normalizedUrl) history.replaceState(history.state, '', normalizedUrl);
   void checkAppUpdate();
   const checkWhenDue = (minElapsed: number) => () => {
     const elapsed = Date.now() - get(appUpdateStatus).checkedAt;
@@ -284,7 +286,16 @@ export function relayServesCurrentOrigin(relayUrl: string): boolean {
 export function cacheBustedAppUrl(currentUrl: string, version: string, nonce = Date.now()): string {
   const url = new URL(currentUrl);
   const cacheKey = version || 'current';
+  url.pathname = '/index.html';
   url.searchParams.set('herdr_reload', `${cacheKey}-${nonce}`);
+  return url.toString();
+}
+
+export function normalizeReloadedAppUrl(currentUrl: string): string | null {
+  const url = new URL(currentUrl);
+  if (url.pathname !== '/index.html' || !url.searchParams.has('herdr_reload')) return null;
+  url.pathname = '/';
+  url.searchParams.delete('herdr_reload');
   return url.toString();
 }
 

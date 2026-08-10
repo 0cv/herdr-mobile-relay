@@ -75,6 +75,25 @@ func TestServesRootAsIndex(t *testing.T) {
 	}
 }
 
+func TestRedirectsLegacyUpdateReloadToDistinctAppPath(t *testing.T) {
+	root := setupTestWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/?setup=preserved&herdr_reload=0.14.4-42", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusTemporaryRedirect)
+	}
+	if location := w.Header().Get("Location"); location != "/index.html?setup=preserved&herdr_reload=0.14.4-42" {
+		t.Fatalf("location = %q", location)
+	}
+}
+
 func TestRejectsDisallowedAsset(t *testing.T) {
 	root := setupTestWebRoot(t)
 	h, err := NewHandler(root)

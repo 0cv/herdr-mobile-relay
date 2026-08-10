@@ -55,6 +55,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if requestPath == "index.html" && r.URL.Path == "/" && r.URL.Query().Has("herdr_reload") {
+		target := *r.URL
+		target.Path = "/index.html"
+		http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+		return
+	}
 	if !isAllowedAsset(requestPath) {
 		// Extensionless paths are SPA routes. Asset-looking paths remain 404.
 		if path.Ext(requestPath) != "" {

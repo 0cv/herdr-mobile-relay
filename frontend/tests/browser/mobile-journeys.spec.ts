@@ -481,10 +481,18 @@ test('loads a deployed phone app and preserves pending relay updates', async ({ 
   await expect(loadUpdate).toBeEnabled();
   await loadUpdate.click();
   const dialog = page.getByRole('dialog', { name: 'Load Update' });
+  const reloadRequest = page.waitForRequest((request) =>
+    new URL(request.url()).searchParams.has('herdr_reload'));
   await dialog.getByRole('button', { name: 'Load Update', exact: true }).click();
 
-  await expect.poll(() => new URL(page.url()).searchParams.get('herdr_reload'))
+  const reloadUrl = new URL((await reloadRequest).url());
+  expect(reloadUrl.pathname).toBe('/index.html');
+  expect(reloadUrl.searchParams.get('herdr_reload'))
     .toMatch(new RegExp(`^${APP_RELEASE.replaceAll('.', '\\.')}-\\d+$`));
+  await expect.poll(() => {
+    const current = new URL(page.url());
+    return `${current.pathname}${current.searchParams.has('herdr_reload') ? '?reloading' : ''}`;
+  }).toBe('/');
   const plan = await page.evaluate(() => JSON.parse(sessionStorage.getItem('herdr_update_progress') || 'null'));
   expect(plan).toMatchObject({
     targetVersion: APP_RELEASE,

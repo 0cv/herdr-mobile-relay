@@ -12,6 +12,7 @@ import {
   newerBundle,
   newerVersion,
   normalizeAppDeployment,
+  normalizeReloadedAppUrl,
   normalizeRelayUpdate,
   markUpdateProgressRelayStarted,
   observeAppUpstreamVersion,
@@ -184,9 +185,13 @@ describe('release updates', () => {
       '0.13.8',
       42,
     ));
+    expect(next.pathname).toBe('/index.html');
     expect(next.searchParams.get('setup')).toBe('preserved');
     expect(next.searchParams.get('herdr_reload')).toBe('0.13.8-42');
     expect(next.hash).toBe('#settings');
+    expect(normalizeReloadedAppUrl(next.toString()))
+      .toBe('https://app.example.test/?setup=preserved#settings');
+    expect(normalizeReloadedAppUrl('https://app.example.test/index.html#settings')).toBeNull();
   });
 
   it('normalizes app deployment metadata without exposing unknown fields', () => {
