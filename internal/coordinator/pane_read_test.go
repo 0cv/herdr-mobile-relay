@@ -44,23 +44,20 @@ func TestFilterOverwidePaneRowsPreservesANSIAndTerminalCells(t *testing.T) {
 	}
 }
 
-func TestHandleReadPaneKeepsResizedScrollbackAndFiltersStaleWideRows(t *testing.T) {
+func TestHandleReadPaneUsesOnlyVisibleRowsForResizedPane(t *testing.T) {
 	dir := t.TempDir()
 	visiblePath := filepath.Join(dir, "visible.ansi")
 	recentPath := filepath.Join(dir, "recent.ansi")
-	historyLines := make([]string, 120)
-	for index := range historyLines {
-		historyLines[index] = fmt.Sprintf("history row %03d", index)
+	visibleLines := make([]string, 46)
+	for index := range visibleLines {
+		visibleLines[index] = fmt.Sprintf("visible row %02d", index)
 	}
-	visible := strings.Join(historyLines[len(historyLines)-46:], "\n") + "\n"
-	recentLines := append([]string{}, historyLines[:60]...)
-	recentLines = append(recentLines, "stale desktop-width row"+strings.Repeat(" ", 20))
-	recentLines = append(recentLines, historyLines[60:]...)
-	recent := strings.Join(recentLines, "\n") + "\n"
+	visible := strings.Join(visibleLines, "\n") + "\n"
+	corruptRecent := strings.Repeat("duplicated desktop redraw\n", 120)
 	if err := os.WriteFile(visiblePath, []byte(visible), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(recentPath, []byte(recent), 0o600); err != nil {
+	if err := os.WriteFile(recentPath, []byte(corruptRecent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
@@ -80,14 +77,13 @@ func TestHandleReadPaneKeepsResizedScrollbackAndFiltersStaleWideRows(t *testing.
 	response := dispatcher.HandleReadPane(context.Background(), map[string]any{
 		"pane_id": "pane-1", "lines": float64(150), "format": "ansi", "terminal_columns": float64(20),
 	})
-	want := strings.Join(historyLines, "\n") + "\n"
-	if response["content"] != want {
-		t.Fatalf("pane content has %d lines, want complete %d-line scrollback",
-			strings.Count(response["content"].(string), "\n"),
-			len(historyLines),
-		)
+	if response["content"] != visible {
+		t.Fatalf("pane content = %q, want current visible rows", response["content"])
 	}
-	if response["truncated"] != true {
-		t.Fatalf("pane truncation = %#v, want true after filtering", response["truncated"])
+	if response["viewport_only"] != true {
+		t.Fatalf("viewport_only = %#v, want true", response["viewport_only"])
+	}
+	if response["truncated"] != false {
+		t.Fatalf("pane truncation = %#v, want false", response["truncated"])
 	}
 }

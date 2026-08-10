@@ -22,6 +22,7 @@ import {
   semverTuple,
   restoreUpdateProgress,
   setUpdateProgressError,
+  waitForDeployedApp,
   updateProgressPlan,
 } from '$lib/updates';
 
@@ -244,6 +245,37 @@ describe('release updates', () => {
     updateProgressPlan.set(null);
     restoreUpdateProgress();
     expect(get(updateProgressPlan)).toEqual(started);
+  });
+
+  it('waits for the deployed origin bundle to converge before reloading', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const target = `${major}.${minor + 1}.${patch}`;
+    observeAppUpstreamVersion(target);
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ version: APP_VERSION, assets: APP_ASSET_VERSION }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ version: APP_VERSION, assets: APP_ASSET_VERSION }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ version: target, assets: APP_ASSET_VERSION + 1 }),
+      });
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    const status = await waitForDeployedApp(target, {
+      fetcher,
+      attempts: 3,
+      intervalMs: 0,
+      sleep,
+    });
+
+    expect(status).toMatchObject({ state: 'reload-ready', deployedVersion: target });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
   });
 
 });

@@ -6,7 +6,6 @@ const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const APP_RECHECK_INTERVAL_MS = 60 * 1_000;
 const PENDING_RELAY_UPDATES_KEY = 'herdr_pending_relay_updates';
 const UPDATE_PROGRESS_KEY = 'herdr_update_progress';
-const AUTO_RELOAD_VERSION_KEY = 'herdr_auto_reload_version';
 const APP_DEPLOY_SELF_UPDATE_MIN_VERSION = '0.13.3';
 export const MANAGED_UPDATE_COMMAND = 'HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes';
 export const CHECKOUT_UPDATE_COMMAND = 'git pull --ff-only && make service-install';
@@ -299,13 +298,43 @@ export function normalizeReloadedAppUrl(currentUrl: string): string | null {
   return url.toString();
 }
 
-export async function reloadUpdatedSameOriginApp(version: string): Promise<boolean> {
-  if (sessionStorage.getItem(AUTO_RELOAD_VERSION_KEY) === version) return false;
-  const status = await checkAppUpdate();
-  if (status.state !== 'reload-ready' || status.deployedVersion !== version) return false;
-  sessionStorage.setItem(AUTO_RELOAD_VERSION_KEY, version);
-  reloadApp(version);
-  return true;
+export interface DeployedAppWaitOptions {
+  fetcher?: typeof fetch;
+  attempts?: number;
+  intervalMs?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
+}
+
+export async function waitForDeployedApp(
+  version: string,
+  options: DeployedAppWaitOptions = {},
+): Promise<AppUpdateStatus | null> {
+  const fetcher = options.fetcher || fetch;
+  const attempts = Math.max(1, options.attempts || 120);
+  const intervalMs = Math.max(0, options.intervalMs ?? 1_000);
+  const sleep = options.sleep || ((milliseconds: number) =>
+    new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds)));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const status = await checkAppUpdate(fetcher);
+    if (status.state === 'reload-ready' && !newerVersion(version, status.deployedVersion)) return status;
+    if (attempt + 1 < attempts) await sleep(intervalMs);
+  }
+  return null;
+}
+
+let automaticReload: Promise<boolean> | null = null;
+
+export function reloadUpdatedSameOriginApp(version: string): Promise<boolean> {
+  if (automaticReload) return automaticReload;
+  automaticReload = (async () => {
+    const status = await waitForDeployedApp(version);
+    if (!status) return false;
+    reloadApp(status.deployedVersion);
+    return true;
+  })().finally(() => {
+    automaticReload = null;
+  });
+  return automaticReload;
 }
 
 export function reloadApp(version = ''): void {

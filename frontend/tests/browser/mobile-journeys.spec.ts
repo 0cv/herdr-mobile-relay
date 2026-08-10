@@ -2066,6 +2066,67 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
     .filter((command) => command.type === 'release_pane_size').length).toBe(3);
 });
 
+test('keeps scrollback while replacing moving Resize Session viewports', async ({ page }) => {
+  await boot(page, [fedora], '/', { terminalLayout: 'preserve' });
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize viewport', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Resize viewport on Fedora' }).click();
+  const baselineRows = Array.from({ length: 120 }, (_, index) => `history row ${index + 1}`);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: baselineRows.join('\n'),
+  });
+  const screen = page.getByRole('log').locator('.term-screen');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
+
+  const initialReadCount = (await commands(page))
+    .filter((command) => command.type === 'read_pane').length;
+  await page.getByRole('button', {
+    name: 'Terminal width: Original Columns. Switch to Resize Session',
+  }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThan(0);
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(initialReadCount);
+  await page.waitForTimeout(300);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    viewport_only: true,
+    content: baselineRows.slice(74).join('\n'),
+  });
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
+
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    viewport_only: true,
+    content: [...baselineRows.slice(75), 'history row 121'].join('\n'),
+  });
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '121');
+  await expect(page.getByRole('log')).toContainText('history row 121');
+
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    viewport_only: true,
+    content: [...baselineRows.slice(75), 'history row 121 updated'].join('\n'),
+  });
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '121');
+  await expect(page.getByRole('log')).toContainText('history row 121 updated');
+});
+
 test('keeps historical Qoder grids aligned in Resize Session', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);

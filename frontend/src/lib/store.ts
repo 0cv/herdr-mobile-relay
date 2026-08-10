@@ -716,6 +716,7 @@ class RelayStore {
         content: nextContent,
         format: String(message.format || frame?.format || 'plain'),
         truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
+        viewportOnly: typeof message.viewport_only === 'boolean' ? message.viewport_only : frame?.viewportOnly,
       });
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
@@ -734,6 +735,7 @@ class RelayStore {
         format: String(message.format || 'plain'),
       };
       if (message.truncated === true) nextFrame.truncated = true;
+      if (message.viewport_only === true) nextFrame.viewportOnly = true;
       this.terminalFramesValue.set(paneId, nextFrame);
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);

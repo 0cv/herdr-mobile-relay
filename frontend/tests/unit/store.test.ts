@@ -654,21 +654,27 @@ describe('relay command store', () => {
     const relayId = get(relayStore.relayConfigs)[0].id;
     socket.message({
       type: 'pane_content', pane_id: 'w1:p1', content: 'one\n', format: 'ansi',
-      content_fingerprint: 'content-1', truncated: false,
+      content_fingerprint: 'content-1', truncated: false, viewport_only: true,
     });
     socket.message({
       type: 'pane_delta', pane_id: 'w1:p1', format: 'ansi',
       base_fingerprint: 'content-1', content_fingerprint: 'content-2',
       truncated: true, segments: [{ copy_lines: 1 }, { text: 'two\n' }],
     });
-    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)?.truncated).toBe(true);
+    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)).toMatchObject({
+      truncated: true,
+      viewportOnly: true,
+    });
 
     socket.message({
       type: 'pane_delta', pane_id: 'w1:p1', format: 'ansi',
       base_fingerprint: 'content-2', content_fingerprint: 'content-3',
       truncated: false, segments: [{ copy_lines: 1 }, { text: 'three\n' }],
     });
-    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)?.truncated).toBe(false);
+    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)).toMatchObject({
+      truncated: false,
+      viewportOnly: true,
+    });
   });
 
   it('ignores late events from a socket that has already been replaced', async () => {

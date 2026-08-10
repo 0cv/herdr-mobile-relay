@@ -35,6 +35,7 @@ import {
   compactRepeatedCharacterRuns,
   isSeparatorOnlyLine,
   latestCompletedResponse,
+  mergeResizeTerminalViewport,
   renderTerminalContent,
   stripAnsi,
   TERMINAL_REPEATED_RUN_LIMIT,
@@ -239,6 +240,38 @@ describe('terminal rendering', () => {
       .toBe(false);
     expect(renderTerminalContent('plain terminal output', 'ansi', true).html)
       .not.toContain('terminal-grid-line');
+  });
+
+  it('merges moving resize viewports without duplicating terminal history', () => {
+    const baselineRows = Array.from({ length: 120 }, (_, index) => `history row ${index + 1}`);
+    const first = mergeResizeTerminalViewport(
+      baselineRows.join('\n'),
+      baselineRows.slice(74).join('\n'),
+      null,
+      1_000,
+    );
+    expect(first.content.split('\n')).toEqual(baselineRows);
+
+    const appendedRows = [...baselineRows.slice(75), 'history row 121'];
+    const appended = mergeResizeTerminalViewport(
+      baselineRows.join('\n'),
+      appendedRows.join('\n'),
+      first.state,
+      1_000,
+    );
+    expect(appended.content.split('\n')).toEqual([...baselineRows, 'history row 121']);
+
+    const redrawnRows = [...baselineRows.slice(75), 'history row 121 updated'];
+    const redrawn = mergeResizeTerminalViewport(
+      baselineRows.join('\n'),
+      redrawnRows.join('\n'),
+      appended.state,
+      1_000,
+    );
+    const renderedRows = redrawn.content.split('\n');
+    expect(renderedRows).toHaveLength(121);
+    expect(renderedRows.at(-1)).toBe('history row 121 updated');
+    expect(renderedRows.filter((row) => row === 'history row 76')).toHaveLength(1);
   });
 
   it('removes desktop-width decoration after terminal status text', () => {
