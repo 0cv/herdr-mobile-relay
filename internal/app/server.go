@@ -1489,8 +1489,8 @@ func (s *Server) preparePaneResponse(message, response map[string]any) map[strin
 	response["question_layout"] = classification.QuestionLayout
 	agentLower := strings.ToLower(agent)
 	resizeSession := messageInt(message["terminal_columns"], 0) > 0
-	if classification.Interaction != nil ||
-		(!resizeSession && !strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
+	if resizeSession || classification.Interaction != nil ||
+		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
 		return response
 	}
 	historyLimit := messageInt(message["lines"], 30)

@@ -2131,6 +2131,7 @@ test('keeps scrollback while replacing moving Resize Session viewports', async (
     pane_id: 'w1:p1',
     format: 'ansi',
     viewport_only: true,
+    viewport_rows: 46,
     content: baselineRows.slice(74).join('\n'),
   });
   await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
@@ -2140,9 +2141,10 @@ test('keeps scrollback while replacing moving Resize Session viewports', async (
     pane_id: 'w1:p1',
     format: 'ansi',
     viewport_only: true,
+    viewport_rows: 46,
     content: [...baselineRows.slice(75), 'history row 121'].join('\n'),
   });
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '121');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
   await expect(page.getByRole('log')).toContainText('history row 121');
 
   await server(page, 0, {
@@ -2150,9 +2152,10 @@ test('keeps scrollback while replacing moving Resize Session viewports', async (
     pane_id: 'w1:p1',
     format: 'ansi',
     viewport_only: true,
+    viewport_rows: 46,
     content: [...baselineRows.slice(75), 'history row 121 updated'].join('\n'),
   });
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '121');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
   await expect(page.getByRole('log')).toContainText('history row 121 updated');
 });
 

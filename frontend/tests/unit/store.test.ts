@@ -655,6 +655,7 @@ describe('relay command store', () => {
     socket.message({
       type: 'pane_content', pane_id: 'w1:p1', content: 'one\n', format: 'ansi',
       content_fingerprint: 'content-1', truncated: false, viewport_only: true,
+      viewport_rows: 46,
     });
     socket.message({
       type: 'pane_delta', pane_id: 'w1:p1', format: 'ansi',
@@ -664,6 +665,7 @@ describe('relay command store', () => {
     expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)).toMatchObject({
       truncated: true,
       viewportOnly: true,
+      viewportRows: 46,
     });
 
     socket.message({
@@ -674,6 +676,7 @@ describe('relay command store', () => {
     expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)).toMatchObject({
       truncated: false,
       viewportOnly: true,
+      viewportRows: 46,
     });
   });
 

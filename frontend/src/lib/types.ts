@@ -227,6 +227,7 @@ export interface TerminalFrame {
   format: string;
   truncated?: boolean;
   viewportOnly?: boolean;
+  viewportRows?: number;
 }
 
 export interface ToastMessage {

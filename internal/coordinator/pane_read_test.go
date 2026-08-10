@@ -1,7 +1,6 @@
 package coordinator
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -12,38 +11,6 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
-func TestFilterOverwidePaneRowsPreservesANSIAndTerminalCells(t *testing.T) {
-	content := []byte(strings.Join([]string{
-		"short",
-		"\x1b[31m1234567890EXTRA\x1b[0m",
-		"界界界界界Z",
-		"界界界界界",
-		strings.Repeat("e\u0301", 10) + "X",
-		strings.Repeat("e\u0301", 10),
-		"\x1b]0;long terminal title\x07ok",
-	}, "\r\n") + "\r\n")
-
-	got, filtered := filterOverwidePaneRows(content, 10, true)
-	if !filtered {
-		t.Fatal("overwide pane rows were not filtered")
-	}
-	want := []byte(strings.Join([]string{
-		"short",
-		"界界界界界",
-		strings.Repeat("e\u0301", 10),
-		"\x1b]0;long terminal title\x07ok",
-	}, "\r\n") + "\r\n")
-	if !bytes.Equal(got, want) {
-		t.Fatalf("filtered pane rows = %q, want %q", got, want)
-	}
-
-	unchanged := []byte("one\ntwo\n")
-	got, filtered = filterOverwidePaneRows(unchanged, 10, false)
-	if filtered || !bytes.Equal(got, unchanged) {
-		t.Fatalf("narrow pane rows = %q, filtered = %v", got, filtered)
-	}
-}
-
 func TestHandleReadPaneUsesOnlyVisibleRowsForResizedPane(t *testing.T) {
 	dir := t.TempDir()
 	visiblePath := filepath.Join(dir, "visible.ansi")
@@ -52,6 +19,7 @@ func TestHandleReadPaneUsesOnlyVisibleRowsForResizedPane(t *testing.T) {
 	for index := range visibleLines {
 		visibleLines[index] = fmt.Sprintf("visible row %02d", index)
 	}
+	visibleLines[20] = strings.Repeat("current-streaming-token-", 8)
 	visible := strings.Join(visibleLines, "\n") + "\n"
 	corruptRecent := strings.Repeat("duplicated desktop redraw\n", 120)
 	if err := os.WriteFile(visiblePath, []byte(visible), 0o600); err != nil {
@@ -75,13 +43,17 @@ func TestHandleReadPaneUsesOnlyVisibleRowsForResizedPane(t *testing.T) {
 	)
 
 	response := dispatcher.HandleReadPane(context.Background(), map[string]any{
-		"pane_id": "pane-1", "lines": float64(150), "format": "ansi", "terminal_columns": float64(20),
+		"pane_id": "pane-1", "lines": float64(150), "format": "ansi",
+		"terminal_columns": float64(20), "terminal_rows": float64(46),
 	})
 	if response["content"] != visible {
 		t.Fatalf("pane content = %q, want current visible rows", response["content"])
 	}
 	if response["viewport_only"] != true {
 		t.Fatalf("viewport_only = %#v, want true", response["viewport_only"])
+	}
+	if response["viewport_rows"] != 46 {
+		t.Fatalf("viewport_rows = %#v, want 46", response["viewport_rows"])
 	}
 	if response["truncated"] != false {
 		t.Fatalf("pane truncation = %#v, want false", response["truncated"])

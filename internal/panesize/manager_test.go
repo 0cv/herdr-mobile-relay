@@ -123,6 +123,9 @@ func TestAcquireUsesForegroundTTYAndChangesColumnsOnly(t *testing.T) {
 	if columns, ok := manager.ActiveColumns("pane-1"); !ok || columns != 84 {
 		t.Fatalf("ActiveColumns() = %d, %v, want 84, true", columns, ok)
 	}
+	if rows, ok := manager.ActiveRows("pane-1"); !ok || rows != 37 {
+		t.Fatalf("ActiveRows() = %d, %v, want 37, true", rows, ok)
+	}
 	if got := runner.sizes["/dev/pts/7"]; got.rows != 37 || got.columns != 84 {
 		t.Fatalf("terminal size = %+v, want rows unchanged and 84 columns", got)
 	}

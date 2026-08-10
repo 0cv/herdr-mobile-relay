@@ -242,13 +242,14 @@ describe('terminal rendering', () => {
       .not.toContain('terminal-grid-line');
   });
 
-  it('merges moving resize viewports without duplicating terminal history', () => {
+  it('keeps pre-resize scrollback while replacing each current viewport', () => {
     const baselineRows = Array.from({ length: 120 }, (_, index) => `history row ${index + 1}`);
     const first = mergeResizeTerminalViewport(
       baselineRows.join('\n'),
       baselineRows.slice(74).join('\n'),
       null,
       1_000,
+      46,
     );
     expect(first.content.split('\n')).toEqual(baselineRows);
 
@@ -258,8 +259,9 @@ describe('terminal rendering', () => {
       appendedRows.join('\n'),
       first.state,
       1_000,
+      46,
     );
-    expect(appended.content.split('\n')).toEqual([...baselineRows, 'history row 121']);
+    expect(appended.content.split('\n')).toEqual([...baselineRows.slice(0, 74), ...appendedRows]);
 
     const redrawnRows = [...baselineRows.slice(75), 'history row 121 updated'];
     const redrawn = mergeResizeTerminalViewport(
@@ -267,11 +269,47 @@ describe('terminal rendering', () => {
       redrawnRows.join('\n'),
       appended.state,
       1_000,
+      46,
     );
     const renderedRows = redrawn.content.split('\n');
-    expect(renderedRows).toHaveLength(121);
+    expect(renderedRows).toHaveLength(120);
     expect(renderedRows.at(-1)).toBe('history row 121 updated');
     expect(renderedRows.filter((row) => row === 'history row 76')).toHaveLength(1);
+  });
+
+  it('does not retain a stale TUI header when a redraw only partly overlaps', () => {
+    const stableRows = Array.from({ length: 12 }, (_, index) => `stable context row ${index + 1}`);
+    const firstViewport = [
+      'streaming diagnostic',
+      'frame=003',
+      '----------------',
+      ...stableRows,
+      'Streaming response:',
+      'token-002 token-003',
+      'PROGRESS 003/239',
+    ];
+    const first = mergeResizeTerminalViewport(
+      'streaming diagnostic\nREADY',
+      firstViewport.join('\n'),
+      null,
+      1_000,
+    );
+    const clippedRedraw = [
+      ...stableRows,
+      'Streaming response:',
+      'token-086 token-087',
+      'PROGRESS 087/239',
+    ];
+
+    const redrawn = mergeResizeTerminalViewport(
+      'streaming diagnostic\nREADY',
+      clippedRedraw.join('\n'),
+      first.state,
+      1_000,
+    );
+
+    expect(redrawn.content).not.toContain('frame=003');
+    expect(redrawn.content).toContain('PROGRESS 087/239');
   });
 
   it('removes desktop-width decoration after terminal status text', () => {

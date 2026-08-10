@@ -244,12 +244,16 @@ func watchMessage(watch *paneWatch) map[string]any {
 
 func (s *Server) applyPaneReadLease(message map[string]any) {
 	delete(message, "terminal_columns")
+	delete(message, "terminal_rows")
 	if s.paneSizeM == nil {
 		return
 	}
 	paneID, _ := message["pane_id"].(string)
 	if columns, ok := s.paneSizeM.ActiveColumns(paneID); ok {
 		message["terminal_columns"] = columns
+		if rows, rowsOK := s.paneSizeM.ActiveRows(paneID); rowsOK {
+			message["terminal_rows"] = rows
+		}
 	}
 }
 

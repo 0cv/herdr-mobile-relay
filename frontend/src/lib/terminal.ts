@@ -669,7 +669,6 @@ export interface RenderedTerminalContent {
 
 export interface ResizeTerminalHistoryState {
   prefix: string[];
-  viewport: string[];
 }
 
 function terminalContentRows(content: string): string[] {
@@ -678,47 +677,29 @@ function terminalContentRows(content: string): string[] {
   return rows;
 }
 
-function resizedViewportShift(previous: string[], current: string[]): number {
-  const shorter = Math.min(previous.length, current.length);
-  const minimumOverlap = Math.max(1, Math.min(8, Math.floor(shorter / 2)));
-  let bestShift = 0;
-  let bestMatches = 0;
-  for (let shift = 0; shift <= previous.length - minimumOverlap; shift += 1) {
-    const overlap = Math.min(previous.length - shift, current.length);
-    if (overlap < minimumOverlap) continue;
-    let matches = 0;
-    for (let index = 0; index < overlap; index += 1) {
-      if (stripAnsi(previous[shift + index]).trimEnd() === stripAnsi(current[index]).trimEnd()) matches += 1;
-    }
-    if (matches / overlap >= 0.8 && matches > bestMatches) {
-      bestShift = shift;
-      bestMatches = matches;
-    }
-  }
-  return bestShift;
-}
 
 export function mergeResizeTerminalViewport(
   baselineContent: string,
   viewportContent: string,
   previous: ResizeTerminalHistoryState | null,
   historyLimit: number,
+  viewportRows = 0,
 ): { content: string; state: ResizeTerminalHistoryState } {
   const viewport = terminalContentRows(viewportContent);
   let prefix: string[];
   if (previous) {
-    const shift = resizedViewportShift(previous.viewport, viewport);
-    prefix = [...previous.prefix, ...previous.viewport.slice(0, shift)];
+    prefix = previous.prefix;
   } else {
     const baseline = terminalContentRows(baselineContent);
-    prefix = baseline.slice(0, Math.max(0, baseline.length - viewport.length));
+    const replacedRows = Math.max(viewport.length, viewportRows);
+    prefix = baseline.slice(0, Math.max(0, baseline.length - replacedRows));
   }
   const prefixLimit = Math.max(0, historyLimit - viewport.length);
   if (prefix.length > prefixLimit) prefix = prefix.slice(-prefixLimit);
   const visible = viewport.length > historyLimit ? viewport.slice(-historyLimit) : viewport;
   return {
     content: [...prefix, ...visible].join('\n'),
-    state: { prefix, viewport },
+    state: { prefix },
   };
 }
 

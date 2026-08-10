@@ -192,6 +192,26 @@ func (m *Manager) ActiveColumns(paneID string) (int, bool) {
 	return minimum, minimum != 0
 }
 
+// ActiveRows reports the unchanged terminal height for an actively leased pane.
+func (m *Manager) ActiveRows(paneID string) (int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return 0, false
+	}
+	state := m.panes[paneID]
+	if state == nil {
+		return 0, false
+	}
+	now := m.now()
+	for _, lease := range state.leases {
+		if lease.ExpiresAt.After(now) {
+			return state.baselineRows, true
+		}
+	}
+	return 0, false
+}
+
 func (m *Manager) Release(ctx context.Context, clientID, paneID string) error {
 	if clientID == "" || paneID == "" {
 		return ErrInvalidLease

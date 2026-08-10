@@ -450,6 +450,7 @@
         next.content,
         resizeHistoryState,
         $terminalHistoryLines,
+        next.viewportRows,
       );
       resizeHistoryState = merged.state;
       content = merged.content;
