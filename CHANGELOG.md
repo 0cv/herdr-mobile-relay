@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-08-10
+
+### Fixed
+
+- Continue pending relay updates automatically after loading a newly deployed
+  phone app.
+
 ## [0.14.2] - 2026-08-10
 
 ### Fixed
@@ -272,8 +279,10 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.3...HEAD
+[0.14.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.1...v0.14.2
+[0.14.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.12...v0.14.0
 [0.13.12]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.11...v0.13.12
 [0.13.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.13.10...v0.13.11
