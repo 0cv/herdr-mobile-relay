@@ -183,6 +183,7 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 
 func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatchFrame) {
 	message := watchMessage(watch)
+	s.applyPaneReadLease(message)
 	response := s.preparePaneResponse(message, s.dispatcher.HandleReadPane(watch.ctx, message))
 	content, ok := successfulPaneContent(response)
 	if !ok {
@@ -238,6 +239,17 @@ func watchMessage(watch *paneWatch) map[string]any {
 		"pane_id": watch.paneID,
 		"lines":   watch.lines,
 		"format":  watch.format,
+	}
+}
+
+func (s *Server) applyPaneReadLease(message map[string]any) {
+	delete(message, "terminal_columns")
+	if s.paneSizeM == nil {
+		return
+	}
+	paneID, _ := message["pane_id"].(string)
+	if columns, ok := s.paneSizeM.ActiveColumns(paneID); ok {
+		message["terminal_columns"] = columns
 	}
 }
 

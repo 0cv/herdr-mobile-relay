@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
@@ -897,13 +900,134 @@ func capPaneContentLines(content []byte, limit int) []byte {
 	return content
 }
 
+func filterOverwidePaneRows(content []byte, columns int, ansi bool) ([]byte, bool) {
+	if columns < 1 || len(content) == 0 {
+		return content, false
+	}
+	var output []byte
+	filtered := false
+	for start := 0; start < len(content); {
+		end := len(content)
+		if newline := bytes.IndexByte(content[start:], '\n'); newline >= 0 {
+			end = start + newline + 1
+		}
+		lineEnd := end
+		if content[lineEnd-1] == '\n' {
+			lineEnd--
+		}
+		if lineEnd > start && content[lineEnd-1] == '\r' {
+			lineEnd--
+		}
+		if paneLineColumns(content[start:lineEnd], ansi) > columns {
+			if output == nil {
+				output = make([]byte, 0, len(content))
+				output = append(output, content[:start]...)
+			}
+			filtered = true
+		} else if output != nil {
+			output = append(output, content[start:end]...)
+		}
+		start = end
+	}
+	if !filtered {
+		return content, false
+	}
+	return output, true
+}
+
+func paneLineColumns(line []byte, ansi bool) int {
+	columns := 0
+	for index := 0; index < len(line); {
+		if ansi && line[index] == '\x1b' {
+			index = skipPaneANSIEscape(line, index)
+			continue
+		}
+		_, size := utf8.DecodeRune(line[index:])
+		if size == 0 {
+			break
+		}
+		columns += paneRuneColumns(line[index : index+size])
+		index += size
+	}
+	return columns
+}
+
+func paneRuneColumns(encoded []byte) int {
+	r, _ := utf8.DecodeRune(encoded)
+	if r < ' ' || r == '\x7f' ||
+		unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Cf, r) {
+		return 0
+	}
+	if isWidePaneRune(r) {
+		return 2
+	}
+	return 1
+}
+
+func skipPaneANSIEscape(line []byte, start int) int {
+	if start+1 >= len(line) {
+		return len(line)
+	}
+	switch line[start+1] {
+	case '[':
+		for index := start + 2; index < len(line); index++ {
+			if line[index] >= 0x40 && line[index] <= 0x7e {
+				return index + 1
+			}
+		}
+		return len(line)
+	case ']':
+		for index := start + 2; index < len(line); index++ {
+			if line[index] == '\a' {
+				return index + 1
+			}
+			if line[index] == '\x1b' && index+1 < len(line) && line[index+1] == '\\' {
+				return index + 2
+			}
+		}
+		return len(line)
+	case 'P', '^', '_':
+		for index := start + 2; index+1 < len(line); index++ {
+			if line[index] == '\x1b' && line[index+1] == '\\' {
+				return index + 2
+			}
+		}
+		return len(line)
+	case '(', ')', '*', '+':
+		if start+2 < len(line) {
+			return start + 3
+		}
+		return len(line)
+	default:
+		return start + 2
+	}
+}
+
+func isWidePaneRune(r rune) bool {
+	return r >= 0x1100 && (r <= 0x115f ||
+		r == 0x2329 ||
+		r == 0x232a ||
+		(r >= 0x2e80 && r <= 0xa4cf && r != 0x303f) ||
+		(r >= 0xac00 && r <= 0xd7a3) ||
+		(r >= 0xf900 && r <= 0xfaff) ||
+		(r >= 0xfe10 && r <= 0xfe19) ||
+		(r >= 0xfe30 && r <= 0xfe6f) ||
+		(r >= 0xff00 && r <= 0xff60) ||
+		(r >= 0xffe0 && r <= 0xffe6) ||
+		(r >= 0x20000 && r <= 0x3fffd))
+}
+
 func (d *Dispatcher) readPaneForDisplay(
 	ctx context.Context,
 	paneID string,
 	lines int,
 	format string,
+	visibleRows bool,
 ) (herdr.PaneRead, error) {
 	agent, ok := d.state.Agent(paneID)
+	if visibleRows {
+		return d.herdr.ReadPaneVisible(ctx, paneID, lines, format)
+	}
 	if ok && isQoderAgent(agent.Agent) {
 		return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
 	}
@@ -927,11 +1051,15 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	if format != "ansi" {
 		format = "text"
 	}
+	terminalColumns := intValue(message["terminal_columns"], 0)
+	if terminalColumns < 1 {
+		terminalColumns = 0
+	}
 	readCtx, cancel := context.WithTimeout(ctx, commandDeadline)
 	defer cancel()
 	generation := d.state.Generation(paneID)
 	revision := d.state.ContentRevision(paneID)
-	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d", paneID, lines, format, generation)
+	key := fmt.Sprintf("%s\x00%d\x00%s\x00%d\x00%d", paneID, lines, format, terminalColumns, generation)
 	d.readMu.Lock()
 	call := d.reads[key]
 	owner := call == nil
@@ -941,7 +1069,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	}
 	d.readMu.Unlock()
 	if owner {
-		call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format)
+		call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format, terminalColumns > 0)
 		d.readMu.Lock()
 		delete(d.reads, key)
 		close(call.done)
@@ -964,7 +1092,15 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent state changed while the pane was being read"}
 	}
 	content := capPaneContentLines(read.Content, lines)
-	return map[string]any{"type": "pane_content", "pane_id": paneID, "content": string(content), "format": format, "truncated": read.Truncated, "interaction": nil, "question_layout": false}
+	filtered := false
+	if terminalColumns > 0 {
+		content, filtered = filterOverwidePaneRows(content, terminalColumns, format == "ansi")
+	}
+	return map[string]any{
+		"type": "pane_content", "pane_id": paneID, "content": string(content),
+		"format": format, "truncated": read.Truncated || filtered,
+		"interaction": nil, "question_layout": false,
+	}
 }
 
 func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {

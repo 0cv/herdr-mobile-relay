@@ -373,6 +373,10 @@ func (c *Client) ReadPaneRecent(ctx context.Context, paneID string, lines int, f
 	return c.readPane(ctx, paneID, lines, format, "recent")
 }
 
+func (c *Client) ReadPaneVisible(ctx context.Context, paneID string, lines int, format string) (PaneRead, error) {
+	return c.readPane(ctx, paneID, lines, format, "visible")
+}
+
 func (c *Client) readPane(ctx context.Context, paneID string, lines int, format, source string) (PaneRead, error) {
 	if lines < 1 {
 		lines = 1

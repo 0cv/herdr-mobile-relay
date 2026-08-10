@@ -168,6 +168,30 @@ func (m *Manager) Acquire(
 	return target, nil
 }
 
+// ActiveColumns reports the narrowest unexpired lease for a pane.
+func (m *Manager) ActiveColumns(paneID string) (int, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return 0, false
+	}
+	state := m.panes[paneID]
+	if state == nil {
+		return 0, false
+	}
+	now := m.now()
+	minimum := 0
+	for _, lease := range state.leases {
+		if !lease.ExpiresAt.After(now) {
+			continue
+		}
+		if minimum == 0 || lease.Columns < minimum {
+			minimum = lease.Columns
+		}
+	}
+	return minimum, minimum != 0
+}
+
 func (m *Manager) Release(ctx context.Context, clientID, paneID string) error {
 	if clientID == "" || paneID == "" {
 		return ErrInvalidLease

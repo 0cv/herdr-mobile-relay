@@ -120,6 +120,9 @@ func TestAcquireUsesForegroundTTYAndChangesColumnsOnly(t *testing.T) {
 	if applied != 84 {
 		t.Fatalf("Acquire() columns = %d, want 84", applied)
 	}
+	if columns, ok := manager.ActiveColumns("pane-1"); !ok || columns != 84 {
+		t.Fatalf("ActiveColumns() = %d, %v, want 84, true", columns, ok)
+	}
 	if got := runner.sizes["/dev/pts/7"]; got.rows != 37 || got.columns != 84 {
 		t.Fatalf("terminal size = %+v, want rows unchanged and 84 columns", got)
 	}
@@ -201,7 +204,13 @@ func TestExpirySweepRestoresBaseline(t *testing.T) {
 	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 72); err != nil {
 		t.Fatal(err)
 	}
+	if columns, ok := manager.ActiveColumns("pane-1"); !ok || columns != 72 {
+		t.Fatalf("ActiveColumns() before expiry = %d, %v, want 72, true", columns, ok)
+	}
 	now = now.Add(LeaseTTL)
+	if columns, ok := manager.ActiveColumns("pane-1"); ok || columns != 0 {
+		t.Fatalf("ActiveColumns() after expiry = %d, %v, want 0, false", columns, ok)
+	}
 	if err := manager.SweepExpired(context.Background()); err != nil {
 		t.Fatalf("SweepExpired() error = %v", err)
 	}

@@ -348,6 +348,7 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			s.sendCommandResult(client, inbound.RequestID, "release_pane_size", true, "completed", "", inbound.PaneID, nil)
 		case "read_pane":
+			s.applyPaneReadLease(msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
 			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
 			if unchanged := unchangedPaneResponse(msg, resp); unchanged != nil {
@@ -1487,8 +1488,9 @@ func (s *Server) preparePaneResponse(message, response map[string]any) map[strin
 	response["interaction"] = classification.Interaction
 	response["question_layout"] = classification.QuestionLayout
 	agentLower := strings.ToLower(agent)
+	resizeSession := messageInt(message["terminal_columns"], 0) > 0
 	if classification.Interaction != nil ||
-		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
+		(!resizeSession && !strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
 		return response
 	}
 	historyLimit := messageInt(message["lines"], 30)

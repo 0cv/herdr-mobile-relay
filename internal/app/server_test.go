@@ -99,6 +99,41 @@ func TestPreparePaneResponseReportsOnlyActualHistoryClipping(t *testing.T) {
 	}
 }
 
+func TestPreparePaneResponseMergesVisibleResizeSessionFrames(t *testing.T) {
+	s := testServerWithCacheDir(t.TempDir())
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "omp", Status: "idle",
+	}}, s.state.RevisionCounter())
+	message := map[string]any{"pane_id": "pane-1", "lines": 100, "terminal_columns": 59}
+
+	first := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": strings.Join([]string{
+			"line a", "line b", "line c", "line d", "line e",
+			"line f", "line g", "line h", "line i", "line j",
+		}, "\n"),
+		"format": "ansi", "truncated": false,
+	}
+	s.preparePaneResponse(message, first)
+
+	second := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": strings.Join([]string{
+			"line c", "line d", "line e", "line f", "line g",
+			"line h", "line i", "line j", "line k", "line l",
+		}, "\n"),
+		"format": "ansi", "truncated": false,
+	}
+	s.preparePaneResponse(message, second)
+	want := strings.Join([]string{
+		"line a", "line b", "line c", "line d", "line e", "line f",
+		"line g", "line h", "line i", "line j", "line k", "line l",
+	}, "\n")
+	if second["content"] != want {
+		t.Fatalf("merged resize-session content = %q, want %q", second["content"], want)
+	}
+}
+
 func TestCopyBlockedMessage(t *testing.T) {
 	tests := []struct {
 		name  string
