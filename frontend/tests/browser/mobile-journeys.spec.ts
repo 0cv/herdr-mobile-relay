@@ -447,15 +447,34 @@ test('shows inventory failure instead of zero agents and recovers without reconn
   expect(await socketCount(page)).toBe(1);
 });
 
-test('loads a deployed phone app through a cache-busted navigation', async ({ page }) => {
+test('loads a deployed phone app and preserves pending relay updates', async ({ page }) => {
   const deployedAssets = APP_METADATA.assets + 1;
+  const availableUpdate = {
+    state: 'available',
+    current_version: '0.14.0',
+    current_revision: 'a'.repeat(40),
+    available_version: APP_RELEASE,
+    available_revision: 'f'.repeat(12),
+    target_revision: 'f'.repeat(40),
+    upstream_version: APP_RELEASE,
+    checked_at: 124,
+    can_install: true,
+    mode: 'local',
+  };
   await page.route('**/version.json?*', async (route) => {
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ version: APP_RELEASE, assets: deployedAssets }),
     });
   });
-  await boot(page);
+  await boot(page, [fedora]);
+  await setAutoCommands(page, false);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    release_version: '0.14.0',
+    capabilities: ['directory_browser', 'self_update'],
+    update: availableUpdate,
+  });
 
   await page.getByRole('button', { name: 'Settings' }).click();
   const loadUpdate = page.getByRole('button', { name: 'Load Update', exact: true }).first();
@@ -466,6 +485,23 @@ test('loads a deployed phone app through a cache-busted navigation', async ({ pa
 
   await expect.poll(() => new URL(page.url()).searchParams.get('herdr_reload'))
     .toMatch(new RegExp(`^${APP_RELEASE.replaceAll('.', '\\.')}-\\d+$`));
+  const plan = await page.evaluate(() => JSON.parse(sessionStorage.getItem('herdr_update_progress') || 'null'));
+  expect(plan).toMatchObject({
+    targetVersion: APP_RELEASE,
+    relayIds: ['fedora'],
+    startedRelayIds: [],
+  });
+
+  await setAutoCommands(page, false);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    release_version: '0.14.0',
+    capabilities: ['directory_browser', 'self_update'],
+    update: availableUpdate,
+  });
+  await expect.poll(async () => (await commandsForSocket(page, 0)).some(
+    (command) => command.type === 'install_update',
+  )).toBe(true);
 });
 
 test('checks every self-updating relay automatically after connection', async ({ page }) => {

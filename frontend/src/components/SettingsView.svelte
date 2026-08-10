@@ -56,6 +56,7 @@
     checkAppUpdate,
     MANAGED_UPDATE_COMMAND,
     relayNeedsManualBootstrap,
+    queueUpdateProgressForReload,
     reloadApp,
     setUpdateProgressError,
   } from '$lib/updates';
@@ -371,7 +372,9 @@
     updateOpen = false;
     if (!action) return;
     if (action.kind === 'reload_app') {
-      reloadApp();
+      const relayIds = relayRows.map(({ relay }) => relay.id);
+      if (relayIds.length) queueUpdateProgressForReload(action.targetVersion, relayIds);
+      reloadApp(action.targetVersion);
       return;
     }
     const relayIds = [

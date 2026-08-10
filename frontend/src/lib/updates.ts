@@ -364,13 +364,13 @@ export function restoreUpdateProgress(): void {
   }
 }
 
-export function beginUpdateProgress(
+function newUpdateProgress(
   targetVersion: string,
   relayIds: string[],
   startedRelayId: string,
   appRelayId = '',
-): void {
-  const plan = normalizeUpdateProgress({
+): UpdateProgressPlan | null {
+  return normalizeUpdateProgress({
     targetVersion,
     relayIds,
     startedRelayIds: [startedRelayId],
@@ -379,7 +379,26 @@ export function beginUpdateProgress(
     errors: {},
     startedAt: Date.now(),
   });
+}
+
+export function beginUpdateProgress(
+  targetVersion: string,
+  relayIds: string[],
+  startedRelayId: string,
+  appRelayId = '',
+): void {
+  const plan = newUpdateProgress(targetVersion, relayIds, startedRelayId, appRelayId);
   if (plan) saveUpdateProgress(plan);
+}
+
+export function queueUpdateProgressForReload(targetVersion: string, relayIds: string[]): void {
+  const plan = newUpdateProgress(targetVersion, relayIds, '');
+  if (!plan) return;
+  try {
+    sessionStorage.setItem(UPDATE_PROGRESS_KEY, JSON.stringify(plan));
+  } catch {
+    // Reloading the app still succeeds when session storage is unavailable.
+  }
 }
 
 export function markUpdateProgressRelayStarted(relayId: string): void {
