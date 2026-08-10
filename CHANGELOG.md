@@ -5,6 +5,13 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-08-10
+
+### Fixed
+
+- Make **Load Update** replace a stale installed phone app reliably instead of
+  retaining its previous document.
+
 ## [0.14.3] - 2026-08-10
 
 ### Fixed
@@ -279,7 +286,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.3...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.4...HEAD
+[0.14.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.3...v0.14.4
 [0.14.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.2...v0.14.3
 [0.14.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.0...v0.14.1
