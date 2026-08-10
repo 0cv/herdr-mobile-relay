@@ -51,11 +51,9 @@
   import { relayStore } from '$lib/store';
   import {
     latestCompletedResponse,
-    mergeResizeTerminalViewport,
     stripAnsi,
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
-    type ResizeTerminalHistoryState,
   } from '$lib/terminal';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
   import { VirtualTerminalIndex } from '$lib/virtual-terminal';
@@ -93,8 +91,6 @@
   let composerFocused = $state(false);
   let resizeFrameBaseline: TerminalFrame | undefined;
   let showingCachedResizeFrame = false;
-  let resizeHistoryBaseline = '';
-  let resizeHistoryState: ResizeTerminalHistoryState | null = null;
   let displayed = $state('');
   let renderedHtml = $state('');
   let renderedRows = $state<RenderedTerminalRow[]>([]);
@@ -157,7 +153,6 @@
   let resizeExpectedLines = 0;
   let resizeSettleDeadline = 0;
   let resizeReadTimer: ReturnType<typeof setTimeout> | undefined;
-  let previousTerminalLayout = $terminalLayout;
 
   const responsePending = $derived(agentNeedsResponse(agent));
   const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
@@ -311,11 +306,6 @@
     const layout = $terminalLayout;
     const interfaceSizeValue = $interfaceSize;
     void layout;
-    if (layout === 'resize' && previousTerminalLayout !== 'resize') {
-      resizeHistoryBaseline = displayed || frame?.content || '';
-      resizeHistoryState = null;
-    }
-    previousTerminalLayout = layout;
     void interfaceSizeValue;
     if (!terminalElement) return;
     virtualStickToBottom = terminalElement.scrollHeight
@@ -443,19 +433,13 @@
       rememberCurrentResizeFrame(next, displayed, renderedHtml, renderedRows);
       return;
     }
-    let content = next.content;
-    if (resizeSessionActive && lastLeasedColumns > 0 && next.viewportOnly) {
-      const merged = mergeResizeTerminalViewport(
-        resizeHistoryBaseline,
-        next.content,
-        resizeHistoryState,
-        $terminalHistoryLines,
-        next.viewportRows,
-      );
-      resizeHistoryState = merged.state;
-      content = merged.content;
-    }
-    const rendered = renderTerminalContent(content, next.format, preserve, preserveLineEnds);
+    const rendered = renderTerminalContent(
+      next.content,
+      next.format,
+      preserve,
+      preserveLineEnds,
+      resizeSessionActive ? lastLeasedColumns : 0,
+    );
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
       && next.format === lastFormat && !layoutChanged) {
@@ -1117,10 +1101,6 @@
   function beginResizeSettling() {
     if (resizeReadTimer) clearTimeout(resizeReadTimer);
     resizeReadTimer = undefined;
-    if (!resizeHistoryBaseline) {
-      resizeHistoryBaseline = displayed || frame?.content || '';
-    }
-    if (lastLeasedColumns === 0) resizeHistoryState = null;
     resizeFrameBaseline = frame;
     resizeExpectedLines = Math.min(terminalFrameLineCount(frame), $terminalHistoryLines);
     resizeSettleDeadline = Date.now() + PANE_SIZE_SETTLE_TIMEOUT_MS;
@@ -1157,8 +1137,6 @@
     leaseTarget = null;
     lastLeasedColumns = 0;
     resizeFrameBaseline = undefined;
-    resizeHistoryBaseline = '';
-    resizeHistoryState = null;
     clearResizeSettling();
     queuedLease = null;
   }

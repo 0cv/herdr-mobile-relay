@@ -667,41 +667,6 @@ export interface RenderedTerminalContent {
   rows: RenderedTerminalRow[];
 }
 
-export interface ResizeTerminalHistoryState {
-  prefix: string[];
-}
-
-function terminalContentRows(content: string): string[] {
-  const rows = content.split('\n');
-  if (rows.at(-1) === '') rows.pop();
-  return rows;
-}
-
-
-export function mergeResizeTerminalViewport(
-  baselineContent: string,
-  viewportContent: string,
-  previous: ResizeTerminalHistoryState | null,
-  historyLimit: number,
-  viewportRows = 0,
-): { content: string; state: ResizeTerminalHistoryState } {
-  const viewport = terminalContentRows(viewportContent);
-  let prefix: string[];
-  if (previous) {
-    prefix = previous.prefix;
-  } else {
-    const baseline = terminalContentRows(baselineContent);
-    const replacedRows = Math.max(viewport.length, viewportRows);
-    prefix = baseline.slice(0, Math.max(0, baseline.length - replacedRows));
-  }
-  const prefixLimit = Math.max(0, historyLimit - viewport.length);
-  if (prefix.length > prefixLimit) prefix = prefix.slice(-prefixLimit);
-  const visible = viewport.length > historyLimit ? viewport.slice(-historyLimit) : viewport;
-  return {
-    content: [...prefix, ...visible].join('\n'),
-    state: { prefix },
-  };
-}
 
 function terminalTextColumns(text: string): number {
   let column = 0;
@@ -715,10 +680,19 @@ function terminalTextColumns(text: string): number {
   return column;
 }
 
+function responsiveTerminalGridLine(line: string, maxColumns: number): string {
+  if (maxColumns < 1
+    || !hasTerminalBoxCell(line)
+    || terminalTextColumns(stripAnsi(line)) <= maxColumns) return line;
+  if (isSeparatorOnlyLine(line)) return TERMINAL_SEPARATOR_TOKEN;
+  return trimTerminalChrome(line, true);
+}
+
 export function terminalHtmlRows(
   text: string,
   normalizeLightPalette = false,
   preserveLineEnds = false,
+  maxFixedGridColumns = 0,
 ): RenderedTerminalRow[] {
   const lines = text.split('\n');
   const backgrounds = ansiLineBackgrounds(lines);
@@ -739,7 +713,11 @@ export function terminalHtmlRows(
     const normalizeRow = normalizeLightPalette && isNearWhiteAnsiColor(sourceBackground);
     const normalizeDarkText = normalizeLightPalette && (!sourceBackground || normalizeRow);
     const background = normalizedAnsiBackground(sourceBackground, normalizeRow);
-    const fixedGrid = preserveLineEnds && hasTerminalBoxCell(renderedLine);
+    const renderedText = stripAnsi(renderedLine);
+    const columns = terminalTextColumns(renderedText);
+    const fixedGrid = preserveLineEnds
+      && hasTerminalBoxCell(renderedLine)
+      && (maxFixedGridColumns < 1 || columns <= maxFixedGridColumns);
     const classes = [
       'ansi-line',
       background ? 'ansi-line-background' : '',
@@ -748,9 +726,9 @@ export function terminalHtmlRows(
     const style = background ? ` style="${ansiLineBackgroundStyle(renderedLine, background)}"` : '';
     // ansiToHtml escapes every text segment before it emits controlled span markup.
     return {
-      html: `<span class="${classes}"${style}>${ansiToHtml(renderedLine, normalizeRow, normalizeDarkText, preserveLineEnds)}</span>`,
-      text: stripAnsi(renderedLine),
-      columns: terminalTextColumns(stripAnsi(renderedLine)),
+      html: `<span class="${classes}"${style}>${ansiToHtml(renderedLine, normalizeRow, normalizeDarkText, fixedGrid)}</span>`,
+      text: renderedText,
+      columns,
       fixedGrid,
       separator: false,
     };
@@ -772,32 +750,39 @@ export function renderTerminalContent(
   format: string,
   preserveLayout = false,
   preserveLineEnds = preserveLayout,
+  maxFixedGridColumns = 0,
 ): RenderedTerminalContent {
   const markedDisplay = preserveLayout
     ? preservedTerminalDisplayContent(content)
     : compactSeparatorLines(terminalDisplayContent(content));
-  const display = preserveLayout && !preserveLineEnds
+  const display = (preserveLayout && !preserveLineEnds
     ? markedDisplay.split('\n').map(trimAnsiLineEnd).join('\n')
-    : markedDisplay;
+    : markedDisplay)
+    .split('\n')
+    .map((line) => responsiveTerminalGridLine(line, maxFixedGridColumns))
+    .join('\n');
   if (format !== 'ansi') {
     const plainDisplay = display.replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
     return {
       display,
       html: escapeHtml(plainDisplay),
       rows: plainDisplay.split('\n').map((line) => {
-        const fixedGrid = preserveLayout && hasTerminalBoxCell(line);
+        const columns = terminalTextColumns(line);
+        const fixedGrid = preserveLayout
+          && hasTerminalBoxCell(line)
+          && (maxFixedGridColumns < 1 || columns <= maxFixedGridColumns);
         const classes = `ansi-line${fixedGrid ? ' terminal-grid-line' : ''}`;
         return {
           html: `<span class="${classes}">${escapeHtml(line)}</span>`,
           text: line,
-          columns: terminalTextColumns(line),
+          columns,
           fixedGrid,
           separator: false,
         };
       }),
     };
   }
-  const rows = terminalHtmlRows(display, true, preserveLayout);
+  const rows = terminalHtmlRows(display, true, preserveLayout, maxFixedGridColumns);
   return {
     display,
     html: rows.map((row) => row.html).join(''),

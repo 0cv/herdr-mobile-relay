@@ -76,13 +76,13 @@ func TestPaneDeltaResponsePreservesTruncation(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponseReportsOnlyActualHistoryClipping(t *testing.T) {
+func TestPreparePaneResponseAppliesHistoryLimitDuringResizeSession(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",
 	}}, s.state.RevisionCounter())
 
-	message := map[string]any{"pane_id": "pane-1", "lines": 2}
+	message := map[string]any{"pane_id": "pane-1", "lines": 2, "terminal_columns": 59}
 	response := map[string]any{
 		"type": "pane_content", "pane_id": "pane-1",
 		"content": "line1\nline2", "format": "ansi", "truncated": false,
@@ -96,38 +96,6 @@ func TestPreparePaneResponseReportsOnlyActualHistoryClipping(t *testing.T) {
 	s.preparePaneResponse(message, response)
 	if response["truncated"] != true {
 		t.Fatalf("limited history truncation = %#v, want true", response["truncated"])
-	}
-}
-
-func TestPreparePaneResponseDoesNotMergeResizeSessionViewports(t *testing.T) {
-	s := testServerWithCacheDir(t.TempDir())
-	s.state.CommitInventory([]*coordinator.AgentState{{
-		PaneID: "pane-1", Agent: "omp", Status: "idle",
-	}}, s.state.RevisionCounter())
-	message := map[string]any{"pane_id": "pane-1", "lines": 100, "terminal_columns": 59}
-
-	first := map[string]any{
-		"type": "pane_content", "pane_id": "pane-1",
-		"content": strings.Join([]string{
-			"line a", "line b", "line c", "line d", "line e",
-			"line f", "line g", "line h", "line i", "line j",
-		}, "\n"),
-		"format": "ansi", "truncated": false,
-	}
-	s.preparePaneResponse(message, first)
-
-	secondContent := strings.Join([]string{
-		"line c", "line d", "line e", "line f", "line g",
-		"line h", "line i", "line j", "line k", "line l",
-	}, "\n")
-	second := map[string]any{
-		"type": "pane_content", "pane_id": "pane-1",
-		"content": secondContent,
-		"format":  "ansi", "truncated": false,
-	}
-	s.preparePaneResponse(message, second)
-	if second["content"] != secondContent {
-		t.Fatalf("resize-session content = %q, want current viewport %q", second["content"], secondContent)
 	}
 }
 

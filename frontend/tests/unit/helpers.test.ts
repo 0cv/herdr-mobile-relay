@@ -35,7 +35,6 @@ import {
   compactRepeatedCharacterRuns,
   isSeparatorOnlyLine,
   latestCompletedResponse,
-  mergeResizeTerminalViewport,
   renderTerminalContent,
   stripAnsi,
   TERMINAL_REPEATED_RUN_LIMIT,
@@ -225,92 +224,31 @@ describe('terminal rendering', () => {
     expect(mixedBorders.html).not.toContain('<span class="terminal-cell">');
   });
 
-  it('marks fixed-grid rows so resized history does not wrap their cells', () => {
-    const table = renderTerminalContent([
+  it('keeps current-width grids aligned and wraps stale wider grids in Resize Session', () => {
+    const desktopTable = [
       `┌${'─'.repeat(80)}┐`,
       `│ ${'Metric'.padEnd(78)}│`,
       `└${'─'.repeat(80)}┘`,
-    ].join('\n'), 'ansi', true);
-    expect(table.html.match(/terminal-grid-line/g)).toHaveLength(3);
-    const plainTable = renderTerminalContent(table.display, 'plain', true);
-    expect(plainTable.rows.every((row) => row.fixedGrid)).toBe(true);
-    expect(plainTable.rows.filter((row) => row.html.includes('terminal-grid-line')))
-      .toHaveLength(3);
-    expect(renderTerminalContent('plain terminal output', 'plain', true).rows[0].fixedGrid)
-      .toBe(false);
-    expect(renderTerminalContent('plain terminal output', 'ansi', true).html)
-      .not.toContain('terminal-grid-line');
+    ].join('\n');
+    const preserved = renderTerminalContent(desktopTable, 'ansi', true);
+    expect(preserved.rows.every((row) => row.fixedGrid)).toBe(true);
+
+    const resizedHistory = renderTerminalContent(desktopTable, 'ansi', true, false, 40);
+    expect(resizedHistory.rows.every((row) => row.fixedGrid)).toBe(false);
+    expect(resizedHistory.html).not.toContain('terminal-grid-line');
+    expect(resizedHistory.html).not.toContain('terminal-cell-box');
+    expect(resizedHistory.rows.filter((row) => row.separator)).toHaveLength(2);
+    expect(Math.max(...resizedHistory.rows.map((row) => row.columns))).toBeLessThanOrEqual(40);
+
+    const currentTable = renderTerminalContent([
+      `┌${'─'.repeat(38)}┐`,
+      `│ ${'Metric'.padEnd(36)}│`,
+      `└${'─'.repeat(38)}┘`,
+    ].join('\n'), 'ansi', true, false, 40);
+    expect(currentTable.rows.every((row) => row.fixedGrid)).toBe(true);
+    expect(currentTable.html.match(/terminal-grid-line/g)).toHaveLength(3);
   });
 
-  it('keeps pre-resize scrollback while replacing each current viewport', () => {
-    const baselineRows = Array.from({ length: 120 }, (_, index) => `history row ${index + 1}`);
-    const first = mergeResizeTerminalViewport(
-      baselineRows.join('\n'),
-      baselineRows.slice(74).join('\n'),
-      null,
-      1_000,
-      46,
-    );
-    expect(first.content.split('\n')).toEqual(baselineRows);
-
-    const appendedRows = [...baselineRows.slice(75), 'history row 121'];
-    const appended = mergeResizeTerminalViewport(
-      baselineRows.join('\n'),
-      appendedRows.join('\n'),
-      first.state,
-      1_000,
-      46,
-    );
-    expect(appended.content.split('\n')).toEqual([...baselineRows.slice(0, 74), ...appendedRows]);
-
-    const redrawnRows = [...baselineRows.slice(75), 'history row 121 updated'];
-    const redrawn = mergeResizeTerminalViewport(
-      baselineRows.join('\n'),
-      redrawnRows.join('\n'),
-      appended.state,
-      1_000,
-      46,
-    );
-    const renderedRows = redrawn.content.split('\n');
-    expect(renderedRows).toHaveLength(120);
-    expect(renderedRows.at(-1)).toBe('history row 121 updated');
-    expect(renderedRows.filter((row) => row === 'history row 76')).toHaveLength(1);
-  });
-
-  it('does not retain a stale TUI header when a redraw only partly overlaps', () => {
-    const stableRows = Array.from({ length: 12 }, (_, index) => `stable context row ${index + 1}`);
-    const firstViewport = [
-      'streaming diagnostic',
-      'frame=003',
-      '----------------',
-      ...stableRows,
-      'Streaming response:',
-      'token-002 token-003',
-      'PROGRESS 003/239',
-    ];
-    const first = mergeResizeTerminalViewport(
-      'streaming diagnostic\nREADY',
-      firstViewport.join('\n'),
-      null,
-      1_000,
-    );
-    const clippedRedraw = [
-      ...stableRows,
-      'Streaming response:',
-      'token-086 token-087',
-      'PROGRESS 087/239',
-    ];
-
-    const redrawn = mergeResizeTerminalViewport(
-      'streaming diagnostic\nREADY',
-      clippedRedraw.join('\n'),
-      first.state,
-      1_000,
-    );
-
-    expect(redrawn.content).not.toContain('frame=003');
-    expect(redrawn.content).toContain('PROGRESS 087/239');
-  });
 
   it('removes desktop-width decoration after terminal status text', () => {
     const decorated = `\x1b[2m─ Worked for 1m 46s ${'─'.repeat(120)}\x1b[0m`;

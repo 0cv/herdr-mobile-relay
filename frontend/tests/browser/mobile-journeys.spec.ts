@@ -2095,71 +2095,47 @@ test('leases measured terminal columns and releases on mode exit and teardown', 
     .filter((command) => command.type === 'release_pane_size').length).toBe(3);
 });
 
-test('keeps scrollback while replacing moving Resize Session viewports', async ({ page }) => {
-  await boot(page, [fedora], '/', { terminalLayout: 'preserve' });
+test('renders the selected full history while Resize Session is active', async ({ page }) => {
+  await boot(page, [fedora], '/', { terminalLayout: 'resize' });
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
     capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize viewport', agent: 'omp' }],
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize history', agent: 'omp' }],
   });
-  await page.getByRole('button', { name: 'Open Resize viewport on Fedora' }).click();
-  const baselineRows = Array.from({ length: 120 }, (_, index) => `history row ${index + 1}`);
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: baselineRows.join('\n'),
-  });
-  const screen = page.getByRole('log').locator('.term-screen');
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
-
-  const initialReadCount = (await commands(page))
-    .filter((command) => command.type === 'read_pane').length;
-  await page.getByRole('button', {
-    name: 'Terminal width: Original Columns. Switch to Resize Session',
-  }).click();
+  await page.getByRole('button', { name: 'Open Resize history on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThan(0);
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
   await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(initialReadCount);
-  await page.waitForTimeout(300);
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    viewport_only: true,
-    viewport_rows: 46,
-    content: baselineRows.slice(74).join('\n'),
-  });
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
 
+  const historyRows = Array.from(
+    { length: 1_000 },
+    (_, index) => `complete resize history row ${String(index + 1).padStart(4, '0')}`,
+  );
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    viewport_only: true,
-    viewport_rows: 46,
-    content: [...baselineRows.slice(75), 'history row 121'].join('\n'),
+    content: historyRows.join('\n'),
   });
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
-  await expect(page.getByRole('log')).toContainText('history row 121');
 
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    viewport_only: true,
-    viewport_rows: 46,
-    content: [...baselineRows.slice(75), 'history row 121 updated'].join('\n'),
+  const terminal = page.getByRole('log');
+  const screen = terminal.locator('.term-screen');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '1000');
+  await expect(terminal).toContainText('complete resize history row 1000');
+  await terminal.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
   });
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '120');
-  await expect(page.getByRole('log')).toContainText('history row 121 updated');
+  await expect(terminal).toContainText('complete resize history row 0001');
+  expect((await commands(page)).find((command) => command.type === 'read_pane'))
+    .toMatchObject({ lines: 1_000 });
 });
 
-test('keeps historical Qoder grids aligned in Resize Session', async ({ page }) => {
+test('wraps stale wide grids but preserves current grids in Resize Session', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -2170,18 +2146,6 @@ test('keeps historical Qoder grids aligned in Resize Session', async ({ page }) 
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Qoder grid', agent: 'qodercli' }],
   });
   await page.getByRole('button', { name: 'Open Qoder grid on Fedora' }).click();
-
-  const table = [
-    `┌${'─'.repeat(118)}┐`,
-    `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(116)}│`,
-    `└${'─'.repeat(118)}┘`,
-  ].join('\n');
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: table,
-  });
   const readsBeforeResize = (await commands(page))
     .filter((command) => command.type === 'read_pane').length;
   await page.getByRole('button', {
@@ -2191,32 +2155,54 @@ test('keeps historical Qoder grids aligned in Resize Session', async ({ page }) 
     name: 'Terminal width: Original Columns. Switch to Resize Session',
   }).click();
   await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+  await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readsBeforeResize);
+  const lease = (await commands(page))
+    .find((command) => command.type === 'lease_pane_size')!;
+  const columns = Number(lease.columns);
+
+  const staleTable = [
+    `┌${'─'.repeat(columns + 78)}┐`,
+    `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(columns + 76)}│`,
+    `└${'─'.repeat(columns + 78)}┘`,
+  ].join('\n');
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: table,
+    content: staleTable,
   });
 
   const terminal = page.getByRole('log');
-  const gridLines = terminal.locator('.terminal-grid-line');
-  await expect(gridLines).toHaveCount(3);
-  const geometry = await terminal.evaluate((element) => {
-    const lines = [...element.querySelectorAll<HTMLElement>('.terminal-grid-line')];
+  await expect(terminal.locator('.terminal-grid-line')).toHaveCount(0);
+  await expect(terminal).toContainText('Lookback | Sharpe | Max DD | 2x-cost Sharpe');
+  const wrappedGeometry = await terminal.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(wrappedGeometry.scrollWidth).toBeLessThanOrEqual(wrappedGeometry.clientWidth);
+
+  const currentTable = [
+    `┌${'─'.repeat(columns - 2)}┐`,
+    `│ ${'Current grid'.padEnd(columns - 4)}│`,
+    `└${'─'.repeat(columns - 2)}┘`,
+  ].join('\n');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: currentTable,
+  });
+  await expect(terminal.locator('.terminal-grid-line')).toHaveCount(3);
+  const lineHeights = await terminal.locator('.terminal-grid-line').evaluateAll((lines) => {
     const lineHeight = Number.parseFloat(getComputedStyle(lines[0]).lineHeight);
     return {
-      clientWidth: element.clientWidth,
-      documentClientWidth: document.documentElement.clientWidth,
-      documentScrollWidth: document.documentElement.scrollWidth,
       lineHeight,
-      lineHeights: lines.map((line) => line.getBoundingClientRect().height),
-      scrollWidth: element.scrollWidth,
+      heights: lines.map((line) => line.getBoundingClientRect().height),
     };
   });
-  expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
-  expect(Math.max(...geometry.lineHeights)).toBeLessThan(geometry.lineHeight * 1.2);
-  expect(geometry.documentScrollWidth).toBeLessThanOrEqual(geometry.documentClientWidth);
+  expect(Math.max(...lineHeights.heights)).toBeLessThan(lineHeights.lineHeight * 1.2);
 });
 
 test('surfaces one explicit error when a pane-size lease fails', async ({ page }) => {

@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.9] - 2026-08-10
+
+### Fixed
+
+- Keep the selected terminal history in **Resize Session** instead of showing
+  only the roughly 46-row live viewport, and wrap stale desktop-width grids so
+  their text remains readable on the phone.
+
 ## [0.14.8] - 2026-08-10
 
 ### Fixed
@@ -316,7 +324,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.8...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.9...HEAD
+[0.14.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.8...v0.14.9
 [0.14.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.7...v0.14.8
 [0.14.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.6...v0.14.7
 [0.14.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.5...v0.14.6

@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.14.8`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.14.8) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.14.9`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.14.9) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -131,8 +131,9 @@ computer and phone CPU use while output is changing.
 
 Returning to an unchanged Resize Session paints its cached rendered frame
 immediately, then reacquires the lease and reconciles current content in the
-background. Long tokens wrap in responsive output, while fixed-grid table rows
-remain aligned.
+background. The selected history remains available while resized. Long tokens
+and grids captured at a wider width wrap for the phone, while grids redrawn at
+the leased width remain aligned.
 
 The terminal controls send **Esc**, **Tab**, arrow keys, and combinable
 **Shift**/**Ctrl** modifiers: tap either (or both) to arm it, then type a
