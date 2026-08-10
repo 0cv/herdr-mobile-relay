@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.6] - 2026-08-10
+
+### Fixed
+
+- Keep **Resize Session** text stable across live refreshes by retaining phone
+  scrollback and replacing only the clean, current terminal viewport.
+- Wait for a hosted app deployment to converge before loading it, so an old
+  cached app cannot consume and suppress the automatic update.
+
 ## [0.14.5] - 2026-08-10
 
 ### Fixed
@@ -293,7 +302,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.5...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.6...HEAD
+[0.14.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.5...v0.14.6
 [0.14.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.4...v0.14.5
 [0.14.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.3...v0.14.4
 [0.14.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.2...v0.14.3
