@@ -14,6 +14,7 @@ relay/push/
 /internal/app/push/
 relay/cloudflared/
 relay/stable-setup.json
+relay/support-state.json
 relay/update-state.json
 relay/update-job-*.json
 relay/update.lock
