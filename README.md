@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.14.10`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.14.10) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.14.11`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.14.11) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -91,10 +91,13 @@ The relay continues to support Herdr 0.7.5 or newer.
   live Herdr event stream (15-second reconciliation backstop).
 - Start, rename, clear, restart, and stop agents from relay-provided launch
   profiles.
-- Send prompts, terminal keys, slash commands, screenshots, and photos.
+- Send durable prompt drafts, terminal keys, slash commands, screenshots, and
+  photos; search the loaded terminal output.
 - Answer verified Codex, Claude Code, and Qoder approvals, plus structured
   questions from those agents and OpenCode.
-- Search local activity and receive blocked or completion notifications.
+- Read native user/assistant conversation history for Claude Code, Codex,
+  Qoder, Pi, and Oh My Pi; search local activity and receive blocked or
+  completion notifications.
 - Require device verification before reconnecting relays.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
@@ -121,6 +124,13 @@ When older rows are left out — either because Herdr clipped the pane's
 scrollback or because the selected line limit did — the terminal reports that
 older history is not shown.
 
+For supported agents, the terminal header opens **Conversation History** after
+the agent reports a session. The relay reads that harness's local transcript,
+keeps only user and assistant text, and pages the newest 80 turns at a time.
+Tool output, hidden reasoning, and injected system records are excluded. Reads
+are confined to known session directories and the newest 16 MiB of very large
+logs; the view reports when that bound omitted older turns.
+
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second. The 250 ms default balances responsiveness with
 computer and phone CPU use while output is changing.
@@ -131,12 +141,15 @@ background. The selected history remains available while resized. Long tokens
 and grids captured at a wider width wrap for the phone, while grids redrawn at
 the leased width remain aligned.
 
-The terminal controls send **Esc**, **Tab**, arrow keys, and combinable
-**Shift**/**Ctrl** modifiers: tap either (or both) to arm it, then type a
-letter or tap **Tab** to send the combined chord (`shift+tab`, `ctrl+c`,
-`ctrl+shift+c`, and so on). The modifier keyboard stays open for repeated
-presses and closes only when focus moves to the composer, terminal, or
-**Enter**/**Send**.
+**Find** searches every loaded terminal row, highlights visible matches, and
+moves between matches even when the terminal has virtualized them off-screen.
+Its scope is the output supplied by the selected Terminal History limit.
+
+The terminal controls send **Esc**, **Tab**, **Enter**, and arrow keys.
+**Shift**, **Ctrl**, and **Alt** can be combined, remain armed for repeated
+input, and apply to typed characters or any available terminal key. Sends are
+ordered, and a live status confirms the exact chord. Toggle the modifiers off
+or move focus to the composer to disarm them.
 
 **Copy** runs the agent's own copy command (Claude Code, Codex, Kimi, OMP, Pi,
 and Qoder) to capture its latest

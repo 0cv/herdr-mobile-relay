@@ -37,7 +37,7 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Arrow keys' }).click();
-  await expect(page.getByRole('button', { name: 'Up' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Up', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
 
   await approvalCard.getByRole('button', { name: 'Allow once', exact: true }).click();

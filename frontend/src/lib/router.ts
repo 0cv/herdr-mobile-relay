@@ -9,6 +9,7 @@ export type ViewState =
   | { view: 'activity' }
   | { view: 'activity_detail'; key: string }
   | { view: 'terminal'; paneId: string }
+  | { view: 'history'; paneId: string }
   | { view: 'notification'; target: NotificationTarget };
 
 type HistoryViewState = ViewState & {
@@ -44,6 +45,14 @@ export function stateFromLocation(locationValue: Pick<Location, 'hash'> = locati
       return { view: 'agents' };
     }
   }
+  const historyPane = locationValue.hash.match(/^#history=(.+)$/);
+  if (historyPane) {
+    try {
+      return { view: 'history', paneId: decodeURIComponent(historyPane[1]) };
+    } catch {
+      return { view: 'agents' };
+    }
+  }
   const notification = locationValue.hash.match(/^#notify=(.+)$/);
   if (notification) {
     const target = parseNotificationTarget(notification[1]);
@@ -58,6 +67,7 @@ export function viewUrl(state: ViewState): string {
   if (state.view === 'activity') return '#activity';
   if (state.view === 'activity_detail') return `#activity=${encodeURIComponent(state.key)}`;
   if (state.view === 'terminal') return `#pane=${encodeURIComponent(state.paneId)}`;
+  if (state.view === 'history') return `#history=${encodeURIComponent(state.paneId)}`;
   if (state.view === 'notification') return `#notify=${encodeURIComponent(JSON.stringify(state.target))}`;
   return location.pathname + location.search;
 }

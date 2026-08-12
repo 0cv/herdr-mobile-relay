@@ -5,6 +5,31 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.11] - 2026-08-12
+
+### Added
+
+- Add durable per-pane prompt drafts with bounded browser storage and explicit
+  fallback when persistence is unavailable.
+- Add native, searchable user/assistant conversation history for Claude Code,
+  Codex, Qoder, Pi, and Oh My Pi.
+- Add literal find across loaded terminal history with match highlighting and
+  next/previous navigation through virtualized rows.
+- Add **Alt** and multi-modifier terminal chords, ordered key delivery, and
+  visible chord confirmation.
+
+### Changed
+
+- Preserve completed-agent triage and recent ordering across relay restarts.
+
+### Fixed
+
+- Keep the mobile terminal navigation pad limited to arrow keys supported by
+  Herdr 0.8.0 instead of offering Home, End, Page Up, and Page Down actions
+  that fail.
+- Keep uncertain prompt deliveries out of the composer and persistent draft
+  store so reconnecting cannot invite an accidental duplicate send.
+
 ## [0.14.10] - 2026-08-12
 
 ### Added
@@ -355,7 +380,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.10...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.11...HEAD
+[0.14.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.10...v0.14.11
 [0.14.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.9...v0.14.10
 [0.14.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.8...v0.14.9
 [0.14.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.7...v0.14.8

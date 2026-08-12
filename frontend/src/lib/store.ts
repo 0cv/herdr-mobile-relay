@@ -41,6 +41,7 @@ import type {
   AgentProfile,
   AgentInventoryStatus,
   CommandResult,
+  ConversationPage,
   DirectoryListing,
   QuestionDraft,
   QuestionInteraction,
@@ -1077,6 +1078,35 @@ class RelayStore {
     }
   }
 
+  async getConversationHistory(agent: Agent, before = '', limit = 80): Promise<ConversationPage> {
+    const result = await this.sendToAgent(agent, {
+      type: 'get_conversation_history',
+      before,
+      limit,
+    }, 20_000);
+    const data = result.data || {};
+    const entries = Array.isArray(data.entries)
+      ? data.entries
+        .filter((entry: unknown): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'))
+        .map((entry) => ({
+          id: String(entry.id || ''),
+          timestamp: String(entry.timestamp || ''),
+          role: entry.role === 'assistant' ? 'assistant' as const : 'user' as const,
+          text: String(entry.text || ''),
+          truncated: entry.truncated === true,
+        }))
+        .filter((entry) => entry.id && entry.text)
+      : [];
+    return {
+      available: data.available === true,
+      reason: String(data.reason || ''),
+      entries,
+      hasMore: data.has_more === true,
+      total: Math.max(0, Number(data.total) || 0),
+      fileTruncated: data.file_truncated === true,
+    };
+  }
+
   readPane(agent: Agent, force = false): void {
     const requestedAt = this.pendingPaneReads.get(agent.pane_id);
     if (!force && requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
@@ -1179,9 +1209,10 @@ class RelayStore {
   }
 
   async acknowledgePane(agent: Agent): Promise<void> {
-    if (agentStatusGroup(agent) !== 'done') return;
-    this.agentsValue = this.agentsValue.map((item) => item.pane_id === agent.pane_id ? { ...item, status: 'idle' } : item);
-    this.agents.set(this.agentsValue);
+    if (agentStatusGroup(agent) === 'done') {
+      this.agentsValue = this.agentsValue.map((item) => item.pane_id === agent.pane_id ? { ...item, status: 'idle' } : item);
+      this.agents.set(this.agentsValue);
+    }
     await this.sendToAgent(agent, { type: 'acknowledge_pane' }).catch((error) => this.showToast(error.message, true));
   }
 

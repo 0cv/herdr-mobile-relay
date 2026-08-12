@@ -4,6 +4,7 @@
   import ActivityDetail from '$components/ActivityDetail.svelte';
   import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
+  import ConversationHistory from '$components/ConversationHistory.svelte';
   import LaunchView from '$components/LaunchView.svelte';
   import LockScreen from '$components/LockScreen.svelte';
   import ManageDialog from '$components/ManageDialog.svelte';
@@ -67,10 +68,16 @@
   const handlingNotifications = new Set<string>();
   const automaticUpdateChecks = new Set<string>();
 
-  const activeAgent = $derived($currentView.view === 'terminal'
-    ? $agents.find((agent) => agent.pane_id === $currentView.paneId) || null
-    : null);
+  const activeAgent = $derived.by(() => {
+    const view = $currentView;
+    if (view.view !== 'terminal' && view.view !== 'history') return null;
+    return $agents.find((agent) => agent.pane_id === view.paneId) || null;
+  });
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
+  const conversationHistoryAvailable = $derived(Boolean(
+    activeAgent?.conversation_history_available
+    && activeConnection?.capabilities.includes('conversation_history'),
+  ));
   const connected = $derived([...$connections.values()].filter((connection) => connection.status === 'connected').length);
   const connecting = $derived([...$connections.values()].some((connection) => connection.status === 'connecting'));
   const inventoryUnavailable = $derived([...$connections.values()].filter(
@@ -440,8 +447,21 @@
     {#if $currentView.view === 'agents'}<span class="agent-count">{connected}/{$relays.length} relays{#if $agents.length} · {$agents.length}{/if}</span>{/if}
     <nav aria-label="Application">
       {#if $currentView.view === 'terminal'}
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Conversation history"
+          disabled={!conversationHistoryAvailable || !activeAgent}
+          title={conversationHistoryAvailable ? 'Conversation history' : 'Conversation history is unavailable for this agent'}
+          onclick={() => { if (activeAgent) navigate({ view: 'history', paneId: activeAgent.pane_id }); }}
+        >
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path>
+            <path d="M4 5.5v15M8 7h8M8 11h6"></path>
+          </svg>
+        </Button>
         <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
-      {:else}
+      {:else if $currentView.view !== 'history'}
         <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => toggle('launch')}>＋</Button>
         <Button variant="ghost" size="icon" aria-label="Activity history" onclick={() => toggle('activity')}>
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -470,6 +490,13 @@
     <ActivityView />
   {:else if $currentView.view === 'activity_detail'}
     <ActivityDetail key={$currentView.key} />
+  {:else if $currentView.view === 'history' && activeAgent}
+    <ConversationHistory agent={activeAgent} />
+  {:else if $currentView.view === 'history'}
+    <main class="page terminal-loading" aria-label="Conversation history unavailable">
+      <p role="alert">This agent is not available.</p>
+      <Button onclick={() => replaceView({ view: 'agents' })}>Back to agents</Button>
+    </main>
   {:else if $currentView.view === 'terminal' && activeAgent && activeConnection?.status === 'connected' && activeConnection.inventory.state !== 'ready'}
     <main class="page terminal-loading" aria-label="Agent inventory unavailable">
       <p role="alert">{activeConnection.inventory.message || 'This computer’s Herdr agent inventory is not ready.'}</p>

@@ -100,6 +100,10 @@ describe('protocol and setup parsing', () => {
     expect(parseNotificationTarget(encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', action: 'approve', index: 9, total: 3 })))).toBeNull();
     expect(parseNotificationTarget('%not-json')).toBeNull();
     expect(stateFromLocation({ hash: '#pane=%invalid' } as Location)).toEqual({ view: 'agents' });
+    expect(stateFromLocation({ hash: '#history=relay%3A%3Apane-1' } as Location)).toEqual({
+      view: 'history',
+      paneId: 'relay::pane-1',
+    });
     expect(relayPushScope('UPPER-id-')).toBe('./push/upper-id/');
     expect(relayPushScope('---')).toBe('./push/relay/');
   });

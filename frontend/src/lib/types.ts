@@ -90,6 +90,8 @@ export interface Agent {
   cwd?: string;
   host?: string;
   updated_at?: number | string;
+  last_active_at?: number | string;
+  last_seen_at?: number | string;
   activity_seq?: number | string;
   pane_revision?: number;
   prompt?: string;
@@ -100,6 +102,8 @@ export interface Agent {
   event_id?: string;
   attention_kind?: AttentionKind;
   attention_capable?: boolean;
+  terminal_id?: string;
+  conversation_history_available?: boolean;
   tab_id?: string;
   tab_label?: string;
   tab_number?: number;
@@ -123,7 +127,25 @@ export interface Activity {
   details?: Record<string, unknown>;
   relay_id: string;
   relay_label: string;
+
   activity_key: string;
+}
+
+export interface ConversationEntry {
+  id: string;
+  timestamp: string;
+  role: 'user' | 'assistant';
+  text: string;
+  truncated?: boolean;
+}
+
+export interface ConversationPage {
+  available: boolean;
+  reason: string;
+  entries: ConversationEntry[];
+  hasMore: boolean;
+  total: number;
+  fileTruncated: boolean;
 }
 
 export interface RelayConnectionView {

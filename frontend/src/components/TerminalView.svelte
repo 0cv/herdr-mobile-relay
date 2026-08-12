@@ -42,6 +42,14 @@
     questionInteraction,
     sortedAgents,
   } from '$lib/agents';
+  import { clearPromptDraft, loadPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
+  import {
+    findTerminalText,
+    terminalMatchFragments,
+    terminalRowForOffset,
+    terminalRowOffsets,
+    terminalSearchText,
+  } from '$lib/terminal-find';
   import {
     interfaceSize,
     terminalHistoryLines,
@@ -77,17 +85,26 @@
     text: string;
   }
 
+
+  interface QueuedKeyCommand {
+    keys: string[];
+    label: string;
+    resolve: (sent: boolean) => void;
+  }
   let terminalElement = $state<HTMLDivElement>(null!);
   let cellMeasureElement = $state<HTMLSpanElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
   let modifierInputElement = $state<HTMLInputElement>(null!);
+  let findInputElement = $state<HTMLInputElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
   let transcriptElement = $state<HTMLTextAreaElement>(null!);
   let responseElement = $state<HTMLTextAreaElement>(null!);
   let agentResponsePreviewElement = $state<HTMLTextAreaElement>(null!);
   let copiedAgentResponseText = $state('');
-  let composer = $state('');
+  let composer = $state(untrack(() => loadPromptDraft(agent)));
   let composerFocused = $state(false);
+  let sendingPrompt = $state(false);
+  let draftPersistenceWarning = $state('');
   let resizeFrameBaseline: TerminalFrame | undefined;
   let showingCachedResizeFrame = false;
   let displayed = $state('');
@@ -115,8 +132,15 @@
   let lastPreserveLineEnds = false;
   let jumpVisible = $state(false);
   let arrowsOpen = $state(false);
+  let findOpen = $state(false);
+  let findQuery = $state('');
+  let activeFindIndex = $state(-1);
   let ctrlArmed = $state(false);
   let shiftArmed = $state(false);
+  let altArmed = $state(false);
+  let keyFeedback = $state('');
+  let keyFeedbackError = $state(false);
+  let keySending = $state(false);
   let uploadStatus = $state('');
   let uploadError = $state(false);
   let copyingAgentResponse = $state(false);
@@ -152,6 +176,9 @@
   let resizeExpectedLines = 0;
   let resizeSettleDeadline = 0;
   let resizeReadTimer: ReturnType<typeof setTimeout> | undefined;
+  const keyQueue: QueuedKeyCommand[] = [];
+  let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
+  let keyReadTimer: ReturnType<typeof setTimeout> | undefined;
 
   const responsePending = $derived(agentNeedsResponse(agent));
   const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
@@ -180,6 +207,19 @@
   const terminalPlainText = $derived(
     stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
+  const terminalFindCorpus = $derived.by(() => ({
+    text: terminalSearchText(renderedRows),
+    offsets: terminalRowOffsets(renderedRows),
+  }));
+  const terminalFind = $derived(findTerminalText(terminalFindCorpus.text, findQuery.trim()));
+  const armedModifierLabel = $derived([
+    ctrlArmed ? 'Ctrl' : '',
+    altArmed ? 'Alt' : '',
+    shiftArmed ? 'Shift' : '',
+  ].filter(Boolean).join('+'));
+  const keyControlStatus = $derived(armedModifierLabel
+    ? `${armedModifierLabel} armed${keyFeedback ? ` · ${keyFeedback}` : ' — choose a key or type a character'}`
+    : keyFeedback);
   const agentResponseCopySupported = $derived.by(() => {
     const connection = $connections.get(agent.relay_id);
     return Boolean(
@@ -197,6 +237,39 @@
       styles.push(`--terminal-content-width: ${virtualContentColumns}ch`);
     }
     return styles.length ? styles.join(';') : undefined;
+  });
+
+  $effect(() => {
+    const result = savePromptDraft(agent, composer);
+    draftPersistenceWarning = result === 'too-large'
+      ? 'This draft is too large to persist; keep this page open.'
+      : result === 'unavailable'
+        ? 'Draft persistence is unavailable; keep this page open.'
+        : '';
+  });
+
+  $effect(() => {
+    const count = terminalFind.matches.length;
+    const query = findQuery.trim();
+    untrack(() => {
+      if (!query || !count) {
+        activeFindIndex = -1;
+        return;
+      }
+      if (activeFindIndex < 0 || activeFindIndex >= count) activeFindIndex = 0;
+    });
+  });
+
+  $effect(() => {
+    const highlightState = [
+      findOpen,
+      findQuery,
+      activeFindIndex,
+      virtualHtml,
+      terminalFind.matches.length,
+    ];
+    void highlightState;
+    void tick().then(applyTerminalFindHighlights);
   });
 
   $effect(() => {
@@ -387,6 +460,15 @@
       relayStore.readPane(agent, true);
       relayStore.watchPane(agent);
     };
+    const findShortcut = (event: KeyboardEvent) => {
+      if (questionMode
+        || event.altKey
+        || (!event.ctrlKey && !event.metaKey)
+        || event.key.toLocaleLowerCase() !== 'f') return;
+      event.preventDefault();
+      openTerminalFind();
+    };
+    window.addEventListener('keydown', findShortcut);
     window.addEventListener('resize', measurePane);
     window.visualViewport?.addEventListener('resize', measurePane);
     document.addEventListener('visibilitychange', visibilityChanged);
@@ -409,8 +491,12 @@
       window.removeEventListener('resize', measurePane);
       window.visualViewport?.removeEventListener('resize', measurePane);
       document.removeEventListener('visibilitychange', visibilityChanged);
+      window.removeEventListener('keydown', findShortcut);
       clearInterval(refresh);
       clearInterval(refreshPaneSizeLease);
+      if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
+      if (keyReadTimer) clearTimeout(keyReadTimer);
+      for (const command of keyQueue.splice(0)) command.resolve(false);
       relayStore.unwatchPane(agent);
       releasePaneSizeLease(false);
       virtualRowObserver?.disconnect();
@@ -709,6 +795,125 @@
     });
   }
 
+  function clearTerminalFindHighlights() {
+    if (!terminalElement) return;
+    const parents = new Set<Node>();
+    for (const mark of terminalElement.querySelectorAll<HTMLElement>('mark[data-terminal-find]')) {
+      if (mark.parentNode) parents.add(mark.parentNode);
+      mark.replaceWith(document.createTextNode(mark.textContent || ''));
+    }
+    for (const parent of parents) parent.normalize();
+  }
+
+  function applyTerminalFindHighlights() {
+    clearTerminalFindHighlights();
+    if (!terminalElement || !findOpen || !findQuery.trim() || !terminalFind.matches.length) return;
+    const byRow = new Map<number, Array<{ start: number; end: number; active: boolean }>>();
+    terminalFind.matches.forEach((match, matchIndex) => {
+      for (const fragment of terminalMatchFragments(renderedRows, terminalFindCorpus.offsets, match)) {
+        if (fragment.row < virtualStart || fragment.row >= virtualEnd) continue;
+        const fragments = byRow.get(fragment.row) || [];
+        fragments.push({ start: fragment.start, end: fragment.end, active: matchIndex === activeFindIndex });
+        byRow.set(fragment.row, fragments);
+      }
+    });
+    for (const [row, fragments] of byRow) {
+      const element = terminalElement.querySelector<HTMLElement>(`[data-terminal-row="${row}"]`);
+      if (element) highlightTerminalRow(element, fragments);
+    }
+  }
+
+  function highlightTerminalRow(
+    element: HTMLElement,
+    fragments: Array<{ start: number; end: number; active: boolean }>,
+  ) {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    const nodes: Array<{ node: Text; start: number; end: number }> = [];
+    let offset = 0;
+    let node = walker.nextNode();
+    while (node) {
+      const text = node as Text;
+      nodes.push({ node: text, start: offset, end: offset + text.data.length });
+      offset += text.data.length;
+      node = walker.nextNode();
+    }
+    for (const entry of nodes) {
+      const intersections = fragments
+        .map((fragment) => ({
+          start: Math.max(fragment.start, entry.start) - entry.start,
+          end: Math.min(fragment.end, entry.end) - entry.start,
+          active: fragment.active,
+        }))
+        .filter((fragment) => fragment.end > fragment.start)
+        .sort((left, right) => right.start - left.start);
+      for (const fragment of intersections) {
+        entry.node.splitText(fragment.end);
+        const selected = entry.node.splitText(fragment.start);
+        const mark = document.createElement('mark');
+        mark.dataset.terminalFind = '';
+        mark.className = `terminal-find-match${fragment.active ? ' active' : ''}`;
+        selected.replaceWith(mark);
+        mark.append(selected);
+      }
+    }
+  }
+
+  function openTerminalFind() {
+    arrowsOpen = false;
+    findOpen = true;
+    void tick().then(() => {
+      findInputElement?.focus();
+      findInputElement?.select();
+    });
+  }
+
+  function closeTerminalFind() {
+    findOpen = false;
+  }
+
+  function findInputChanged() {
+    activeFindIndex = -1;
+    void tick().then(() => {
+      if (terminalFind.matches.length) revealFindMatch(0);
+    });
+  }
+
+  function findKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeTerminalFind();
+      return;
+    }
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    revealFindMatch(activeFindIndex + (event.shiftKey ? -1 : 1));
+  }
+
+  function revealFindMatch(index: number) {
+    const count = terminalFind.matches.length;
+    if (!terminalElement || !count) return;
+    const normalized = ((index % count) + count) % count;
+    activeFindIndex = normalized;
+    const match = terminalFind.matches[normalized];
+    const row = terminalRowForOffset(renderedRows, terminalFindCorpus.offsets, match.start);
+    if (row < 0) return;
+    const rowTop = terminalScreenOffset() + virtualIndex.offset(row);
+    const nextTop = Math.max(0, rowTop - (terminalElement.clientHeight - virtualIndex.size(row)) / 2);
+    virtualStickToBottom = false;
+    virtualScrollResetPending = true;
+    renderVirtualWindow(nextTop, true);
+    void tick().then(() => {
+      if (!terminalElement) return;
+      terminalElement.scrollTop = nextTop;
+      virtualStickToBottom = terminalElement.scrollHeight
+        - terminalElement.scrollTop
+        - terminalElement.clientHeight < 48;
+      jumpVisible = !virtualStickToBottom;
+      virtualScrollResetPending = false;
+      applyTerminalFindHighlights();
+    });
+  }
+
   function focusComposer(event: FocusEvent) {
     const target = event.target;
     if (!(target instanceof HTMLTextAreaElement)
@@ -727,9 +932,12 @@
 
 
   async function sendPrompt() {
-    const text = composer.replace(/[\r\n]+$/g, '');
-    if (!text || inputLocked) return;
+    const submittedDraft = composer;
+    const text = submittedDraft.replace(/[\r\n]+$/g, '');
+    if (!text || inputLocked || sendingPrompt) return;
+    sendingPrompt = true;
     composer = '';
+    clearPromptDraft(agent);
     try {
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
       relayStore.showToast('Prompt sent.');
@@ -741,10 +949,15 @@
         && error.data !== null
         && 'dispatched_unknown' in error.data
         && error.data.dispatched_unknown === true;
-      if (!composer && !dispatchedUnknown) composer = text;
-      relayStore.showToast((error as Error).message, true);
+      if (!composer && !dispatchedUnknown) composer = submittedDraft;
+      const detail = error instanceof Error ? error.message : 'Prompt could not be sent.';
+      relayStore.showToast(dispatchedUnknown
+        ? `${detail} Check the terminal before sending again.`
+        : detail, true);
+    } finally {
+      sendingPrompt = false;
+      setTimeout(() => relayStore.readPane(agent), 500);
     }
-    setTimeout(() => relayStore.readPane(agent), 500);
   }
 
   function composerInput() {
@@ -806,15 +1019,51 @@
     }
   }
 
-  async function sendKeys(keys: string[], activityLabel = ''): Promise<boolean> {
-    try {
-      await relayStore.sendToAgent(agent, { type: 'send_keys', keys, activity_label: activityLabel });
-      setTimeout(() => relayStore.readPane(agent), 300);
-      return true;
-    } catch (error) {
-      relayStore.showToast((error as Error).message, true);
-      return false;
+  function sendKeys(keys: string[], activityLabel = ''): Promise<boolean> {
+    return new Promise((resolve) => {
+      keyQueue.push({ keys, label: activityLabel || keys.join(', '), resolve });
+      void drainKeyQueue();
+    });
+  }
+
+  async function drainKeyQueue() {
+    if (keySending) return;
+    keySending = true;
+    while (keyQueue.length) {
+      const command = keyQueue.shift()!;
+      showKeyFeedback(`Sending ${command.label}…`);
+      try {
+        await relayStore.sendToAgent(agent, {
+          type: 'send_keys',
+          keys: command.keys,
+          activity_label: command.label,
+        });
+        command.resolve(true);
+        showKeyFeedback(`${command.label} sent`);
+        if (keyReadTimer) clearTimeout(keyReadTimer);
+        keyReadTimer = setTimeout(() => {
+          if (componentMounted) relayStore.readPane(agent);
+        }, 300);
+      } catch (error) {
+        command.resolve(false);
+        const message = error instanceof Error ? error.message : 'Terminal keys could not be sent.';
+        showKeyFeedback('Key send failed', true);
+        relayStore.showToast(message, true);
+        for (const queued of keyQueue.splice(0)) queued.resolve(false);
+      }
     }
+    keySending = false;
+  }
+
+  function showKeyFeedback(message: string, error = false) {
+    if (!componentMounted) return;
+    if (keyFeedbackTimer) clearTimeout(keyFeedbackTimer);
+    keyFeedback = message;
+    keyFeedbackError = error;
+    keyFeedbackTimer = setTimeout(() => {
+      keyFeedback = '';
+      keyFeedbackError = false;
+    }, 2_000);
   }
 
   async function copyTerminalOutput() {
@@ -900,11 +1149,12 @@
   function dismissCopiedAgentResponse() {
     copiedAgentResponseText = '';
   }
-  function toggleModifier(which: 'ctrl' | 'shift') {
+  function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
     arrowsOpen = false;
     if (which === 'ctrl') ctrlArmed = !ctrlArmed;
+    else if (which === 'alt') altArmed = !altArmed;
     else shiftArmed = !shiftArmed;
-    if (ctrlArmed || shiftArmed) {
+    if (ctrlArmed || altArmed || shiftArmed) {
       modifierInputElement.value = '';
       modifierInputElement.focus();
     } else {
@@ -916,6 +1166,10 @@
     toggleModifier('ctrl');
   }
 
+  function toggleAlt() {
+    toggleModifier('alt');
+  }
+
   function toggleShift() {
     toggleModifier('shift');
   }
@@ -924,36 +1178,36 @@
     const parts: string[] = [];
     const labels: string[] = [];
     if (ctrlArmed) { parts.push('ctrl'); labels.push('Ctrl'); }
+    if (altArmed) { parts.push('alt'); labels.push('Alt'); }
     if (shiftArmed) { parts.push('shift'); labels.push('Shift'); }
     if (!parts.length) return null;
-    parts.push(key.toLowerCase());
-    labels.push(key.length === 1 ? key.toUpperCase() : key[0].toUpperCase() + key.slice(1).toLowerCase());
+    parts.push(key.toLocaleLowerCase());
+    labels.push(key.length === 1 ? key.toLocaleUpperCase() : key[0].toLocaleUpperCase() + key.slice(1).toLocaleLowerCase());
     return { chord: parts.join('+'), label: labels.join('+') };
   }
 
   function disarmModifiers() {
     ctrlArmed = false;
+    altArmed = false;
     shiftArmed = false;
     modifierInputElement.blur();
   }
 
   function modifierInput(event: Event) {
     const target = event.currentTarget as HTMLInputElement;
-    const letter = target.value.match(/[a-z]/i)?.[0];
+    const character = Array.from(target.value)[0] || '';
     target.value = '';
-    if (!letter) return;
-    const result = modifierChord(letter);
-    if (!result) return;
-    void sendKeys([result.chord], result.label);
+    if (!character || /\s/u.test(character)) return;
+    sendTerminalKey(character);
+  }
+
+  function sendTerminalKey(key: string, plainLabel = key) {
+    const result = modifierChord(key);
+    void sendKeys([result?.chord || key], result?.label || plainLabel);
   }
 
   function sendTab() {
-    const result = modifierChord('tab');
-    if (!result) {
-      void sendKeys(['Tab']);
-      return;
-    }
-    void sendKeys([result.chord], result.label);
+    sendTerminalKey('Tab');
   }
 
   function modifierKeydown(event: KeyboardEvent) {
@@ -966,6 +1220,7 @@
     setTimeout(() => {
       if (document.activeElement !== modifierInputElement) {
         ctrlArmed = false;
+        altArmed = false;
         shiftArmed = false;
       }
     });
@@ -1253,9 +1508,15 @@
 {#snippet arrowPopup()}
   {#if arrowsOpen}
     <div class="arrow-popup">
-      <span></span><button aria-label="Up" onclick={() => sendKeys(['Up'])}>↑</button><span></span>
-      <button aria-label="Left" onclick={() => sendKeys(['Left'])}>←</button><span></span><button aria-label="Right" onclick={() => sendKeys(['Right'])}>→</button>
-      <span></span><button aria-label="Down" onclick={() => sendKeys(['Down'])}>↓</button><span></span>
+      <span aria-hidden="true"></span>
+      <button aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
+      <span aria-hidden="true"></span>
+      <button aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
+      <span aria-hidden="true"></span>
+      <button aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
+      <span aria-hidden="true"></span>
+      <button aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
+      <span aria-hidden="true"></span>
     </div>
   {/if}
 {/snippet}
@@ -1263,14 +1524,18 @@
 <main
   class:has-actions={inputLocked || nextBlocked}
   class:question-only={questionMode}
+  class:find-open={findOpen}
   class="terminal-view"
   aria-label={`${questionMode ? 'Questions' : 'Terminal'} for ${agent.project || agent.name || agent.agent || 'agent'}`}
 >
   {#if questionMode && interaction}
     <QuestionForm {agent} {interaction} responding={responding.has(agent.pane_id)} />
-    <div class="term-keys question-term-keys" aria-label="Terminal fallback keys">
-      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Tab'])}>Tab</Button>
+    {#if keyControlStatus}
+      <p class:error={keyFeedbackError} class="key-feedback" role="status" aria-live="polite">{keyControlStatus}</p>
+    {/if}
+    <div class="term-keys question-term-keys" aria-label="Terminal fallback keys" aria-busy={keySending}>
+      <Button variant="secondary" size="sm" onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" onclick={sendTab}>Tab</Button>
       <span class="spacer"></span>
       <div class="arrow-menu">
         <Button variant="secondary" size="sm" aria-label="Arrow keys" aria-expanded={arrowsOpen} onclick={() => { arrowsOpen = !arrowsOpen; }}>
@@ -1278,9 +1543,37 @@
         </Button>
         {@render arrowPopup()}
       </div>
-      <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
+      <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendTerminalKey('Enter')}>Enter</Button>
     </div>
   {:else}
+  {#if findOpen}
+    <section class="terminal-find" aria-label="Find in terminal">
+      <input
+        bind:this={findInputElement}
+        bind:value={findQuery}
+        type="search"
+        aria-label="Find in terminal output"
+        placeholder="Find in terminal"
+        autocomplete="off"
+        autocapitalize="none"
+        spellcheck="false"
+        oninput={findInputChanged}
+        onkeydown={findKeydown}
+      />
+      <span class="terminal-find-count" role="status" aria-live="polite">
+        {#if !findQuery.trim()}
+          Type to find
+        {:else if !terminalFind.matches.length}
+          No matches
+        {:else}
+          {activeFindIndex + 1} of {terminalFind.matches.length}{terminalFind.truncated ? '+' : ''}
+        {/if}
+      </span>
+      <Button variant="secondary" size="sm" aria-label="Previous match" disabled={!terminalFind.matches.length} onclick={() => revealFindMatch(activeFindIndex - 1)}>↑</Button>
+      <Button variant="secondary" size="sm" aria-label="Next match" disabled={!terminalFind.matches.length} onclick={() => revealFindMatch(activeFindIndex + 1)}>↓</Button>
+      <Button variant="ghost" size="sm" aria-label="Close find" onclick={closeTerminalFind}>×</Button>
+    </section>
+  {/if}
   <div
     class:resize-layout={resizeSessionActive}
     class="term-content preserve-layout"
@@ -1340,6 +1633,7 @@
     </section>
   {/if}
   <div class="terminal-copy">
+    <Button variant="secondary" size="sm" aria-label="Find in terminal" onclick={openTerminalFind}>Find</Button>
     <Button
       variant="secondary"
       size="sm"
@@ -1439,10 +1733,11 @@
         ></textarea>
         {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
-      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked} aria-label="Send prompt" onclick={sendPrompt}>➤</Button>
+      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked || sendingPrompt} aria-label={sendingPrompt ? 'Sending prompt' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
       <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
+    {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
     {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
     {#if frame?.truncated}<p class="upload-status" role="status">Older terminal history is not shown; this pane response was limited.</p>{/if}
 
@@ -1460,15 +1755,18 @@
       <div class="quick-actions"><Button variant="secondary" onclick={openNext}>Next blocked →</Button></div>
     {/if}
 
-    <div class="term-keys">
-      <Button variant="secondary" size="sm" onclick={() => sendKeys(['Escape'], 'Cancelled prompt')}>Esc</Button>
+    {#if keyControlStatus}
+      <p class:error={keyFeedbackError} class="key-feedback" role="status" aria-live="polite">{keyControlStatus}</p>
+    {/if}
+    <div class="term-keys" aria-busy={keySending}>
+      <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
       <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>Tab</Button>
       <div class="modifier-menu">
         <input
           id="modifier-key-input"
           class="modifier-key-input"
           bind:this={modifierInputElement}
-          aria-label="Shift or Ctrl shortcut letter"
+          aria-label="Modifier shortcut character"
           autocomplete="off"
           autocapitalize="none"
           maxlength="1"
@@ -1483,7 +1781,7 @@
           aria-controls="modifier-key-input"
           aria-pressed={shiftArmed}
           aria-label="Shift"
-          title="Press Shift, then type a letter — combine with Ctrl"
+          title="Arm Shift; combine it with Ctrl or Alt"
           onpointerdown={(event) => event.preventDefault()}
           onclick={toggleShift}
         >⇧</Button>
@@ -1492,10 +1790,19 @@
           size="sm"
           aria-controls="modifier-key-input"
           aria-pressed={ctrlArmed}
-          title="Press Ctrl, then type a letter — combine with Shift"
+          title="Arm Ctrl; combine it with Shift or Alt"
           onpointerdown={(event) => event.preventDefault()}
           onclick={toggleCtrl}
         >Ctrl</Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          aria-controls="modifier-key-input"
+          aria-pressed={altArmed}
+          title="Arm Alt; combine it with Ctrl or Shift"
+          onpointerdown={(event) => event.preventDefault()}
+          onclick={toggleAlt}
+        >Alt</Button>
       </div>
       <span class="spacer"></span>
       <div class="arrow-menu">
@@ -1504,18 +1811,14 @@
           size="sm"
           aria-label="Arrow keys"
           aria-expanded={arrowsOpen}
-          onclick={() => {
-            ctrlArmed = false;
-            shiftArmed = false;
-            modifierInputElement.blur();
-            arrowsOpen = !arrowsOpen;
-          }}
+          onpointerdown={(event) => event.preventDefault()}
+          onclick={() => { arrowsOpen = !arrowsOpen; }}
         >
           {@render arrowIcon()}
         </Button>
         {@render arrowPopup()}
       </div>
-      <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendKeys(['Enter'])}>Enter</Button>
+      <Button variant="secondary" size="sm" aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
     </div>
   </div>
   {/if}

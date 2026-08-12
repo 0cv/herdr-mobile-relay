@@ -81,7 +81,7 @@ describe('accessible Svelte interactions', () => {
     const onopen = vi.fn();
     const respond = vi.spyOn(relayStore, 'respond').mockResolvedValue(true);
     render(AgentList, { agents: [blockedAgent], relays: [{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }], responding: new Set<string>(), onopen });
-    expect(screen.getByRole('heading', { name: 'Blocked' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Needs input' })).toBeInTheDocument();
     expect(screen.getByText('Run make check?')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Approve once' }));
     expect(respond).toHaveBeenCalledWith(blockedAgent, 0, 3, 'Approve once');

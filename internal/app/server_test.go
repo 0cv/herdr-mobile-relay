@@ -56,14 +56,16 @@ func TestResolveAgentSessionName(t *testing.T) {
 
 	named := &coordinator.AgentState{Agent: "codex", Session: "session-1"}
 	s.resolveAgentSessionName(named)
-	if named.SessionName != "current-session" || named.Session != "current-session" {
-		t.Fatalf("named session = %#v, want resolved name on both wire fields", named)
+	if named.SessionName != "current-session" || named.Session != "current-session" ||
+		named.SessionID != "session-1" || !named.ConversationHistoryAvailable {
+		t.Fatalf("named session = %#v, want resolved display name and retained history identity", named)
 	}
 
 	unnamed := &coordinator.AgentState{Agent: "codex", Session: "missing-session"}
 	s.resolveAgentSessionName(unnamed)
-	if unnamed.SessionName != "" || unnamed.Session != "missing-session" {
-		t.Fatalf("unnamed session = %#v, want empty name and preserved session identifier", unnamed)
+	if unnamed.SessionName != "" || unnamed.Session != "missing-session" ||
+		unnamed.SessionID != "missing-session" || !unnamed.ConversationHistoryAvailable {
+		t.Fatalf("unnamed session = %#v, want preserved history identity", unnamed)
 	}
 }
 

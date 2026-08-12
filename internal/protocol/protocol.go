@@ -58,6 +58,8 @@ type Inbound struct {
 	OtherText        string          `json:"other_text,omitempty"`
 	Direction        string          `json:"direction,omitempty"`
 	Lines            int             `json:"lines,omitempty"`
+	Before           string          `json:"before,omitempty"`
+	Limit            int             `json:"limit,omitempty"`
 	Columns          int             `json:"columns,omitempty"`
 	Format           string          `json:"format,omitempty"`
 	Path             string          `json:"path,omitempty"`
@@ -193,5 +195,6 @@ var Capabilities = []string{
 	"self_update",
 	"structured_questions",
 	"slash_commands",
+	"conversation_history",
 	"pane_size_lease",
 }

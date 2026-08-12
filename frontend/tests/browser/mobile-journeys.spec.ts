@@ -98,6 +98,29 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           }));
           return;
         }
+        if (message.type === 'get_conversation_history') {
+          const older = Boolean(message.before);
+          queueMicrotask(() => this.server({
+            type: 'command_result',
+            action: message.type,
+            request_id: message.request_id,
+            ok: true,
+            phase: 'completed',
+            data: {
+              available: true,
+              entries: older
+                ? [{ id: 'turn-1', timestamp: '2026-08-12T09:00:00Z', role: 'user', text: 'first retained question' }]
+                : [
+                  { id: 'turn-2', timestamp: '2026-08-12T09:00:01Z', role: 'assistant', text: 'middle retained answer' },
+                  { id: 'turn-3', timestamp: '2026-08-12T09:00:02Z', role: 'user', text: 'latest retained question' },
+                ],
+              has_more: !older,
+              total: 3,
+              file_truncated: false,
+            },
+          }));
+          return;
+        }
         if (message.type === 'copy_agent_response') {
           queueMicrotask(() => this.server({
             type: 'command_result',
@@ -2138,6 +2161,53 @@ test('preserves unsafe prompt state for older relays without error data', async 
   await expect(prompt).toHaveValue('');
 });
 
+test('opens native conversation history and pages older turns', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: [
+      'attention_classification',
+      'clear_activities',
+      'directory_browser',
+      'self_update',
+      'structured_questions',
+      'slash_commands',
+      'conversation_history',
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'History app',
+      agent: 'omp',
+      session: 'Current session',
+      conversation_history_available: true,
+    }],
+  });
+
+  await page.getByRole('button', { name: 'Open History app on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('middle retained answer')).toBeVisible();
+  await expect(page.getByText('latest retained question')).toBeVisible();
+  await expect(page.getByText('3 turns in this session')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Load older turns' }).click();
+  await expect(page.getByText('first retained question')).toBeVisible();
+  await expect.poll(async () => (await commands(page)).find((command) => (
+    command.type === 'get_conversation_history' && command.before === 'turn-2'
+  ))).toMatchObject({ pane_id: 'w1:p1', before: 'turn-2' });
+
+  const search = page.getByRole('searchbox', { name: 'Search loaded conversation turns' });
+  await search.fill('first retained');
+  await expect(page.getByText('first retained question')).toBeVisible();
+  await expect(page.getByText('latest retained question')).toBeHidden();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeVisible();
+});
+
 test('keeps the Pi desktop UI separate from the generic mobile composer', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -2220,6 +2290,44 @@ test('keeps the Codex picker in the shared terminal with generic controls', asyn
   await expect.poll(async () => (await commands(page)).find((command) => (
     command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(['Right'])
   ))).toMatchObject({ pane_id: 'w1:p1', keys: ['Right'] });
+});
+
+test('finds and highlights matches across virtualized terminal output', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Search app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Search app on Fedora' }).click();
+  const lines = Array.from({ length: 320 }, (_, index) => {
+    if (index === 24) return 'needle early result';
+    if (index === 286) return 'needle late result';
+    return `terminal row ${index}`;
+  });
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: lines.join('\n'),
+  });
+
+  await page.getByRole('button', { name: 'Find in terminal', exact: true }).click();
+  const search = page.getByRole('searchbox', { name: 'Find in terminal output' });
+  await search.fill('needle');
+  await expect(page.getByText('1 of 2', { exact: true })).toBeVisible();
+  await expect(page.locator('mark.terminal-find-match.active')).toHaveText('needle');
+  await expect(page.getByRole('log')).toContainText('needle early result');
+
+  await page.getByRole('button', { name: 'Next match' }).click();
+  await expect(page.getByText('2 of 2', { exact: true })).toBeVisible();
+  await expect(page.locator('mark.terminal-find-match.active')).toHaveText('needle');
+  await expect(page.getByRole('log')).toContainText('needle late result');
+
+  await search.press('Escape');
+  await expect(search).toBeHidden();
+  await expect(page.locator('mark.terminal-find-match')).toHaveCount(0);
 });
 
 test('discovers slash commands per terminal and fills them before sending', async ({ page }) => {
@@ -2705,20 +2813,24 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   const tabKey = page.getByRole('button', { name: 'Tab', exact: true });
   const ctrlKey = page.getByRole('button', { name: 'Ctrl', exact: true });
   const shiftKey = page.getByRole('button', { name: 'Shift', exact: true });
-  const modifierLetter = page.getByRole('textbox', { name: 'Shift or Ctrl shortcut letter' });
+  const altKey = page.getByRole('button', { name: 'Alt', exact: true });
+  const modifierLetter = page.getByRole('textbox', { name: 'Modifier shortcut character' });
   const copyOutput = page.getByRole('button', { name: 'Copy', exact: true });
   await expect(attachImage.locator('svg')).toBeVisible();
   await expect(arrowKeys.locator('svg')).toBeVisible();
   await expect(enterKey).toBeVisible();
   await expect(ctrlKey).toBeVisible();
   await expect(shiftKey).toBeVisible();
+  await expect(altKey).toBeVisible();
   await expect(copyOutput).toBeVisible();
   await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
   await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(altKey).toHaveAttribute('aria-pressed', 'false');
   await expect(attachImage).not.toContainText('▧');
   await expect(arrowKeys).not.toContainText('⌨');
   await arrowKeys.click();
-  await expect(page.getByRole('button', { name: 'Up' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Up', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^(Home|End|Page up|Page down)$/ })).toHaveCount(0);
   await expect(page.locator('.arrow-popup').getByRole('button', { name: 'Enter' })).toHaveCount(0);
   await enterKey.click();
   expect((await commands(page)).find((command) => command.type === 'send_keys')).toMatchObject({
@@ -2783,9 +2895,27 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
   await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
   await expect(modifierLetter).toBeFocused();
+  await arrowKeys.click();
+  await page.getByRole('button', { name: 'Up', exact: true }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['ctrl+shift+up'])).length).toBe(1);
+  await altKey.click();
+  await expect(altKey).toHaveAttribute('aria-pressed', 'true');
+  await modifierLetter.press('x');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['ctrl+alt+shift+x'])).length).toBe(1);
+  await altKey.click();
   await enterKey.click();
-  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
-  await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['ctrl+shift+enter'])).length).toBe(1);
+  await expect(page.getByRole('status').filter({ hasText: 'Ctrl+Shift+Enter sent' })).toBeVisible();
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
+  await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');
+  await ctrlKey.click();
+  await shiftKey.click();
   await expect(modifierLetter).not.toBeFocused();
   await shiftKey.click();
   await expect(shiftKey).toHaveAttribute('aria-pressed', 'true');

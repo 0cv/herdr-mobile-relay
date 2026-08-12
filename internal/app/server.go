@@ -23,6 +23,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
@@ -75,6 +76,7 @@ type Server struct {
 	transitionEnrich func(context.Context, *coordinator.AgentState)
 	sessions         *session.Resolver
 	historyM         *history.Manager
+	conversationM    *conversation.Reader
 	profiles         *profiles.Resolver
 	webH             *web.Handler
 	herdrC           *herdr.Client
@@ -152,6 +154,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,
+		conversationM:       conversation.NewReader(home),
 		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		startedAt:           time.Now(),
@@ -166,6 +169,8 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 
 func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	agent.SessionName = ""
+	agent.SessionID = agent.Session
+	agent.ConversationHistoryAvailable = agent.SessionID != "" && conversation.Supported(agent.Agent)
 	if agent.Session == "" {
 		return
 	}
@@ -184,6 +189,10 @@ func (s *Server) Run(ctx context.Context) error {
 	s.transitionTasks = newLifecycleTasks(ctx)
 	s.historyTasks = newLifecycleTasks(ctx)
 	defer s.drainLifecycleWork()
+	if err := s.state.EnableTriagePersistence(s.cfg.CacheDir); err != nil {
+		s.recordSafeError("durable agent triage unavailable", err)
+		s.logger.Warn("durable agent triage unavailable", "error", err)
+	}
 
 	journal, err := activity.OpenJournal(s.cfg.CacheDir)
 	if err != nil {
@@ -375,6 +384,24 @@ func (s *Server) Run(ctx context.Context) error {
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
 		case "pane_applied":
 			s.handlePaneApplied(client, msg)
+		case "get_conversation_history":
+			agent, exists := s.state.Agent(inbound.PaneID)
+			if !exists {
+				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent is unavailable", inbound.PaneID, nil)
+				break
+			}
+			generation := s.state.Generation(inbound.PaneID)
+			page, historyErr := s.conversationM.Read(agent.Agent, agent.SessionID, inbound.Before, inbound.Limit)
+			if historyErr != nil {
+				s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
+				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
+				break
+			}
+			if !s.state.PaneSessionCurrent(inbound.PaneID, uint64(generation)) {
+				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
+				break
+			}
+			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, page)
 		case "get_activity":
 			limit := messageInt(msg["limit"], 500)
 			if limit < 1 || limit > 500 {

@@ -14,36 +14,40 @@ import (
 )
 
 type AgentState struct {
-	PaneID          string                 `json:"pane_id"`
-	RawPaneID       string                 `json:"raw_pane_id"`
-	TerminalID      string                 `json:"terminal_id"`
-	TabID           string                 `json:"tab_id"`
-	TabLabel        string                 `json:"tab_label"`
-	TabNumber       int                    `json:"tab_number"`
-	WorkspaceID     string                 `json:"workspace_id"`
-	Agent           string                 `json:"agent"`
-	Name            string                 `json:"name"`
-	Status          string                 `json:"status"`
-	Focused         bool                   `json:"_focused"`
-	Cwd             string                 `json:"cwd"`
-	Project         string                 `json:"project"`
-	Host            string                 `json:"host"`
-	Session         string                 `json:"session"`
-	SessionName     string                 `json:"session_name"`
-	UpdatedAt       int64                  `json:"updated_at"`
-	ActivitySeq     int64                  `json:"activity_seq,omitempty"`
-	BlockedEventID  string                 `json:"event_id,omitempty"`
-	AttentionKind   question.AttentionKind `json:"attention_kind,omitempty"`
-	Prompt          string                 `json:"prompt,omitempty"`
-	Command         string                 `json:"command,omitempty"`
-	Options         []string               `json:"options,omitempty"`
-	Interaction     *question.Interaction  `json:"interaction,omitempty"`
-	QuestionLayout  bool                   `json:"question_layout,omitempty"`
-	InteractionID   string                 `json:"-"`
-	PaneRevision    int                    `json:"-"`
-	StateRevision   int64                  `json:"pane_revision,omitempty"`
-	ScrollMaxOffset int                    `json:"-"`
-	ForegroundCwd   string                 `json:"-"`
+	PaneID                       string                 `json:"pane_id"`
+	RawPaneID                    string                 `json:"raw_pane_id"`
+	TerminalID                   string                 `json:"terminal_id"`
+	TabID                        string                 `json:"tab_id"`
+	TabLabel                     string                 `json:"tab_label"`
+	TabNumber                    int                    `json:"tab_number"`
+	WorkspaceID                  string                 `json:"workspace_id"`
+	Agent                        string                 `json:"agent"`
+	Name                         string                 `json:"name"`
+	Status                       string                 `json:"status"`
+	Focused                      bool                   `json:"_focused"`
+	Cwd                          string                 `json:"cwd"`
+	Project                      string                 `json:"project"`
+	Host                         string                 `json:"host"`
+	Session                      string                 `json:"session"`
+	SessionName                  string                 `json:"session_name"`
+	UpdatedAt                    int64                  `json:"updated_at"`
+	LastActiveAt                 int64                  `json:"last_active_at,omitempty"`
+	LastSeenAt                   int64                  `json:"last_seen_at,omitempty"`
+	ActivitySeq                  int64                  `json:"activity_seq,omitempty"`
+	BlockedEventID               string                 `json:"event_id,omitempty"`
+	AttentionKind                question.AttentionKind `json:"attention_kind,omitempty"`
+	Prompt                       string                 `json:"prompt,omitempty"`
+	Command                      string                 `json:"command,omitempty"`
+	Options                      []string               `json:"options,omitempty"`
+	Interaction                  *question.Interaction  `json:"interaction,omitempty"`
+	QuestionLayout               bool                   `json:"question_layout,omitempty"`
+	InteractionID                string                 `json:"-"`
+	SessionID                    string                 `json:"-"`
+	ConversationHistoryAvailable bool                   `json:"conversation_history_available,omitempty"`
+	PaneRevision                 int                    `json:"-"`
+	StateRevision                int64                  `json:"pane_revision,omitempty"`
+	ScrollMaxOffset              int                    `json:"-"`
+	ForegroundCwd                string                 `json:"-"`
 }
 
 type TransitionCallback func(paneID, agent, project, status string, revision int64)
@@ -62,6 +66,8 @@ type State struct {
 	finishedNotif      map[string]bool
 	completionRev      map[string]int64
 	generation         map[string]int64
+	triage             map[string]triageRecord
+	triagePath         string
 	inventoryReady     bool
 	inventoryErrorCode string
 	inventoryMessage   string
@@ -101,6 +107,7 @@ func NewState(logger *slog.Logger) *State {
 		generation:    make(map[string]int64),
 		pendingEvents: make(map[string]pendingEvent),
 		logger:        logger,
+		triage:        make(map[string]triageRecord),
 	}
 }
 
@@ -351,6 +358,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 	s.lastSuccessAt = s.lastAttemptAt
 
 	seen := make(map[string]bool, len(agents))
+	triageDirty := false
 	for _, incoming := range agents {
 		seen[incoming.PaneID] = true
 
@@ -367,6 +375,12 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.completionRev, incoming.PaneID)
 			existing = nil
 			exists = false
+		}
+		if exists {
+			cp.LastActiveAt = existing.LastActiveAt
+			cp.LastSeenAt = existing.LastSeenAt
+		} else {
+			s.applyTriageLocked(&cp)
 		}
 		if !exists && !replaced && !initialSnapshot && s.generation[incoming.PaneID] > 0 {
 			// Disappearance already ended the previous epoch. Reappearance must
@@ -410,6 +424,13 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		} else {
 			cp.UpdatedAt = time.Now().UnixMilli()
 		}
+		if cp.UpdatedAt > cp.LastActiveAt {
+			cp.LastActiveAt = cp.UpdatedAt
+		}
+		if !exists && initialSnapshot && cp.LastActiveAt == 0 &&
+			(attentionStatuses[cp.Status] || doneStatuses[cp.Status]) {
+			cp.LastActiveAt = s.lastAttemptAt.UnixMilli()
+		}
 
 		s.applyBlockedCycleLocked(&cp, existing)
 		attentionChanged := !blockedDetailsEqual(existing, &cp)
@@ -432,6 +453,15 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		s.agents[incoming.PaneID] = &cp
 		s.prevStatus[incoming.PaneID] = cp.Status
 		s.registerTransition(incoming.PaneID, prev, cp.Status, previousAttention)
+		if !exists && (doneStatuses[cp.Status] || cp.Status == "idle") {
+			if cp.LastActiveAt > cp.LastSeenAt {
+				s.unseenDone[incoming.PaneID] = true
+				delete(s.ackDone, incoming.PaneID)
+			} else if doneStatuses[cp.Status] && cp.LastActiveAt > 0 {
+				s.ackDone[incoming.PaneID] = true
+			}
+		}
+		triageDirty = s.syncTriageLocked(&cp) || triageDirty
 		if !preservesChatCompletion(prev, cp.Status, previousAttention) {
 			s.syncAttentionCompletionLocked(incoming.PaneID, previousAttention, cp.AttentionKind)
 		}
@@ -462,6 +492,9 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		if !now.Before(pending.expiresAt) {
 			delete(s.pendingEvents, paneID)
 		}
+	}
+	if triageDirty {
+		s.persistTriageLocked()
 	}
 }
 
@@ -532,6 +565,11 @@ func (s *State) CommitEventForSession(
 	previousAttention := a.AttentionKind
 	a.Status = status
 	a.UpdatedAt = updatedAt
+	if updatedAt > a.LastActiveAt {
+		a.LastActiveAt = updatedAt
+	} else if updatedAt <= 0 {
+		a.LastActiveAt = time.Now().UnixMilli()
+	}
 	if prev != status {
 		s.contentRev[paneID]++
 	}
@@ -551,6 +589,9 @@ func (s *State) CommitEventForSession(
 	s.registerTransition(paneID, prev, status, previousAttention)
 	if !preservesChatCompletion(prev, status, previousAttention) {
 		s.syncAttentionCompletionLocked(paneID, previousAttention, a.AttentionKind)
+	}
+	if s.syncTriageLocked(a) {
+		s.persistTriageLocked()
 	}
 	return true
 }
@@ -815,9 +856,13 @@ func (s *State) AcknowledgePane(paneID string) bool {
 	if !exists {
 		return false
 	}
+	agent.LastSeenAt = maxInt64(time.Now().UnixMilli(), agent.LastActiveAt)
 	if s.unseenDone[paneID] || doneStatuses[agent.Status] {
 		delete(s.unseenDone, paneID)
 		s.ackDone[paneID] = true
+	}
+	if s.syncTriageLocked(agent) {
+		s.persistTriageLocked()
 	}
 	return true
 }

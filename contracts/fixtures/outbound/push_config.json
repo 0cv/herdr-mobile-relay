@@ -15,6 +15,7 @@
     "self_update",
     "structured_questions",
     "slash_commands",
+    "conversation_history",
     "pane_size_lease"
   ],
   "inventory": {"state": "ready"},
