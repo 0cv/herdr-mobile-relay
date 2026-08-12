@@ -3,17 +3,25 @@
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
   import { activityMatchesSearch, activityTone } from '$lib/activity';
+  import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
   import { navigate } from '$lib/router';
   import { relayStore } from '$lib/store';
   import type { Activity } from '$lib/types';
 
   const activities = relayStore.activities;
+  const agents = relayStore.agents;
   let search = $state('');
   let confirmOpen = $state(false);
   let deleting = $state(false);
+  let now = $state(Date.now());
   const visible = $derived($activities.filter((activity) => activityMatchesSearch(activity, search.trim())));
+  const daily = $derived(dailyActivitySummary($activities, $agents, now));
 
-  onMount(() => relayStore.requestActivities());
+  onMount(() => {
+    relayStore.requestActivities();
+    const timer = setInterval(() => { now = Date.now(); }, 60_000);
+    return () => clearInterval(timer);
+  });
 
   function open(activity: Activity) {
     navigate({ view: 'activity_detail', key: activity.activity_key });
@@ -40,6 +48,34 @@
     <h2 id="activity-title">Activity</h2>
     <Button variant="danger" size="sm" disabled={!$activities.length || deleting} onclick={() => { confirmOpen = true; }}>Delete all</Button>
   </div>
+  <section class="activity-summary" aria-labelledby="activity-summary-title">
+    <header>
+      <div>
+        <h3 id="activity-summary-title">Last 24 hours</h3>
+        <p>Across {daily.relays} {daily.relays === 1 ? 'relay' : 'relays'} · retained activity</p>
+      </div>
+      <time datetime={new Date(daily.since).toISOString()}>Since {new Date(daily.since).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>
+    </header>
+    <div class="activity-summary-metrics">
+      <div><strong>{formatWorkingDuration(daily.workingMs)}</strong><span>Working</span></div>
+      <div><strong>{daily.attention}</strong><span>Needed you</span></div>
+      <div><strong>{daily.completions}</strong><span>Completed</span></div>
+      <div><strong>{daily.actions}</strong><span>Actions</span></div>
+    </div>
+    {#if daily.agents.length}
+      <details>
+        <summary>By agent <span>{daily.agents.length}</span></summary>
+        <div class="activity-summary-agents">
+          {#each daily.agents as item (item.key)}
+            <div>
+              <span><strong>{item.label}</strong><small>@{item.host}</small></span>
+              <span>{formatWorkingDuration(item.workingMs)} · {item.attention} needs · {item.completions} done</span>
+            </div>
+          {/each}
+        </div>
+      </details>
+    {/if}
+  </section>
   <label class="sr-only" for="activity-search">Search activity</label>
   <input id="activity-search" class="activity-search" bind:value={search} type="search" placeholder="Search activity…" />
   <div class="activity-list" aria-live="polite">

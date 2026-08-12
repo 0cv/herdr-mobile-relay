@@ -88,6 +88,9 @@ func TestOnlyInitialSnapshotUsesZeroUpdatedAt(t *testing.T) {
 	if reappeared.UpdatedAt <= 0 {
 		t.Fatalf("reappeared updated_at = %d, want epoch milliseconds", reappeared.UpdatedAt)
 	}
+	if reappeared.LastActiveAt != 0 {
+		t.Fatalf("reappeared last_active_at = %d, want unknown without observed activity", reappeared.LastActiveAt)
+	}
 }
 
 func TestActivitySequenceAdvancesUpdatedAt(t *testing.T) {
@@ -109,6 +112,27 @@ func TestActivitySequenceAdvancesUpdatedAt(t *testing.T) {
 	}
 	if updated.ActivitySeq != 11 {
 		t.Fatalf("activity sequence = %d, want 11", updated.ActivitySeq)
+	}
+	if updated.LastActiveAt <= 0 {
+		t.Fatalf("activity last_active_at = %d, want epoch milliseconds", updated.LastActiveAt)
+	}
+}
+
+func TestInventoryMetadataDoesNotAdvanceLastActiveAt(t *testing.T) {
+	s := testState()
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Status: "idle", Name: "old",
+	}}, s.RevisionCounter())
+
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", Status: "idle", Name: "new",
+	}}, s.RevisionCounter())
+	updated, _ := s.Agent("p1")
+	if updated.UpdatedAt <= 0 {
+		t.Fatalf("metadata updated_at = %d, want epoch milliseconds", updated.UpdatedAt)
+	}
+	if updated.LastActiveAt != 0 {
+		t.Fatalf("metadata last_active_at = %d, want unknown without observed activity", updated.LastActiveAt)
 	}
 }
 

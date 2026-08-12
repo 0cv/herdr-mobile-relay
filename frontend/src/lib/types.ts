@@ -47,6 +47,46 @@ export interface SlashCommandCatalog {
   truncated: boolean;
 }
 
+export interface WorkspaceTreeEntry {
+  path: string;
+  name: string;
+  kind: 'directory' | 'file';
+  size?: number;
+}
+
+export interface WorkspaceTree {
+  root: string;
+  entries: WorkspaceTreeEntry[];
+  truncated?: boolean;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  media_type: string;
+  kind: 'text' | 'image';
+  text?: string;
+  data_url?: string;
+  size: number;
+}
+
+export interface WorkspaceGitFile {
+  path: string;
+  original_path?: string;
+  status: string;
+}
+
+export interface WorkspaceGitStatus {
+  available: boolean;
+  branch?: string;
+  files: WorkspaceGitFile[];
+  truncated?: boolean;
+}
+
+export interface WorkspaceGitDiff {
+  path: string;
+  diff: string;
+}
+
 export interface QuestionOption {
   index: number;
   label: string;
@@ -131,12 +171,22 @@ export interface Activity {
   activity_key: string;
 }
 
+export interface ConversationTool {
+  id?: string;
+  name: string;
+  input?: string;
+  output?: string;
+  error?: boolean;
+  truncated?: boolean;
+}
+
 export interface ConversationEntry {
   id: string;
   timestamp: string;
   role: 'user' | 'assistant';
   text: string;
   truncated?: boolean;
+  tools?: ConversationTool[];
 }
 
 export interface ConversationPage {

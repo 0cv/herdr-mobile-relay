@@ -424,12 +424,10 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		} else {
 			cp.UpdatedAt = time.Now().UnixMilli()
 		}
-		if cp.UpdatedAt > cp.LastActiveAt {
+		activityAdvanced := pendingTimestamp || (exists &&
+			(existing.Status != cp.Status || existing.ActivitySeq != cp.ActivitySeq))
+		if activityAdvanced && cp.UpdatedAt > cp.LastActiveAt {
 			cp.LastActiveAt = cp.UpdatedAt
-		}
-		if !exists && initialSnapshot && cp.LastActiveAt == 0 &&
-			(attentionStatuses[cp.Status] || doneStatuses[cp.Status]) {
-			cp.LastActiveAt = s.lastAttemptAt.UnixMilli()
 		}
 
 		s.applyBlockedCycleLocked(&cp, existing)
@@ -457,7 +455,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			if cp.LastActiveAt > cp.LastSeenAt {
 				s.unseenDone[incoming.PaneID] = true
 				delete(s.ackDone, incoming.PaneID)
-			} else if doneStatuses[cp.Status] && cp.LastActiveAt > 0 {
+			} else if doneStatuses[cp.Status] && (cp.LastActiveAt > 0 || cp.LastSeenAt > 0) {
 				s.ackDone[incoming.PaneID] = true
 			}
 		}
@@ -673,6 +671,14 @@ func (s *State) registerTransition(
 			delete(s.completionRev, paneID)
 		}
 		if status == "blocked" && prev != "blocked" && s.onTransition != nil {
+			a := s.agents[paneID]
+			agent, project := "", ""
+			if a != nil {
+				agent, project = a.Agent, a.Project
+			}
+			s.onTransition(paneID, agent, project, status, s.revision[paneID])
+		}
+		if status == "working" && prev != "working" && s.onTransition != nil {
 			a := s.agents[paneID]
 			agent, project := "", ""
 			if a != nil {

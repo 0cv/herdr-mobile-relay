@@ -5,6 +5,42 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-12
+
+### Added
+
+- Add workspace-first home cards, global agent search through the phone's
+  magnifying-glass button, and a workspace agent rail on wider displays.
+- Add read-only, symlink-confined workspace file, image, Git status, and unified
+  diff inspection with bounded output, hardened Git execution, theme-aware diff
+  colors, and per-diff pinch/button zoom.
+- Add a focused user/final-answer conversation view plus full history with safe
+  structured Markdown, per-message Markdown copy, and collapsible tool calls
+  and results.
+- Add isolated HTTP(S) links and conservative key-hint actions to terminal
+  output.
+- Add a retained 24-hour activity summary with observed working time,
+  attention, completion, action, relay, and per-agent totals.
+- Add private rotating JSONL attempt/result attribution for remote agent writes
+  without storing prompt, response, or upload content.
+
+### Changed
+
+- Raise the guarded initial page payload ceiling from 96 KiB to 104 KiB for the
+  expanded navigation and inspection UI, while moving push-only notification
+  artwork out of the page bootstrap.
+
+### Fixed
+
+- Keep opened workspace cards expanded across agent navigation.
+- Prevent non-agent pane metadata from briefly appearing as empty agent tabs.
+- Let the mobile workspace sidebar collapse by swipe or button, and vertically
+  center the Git branch label.
+- Avoid repeating tab labels inside workspace agent tiles, and show relative
+  activity ages only after the relay observes actual agent activity.
+- Explain that the 16 MiB conversation read bound leaves older turns in the
+  harness log and is unrelated to relay restarts.
+
 ## [0.14.11] - 2026-08-12
 
 ### Added
@@ -380,7 +416,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.11...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.11...v0.15.0
 [0.14.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.10...v0.14.11
 [0.14.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.9...v0.14.10
 [0.14.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.8...v0.14.9

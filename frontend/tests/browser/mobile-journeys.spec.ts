@@ -98,6 +98,58 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           }));
           return;
         }
+        if (String(message.type).startsWith('workspace_')) {
+          let data: Record<string, unknown>;
+          switch (message.type) {
+            case 'workspace_tree':
+              data = {
+                root: '/work/mobile',
+                entries: [
+                  { path: 'README.md', name: 'README.md', kind: 'file', size: 24 },
+                  { path: 'src', name: 'src', kind: 'directory' },
+                  { path: 'src/main.ts', name: 'main.ts', kind: 'file', size: 42 },
+                ],
+              };
+              break;
+            case 'workspace_file':
+              data = {
+                path: message.path,
+                media_type: 'text/markdown',
+                kind: 'text',
+                text: '# Workspace preview\n\nRead-only file contents.',
+                size: 46,
+              };
+              break;
+            case 'workspace_git_status':
+              data = {
+                available: true,
+                branch: 'feature/mobile',
+                files: [{ path: 'README.md', status: ' M' }],
+              };
+              break;
+            default:
+              data = {
+                path: message.path,
+                diff: [
+                  'diff --git a/README.md b/README.md',
+                  '--- a/README.md',
+                  '+++ b/README.md',
+                  '@@ -1 +1 @@',
+                  '-Old text',
+                  '+Read-only change',
+                ].join('\n'),
+              };
+          }
+          queueMicrotask(() => this.server({
+            type: 'command_result',
+            action: message.type,
+            request_id: message.request_id,
+            ok: true,
+            phase: 'completed',
+            data,
+          }));
+          return;
+        }
         if (message.type === 'get_conversation_history') {
           const older = Boolean(message.before);
           queueMicrotask(() => this.server({
@@ -111,12 +163,24 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
               entries: older
                 ? [{ id: 'turn-1', timestamp: '2026-08-12T09:00:00Z', role: 'user', text: 'first retained question' }]
                 : [
-                  { id: 'turn-2', timestamp: '2026-08-12T09:00:01Z', role: 'assistant', text: 'middle retained answer' },
-                  { id: 'turn-3', timestamp: '2026-08-12T09:00:02Z', role: 'user', text: 'latest retained question' },
+                  {
+                    id: 'turn-2',
+                    timestamp: '2026-08-12T09:00:01Z',
+                    role: 'assistant',
+                    text: 'intermediate progress update',
+                    tools: [{ id: 'tool-1', name: 'Read', input: 'README.md', output: 'file contents' }],
+                  },
+                  {
+                    id: 'turn-2-final',
+                    timestamp: '2026-08-12T09:00:02Z',
+                    role: 'assistant',
+                    text: '# middle retained answer',
+                  },
+                  { id: 'turn-3', timestamp: '2026-08-12T09:00:03Z', role: 'user', text: 'latest retained question' },
                 ],
               has_more: !older,
-              total: 3,
-              file_truncated: false,
+              total: 4,
+              file_truncated: true,
             },
           }));
           return;
@@ -221,13 +285,15 @@ test('keeps activity cards inside the page and confirms permanent deletion', asy
   await server(page, 0, {
     type: 'activity_history',
     activities: [{
-      id: 'activity-1', timestamp: Date.now(), summary: 'codex completed',
-      project: 'herdr-mobile-relay', agent: 'codex', status: 'completed',
+      id: 'activity-1', timestamp: Date.now(), kind: 'finished', summary: 'codex completed',
+      pane_id: 'w1:p1', project: 'herdr-mobile-relay', agent: 'codex', status: 'completed',
     }],
   });
 
   await page.getByRole('button', { name: 'Activity history' }).click();
   const activity = page.getByRole('button', { name: /codex completed/ });
+  await expect(page.getByRole('heading', { name: 'Last 24 hours' })).toBeVisible();
+  await expect(page.locator('.activity-summary-metrics > div').filter({ hasText: 'Completed' })).toContainText('1');
   await expect(activity).toBeVisible();
   const headingBox = await page.getByRole('heading', { name: 'Activity', level: 2 }).boundingBox();
   const deleteBox = await page.getByRole('button', { name: 'Delete all' }).boundingBox();
@@ -375,10 +441,8 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
   const leadingInset = connectionBox!.x + connectionBox!.width / 2 - headerBox!.x;
   const trailingInset = headerBox!.x + headerBox!.width - settingsBox!.x - settingsBox!.width / 2;
   expect(Math.abs(leadingInset - trailingInset)).toBeLessThan(2);
-  await expect(page.getByText('Fedora app')).toBeVisible();
-  await expect(page.getByText('Mac app')).toBeVisible();
-  await expect(page.getByText('@Fedora Workstation')).toBeVisible();
-  await expect(page.getByText('@Mac')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Fedora app on Fedora Workstation' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Mac app on Mac' })).toBeVisible();
 });
 
 test('sorts a cold idle snapshot by the latest Herdr activity', async ({ page }) => {
@@ -409,7 +473,50 @@ test('sorts a cold idle snapshot by the latest Herdr activity', async ({ page })
     ],
   });
 
-  await expect(page.locator('.agent-card .agent-meta').first()).toContainText('codex_review_bugs');
+  await expect(page.locator('.workspace-card .workspace-tab h3').first()).toHaveText('codex_review_bugs');
+});
+
+test('keeps an opened workspace expanded across tab navigation and inventory refreshes', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  const agents = [
+    {
+      pane_id: 'w1:p1',
+      workspace_id: 'workspace-mobile',
+      status: 'idle',
+      project: 'Mobile app',
+      agent: 'codex',
+      cwd: '/work/mobile',
+    },
+    {
+      pane_id: 'w2:p1',
+      workspace_id: 'workspace-docs',
+      status: 'idle',
+      project: 'Docs',
+      agent: 'claude',
+      cwd: '/work/docs',
+    },
+  ];
+  await server(page, 0, { type: 'agents', agents });
+
+  const workspace = page.locator('details.workspace-card').filter({ hasText: 'Mobile app' });
+  await expect(workspace).toHaveCount(1);
+  await workspace.locator('summary').click();
+  await expect(workspace).toHaveAttribute('open', '');
+  await workspace.getByRole('button', { name: 'Open Mobile app on Fedora' }).click();
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(workspace).toHaveAttribute('open', '');
+
+
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ ...agents[0], activity_seq: 2 }, { ...agents[1] }],
+  });
+
+  await expect(workspace).toHaveAttribute('open', '');
+  await expect(workspace.getByRole('button', { name: 'Open Mobile app on Fedora' })).toBeVisible();
 });
 
 test('reconnects and blocks mutations for an incompatible relay protocol', async ({ page }) => {
@@ -506,7 +613,7 @@ test('shows inventory failure instead of zero agents and recovers without reconn
   });
 
   await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toBeHidden();
-  await expect(page.getByText('Recovered relay')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Recovered relay on Fedora' })).toBeVisible();
   expect(await socketCount(page)).toBe(1);
 });
 
@@ -2162,6 +2269,16 @@ test('preserves unsafe prompt state for older relays without error data', async 
 });
 
 test('opens native conversation history and pages older turns', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        async writeText(text: string) {
+          Reflect.set(window, '__copiedConversation', text);
+        },
+      },
+    });
+  });
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -2192,7 +2309,18 @@ test('opens native conversation history and pages older turns', async ({ page })
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('middle retained answer')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeVisible();
-  await expect(page.getByText('3 turns in this session')).toBeVisible();
+  await expect(page.getByText('4 recorded messages')).toBeVisible();
+  await expect(page.getByText(/session log is larger than 16 MB/)).toBeVisible();
+  await page.getByRole('button', { name: 'Copy History app message as Markdown' }).click();
+  await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedConversation')))
+    .toBe('# middle retained answer');
+  await expect(page.getByText('intermediate progress update')).toBeHidden();
+  await expect(page.getByText('Read', { exact: true })).toBeHidden();
+  await page.getByRole('button', { name: 'Full history' }).click();
+  await expect(page.getByText('intermediate progress update')).toBeVisible();
+  await expect(page.getByText('Read', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Conversation', exact: true }).click();
+  await expect(page.getByText('intermediate progress update')).toBeHidden();
 
   await page.getByRole('button', { name: 'Load older turns' }).click();
   await expect(page.getByText('first retained question')).toBeVisible();
@@ -2200,12 +2328,155 @@ test('opens native conversation history and pages older turns', async ({ page })
     command.type === 'get_conversation_history' && command.before === 'turn-2'
   ))).toMatchObject({ pane_id: 'w1:p1', before: 'turn-2' });
 
-  const search = page.getByRole('searchbox', { name: 'Search loaded conversation turns' });
+  const search = page.getByRole('searchbox', { name: 'Search displayed conversation' });
   await search.fill('first retained');
   await expect(page.getByText('first retained question')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeHidden();
   await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeVisible();
+});
+
+test('inspects workspace files and Git changes without write controls', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: [
+      'attention_classification',
+      'clear_activities',
+      'directory_browser',
+      'self_update',
+      'structured_questions',
+      'slash_commands',
+      'workspace_inspection',
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      workspace_id: 'workspace-mobile',
+      status: 'working',
+      project: 'Workspace app',
+      agent: 'codex',
+      cwd: '/work/mobile',
+    }],
+  });
+
+  await page.getByRole('button', { name: 'Open Workspace app on Fedora' }).click();
+  await page.getByRole('button', { name: 'Inspect workspace' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Workspace' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('/work/mobile', { exact: true })).toBeVisible();
+  await expect(dialog.getByText('feature/mobile', { exact: true })).toBeVisible();
+  const sectionTabsBox = await dialog.getByRole('tablist', { name: 'Workspace sections' }).boundingBox();
+  const branchBox = await dialog.getByText('feature/mobile', { exact: true }).boundingBox();
+  expect(sectionTabsBox).not.toBeNull();
+  expect(branchBox).not.toBeNull();
+  expect(Math.abs(
+    sectionTabsBox!.y + sectionTabsBox!.height / 2
+    - (branchBox!.y + branchBox!.height / 2),
+  )).toBeLessThan(2);
+
+
+  await dialog.locator('aside').getByRole('button', { name: 'README.md', exact: true }).click();
+  await expect(dialog.getByRole('textbox', { name: 'Contents of README.md' }))
+    .toHaveValue('# Workspace preview\n\nRead-only file contents.');
+
+  await dialog.getByRole('tab', { name: /Changes/ }).click();
+  await dialog.locator('aside').getByRole('button', { name: /README\.md/ }).click();
+  const diff = dialog.getByLabel('Diff for README.md');
+  await expect(diff).toContainText('diff --git a/README.md b/README.md');
+  await expect(diff.locator('.diff-hunk')).toHaveText('@@ -1 +1 @@');
+  await expect(diff.locator('.diff-deletion')).toHaveText('-Old text');
+  await expect(diff.locator('.diff-addition')).toHaveText('+Read-only change');
+  const initialDiffFontSize = await diff.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+  await diff.dispatchEvent('pointerdown', {
+    pointerType: 'touch', pointerId: 11, isPrimary: true, clientX: 80, clientY: 180,
+  });
+  await diff.dispatchEvent('pointerdown', {
+    pointerType: 'touch', pointerId: 12, isPrimary: false, clientX: 180, clientY: 180,
+  });
+  await diff.dispatchEvent('pointermove', {
+    pointerType: 'touch', pointerId: 12, isPrimary: false, clientX: 240, clientY: 180,
+  });
+  await diff.dispatchEvent('pointerup', {
+    pointerType: 'touch', pointerId: 12, isPrimary: false, clientX: 240, clientY: 180,
+  });
+  await diff.dispatchEvent('pointerup', {
+    pointerType: 'touch', pointerId: 11, isPrimary: true, clientX: 80, clientY: 180,
+  });
+  await expect.poll(() => diff.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)))
+    .toBeGreaterThan(initialDiffFontSize * 1.4);
+  const changedFiles = dialog.locator('aside');
+  await changedFiles.dispatchEvent('pointerdown', {
+    pointerType: 'touch', pointerId: 7, isPrimary: true, clientX: 150, clientY: 220,
+  });
+  await changedFiles.dispatchEvent('pointerup', {
+    pointerType: 'touch', pointerId: 7, isPrimary: true, clientX: 40, clientY: 224,
+  });
+  await expect(changedFiles).toHaveCount(0);
+  const showChanges = dialog.getByRole('button', { name: 'Show changed-file list' });
+  await expect(showChanges).toBeVisible();
+  await showChanges.click();
+  await expect(dialog.locator('aside')).toBeVisible();
+
+  await expect(dialog.getByRole('button', { name: /save|write|apply|commit/i })).toHaveCount(0);
+
+  await expect.poll(async () => (await commands(page))
+    .map((command) => String(command.type))
+    .filter((type) => type.startsWith('workspace_'))
+    .sort()).toEqual([
+    'workspace_file',
+    'workspace_git_diff',
+    'workspace_git_status',
+    'workspace_tree',
+  ]);
+});
+
+test('uses a workspace agent rail in a tablet terminal', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      {
+        pane_id: 'w1:p1',
+        workspace_id: 'workspace-mobile',
+        status: 'working',
+        project: 'Mobile workspace',
+        agent: 'codex',
+        cwd: '/work/mobile',
+      },
+      {
+        pane_id: 'w2:p1',
+        workspace_id: 'workspace-api',
+        status: 'idle',
+        project: 'API workspace',
+        agent: 'claude',
+        cwd: '/work/api',
+      },
+    ],
+  });
+
+  await page.getByRole('button', { name: 'Search all agents' }).click();
+  const jump = page.getByRole('dialog', { name: 'Jump to agent' });
+  await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Mobile workspace');
+  await jump.getByRole('button', { name: /Mobile workspace/ }).click();
+
+  const rail = page.getByRole('complementary', { name: 'Agent navigation' });
+  const terminal = page.getByRole('main', { name: 'Terminal for Mobile workspace' });
+  await expect(rail).toBeVisible();
+  await expect(terminal).toBeVisible();
+  const [railBox, terminalBox] = await Promise.all([rail.boundingBox(), terminal.boundingBox()]);
+  expect(railBox).not.toBeNull();
+  expect(terminalBox).not.toBeNull();
+  expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(terminalBox!.x + 1);
+  expect(terminalBox!.width).toBeGreaterThan(600);
+
+  await rail.getByRole('button', { name: /API workspace/ }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for API workspace' })).toBeVisible();
 });
 
 test('keeps the Pi desktop UI separate from the generic mobile composer', async ({ page }) => {
@@ -2286,7 +2557,7 @@ test('keeps the Codex picker in the shared terminal with generic controls', asyn
   await expect(page.getByRole('button', { name: 'Previous result' })).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Arrow keys' }).click();
-  await page.getByRole('button', { name: 'Right' }).click();
+  await page.getByRole('button', { name: 'Right', exact: true }).click();
   await expect.poll(async () => (await commands(page)).find((command) => (
     command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(['Right'])
   ))).toMatchObject({ pane_id: 'w1:p1', keys: ['Right'] });
@@ -2342,7 +2613,10 @@ test('discovers slash commands per terminal and fills them before sending', asyn
     ],
   });
 
-  await page.getByRole('button', { name: 'Open Codex app on Fedora' }).click();
+  await page.getByRole('button', { name: 'Search all agents' }).click();
+  const jump = page.getByRole('dialog', { name: 'Jump to agent' });
+  await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Codex app');
+  await jump.getByRole('button', { name: /Codex app/ }).click();
   const codexComposer = page.getByRole('combobox', { name: 'Prompt' });
   const restingComposerBox = await codexComposer.boundingBox();
   await codexComposer.fill('/');
@@ -2387,7 +2661,9 @@ test('discovers slash commands per terminal and fills them before sending', asyn
   });
 
   await page.getByRole('button', { name: 'Back' }).click();
-  await page.getByRole('button', { name: 'Open Claude app on Fedora' }).click();
+  await page.getByRole('button', { name: 'Search all agents' }).click();
+  await jump.getByRole('searchbox', { name: 'Search agents and workspaces' }).fill('Claude app');
+  await jump.getByRole('button', { name: /Claude app/ }).click();
   const claudeComposer = page.getByRole('combobox', { name: 'Prompt' });
   await claudeComposer.fill('/he');
   await expect(page.getByRole('option', { name: /\/help/ })).toBeVisible();
@@ -2928,12 +3204,16 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
     .toBe(refreshesBeforeBack + 1);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode' }] });
-  await expect(page.getByRole('heading', { name: 'Working' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeVisible();
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '     + Thought: 1.0s\n\u001b[38;5;6m     Safe <img src=x onerror=alert(1)>\u001b[0m\n     Details\n     ▣ Build · model · 1s' });
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '     + Thought: 1.0s\n\u001b[38;5;6m     Safe <img src=x onerror=alert(1)>\u001b[0m\n     Docs https://example.com/report?q=1\n     Details\n     ▣ Build · model · 1s' });
   const terminal = page.getByRole('log');
   await expect(terminal).toContainText('Safe <img src=x onerror=alert(1)>');
   expect(await terminal.locator('img').count()).toBe(0);
+  const terminalLink = terminal.getByRole('link', { name: 'https://example.com/report?q=1' });
+  await expect(terminalLink).toHaveAttribute('target', '_blank');
+  await expect(terminalLink).toHaveAttribute('rel', 'noopener noreferrer');
+  await expect(terminalLink).toHaveAttribute('referrerpolicy', 'no-referrer');
   await page.evaluate(() => {
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -2947,7 +3227,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await copyOutput.click();
   await expect.poll(() => page.evaluate(
     () => (window as typeof window & { __copiedTerminal?: string }).__copiedTerminal,
-  )).toBe('Safe <img src=x onerror=alert(1)>\nDetails');
+  )).toBe('Safe <img src=x onerror=alert(1)>\nDocs https://example.com/report?q=1\nDetails');
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
@@ -3166,6 +3446,8 @@ test('resets the home page scroll offset before opening a terminal', async ({ pa
     })),
   });
 
+  const lastWorkspace = page.locator('.workspace-card').filter({ hasText: 'Scrollable agent 20' });
+  await lastWorkspace.locator('summary').click();
   const lastAgent = page.getByRole('button', { name: 'Open Scrollable agent 20 on Fedora' });
   await page.evaluate(() => {
     document.documentElement.style.minHeight = '300vh';

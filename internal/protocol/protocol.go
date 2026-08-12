@@ -197,4 +197,5 @@ var Capabilities = []string{
 	"slash_commands",
 	"conversation_history",
 	"pane_size_lease",
+	"workspace_inspection",
 }

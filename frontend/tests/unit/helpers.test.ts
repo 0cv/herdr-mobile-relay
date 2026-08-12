@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { activityForNotification, activityMatchesSearch } from '$lib/activity';
 import {
   agentActivitySeq,
+  agentLastActiveAt,
   agentNeedsInspection,
   agentStatusGroup,
   agentStatusTone,
@@ -305,12 +306,13 @@ describe('agent state and sorting', () => {
     expect(tabName(agent({}))).toBe('');
   });
 
-  it('sorts activity newest-first with stable host fallback', () => {
+  it('sorts observed activity newest-first without treating metadata updates as activity', () => {
     expect(agentUpdatedAt(agent({ updated_at: 'invalid' }))).toBe(0);
+    expect(agentLastActiveAt(agent({ updated_at: 5 }))).toBe(0);
     expect(agentActivitySeq(agent({ activity_seq: 'invalid' }))).toBe(0);
     const sorted = sortedAgents([
-      agent({ pane_id: 'relay::old', raw_pane_id: 'old', updated_at: 1 }),
-      agent({ pane_id: 'relay::new', raw_pane_id: 'new', updated_at: 3 }),
+      agent({ pane_id: 'relay::old', raw_pane_id: 'old', last_active_at: 1, updated_at: 9 }),
+      agent({ pane_id: 'relay::new', raw_pane_id: 'new', last_active_at: 3, updated_at: 2 }),
     ]);
     expect(sorted.map((item) => item.raw_pane_id)).toEqual(['new', 'old']);
   });

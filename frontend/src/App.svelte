@@ -4,13 +4,16 @@
   import ActivityDetail from '$components/ActivityDetail.svelte';
   import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
+  import AgentRail from '$components/AgentRail.svelte';
   import ConversationHistory from '$components/ConversationHistory.svelte';
   import LaunchView from '$components/LaunchView.svelte';
+  import GlobalJump from '$components/GlobalJump.svelte';
   import LockScreen from '$components/LockScreen.svelte';
   import ManageDialog from '$components/ManageDialog.svelte';
   import SettingsView from '$components/SettingsView.svelte';
   import TerminalView from '$components/TerminalView.svelte';
   import UpdateProgressDialog from '$components/UpdateProgressDialog.svelte';
+  import WorkspaceInspector from '$components/WorkspaceInspector.svelte';
   import Button from '$components/ui/Button.svelte';
   import Toast from '$components/ui/Toast.svelte';
   import { activityForNotification } from '$lib/activity';
@@ -62,6 +65,9 @@
   const appUpdates = appUpdateStatus;
 
   let manageOpen = $state(false);
+  let jumpOpen = $state(false);
+  let workspaceOpen = $state(false);
+  let workspaceDisclosure = $state<Record<string, boolean>>({});
   let lastBlocked = new Set<string>();
   let previousView = '';
   let terminalUnavailable = $state(false);
@@ -77,6 +83,10 @@
   const conversationHistoryAvailable = $derived(Boolean(
     activeAgent?.conversation_history_available
     && activeConnection?.capabilities.includes('conversation_history'),
+  ));
+  const workspaceInspectionAvailable = $derived(Boolean(
+    activeAgent?.cwd
+    && activeConnection?.capabilities.includes('workspace_inspection'),
   ));
   const connected = $derived([...$connections.values()].filter((connection) => connection.status === 'connected').length);
   const connecting = $derived([...$connections.values()].some((connection) => connection.status === 'connecting'));
@@ -412,8 +422,8 @@
       body: approvalPromptPreview(agent) || fallback,
       tag: `herdr-${target.host}-${target.pane_id}`,
       renotify: true,
-      icon: typeof HERDR_NOTIFICATION_ICON === 'string' ? HERDR_NOTIFICATION_ICON : undefined,
-      badge: typeof HERDR_NOTIFICATION_BADGE === 'string' ? HERDR_NOTIFICATION_BADGE : undefined,
+      icon: 'icons/icon-192.png',
+      badge: 'icons/notification-badge.png',
       actions: kind === 'approval' && total >= 2 ? [{ action: 'approve', title: 'Approve once' }] : [],
       data: {
         url: viewUrl({ view: 'notification', target: open }),
@@ -446,6 +456,11 @@
     </div>
     {#if $currentView.view === 'agents'}<span class="agent-count">{connected}/{$relays.length} relays{#if $agents.length} · {$agents.length}{/if}</span>{/if}
     <nav aria-label="Application">
+      <Button class="global-jump-button" variant="ghost" size="icon" aria-label="Search all agents" title="Search all agents" onclick={() => { jumpOpen = true; }}>
+        <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false">
+          <circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path>
+        </svg>
+      </Button>
       {#if $currentView.view === 'terminal'}
         <Button
           variant="ghost"
@@ -458,6 +473,18 @@
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
             <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path>
             <path d="M4 5.5v15M8 7h8M8 11h6"></path>
+          </svg>
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Inspect workspace"
+          disabled={!workspaceInspectionAvailable}
+          title={workspaceInspectionAvailable ? 'Inspect workspace files and Git changes' : 'Workspace inspection is unavailable'}
+          onclick={() => { workspaceOpen = true; }}
+        >
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M3 6.5h7l2 2h9v10H3z"></path>
           </svg>
         </Button>
         <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
@@ -504,7 +531,10 @@
     </main>
   {:else if $currentView.view === 'terminal' && activeAgent}
     {#key activeAgent.pane_id}
-      <TerminalView agent={activeAgent} allAgents={$agents} frame={$frames.get(activeAgent.pane_id)} responding={$responding} />
+      <div class="terminal-layout">
+        <AgentRail agents={$agents} active={activeAgent} onopen={openAgent} onjump={() => { jumpOpen = true; }} />
+        <TerminalView agent={activeAgent} allAgents={$agents} frame={$frames.get(activeAgent.pane_id)} responding={$responding} />
+      </div>
     {/key}
   {:else if $currentView.view === 'terminal'}
     <main class="page terminal-loading" aria-label={terminalUnavailable ? 'Agent unavailable' : 'Opening agent'}>
@@ -516,11 +546,13 @@
       {/if}
     </main>
   {:else}
-    <AgentList agents={$agents} relays={$relays} connections={$connections} responding={$responding} onopen={openAgent} />
+    <AgentList bind:workspaceDisclosure agents={$agents} relays={$relays} connections={$connections} responding={$responding} onopen={openAgent} />
   {/if}
 </div>
 
 <UpdateProgressDialog />
 <ManageDialog bind:open={manageOpen} agent={activeAgent} />
+<GlobalJump bind:open={jumpOpen} agents={$agents} onselect={openAgent} />
+<WorkspaceInspector bind:open={workspaceOpen} agent={activeAgent} />
 <LockScreen />
 <Toast />

@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.14.11`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.14.11) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.15.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -89,15 +89,20 @@ The relay continues to support Herdr 0.7.5 or newer.
 - Monitor and control agents across several computers, with new, closed, and
   renamed agents, workspaces, and tabs reflected within seconds through a
   live Herdr event stream (15-second reconciliation backstop).
+- Group agents by relay workspace and tab, hoist agents that need input, search
+  every relay from the phone's search button, and keep a workspace agent rail
+  beside the terminal on wider displays.
 - Start, rename, clear, restart, and stop agents from relay-provided launch
   profiles.
 - Send durable prompt drafts, terminal keys, slash commands, screenshots, and
-  photos; search the loaded terminal output.
+  photos; search loaded terminal output and open explicit HTTP(S) links.
 - Answer verified Codex, Claude Code, and Qoder approvals, plus structured
   questions from those agents and OpenCode.
-- Read native user/assistant conversation history for Claude Code, Codex,
-  Qoder, Pi, and Oh My Pi; search local activity and receive blocked or
-  completion notifications.
+- Inspect the current agent's workspace files, images, Git status, and unified
+  diffs without exposing a write action.
+- Read searchable native conversations for Claude Code, Codex, Qoder, Pi, and
+  Oh My Pi in focused conversation or full-history form; review a retained
+  24-hour activity summary and receive blocked or completion notifications.
 - Require device verification before reconnecting relays.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
@@ -108,6 +113,36 @@ The relay continues to support Herdr 0.7.5 or newer.
 | Plan Questions | Notifications |
 | --- | --- |
 | <img src="images/agent_plan.jpeg" alt="Structured plan question navigation" width="392"> | <img src="images/notifications.jpg" alt="Blocked-agent notification" width="392"> |
+
+| Git Inspection | Native Conversations |
+| --- | --- |
+| <img src="images/git-history.jpeg" alt="Read-only mobile Git diff with syntax-aware colors and zoom controls" width="392"> | <img src="images/conversations.jpeg" alt="Mobile native conversation history rendered from the agent transcript" width="392"> |
+
+## Workspace Navigation and Inspection
+
+The home screen groups non-blocked agents under their relay-reported workspace
+and tab. Agents that need input remain at the top. On a phone, tap the
+magnifying-glass button to search projects, workspaces, paths, tabs, sessions,
+agents, hosts, and relays. At 900 CSS pixels and wider, an agent rail keeps
+those workspace groups beside the open terminal.
+Opened workspace cards remain expanded after visiting an agent and returning to
+the home screen.
+
+**Inspect Workspace** is read-only and is available only when the connected
+relay advertises workspace inspection and the agent reports a working
+directory. The relay confines reads to that directory, skips symlinks and
+common generated directories, and returns at most 4,000 tree entries. Text
+previews are limited to 1 MiB and image previews to 5 MiB.
+
+Git inspection disables hooks, pagers, text conversion, external diffs, lazy
+fetches, and user/system Git configuration. Status is limited to 2,000 changed
+files, individual unified diffs to 1 MiB, and Git commands to eight seconds.
+The inspector has no save, stage, commit, or shell control.
+On narrow screens, swipe the file or changed-file sidebar left to collapse it;
+the adjacent sidebar button restores it. Unified diffs use theme-aware colors
+for headers, hunks, additions, and deletions. Pinch the diff or use its zoom
+controls to resize it without changing the rest of the app.
+
 
 
 ## Mobile Terminal
@@ -126,10 +161,16 @@ older history is not shown.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. The relay reads that harness's local transcript,
-keeps only user and assistant text, and pages the newest 80 turns at a time.
-Tool output, hidden reasoning, and injected system records are excluded. Reads
-are confined to known session directories and the newest 16 MiB of very large
-logs; the view reports when that bound omitted older turns.
+associates bounded tool calls with their recorded results, and pages the newest
+80 user or assistant messages at a time. **Conversation** keeps each user prompt
+and the latest agent answer from that exchange. **Full history** shows every
+recorded message with collapsible tool activity. Both use an escaped Markdown
+subset, search filters the currently displayed view, and each message can copy
+its original Markdown. Hidden reasoning, injected system records, and sidechain
+turns remain excluded. Reads are confined to known session directories and the
+newest 16 MiB of very large logs. When that bound omits older turns, they remain
+in the harness log on the computer; restarting the relay neither caused the
+bound nor removed those turns.
 
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second. The 250 ms default balances responsiveness with
@@ -144,6 +185,13 @@ the leased width remain aligned.
 **Find** searches every loaded terminal row, highlights visible matches, and
 moves between matches even when the terminal has virtualized them off-screen.
 Its scope is the output supplied by the selected Terminal History limit.
+
+Explicit HTTP(S) URLs in terminal output become external links with opener and
+referrer isolation. When the last terminal lines name supported key hints such
+as arrows, Enter, Esc, Tab, Y/N, or a modifier chord, the app offers matching
+one-tap actions through the same ordered key path. Detected actions can be
+dismissed and never replace verified approval or structured-question controls.
+
 
 The terminal controls send **Esc**, **Tab**, **Enter**, and arrow keys.
 **Shift**, **Ctrl**, and **Alt** can be combined, remain armed for repeated
@@ -230,6 +278,14 @@ and launch requests cannot provide arbitrary executables or shell commands.
 Runtime data stays in the relay's private config and cache roots. The phone
 stores its relay list locally. There is no central broker and relays do not
 connect to one another.
+
+Remote agent writes append private JSONL attempt and result records under
+`<cache>/audit/remote-writes.jsonl`. Each record correlates the stable phone
+client, WebSocket connection, request, pane, agent context, outcome, payload
+size, and SHA-256 digest without retaining prompt, response, or upload content.
+The file is mode `0600` inside a mode `0700` directory and rotates at 5 MiB with
+three retained rotations.
+
 
 When a relay key is configured, the phone and relay authenticate an ephemeral
 P-256 ECDH handshake with that key, derive per-connection keys with

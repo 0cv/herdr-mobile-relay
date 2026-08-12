@@ -26,12 +26,22 @@ const (
 
 var canonicalSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-type Entry struct {
-	ID        string `json:"id"`
-	Timestamp string `json:"timestamp,omitempty"`
-	Role      string `json:"role"`
-	Text      string `json:"text"`
+type ToolActivity struct {
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name"`
+	Input     string `json:"input,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Error     bool   `json:"error,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type Entry struct {
+	ID        string         `json:"id"`
+	Timestamp string         `json:"timestamp,omitempty"`
+	Role      string         `json:"role"`
+	Text      string         `json:"text,omitempty"`
+	Tools     []ToolActivity `json:"tools,omitempty"`
+	Truncated bool           `json:"truncated,omitempty"`
 }
 
 type Page struct {
@@ -332,10 +342,22 @@ func loadTail(path string, limit int64) (string, bool, error) {
 	return string(data), clipped, nil
 }
 
+type toolResult struct {
+	id     string
+	output string
+	failed bool
+}
+
+type toolLocation struct {
+	entry int
+	tool  int
+}
+
 func parseTranscript(agent, text string) []Entry {
 	normalized := normalizedAgent(agent)
 	entries := make([]Entry, 0)
 	seenIDs := make(map[string]int)
+	pendingTools := make(map[string]toolLocation)
 	for _, line := range strings.Split(text, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -344,6 +366,21 @@ func parseTranscript(agent, text string) []Entry {
 		if json.Unmarshal([]byte(line), &record) != nil {
 			continue
 		}
+		calls, results := parseToolActivity(normalized, record)
+		for _, result := range results {
+			location, ok := pendingTools[result.id]
+			if !ok || location.entry >= len(entries) || location.tool >= len(entries[location.entry].Tools) {
+				continue
+			}
+			output := sanitizeText(result.output)
+			output, truncated := clampText(output, maxEntryBytes)
+			tool := &entries[location.entry].Tools[location.tool]
+			tool.Output = output
+			tool.Error = result.failed
+			tool.Truncated = tool.Truncated || truncated
+			delete(pendingTools, result.id)
+		}
+
 		role, timestamp, body := "", stringValue(record["timestamp"]), ""
 		switch normalized {
 		case "claude", "claudecode", "qoder", "qodercli":
@@ -354,14 +391,145 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parsePiRecord(record)
 		}
 		body = sanitizeText(body)
-		if role == "" || body == "" {
+		if role == "" && len(calls) > 0 {
+			role = "assistant"
+		}
+		if role == "" || (body == "" && len(calls) == 0) {
 			continue
 		}
 		body, truncated := clampText(body, maxEntryBytes)
 		id := stableRowID(line, seenIDs)
-		entries = append(entries, Entry{ID: id, Timestamp: timestamp, Role: role, Text: body, Truncated: truncated})
+		entryIndex := len(entries)
+		entries = append(entries, Entry{
+			ID: id, Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated,
+		})
+		for toolIndex := range calls {
+			if calls[toolIndex].ID != "" {
+				pendingTools[calls[toolIndex].ID] = toolLocation{entry: entryIndex, tool: toolIndex}
+			}
+		}
 	}
 	return entries
+}
+
+func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []toolResult) {
+	switch agent {
+	case "claude", "claudecode", "qoder", "qodercli":
+		if record["isSidechain"] == true {
+			return nil, nil
+		}
+		message, _ := record["message"].(map[string]any)
+		blocks, _ := message["content"].([]any)
+		return toolsFromBlocks(blocks)
+	case "codex", "openaicodex":
+		if stringValue(record["type"]) != "response_item" {
+			return nil, nil
+		}
+		payload, _ := record["payload"].(map[string]any)
+		switch normalizedBlockType(payload["type"]) {
+		case "functioncall", "customtoolcall", "localshellcall":
+			call := newToolActivity(
+				firstString(payload, "call_id", "id"),
+				firstString(payload, "name", "tool_name"),
+				firstValue(payload, "arguments", "input"),
+			)
+			return []ToolActivity{call}, nil
+		case "functioncalloutput", "customtoolcalloutput", "localshellcalloutput":
+			return nil, []toolResult{{
+				id:     firstString(payload, "call_id", "id"),
+				output: textValue(firstValue(payload, "output", "content")),
+				failed: payload["is_error"] == true,
+			}}
+		}
+	case "pi", "picodingagent", "omp", "ohmypi":
+		if stringValue(record["type"]) != "message" {
+			return nil, nil
+		}
+		message, _ := record["message"].(map[string]any)
+		if normalizedBlockType(message["role"]) == "toolresult" {
+			return nil, []toolResult{{
+				id:     firstString(message, "toolCallId", "tool_call_id", "id"),
+				output: textValue(message["content"]),
+				failed: message["isError"] == true || message["is_error"] == true,
+			}}
+		}
+		blocks, _ := message["content"].([]any)
+		return toolsFromBlocks(blocks)
+	}
+	return nil, nil
+}
+
+func toolsFromBlocks(blocks []any) ([]ToolActivity, []toolResult) {
+	calls := make([]ToolActivity, 0)
+	results := make([]toolResult, 0)
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch normalizedBlockType(block["type"]) {
+		case "tooluse", "toolcall":
+			calls = append(calls, newToolActivity(
+				firstString(block, "id", "toolCallId", "tool_call_id"),
+				firstString(block, "name", "toolName", "tool_name"),
+				firstValue(block, "input", "arguments"),
+			))
+		case "toolresult":
+			results = append(results, toolResult{
+				id:     firstString(block, "tool_use_id", "toolCallId", "tool_call_id", "id"),
+				output: textValue(block["content"]),
+				failed: block["is_error"] == true || block["isError"] == true,
+			})
+		}
+	}
+	return calls, results
+}
+
+func newToolActivity(id, name string, input any) ToolActivity {
+	if strings.TrimSpace(name) == "" {
+		name = "Tool"
+	}
+	inputText := sanitizeText(textValue(input))
+	inputText, truncated := clampText(inputText, maxEntryBytes/2)
+	return ToolActivity{
+		ID: strings.TrimSpace(id), Name: strings.TrimSpace(name), Input: inputText, Truncated: truncated,
+	}
+}
+
+func normalizedBlockType(value any) string {
+	return strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(stringValue(value)))
+}
+
+func firstString(record map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := stringValue(record[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstValue(record map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := record[key]; ok && value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func textValue(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	if text := textBlocks(value); text != "" {
+		return text
+	}
+	data, err := json.Marshal(value)
+	if err != nil || string(data) == "null" {
+		return ""
+	}
+	return string(data)
 }
 
 func parseClaudeRecord(record map[string]any) (string, string) {

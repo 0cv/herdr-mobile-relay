@@ -9,8 +9,6 @@ declare module 'svelte/elements' {
 }
 
 declare global {
-  const HERDR_NOTIFICATION_ICON: string;
-  const HERDR_NOTIFICATION_BADGE: string;
 
   interface NotificationAction {
     action: string;

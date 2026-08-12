@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	triageStateVersion  = 1
+	triageStateVersion  = 2
 	triageStateFilename = "triage-state.json"
 	triageStateLimit    = 2048
 	triageStateMaxAge   = 90 * 24 * time.Hour
@@ -40,15 +40,21 @@ func (s *State) EnableTriagePersistence(cacheDir string) error {
 	}
 	path := filepath.Join(cacheDir, triageStateFilename)
 	loaded := make(map[string]triageRecord)
+	migrated := false
 	data, err := os.ReadFile(path)
 	if err == nil {
 		var file triageStateFile
-		if json.Unmarshal(data, &file) != nil || file.Version != triageStateVersion {
+		if json.Unmarshal(data, &file) != nil ||
+			(file.Version != 1 && file.Version != triageStateVersion) {
 			return errors.New("triage state is invalid")
 		}
+		migrated = file.Version == 1
 		for key, record := range file.Panes {
 			if key == "" || record.LastActiveAt < 0 || record.LastSeenAt < 0 {
 				continue
+			}
+			if migrated {
+				record.LastActiveAt = 0
 			}
 			loaded[key] = record
 		}
@@ -60,6 +66,9 @@ func (s *State) EnableTriagePersistence(cacheDir string) error {
 	defer s.mu.Unlock()
 	s.triagePath = path
 	s.triage = loaded
+	if migrated {
+		s.persistTriageLocked()
+	}
 	return nil
 }
 

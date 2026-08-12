@@ -181,7 +181,7 @@ function terminalCellsHtml(text: string, startingColumn: number): { html: string
   let horizontalCells = 0;
   const flushPlain = () => {
     if (!plain) return;
-    html += `<span class="terminal-cell-run" style="width:${plainCells}ch">${escapeHtml(plain)}</span>`;
+    html += `<span class="terminal-cell-run" style="width:${plainCells}ch">${linkifyTerminalText(plain)}</span>`;
     plain = '';
     plainCells = 0;
   };
@@ -240,6 +240,47 @@ export function escapeHtml(text: unknown): string {
   return String(text ?? '').replace(/[&<>"']/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[character] || character);
+}
+
+const TERMINAL_URL_PATTERN = /https?:\/\/[^\s<>"']+/giu;
+
+function splitTerminalUrl(value: string): [string, string] {
+  let candidate = value;
+  let suffix = '';
+  while (candidate && /[.,;:!?\])]/u.test(candidate.at(-1) || '')) {
+    const character = candidate.at(-1) || '';
+    if (character === ')' && (candidate.match(/\(/g)?.length || 0) >= (candidate.match(/\)/g)?.length || 0)) break;
+    if (character === ']' && (candidate.match(/\[/g)?.length || 0) >= (candidate.match(/\]/g)?.length || 0)) break;
+    suffix = character + suffix;
+    candidate = candidate.slice(0, -1);
+  }
+  return [candidate, suffix];
+}
+
+function safeTerminalUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : '';
+  } catch {
+    return '';
+  }
+}
+
+export function linkifyTerminalText(value: string): string {
+  let html = '';
+  let cursor = 0;
+  for (const match of value.matchAll(TERMINAL_URL_PATTERN)) {
+    const index = match.index || 0;
+    html += escapeHtml(value.slice(cursor, index));
+    const [candidate, suffix] = splitTerminalUrl(match[0]);
+    const href = safeTerminalUrl(candidate);
+    html += href
+      ? `<a class="terminal-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${escapeHtml(candidate)}</a>${escapeHtml(suffix)}`
+      : escapeHtml(match[0]);
+    cursor = index + match[0].length;
+  }
+  html += escapeHtml(value.slice(cursor));
+  return html;
 }
 
 export function stripAnsi(text: unknown): string {
@@ -526,7 +567,7 @@ export function ansiToHtml(
         html += rendered.html;
         column = rendered.column;
       } else {
-        html += escapeHtml(parts[index]);
+        html += linkifyTerminalText(parts[index]);
       }
       continue;
     }
@@ -765,7 +806,7 @@ export function renderTerminalContent(
     const plainDisplay = display.replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
     return {
       display,
-      html: escapeHtml(plainDisplay),
+      html: linkifyTerminalText(plainDisplay),
       rows: plainDisplay.split('\n').map((line) => {
         const columns = terminalTextColumns(line);
         const fixedGrid = preserveLayout
@@ -773,7 +814,7 @@ export function renderTerminalContent(
           && (maxFixedGridColumns < 1 || columns <= maxFixedGridColumns);
         const classes = `ansi-line${fixedGrid ? ' terminal-grid-line' : ''}`;
         return {
-          html: `<span class="${classes}">${escapeHtml(line)}</span>`,
+          html: `<span class="${classes}">${linkifyTerminalText(line)}</span>`,
           text: line,
           columns,
           fixedGrid,

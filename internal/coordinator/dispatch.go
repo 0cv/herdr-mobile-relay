@@ -805,6 +805,9 @@ func (d *Dispatcher) RecordTransitionActivity(
 	d.activityOrder.Lock()
 	defer d.activityOrder.Unlock()
 	transitionCurrent := func() bool {
+		if kind == "working" {
+			return true
+		}
 		if kind == "finished" {
 			return d.state.CompletionCurrent(paneID, revision)
 		}
@@ -839,6 +842,9 @@ func (d *Dispatcher) RecordTransitionActivity(
 	entry.Host = host
 	entry.Session = session
 	entry.Details = details
+	if transitionAt, ok := details["transition_at"].(int64); ok && transitionAt > 0 {
+		entry.Timestamp = activity.MilliTimestamp(transitionAt)
+	}
 	entry.Extract = extract
 	committed, err := d.activityW.Commit(context.Background(), activity.ActivityCommitRequested{
 		Sequence: d.activitySequence.Add(1),

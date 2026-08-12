@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -138,5 +139,39 @@ func TestConversationPagesOlderTurnsWithStableCursors(t *testing.T) {
 	}
 	if len(older.Entries) != 2 || older.Entries[0].Text != "one" || older.Entries[1].Text != "two" || older.HasMore {
 		t.Fatalf("older page = %#v", older)
+	}
+}
+
+func TestClaudeConversationAssociatesToolResultsWithCallingTurn(t *testing.T) {
+	reader, home := testReader(t)
+	path := filepath.Join(home, ".claude", "projects", "-work", testSessionID+".jsonl")
+	writeRows(t, path,
+		map[string]any{
+			"type": "assistant", "timestamp": "2026-08-12T10:00:00Z",
+			"message": map[string]any{"content": []any{
+				map[string]any{"type": "text", "text": "I will inspect the file."},
+				map[string]any{"type": "tool_use", "id": "tool-1", "name": "Read", "input": map[string]any{"path": "README.md"}},
+			}},
+		},
+		map[string]any{
+			"type": "user", "timestamp": "2026-08-12T10:00:01Z",
+			"message": map[string]any{"content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "tool-1", "content": "file contents"},
+			}},
+		},
+	)
+
+	page, err := reader.Read("claude", testSessionID, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Entries[0].Tools) != 1 {
+		t.Fatalf("entries = %#v", page.Entries)
+	}
+	tool := page.Entries[0].Tools[0]
+	if tool.ID != "tool-1" || tool.Name != "Read" ||
+		!strings.Contains(tool.Input, `"path":"README.md"`) ||
+		tool.Output != "file contents" || tool.Error {
+		t.Fatalf("tool = %#v", tool)
 	}
 }

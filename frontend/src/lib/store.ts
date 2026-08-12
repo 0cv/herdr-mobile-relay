@@ -51,8 +51,11 @@ import type {
   SlashCommandCatalog,
   TerminalFrame,
   ToastMessage,
+  WorkspaceFile,
+  WorkspaceGitDiff,
+  WorkspaceGitStatus,
+  WorkspaceTree,
 } from './types';
-
 const COMMAND_TIMEOUT_MS = 15_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
 const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
@@ -1088,14 +1091,29 @@ class RelayStore {
     const entries = Array.isArray(data.entries)
       ? data.entries
         .filter((entry: unknown): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'))
-        .map((entry) => ({
-          id: String(entry.id || ''),
-          timestamp: String(entry.timestamp || ''),
-          role: entry.role === 'assistant' ? 'assistant' as const : 'user' as const,
-          text: String(entry.text || ''),
-          truncated: entry.truncated === true,
-        }))
-        .filter((entry) => entry.id && entry.text)
+        .map((entry) => {
+          const tools = Array.isArray(entry.tools)
+            ? entry.tools
+              .filter((tool: unknown): tool is Record<string, unknown> => Boolean(tool && typeof tool === 'object'))
+              .map((tool) => ({
+                id: String(tool.id || ''),
+                name: String(tool.name || 'Tool').slice(0, 160),
+                input: String(tool.input || ''),
+                output: String(tool.output || ''),
+                error: tool.error === true,
+                truncated: tool.truncated === true,
+              }))
+            : [];
+          return {
+            id: String(entry.id || ''),
+            timestamp: String(entry.timestamp || ''),
+            role: entry.role === 'assistant' ? 'assistant' as const : 'user' as const,
+            text: String(entry.text || ''),
+            tools,
+            truncated: entry.truncated === true,
+          };
+        })
+        .filter((entry) => entry.id && (entry.text || entry.tools.length))
       : [];
     return {
       available: data.available === true,
@@ -1377,6 +1395,56 @@ class RelayStore {
         this.emitConnections();
       }
     }
+  }
+
+  private workspaceInspectionAvailable(agent: Agent): void {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    if (!connection?.capabilities.includes('workspace_inspection')) {
+      throw new CommandError('This relay does not support workspace inspection.');
+    }
+    if (!String(agent.cwd || '').trim()) {
+      throw new CommandError('This agent does not report a workspace path.');
+    }
+  }
+
+  async loadWorkspaceTree(agent: Agent): Promise<WorkspaceTree> {
+    this.workspaceInspectionAvailable(agent);
+    const result = await this.sendToAgent(agent, { type: 'workspace_tree' }, 20_000);
+    const data = result.data as unknown as WorkspaceTree;
+    if (!data || typeof data.root !== 'string' || !Array.isArray(data.entries)) {
+      throw new CommandError('Relay returned an invalid workspace tree.');
+    }
+    return data;
+  }
+
+  async loadWorkspaceFile(agent: Agent, path: string): Promise<WorkspaceFile> {
+    this.workspaceInspectionAvailable(agent);
+    const result = await this.sendToAgent(agent, { type: 'workspace_file', path }, 20_000);
+    const data = result.data as unknown as WorkspaceFile;
+    if (!data || data.path !== path || !['text', 'image'].includes(data.kind)) {
+      throw new CommandError('Relay returned an invalid workspace preview.');
+    }
+    return data;
+  }
+
+  async loadWorkspaceGitStatus(agent: Agent): Promise<WorkspaceGitStatus> {
+    this.workspaceInspectionAvailable(agent);
+    const result = await this.sendToAgent(agent, { type: 'workspace_git_status' }, 20_000);
+    const data = result.data as unknown as WorkspaceGitStatus;
+    if (!data || typeof data.available !== 'boolean' || !Array.isArray(data.files)) {
+      throw new CommandError('Relay returned an invalid Git status.');
+    }
+    return data;
+  }
+
+  async loadWorkspaceGitDiff(agent: Agent, path: string): Promise<WorkspaceGitDiff> {
+    this.workspaceInspectionAvailable(agent);
+    const result = await this.sendToAgent(agent, { type: 'workspace_git_diff', path }, 20_000);
+    const data = result.data as unknown as WorkspaceGitDiff;
+    if (!data || data.path !== path || typeof data.diff !== 'string') {
+      throw new CommandError('Relay returned an invalid Git diff.');
+    }
+    return data;
   }
 
   async loadSlashCommands(agent: Agent): Promise<SlashCommandCatalog> {

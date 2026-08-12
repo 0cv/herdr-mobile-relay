@@ -125,6 +125,12 @@ func TestSessionCacheCoalescesTerminalLocalPaneUpdates(t *testing.T) {
 			Status:      "working",
 			Revision:    5,
 		}},
+		Agents: []SnapshotAgent{{
+			PaneID: "pane-1",
+			Agent:  "codex",
+			Name:   "old title",
+			Status: "working",
+		}},
 	})
 
 	changed, err := cache.Apply(Event{
@@ -151,6 +157,50 @@ func TestSessionCacheCoalescesTerminalLocalPaneUpdates(t *testing.T) {
 	}
 	if !changed {
 		t.Fatal("workspace move did not trigger a topology commit")
+	}
+}
+
+func TestSessionCacheDoesNotPromotePaneMetadataToRunningAgent(t *testing.T) {
+	cache := NewSessionCache(SessionSnapshot{
+		Panes: []SnapshotPane{{
+			ID:          "pane-shell",
+			TerminalID:  "term-shell",
+			WorkspaceID: "workspace-1",
+			TabID:       "tab-4",
+			Agent:       "codex",
+			Status:      "idle",
+		}},
+	})
+
+	snapshot := cache.Snapshot()
+	if len(snapshot.Panes) != 1 {
+		t.Fatalf("panes = %#v, want one terminal pane", snapshot.Panes)
+	}
+	if snapshot.Panes[0].Agent != "" {
+		t.Fatalf("pane agent = %q, want empty without an authoritative agent record", snapshot.Panes[0].Agent)
+	}
+
+	detected := "codex"
+	changed, err := cache.Apply(Event{
+		Event: "pane.agent_detected",
+		Data:  json.RawMessage(`{"pane_id":"pane-shell","agent":"codex"}`),
+	})
+	if err != nil || !changed {
+		t.Fatalf("agent detection changed=%v err=%v, want changed", changed, err)
+	}
+	if got := cache.Snapshot().Panes[0].Agent; got != detected {
+		t.Fatalf("detected agent = %q, want %q", got, detected)
+	}
+
+	changed, err = cache.Apply(Event{
+		Event: "pane.agent_detected",
+		Data:  json.RawMessage(`{"pane_id":"pane-shell","released":true}`),
+	})
+	if err != nil || !changed {
+		t.Fatalf("agent release changed=%v err=%v, want changed", changed, err)
+	}
+	if got := cache.Snapshot().Panes[0].Agent; got != "" {
+		t.Fatalf("released agent = %q, want empty", got)
 	}
 }
 

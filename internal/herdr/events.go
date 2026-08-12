@@ -661,6 +661,7 @@ func (c *SessionCache) setPane(snapshot SnapshotPane) bool {
 	}
 	pane := paneToInventoryPane(snapshot)
 	if exists {
+		pane.Agent = previous.Agent
 		pane.Name = firstNonEmpty(pane.Name, previous.Name)
 		pane.Session = firstNonEmpty(pane.Session, previous.Session)
 		pane.SessionRaw = previous.SessionRaw
@@ -706,13 +707,15 @@ func (c *SessionCache) applyAgent(agent SnapshotAgent) {
 	c.panes[pane.ID] = pane
 }
 
+// Pane snapshots describe every terminal, including terminals where a detected
+// agent has already exited. Agent snapshots and pane.agent_detected events are
+// the authoritative sources for active agent identity.
 func paneToInventoryPane(snapshot SnapshotPane) Pane {
 	return Pane{
 		ID:          snapshot.ID,
 		TerminalID:  snapshot.TerminalID,
 		TabID:       snapshot.TabID,
 		WorkspaceID: snapshot.WorkspaceID,
-		Agent:       snapshot.Agent,
 		Name:        snapshot.Label,
 		Status:      snapshot.Status,
 		Focused:     snapshot.Focused,

@@ -176,13 +176,14 @@ describe('accessible Svelte interactions', () => {
     expect(screen.getByText('Loading agents…')).toBeInTheDocument();
   });
 
-  it('shows the Herdr tab name, session, and agent logo in the card', () => {
+  it('shows the Herdr tab once above its agent tile with session metadata and logo', () => {
     const named: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w2:p1', pane_id: 'fedora::w2:p1',
-      project: 'relay', agent: 'codex', status: 'working', tab_label: 'my-tab', session: 'my-session',
+      project: 'relay', agent: 'codex', status: 'working', tab_id: 'tab-1', tab_label: 'my-tab', session: 'my-session',
     };
     const { container } = render(AgentList, { agents: [named], relays: [], responding: new Set<string>(), onopen: vi.fn() });
-    expect(container.querySelector('.agent-meta')?.textContent).toBe('my-tab · my-session');
+    expect(screen.getByRole('heading', { name: 'my-tab' })).toBeInTheDocument();
+    expect(container.querySelector('.agent-meta')?.textContent).toBe('my-session');
     expect(screen.getByRole('img', { name: 'Codex' })).toBeInTheDocument();
     expect(container.querySelector('.agent-project')?.textContent).toContain('relay');
   });

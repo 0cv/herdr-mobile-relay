@@ -21,6 +21,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
+	"github.com/0cv/herdr-mobile-relay/internal/audit"
 	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
@@ -41,6 +42,7 @@ import (
 	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
 	"github.com/0cv/herdr-mobile-relay/internal/upload"
 	"github.com/0cv/herdr-mobile-relay/internal/web"
+	"github.com/0cv/herdr-mobile-relay/internal/workspace"
 )
 
 type copyResponseRunner func(
@@ -66,6 +68,7 @@ type Server struct {
 	poller         *coordinator.Poller
 	udp            *coordinator.UDPListener
 	journal        *activity.Journal
+	auditLog       *audit.Logger
 	pushM          *push.Manager
 	transitionPush interface {
 		Send(context.Context, []byte)
@@ -203,6 +206,14 @@ func (s *Server) Run(ctx context.Context) error {
 		s.activityView = journal.Recent(500)
 	}
 
+	auditLog, auditErr := audit.Open(s.cfg.CacheDir)
+	if auditErr != nil {
+		s.recordSafeError("remote write audit unavailable", auditErr)
+		s.logger.Warn("remote write audit unavailable", "error", auditErr)
+	} else {
+		s.auditLog = auditLog
+	}
+
 	pushDir := filepath.Join(s.cfg.RuntimeDir, "push")
 	pm, err := push.NewManager(pushDir, s.logger)
 	if err != nil {
@@ -212,8 +223,9 @@ func (s *Server) Run(ctx context.Context) error {
 	s.transitionPush = pm
 
 	s.state.SetOnTransition(func(paneID, agent, project, status string, revision int64) {
+		transitionAt := time.Now().UnixMilli()
 		s.transitionTasks.Start(func(taskCtx context.Context) {
-			s.handleTransition(taskCtx, paneID, agent, project, status, revision)
+			s.handleTransition(taskCtx, paneID, agent, project, status, revision, transitionAt)
 		})
 	})
 
@@ -299,6 +311,10 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		action := inbound.Type
 		coordinated := isCoordinatorMutation(action)
+		auditedWrite := isAuditedWrite(action)
+		if auditedWrite {
+			s.recordWriteAudit(client, msg, nil)
+		}
 		if !coordinated {
 			admitted()
 		}
@@ -444,6 +460,16 @@ func (s *Server) Run(ctx context.Context) error {
 				}
 				s.dispatcher.RecordActivity("upload", status, summary, paneID, requestID)
 			}
+			if auditedWrite {
+				s.recordWriteAudit(client, msg, &coordinator.CommandResult{
+					RequestID: requestID,
+					Action:    "upload_image",
+					OK:        res.OK,
+					Phase:     map[bool]string{true: "completed", false: "failed"}[res.OK],
+					Error:     res.Error,
+					PaneID:    paneID,
+				})
+			}
 		case "list_directories":
 			requestID, _ := msg["request_id"].(string)
 			path, _ := msg["path"].(string)
@@ -482,6 +508,43 @@ func (s *Server) Run(ctx context.Context) error {
 				break
 			}
 			s.sendCommandResult(client, requestID, "list_slash_commands", true, "completed", "", paneID, catalog)
+		case "workspace_tree", "workspace_file", "workspace_git_status", "workspace_git_diff":
+			requestID := inbound.RequestID
+			paneID := inbound.PaneID
+			agent, exists := s.state.Agent(paneID)
+			if paneID == "" || !exists {
+				s.sendCommandResult(client, requestID, inbound.Type, false, "failed", "Agent pane not found", paneID, nil)
+				break
+			}
+			generation := s.state.Generation(paneID)
+			cwd := strings.TrimSpace(agent.Cwd)
+			var data any
+			var inspectErr error
+			switch inbound.Type {
+			case "workspace_tree":
+				data, inspectErr = workspace.TreeFor(cwd)
+			case "workspace_file":
+				data, inspectErr = workspace.ReadFile(cwd, inbound.Path)
+			case "workspace_git_status":
+				data, inspectErr = workspace.GitStatusFor(client.Context(), cwd)
+			case "workspace_git_diff":
+				data, inspectErr = workspace.GitDiffFor(client.Context(), cwd, inbound.Path)
+			}
+			currentAgent, currentExists := s.state.Agent(paneID)
+			if !currentExists || s.state.Generation(paneID) != generation || strings.TrimSpace(currentAgent.Cwd) != cwd {
+				s.sendCommandResult(client, requestID, inbound.Type, false, "failed", "Agent workspace changed during inspection", paneID, nil)
+				break
+			}
+			if inspectErr != nil {
+				var public *workspace.Error
+				message := "Workspace inspection failed"
+				if errors.As(inspectErr, &public) {
+					message = public.Message
+				}
+				s.sendCommandResult(client, requestID, inbound.Type, false, "failed", message, paneID, nil)
+				break
+			}
+			s.sendCommandResult(client, requestID, inbound.Type, true, "completed", "", paneID, data)
 		case "copy_agent_response":
 			requestID, _ := msg["request_id"].(string)
 			paneID, _ := msg["pane_id"].(string)
@@ -536,6 +599,9 @@ func (s *Server) Run(ctx context.Context) error {
 				result = s.dispatcher.HandleAdmitted(commandCtx, msg, admitted)
 			} else {
 				result = s.dispatcher.Handle(commandCtx, msg)
+			}
+			if auditedWrite {
+				s.recordWriteAudit(client, msg, result)
 			}
 			s.hub.Send(client, commandResultMessage(result))
 		}
@@ -770,14 +836,21 @@ func (s *Server) handleTransition(
 	parent context.Context,
 	paneID, agent, project, status string,
 	revision int64,
+	observedAt ...int64,
 ) {
+	transitionAt := time.Now().UnixMilli()
+	if len(observedAt) > 0 && observedAt[0] > 0 {
+		transitionAt = observedAt[0]
+	}
 	agentState, agentExists := s.state.Agent(paneID)
 	var session string
 	var blockedEventID string
 	var paneGeneration uint64
 	var blockedContentRevision int64
 	if agentExists {
-		session = agentState.Session
+		if status != "working" || s.state.TransitionCurrent(paneID, status, revision) {
+			session = agentState.Session
+		}
 		blockedEventID = agentState.BlockedEventID
 		blockedContentRevision = s.state.ContentRevision(paneID)
 	}
@@ -792,6 +865,9 @@ func (s *Server) handleTransition(
 		if status == "blocked" {
 			return s.state.BlockedTransitionCurrent(paneID, blockedEventID, paneGeneration)
 		}
+		if status == "working" {
+			return true
+		}
 		return s.state.CompletionCurrent(paneID, revision)
 	}
 	if !transitionCurrent() {
@@ -799,6 +875,21 @@ func (s *Server) handleTransition(
 	}
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
+
+	if status == "working" {
+		summary := agent + " started working"
+		if agent == "" {
+			summary = "Agent started working"
+		}
+		if s.dispatcher != nil {
+			s.dispatcher.RecordTransitionActivity(
+				"working", "working", summary, paneID, status, revision,
+				map[string]any{"transition": "working", "transition_at": transitionAt},
+				agent, project, s.hostname, session, "",
+			)
+		}
+		return
+	}
 
 	if status == "blocked" {
 		if !agentExists {
@@ -863,6 +954,7 @@ func (s *Server) handleTransition(
 			map[string]any{
 				"event_id":       eventID,
 				"attention_kind": agentState.AttentionKind,
+				"transition_at":  transitionAt,
 			},
 			agent, project, s.hostname, session, agentState.Prompt,
 			blockedEventID, paneGeneration,
@@ -906,7 +998,8 @@ func (s *Server) handleTransition(
 	}
 	if s.dispatcher != nil && !s.dispatcher.RecordTransitionActivity(
 		"finished", "completed", summary, paneID, status, revision,
-		map[string]any{"event_id": eventID}, agent, project, s.hostname, session, extract,
+		map[string]any{"event_id": eventID, "transition_at": transitionAt},
+		agent, project, s.hostname, session, extract,
 	) {
 		return
 	}
@@ -1654,6 +1747,181 @@ func (s *Server) updateCheckLoop(ctx context.Context) {
 func serializedState(value any) string {
 	data, _ := json.Marshal(value)
 	return string(data)
+}
+
+func isAuditedWrite(action string) bool {
+	switch action {
+	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
+		"respond", "answer_question", "navigate_question", "clarify_question",
+		"agent_stop", "agent_rename", "agent_start", "agent_clear", "agent_restart",
+		"upload_image":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) recordWriteAudit(
+	client *transport.ClientConn,
+	message map[string]any,
+	result *coordinator.CommandResult,
+) {
+	if s.auditLog == nil {
+		return
+	}
+	action, _ := message["type"].(string)
+	if action == "" || action == "command" {
+		action, _ = message["action"].(string)
+	}
+	requestID, _ := message["request_id"].(string)
+	paneID, _ := message["pane_id"].(string)
+	clientID, _ := message["client_id"].(string)
+	if clientID == "" {
+		clientID = "connection:" + client.ID()
+	}
+	record := audit.Record{
+		Stage:        "attempt",
+		Action:       action,
+		RequestID:    requestID,
+		ClientID:     clientID,
+		ConnectionID: client.ID(),
+		PaneID:       paneID,
+		Details:      auditWriteDetails(message),
+	}
+	if agent, ok := s.state.Agent(paneID); ok {
+		record.Agent = agent.Agent
+		record.Project = agent.Project
+		record.Session = agent.Session
+		record.Host = agent.Host
+	}
+	if result != nil {
+		ok := result.OK
+		record.Stage = "result"
+		record.OK = &ok
+		record.Phase = result.Phase
+		record.Error = result.Error
+		record.Details = nil
+		if result.PaneID != "" {
+			record.PaneID = result.PaneID
+		}
+	}
+	if err := s.auditLog.Append(record); err != nil {
+		s.logger.Warn(
+			"remote write audit append failed",
+			"stage", record.Stage,
+			"action", record.Action,
+			"request_id", record.RequestID,
+			"error", err,
+		)
+	}
+}
+
+func auditWriteDetails(message map[string]any) map[string]any {
+	details := make(map[string]any)
+	if encoded, err := json.Marshal(message); err == nil {
+		digest := sha256.Sum256(encoded)
+		details["payload_sha256"] = fmt.Sprintf("%x", digest[:])
+		details["payload_bytes"] = len(encoded)
+	}
+	stringLimits := map[string]int{
+		"name": 256, "profile_id": 160, "cwd": 1024,
+		"filename": 512, "mime": 128, "activity_label": 256,
+	}
+	for key, limit := range stringLimits {
+		if value, ok := message[key].(string); ok && value != "" {
+			details[key] = boundedAuditString(value, limit)
+		}
+	}
+	for _, key := range []string{"text", "prompt", "choice", "data"} {
+		if value, ok := message[key].(string); ok && value != "" {
+			details[key+"_bytes"] = len(value)
+		}
+	}
+	for _, key := range []string{"index", "total", "_server_sequence"} {
+		if value, ok := auditInteger(message[key]); ok {
+			details[key] = value
+		}
+	}
+	keys := make([]string, 0, 16)
+	switch values := message["keys"].(type) {
+	case []any:
+		for _, value := range values {
+			key, valid := value.(string)
+			if !valid {
+				continue
+			}
+			keys = append(keys, boundedAuditString(key, 64))
+			if len(keys) == 32 {
+				break
+			}
+		}
+	case []string:
+		for _, key := range values {
+			keys = append(keys, boundedAuditString(key, 64))
+			if len(keys) == 32 {
+				break
+			}
+		}
+	}
+	if len(keys) > 0 {
+		details["keys"] = keys
+	}
+	indices := make([]int64, 0, 8)
+	switch values := message["selected_indices"].(type) {
+	case []any:
+		for _, value := range values {
+			if index, ok := auditInteger(value); ok {
+				indices = append(indices, index)
+			}
+			if len(indices) == 128 {
+				break
+			}
+		}
+	case []int:
+		for _, value := range values {
+			if value >= 0 {
+				indices = append(indices, int64(value))
+			}
+			if len(indices) == 128 {
+				break
+			}
+		}
+	}
+	if len(indices) > 0 {
+		details["selected_indices"] = indices
+	}
+	return details
+}
+
+func boundedAuditString(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+func auditInteger(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int:
+		if number >= 0 {
+			return int64(number), true
+		}
+	case int64:
+		if number >= 0 {
+			return number, true
+		}
+	case uint64:
+		if number <= uint64(^uint64(0)>>1) {
+			return int64(number), true
+		}
+	case float64:
+		if number >= 0 && number <= 1<<53 && number == float64(int64(number)) {
+			return int64(number), true
+		}
+	}
+	return 0, false
 }
 
 func isCoordinatorMutation(action string) bool {

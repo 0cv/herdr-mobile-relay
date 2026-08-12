@@ -62,6 +62,7 @@
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
   } from '$lib/terminal';
+  import { detectTerminalMenu } from '$lib/terminal-menu';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
   import { VirtualTerminalIndex } from '$lib/virtual-terminal';
 
@@ -151,6 +152,7 @@
   let slashCatalogUnavailable = $state(false);
   let activeSlashIndex = $state(0);
   let dismissedSlashQuery = $state<string | null>(null);
+  let dismissedMenuSignature = $state('');
   const CELL_MEASURE_TEXT = '0000000000';
   const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
   const PANE_REALTIME_RESYNC_MS = 15_000;
@@ -206,6 +208,15 @@
     && dismissedSlashQuery !== composer);
   const terminalPlainText = $derived(
     stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
+  );
+  const terminalMenu = $derived(detectTerminalMenu(terminalPlainText));
+  const visibleTerminalMenu = $derived(
+    !approvalMode
+    && !questionMode
+    && terminalMenu
+    && terminalMenu.signature !== dismissedMenuSignature
+      ? terminalMenu
+      : null,
   );
   const terminalFindCorpus = $derived.by(() => ({
     text: terminalSearchText(renderedRows),
@@ -1493,6 +1504,10 @@
     void filesSelected(files);
   }
 
+  function menuKeyLabel(keys: string[]): string {
+    return keys.map((key) => key === ' ' ? 'Space' : key).join('+');
+  }
+
   function openNext() {
     if (nextBlocked) replaceView({ view: 'terminal', paneId: nextBlocked.pane_id });
   }
@@ -1740,6 +1755,26 @@
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
     {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
     {#if frame?.truncated}<p class="upload-status" role="status">Older terminal history is not shown; this pane response was limited.</p>{/if}
+
+    {#if visibleTerminalMenu}
+      <section class="generic-menu-actions" aria-label={`Terminal menu: ${visibleTerminalMenu.title}`} aria-busy={keySending}>
+        <header>
+          <strong>{visibleTerminalMenu.title}</strong>
+          <span>Detected from terminal key hints</span>
+          <button type="button" aria-label="Dismiss detected menu actions" onclick={() => { dismissedMenuSignature = visibleTerminalMenu.signature; }}>×</button>
+        </header>
+        <div>
+          {#each visibleTerminalMenu.actions as action (action.keys.join('+'))}
+            <Button
+              variant={action.cancel ? 'secondary' : 'default'}
+              size="sm"
+              disabled={keySending}
+              onclick={() => { void sendKeys(action.keys, action.label); }}
+            ><kbd>{menuKeyLabel(action.keys)}</kbd>{action.label}</Button>
+          {/each}
+        </div>
+      </section>
+    {/if}
 
     {#if approvalMode && !responding.has(agent.pane_id)}
       <div class="quick-actions" aria-label="Approval choices">

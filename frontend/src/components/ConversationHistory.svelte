@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import ConversationMessage from '$components/ConversationMessage.svelte';
   import Button from '$components/ui/Button.svelte';
   import { displayName } from '$lib/agents';
   import { relayStore } from '$lib/store';
@@ -17,16 +18,22 @@
   let loadingOlder = $state(false);
   let error = $state('');
   let query = $state('');
+  let mode = $state<'conversation' | 'activity'>('conversation');
   let listElement = $state<HTMLElement>(null!);
   let mounted = false;
 
+  const modeEntries = $derived(mode === 'conversation' ? conversationEntries(entries) : entries);
   const visibleEntries = $derived.by(() => {
     const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return entries;
-    return entries.filter((entry) => entry.text.toLocaleLowerCase().includes(needle));
+    if (!needle) return modeEntries;
+    return modeEntries.filter((entry) => [
+      entry.text,
+      ...(mode === 'activity' ? (entry.tools || []).flatMap((tool) => [tool.name, tool.input || '', tool.output || '']) : []),
+    ].join(' ').toLocaleLowerCase().includes(needle));
   });
 
   onMount(() => {
+    mode = localStorage.getItem('herdr-conversation-view') === 'activity' ? 'activity' : 'conversation';
     mounted = true;
     void loadLatest(true);
     const refresh = setInterval(() => { void loadLatest(false); }, 5_000);
@@ -82,15 +89,40 @@
     }
   }
 
+  function conversationEntries(recorded: ConversationEntry[]): ConversationEntry[] {
+    const conversation: ConversationEntry[] = [];
+    let latestAssistant: ConversationEntry | null = null;
+    for (const entry of recorded) {
+      if (entry.role === 'user') {
+        if (latestAssistant) conversation.push(latestAssistant);
+        latestAssistant = null;
+        conversation.push(entry);
+        continue;
+      }
+      if (entry.text.trim()) latestAssistant = entry;
+    }
+    if (latestAssistant) conversation.push(latestAssistant);
+    return conversation;
+  }
+
   function mergeEntries(first: ConversationEntry[], second: ConversationEntry[]): ConversationEntry[] {
     const merged: ConversationEntry[] = [];
-    const seen = new Set<string>();
+    const indexById = new Map<string, number>();
     for (const entry of [...first, ...second]) {
-      if (seen.has(entry.id)) continue;
-      seen.add(entry.id);
-      merged.push(entry);
+      const index = indexById.get(entry.id);
+      if (index === undefined) {
+        indexById.set(entry.id, merged.length);
+        merged.push(entry);
+      } else {
+        merged[index] = entry;
+      }
     }
     return merged;
+  }
+
+  function setMode(next: 'conversation' | 'activity') {
+    mode = next;
+    localStorage.setItem('herdr-conversation-view', next);
   }
 
   function formatTimestamp(value: string): string {
@@ -98,20 +130,39 @@
     if (Number.isNaN(timestamp.getTime())) return '';
     return timestamp.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
   }
+
+  async function copyMarkdown(entry: ConversationEntry) {
+    if (!entry.text || !navigator.clipboard?.writeText) {
+      relayStore.showToast('Clipboard access is unavailable. Select the message manually.', true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(entry.text);
+      relayStore.showToast('Markdown copied.');
+    } catch {
+      relayStore.showToast('Could not copy the Markdown. Select the message manually.', true);
+    }
+  }
 </script>
 
 <main class="conversation-page" aria-labelledby="conversation-title">
   <header class="conversation-toolbar">
     <div>
       <h2 id="conversation-title">Conversation</h2>
-      {#if available && total}<p>{total} {total === 1 ? 'turn' : 'turns'} in this session</p>{/if}
+      {#if available && total}<p>{total} recorded {total === 1 ? 'message' : 'messages'}</p>{/if}
     </div>
-    {#if entries.length}
-      <label class="conversation-search">
-        <span class="sr-only">Search loaded conversation turns</span>
-        <input type="search" bind:value={query} placeholder="Search loaded turns" />
-      </label>
-    {/if}
+    <div class="conversation-toolbar-actions">
+      <div class="conversation-mode" role="group" aria-label="Conversation display">
+        <button class:active={mode === 'conversation'} type="button" aria-pressed={mode === 'conversation'} title="Show user prompts and the latest agent answer from each exchange" onclick={() => setMode('conversation')}>Conversation</button>
+        <button class:active={mode === 'activity'} type="button" aria-pressed={mode === 'activity'} title="Show every recorded agent message and tool call" onclick={() => setMode('activity')}>Full history</button>
+      </div>
+      {#if entries.length}
+        <label class="conversation-search">
+          <span class="sr-only">Search displayed conversation</span>
+          <input type="search" bind:value={query} placeholder="Search" />
+        </label>
+      {/if}
+    </div>
   </header>
 
   {#if loading}
@@ -129,11 +180,14 @@
       </div>
     {/if}
     {#if fileTruncated}
-      <p class="conversation-warning" role="status">The oldest part of this very large session is outside the relay’s bounded read window.</p>
+      <p class="conversation-warning" role="status">This session log is larger than 16 MB. The relay loads its newest 16 MB to bound memory use; older turns remain on this computer and are not removed by a relay restart.</p>
     {/if}
     {#if error}<p class="conversation-warning error" role="alert">{error}</p>{/if}
     {#if !entries.length}
       <div class="empty-state" role="status">No user or assistant turns are recorded for this session.</div>
+    {/if}
+    {#if entries.length && !modeEntries.length}
+      <div class="empty-state" role="status">No user prompts or agent answers are recorded for this session.</div>
     {/if}
     {#if query.trim() && !visibleEntries.length}
       <div class="empty-state" role="status">No loaded turns match “{query.trim()}”.</div>
@@ -143,9 +197,26 @@
         <article class:conversation-user={entry.role === 'user'} class="conversation-entry">
           <header>
             <strong>{entry.role === 'user' ? 'You' : displayName(agent)}</strong>
-            {#if formatTimestamp(entry.timestamp)}<time datetime={entry.timestamp}>{formatTimestamp(entry.timestamp)}</time>{/if}
+            <span class="conversation-entry-actions">
+              {#if formatTimestamp(entry.timestamp)}<time datetime={entry.timestamp}>{formatTimestamp(entry.timestamp)}</time>{/if}
+              {#if entry.text}
+                <Button
+                  class="copy-conversation-markdown"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Copy ${entry.role === 'user' ? 'your' : displayName(agent)} message as Markdown`}
+                  title="Copy Markdown"
+                  onclick={() => copyMarkdown(entry)}
+                >
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                </Button>
+              {/if}
+            </span>
           </header>
-          <div class="conversation-text">{entry.text}</div>
+          <ConversationMessage text={entry.text} tools={mode === 'activity' ? entry.tools : []} highlight={query.trim()} />
           {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
         </article>
       {/each}

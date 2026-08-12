@@ -1,7 +1,10 @@
 package coordinator
 
 import (
+	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -46,6 +49,51 @@ func TestTriagePersistsSeenCompletionAcrossRestart(t *testing.T) {
 	second.CommitEvent("pane-1", "idle", next+1)
 	if got := second.DisplayedStatus("pane-1"); got != "done" {
 		t.Fatalf("new completion after restart displayed as %q, want done", got)
+	}
+}
+
+func TestTriageMigratesInferredActivityTimestamps(t *testing.T) {
+	cacheDir := t.TempDir()
+	identity := &AgentState{
+		PaneID: "pane-1", RawPaneID: "pane-1", TerminalID: "terminal-1",
+		SessionID: "session-1", Status: "done",
+	}
+	lastActiveAt := time.Now().Add(-time.Hour).UnixMilli()
+	lastSeenAt := lastActiveAt + 1
+	legacy := triageStateFile{
+		Version: 1,
+		Panes: map[string]triageRecord{
+			triageIdentity(identity): {LastActiveAt: lastActiveAt, LastSeenAt: lastSeenAt},
+		},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, triageStateFilename), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state := NewState(slog.Default())
+	if err := state.EnableTriagePersistence(cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	state.CommitInventory([]*AgentState{identity}, state.RevisionCounter())
+	snapshot := state.Snapshot()
+	if len(snapshot) != 1 || snapshot[0].LastActiveAt != 0 || snapshot[0].LastSeenAt != lastSeenAt {
+		t.Fatalf("migrated triage timestamps = %#v, want unknown activity and preserved seen time", snapshot)
+	}
+	if got := state.DisplayedStatus("pane-1"); got != "idle" {
+		t.Fatalf("acknowledged completion after migration displayed as %q, want idle", got)
+	}
+
+	stored, err := os.ReadFile(filepath.Join(cacheDir, triageStateFilename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var migrated triageStateFile
+	if json.Unmarshal(stored, &migrated) != nil || migrated.Version != triageStateVersion {
+		t.Fatalf("migrated triage file = %s", stored)
 	}
 }
 

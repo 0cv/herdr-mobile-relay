@@ -16,7 +16,8 @@
     "structured_questions",
     "slash_commands",
     "conversation_history",
-    "pane_size_lease"
+    "pane_size_lease",
+    "workspace_inspection"
   ],
   "inventory": {"state": "ready"},
   "agent_profiles": [

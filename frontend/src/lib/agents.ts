@@ -85,7 +85,7 @@ export function agentUpdatedAt(agent: Partial<Agent> | null | undefined): number
 }
 
 export function agentLastActiveAt(agent: Partial<Agent> | null | undefined): number {
-  const value = Number(agent?.last_active_at || agent?.updated_at);
+  const value = Number(agent?.last_active_at);
   return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
