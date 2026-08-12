@@ -14,14 +14,10 @@ function createMemoryStorage(): Storage {
   };
 }
 
-// Node 24 exposes experimental localStorage/sessionStorage globals whose
-// getters shadow the copies vitest installs from jsdom, leaving both
-// undefined. Rebind them to an in-memory storage so app code and tests share
-// one working implementation.
-if (typeof globalThis.localStorage?.getItem !== 'function') {
-  Object.defineProperty(globalThis, 'localStorage', { value: createMemoryStorage(), configurable: true, writable: true });
-  Object.defineProperty(globalThis, 'sessionStorage', { value: createMemoryStorage(), configurable: true, writable: true });
-}
+// Node 24 may expose experimental storage globals that differ by launch flags.
+// Always use one deterministic in-memory implementation for unit tests.
+Object.defineProperty(globalThis, 'localStorage', { value: createMemoryStorage(), configurable: true, writable: true });
+Object.defineProperty(globalThis, 'sessionStorage', { value: createMemoryStorage(), configurable: true, writable: true });
 
 if (!HTMLDialogElement.prototype.showModal) {
   HTMLDialogElement.prototype.showModal = function showModal() {
