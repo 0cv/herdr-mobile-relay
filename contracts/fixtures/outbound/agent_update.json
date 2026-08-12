@@ -11,5 +11,7 @@
   "cwd": "/home/user/project",
   "project": "project",
   "host": "localhost",
+  "session": "",
+  "session_name": "",
   "updated_at": 1753178400000
 }

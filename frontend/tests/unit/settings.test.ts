@@ -8,7 +8,6 @@ import {
   PUSH_ENABLED_KEY,
   TERMINAL_HISTORY_KEY,
   TERMINAL_REFRESH_KEY,
-  TERMINAL_LAYOUT_KEY,
 } from '$lib/config';
 import { relayStore } from '$lib/store';
 import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
@@ -206,25 +205,13 @@ describe('settings relay status', () => {
     await user.click(refresh.getByRole('button', { name: '250 ms' }));
   });
 
-  it('persists all three terminal width choices', async () => {
-    const user = userEvent.setup();
+  it('does not expose removed terminal width choices', () => {
     render(SettingsView);
-    const layouts = within(screen.getByRole('group', { name: 'Terminal Width' }));
-    const fit = layouts.getByRole('button', { name: 'Fit to Phone' });
-    const original = layouts.getByRole('button', { name: 'Original Columns' });
-    const resize = layouts.getByRole('button', { name: 'Resize Session' });
 
-    await user.click(fit);
-    expect(fit).toHaveAttribute('aria-pressed', 'true');
-    expect(localStorage.getItem(TERMINAL_LAYOUT_KEY)).toBe('readable');
-    await user.click(original);
-    expect(original).toHaveAttribute('aria-pressed', 'true');
-    expect(localStorage.getItem(TERMINAL_LAYOUT_KEY)).toBe('preserve');
-    await user.click(resize);
-    expect(resize).toHaveAttribute('aria-pressed', 'true');
-    expect(localStorage.getItem(TERMINAL_LAYOUT_KEY)).toBe('resize');
-    expect(screen.getByText(/Resize Session temporarily/)).toBeInTheDocument();
-    await user.click(fit);
+    expect(screen.queryByRole('group', { name: 'Terminal Width' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Fit to Phone' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Original Columns' })).not.toBeInTheDocument();
+    expect(screen.getByText(/Resize Session automatically leases/)).toBeInTheDocument();
   });
 
   it('enables the finished-agent switch immediately after push is enabled', async () => {

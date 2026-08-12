@@ -85,6 +85,7 @@ export interface Agent {
   name?: string;
   status?: string;
   session?: string;
+  session_name?: string;
   project?: string;
   cwd?: string;
   host?: string;

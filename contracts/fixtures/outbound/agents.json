@@ -17,6 +17,7 @@
       "project": "project",
       "host": "localhost",
       "session": "",
+      "session_name": "",
       "updated_at": 0
     }
   ]

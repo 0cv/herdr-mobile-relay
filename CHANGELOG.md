@@ -5,6 +5,37 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.10] - 2026-08-12
+
+### Added
+
+- Add **Rename Session** to the agent menu for every harness except OpenCode. It
+  sends `/rename new_session_name`.
+
+### Changed
+
+- Make **Resize Session** the only terminal-width behavior. Remove the
+  **Fit to Phone** and **Original Columns** choices from the header and
+  Settings.
+- Label the existing agent rename action **Rename Tab**. Open either rename
+  action in a dedicated form prefilled with the current name; unnamed sessions
+  start blank.
+
+### Fixed
+
+- Keep error and status messages above modal backdrops so they remain fully
+  visible while a dialog is open.
+- Preserve the selected terminal position when **Resize Session** reacts to a
+  phone-width change.
+- Make **Rename Tab** call Herdr's tab-label operation directly instead of the
+  restricted agent-name operation, allowing labels such as `123`.
+- Prefill **Rename Session** from the current title on both current and older
+  relays without exposing raw session paths or UUIDs.
+- Let **Rename Session** submit natural titles with spaces and uppercase
+  characters instead of being blocked by tab-name validation.
+- Match Activity excerpts to the selected terminal text size and terminal font,
+  including Nerd Font status symbols.
+
 ## [0.14.9] - 2026-08-10
 
 ### Fixed
@@ -324,7 +355,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.9...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.10...HEAD
+[0.14.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.9...v0.14.10
 [0.14.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.8...v0.14.9
 [0.14.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.7...v0.14.8
 [0.14.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.6...v0.14.7

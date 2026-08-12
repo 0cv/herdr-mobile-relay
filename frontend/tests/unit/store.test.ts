@@ -48,9 +48,9 @@ describe('relay command store', () => {
     socket.open();
     socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const pending = relayStore.sendCommand(relayId, { type: 'agent_rename', pane_id: 'w1:p1', name: 'renamed' });
+    const pending = relayStore.sendCommand(relayId, { type: 'agent_rename', pane_id: 'w1:p1', name: '123' });
     const command = JSON.parse(socket.sent.at(-1)!);
-    expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: 'renamed', protocol: 2 });
+    expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: '123', protocol: 2 });
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });

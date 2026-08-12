@@ -7,7 +7,6 @@ export const THEME_KEY = 'herdr_theme';
 export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
 export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
-export const TERMINAL_LAYOUT_KEY = 'herdr_terminal_layout';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
 export const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
 export const DEVICE_CREDENTIAL_KEY = 'herdr_device_unlock_credential';
@@ -34,13 +33,6 @@ export const TERMINAL_REFRESH_LABELS: Record<TerminalRefreshInterval, string> = 
   250: '250 ms',
   500: '500 ms',
   1_000: '1 s',
-};
-export const TERMINAL_LAYOUTS = ['readable', 'preserve', 'resize'] as const;
-export type TerminalLayout = (typeof TERMINAL_LAYOUTS)[number];
-export const TERMINAL_LAYOUT_LABELS: Record<TerminalLayout, string> = {
-  readable: 'Fit to Phone',
-  preserve: 'Original Columns',
-  resize: 'Resize Session',
 };
 export const MIN_PANE_SIZE_COLUMNS = 40;
 export const MAX_PANE_SIZE_COLUMNS = 240;

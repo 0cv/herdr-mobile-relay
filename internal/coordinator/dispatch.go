@@ -274,7 +274,7 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	case "agent_stop":
 		return d.handleStop(ctx, receivedAt, requestID, paneID)
 	case "agent_rename":
-		return d.handleRename(ctx, receivedAt, requestID, paneID, message)
+		return d.handleTabRename(ctx, receivedAt, requestID, paneID, message)
 	case "acknowledge_pane":
 		return d.handleAcknowledge(requestID, paneID)
 	case "agent_start":
@@ -438,35 +438,31 @@ func (d *Dispatcher) handleStop(ctx context.Context, receivedAt time.Time, reque
 	return result
 }
 
-func (d *Dispatcher) handleRename(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
-	name := stringValue(message, "name")
-	if paneID == "" || name == "" {
-		return d.fail(requestID, "agent_rename", paneID, "Name and agent are required")
+func (d *Dispatcher) handleTabRename(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+	label := strings.TrimSpace(stringValue(message, "name"))
+	if paneID == "" {
+		return d.fail(requestID, "agent_rename", paneID, "Agent is required")
 	}
-	if !agentNamePattern.MatchString(name) {
-		return d.fail(requestID, "agent_rename", paneID, "Invalid agent name")
+	if label == "" {
+		return d.fail(requestID, "agent_rename", paneID, "Tab name is required")
 	}
-	agent, _ := d.state.Agent(paneID)
+	agent, ok := d.state.Agent(paneID)
+	if !ok || agent.TabID == "" {
+		return d.fail(requestID, "agent_rename", paneID, "Tab is unavailable")
+	}
 	result := d.schedule(ctx, ScheduleOptions{
-		Command: d.command(ctx, receivedAt, requestID, CommandRename, paneID, commandDeadline, name),
+		Command: d.command(ctx, receivedAt, requestID, CommandTabRename, paneID, commandDeadline, label),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "agent_rename"); stale != nil {
 			return EffectResult{Result: stale}
 		}
-		if err := d.herdr.RenameAgent(effectCtx, paneID, name); err != nil {
+		if err := d.herdr.TabRename(effectCtx, agent.TabID, label); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "agent_rename", paneID, err)}
-		}
-		if agent != nil && agent.TabID != "" {
-			if err := d.herdr.TabRename(effectCtx, agent.TabID, name); err != nil {
-				result := completed(requestID, "agent_rename", paneID, map[string]any{"warning": "Agent renamed, but its tab label could not be updated"})
-				result.Phase = "completed_with_warning"
-				return EffectResult{Result: result}
-			}
 		}
 		return EffectResult{Result: completed(requestID, "agent_rename", paneID, nil)}
 	}))
 	if result.OK {
-		d.recordActivity("agent_rename", "renamed", "Renamed agent to "+name, paneID, requestID)
+		d.recordActivity("agent_rename", "renamed", "Renamed tab to "+label, paneID, requestID)
 		d.wake()
 	}
 	return result

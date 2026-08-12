@@ -5,7 +5,7 @@ package blackbox
 //   - /healthz must expose the served web/ bundle version+hash (§13.1)
 //   - WebSocket connections must close gracefully on shutdown, not be dropped
 //     (finding #3: srv.Shutdown does not drain hijacked conns)
-// Reuses freePort/repoRoot/waitForHealth/setupEnv from relay_test.go.
+// Reuses freePort/repoRoot/waitForStatus/setupEnv from relay_test.go.
 
 import (
 	"context"
@@ -72,7 +72,7 @@ func startRelayBrokenHerdr(t *testing.T) string {
 	})
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForHealth(t, base)
+	waitForStatus(t, base, "/health", http.StatusOK)
 	return base
 }
 

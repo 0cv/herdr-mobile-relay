@@ -59,6 +59,16 @@ export function tabName(agent: Partial<Agent>): string {
   return String(agent.tab_label || agent.name || '').trim();
 }
 
+export function sessionName(agent: Partial<Agent>): string {
+  if (Object.prototype.hasOwnProperty.call(agent, 'session_name')) {
+    return String(agent.session_name || '').trim();
+  }
+  const legacy = String(agent.session || '').trim();
+  if (legacy.includes('/') || legacy.includes('\\')) return '';
+  if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(legacy)) return '';
+  return legacy;
+}
+
 export function agentContextLabel(agent: Partial<Agent>): string {
   const name = tabName(agent);
   if (name && name !== agent.project) return name;

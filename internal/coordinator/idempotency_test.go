@@ -181,6 +181,38 @@ func TestAgentStopRetryDoesNotCloseOrBumpTwice(t *testing.T) {
 	}
 }
 
+func TestTabRenameAcceptsNaturalLabel(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "renames.log")
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{
+		PaneID: "pane-1", TabID: "tab-1", Status: "working",
+	}}, state.RevisionCounter())
+	d := NewDispatcher(
+		herdr.NewClient(recordingHerdr(t, dir, record, `{"ok":true}`), filepath.Join(dir, "sock")),
+		state,
+		nil,
+		testLogger(),
+	)
+
+	result := d.Handle(context.Background(), map[string]any{
+		"action": "agent_rename", "request_id": "rename-1", "pane_id": "pane-1", "name": "123",
+	})
+	if !result.OK {
+		t.Fatalf("numeric rename failed: %+v", result)
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "tab rename tab-1 123") {
+		t.Fatalf("rename commands = %q, missing tab rename", data)
+	}
+	if strings.Contains(string(data), "agent rename") {
+		t.Fatalf("tab label was sent through agent rename: %q", data)
+	}
+}
+
 func TestApprovalRetryAfterStatusChangeReturnsStoredPhase(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "approvals.log")

@@ -45,7 +45,6 @@
   import {
     interfaceSize,
     terminalHistoryLines,
-    terminalLayout,
   } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
@@ -160,10 +159,9 @@
   const inputLocked = $derived(responsePending || inspectionMode);
   const interaction = $derived(questionInteraction(agent));
   const questionMode = $derived(Boolean(responsePending && attentionKind(agent) === 'question' && interaction));
-  const resizeLayout = $derived($terminalLayout === 'resize');
-  const resizeSessionActive = $derived(resizeLayout
-    && Boolean($connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')));
-  const preserveLayout = $derived($terminalLayout !== 'readable');
+  const resizeSessionActive = $derived(
+    Boolean($connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
+  );
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -203,8 +201,8 @@
 
   $effect(() => {
     const next = frame;
-    const preserve = preserveLayout;
-    const preserveLineEnds = preserve && !resizeSessionActive;
+    const preserve = true;
+    const preserveLineEnds = !resizeSessionActive;
     const cachedResizeFrame = validResizedTerminalFrame(next);
     if (resizeSessionActive
       && cachedResizeFrame
@@ -283,7 +281,7 @@
     const interfaceSizeValue = $interfaceSize;
     const paneId = agent.pane_id;
     void interfaceSizeValue;
-    if (!resizeLayout || questionMode) {
+    if (questionMode) {
       releasePaneSizeLease(componentMounted);
       paneSizeLeaseError = '';
       return;
@@ -295,7 +293,7 @@
     }
     if (!connection.capabilities.includes('pane_size_lease')) {
       discardPaneSizeLease();
-      paneSizeLeaseError = 'Resize Session is unavailable on this relay. Original Columns rendering remains active.';
+      paneSizeLeaseError = 'Resize Session is unavailable on this relay.';
       return;
     }
     if (leaseTarget && leaseTarget.pane_id !== paneId) releasePaneSizeLease(componentMounted);
@@ -303,9 +301,7 @@
     void tick().then(() => requestPaneSizeLease(false));
   });
   $effect.pre(() => {
-    const layout = $terminalLayout;
     const interfaceSizeValue = $interfaceSize;
-    void layout;
     void interfaceSizeValue;
     if (!terminalElement) return;
     virtualStickToBottom = terminalElement.scrollHeight
@@ -424,7 +420,7 @@
 
   async function applyFrame(
     next: TerminalFrame,
-    preserve = preserveLayout,
+    preserve = true,
     preserveLineEnds = preserve && !resizeSessionActive,
   ) {
     const layoutChanged = preserve !== lastPreserveLayout
@@ -1003,7 +999,6 @@
   function paneSizeLeaseSupported(target: Agent): boolean {
     const connection = $connections.get(target.relay_id);
     return componentMounted
-      && resizeLayout
       && !questionMode
       && connection?.status === 'connected'
       && connection.capabilities.includes('pane_size_lease');
@@ -1288,8 +1283,7 @@
   {:else}
   <div
     class:resize-layout={resizeSessionActive}
-    class:preserve-layout={preserveLayout}
-    class="term-content"
+    class="term-content preserve-layout"
     style={terminalContentStyle}
     bind:this={terminalElement}
     role="log"

@@ -10,23 +10,18 @@
     TERMINAL_HISTORY_OPTIONS,
     TERMINAL_REFRESH_LABELS,
     TERMINAL_REFRESH_OPTIONS,
-    TERMINAL_LAYOUTS,
-    TERMINAL_LAYOUT_LABELS,
     THEMES,
     type InterfaceSize,
     type TerminalHistoryLines,
     type TerminalRefreshInterval,
-    type TerminalLayout,
     type Theme,
   } from '$lib/config';
   import {
     interfaceSize,
     setInterfaceSize,
-    setTerminalLayout,
     setTerminalHistoryLines,
     setTerminalRefreshInterval,
     setTheme,
-    terminalLayout,
     terminalHistoryLines,
     terminalRefreshInterval,
     theme,
@@ -541,18 +536,7 @@
       {/each}
     </fieldset>
     <p class="hint">How often the relay checks the visible pane. 250 ms is balanced; faster refresh uses more computer and phone CPU during active output.</p>
-    <fieldset class="choice-grid compact-grid">
-      <legend>Terminal Width</legend>
-      {#each TERMINAL_LAYOUTS as item (item)}
-        <button
-          class:active={$terminalLayout === item}
-          type="button"
-          aria-pressed={$terminalLayout === item}
-          onclick={() => setTerminalLayout(item as TerminalLayout)}
-        >{TERMINAL_LAYOUT_LABELS[item]}</button>
-      {/each}
-    </fieldset>
-    <p class="hint">Resize Session temporarily makes the shared session phone-width, so the laptop view changes too. Fit to Phone wraps desktop output for reading. Original Columns keeps the terminal grid for sideways panning.</p>
+    <p class="hint">Resize Session automatically leases the shared terminal at the phone width while it is open, so the laptop view changes too. The previous width is restored when the terminal closes or disconnects.</p>
   </Card>
 
   <Card>

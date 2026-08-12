@@ -24,20 +24,12 @@
     approvalPromptPreview,
     displayName,
     hostLabel,
-    questionInteraction,
   } from '$lib/agents';
   import {
     APP_VERSION,
     HANDLED_NOTIFICATION_ACTIONS_KEY,
-    TERMINAL_LAYOUT_LABELS,
-    TERMINAL_LAYOUTS,
-    type TerminalLayout,
   } from '$lib/config';
-  import {
-    initializePreferences,
-    setTerminalLayout,
-    terminalLayout,
-  } from '$lib/preferences';
+  import { initializePreferences } from '$lib/preferences';
   import { initializePush, notificationsEnabled, pushOptedIn, showPageNotification } from '$lib/push';
   import {
     closeCurrentView,
@@ -107,25 +99,6 @@
       : relayUpdateNeedsAttention
         ? 'Settings, relay update needs attention'
         : 'Settings');
-  const terminalQuestionMode = $derived(Boolean(
-    activeAgent
-      && agentNeedsResponse(activeAgent)
-      && attentionKind(activeAgent) === 'question'
-      && questionInteraction(activeAgent),
-  ));
-  const terminalControlsVisible = $derived(Boolean(
-    activeAgent
-      && !(activeConnection?.status === 'connected' && activeConnection.inventory.state !== 'ready')
-      && !terminalQuestionMode,
-  ));
-  const terminalLayoutLabel = $derived(TERMINAL_LAYOUT_LABELS[$terminalLayout]);
-  const nextTerminalLayout = $derived(TERMINAL_LAYOUTS[
-    (TERMINAL_LAYOUTS.indexOf($terminalLayout) + 1) % TERMINAL_LAYOUTS.length
-  ] as TerminalLayout);
-  const nextTerminalLayoutLabel = $derived(TERMINAL_LAYOUT_LABELS[nextTerminalLayout]);
-  const terminalLayoutButtonLabel = $derived(
-    $terminalLayout === 'readable' ? 'Fit' : $terminalLayout === 'preserve' ? 'Original' : 'Resize',
-  );
   const headerTitle = $derived.by(() => {
     if ($currentView.view === 'settings') return 'Settings';
     if ($currentView.view === 'launch') return 'Start Agent';
@@ -467,15 +440,6 @@
     {#if $currentView.view === 'agents'}<span class="agent-count">{connected}/{$relays.length} relays{#if $agents.length} · {$agents.length}{/if}</span>{/if}
     <nav aria-label="Application">
       {#if $currentView.view === 'terminal'}
-        {#if terminalControlsVisible}
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label={`Terminal width: ${terminalLayoutLabel}. Switch to ${nextTerminalLayoutLabel}`}
-            title={`Current: ${terminalLayoutLabel}. Switch to ${nextTerminalLayoutLabel}`}
-            onclick={() => setTerminalLayout(nextTerminalLayout)}
-          >{terminalLayoutButtonLabel}</Button>
-        {/if}
         <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
       {:else}
         <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => toggle('launch')}>＋</Button>

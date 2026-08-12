@@ -29,6 +29,7 @@ type AgentState struct {
 	Project         string                 `json:"project"`
 	Host            string                 `json:"host"`
 	Session         string                 `json:"session"`
+	SessionName     string                 `json:"session_name"`
 	UpdatedAt       int64                  `json:"updated_at"`
 	ActivitySeq     int64                  `json:"activity_seq,omitempty"`
 	BlockedEventID  string                 `json:"event_id,omitempty"`

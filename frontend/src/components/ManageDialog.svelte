@@ -1,45 +1,96 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { clientPaneId, displayName, hostLabel, tabName } from '$lib/agents';
-  import { validAgentName } from '$lib/launch';
+  import { clientPaneId, displayName, hostLabel, sessionName, tabName } from '$lib/agents';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
   import type { Agent } from '$lib/types';
 
   let { open = $bindable(false), agent }: { open?: boolean; agent: Agent | null } = $props();
   let name = $state('');
+  let renameMode = $state<'tab' | 'session' | ''>('');
   let confirming = $state<'clear' | 'stop' | ''>('');
   let busy = $state(false);
   let initializedPaneId = '';
+  let nameInput = $state<HTMLInputElement | null>(null);
+  let actionMenu = $state<HTMLDivElement | null>(null);
+
+  const sessionRenameAvailable = $derived(Boolean(
+    agent && String(agent.agent || '').trim().toLocaleLowerCase().replace(/[\s_-]+/g, '') !== 'opencode',
+  ));
 
   $effect(() => {
     if (!open) {
       initializedPaneId = '';
+      renameMode = '';
       return;
     }
     if (!agent || initializedPaneId === agent.pane_id) return;
     initializedPaneId = agent.pane_id;
-    name = tabName(agent) || String(agent.project || '');
+    name = '';
+    renameMode = '';
     confirming = '';
   });
 
-  async function rename() {
+  $effect(() => {
+    if (renameMode === 'session' && !sessionRenameAvailable) renameMode = '';
+  });
+
+  async function beginRename(mode: 'tab' | 'session') {
+    if (!agent || (mode === 'session' && !sessionRenameAvailable)) return;
+    confirming = '';
+    renameMode = mode;
+    name = mode === 'tab'
+      ? tabName(agent) || String(agent.project || '')
+      : sessionName(agent);
+    await tick();
+    nameInput?.focus();
+    nameInput?.select();
+  }
+
+  async function cancelRename() {
+    const mode = renameMode;
+    renameMode = '';
+    name = '';
+    await tick();
+    actionMenu?.querySelector<HTMLButtonElement>(`[data-rename-action="${mode}"]`)?.focus();
+  }
+
+  function nextName(): string | null {
+    const value = name.trim();
+    if (!value) {
+      relayStore.showToast('Enter a new name.', true);
+      return null;
+    }
+    return value;
+  }
+
+  async function renameTab() {
     if (!agent) return;
-    const nextName = name.trim();
-    if (!nextName) {
-      relayStore.showToast('Enter a name for the agent.', true);
-      return;
-    }
-    if (!validAgentName(nextName)) {
-      relayStore.showToast('Use up to 32 lowercase letters, numbers, underscores, or dashes, starting with a letter.', true);
-      return;
-    }
+    const value = nextName();
+    if (!value) return;
     busy = true;
     try {
-      await relayStore.sendToAgent(agent, { type: 'agent_rename', name: nextName });
+      await relayStore.sendToAgent(agent, { type: 'agent_rename', name: value });
       open = false;
-      relayStore.showToast(`Agent renamed to ${nextName}.`);
+      relayStore.showToast(`Tab renamed to ${value}.`);
+    } catch (error) {
+      relayStore.showToast((error as Error).message, true);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function renameSession() {
+    if (!agent || !sessionRenameAvailable) return;
+    const value = nextName();
+    if (!value) return;
+    busy = true;
+    try {
+      await relayStore.sendToAgent(agent, { type: 'submit_prompt', text: `/rename ${value}` });
+      open = false;
+      relayStore.showToast(`Session rename sent for ${value}.`);
     } catch (error) {
       relayStore.showToast((error as Error).message, true);
     } finally {
@@ -95,15 +146,31 @@
 </script>
 
 <AppDialog id="manage-agent-dialog" bind:open title="Manage Agent" description={agent ? `${displayName(agent)} @${hostLabel(agent)}` : 'Agent unavailable'}>
-  <div class="form-stack">
-    <label for="manage-name">New name</label>
-    <input id="manage-name" bind:value={name} required maxlength="32" pattern={'[a-z][a-z0-9_-]{0,31}'} title="Start with a lowercase letter; use lowercase letters, numbers, underscores, or dashes." autocomplete="off" />
-    <div class="dialog-actions">
-      <Button disabled={busy} onclick={rename}>Rename</Button>
-      <Button variant="secondary" disabled={busy} onclick={clearAgent}>{confirming === 'clear' ? 'Confirm Clear' : 'Clear Agent'}</Button>
-      <Button variant="danger" disabled={busy} onclick={stopAgent}>{confirming === 'stop' ? 'Confirm Stop' : 'Stop Agent'}</Button>
-      <Button variant="ghost" disabled={busy} onclick={() => { open = false; }}>Cancel</Button>
+  {#if renameMode}
+    <form class="form-stack" onsubmit={(event) => {
+      event.preventDefault();
+      if (renameMode === 'tab') void renameTab();
+      else void renameSession();
+    }}>
+      <label for="manage-name">New {renameMode} name</label>
+      <input bind:this={nameInput} id="manage-name" bind:value={name} required autocomplete="off" />
+      <div class="dialog-actions">
+        <Button type="submit" disabled={busy}>Rename</Button>
+        <Button variant="ghost" disabled={busy} onclick={cancelRename}>Cancel</Button>
+      </div>
+    </form>
+  {:else}
+    <div bind:this={actionMenu} class="form-stack">
+      <div class="dialog-actions">
+        <Button data-rename-action="tab" disabled={busy} onclick={() => beginRename('tab')}>Rename Tab</Button>
+        {#if sessionRenameAvailable}
+          <Button data-rename-action="session" variant="secondary" disabled={busy} onclick={() => beginRename('session')}>Rename Session</Button>
+        {/if}
+        <Button variant="secondary" disabled={busy} onclick={clearAgent}>{confirming === 'clear' ? 'Confirm Clear' : 'Clear Agent'}</Button>
+        <Button variant="danger" disabled={busy} onclick={stopAgent}>{confirming === 'stop' ? 'Confirm Stop' : 'Stop Agent'}</Button>
+        <Button variant="ghost" disabled={busy} onclick={() => { open = false; }}>Cancel</Button>
+      </div>
+      {#if confirming}<p class="warning" role="alert">{confirming === 'stop' ? 'Tap Confirm Stop to close this agent pane.' : 'Tap Confirm Clear to start a fresh agent in the same working directory.'}</p>{/if}
     </div>
-    {#if confirming}<p class="warning" role="alert">{confirming === 'stop' ? 'Tap Confirm Stop to close this agent pane.' : 'Tap Confirm Clear to start a fresh agent in the same working directory.'}</p>{/if}
-  </div>
+  {/if}
 </AppDialog>

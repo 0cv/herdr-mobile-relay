@@ -164,6 +164,19 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	}
 }
 
+func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
+	agent.SessionName = ""
+	if agent.Session == "" {
+		return
+	}
+	title := s.sessions.SessionName(agent.Agent, agent.Cwd, agent.Session)
+	if title == "" {
+		return
+	}
+	agent.SessionName = title
+	agent.Session = title
+}
+
 func (s *Server) Run(ctx context.Context) error {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -531,6 +544,8 @@ func (s *Server) Run(ctx context.Context) error {
 				"cwd":            agent.Cwd,
 				"project":        agent.Project,
 				"host":           agent.Host,
+				"session":        agent.Session,
+				"session_name":   agent.SessionName,
 				"updated_at":     agent.UpdatedAt,
 				"event_id":       agent.BlockedEventID,
 				"attention_kind": agent.AttentionKind,
@@ -564,11 +579,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
 		for _, a := range agents {
-			if a.Session != "" {
-				if title := s.sessions.SessionName(a.Agent, a.Cwd, a.Session); title != "" {
-					a.Session = title
-				}
-			}
+			s.resolveAgentSessionName(a)
 			if a.Status != "blocked" {
 				continue
 			}
@@ -990,6 +1001,7 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 		"project":         agent.Project,
 		"host":            agent.Host,
 		"session":         agent.Session,
+		"session_name":    agent.SessionName,
 		"updated_at":      agent.UpdatedAt,
 		"event_id":        agent.BlockedEventID,
 		"attention_kind":  agent.AttentionKind,
@@ -1936,6 +1948,8 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 	setString("cwd", &agent.Cwd)
 	setString("project", &agent.Project)
 	setString("host", &agent.Host)
+	setString("session", &agent.Session)
+	setString("session_name", &agent.SessionName)
 	if value, exists := delta["updated_at"]; exists {
 		switch v := value.(type) {
 		case float64:

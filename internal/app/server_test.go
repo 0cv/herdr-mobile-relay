@@ -20,6 +20,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
+	"github.com/0cv/herdr-mobile-relay/internal/session"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
@@ -37,6 +38,33 @@ func testServerWithCacheDir(cacheDir string) *Server {
 		CacheDir:   cacheDir,
 	}
 	return New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func TestResolveAgentSessionName(t *testing.T) {
+	home := t.TempDir()
+	codexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := []byte("{\"id\":\"session-1\",\"thread_name\":\"current-session\"}\n")
+	if err := os.WriteFile(filepath.Join(codexDir, "session_index.jsonl"), index, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := testServer()
+	s.sessions = session.NewResolver(home)
+
+	named := &coordinator.AgentState{Agent: "codex", Session: "session-1"}
+	s.resolveAgentSessionName(named)
+	if named.SessionName != "current-session" || named.Session != "current-session" {
+		t.Fatalf("named session = %#v, want resolved name on both wire fields", named)
+	}
+
+	unnamed := &coordinator.AgentState{Agent: "codex", Session: "missing-session"}
+	s.resolveAgentSessionName(unnamed)
+	if unnamed.SessionName != "" || unnamed.Session != "missing-session" {
+		t.Fatalf("unnamed session = %#v, want empty name and preserved session identifier", unnamed)
+	}
 }
 
 func TestHealth(t *testing.T) {

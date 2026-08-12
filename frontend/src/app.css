@@ -293,8 +293,14 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .activity-detail-head h2 { flex: 1; font-size: 1rem; margin: 0; }
 .activity-detail-time { color: var(--muted); font-size: .72rem; }
 .activity-detail-meta { color: var(--muted); font-size: .74rem; margin: 0; }
+.activity-extract pre,
+.term-content {
+  font-family: 'Herdr Nerd Symbols', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: .72rem;
+  line-height: 1.45;
+}
 .activity-extract { background: var(--terminal); border: 1px solid var(--border); border-radius: .7rem; position: relative; }
-.activity-extract pre { color: var(--terminal-text); font-size: .74rem; line-height: 1.4; margin: 0; max-height: 55dvh; overflow: auto; padding: .8rem; padding-top: 2.4rem; white-space: pre-wrap; word-break: break-word; }
+.activity-extract pre { color: var(--terminal-text); margin: 0; max-height: 55dvh; overflow: auto; overflow-wrap: anywhere; padding: .8rem; padding-top: 2.4rem; white-space: pre-wrap; word-break: normal; }
 .activity-extract .empty-state { color: color-mix(in srgb, var(--terminal-text) 60%, transparent); padding: 1rem; }
 .copy-extract { color: var(--terminal-text); height: 2rem; min-height: 2rem; opacity: .65; position: absolute; right: .35rem; top: .35rem; width: 2rem; }
 .copy-extract:hover, .copy-extract:focus-visible { opacity: 1; }
@@ -314,9 +320,6 @@ textarea { min-height: 6.5rem; resize: vertical; }
   background: var(--terminal);
   color: var(--terminal-text);
   flex: 1 1 auto;
-  font-family: 'Herdr Nerd Symbols', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: .72rem;
-  line-height: 1.45;
   min-height: 0;
   overflow: auto;
   overflow-wrap: anywhere;
@@ -351,8 +354,8 @@ textarea { min-height: 6.5rem; resize: vertical; }
 }
 .term-content.preserve-layout.resize-layout .terminal-grid-line .terminal-cell-run { display: inline-block; }
 .term-content.preserve-layout.resize-layout .terminal-cell-run { display: inline; }
-:root[data-interface-size='regular'] .term-content { font-size: .82rem; }
-:root[data-interface-size='large'] .term-content { font-size: .94rem; }
+:root[data-interface-size='regular'] :is(.activity-extract pre, .term-content) { font-size: .82rem; }
+:root[data-interface-size='large'] :is(.activity-extract pre, .term-content) { font-size: .94rem; }
 .term-content.preserve-layout .terminal-cell-run { display: inline-block; }
 .term-content.preserve-layout .terminal-cell {
   display: inline-block;
@@ -535,7 +538,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
   .update-progress-active .update-progress-marker { animation: update-pulse 1.2s ease-in-out infinite; }
   @keyframes update-pulse { 0%, 100% { opacity: .55; transform: scale(.9); } 50% { opacity: 1; transform: scale(1.08); } }
 }
-.toast { background: var(--foreground); border-radius: .65rem; color: var(--background); left: 50%; max-width: calc(100% - 2rem); opacity: 0; padding: .75rem 1rem; pointer-events: none; position: fixed; top: calc(4rem + env(safe-area-inset-top)); transform: translate(-50%, -1rem); transition: opacity .15s, transform .15s; z-index: 80; }
+.toast { background: var(--foreground); border: 0; border-radius: .65rem; box-shadow: 0 .8rem 2rem rgb(0 0 0 / .5); color: var(--background); left: 50%; margin: 0; max-width: calc(100% - 2rem); opacity: 0; padding: .75rem 1rem; pointer-events: none; position: fixed; top: calc(4rem + env(safe-area-inset-top)); transform: translate(-50%, -1rem); transition: opacity .15s, transform .15s; z-index: 80; }
 .toast.visible { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { background: var(--danger); color: #fff; }
 

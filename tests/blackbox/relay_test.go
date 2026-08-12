@@ -111,25 +111,25 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 		}
 	})
 
-	waitForHealth(t, env.httpBase)
+	waitForStatus(t, env.httpBase, "/readyz", http.StatusOK)
 	return env
 }
 
-func waitForHealth(t *testing.T, base string) {
+func waitForStatus(t *testing.T, base, endpoint string, status int) {
 	t.Helper()
 	// Fresh CI runners build several test packages concurrently. Give the relay
 	// enough time to complete its first fake-Herdr inventory under that load.
 	for i := 0; i < 200; i++ {
-		resp, err := http.Get(base + "/health")
+		resp, err := http.Get(base + endpoint)
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode == 200 {
+			if resp.StatusCode == status {
 				return
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("relay did not become healthy")
+	t.Fatalf("%s did not return status %d", endpoint, status)
 }
 
 func freePort(t *testing.T) int {

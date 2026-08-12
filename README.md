@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.14.9`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.14.9) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.14.10`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.14.10) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -109,14 +109,10 @@ The relay continues to support Herdr 0.7.5 or newer.
 
 ## Mobile Terminal
 
-The terminal-width control in the header and Settings offers three modes:
-
-- **Fit to Phone** reflows terminal output into the phone viewport.
-- **Original Columns** preserves the captured terminal grid and allows
-  horizontal scrolling.
-- **Resize Session** temporarily leases the live PTY at the measured mobile
-  width, so full-screen agents redraw for the phone. The relay restores the
-  previous width on mode exit, disconnect, lease expiry, or shutdown.
+The mobile terminal always uses **Resize Session**. While a terminal is open,
+the relay leases the live PTY at the measured phone width so full-screen agents
+redraw for the phone. The relay restores the previous width when the terminal
+closes, the phone disconnects, the lease expires, or the relay shuts down.
 
 Terminal History requests 100, 1,000, 5,000, or 10,000 lines per pane; 1,000 is
 the default. The relay enforces the selected limit after any Claude or Qoder
