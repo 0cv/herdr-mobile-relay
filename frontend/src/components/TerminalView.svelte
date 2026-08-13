@@ -1621,7 +1621,8 @@
       </div>
       <Button variant="secondary" size="sm" aria-label="Enter" onclick={() => sendTerminalKey('Enter')}>Enter</Button>
     </div>
-  {:else}
+  {/if}
+  <div class:hidden={questionMode} class="terminal-view term">
   {#if findOpen}
     <section class="terminal-find" aria-label="Find in terminal">
       <input
@@ -1921,5 +1922,5 @@
       <Button variant="secondary" size="sm" aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
     </div>
   </div>
-  {/if}
+</div>
 </main>

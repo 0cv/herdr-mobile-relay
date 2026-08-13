@@ -56,21 +56,23 @@ func planCodexInput(interaction *Interaction, intent InputIntent) []InputStep {
 	}
 	target := Focus{Kind: "option", Index: interaction.AllOptionCount - 1}
 	keys := navigationKeys(interaction, target)
-	if interaction.NotesActive {
-		keys = nil
-	}
 	if intent.OtherText == "" {
 		return []InputStep{{Keys: append(keys, "Enter")}}
 	}
-	if !interaction.NotesActive {
+	if interaction.NotesActive {
+		keys = []string{"Ctrl+U"}
+	} else {
 		keys = append(keys, "Tab")
 	}
-	keys = append(keys, "Ctrl+U")
-	return []InputStep{
-		{Keys: keys},
-		{Text: intent.OtherText},
-		{Keys: []string{"Enter"}},
+	steps := make([]InputStep, 0, 3)
+	if len(keys) > 0 {
+		steps = append(steps, InputStep{Keys: keys})
 	}
+	steps = append(steps,
+		InputStep{Text: intent.OtherText},
+		InputStep{Keys: []string{"Enter"}},
+	)
+	return steps
 }
 
 func planQoderInput(interaction *Interaction, intent InputIntent) []InputStep {

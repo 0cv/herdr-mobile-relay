@@ -132,6 +132,25 @@ func TestPlanQoderReviewChoiceAndPrevious(t *testing.T) {
 	}
 }
 
+func TestPlanCodexCustomAnswerOpensNotesBeforePasting(t *testing.T) {
+	interaction := Parse(codexQuestionView, "codex")
+	if interaction == nil {
+		t.Fatal("question was not parsed")
+	}
+	steps := PlanInput(interaction, InputIntent{
+		OtherSelected: true,
+		OtherText:     "Show a generated confirmation",
+	})
+	want := []InputStep{
+		{Keys: []string{"Down", "Down", "Down", "Tab"}},
+		{Text: "Show a generated confirmation"},
+		{Keys: []string{"Enter"}},
+	}
+	if !reflect.DeepEqual(steps, want) {
+		t.Fatalf("custom answer plan = %#v, want %#v", steps, want)
+	}
+}
+
 func TestPlanCodexActiveNotesReplacesTextInPlace(t *testing.T) {
 	interaction := Parse(
 		attentionFixture(t, "codex-first-question_with_notes.ansi"),

@@ -201,6 +201,9 @@ func LayoutHint(text string) bool {
 		return false
 	}
 	for _, line := range lines[lastControl+1:] {
+		if hasCodexHeader && strings.EqualFold(strings.TrimSpace(line), "esc to interrupt") {
+			continue
+		}
 		if line != "" && strings.Trim(line, "─━═_—│| ") != "" {
 			return false
 		}

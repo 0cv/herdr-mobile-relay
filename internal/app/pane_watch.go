@@ -13,8 +13,10 @@ import (
 const defaultPaneWatchInterval = 250 * time.Millisecond
 
 type paneWatchFrame struct {
-	content     string
-	fingerprint string
+	content             string
+	contentFingerprint  string
+	frameFingerprint    string
+	classificationAgent string
 }
 
 type paneWatch struct {
@@ -95,16 +97,23 @@ func (s *Server) runPaneWatch(watch *paneWatch, knownFingerprint string) {
 		}
 		response, frame := s.readPaneWatchFrame(watch)
 		if frame != nil {
+			var acknowledged *paneWatchFrame
+			if knownFingerprint == frame.contentFingerprint {
+				acknowledged = &paneWatchFrame{
+					content:            frame.content,
+					contentFingerprint: knownFingerprint,
+				}
+			}
+			message := paneWatchUpdate(response, acknowledged, frame)
 			watch.mu.Lock()
-			if knownFingerprint == frame.fingerprint {
+			if message == nil {
 				watch.acknowledged = frame
 			} else {
-				response["ack_required"] = true
 				watch.pending = frame
 			}
 			watch.mu.Unlock()
-			if knownFingerprint != frame.fingerprint {
-				s.hub.Send(watch.client, response)
+			if message != nil {
+				s.hub.Send(watch.client, message)
 			}
 			break
 		}
@@ -138,6 +147,7 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 		return
 	}
 	previousProbe := watch.probeFingerprint
+	acknowledged := watch.acknowledged
 	watch.mu.Unlock()
 
 	probe := s.dispatcher.HandleProbePane(watch.ctx, watchMessage(watch))
@@ -146,7 +156,9 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 		return
 	}
 	probeFingerprint := paneFingerprint(probeContent)
-	if previousProbe != "" && probeFingerprint == previousProbe {
+	classificationAgentID, _ := s.agentInfo(watch.paneID)
+	if previousProbe != "" && probeFingerprint == previousProbe &&
+		(acknowledged == nil || acknowledged.classificationAgent == classificationAgentID) {
 		return
 	}
 
@@ -160,21 +172,12 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 		return
 	}
 	watch.probeFingerprint = probeFingerprint
-	acknowledged := watch.acknowledged
-	if acknowledged != nil && acknowledged.fingerprint == frame.fingerprint {
+	acknowledged = watch.acknowledged
+	message := paneWatchUpdate(response, acknowledged, frame)
+	if message == nil {
+		watch.acknowledged = frame
 		watch.mu.Unlock()
 		return
-	}
-	message := response
-	if acknowledged != nil {
-		segments := panedelta.Build(acknowledged.content, frame.content)
-		if panedelta.Efficient(segments, frame.content) {
-			message = paneDeltaResponse(response, acknowledged.fingerprint, segments)
-		} else {
-			message["ack_required"] = true
-		}
-	} else {
-		message["ack_required"] = true
 	}
 	watch.pending = frame
 	watch.mu.Unlock()
@@ -189,9 +192,16 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 	if !ok {
 		return response, nil
 	}
-	fingerprint := paneFingerprint(content)
-	response["content_fingerprint"] = fingerprint
-	return response, &paneWatchFrame{content: content, fingerprint: fingerprint}
+	contentFingerprint := paneFingerprint(content)
+	frameFingerprint := paneFrameFingerprint(response)
+	classificationAgentID, _ := s.agentInfo(watch.paneID)
+	response["content_fingerprint"] = contentFingerprint
+	return response, &paneWatchFrame{
+		content:             content,
+		contentFingerprint:  contentFingerprint,
+		frameFingerprint:    frameFingerprint,
+		classificationAgent: classificationAgentID,
+	}
 }
 
 func (s *Server) paneWatchCurrent(watch *paneWatch) bool {
@@ -210,13 +220,13 @@ func (s *Server) handlePaneApplied(client *transport.ClientConn, message map[str
 		return
 	}
 	watch.mu.Lock()
-	if watch.pending != nil && watch.pending.fingerprint == fingerprint {
+	if watch.pending != nil && watch.pending.contentFingerprint == fingerprint {
 		watch.acknowledged = watch.pending
 		watch.pending = nil
 		watch.mu.Unlock()
 		return
 	}
-	if watch.acknowledged != nil && watch.acknowledged.fingerprint == fingerprint {
+	if watch.acknowledged != nil && watch.acknowledged.contentFingerprint == fingerprint {
 		watch.mu.Unlock()
 		return
 	}
@@ -255,6 +265,29 @@ func (s *Server) applyPaneReadLease(message map[string]any) {
 			message["terminal_rows"] = rows
 		}
 	}
+}
+
+func paneWatchUpdate(
+	response map[string]any,
+	acknowledged, current *paneWatchFrame,
+) map[string]any {
+	if acknowledged != nil && acknowledged.frameFingerprint != "" &&
+		acknowledged.frameFingerprint == current.frameFingerprint {
+		return nil
+	}
+	if acknowledged == nil {
+		response["ack_required"] = true
+		return response
+	}
+	if acknowledged.contentFingerprint == current.contentFingerprint {
+		return paneDeltaResponse(response, acknowledged.contentFingerprint, nil)
+	}
+	segments := panedelta.Build(acknowledged.content, current.content)
+	if panedelta.Efficient(segments, current.content) {
+		return paneDeltaResponse(response, acknowledged.contentFingerprint, segments)
+	}
+	response["ack_required"] = true
+	return response
 }
 
 func paneDeltaResponse(response map[string]any, baseFingerprint string, segments []panedelta.Segment) map[string]any {

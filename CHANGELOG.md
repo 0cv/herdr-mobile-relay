@@ -5,6 +5,19 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-08-13
+
+### Fixed
+
+- Preserve Codex free-text answers by opening its notes editor before typing and
+  pacing terminal input so **Enter** cannot overtake the pasted text.
+- Detect Codex follow-up questions immediately, including partially drawn
+  question frames and the current separate `esc to interrupt` footer.
+- Switch an active chat to structured question controls as soon as a question
+  frame arrives, and restore the terminal position when the question clears.
+- Refresh structured question controls even when the terminal bytes have stopped
+  changing, so an open plan no longer requires leaving and reopening the agent.
+
 ## [0.15.1] - 2026-08-13
 
 ### Fixed
@@ -456,7 +469,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.2...HEAD
+[0.15.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.11...v0.15.0
 [0.14.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.10...v0.14.11

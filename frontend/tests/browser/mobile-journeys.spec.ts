@@ -2963,6 +2963,101 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await expect(composer).toBeEnabled();
 });
 
+test('hands an active chat to structured questions without losing terminal position', async ({ page }) => {
+  const interaction = {
+    id: 'live-question', kind: 'single_select', question: 'Choose the delivery style',
+    options: [{ index: 0, label: 'Direct' }, { index: 1, label: 'Staged' }],
+    submit_label: 'Submit', can_go_back: false, question_index: 1, question_total: 1,
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Live chat', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Live chat on Fedora' }).click();
+  const terminal = page.getByRole('log');
+  const content = Array.from({ length: 140 }, (_, index) => `conversation line ${index + 1}`).join('\n');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content });
+  await expect(terminal).toContainText('conversation line 140');
+  const before = await terminal.evaluate((element) => {
+    const target = Math.max(0, element.scrollHeight - element.clientHeight - 80);
+    element.scrollTop = target;
+    element.dispatchEvent(new Event('scroll'));
+    return target;
+  });
+  await expect.poll(async () => terminal.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content,
+    attention_kind: 'question',
+    interaction,
+    question_layout: true,
+  });
+  await expect(page.getByRole('group', { name: interaction.question })).toBeVisible();
+  await expect(page.getByRole('log')).toBeHidden();
+
+  for (let update = 0; update < 2; update += 1) {
+    await server(page, 0, {
+      type: 'agents',
+      agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Live chat', agent: 'codex' }],
+    });
+  }
+  await expect(page.getByRole('group', { name: interaction.question })).toBeHidden();
+  const after = await terminal.evaluate((element) => element.scrollTop);
+  expect(Math.abs(after - before), `before=${before} after=${after}`).toBeLessThan(2);
+});
+
+test('shows a live plan question immediately without reopening the agent', async ({ page }) => {
+  const interaction = {
+    id: 'plan-question', kind: 'single_select',
+    question: 'Where should the new app live relative to the existing Herdr relay app?',
+    options: [
+      { index: 0, label: 'Separate package', description: 'Keep the relay release path untouched.' },
+      { index: 1, label: 'New route', description: 'Add the questionnaire inside the existing app.' },
+    ],
+    other: { label: 'None of the above', placeholder: 'Add details' },
+    submit_label: 'Next', can_go_back: false, question_index: 1, question_total: 3,
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Plan app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Plan app on Fedora' }).click();
+  const questionContent = 'Question 1/3 (3 unanswered)\nWhere should the new app live?';
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: questionContent,
+    content_fingerprint: 'plan-question-content',
+  });
+  await expect(page.getByRole('log', { name: 'Agent terminal output' })).toContainText('Question 1/3');
+  await server(page, 0, {
+    type: 'pane_delta',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    base_fingerprint: 'plan-question-content',
+    content_fingerprint: 'plan-question-content',
+    segments: [],
+    attention_kind: 'question',
+    interaction,
+    question_layout: true,
+  });
+
+  await expect(page.getByRole('group', { name: interaction.question })).toBeVisible();
+  await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
+  await expect(page.getByRole('radio', { name: 'Separate package' })).toBeVisible();
+  await expect(page.getByPlaceholder('Type a reply…')).toBeHidden();
+});
+
 test('keeps a nonfinal question mounted when a transient frame is confirmed', async ({ page }) => {
   const first = {
     id: 'q1', kind: 'single_select', question: 'Choose deployment scope',

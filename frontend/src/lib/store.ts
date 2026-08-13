@@ -770,30 +770,18 @@ class RelayStore {
   }
 
   private mergePaneInteraction(paneId: string, message: Record<string, any>): void {
-    if (!Object.prototype.hasOwnProperty.call(message, 'attention_kind')
-      && !Object.prototype.hasOwnProperty.call(message, 'interaction')) return;
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
     if (index < 0) return;
     const agent = this.agentsValue[index];
-    if (!rawBlocked(agent)) return;
-    const connection = this.connectionsValue.get(agent.relay_id);
-    const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
-    const interaction = (message.interaction || null) as QuestionInteraction | null;
-    const questionLayout = Boolean(message.question_layout || interaction);
-    const next = normalizeAgentAttention({
+    if (!agent.attention_capable || message.attention_kind !== 'question' || !message.interaction) return;
+    this.agentsValue[index] = {
       ...agent,
-      attention_kind: message.attention_kind,
-      prompt: message.prompt,
-      command: message.command,
-      interaction: questionLayout ? interaction : null,
-      question_layout: questionLayout,
-      options: Array.isArray(message.options) ? message.options : undefined,
-    }, attentionCapable);
+      status: 'blocked',
+      attention_kind: 'question',
+      interaction: message.interaction as QuestionInteraction,
+    };
     this.blockedSnapshotMisses.delete(paneId);
-    const copy = [...this.agentsValue];
-    copy[index] = next;
-    this.agentsValue = copy;
-    this.agents.set(copy);
+    this.agents.set(this.agentsValue);
   }
 
   private removeAgentsForRelay(relayId: string): void {
@@ -1190,7 +1178,6 @@ class RelayStore {
       this.sendRaw(relayId, { type: 'refresh_agents' });
     }
   }
-
   waitForAgent(
     relayId: string,
     identity: { rawPaneId?: string; name?: string; cwd?: string },

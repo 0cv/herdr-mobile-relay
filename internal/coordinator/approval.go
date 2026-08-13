@@ -429,7 +429,7 @@ func (d *Dispatcher) executeQuestion(
 		OtherSelected: payload.OtherSelected,
 		OtherText:     payload.OtherText,
 	})
-	for _, step := range steps {
+	for index, step := range steps {
 		if len(step.Keys) > 0 {
 			if err := keys(step.Keys); err != nil {
 				return err
@@ -438,6 +438,11 @@ func (d *Dispatcher) executeQuestion(
 		if step.Text != "" {
 			if err := text(step.Text); err != nil {
 				return err
+			}
+		}
+		if index+1 < len(steps) {
+			if err := contextDelay(ctx, questionKeyDelay); err != nil {
+				return partiallyApplied("question input was only partially applied", err)
 			}
 		}
 	}

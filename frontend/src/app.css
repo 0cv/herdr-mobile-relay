@@ -400,6 +400,13 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .terminal-view { display: flex; flex-direction: column; height: calc(100dvh - 3.5rem - env(safe-area-inset-top)); position: relative; }
 .terminal-view.question-only { overflow: hidden; }
 .terminal-view.question-only .question-form { border-top: 0; flex: 1 1 auto; max-height: none; }
+.term { display: contents; }
+.term.hidden {
+  display: flex;
+  inset: 0;
+  position: absolute;
+  visibility: hidden;
+}
 .question-term-keys { flex: 0 0 auto; padding-bottom: calc(.4rem + env(safe-area-inset-bottom)); }
 .terminal-copy { display: flex; gap: .3rem; justify-content: flex-end; padding: .2rem .5rem; position: absolute; right: 0; top: 0; z-index: 2; }
 .terminal-view.find-open .terminal-copy { top: 3rem; }

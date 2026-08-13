@@ -982,6 +982,22 @@ func TestClassifyCapturedClaudeWrappedQuestion(t *testing.T) {
 	}
 }
 
+func TestClassifyCapturedCodexFollowUpQuestion(t *testing.T) {
+	got := Classify(attentionFixture(t, "codex-follow-up-question.ansi"), "codex")
+	if got.Kind != AttentionQuestion || got.Interaction == nil {
+		t.Fatalf("classification = %+v", got)
+	}
+	interaction := got.Interaction
+	if interaction.Question != "Was the custom note preserved?" ||
+		len(interaction.Options) != 2 ||
+		interaction.Options[0].Label != "Yes" ||
+		interaction.Other.Label != "None of the above" ||
+		interaction.QuestionIndex != 1 ||
+		interaction.QuestionTotal != 1 {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
 func TestFillCustomAnswersReplacesPlaceholders(t *testing.T) {
 	interaction := &Interaction{
 		Options: []Option{{

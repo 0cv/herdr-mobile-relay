@@ -19,6 +19,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
+	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/session"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
@@ -106,6 +107,51 @@ func TestPaneDeltaResponsePreservesTruncation(t *testing.T) {
 	}
 }
 
+func TestPaneWatchUpdateSendsMetadataOnlyDelta(t *testing.T) {
+	response := map[string]any{
+		"type":           "pane_content",
+		"content":        "unchanged question",
+		"attention_kind": question.AttentionQuestion,
+		"interaction":    map[string]any{"id": "question-1"},
+	}
+	previous := map[string]any{
+		"type":           "pane_content",
+		"content":        "unchanged question",
+		"attention_kind": question.AttentionUnknown,
+	}
+	acknowledged := &paneWatchFrame{
+		content:            "unchanged question",
+		contentFingerprint: "content-1",
+		frameFingerprint:   paneFrameFingerprint(previous),
+	}
+	current := &paneWatchFrame{
+		content:            "unchanged question",
+		contentFingerprint: "content-1",
+		frameFingerprint:   paneFrameFingerprint(response),
+	}
+	if acknowledged.frameFingerprint == current.frameFingerprint {
+		t.Fatal("question metadata did not change the pane frame fingerprint")
+	}
+	initial := *acknowledged
+	initial.frameFingerprint = ""
+	if paneWatchUpdate(response, &initial, current) == nil {
+		t.Fatal("initial pane watch suppressed current interaction metadata")
+	}
+
+	update := paneWatchUpdate(response, acknowledged, current)
+	if update["type"] != "pane_delta" ||
+		update["base_fingerprint"] != "content-1" {
+		t.Fatalf("metadata update = %#v", update)
+	}
+	if _, ok := update["content"]; ok {
+		t.Fatal("metadata delta unexpectedly included full terminal content")
+	}
+	segments, ok := update["segments"].([]panedelta.Segment)
+	if !ok || len(segments) != 0 {
+		t.Fatalf("metadata delta segments = %#v, want empty", update["segments"])
+	}
+}
+
 func TestPreparePaneResponseAppliesHistoryLimitDuringResizeSession(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
@@ -155,6 +201,43 @@ func TestCopyBlockedMessage(t *testing.T) {
 				t.Fatalf("copyBlockedMessage() = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestClassifyBlockedTransitionRetriesPartialCodexQuestion(t *testing.T) {
+	partial := `
+Question 1/3 (3 unanswered)
+After a respondent finishes a questionnaire, what should the app do?
+
+› 1. Builder-defined result (Recommended)  Show the configured result.
+  2. Response dashboard                    Store responses for review.
+  3. Personalized output                   Generate a tailored result.
+  4. None of the above                     Optionally, add details in notes (tab).
+`
+	complete := partial + `
+tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt
+`
+	calls := 0
+	classification, err := classifyBlockedTransition(
+		context.Background(),
+		"codex",
+		func(context.Context) (string, error) {
+			calls++
+			if calls == 1 {
+				return partial, nil
+			}
+			return complete, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 ||
+		classification.Kind != question.AttentionQuestion ||
+		classification.Interaction == nil ||
+		classification.Interaction.Question !=
+			"After a respondent finishes a questionnaire, what should the app do?" {
+		t.Fatalf("classification after %d reads = %+v", calls, classification)
 	}
 }
 

@@ -1044,13 +1044,21 @@ func (s *Server) sendTransitionPush(
 	<-watcherDone
 }
 
+const (
+	blockedClassificationAttempts   = 4
+	blockedClassificationRetryDelay = 100 * time.Millisecond
+)
+
 func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator.AgentState) {
 	if agent == nil {
 		return
 	}
-	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	read, err := s.herdrC.ReadPane(readCtx, agent.PaneID, 80, "ansi")
+	classification, err := classifyBlockedTransition(ctx, agent.Agent, func(readCtx context.Context) (string, error) {
+		attemptCtx, cancel := context.WithTimeout(readCtx, 3*time.Second)
+		defer cancel()
+		read, readErr := s.herdrC.ReadPane(attemptCtx, agent.PaneID, 80, "ansi")
+		return string(read.Content), readErr
+	})
 	if err != nil {
 		setAgentAttention(s.state, agent, question.Classification{
 			Kind:   question.AttentionUnknown,
@@ -1058,7 +1066,42 @@ func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator
 		})
 		return
 	}
-	setAgentAttention(s.state, agent, question.Classify(string(read.Content), agent.Agent))
+	setAgentAttention(s.state, agent, classification)
+}
+
+func classifyBlockedTransition(
+	ctx context.Context,
+	agent string,
+	read func(context.Context) (string, error),
+) (question.Classification, error) {
+	classification := question.Classification{
+		Kind:   question.AttentionUnknown,
+		Prompt: "Agent needs inspection",
+	}
+	for attempt := range blockedClassificationAttempts {
+		content, err := read(ctx)
+		if err != nil {
+			return classification, err
+		}
+		classification = question.Classify(content, agent)
+		if classification.Kind != question.AttentionUnknown ||
+			attempt+1 == blockedClassificationAttempts {
+			return classification, nil
+		}
+		timer := time.NewTimer(blockedClassificationRetryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return classification, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return classification, nil
 }
 
 func setAgentAttention(
@@ -1661,6 +1704,27 @@ func successfulPaneContent(response map[string]any) (string, bool) {
 func paneFingerprint(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", sum[:8])
+}
+
+func paneFrameFingerprint(response map[string]any) string {
+	state := []any{
+		response["content"],
+		response["format"],
+		response["truncated"],
+		response["viewport_only"],
+		response["viewport_rows"],
+		response["attention_kind"],
+		response["prompt"],
+		response["command"],
+		response["options"],
+		response["interaction"],
+		response["question_layout"],
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return paneFingerprint(fmt.Sprint(state...))
+	}
+	return paneFingerprint(string(encoded))
 }
 
 func unchangedPaneResponse(message, response map[string]any) map[string]any {
