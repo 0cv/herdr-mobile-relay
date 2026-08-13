@@ -42,6 +42,8 @@ func PlanInput(interaction *Interaction, intent InputIntent) []InputStep {
 		return planQoderInput(interaction, intent)
 	case "opencode":
 		return planOpenCodeInput(interaction, intent)
+	case "omp":
+		return planOMPInput(interaction, intent)
 	default:
 		return planClaudeInput(interaction, intent)
 	}
@@ -239,11 +241,65 @@ func planOpenCodeMultiInput(interaction *Interaction, intent InputIntent) []Inpu
 	return append(steps, InputStep{Keys: []string{"Tab"}})
 }
 
-func planClaudeInput(interaction *Interaction, intent InputIntent) []InputStep {
+func planOMPInput(interaction *Interaction, intent InputIntent) []InputStep {
 	if interaction.Kind == "single_select" {
 		if len(intent.Selected) > 0 {
 			target := Focus{Kind: "option", Index: intent.Selected[0]}
 			return []InputStep{{Keys: append(navigationKeys(interaction, target), "Enter")}}
+		}
+		target := Focus{Kind: "option", Index: interaction.AllOptionCount - 1}
+		steps := []InputStep{{Keys: append(navigationKeys(interaction, target), "Enter", "Ctrl+U")}}
+		if intent.OtherText != "" {
+			steps = append(steps, InputStep{Text: intent.OtherText})
+		}
+		return append(steps, InputStep{Keys: []string{"Enter"}})
+	}
+
+	current := *interaction
+	var steps []InputStep
+	for index, option := range current.Options {
+		desired := containsInt(intent.Selected, index)
+		if option.Selected == desired {
+			continue
+		}
+		target := Focus{Kind: "option", Index: index}
+		steps = append(steps, InputStep{Keys: append(navigationKeys(&current, target), "Enter")})
+		current.Focus = target
+	}
+	if intent.OtherSelected {
+		target := Focus{Kind: "option", Index: current.AllOptionCount - 1}
+		steps = append(steps, InputStep{Keys: append(navigationKeys(&current, target), "Enter", "Ctrl+U")})
+		if intent.OtherText != "" {
+			steps = append(steps, InputStep{Text: intent.OtherText})
+		}
+		return append(steps, InputStep{Keys: []string{"Enter"}})
+	}
+	if current.QuestionTotal > 1 {
+		return append(steps, InputStep{Keys: []string{"Right"}})
+	}
+	if len(intent.Selected) == 0 {
+		return steps
+	}
+	distance := len(current.Options) - current.Focus.Index
+	keys := make([]string, distance)
+	for index := range keys {
+		keys[index] = "Down"
+	}
+	return append(steps, InputStep{Keys: append(keys, "Enter")})
+}
+
+func planClaudeInput(interaction *Interaction, intent InputIntent) []InputStep {
+	if interaction.Kind == "single_select" {
+		if len(intent.Selected) > 0 {
+			current := *interaction
+			var steps []InputStep
+			if !current.Other.Hidden && current.Other.Text != "" && intent.OtherText == "" {
+				otherTarget := Focus{Kind: "option", Index: current.AllOptionCount - 1}
+				steps = append(steps, InputStep{Keys: append(navigationKeys(&current, otherTarget), "Ctrl+U")})
+				current.Focus = otherTarget
+			}
+			target := Focus{Kind: "option", Index: intent.Selected[0]}
+			return append(steps, InputStep{Keys: append(navigationKeys(&current, target), "Enter")})
 		}
 		target := Focus{Kind: "option", Index: interaction.AllOptionCount - 1}
 		keys := append(navigationKeys(interaction, target), "Ctrl+U")

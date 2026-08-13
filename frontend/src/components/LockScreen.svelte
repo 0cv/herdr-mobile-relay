@@ -10,8 +10,8 @@
   dismissible={false}
   title="Unlock Herdr"
   description={$securityState.reason === 'resume'
-    ? 'Verify before reconnecting relays after the page was paused.'
-    : 'Verify with your device fingerprint, face unlock, or passcode before connecting to relays.'}
+    ? 'Verify to reconnect relays after the pause.'
+    : 'Verify with your device fingerprint, face unlock, or passcode.'}
 >
   <Button disabled={$securityState.busy} onclick={() => unlockWithDevice($securityState.reason)}>Unlock</Button>
   {#if $securityState.status}<p class="form-status" role="status">{$securityState.status}</p>{/if}

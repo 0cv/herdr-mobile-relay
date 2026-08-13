@@ -682,13 +682,13 @@ func (s *Server) Run(ctx context.Context) error {
 			if err != nil {
 				s.recordSafeError("blocked pane enrichment failed", err)
 				s.logger.Warn("blocked pane enrichment failed", "pane_id", a.PaneID, "error", err)
-				setAgentAttention(a, question.Classification{
+				setAgentAttention(s.state, a, question.Classification{
 					Kind:   question.AttentionUnknown,
 					Prompt: "Agent needs inspection",
 				})
 				continue
 			}
-			setAgentAttention(a, question.Classify(string(read.Content), a.Agent))
+			setAgentAttention(s.state, a, question.Classify(string(read.Content), a.Agent))
 		}
 	})
 
@@ -1052,16 +1052,17 @@ func (s *Server) enrichBlockedTransition(ctx context.Context, agent *coordinator
 	defer cancel()
 	read, err := s.herdrC.ReadPane(readCtx, agent.PaneID, 80, "ansi")
 	if err != nil {
-		setAgentAttention(agent, question.Classification{
+		setAgentAttention(s.state, agent, question.Classification{
 			Kind:   question.AttentionUnknown,
 			Prompt: "Agent needs inspection",
 		})
 		return
 	}
-	setAgentAttention(agent, question.Classify(string(read.Content), agent.Agent))
+	setAgentAttention(s.state, agent, question.Classify(string(read.Content), agent.Agent))
 }
 
 func setAgentAttention(
+	state *coordinator.State,
 	agent *coordinator.AgentState,
 	classification question.Classification,
 ) {
@@ -1083,6 +1084,12 @@ func setAgentAttention(
 		agent.QuestionLayout = classification.QuestionLayout
 		if agent.Interaction != nil {
 			agent.InteractionID = agent.Interaction.ID
+			if state != nil {
+				if text := strings.TrimSpace(agent.Interaction.Other.Text); text != "" {
+					state.RecordCustomAnswer(agent.PaneID, agent.Interaction.Question, text)
+				}
+				question.FillCustomAnswers(agent.Interaction, state.CustomAnswers(agent.PaneID))
+			}
 		}
 	}
 }
@@ -1619,6 +1626,12 @@ func (s *Server) preparePaneResponse(message, response map[string]any) map[strin
 	response["options"] = classification.Options
 	response["interaction"] = classification.Interaction
 	response["question_layout"] = classification.QuestionLayout
+	if interaction := classification.Interaction; interaction != nil {
+		if text := strings.TrimSpace(interaction.Other.Text); text != "" {
+			s.state.RecordCustomAnswer(paneID, interaction.Question, text)
+		}
+		question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
+	}
 	agentLower := strings.ToLower(agent)
 	if classification.Interaction != nil ||
 		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {

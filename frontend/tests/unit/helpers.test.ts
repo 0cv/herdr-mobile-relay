@@ -349,6 +349,61 @@ describe('agent state and sorting', () => {
     expect(immediate.status).toBe('working');
   });
 
+  it('keeps a structured question mounted across transient answer states', () => {
+    const first: QuestionInteraction = {
+      id: 'question-1', kind: 'single_select', question: 'First question',
+      options: [{ index: 0, label: 'First answer' }],
+    };
+    const second: QuestionInteraction = {
+      ...first, id: 'question-2', question: 'Second question',
+    };
+    const question = agent({
+      status: 'blocked', attention_kind: 'question', attention_capable: true,
+      interaction: first, question_layout: true,
+    });
+    const responding = new Set([question.pane_id]);
+    const misses = new Map<string, number>();
+
+    const working = mergeAgentList(
+      [question],
+      'relay',
+      [agent({ status: 'working', attention_capable: true })],
+      misses,
+      responding,
+    )[0];
+    expect(working).toMatchObject({
+      status: 'blocked', attention_kind: 'question',
+      interaction: first, question_layout: true,
+    });
+
+    const chat = mergeAgentList(
+      [working],
+      'relay',
+      [agent({ status: 'blocked', attention_kind: 'chat', attention_capable: true })],
+      misses,
+      responding,
+    )[0];
+    expect(chat).toMatchObject({
+      status: 'blocked', attention_kind: 'question',
+      interaction: first, question_layout: true,
+    });
+
+    const nextQuestion = mergeAgentList(
+      [chat],
+      'relay',
+      [agent({
+        status: 'blocked', attention_kind: 'question', attention_capable: true,
+        interaction: second, question_layout: true,
+      })],
+      misses,
+      responding,
+    )[0];
+    expect(nextQuestion).toMatchObject({
+      status: 'blocked', attention_kind: 'question',
+      interaction: second, question_layout: true,
+    });
+  });
+
   it('clears an old question when a blocked update explicitly becomes an approval', () => {
     const interaction: QuestionInteraction = {
       id: 'old-question', kind: 'single_select', question: 'Old question',

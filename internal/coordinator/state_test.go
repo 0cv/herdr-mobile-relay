@@ -604,3 +604,22 @@ func TestBlockedClassificationChangeTriggersAndChatSuppressesIdleCompletion(t *t
 		t.Fatal("raw idle canceled the classified chat completion")
 	}
 }
+
+func TestCustomAnswerMemoryNormalizesAndPrunes(t *testing.T) {
+	s := NewState(testLogger())
+	s.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "blocked"}}, s.RevisionCounter())
+
+	s.RecordCustomAnswer("pane-1", "Roughly how much TIME do you want?", "Tyy")
+	s.RecordCustomAnswer("pane-1", "", "ignored")
+	s.RecordCustomAnswer("pane-1", "Empty answer?", "   ")
+	answers := s.CustomAnswers("pane-1")
+	if len(answers) != 1 ||
+		answers[question.SummaryKey("roughly how much time do you want")] != "Tyy" {
+		t.Fatalf("answers = %#v", answers)
+	}
+
+	s.CommitInventory([]*AgentState{{PaneID: "pane-2", Status: "working"}}, s.RevisionCounter())
+	if remaining := s.CustomAnswers("pane-1"); remaining != nil {
+		t.Fatalf("answers survived pane removal: %#v", remaining)
+	}
+}

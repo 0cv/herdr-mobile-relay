@@ -37,6 +37,56 @@ Retry only after connectivity changes.
 Enter to select · ↑/↓ to navigate · Esc to cancel
 `
 
+const claudeAskQuestionView = `
+╭────────────────────────────────────────────╮
+├─── [region] · options:4 ───────────────────┤
+│ Which general area should the cabin be in? │
+├─── [budget] · options:3 ───────────────────┤
+│ What's the budget per night for the cabin? │
+├─── [party_timing] · options:4 ─────────────┤
+│ Who's going, and when?                     │
+╰────────────────────────────────────────────╯
+
+╭─ Ask ─────────────────────────────────────╮
+│  region    budget    party_timing    Submit │
+│ What's the budget per night for the cabin? │
+├────────────────────────────────────────────┤
+│   ○ Budget ($80–150/night)                  │
+│       Simple, rustic cabin.                 │
+│ ❯ ○ Mid-range ($150–300/night) (Recommended) │
+│       Comfortable cabin with modern amenities. │
+│   ○ Splurge ($300+/night)                   │
+│       Premium cabin, hot tub, lake-view deck. │
+│   ○ Other (type your own)                   │
+├────────────────────────────────────────────┤
+│ Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel │
+╰────────────────────────────────────────────╯
+`
+
+const ompReviewView = `
+╭────────────────────────────────────────────╮
+├─── [region] · options:4 ───────────────────┤
+│ Which general area should the cabin be in? │
+├─── [budget] · options:3 ───────────────────┤
+│ What's the budget per night for the cabin? │
+├─── [party_timing] · options:4 ─────────────┤
+│ Who's going, and when?                     │
+╰────────────────────────────────────────────╯
+
+╭─ Ask ──────────────────────────────────────╮
+│ region    budget    party_timing    Submit │
+│ Review answers                             │
+├────────────────────────────────────────────┤
+│ 1. region: Upper Midwest lakes             │
+│ 2. budget: Mid-range ($150–300/night)      │
+│ 3. party_timing: Couple, a future weekend  │
+│                                            │
+│  Submit                                   │
+├────────────────────────────────────────────┤
+│ Enter submit · ↑/↓ scroll · Esc cancel     │
+╰────────────────────────────────────────────╯
+`
+
 const codexQuestionView = `
 [48;2;240;240;240m  [2mQuestion 1/3 (3 unanswered)
 [48;2;240;240;240m  [38;5;6mWhere should the reusable adapter boundary sit?
@@ -166,6 +216,85 @@ func TestParseClaudeSingleQuestionPosition(t *testing.T) {
 	}
 }
 
+const claudeStaleNoteQuestionView = `
+←  ☒ Existing work  ☒ Work type  ☒ Time budget  ☒ Top outcome  ✔ Submit  →
+
+Roughly how much time do you want to put into this over the weekend?
+
+❯ 1. A few focused hours
+     One short session, keep scope tight
+  2. Half a day
+     One solid block, e.g. Saturday morning
+  3. Most of the weekend ✔
+     Multiple sessions across Saturday and Sunday
+  4. Just exploring / no fixed budget
+     Casual, see how far it goes
+  5. Hhrr
+  6. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+`
+
+func TestParseClaudeStaleNoteKeepsConfirmedOption(t *testing.T) {
+	interaction := Parse(claudeStaleNoteQuestionView, "claude")
+	if interaction == nil {
+		t.Fatal("question was not parsed")
+	}
+	if interaction.Kind != "single_select" ||
+		len(interaction.Options) != 4 ||
+		!interaction.Options[2].Selected ||
+		interaction.Options[2].Label != "Most of the weekend" ||
+		interaction.Other.Selected ||
+		interaction.Other.Text != "Hhrr" {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestParseOMPAskQuestion(t *testing.T) {
+	interaction := Parse(claudeAskQuestionView, "omp")
+	if interaction == nil {
+		t.Fatal("question was not parsed")
+	}
+	if interaction.Kind != "single_select" ||
+		interaction.Question != "What's the budget per night for the cabin?" ||
+		len(interaction.Options) != 3 ||
+		interaction.Options[1].Description != "Comfortable cabin with modern amenities." ||
+		interaction.Other.Label != "Other (type your own)" ||
+		interaction.SubmitLabel != "Next" ||
+		interaction.QuestionIndex != 2 ||
+		interaction.QuestionTotal != 3 {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+	nerdFont := strings.Replace(claudeAskQuestionView, "❯ ○", " ", 1)
+	nerdInteraction := Parse(nerdFont, "omp")
+	if nerdInteraction == nil || len(nerdInteraction.Options) != 3 ||
+		nerdInteraction.Focus != (Focus{Kind: "option", Index: 1}) {
+		t.Fatalf("Nerd Font interaction = %+v", nerdInteraction)
+	}
+}
+
+func TestParseOMPReview(t *testing.T) {
+	interaction := Parse(ompReviewView, "omp")
+	if interaction == nil {
+		t.Fatal("review was not parsed")
+	}
+	if interaction.Kind != "single_select" ||
+		interaction.Question != "Review answers" ||
+		len(interaction.Options) != 1 ||
+		!interaction.Options[0].Selected ||
+		interaction.Options[0].Description != "1. region: Upper Midwest lakes\n2. budget: Mid-range ($150–300/night)\n3. party_timing: Couple, a future weekend" ||
+		interaction.SubmitLabel != "Submit" ||
+		interaction.QuestionIndex != 4 ||
+		interaction.QuestionTotal != 4 ||
+		!interaction.CanGoBack {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+	clipped := Parse(ompReviewView[strings.Index(ompReviewView, "╭─ Ask"):], "omp")
+	if clipped == nil || clipped.QuestionIndex != 4 || clipped.QuestionTotal != 4 {
+		t.Fatalf("clipped interaction = %+v", clipped)
+	}
+}
+
 func TestParseCodexQuestion(t *testing.T) {
 	interaction := Parse(codexQuestionView, "codex")
 	if interaction == nil {
@@ -273,7 +402,7 @@ func TestParseQoderReview(t *testing.T) {
 		len(interaction.Options) != 2 ||
 		interaction.Options[0].Label != "Submit answers" ||
 		interaction.Options[1].Label != "Cancel ask" ||
-		interaction.Options[0].Description != "Vibe: Relaxation · Distance: Open to flying · Activities: Food & wine · Budget: Mid-range" ||
+		interaction.Options[0].Description != "1. Vibe: Relaxation\n2. Distance: Open to flying\n3. Activities: Food & wine\n4. Budget: Mid-range" ||
 		!interaction.Other.Hidden ||
 		interaction.SubmitLabel != "Continue" ||
 		!interaction.CanGoBack ||
@@ -291,13 +420,15 @@ func TestQoderHistoricalQuestionIsNotLive(t *testing.T) {
 }
 
 func TestQuestionSupportsKnownTerminalAdapters(t *testing.T) {
-	for _, agent := range []string{"claude", "codex", "opencode", "qoder", "qodercli"} {
+	for _, agent := range []string{"claude", "codex", "omp", "omp-question", "pi", "opencode", "qoder", "qodercli"} {
 		if !Supports(agent) {
 			t.Errorf("%q is not supported", agent)
 		}
 	}
-	if Supports("unparsed-agent") {
-		t.Fatal("unknown keyboard protocol was treated as supported")
+	for _, agent := range []string{"unparsed-agent", "computer-use"} {
+		if Supports(agent) {
+			t.Fatalf("%q was treated as a supported keyboard protocol", agent)
+		}
 	}
 }
 

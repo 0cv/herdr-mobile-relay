@@ -62,7 +62,7 @@
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
   } from '$lib/terminal';
-  import { detectTerminalMenu } from '$lib/terminal-menu';
+  import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
   import { VirtualTerminalIndex } from '$lib/virtual-terminal';
 
@@ -123,6 +123,9 @@
   let pendingResizeAnchor: VirtualTerminalAnchor | null = null;
   let pendingResizeStick: boolean | null = null;
   let pendingLayoutStick: boolean | null = null;
+  let virtualScrollTop = 0;
+  let virtualScrollHeight = 0;
+  let virtualClientHeight = 0;
   let virtualWindowFrame = 0;
   let virtualRowObserver: ResizeObserver | undefined;
   let virtualHeightCache = new Map<string, number>();
@@ -209,6 +212,8 @@
   const terminalPlainText = $derived(
     stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
+  const terminalTextMode = $derived(inspectionMode && terminalTextInputActive(terminalPlainText));
+  const composerLocked = $derived(responsePending || (inspectionMode && !terminalTextMode));
   const terminalMenu = $derived(detectTerminalMenu(terminalPlainText));
   const visibleTerminalMenu = $derived(
     !approvalMode
@@ -394,12 +399,19 @@
     pendingLayoutStick = virtualStickToBottom;
   });
 
+  function rememberVirtualScrollGeometry(element: HTMLElement) {
+    virtualScrollTop = element.scrollTop;
+    virtualScrollHeight = element.scrollHeight;
+    virtualClientHeight = element.clientHeight;
+  }
+
   function resetVirtualScroll(element: HTMLElement, stick: boolean) {
     virtualScrollResetPending = true;
     virtualLayoutSignature = '';
     const nextTop = resetVirtualRows(stick ? Number.POSITIVE_INFINITY : element.scrollTop);
     void tick().then(() => {
       element.scrollTop = stick ? element.scrollHeight : nextTop;
+      rememberVirtualScrollGeometry(element);
       if (stick) virtualStickToBottom = true;
       virtualScrollResetPending = false;
     });
@@ -412,6 +424,7 @@
     void interfaceSizeValue;
     if (!element || typeof ResizeObserver === 'undefined') return;
     let previousWidth = element.clientWidth;
+    let previousHeight = element.clientHeight;
     untrack(() => {
       if (!renderedRows.length) return;
       const stick = virtualStickToBottom;
@@ -419,12 +432,21 @@
     });
     const observer = new ResizeObserver(() => {
       const nextWidth = element.clientWidth;
-      if (renderedRows.length && Math.abs(nextWidth - previousWidth) >= 1) {
-        const stick = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+      const nextHeight = element.clientHeight;
+      const widthChanged = Math.abs(nextWidth - previousWidth) >= 1;
+      const heightChanged = Math.abs(nextHeight - previousHeight) >= 1;
+      if (renderedRows.length && widthChanged) {
+        const stick = virtualStickToBottom
+          || element.scrollHeight - element.scrollTop - element.clientHeight < 48;
         virtualStickToBottom = stick;
-        previousWidth = nextWidth;
         resetVirtualScroll(element, stick);
-      } else scheduleVirtualWindow();
+      } else if (heightChanged && virtualStickToBottom) {
+        jumpToBottom();
+      } else {
+        scheduleVirtualWindow();
+      }
+      previousWidth = nextWidth;
+      previousHeight = nextHeight;
       requestPaneSizeLease(false);
     });
     observer.observe(element);
@@ -581,6 +603,7 @@
       terminalElement.scrollTop = nextTop;
       jumpVisible = true;
     }
+    rememberVirtualScrollGeometry(terminalElement);
     virtualScrollResetPending = false;
     observeVirtualRows();
   }
@@ -793,6 +816,7 @@
         return;
       }
       terminalElement.scrollTop = wasAtBottom ? terminalElement.scrollHeight : nextTop;
+      rememberVirtualScrollGeometry(terminalElement);
       if (wasAtBottom) virtualStickToBottom = true;
       virtualScrollResetPending = false;
     });
@@ -916,6 +940,7 @@
     void tick().then(() => {
       if (!terminalElement) return;
       terminalElement.scrollTop = nextTop;
+      rememberVirtualScrollGeometry(terminalElement);
       virtualStickToBottom = terminalElement.scrollHeight
         - terminalElement.scrollTop
         - terminalElement.clientHeight < 48;
@@ -945,13 +970,25 @@
   async function sendPrompt() {
     const submittedDraft = composer;
     const text = submittedDraft.replace(/[\r\n]+$/g, '');
-    if (!text || inputLocked || sendingPrompt) return;
+    if (!text || composerLocked || sendingPrompt) return;
+    const terminalText = terminalTextMode;
+    let terminalTextInserted = false;
     sendingPrompt = true;
     composer = '';
     clearPromptDraft(agent);
     try {
-      await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
-      relayStore.showToast('Prompt sent.');
+      if (terminalText) {
+        await relayStore.sendToAgent(agent, { type: 'send_text', text });
+        terminalTextInserted = true;
+        await relayStore.sendToAgent(agent, {
+          type: 'send_keys',
+          keys: ['Enter'],
+          activity_label: 'Submitted terminal text',
+        });
+      } else {
+        await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
+      }
+      relayStore.showToast(terminalText ? 'Terminal text submitted.' : 'Prompt sent.');
     } catch (error) {
       const dispatchedUnknown = typeof error === 'object'
         && error !== null
@@ -960,11 +997,16 @@
         && error.data !== null
         && 'dispatched_unknown' in error.data
         && error.data.dispatched_unknown === true;
-      if (!composer && !dispatchedUnknown) composer = submittedDraft;
-      const detail = error instanceof Error ? error.message : 'Prompt could not be sent.';
-      relayStore.showToast(dispatchedUnknown
-        ? `${detail} Check the terminal before sending again.`
-        : detail, true);
+      if (!composer && !dispatchedUnknown && !terminalTextInserted) composer = submittedDraft;
+      const detail = error instanceof Error
+        ? error.message
+        : terminalText ? 'Terminal text could not be submitted.' : 'Prompt could not be sent.';
+      const recovery = terminalText && terminalTextInserted
+        ? `${detail} Text remains in the terminal; use Enter to submit it.`
+        : dispatchedUnknown
+          ? `${detail} Check the terminal before sending again.`
+          : detail;
+      relayStore.showToast(recovery, true);
     } finally {
       sendingPrompt = false;
       setTimeout(() => relayStore.readPane(agent), 500);
@@ -1116,10 +1158,10 @@
         ? 'Final response copied.'
         : 'Copied the visible terminal output.';
     const selectedMessage = copiedAgentResponse
-      ? 'Agent response selected. Use your browser Copy command.'
+      ? 'Output selected. Use your browser Copy command.'
       : hasCompletedResponse
         ? 'Final response selected. Use your browser Copy command.'
-        : 'Visible terminal output selected. Use your browser Copy command.';
+        : 'Output selected. Use your browser Copy command.';
     if (!navigator.clipboard?.writeText) {
       target.value = text;
       target.focus({ preventScroll: true });
@@ -1144,7 +1186,7 @@
     if (!navigator.clipboard?.writeText) {
       agentResponsePreviewElement.focus({ preventScroll: true });
       agentResponsePreviewElement.select();
-      relayStore.showToast('Agent response selected. Use your browser Copy command.');
+      relayStore.showToast('Output selected. Use your browser Copy command.');
       return;
     }
     try {
@@ -1153,7 +1195,7 @@
     } catch {
       agentResponsePreviewElement.focus({ preventScroll: true });
       agentResponsePreviewElement.select();
-      relayStore.showToast('Agent response selected. Use your browser Copy command.');
+      relayStore.showToast('Output selected. Use your browser Copy command.');
     }
   }
 
@@ -1248,17 +1290,35 @@
         return;
       }
       terminalElement.scrollTop = terminalElement.scrollHeight;
+      rememberVirtualScrollGeometry(terminalElement);
       virtualScrollResetPending = false;
       jumpVisible = false;
     });
   }
 
   function handleScroll() {
-    if (virtualScrollResetPending) return;
-    virtualStickToBottom = terminalElement.scrollHeight
-      - terminalElement.scrollTop
-      - terminalElement.clientHeight < 48;
-    if (virtualStickToBottom) jumpVisible = false;
+    if (virtualScrollResetPending) {
+      rememberVirtualScrollGeometry(terminalElement);
+      return;
+    }
+    const scrollTop = terminalElement.scrollTop;
+    const scrollHeight = terminalElement.scrollHeight;
+    const clientHeight = terminalElement.clientHeight;
+    const atBottom = scrollHeight - scrollTop - clientHeight < 48;
+    const geometryChanged = Math.abs(scrollHeight - virtualScrollHeight) >= 1
+      || Math.abs(clientHeight - virtualClientHeight) >= 1;
+    const movedTowardHistory = !geometryChanged && scrollTop < virtualScrollTop - 1;
+    rememberVirtualScrollGeometry(terminalElement);
+    if (atBottom) {
+      virtualStickToBottom = true;
+      jumpVisible = false;
+    } else if (!virtualStickToBottom || movedTowardHistory) {
+      virtualStickToBottom = false;
+      jumpVisible = true;
+    } else {
+      jumpToBottom();
+      return;
+    }
     scheduleVirtualWindow();
   }
 
@@ -1316,6 +1376,7 @@
     }
     terminalElement.scrollLeft = 0;
     terminalElement.scrollTop = stick ? terminalElement.scrollHeight : nextTop;
+    rememberVirtualScrollGeometry(terminalElement);
     virtualScrollResetPending = false;
     jumpVisible = !stick;
     observeVirtualRows();
@@ -1589,6 +1650,7 @@
       <Button variant="ghost" size="sm" aria-label="Close find" onclick={closeTerminalFind}>×</Button>
     </section>
   {/if}
+  <div class="term-wrap">
   <div
     class:resize-layout={resizeSessionActive}
     class="term-content preserve-layout"
@@ -1613,6 +1675,10 @@
         <span class="terminal-virtual-spacer" style={`height:${virtualBottomHeight}px`} aria-hidden="true"></span>
       {/if}
     </div>
+  </div>
+    {#if jumpVisible}
+      <button class="jump-bottom" aria-label="Jump to latest" onclick={jumpToBottom}>↓</button>
+    {/if}
   </div>
   <textarea
     class="sr-only"
@@ -1656,9 +1722,6 @@
       onclick={copyTerminalOutput}
     >{copyingAgentResponse ? 'Copying…' : 'Copy'}</Button>
   </div>
-  {#if jumpVisible}
-    <button class="jump-bottom" aria-label="Jump to latest output" onclick={jumpToBottom}>↓</button>
-  {/if}
 
   <div class="terminal-bottom" onfocusin={focusComposer} onfocusout={blurComposer}>
     {#if slashMenuOpen}
@@ -1724,11 +1787,13 @@
           bind:this={composerElement}
           bind:value={composer}
           rows="1"
-          disabled={inputLocked && !composerFocused}
+          disabled={composerLocked}
           placeholder={approvalMode
             ? 'Approval pending — use buttons'
             : inspectionMode
-              ? 'Needs inspection — use terminal keys'
+              ? terminalTextMode
+                ? 'Type terminal input…'
+                : 'Needs inspection — use terminal controls'
               : 'Type a reply…'}
           role="combobox"
           aria-label="Prompt"
@@ -1748,7 +1813,7 @@
         ></textarea>
         {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
-      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked || sendingPrompt} aria-label={sendingPrompt ? 'Sending prompt' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
+      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || sendingPrompt} aria-label={sendingPrompt ? 'Submitting input' : inspectionMode ? 'Submit terminal text' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
       <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}

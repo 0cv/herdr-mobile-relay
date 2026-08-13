@@ -1,0 +1,48 @@
+╭─ Plan Review ──────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ▎Context                       │  Context                                                                                                           │
+│  Approach                      │                                                                                                                    │
+│  Verification                  │  Add a single minimal README.md to the currently empty /tmp/omp-plan-verify directory.                             │
+│                                │                                                                                                                    │
+│                                │  Approach                                                                                                          │
+│                                │                                                                                                                    │
+│                                │  1. Recheck /tmp/omp-plan-verify before editing; if files now exist, preserve them and continue without            │
+│                                │     overwriting anything except a pre-existing README.md, which requires stopping rather than replacing unknown    │
+│                                │     work.                                                                                                          │
+│                                │  2. Create /tmp/omp-plan-verify/README.md with exactly # omp-plan-verify followed by one newline.                  │
+│                                │  3. From /tmp/omp-plan-verify, run test "$(cat README.md)" = "# omp-plan-verify"; success confirms the file        │
+│                                │     exists with the intended content.                                                                              │
+│                                │                                                                                                                    │
+│                                │  Verification                                                                                                      │
+│                                │                                                                                                                    │
+│                                │  Step 3 is the end-to-end check; expected output is none and exit status is 0.                                     │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+│                                │                                                                                                                    │
+├────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Plan mode - next step                                                                                                                               │
+│ continue with  ◂   default   OPUS  FABLE  SONNET  LUNA  SOL  ▸                                                                                │
+│   ↳ GPT-5.6-Sol                                                                                                                                     │
+│  Approve and execute                                                                                                                               │
+│   Approve and compact context                                                                                                                       │
+│   Approve and keep context (~18k / 272k)                                                                                                            │
+│   Refine plan                                                                                                                                       │
+├─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ ↑↓ select · ⏎ confirm · ◂▸ model · c copy · tab regions · Ctrl+G editor · esc cancel                                                                │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

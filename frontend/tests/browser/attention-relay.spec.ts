@@ -100,6 +100,33 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   })).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
 
+  await page.getByRole('button', { name: /Open omp-plan-approval on Captured relay/ }).click();
+  await expect(page.getByRole('button', { name: 'Approve and execute', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Approve and compact context', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Approve and keep context (~18k / 272k)', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Refine plan', exact: true }).click();
+  await expect.poll(async () => (await operations()).some((operation) =>
+    JSON.stringify(operation.argv) === JSON.stringify([
+      'pane', 'send-keys', 'omp-plan-approval', 'Down', 'Down', 'Down', 'Enter',
+    ]))).toBe(true);
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: /Open omp-partial-ask on Captured relay/ }).click();
+  await expect(page.getByRole('group', {
+    name: 'What kind of weekend trip are you in the mood for?',
+  })).toBeVisible();
+  await expect(page.getByText('Question 1 of 4')).toBeVisible();
+  await expect(page.getByRole('radio', { name: /Quiet lakeside cabin \(Recommended\)/ })).toBeChecked();
+  await expect(page.getByRole('textbox')).toHaveCount(0);
+  await page.getByRole('radio', { name: /Beach & coast/ }).check();
+  await page.getByRole('button', { name: 'Next', exact: true }).click();
+  await expect.poll(async () => (await operations())
+    .filter((operation) =>
+      operation.argv?.[1] === 'send-keys' &&
+      operation.argv?.[2] === 'omp-partial-ask')
+    .map((operation) => operation.argv?.slice(3))).toEqual([['Up'], ['Up'], ['Up'], ['Enter']]);
+  await page.getByRole('button', { name: 'Back' }).click();
+
   await page.getByRole('button', { name: /Open claude-approval on Captured relay/ }).click();
   await expect(page.getByRole('button', { name: 'Yes', exact: true })).toBeVisible();
   await expect(page.getByRole('button', {
@@ -195,7 +222,7 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   }).click();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toHaveAttribute(
     'placeholder',
-    'Needs inspection — use terminal keys',
+    'Needs inspection — use terminal controls',
   );
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();

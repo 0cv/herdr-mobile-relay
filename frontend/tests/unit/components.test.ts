@@ -90,9 +90,13 @@ describe('accessible Svelte interactions', () => {
     respond.mockRestore();
   });
 
-  it('keeps chat replies enabled and unknown blocked panes terminal-only', () => {
+  it('enables blocked terminal text only while its editor is active', async () => {
+    const user = userEvent.setup();
     vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
     vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'text-1', ok: true,
+    });
     const chat: Agent = {
       ...blockedAgent,
       attention_kind: 'chat',
@@ -114,15 +118,43 @@ describe('accessible Svelte interactions', () => {
       attention_kind: 'unknown',
       options: ['must not render', 'reject'],
     };
+    const choiceView = render(TerminalView, {
+      agent: unknown,
+      allAgents: [unknown],
+      frame: {
+        paneId: unknown.pane_id,
+        content: 'Other (type your own)\nEnter select · ↑/↓ move · Tab/←/→ · Esc cancel',
+        format: 'plain',
+      },
+      responding: new Set<string>(),
+    });
+    expect(screen.getByPlaceholderText('Needs inspection — use terminal controls')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach image' })).toBeDisabled();
+    choiceView.unmount();
+
     const unknownView = render(TerminalView, {
       agent: unknown,
       allAgents: [unknown],
-      frame: { paneId: unknown.pane_id, content: 'Inspect this pane', format: 'plain' },
+      frame: {
+        paneId: unknown.pane_id,
+        content: 'Custom answer: Which weekend?\n>\nenter or ctrl+q submit  esc cancel  ctrl+g external editor',
+        format: 'plain',
+      },
       responding: new Set<string>(),
     });
-    expect(screen.getByPlaceholderText('Needs inspection — use terminal keys')).toBeDisabled();
+    const terminalInput = screen.getByPlaceholderText('Type terminal input…');
+    expect(terminalInput).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Attach image' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
     expect(screen.queryByText('must not render')).not.toBeInTheDocument();
+    await user.type(terminalInput, 'custom weekend');
+    await user.click(screen.getByRole('button', { name: 'Submit terminal text' }));
+    expect(send).toHaveBeenNthCalledWith(1, unknown, {
+      type: 'send_text', text: 'custom weekend',
+    });
+    expect(send).toHaveBeenNthCalledWith(2, unknown, {
+      type: 'send_keys', keys: ['Enter'], activity_label: 'Submitted terminal text',
+    });
     unknownView.unmount();
     vi.restoreAllMocks();
   });

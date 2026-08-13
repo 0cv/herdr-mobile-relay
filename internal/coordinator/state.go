@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,6 +79,7 @@ type State struct {
 	pendingEvents      map[string]pendingEvent
 	topologyRetries    uint64
 	blockedEventSeq    uint64
+	customAnswers      map[string]map[string]string
 }
 
 type pendingEvent struct {
@@ -108,9 +110,46 @@ func NewState(logger *slog.Logger) *State {
 		pendingEvents: make(map[string]pendingEvent),
 		logger:        logger,
 		triage:        make(map[string]triageRecord),
+		customAnswers: make(map[string]map[string]string),
 	}
 }
 
+// RecordCustomAnswer remembers the free text typed for a question so review
+// summaries can show it instead of the terminal's placeholder. Memory is
+// process-local; a relay restart falls back to the placeholder.
+func (s *State) RecordCustomAnswer(paneID, questionText, text string) {
+	key := question.SummaryKey(questionText)
+	text = strings.TrimSpace(text)
+	if paneID == "" || key == "" || text == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	answers := s.customAnswers[paneID]
+	if answers == nil {
+		answers = make(map[string]string)
+		s.customAnswers[paneID] = answers
+	}
+	if _, exists := answers[key]; !exists && len(answers) >= 32 {
+		return
+	}
+	answers[key] = text
+}
+
+// CustomAnswers returns a copy of the recorded free-text answers for a pane.
+func (s *State) CustomAnswers(paneID string) map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	answers := s.customAnswers[paneID]
+	if len(answers) == 0 {
+		return nil
+	}
+	copied := make(map[string]string, len(answers))
+	for key, value := range answers {
+		copied[key] = value
+	}
+	return copied
+}
 func (s *State) SetOnTransition(fn TransitionCallback) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -483,6 +522,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			delete(s.ackDone, id)
 			delete(s.finishedNotif, id)
 			delete(s.completionRev, id)
+			delete(s.customAnswers, id)
 		}
 	}
 	now := time.Now()

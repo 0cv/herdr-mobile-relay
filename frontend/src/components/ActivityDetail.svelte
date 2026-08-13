@@ -39,7 +39,7 @@
       await navigator.clipboard.writeText(activity.extract);
       relayStore.showToast('Excerpt copied.');
     } catch {
-      relayStore.showToast('Could not copy the excerpt. Select it manually.', true);
+      relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
 </script>

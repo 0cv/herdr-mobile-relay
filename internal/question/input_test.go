@@ -2,8 +2,55 @@ package question
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestPlanOMPChoiceAndCustomAnswer(t *testing.T) {
+	interaction := Parse(claudeAskQuestionView, "omp")
+	if interaction == nil {
+		t.Fatal("question was not parsed")
+	}
+	choice := PlanInput(interaction, InputIntent{Selected: []int{0}})
+	wantChoice := []InputStep{{Keys: []string{"Up", "Enter"}}}
+	if !reflect.DeepEqual(choice, wantChoice) {
+		t.Fatalf("choice plan = %#v, want %#v", choice, wantChoice)
+	}
+
+	custom := PlanInput(interaction, InputIntent{OtherSelected: true, OtherText: "Quiet lakes"})
+	wantCustom := []InputStep{
+		{Keys: []string{"Down", "Down", "Enter", "Ctrl+U"}},
+		{Text: "Quiet lakes"},
+		{Keys: []string{"Enter"}},
+	}
+	if !reflect.DeepEqual(custom, wantCustom) {
+		t.Fatalf("custom plan = %#v, want %#v", custom, wantCustom)
+	}
+
+	multiView := strings.ReplaceAll(claudeAskQuestionView, "○", "☐")
+	multiView = strings.Replace(multiView, "☐ Budget", "☑ Budget", 1)
+	multi := Parse(multiView, "omp")
+	if multi == nil || multi.Kind != "multi_select" {
+		t.Fatalf("multi-select interaction = %+v", multi)
+	}
+	multiChoice := PlanInput(multi, InputIntent{Selected: []int{0, 2}})
+	wantMulti := []InputStep{
+		{Keys: []string{"Down", "Enter"}},
+		{Keys: []string{"Right"}},
+	}
+	if !reflect.DeepEqual(multiChoice, wantMulti) {
+		t.Fatalf("multi-select plan = %#v, want %#v", multiChoice, wantMulti)
+	}
+
+	review := Parse(ompReviewView, "omp")
+	if review == nil {
+		t.Fatal("review was not parsed")
+	}
+	submit := PlanInput(review, InputIntent{Selected: []int{0}})
+	if !reflect.DeepEqual(submit, []InputStep{{Keys: []string{"Enter"}}}) {
+		t.Fatalf("review plan = %#v", submit)
+	}
+}
 
 func TestPlanQoderChoiceAndNavigation(t *testing.T) {
 	interaction := Parse(qoderQuestionView, "qodercli")
@@ -255,6 +302,21 @@ func TestPlanClaudeCapturedCustomAnswerReplacesTextInPlace(t *testing.T) {
 	}
 	if !reflect.DeepEqual(steps, want) {
 		t.Fatalf("custom answer plan = %#v, want %#v", steps, want)
+	}
+}
+
+func TestPlanClaudeChoiceClearsStaleNote(t *testing.T) {
+	interaction := Parse(claudeStaleNoteQuestionView, "claude")
+	if interaction == nil || interaction.Other.Text != "Hhrr" {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+	steps := PlanInput(interaction, InputIntent{Selected: []int{2}})
+	want := []InputStep{
+		{Keys: []string{"Down", "Down", "Down", "Down", "Ctrl+U"}},
+		{Keys: []string{"Up", "Up", "Enter"}},
+	}
+	if !reflect.DeepEqual(steps, want) {
+		t.Fatalf("choice plan = %#v, want %#v", steps, want)
 	}
 }
 

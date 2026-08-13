@@ -133,14 +133,14 @@
 
   async function copyMarkdown(entry: ConversationEntry) {
     if (!entry.text || !navigator.clipboard?.writeText) {
-      relayStore.showToast('Clipboard access is unavailable. Select the message manually.', true);
+      relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
       return;
     }
     try {
       await navigator.clipboard.writeText(entry.text);
       relayStore.showToast('Markdown copied.');
     } catch {
-      relayStore.showToast('Could not copy the Markdown. Select the message manually.', true);
+      relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
 </script>

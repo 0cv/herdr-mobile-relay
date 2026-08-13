@@ -92,6 +92,7 @@ export interface QuestionOption {
   label: string;
   description?: string;
   selected?: boolean;
+  summary?: { q: string; a: string }[];
 }
 
 export interface QuestionOther {

@@ -116,14 +116,14 @@
   });
   async function copyManualCommand(): Promise<void> {
     if (!navigator.clipboard?.writeText) {
-      relayStore.showToast('Clipboard access is unavailable. Select the command manually.', true);
+      relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
       return;
     }
     try {
       await navigator.clipboard.writeText(MANAGED_UPDATE_COMMAND);
       relayStore.showToast('Update command copied.');
     } catch {
-      relayStore.showToast('Could not copy the command. Select it manually.', true);
+      relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
 
@@ -159,7 +159,7 @@
         ...base,
         label: manual ? 'Manual update required' : 'Update could not start',
         detail: manual
-          ? 'Run the one-time Terminal command below. It preserves agents and configuration, restarts the relay, and enables phone-driven updates.'
+          ? 'Run the one-time Terminal command below to restart the relay and enable phone-driven updates.'
           : clientError,
         tone: 'danger',
         score: 0,
@@ -186,7 +186,7 @@
       return {
         ...base,
         label: 'Manual update required',
-        detail: 'Run the one-time Terminal command below. It preserves agents and configuration, restarts the relay, and enables phone-driven updates.',
+        detail: 'Run the one-time Terminal command below to restart the relay and enable phone-driven updates.',
         tone: 'danger',
         score: 0,
         canStart: false,
@@ -234,7 +234,7 @@
     if (state === 'checking') return { label: 'Checking release…', detail: 'Looking for the exact verified target.', tone: 'active', score: .05 };
     if (state === 'scheduled') return { label: 'Update scheduled…', detail: 'The background update worker is starting.', tone: 'active', score: .1 };
     if (state === 'preparing') return { label: 'Verifying release…', detail: 'Downloading and checking the signed release bundle.', tone: 'active', score: .25 };
-    if (state === 'deploying_app') return { label: 'Publishing phone app…', detail: 'Waiting for the public app origin to serve the verified bundle.', tone: 'active', score: .45 };
+    if (state === 'deploying_app') return { label: 'Publishing phone app…', detail: 'Waiting for the app origin to serve the verified bundle.', tone: 'active', score: .45 };
     if (state === 'installing') return { label: 'Installing relay…', detail: 'Running agents and saved configuration remain intact.', tone: 'active', score: .65 };
     return { label: 'Restarting relay…', detail: 'The phone connection may briefly disconnect.', tone: 'active', score: .85 };
   }

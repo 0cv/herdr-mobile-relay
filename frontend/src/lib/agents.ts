@@ -213,6 +213,20 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
   return next;
 }
 
+function retainBlockedDetails(previous: Agent, next: Agent): Agent {
+  return {
+    ...next,
+    status: previous.status,
+    attention_kind: previous.attention_kind,
+    attention_capable: previous.attention_capable,
+    prompt: previous.prompt,
+    command: previous.command,
+    options: previous.options,
+    interaction: previous.interaction,
+    question_layout: previous.question_layout,
+  };
+}
+
 export function stabilizeBlockedSnapshot(
   previous: Agent | undefined,
   next: Agent,
@@ -220,8 +234,21 @@ export function stabilizeBlockedSnapshot(
   responding: Set<string>,
 ): Agent {
   const paneId = next.pane_id;
-  if (!paneId || rawBlocked(next)) {
-    if (paneId) misses.delete(paneId);
+  if (!paneId) return next;
+  const nextQuestion = rawBlocked(next)
+    && attentionKind(next) === 'question'
+    && Boolean(next.interaction);
+  const pendingQuestion = responding.has(paneId)
+    && previous
+    && rawBlocked(previous)
+    && attentionKind(previous) === 'question'
+    && Boolean(previous.interaction);
+  if (pendingQuestion && !nextQuestion) {
+    misses.delete(paneId);
+    return retainBlockedDetails(previous, next);
+  }
+  if (rawBlocked(next)) {
+    misses.delete(paneId);
     return next;
   }
   if (!previous || !rawBlocked(previous) || responding.has(paneId)) {
@@ -234,7 +261,7 @@ export function stabilizeBlockedSnapshot(
     return next;
   }
   misses.set(paneId, count);
-  return { ...next, status: previous.status };
+  return retainBlockedDetails(previous, next);
 }
 
 export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Agent {

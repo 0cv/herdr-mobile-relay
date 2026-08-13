@@ -548,7 +548,7 @@ test('reconnects and blocks mutations for an incompatible relay protocol', async
   await expect.poll(() => socketCount(page)).toBe(2);
 });
 
-test('uses terminal-only fallback for old relays and enables classified chat replies', async ({ page }) => {
+test('centers plan keys and enables text only for the terminal editor', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -564,7 +564,64 @@ test('uses terminal-only fallback for old relays and enables classified chat rep
   await expect(page.getByRole('heading', { name: 'Needs inspection' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Approve once' })).toBeHidden();
   await page.getByRole('button', { name: 'Open Old controls on Fedora' }).click();
-  await expect(page.getByPlaceholder('Needs inspection — use terminal keys')).toBeDisabled();
+  const terminal = page.getByRole('log');
+  const history = Array.from({ length: 120 }, (_, index) => `question history ${index + 1}`);
+  const choiceContent = [
+    ...history,
+    'Other (type your own)',
+    'Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel',
+  ].join('\n');
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: choiceContent,
+  });
+  const planInput = page.getByPlaceholder('Needs inspection — use terminal controls');
+  await expect(planInput).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Attach image' })).toBeDisabled();
+  const directions = await page.locator('.generic-menu-actions > div > button').evaluateAll((elements) =>
+    elements.slice(0, 4).map((element) => ({
+      key: element.querySelector('kbd')?.textContent,
+      label: element.textContent?.replace(element.querySelector('kbd')?.textContent || '', '').trim(),
+    })));
+  expect(directions).toEqual([
+    { key: 'Left', label: 'Previous' },
+    { key: 'Up', label: 'Up' },
+    { key: 'Down', label: 'Down' },
+    { key: 'Right', label: 'Next' },
+  ]);
+  const promptContent = [
+    ...history,
+    'Custom answer: Which weekend?',
+    '>',
+    'enter or ctrl+q submit  esc cancel  ctrl+g external editor',
+  ].join('\n');
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: promptContent,
+  });
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  const terminalInput = page.getByPlaceholder('Type terminal input…');
+  await expect(terminalInput).toBeEnabled();
+  await terminalInput.fill('custom weekend');
+  await page.getByRole('button', { name: 'Submit terminal text' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_text' || command.type === 'send_keys')
+    .map((command) => ({ type: command.type, text: command.text, keys: command.keys }))).toEqual([
+      { type: 'send_text', text: 'custom weekend', keys: undefined },
+      { type: 'send_keys', text: undefined, keys: ['Enter'] },
+    ]);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: `${promptContent}\nAccepted custom weekend`,
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Old controls', agent: 'opencode' }],
+  });
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Enter' })).toBeEnabled();
 
   await handshake(page, 0);
@@ -1613,6 +1670,19 @@ test('virtualizes terminal history and copies the latest response', async ({ pag
   await expect.poll(async () => Number(await mountedRows.last().getAttribute('data-terminal-row'))).toBe(1001);
   await expect.poll(async () => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  const viewport = page.viewportSize();
+  expect(viewport).not.toBeNull();
+  await page.setViewportSize({ width: viewport!.width, height: viewport!.height - 180 });
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await terminal.evaluate((element) => {
+    const view = element.closest<HTMLElement>('.terminal-view');
+    if (!view) throw new Error('Terminal view is missing');
+    view.style.height = `${view.clientHeight - 120}px`;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
   await expect(page.getByRole('navigation', { name: 'Application' })
     .getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
   await expect(screen).toHaveAttribute('data-terminal-row-count', '1002');
@@ -1698,7 +1768,7 @@ test('copies visible terminal output when no completed response is available', a
     if (!(element instanceof HTMLTextAreaElement)) return null;
     return { start: element.selectionStart, end: element.selectionEnd };
   })).toEqual({ start: 0, end: visibleOutput.length });
-  await expect(page.getByRole('status').filter({ hasText: 'Visible terminal output selected.' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'Output selected.' })).toBeVisible();
 });
 
 test('uses relay response copy before parser and surfaces failures', async ({ page }) => {
@@ -2788,17 +2858,85 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   const second = {
     ...first, id: 'q2', question: 'Choose device coverage', submit_label: 'Submit', can_go_back: true, question_index: 2,
   };
-  await page.evaluate((interaction) => (window as any).__relayNextInteraction(interaction), second);
+  await setAutoCommands(page, false);
   await server(page, 0, { type: 'blocked', pane_id: 'w1:p1', attention_kind: 'question', project: 'Approvals', agent: 'claude', interaction: first, question_layout: true });
   await expect(page.getByText('Question 1 of 2')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Chat about this' })).toBeHidden();
+  await page.evaluate(() => {
+    const trace = window as unknown as {
+      __questionUnmounts: number;
+      __questionObserver: MutationObserver;
+    };
+    trace.__questionUnmounts = 0;
+    trace.__questionObserver = new MutationObserver(() => {
+      if (!document.querySelector('form.question-form')) trace.__questionUnmounts += 1;
+    });
+    trace.__questionObserver.observe(document.body, { childList: true, subtree: true });
+  });
   await page.getByRole('radio', { name: /Repository/ }).click();
   await page.getByRole('button', { name: 'Next' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'answer_question').length).toBe(1);
+  const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
+
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Approvals', agent: 'claude' }],
+  });
+  await expect(page.getByRole('group', { name: 'Choose deployment scope' })).toBeVisible();
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'blocked', attention_kind: 'chat',
+      project: 'Approvals', agent: 'claude',
+    }],
+  });
+  await expect(page.getByRole('group', { name: 'Choose deployment scope' })).toBeVisible();
+  await expect(page.getByRole('main', { name: /Questions for Approvals/ })).toBeVisible();
+
+  await server(page, 0, {
+    type: 'command_result', action: 'answer_question', request_id: answer.request_id,
+    ok: true, phase: 'advanced', data: { interaction: second },
+  });
+  await setAutoCommands(page, true);
   await expect(page.getByRole('group', { name: 'Choose device coverage' })).toBeVisible();
   await expect(page.getByText('Question 2 of 2')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Previous' })).toBeVisible();
-  const answer = (await commands(page)).find((command) => command.type === 'answer_question');
   expect(answer).toMatchObject({ selected_indices: [0], other_selected: false, protocol: 2 });
+  for (let update = 0; update < 3; update += 1) {
+    await server(page, 0, {
+      type: 'agent_update', pane_id: 'w1:p1', status: 'blocked', pane_revision: 10 + update,
+    });
+  }
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi',
+    attention_kind: 'question', interaction: second, question_layout: true,
+  });
+  expect(await page.evaluate(() => {
+    const trace = window as unknown as {
+      __questionUnmounts: number;
+      __questionObserver: MutationObserver;
+    };
+    trace.__questionObserver.disconnect();
+    return trace.__questionUnmounts;
+  })).toBe(0);
+
+  await setAutoCommands(page, false);
+  await page.getByRole('radio', { name: 'Module' }).click();
+  await page.getByRole('button', { name: 'Submit' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'answer_question').length).toBe(2);
+  const finalAnswer = (await commands(page))
+    .filter((command) => command.type === 'answer_question').at(-1)!;
+  await server(page, 0, {
+    type: 'blocked', pane_id: 'w1:p1', attention_kind: 'unknown',
+    project: 'Approvals', agent: 'claude', interaction: null, question_layout: false,
+  });
+  await server(page, 0, {
+    type: 'command_result', action: 'answer_question', request_id: finalAnswer.request_id,
+    ok: true, phase: 'confirmed',
+  });
+  await expect(page.getByText('Answers submitted.')).toBeVisible();
+  await setAutoCommands(page, true);
 
   await server(page, 0, {
     type: 'blocked', pane_id: 'w1:p1', attention_kind: 'approval', project: 'Approvals', agent: 'claude',
@@ -2823,6 +2961,48 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await server(page, 0, working);
   await server(page, 0, working);
   await expect(composer).toBeEnabled();
+});
+
+test('keeps a nonfinal question mounted when a transient frame is confirmed', async ({ page }) => {
+  const first = {
+    id: 'q1', kind: 'single_select', question: 'Choose deployment scope',
+    options: [{ index: 0, label: 'Repository' }, { index: 1, label: 'Module' }],
+    other: { label: 'Other', placeholder: 'Other answer' },
+    submit_label: 'Next', can_go_back: false, question_index: 1, question_total: 2,
+  };
+  const second = {
+    ...first, id: 'q2', question: 'Choose device coverage',
+    submit_label: 'Submit', can_go_back: true, question_index: 2,
+  };
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'blocked', attention_kind: 'question',
+      project: 'Questions', agent: 'claude', interaction: first, question_layout: true,
+    }],
+  });
+  await page.getByRole('button', { name: 'Open Questions on Fedora' }).click();
+  await setAutoCommands(page, false);
+  await page.getByRole('radio', { name: 'Repository' }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'answer_question').length).toBe(1);
+  const answer = (await commands(page)).find((command) => command.type === 'answer_question')!;
+
+  await server(page, 0, {
+    type: 'command_result', action: 'answer_question', request_id: answer.request_id,
+    ok: true, phase: 'confirmed',
+  });
+  await expect(page.getByRole('group', { name: first.question })).toBeVisible();
+  await expect(page.getByText('Unexpected question result.')).toBeVisible();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', content: '', format: 'ansi',
+    attention_kind: 'question', interaction: second, question_layout: true,
+  });
+  await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 });
 
 test('rejects stale notification approvals and retries transient failures', async ({ page }) => {
@@ -3072,7 +3252,7 @@ test('does not report failed question navigation as opened', async ({ page }) =>
     ok: false, phase: 'unconfirmed', error: 'The agent still shows the same question; try again',
   });
   await expect(page.getByRole('status').filter({ hasText: 'still shows the same question' })).toBeVisible();
-  await expect(page.getByRole('status').filter({ hasText: 'Opened the previous question' })).toBeHidden();
+  await expect(page.getByRole('status').filter({ hasText: 'Opened previous question' })).toBeHidden();
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 });
 
@@ -3337,7 +3517,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
     element.dispatchEvent(new Event('scroll'));
   });
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: `${longFrame}\nlatest output` });
-  const jumpToLatest = page.getByRole('button', { name: 'Jump to latest output' });
+  const jumpToLatest = page.getByRole('button', { name: 'Jump to latest' });
   await expect(jumpToLatest).toBeVisible();
   await jumpToLatest.click();
   await expect.poll(() => terminal.evaluate((element) =>

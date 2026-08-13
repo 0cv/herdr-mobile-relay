@@ -1,0 +1,25 @@
+ [0m[38;2;215;119;87m▎ [0mhttps://support.claude.com/en/articles/15424964-claude-fable-5-promotional-access
+
+[0m[38;2;80;80;80m[48;2;55;55;55m❯[0m[48;2;55;55;55m [0m[38;2;255;255;255m[48;2;55;55;55m/clear[0m[48;2;55;55;55m                                                                                                                                               [0m
+
+[0m[38;2;80;80;80m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mLet's plan for the weekend. Send me multi questions, some free text or multiple choice[0m[48;2;55;55;55m                                                               [0m
+
+[0m[38;2;153;153;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+←  ☒ Existing work  ☒ Work type  ☒ Time budget  ☒ Top outcome [0m[38;2;0;0;0m[48;2;177;185;249m ✔ Submit [0m[38;2;153;153;153m →[0m
+
+[0m[1m[38;2;255;255;255mReview your answers[0m
+
+ ● There's a big pile of uncommitted changes already in the repo (approval.go, dispatch.go, question parser, TerminalView, agents.ts, etc.) — is
+   finishing/shipping that work part of the weekend plan?
+   [0m[38;2;78;186;101m→ __other__[0m
+ ● What's the main type of work you want to tackle this weekend?
+   [0m[38;2;78;186;101m→ Bug fixes / polish, Testing & stability, Refactor / cleanup[0m
+ ● Roughly how much time do you want to put into this over the weekend?
+   [0m[38;2;78;186;101m→ __other__[0m
+ ● If you had to name ONE thing you want done or working by Monday, what is it? (free text)
+   [0m[38;2;78;186;101m→ No single goal — flexible weekend[0m
+ 
+[0m[38;2;153;153;153mReady to submit your answers?[0m
+
+[0m[38;2;177;185;249m❯ [0m[38;2;153;153;153m1. [0m[38;2;177;185;249mSubmit answers[0m
+  [0m[38;2;153;153;153m2. [0mCancel

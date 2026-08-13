@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.15.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.0) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.15.1`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.1) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -97,7 +97,7 @@ The relay continues to support Herdr 0.7.5 or newer.
 - Send durable prompt drafts, terminal keys, slash commands, screenshots, and
   photos; search loaded terminal output and open explicit HTTP(S) links.
 - Answer verified Codex, Claude Code, and Qoder approvals, plus structured
-  questions from those agents and OpenCode.
+  questions from those agents, OpenCode, OMP, and Pi.
 - Inspect the current agent's workspace files, images, Git status, and unified
   diffs without exposing a write action.
 - Read searchable native conversations for Claude Code, Codex, Qoder, Pi, and
@@ -198,6 +198,9 @@ The terminal controls send **Esc**, **Tab**, **Enter**, and arrow keys.
 input, and apply to typed characters or any available terminal key. Sends are
 ordered, and a live status confirms the exact chord. Toggle the modifiers off
 or move focus to the composer to disarm them.
+When an unclassified blocked pane needs inspection, the composer inserts
+literal terminal text and sends **Enter** as one ordered action instead of
+starting a new agent prompt.
 
 **Copy** runs the agent's own copy command (Claude Code, Codex, Kimi, OMP, Pi,
 and Qoder) to capture its latest

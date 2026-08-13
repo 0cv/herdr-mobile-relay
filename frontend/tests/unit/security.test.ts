@@ -70,7 +70,7 @@ describe('device verification lifecycle', () => {
     expect(get(securityState)).toMatchObject({
       locked: true,
       busy: false,
-      status: 'Verification was cancelled or failed. Tap Unlock to try again.',
+      status: 'Verification failed. Tap Unlock to try again.',
     });
     stopSecurity();
   });

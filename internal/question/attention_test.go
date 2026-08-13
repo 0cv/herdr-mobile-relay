@@ -52,6 +52,23 @@ $ go test ./...
 Tab/←→ switch · Enter select · Esc cancel
 `
 
+const ompPlanApprovalView = `
+╭─ Plan Review ──────────────────────────────────────────────╮
+│  3-Day Itinerary Template (Fri evening – Sun)              │
+│  Applies to whichever option is chosen.                    │
+├────────────────────────────────────────────────────────────┤
+│ Plan mode - next step                                      │
+│ continue with  ◂   default   OPUS  FABLE  SONNET  LU… │
+│   ↳ GPT-5.6-Sol                                            │
+│  Approve and execute                                      │
+│   Approve and compact context                              │
+│   Approve and keep context (~59k / 1m)                     │
+│   Refine plan                                              │
+├────────────────────────────────────────────────────────────┤
+│ ↑↓ scroll · ⇧ faster · pgup/pgdn · g/G ends · a annotate … │
+╰────────────────────────────────────────────────────────────╯
+`
+
 func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -64,6 +81,10 @@ func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 		{"claude proceed", "claude", claudeApprovalView, []string{"Yes", "Yes, and remember this choice", "No"}},
 		{"claude permission", "claude", claudePermissionView, []string{"Allow once", "Reject"}},
 		{"qoder allow", "qodercli", qoderApprovalView, []string{"Allow", "Reject"}},
+		{"omp plan review", "omp", ompPlanApprovalView, []string{
+			"Approve and execute", "Approve and compact context",
+			"Approve and keep context (~59k / 1m)", "Refine plan",
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -75,6 +96,23 @@ func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 	}
 }
 
+func TestClassifyOMPPlanApprovalFocus(t *testing.T) {
+	first := Classify(ompPlanApprovalView, "omp")
+	if first.Kind != AttentionApproval || first.ApprovalFocus != 0 {
+		t.Fatalf("classification = %+v, want focus 0", first)
+	}
+	moved := strings.Replace(ompPlanApprovalView, "\uf054 Approve and execute", "  Approve and execute", 1)
+	moved = strings.Replace(moved, "  Refine plan", "❯ Refine plan", 1)
+	shifted := Classify(moved, "omp")
+	if shifted.Kind != AttentionApproval || shifted.ApprovalFocus != 3 {
+		t.Fatalf("shifted classification = %+v, want focus 3", shifted)
+	}
+	stale := strings.Replace(ompPlanApprovalView, "Plan mode - next step", "Plan mode was here", 1)
+	if got := Classify(stale, "omp"); got.Kind == AttentionApproval {
+		t.Fatalf("stale classification = %+v, want no approval", got)
+	}
+}
+
 func TestClassifyStructuredQuestionsBeforeApprovalMenus(t *testing.T) {
 	for _, test := range []struct {
 		agent   string
@@ -82,6 +120,7 @@ func TestClassifyStructuredQuestionsBeforeApprovalMenus(t *testing.T) {
 	}{
 		{"codex", codexQuestionView},
 		{"claude", claudeFirstQuestionView},
+		{"omp", claudeAskQuestionView},
 		{"qoder", qoderQuestionView},
 		{"qoder", qoderReviewView},
 	} {
@@ -500,7 +539,7 @@ func TestClassifyCapturedOpenCodeQuestionLayouts(t *testing.T) {
 			total:       4,
 			options:     []string{"Submit answers"},
 			selected:    []bool{false},
-			description: "App type: Social platform · Frontend: Vue 3 · Backend: Python + FastAPI",
+			description: "1. App type: Social platform\n2. Frontend: Vue 3\n3. Backend: Python + FastAPI",
 		},
 		{
 			name:     "multi select",
@@ -572,7 +611,7 @@ func TestClassifyCapturedOpenCodeQuestionLayouts(t *testing.T) {
 			total:       5,
 			options:     []string{"Submit answers"},
 			selected:    []bool{false},
-			description: "Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery · Budget: €800-1200 · Timing: Next weekend · Company: Small group (3-5)",
+			description: "1. Trip vibe: Nature and outdoors, Food and wine, Relaxation and scenery\n2. Budget: €800-1200\n3. Timing: Next weekend\n4. Company: Small group (3-5)",
 		},
 	}
 	for _, test := range tests {
@@ -710,10 +749,10 @@ func TestClassifyCapturedClaudeQuestionLayouts(t *testing.T) {
 			options:     []string{"Submit answers", "Cancel"},
 			selected:    []bool{false, false},
 			otherHidden: true,
-			firstDescription: "What kind of webapp are you building: Content/marketing site · " +
-				"Which frontend approach do you prefer: Vue · " +
-				"Do you need a backend/server, and if so what language: No backend needed · " +
-				"Do you need a database: No database needed",
+			firstDescription: "1. What kind of webapp are you building: Content/marketing site\n" +
+				"2. Which frontend approach do you prefer: Vue\n" +
+				"3. Do you need a backend/server, and if so what language: No backend needed\n" +
+				"4. Do you need a database: No database needed",
 		},
 		{
 			name:        "multi select",
@@ -751,7 +790,7 @@ func TestClassifyCapturedClaudeQuestionLayouts(t *testing.T) {
 			options:     []string{"Submit answers", "Cancel"},
 			selected:    []bool{false, false},
 			otherHidden: true,
-			firstDescription: "Which activities would you like to include on your week-end trip: " +
+			firstDescription: "1. Which activities would you like to include on your week-end trip: " +
 				"Sightseeing, Relaxation, Sport haha!!",
 		},
 	}
@@ -818,6 +857,154 @@ func TestCapturedQoderApprovalFollowedByIndentedOutputIsUnknown(t *testing.T) {
 	got := Classify(content, "qodercli")
 	if got.Kind != AttentionUnknown || len(got.Options) != 0 || got.Interaction != nil {
 		t.Fatalf("classification = %+v", got)
+	}
+}
+
+func TestClassifyCapturedOMPPlanApproval(t *testing.T) {
+	got := Classify(attentionFixture(t, "omp-plan-approval.ansi"), "omp")
+	want := []string{
+		"Approve and execute",
+		"Approve and compact context",
+		"Approve and keep context (~18k / 272k)",
+		"Refine plan",
+	}
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, want) ||
+		got.ApprovalFocus != 0 {
+		t.Fatalf("classification = %+v", got)
+	}
+}
+
+func TestClassifyCapturedOMPPartialAskQuestion(t *testing.T) {
+	got := Classify(attentionFixture(t, "omp-partial-ask.ansi"), "omp")
+	if got.Kind != AttentionQuestion || got.Interaction == nil {
+		t.Fatalf("classification = %+v", got)
+	}
+	interaction := got.Interaction
+	var labels []string
+	for _, option := range interaction.Options {
+		labels = append(labels, option.Label)
+	}
+	want := []string{
+		"Beach & coast", "Mountains & nature", "City break",
+		"Quiet lakeside cabin (Recommended)",
+	}
+	if interaction.Options[0].Description != "Relax by the water — swimming, seafood, sunset walks." {
+		t.Fatalf("description = %q", interaction.Options[0].Description)
+	}
+	if interaction.Kind != "single_select" ||
+		interaction.Question != "What kind of weekend trip are you in the mood for?" ||
+		!reflect.DeepEqual(labels, want) ||
+		!interaction.Options[3].Selected ||
+		interaction.Focus != (Focus{Kind: "option", Index: 3}) ||
+		!interaction.Other.Hidden ||
+		interaction.QuestionIndex != 1 ||
+		interaction.QuestionTotal != 4 ||
+		interaction.SubmitLabel != "Next" ||
+		interaction.CanGoBack ||
+		interaction.AllOptionCount != 4 {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestClassifyCapturedClaudeStaleNote(t *testing.T) {
+	got := Classify(attentionFixture(t, "claude-stale-note.ansi"), "claude")
+	if got.Kind != AttentionQuestion || got.Interaction == nil {
+		t.Fatalf("classification = %+v", got)
+	}
+	interaction := got.Interaction
+	if interaction.Kind != "single_select" ||
+		!interaction.Options[2].Selected ||
+		interaction.Options[2].Label != "Most of the weekend" ||
+		interaction.Other.Selected ||
+		interaction.Other.Text != "Hhrr" {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestClassifyCapturedOMPNoteQuestion(t *testing.T) {
+	got := Classify(attentionFixture(t, "omp-note-question.ansi"), "omp")
+	if got.Kind != AttentionQuestion || got.Interaction == nil {
+		t.Fatalf("classification = %+v", got)
+	}
+	interaction := got.Interaction
+	if interaction.Kind != "single_select" ||
+		interaction.Question != "Who's going, and when?" ||
+		len(interaction.Options) != 4 ||
+		interaction.Other.Label != "Other (type your own)" ||
+		!interaction.Other.Selected ||
+		interaction.Other.Text != "GhhTyy" ||
+		interaction.QuestionIndex != 4 ||
+		interaction.QuestionTotal != 4 {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestClassifyCapturedClaudeWrappedReview(t *testing.T) {
+	got := Classify(attentionFixture(t, "claude-wrapped-review.ansi"), "claude")
+	if got.Kind != AttentionQuestion || got.Interaction == nil {
+		t.Fatalf("classification = %+v", got)
+	}
+	interaction := got.Interaction
+	want := "1. There's a big pile of uncommitted changes already in the repo (approval.go, " +
+		"dispatch.go, question parser, TerminalView, agents.ts, etc.) — is " +
+		"finishing/shipping that work part of the weekend plan: custom answer\n" +
+		"2. What's the main type of work you want to tackle this weekend: " +
+		"Bug fixes / polish, Testing & stability, Refactor / cleanup\n" +
+		"3. Roughly how much time do you want to put into this over the weekend: custom answer\n" +
+		"4. If you had to name ONE thing you want done or working by Monday, what is it? (free text): " +
+		"No single goal — flexible weekend"
+	if interaction.Question != "Review your answers and choose what to do" ||
+		interaction.Options[0].Description != want {
+		t.Fatalf("description = %q", interaction.Options[0].Description)
+	}
+	entries := interaction.Options[0].Summary
+	if len(entries) != 4 ||
+		entries[2].Question != "Roughly how much time do you want to put into this over the weekend" ||
+		entries[2].Answer != "custom answer" {
+		t.Fatalf("summary = %+v", entries)
+	}
+}
+
+func TestClassifyCapturedClaudeWrappedQuestion(t *testing.T) {
+	got := Classify(attentionFixture(t, "claude-wrapped-question.ansi"), "claude")
+	if got.Kind != AttentionQuestion || got.Interaction == nil {
+		t.Fatalf("classification = %+v", got)
+	}
+	interaction := got.Interaction
+	want := "There's a big pile of uncommitted changes already in the repo (approval.go, " +
+		"dispatch.go, question parser, TerminalView, agents.ts, etc.) — is " +
+		"finishing/shipping that work part of the weekend plan?"
+	if interaction.Question != want ||
+		interaction.Other.Text != "we" ||
+		!interaction.Other.Selected {
+		t.Fatalf("interaction = %+v", interaction)
+	}
+}
+
+func TestFillCustomAnswersReplacesPlaceholders(t *testing.T) {
+	interaction := &Interaction{
+		Options: []Option{{
+			Label: "Submit answers",
+			Summary: []SummaryEntry{
+				{Question: "Roughly how much time do you want to put into this over the weekend", Answer: CustomAnswerPlaceholder},
+				{Question: "Pick a lane", Answer: "Bug fixes"},
+				{Question: "Name one outcome", Answer: CustomAnswerPlaceholder},
+			},
+		}},
+	}
+	FillCustomAnswers(interaction, map[string]string{
+		SummaryKey("Roughly how much time do you want to put into this over the weekend?"): "Tyy",
+	})
+	entries := interaction.Options[0].Summary
+	want := "1. Roughly how much time do you want to put into this over the weekend: Tyy\n" +
+		"2. Pick a lane: Bug fixes\n" +
+		"3. Name one outcome: custom answer"
+	if entries[0].Answer != "Tyy" ||
+		entries[1].Answer != "Bug fixes" ||
+		entries[2].Answer != CustomAnswerPlaceholder ||
+		interaction.Options[0].Description != want {
+		t.Fatalf("interaction = %+v", interaction.Options[0])
 	}
 }
 

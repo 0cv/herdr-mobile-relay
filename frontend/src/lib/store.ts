@@ -673,9 +673,14 @@ class RelayStore {
     if (message.type === 'agent_update' && message.pane_id) {
       const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
       const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
-      const next = normalizeAgent(relayId, label, message, attentionCapable);
-      const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
+      const paneId = clientPaneId(relayId, message.pane_id);
+      const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
       const before = index >= 0 ? this.agentsValue[index] : undefined;
+      const source = before && rawBlocked(message)
+        && !Object.prototype.hasOwnProperty.call(message, 'attention_kind')
+        ? { ...before, ...message }
+        : message;
+      const next = normalizeAgent(relayId, label, source, attentionCapable);
       if (staleAgentRevision(before, next)) return;
       const stabilized = stabilizeBlockedSnapshot(before, next, this.blockedSnapshotMisses, this.respondingValue);
       if (index >= 0) {
@@ -895,7 +900,7 @@ class RelayStore {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        reject(new CommandError('Relay did not confirm the command in time'));
+        reject(new CommandError('Relay confirmation timed out'));
       }, timeoutMs);
       this.pendingRequests.set(requestId, { relayId, action: payload.type, resolve, reject, timer });
       const command: Record<string, unknown> = {
@@ -1011,9 +1016,9 @@ class RelayStore {
       clearTimeout(pending.timer);
       pending.timer = setTimeout(() => {
         this.pendingRequests.delete(result.request_id);
-        pending.reject(new CommandError('Relay did not confirm the command in time'));
+        pending.reject(new CommandError('Relay confirmation timed out'));
       }, ACCEPTED_COMMAND_TIMEOUT_MS);
-      this.showToast('Command accepted; waiting for agent state…');
+      this.showToast('Command accepted; waiting for agent…');
       return;
     }
     clearTimeout(pending.timer);
@@ -1050,7 +1055,7 @@ class RelayStore {
   async leasePaneSize(agent: Agent, columns: number): Promise<number> {
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('pane_size_lease')) {
-      throw new CommandError('Resize Session requires a relay with pane-size lease support');
+      throw new CommandError('Relay lacks pane-size lease support');
     }
     if (!Number.isInteger(columns) || columns < MIN_PANE_SIZE_COLUMNS || columns > MAX_PANE_SIZE_COLUMNS) {
       throw new CommandError(
@@ -1059,7 +1064,7 @@ class RelayStore {
     }
     const result = await this.sendToAgent(agent, { type: 'lease_pane_size', columns });
     if (result.action && result.action !== 'lease_pane_size') {
-      throw new CommandError('Relay returned the wrong pane-size lease confirmation');
+      throw new CommandError('Wrong pane-size lease confirmation');
     }
     const appliedColumns = Number(result.data?.columns);
     if (!Number.isInteger(appliedColumns)
@@ -1073,7 +1078,7 @@ class RelayStore {
   async releasePaneSize(agent: Agent): Promise<void> {
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('pane_size_lease')) {
-      throw new CommandError('Resize Session requires a relay with pane-size lease support');
+      throw new CommandError('Relay lacks pane-size lease support');
     }
     const result = await this.sendToAgent(agent, { type: 'release_pane_size' });
     if (result.action && result.action !== 'release_pane_size') {
@@ -1243,7 +1248,7 @@ class RelayStore {
         type: 'respond', index, total, choice: label, source, event_id: agent.event_id || '',
       }, 12_000);
       this.showToast(result.phase === 'unconfirmed'
-        ? 'Approval was accepted but the agent still appears blocked.'
+        ? 'Accepted; agent still appears blocked.'
         : `Confirmed: ${label}`,
       );
       return true;
@@ -1264,7 +1269,7 @@ class RelayStore {
         interaction_id: interaction.id,
         selected_indices: [...draft.selected].sort((a, b) => a - b),
         other_selected: draft.otherSelected,
-        other_text: draft.otherText,
+        other_text: draft.otherSelected ? draft.otherText : '',
         source: 'App',
       }, 20_000);
     } finally {
@@ -1303,7 +1308,13 @@ class RelayStore {
     this.clearResponding(agent.pane_id);
     this.blockedSnapshotMisses.delete(agent.pane_id);
     this.agentsValue = this.agentsValue.map((item) => item.pane_id === agent.pane_id
-      ? { ...item, interaction, question_layout: Boolean(interaction), status: interaction ? 'blocked' : 'working' }
+      ? {
+          ...item,
+          status: interaction ? 'blocked' : 'working',
+          attention_kind: interaction ? 'question' : undefined,
+          interaction,
+          question_layout: Boolean(interaction),
+        }
       : item);
     this.agents.set(this.agentsValue);
   }

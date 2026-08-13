@@ -87,6 +87,8 @@ export default async function setup() {
     openCodeReview,
     qoderStandalone,
     qoderSettings,
+    ompPlanApproval,
+    ompPartialAsk,
   ] = await Promise.all([
     readFile(join(captureRoot, 'qodercli-permission-required2.ansi'), 'utf8'),
     readFile(join(captureRoot, 'qodercli-multi-questions-and-notes.ansi'), 'utf8'),
@@ -104,6 +106,8 @@ export default async function setup() {
     readFile(join(captureRoot, 'opencode-questions-with-multiple-choice-answers-confirm.ansi'), 'utf8'),
     readFile(join(captureRoot, 'qodercli-single-question.ansi'), 'utf8'),
     readFile(join(captureRoot, 'qodercli-yes-no.ansi'), 'utf8'),
+    readFile(join(captureRoot, 'omp-plan-approval.ansi'), 'utf8'),
+    readFile(join(captureRoot, 'omp-partial-ask.ansi'), 'utf8'),
   ]);
   await writeFile(scenarioPath, JSON.stringify({
     panes: [
@@ -187,6 +191,16 @@ export default async function setup() {
         agent_status: 'blocked', tab_id: 'attention-p', workspace_id: 'workspace-1',
         cwd: '/tmp/qoder-settings', revision: 1,
       },
+      {
+        pane_id: 'omp-plan-approval', agent: 'omp', name: 'omp-plan-approval',
+        agent_status: 'blocked', tab_id: 'attention-q', workspace_id: 'workspace-1',
+        cwd: '/tmp/omp-plan-approval', revision: 1,
+      },
+      {
+        pane_id: 'omp-partial-ask', agent: 'omp', name: 'omp-partial-ask',
+        agent_status: 'blocked', tab_id: 'attention-r', workspace_id: 'workspace-1',
+        cwd: '/tmp/omp-partial-ask', revision: 1,
+      },
     ],
     tabs: [
       { tab_id: 'tab-1', workspace_id: 'workspace-1', label: 'qoder-approval', number: 1, cwd: '/tmp/qoder-approval' },
@@ -205,6 +219,8 @@ export default async function setup() {
       { tab_id: 'attention-n', workspace_id: 'workspace-1', label: 'opencode-review', number: 14, cwd: '/tmp/opencode-review' },
       { tab_id: 'attention-o', workspace_id: 'workspace-1', label: 'qoder-standalone', number: 15, cwd: '/tmp/qoder-standalone' },
       { tab_id: 'attention-p', workspace_id: 'workspace-1', label: 'qoder-settings', number: 16, cwd: '/tmp/qoder-settings' },
+      { tab_id: 'attention-q', workspace_id: 'workspace-1', label: 'omp-plan-approval', number: 17, cwd: '/tmp/omp-plan-approval' },
+      { tab_id: 'attention-r', workspace_id: 'workspace-1', label: 'omp-partial-ask', number: 18, cwd: '/tmp/omp-partial-ask' },
     ],
     content: {
       'qoder-approval': approval,
@@ -223,6 +239,8 @@ export default async function setup() {
       'opencode-review': openCodeReview,
       'qoder-standalone': qoderStandalone,
       'qoder-settings': qoderSettings,
+      'omp-plan-approval': ompPlanApproval,
+      'omp-partial-ask': ompPartialAsk,
     },
   }));
 

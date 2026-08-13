@@ -43,6 +43,8 @@ var (
 			`\?\s+for\s+shortcuts|\b(?:manual|plan)\s+mode\b|` +
 			`\b(?:shift\+tab|ctrl\+|cmd\+)|\b\d+\s+agents?\b)`,
 	)
+	ompPlanMenuPattern  = regexp.MustCompile(`(?i)^plan mode\s*[-–—]\s*next step$`)
+	ompPlanFocusPattern = regexp.MustCompile(`^[❯›>\x{f054}]\s+`)
 )
 
 // Classify determines what, if anything, the live control region is asking
@@ -95,6 +97,9 @@ func liveApprovalDetails(text, agent string) ([]string, int) {
 		return nil, 0
 	}
 	lines := cleanLines(text)
+	if ompAskAgent(normalized) {
+		return ompPlanApprovalDetails(lines)
+	}
 	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	menuLines := make([]string, len(rawLines))
 	for index, line := range rawLines {
@@ -129,6 +134,51 @@ func liveApprovalDetails(text, agent string) ([]string, int) {
 		if row.focus {
 			focus = index
 		}
+	}
+	return options, focus
+}
+
+// ompPlanApprovalDetails detects the OMP plan-review action menu, which uses
+// unnumbered focus-marker rows instead of the shared numbered approval menus.
+func ompPlanApprovalDetails(lines []string) ([]string, int) {
+	header := -1
+	for index, line := range lines {
+		if ompPlanMenuPattern.MatchString(line) {
+			header = index
+		}
+	}
+	if header < 0 {
+		return nil, 0
+	}
+	options := make([]string, 0, 4)
+	focus := 0
+	end := -1
+	for index := header + 1; index < len(lines); index++ {
+		line := lines[index]
+		if line == "" || ompBorderLine(line) {
+			end = index
+			break
+		}
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "continue with") || strings.HasPrefix(line, "↳") {
+			continue
+		}
+		if marker := ompPlanFocusPattern.FindString(line); marker != "" {
+			focus = len(options)
+			line = strings.TrimSpace(strings.TrimPrefix(line, marker))
+		}
+		options = append(options, compact(line, 500))
+	}
+	if end < 0 || len(options) < 2 {
+		return nil, 0
+	}
+	for _, line := range lines[end:] {
+		if line == "" || ompBorderLine(line) ||
+			strings.ContainsRune(line, '·') ||
+			strings.Contains(strings.ToLower(line), "scroll") {
+			continue
+		}
+		return nil, 0
 	}
 	return options, focus
 }

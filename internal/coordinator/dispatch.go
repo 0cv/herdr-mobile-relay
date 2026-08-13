@@ -469,16 +469,18 @@ func (d *Dispatcher) handleTabRename(ctx context.Context, receivedAt time.Time, 
 }
 
 func (d *Dispatcher) handleAcknowledge(requestID, paneID string) *CommandResult {
+	before := d.state.DisplayedStatus(paneID)
 	if paneID == "" || !d.state.AcknowledgePane(paneID) {
 		return d.fail(requestID, "acknowledge_pane", paneID, "Agent is unavailable")
 	}
+	after := d.state.DisplayedStatus(paneID)
 	d.wake()
-	if d.broadcast != nil {
+	if d.broadcast != nil && before != after {
 		d.broadcast(map[string]any{
 			"type":          "agent_update",
 			"pane_id":       paneID,
 			"raw_pane_id":   paneID,
-			"status":        d.state.DisplayedStatus(paneID),
+			"status":        after,
 			"pane_revision": d.state.Revision(paneID),
 		})
 	}

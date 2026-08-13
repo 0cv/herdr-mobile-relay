@@ -26,6 +26,15 @@ const KEY_NAME: Record<string, string> = {
   n: 'n',
 };
 
+const DIRECTIONAL_ACTION_ORDER: Record<string, number> = {
+  Left: 0,
+  Up: 1,
+  Down: 2,
+  Right: 3,
+  Enter: 4,
+  Escape: 5,
+};
+
 const ACTION_LABEL: Record<string, string> = {
   accept: 'Accept',
   back: 'Back',
@@ -84,6 +93,11 @@ function cleanTitle(value: string): string {
     .slice(0, 100);
 }
 
+export function terminalTextInputActive(value: string): boolean {
+  const tail = value.replace(/\r\n?/g, '\n').split('\n').slice(-8).join('\n');
+  return /\benter(?:\s+or\s+ctrl\+q)?\s+submit\b/iu.test(tail);
+}
+
 export function detectTerminalMenu(value: string): TerminalMenu | null {
   const lines = value.replace(/\r\n?/g, '\n').split('\n');
   while (lines.length && !lines.at(-1)?.trim()) lines.pop();
@@ -105,6 +119,12 @@ export function detectTerminalMenu(value: string): TerminalMenu | null {
   if (yesNo) {
     addAction(actions, yesNo[1], yesNo[1].toLocaleLowerCase() === 'y' ? 'yes' : 'no');
     addAction(actions, yesNo[2], yesNo[2].toLocaleLowerCase() === 'y' ? 'yes' : 'no');
+  }
+  if (actions.some((action) => action.keys[0] === 'Left' || action.keys[0] === 'Right')) {
+    actions.sort((left, right) => (
+      (DIRECTIONAL_ACTION_ORDER[left.keys[0]] ?? 100)
+      - (DIRECTIONAL_ACTION_ORDER[right.keys[0]] ?? 100)
+    ));
   }
 
   if (!actions.length) return null;

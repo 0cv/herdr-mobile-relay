@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
 import { safeMarkdownHtml } from '$lib/markdown';
-import { detectTerminalMenu } from '$lib/terminal-menu';
+import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent } from '$lib/types';
 import { workspaceGroups } from '$lib/workspaces';
@@ -93,6 +93,30 @@ describe('terminal key-hint fallback', () => {
       { label: 'Cancel', keys: ['Escape'], cancel: true },
     ]);
     expect(detectTerminalMenu('Press Enter when the build is done.')).toBeNull();
+  });
+
+  it('places previous and next around vertical plan navigation', () => {
+    const menu = detectTerminalMenu([
+      'Ask',
+      'Other (type your own)',
+      'Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel',
+    ].join('\n'));
+
+    expect(menu?.actions.map((action) => action.label)).toEqual([
+      'Previous', 'Up', 'Down', 'Next', 'Select', 'Cancel',
+    ]);
+  });
+
+  it('enables terminal text only while an editor is asking for submission', () => {
+    expect(terminalTextInputActive([
+      'Custom answer: Which weekend?',
+      '>',
+      'enter or ctrl+q submit  esc cancel  ctrl+g external editor',
+    ].join('\n'))).toBe(true);
+    expect(terminalTextInputActive([
+      'Other (type your own)',
+      'Enter select · n note · ↑/↓ move · Tab/←/→ · Esc cancel',
+    ].join('\n'))).toBe(false);
   });
 });
 

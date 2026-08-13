@@ -5,6 +5,46 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-08-13
+
+### Fixed
+
+- Keep terminal output pinned to its latest row when the mobile viewport or
+  terminal controls change height, including when a scroll event arrives before
+  resize observation.
+- Submit free-text input and **Enter** as one ordered action in unclassified
+  blocked panes.
+- Render OMP and Pi **Ask** dialogs, including final answer reviews, with the
+  same structured mobile controls as other supported agents; keep final
+  submissions safe across relay state updates.
+- Keep structured question controls mounted while an answer advances to the next
+  question, including across terminal redraws and pane-refresh acknowledgements.
+- Classify the OMP plan-review action menu as a structured approval so the
+  phone offers its actions as buttons instead of the raw terminal.
+- Parse OMP **Ask** questions whose frame is partially scrolled on narrow
+  panes: a hidden custom-answer row no longer forces the raw terminal, wrapped
+  question tabs still yield the right progress, and the inner scrollbar column
+  no longer leaks into option labels.
+- Keep the confirmed option selected when revisiting a Claude question whose
+  free-text row still holds an earlier typed note; the stale note no longer
+  re-selects **Other** or blocks resubmission.
+- Load the existing OMP custom-answer note when revisiting a question, and
+  replace the note instead of appending when a new answer is typed.
+- Anchor the jump-to-latest button to the terminal output area so it no longer
+  overlaps the composer send button.
+- Use the full window width for the terminal and question layout on large
+  screens instead of centering it with side margins.
+- Number each answered question in the final review summary, render it on its
+  own line with the question in bold, keep wrapped Claude review prompts
+  complete, and show the actual typed free-text answer in the review instead
+  of a placeholder once the relay has seen it (submitted from the phone or
+  observed on a revisited question).
+- Constrain the terminal to the window on wide agent-rail layouts so its
+  history scrolls again instead of growing past the screen.
+- Enlarge the header and agent-rail icons for easier tapping on tablets.
+- Use a single comfortable column for home cards and workspaces on wide
+  screens instead of a cramped two-column grid.
+
 ## [0.15.0] - 2026-08-12
 
 ### Added
@@ -416,7 +456,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.11...v0.15.0
 [0.14.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.10...v0.14.11
 [0.14.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.9...v0.14.10

@@ -313,6 +313,151 @@ func TestDuplicateQuestionAnswerSendsOnce(t *testing.T) {
 	}
 }
 
+func TestQuestionWatcherWaitsThroughTransientUnparseableFrames(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialView   string
+		nextView      string
+		action        string
+		direction     string
+		expectedPhase string
+	}{
+		{
+			name:          "answer advances",
+			initialView:   "Question 1/2 (2 unanswered)\nChoose the first value\n\n❯ 1. Alpha\n  2. Beta\n  3. None of the above\n\ntab to add notes | enter to submit answer | ←/→ to navigate questions",
+			nextView:      "Question 2/2 (1 unanswered)\nChoose the second value\n\n❯ 1. Gamma\n  2. Delta\n  3. None of the above\n\ntab to add notes | enter to submit all | ←/→ to navigate questions",
+			action:        "answer_question",
+			expectedPhase: "advanced",
+		},
+		{
+			name:          "previous navigates",
+			initialView:   "Question 2/2 (1 unanswered)\nChoose the second value\n\n❯ 1. Gamma\n  2. Delta\n  3. None of the above\n\ntab to add notes | enter to submit all | ←/→ to navigate questions",
+			nextView:      "Question 1/2 (2 unanswered)\nChoose the first value\n\n❯ 1. Alpha\n  2. Beta\n  3. None of the above\n\ntab to add notes | enter to submit answer | ←/→ to navigate questions",
+			action:        "navigate_question",
+			direction:     "previous",
+			expectedPhase: "navigated",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			countFile := filepath.Join(dir, "reads")
+			if err := os.WriteFile(countFile, []byte("0\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+				"if [ \"$1 $2 $3\" = \"pane read pane-1\" ]; then\n"+
+				"  count=$(cat \""+countFile+"\")\n"+
+				"  count=$((count + 1))\n"+
+				"  printf '%s\\n' \"$count\" > \""+countFile+"\"\n"+
+				"  if [ \"$count\" -eq 1 ]; then\n"+
+				"    printf '%s\\n' '"+test.initialView+"'\n"+
+				"  elif [ \"$count\" -eq 2 ]; then\n"+
+				"    printf '%s\\n' 'redrawing question'\n"+
+				"  else\n"+
+				"    printf '%s\\n' '"+test.nextView+"'\n"+
+				"  fi\n"+
+				"else\n"+
+				"  printf '{\"ok\":true}\\n'\n"+
+				"fi\n")
+			state := NewState(testLogger())
+			state.CommitInventory([]*AgentState{{
+				PaneID: "pane-1", Agent: "codex", Status: "blocked",
+			}}, state.RevisionCounter())
+			d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = d.Close(ctx)
+			})
+			updates := make(chan map[string]any, 8)
+			d.SetBroadcast(func(message any) {
+				if update, ok := message.(map[string]any); ok {
+					updates <- update
+				}
+			})
+			interaction := question.Parse(test.initialView, "codex")
+			if interaction == nil {
+				t.Fatal("initial question did not parse")
+			}
+			message := map[string]any{
+				"action":         test.action,
+				"request_id":     "transition",
+				"pane_id":        "pane-1",
+				"interaction_id": interaction.ID,
+			}
+			if test.direction != "" {
+				message["direction"] = test.direction
+			} else {
+				message["selected_indices"] = []any{float64(0)}
+			}
+			if accepted := d.Handle(context.Background(), message); !accepted.OK || accepted.Phase != "accepted" {
+				t.Fatalf("accepted result = %+v", accepted)
+			}
+			timeout := time.After(3 * time.Second)
+			for {
+				select {
+				case update := <-updates:
+					if update["request_id"] != "transition" {
+						continue
+					}
+					if update["phase"] == "confirmed" {
+						t.Fatalf("transient frame was treated as final: %+v", update)
+					}
+					if update["phase"] == test.expectedPhase {
+						return
+					}
+				case <-timeout:
+					t.Fatalf("no %s result", test.expectedPhase)
+				}
+			}
+		})
+	}
+}
+
+func TestAcknowledgeOnlyBroadcastsDisplayedStatusChanges(t *testing.T) {
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{
+		PaneID: "pane-1", Agent: "claude", Status: "blocked",
+	}}, state.RevisionCounter())
+	d := NewDispatcher(nil, state, nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = d.Close(ctx)
+	})
+	updates := make(chan map[string]any, 2)
+	d.SetBroadcast(func(message any) {
+		if update, ok := message.(map[string]any); ok {
+			updates <- update
+		}
+	})
+
+	if result := d.handleAcknowledge("blocked", "pane-1"); !result.OK {
+		t.Fatalf("blocked acknowledgement = %+v", result)
+	}
+	select {
+	case update := <-updates:
+		t.Fatalf("unchanged blocked status broadcast a sparse update: %+v", update)
+	default:
+	}
+
+	state.CommitInventory([]*AgentState{{
+		PaneID: "pane-1", Agent: "claude", Status: "done",
+	}}, state.RevisionCounter())
+	if result := d.handleAcknowledge("done", "pane-1"); !result.OK {
+		t.Fatalf("done acknowledgement = %+v", result)
+	}
+	select {
+	case update := <-updates:
+		if update["status"] != "idle" {
+			t.Fatalf("acknowledgement update = %+v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("displayed done-to-idle transition was not broadcast")
+	}
+}
+
 func TestQuestionNavigationHasRequestIdentityAndReplaysTerminalInteraction(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "keys.log")

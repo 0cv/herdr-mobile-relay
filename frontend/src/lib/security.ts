@@ -239,7 +239,7 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
       ...state,
       locked: true,
       busy: false,
-      status: 'Verification was cancelled or failed. Tap Unlock to try again.',
+      status: 'Verification failed. Tap Unlock to try again.',
     }));
     return false;
   } finally {

@@ -10,10 +10,18 @@ import (
 )
 
 type Option struct {
-	Index       int    `json:"index"`
-	Label       string `json:"label"`
-	Description string `json:"description"`
-	Selected    bool   `json:"selected"`
+	Index       int            `json:"index"`
+	Label       string         `json:"label"`
+	Description string         `json:"description"`
+	Selected    bool           `json:"selected"`
+	Summary     []SummaryEntry `json:"summary,omitempty"`
+}
+
+// SummaryEntry is one answered question in a final review option, kept
+// structured so the phone can style questions and answers differently.
+type SummaryEntry struct {
+	Question string `json:"q"`
+	Answer   string `json:"a"`
 }
 
 type Other struct {
@@ -71,14 +79,21 @@ var (
 	openCodeActivePattern = regexp.MustCompile(
 		`\x1b\[[^m]*48(?:;|:)2(?:;|:)157(?:;|:)124(?:;|:)216m([^\x1b]*)`,
 	)
-	openCodeColumnPattern = regexp.MustCompile(`\s{20,}`)
-	otherPattern          = regexp.MustCompile(`(?i)^(?:type something\.?|type your own answer|none of the above|other)\b`)
-	selectedPattern       = regexp.MustCompile(`\s*[✓✔]\s*$`)
-	columnGapPattern      = regexp.MustCompile(`\s{2,}`)
-	chromePattern         = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
-	promptSkipPattern     = regexp.MustCompile(`(?i)^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$`)
-	commandPattern        = regexp.MustCompile(`^\s*[$>❯›]\s+(.+?)\s*$`)
-	turnDurationPattern   = regexp.MustCompile(
+	openCodeColumnPattern  = regexp.MustCompile(`\s{20,}`)
+	ompAskHeaderPattern    = regexp.MustCompile(`(?i)^╭[─━═_—\s]*Ask(?:[─━═_—\s]|$)`)
+	ompOptionPattern       = regexp.MustCompile(`^\s*([❯›>]?)\s*(☑|☐|◉|○|||||\[[xX ]\]|\([oO ]\))\s+(.+?)\s*$`)
+	ompFrameMetaPattern    = regexp.MustCompile(`\[\s*([\p{L}\p{N}_-]+)\s*\]\s*[·•]\s*options:\s*\d+`)
+	ompProgressPattern     = regexp.MustCompile(`\s+\((\d+)\s*/\s*(\d+)\)\s*$`)
+	ompReviewSubmitPattern = regexp.MustCompile(`(?i)^\s*[❯›>]?\s*submit\s*$`)
+	ompTabIDPattern        = regexp.MustCompile(`^[\p{L}\p{N}_.-]+$`)
+	ompActiveTabPattern    = regexp.MustCompile(`\x1b\[1m(?:\x1b\[[0-9;:]*m)*\s*([\p{L}\p{N}_.-]+)`)
+	otherPattern           = regexp.MustCompile(`(?i)^(?:type something\.?|type your own answer|none of the above|other)\b`)
+	selectedPattern        = regexp.MustCompile(`\s*[✓✔]\s*$`)
+	columnGapPattern       = regexp.MustCompile(`\s{2,}`)
+	chromePattern          = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
+	promptSkipPattern      = regexp.MustCompile(`(?i)^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$`)
+	commandPattern         = regexp.MustCompile(`^\s*[$>❯›]\s+(.+?)\s*$`)
+	turnDurationPattern    = regexp.MustCompile(
 		`(?i)^[^\p{L}\p{N}]*\p{L}+(?:ed|ing)\s+for\s+(?:\d+h\s*)?(?:\d+m\s*)?\d+s\b`,
 	)
 	responseStartPattern  = regexp.MustCompile(`^\s*[•●]\s+\S`)
@@ -89,8 +104,16 @@ func Supports(agent string) bool {
 	agent = strings.ToLower(agent)
 	return strings.Contains(agent, "claude") ||
 		strings.Contains(agent, "codex") ||
+		ompAskAgent(agent) ||
 		strings.Contains(agent, "opencode") ||
 		strings.Contains(agent, "qoder")
+}
+
+func ompAskAgent(agent string) bool {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	return agent == "omp" || strings.HasPrefix(agent, "omp-") ||
+		agent == "pi" || strings.HasPrefix(agent, "pi-") ||
+		strings.Contains(agent, "oh-my-pi")
 }
 
 func Parse(text, agent string) *Interaction {
@@ -98,6 +121,9 @@ func Parse(text, agent string) *Interaction {
 		return nil
 	}
 	normalized := strings.ToLower(agent)
+	if ompAskAgent(normalized) {
+		return parseOMP(text)
+	}
 	if strings.Contains(normalized, "codex") {
 		return parseCodex(text)
 	}
@@ -120,7 +146,7 @@ func Parse(text, agent string) *Interaction {
 }
 
 func LayoutHint(text string) bool {
-	if openCodeLayoutHint(text) {
+	if openCodeLayoutHint(text) || ompLayoutHint(text) {
 		return true
 	}
 	lines := cleanLines(text)
@@ -322,6 +348,389 @@ func approvalCommand(lines []string) string {
 	return fallback
 }
 
+type ompOptionRow struct {
+	line     int
+	focus    bool
+	marker   string
+	label    string
+	selected bool
+}
+
+func ompLayoutHint(text string) bool {
+	lines := cleanLines(text)
+	start := -1
+	for index, line := range lines {
+		if ompAskHeaderPattern.MatchString(line) {
+			start = index
+		}
+	}
+	if start < 0 {
+		return false
+	}
+	footer := -1
+	options := 0
+	review := false
+	reviewSubmit := false
+	for index := start + 1; index < len(lines); index++ {
+		line := lines[index]
+		if ompOptionPattern.MatchString(line) {
+			options++
+		}
+		if strings.EqualFold(line, "review answers") {
+			review = true
+		}
+		if review && ompReviewSubmitPattern.MatchString(line) {
+			reviewSubmit = true
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") {
+			footer = index
+		}
+	}
+	if footer < 0 || (options < 2 && !reviewSubmit) {
+		return false
+	}
+	for _, line := range lines[footer+1:] {
+		if line != "" && !ompBorderLine(line) {
+			return false
+		}
+	}
+	return true
+}
+
+// ompCleanLines additionally strips the Ask frame's inner scrollbar column,
+// which survives edge cleanup when the frame content overflows.
+func ompCleanLines(text string) []string {
+	lines := cleanLines(text)
+	for index, line := range lines {
+		lines[index] = strings.TrimRight(line, " \t│█▉▊▋▌▍▎▏▁▂▃▄▅▆▇▀")
+	}
+	return lines
+}
+
+func parseOMP(text string) *Interaction {
+	lines := ompCleanLines(text)
+	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	start := -1
+	for index, line := range lines {
+		if ompAskHeaderPattern.MatchString(line) {
+			start = index
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+
+	end := len(lines)
+	for index := start + 1; index < len(lines); index++ {
+		lower := strings.ToLower(lines[index])
+		if strings.Contains(lower, "enter select") || strings.Contains(lower, "enter submit") {
+			end = index
+			break
+		}
+	}
+	var rows []ompOptionRow
+	for index := start + 1; index < end; index++ {
+		match := ompOptionPattern.FindStringSubmatch(lines[index])
+		if match == nil {
+			continue
+		}
+		rows = append(rows, ompOptionRow{
+			line:     index,
+			focus:    match[1] != "",
+			marker:   match[2],
+			label:    compact(match[3], 500),
+			selected: ompMarkerSelected(match[2]),
+		})
+	}
+	if len(rows) < 2 {
+		return parseOMPReview(lines, start, end)
+	}
+
+	question := ompQuestion(lines, start, rows[0].line)
+	current, total := ompPosition(lines, rawLines, start, question)
+	if match := ompProgressPattern.FindStringSubmatch(question); match != nil {
+		current, _ = strconv.Atoi(match[1])
+		total, _ = strconv.Atoi(match[2])
+		question = strings.TrimSpace(ompProgressPattern.ReplaceAllString(question, ""))
+	}
+
+	kind := "single_select"
+	if ompCheckboxMarker(rows[0].marker) {
+		kind = "multi_select"
+	}
+	options := make([]Option, 0, len(rows)-1)
+	other := Other{Hidden: true}
+	focus := Focus{Kind: "option"}
+	for rowIndex, row := range rows {
+		label := row.label
+		if strings.EqualFold(label, "done selecting") ||
+			strings.Contains(strings.ToLower(label), "done selecting") {
+			if row.focus {
+				focus = Focus{Kind: "submit"}
+			}
+			continue
+		}
+		if otherPattern.MatchString(label) {
+			rowEnd := end
+			if rowIndex+1 < len(rows) {
+				rowEnd = rows[rowIndex+1].line
+			}
+			other = Other{
+				Selected: row.selected,
+				Label:    label,
+				Text:     ompDescription(lines, row.line, rowEnd),
+			}
+			if row.focus {
+				focus = Focus{Kind: "option", Index: len(options)}
+			}
+			continue
+		}
+		rowEnd := end
+		if rowIndex+1 < len(rows) {
+			rowEnd = rows[rowIndex+1].line
+		}
+		optionIndex := len(options)
+		options = append(options, Option{
+			Index:       optionIndex,
+			Label:       label,
+			Description: ompDescription(lines, row.line, rowEnd),
+			Selected:    row.selected,
+		})
+		if row.focus {
+			focus = Focus{Kind: "option", Index: optionIndex}
+		}
+	}
+	if len(options) == 0 || (other.Hidden && len(options) < 2) {
+		return nil
+	}
+	allOptions := len(options)
+	if !other.Hidden {
+		allOptions++
+	}
+	if total == 0 {
+		current, total = 1, 1
+	}
+	submitLabel := "Submit"
+	if current < total {
+		submitLabel = "Next"
+	}
+	interaction := &Interaction{
+		Kind:           kind,
+		Question:       question,
+		Options:        options,
+		Other:          other,
+		SubmitLabel:    submitLabel,
+		CanGoBack:      current > 1,
+		QuestionIndex:  current,
+		QuestionTotal:  total,
+		Focus:          focus,
+		AllOptionCount: allOptions,
+		Agent:          "omp",
+	}
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+func parseOMPReview(lines []string, start, end int) *Interaction {
+	review, submit := -1, -1
+	for index := start + 1; index < end; index++ {
+		line := strings.TrimSpace(lines[index])
+		if strings.EqualFold(line, "review answers") {
+			review = index
+			continue
+		}
+		if review >= 0 && ompReviewSubmitPattern.MatchString(line) {
+			submit = index
+			break
+		}
+	}
+	if review < 0 || submit < 0 {
+		return nil
+	}
+
+	var summary []SummaryEntry
+	for _, line := range lines[review+1 : submit] {
+		if match := menuPattern.FindStringSubmatch(line); match != nil {
+			summary = append(summary, splitSummaryEntry(match[3]))
+		}
+	}
+	questionTotal := 1
+	if ids, _ := ompTabIDs(lines, start); len(ids) > 0 {
+		questionTotal = len(ids) + 1
+	}
+	interaction := &Interaction{
+		Kind:     "single_select",
+		Question: "Review answers",
+		Options: []Option{{
+			Index:       0,
+			Label:       "Submit answers",
+			Description: summaryLines(summary, 500),
+			Selected:    true,
+			Summary:     summary,
+		}},
+		Other:          Other{Hidden: true},
+		SubmitLabel:    "Submit",
+		CanGoBack:      questionTotal > 1,
+		QuestionIndex:  questionTotal,
+		QuestionTotal:  questionTotal,
+		Focus:          Focus{Kind: "option"},
+		AllOptionCount: 1,
+		Agent:          "omp",
+	}
+	interaction.ID = interactionID(interaction)
+	return interaction
+}
+
+func ompQuestion(lines []string, start, firstOption int) string {
+	for index := firstOption - 1; index > start; index-- {
+		line := lines[index]
+		if line == "" || ompBorderLine(line) {
+			continue
+		}
+		return compact(line, 1000)
+	}
+	return "OMP needs an answer"
+}
+
+func ompDescription(lines []string, start, end int) string {
+	var parts []string
+	for _, line := range lines[start+1 : end] {
+		if line == "" || ompBorderLine(line) ||
+			strings.Contains(strings.ToLower(line), "enter select") {
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(strings.TrimPrefix(line, "↳")))
+	}
+	return compact(strings.Join(parts, " "), 500)
+}
+
+// ompTabIDs collects the question ids from the Ask header tab row, which
+// wraps onto continuation lines on narrow panes; the Submit tab ends it.
+func ompTabIDs(lines []string, askStart int) ([]string, int) {
+	var ids []string
+	for index := askStart + 1; index < len(lines) && index <= askStart+4; index++ {
+		for _, field := range strings.Fields(lines[index]) {
+			if strings.EqualFold(field, "submit") {
+				return ids, index
+			}
+			if !ompTabIDPattern.MatchString(field) {
+				return nil, -1
+			}
+			ids = append(ids, field)
+		}
+	}
+	return nil, -1
+}
+
+// ompActiveTab finds the tab rendered with the bold active-tab style in the
+// raw terminal output; cleaned lines cannot carry that distinction.
+func ompActiveTab(rawLines []string, first, last int) string {
+	for index := first; index <= last && index < len(rawLines); index++ {
+		if match := ompActiveTabPattern.FindStringSubmatch(rawLines[index]); match != nil {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+func ompPosition(lines, rawLines []string, askStart int, question string) (int, int) {
+	ids, tabEnd := ompTabIDs(lines, askStart)
+	if len(ids) > 0 {
+		if active := ompActiveTab(rawLines, askStart+1, tabEnd); active != "" {
+			for index, id := range ids {
+				if strings.EqualFold(id, active) {
+					return index + 1, len(ids)
+				}
+			}
+		}
+	}
+	frameEnd := -1
+	for index := askStart - 1; index >= 0; index-- {
+		if strings.HasPrefix(lines[index], "╰") {
+			frameEnd = index
+			break
+		}
+	}
+	frameStart := -1
+	if frameEnd >= 0 {
+		for index := frameEnd - 1; index >= 0; index-- {
+			if strings.HasPrefix(lines[index], "╭") {
+				frameStart = index
+				break
+			}
+		}
+	}
+
+	var metaIDs, prompts []string
+	if frameStart >= 0 {
+		for index := frameStart + 1; index < frameEnd; index++ {
+			match := ompFrameMetaPattern.FindStringSubmatch(lines[index])
+			if match == nil {
+				continue
+			}
+			prompt := ""
+			for candidate := index + 1; candidate < frameEnd; candidate++ {
+				if ompFrameMetaPattern.MatchString(lines[candidate]) {
+					break
+				}
+				if lines[candidate] == "" || ompBorderLine(lines[candidate]) {
+					continue
+				}
+				prompt = compact(lines[candidate], 1000)
+				break
+			}
+			metaIDs = append(metaIDs, match[1])
+			prompts = append(prompts, prompt)
+		}
+	}
+
+	currentID := ""
+	for index, prompt := range prompts {
+		if prompt == question {
+			currentID = metaIDs[index]
+			break
+		}
+	}
+	if currentID != "" && len(ids) > 0 {
+		for index, id := range ids {
+			if strings.EqualFold(id, currentID) {
+				return index + 1, len(ids)
+			}
+		}
+	}
+	for index, prompt := range prompts {
+		if prompt == question {
+			return index + 1, len(prompts)
+		}
+	}
+	if len(ids) > 0 {
+		return 0, len(ids)
+	}
+	return 0, len(prompts)
+}
+
+func ompMarkerSelected(marker string) bool {
+	switch strings.ToLower(marker) {
+	case "☑", "◉", "", "", "[x]", "(o)":
+		return true
+	default:
+		return false
+	}
+}
+
+func ompCheckboxMarker(marker string) bool {
+	switch strings.ToLower(marker) {
+	case "☑", "☐", "", "", "[x]", "[ ]":
+		return true
+	default:
+		return false
+	}
+}
+
+func ompBorderLine(line string) bool {
+	return strings.Trim(line, " \t─━═_—│|├┤╭╮╰╯┬┴┼") == ""
+}
+
 func parseClaude(text string) *Interaction {
 	lines := cleanLines(text)
 	type row struct {
@@ -491,8 +900,20 @@ func parseClaude(text string) *Interaction {
 		AllOptionCount: len(all),
 		Agent:          "claude",
 	}
-	if otherText != "" {
-		interaction.Other.Selected = true
+	// Leftover typed text only marks the custom answer as chosen while no
+	// option row carries the confirmed selection; otherwise a stale note from
+	// an earlier visit would override the real answer.
+	if otherText != "" && !interaction.Other.Selected {
+		selectedElsewhere := false
+		for _, option := range options {
+			if option.Selected {
+				selectedElsewhere = true
+				break
+			}
+		}
+		if !selectedElsewhere {
+			interaction.Other.Selected = true
+		}
 	}
 	interaction.ID = interactionID(interaction)
 	return interaction
@@ -533,20 +954,35 @@ func parseClaudeReview(text string, lines []string) *Interaction {
 		return nil
 	}
 
-	var summary []string
+	var summary []SummaryEntry
 	prompt := ""
+	answerOpen := false
 	for _, line := range lines[reviewIndex+1:] {
 		trimmed := strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(trimmed, "●"):
 			prompt = strings.TrimSpace(strings.TrimPrefix(trimmed, "●"))
+			answerOpen = false
 		case strings.HasPrefix(trimmed, "→") && prompt != "":
 			answer := strings.TrimSpace(strings.TrimPrefix(trimmed, "→"))
-			summary = append(summary, strings.TrimSuffix(prompt, "?")+": "+answer)
+			if answer == "__other__" {
+				answer = CustomAnswerPlaceholder
+			}
+			summary = append(summary, SummaryEntry{Question: strings.TrimSuffix(prompt, "?"), Answer: answer})
 			prompt = ""
+			answerOpen = true
+		case trimmed == "" || claudeReviewPattern.MatchString(line):
+			prompt = ""
+			answerOpen = false
+		case prompt != "":
+			// Long prompts wrap onto continuation lines in the terminal.
+			prompt += " " + trimmed
+		case answerOpen && len(summary) > 0:
+			summary[len(summary)-1].Answer += " " + trimmed
 		}
 	}
-	options[0].Description = compact(strings.Join(summary, " · "), 1000)
+	options[0].Description = summaryLines(summary, 1000)
+	options[0].Summary = summary
 
 	current, total := claudePosition(text)
 	if current < 1 || total < current {
@@ -902,7 +1338,7 @@ func parseQoderReview(lines []string, headerIndex, footerIndex, questionTotal in
 		return nil
 	}
 
-	var summary []string
+	var summary []SummaryEntry
 	var options []Option
 	focus := Focus{Kind: "option"}
 	for index := reviewIndex + 1; index < footerIndex; index++ {
@@ -917,13 +1353,17 @@ func parseQoderReview(lines []string, headerIndex, footerIndex, questionTotal in
 		}
 		if strings.Contains(line, "→") {
 			parts := strings.SplitN(line, "→", 2)
-			summary = append(summary, strings.TrimSpace(parts[0])+": "+strings.TrimSpace(parts[1]))
+			summary = append(summary, SummaryEntry{
+				Question: strings.TrimSpace(parts[0]),
+				Answer:   strings.TrimSpace(parts[1]),
+			})
 		}
 	}
 	if len(options) != 2 {
 		return nil
 	}
-	options[0].Description = compact(strings.Join(summary, " · "), 1000)
+	options[0].Description = summaryLines(summary, 1000)
+	options[0].Summary = summary
 	step := questionTotal + 1
 	interaction := &Interaction{
 		Kind:           "single_select",
@@ -1115,13 +1555,13 @@ func parseOpenCodeReview(
 		return nil
 	}
 
-	var summary []string
+	var summary []SummaryEntry
 	for _, line := range lines[reviewIndex+1 : footerIndex] {
 		line = strings.TrimSpace(line)
 		if line == "" || !strings.Contains(line, ":") {
 			continue
 		}
-		summary = append(summary, line)
+		summary = append(summary, splitSummaryEntry(line))
 	}
 	if len(summary) == 0 {
 		return nil
@@ -1137,7 +1577,8 @@ func parseOpenCodeReview(
 		Options: []Option{{
 			Index:       0,
 			Label:       "Submit answers",
-			Description: compact(strings.Join(summary, " · "), 1000),
+			Description: summaryLines(summary, 1000),
+			Summary:     summary,
 		}},
 		Other:          Other{Hidden: true},
 		SubmitLabel:    "Continue",
@@ -1297,17 +1738,28 @@ func description(lines []string, start, end int) string {
 }
 
 func prompt(lines []string, firstOption int) string {
+	start, end := -1, -1
 	for index := firstOption - 1; index >= 0; index-- {
 		line := lines[index]
 		lower := strings.ToLower(line)
-		if line == "" || submitPattern.MatchString(line) || chatPattern.MatchString(line) ||
+		boundary := line == "" || submitPattern.MatchString(line) || chatPattern.MatchString(line) ||
 			strings.Contains(lower, "enter to select") ||
-			(strings.Contains(line, "Submit") && strings.Contains(line, "→")) {
+			(strings.Contains(line, "Submit") && strings.Contains(line, "→"))
+		if boundary {
+			if end >= 0 {
+				break
+			}
 			continue
 		}
-		return compact(line, 1000)
+		if end < 0 {
+			end = index
+		}
+		start = index
 	}
-	return "Claude Code needs an answer"
+	if end < 0 {
+		return "Claude Code needs an answer"
+	}
+	return compact(strings.Join(lines[start:end+1], " "), 1000)
 }
 
 func claudePosition(text string) (int, int) {
@@ -1494,6 +1946,66 @@ func interactionID(interaction *Interaction) string {
 	return hex.EncodeToString(sum[:])[:20]
 }
 
+// summaryLines compacts each review answer separately and keeps one answer
+// per line so the phone renders a readable summary instead of a paragraph.
+// Entries stay structured so questions and answers can be styled apart.
+func summaryLines(entries []SummaryEntry, limit int) string {
+	parts := make([]string, 0, len(entries))
+	for index := range entries {
+		entries[index].Question = compact(entries[index].Question, limit)
+		entries[index].Answer = compact(entries[index].Answer, limit)
+		line := strconv.Itoa(index+1) + ". " + entries[index].Question
+		if entries[index].Answer != "" {
+			line += ": " + entries[index].Answer
+		}
+		parts = append(parts, line)
+	}
+	return strings.Join(parts, "\n")
+}
+
+// splitSummaryEntry separates a terminal "label: value" review line into its
+// question and answer halves; the label side never contains a colon.
+func splitSummaryEntry(line string) SummaryEntry {
+	parts := strings.SplitN(line, ": ", 2)
+	if len(parts) == 2 {
+		return SummaryEntry{Question: parts[0], Answer: parts[1]}
+	}
+	return SummaryEntry{Question: line}
+}
+
+// CustomAnswerPlaceholder marks a review answer whose typed free text the
+// terminal does not repeat.
+const CustomAnswerPlaceholder = "custom answer"
+
+// SummaryKey normalizes a question so review summary entries can be matched
+// with the question views the free text was typed into.
+func SummaryKey(value string) string {
+	return strings.ToLower(compact(strings.TrimSuffix(strings.TrimSpace(value), "?"), 500))
+}
+
+// FillCustomAnswers replaces placeholder review answers with the recorded
+// free-text answers and refreshes the plain-text summary fallback.
+func FillCustomAnswers(interaction *Interaction, answers map[string]string) {
+	if interaction == nil || len(answers) == 0 {
+		return
+	}
+	for index := range interaction.Options {
+		option := &interaction.Options[index]
+		changed := false
+		for i := range option.Summary {
+			if option.Summary[i].Answer != CustomAnswerPlaceholder {
+				continue
+			}
+			if text := answers[SummaryKey(option.Summary[i].Question)]; text != "" {
+				option.Summary[i].Answer = text
+				changed = true
+			}
+		}
+		if changed {
+			option.Description = summaryLines(option.Summary, 1000)
+		}
+	}
+}
 func compact(value string, limit int) string {
 	value = strings.Join(strings.Fields(value), " ")
 	runes := []rune(value)

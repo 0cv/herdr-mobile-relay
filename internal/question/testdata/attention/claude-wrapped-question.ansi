@@ -1,0 +1,26 @@
+ [0m[38;2;215;119;87m▎ [0mhttps://support.claude.com/en/articles/15424964-claude-fable-5-promotional-access
+
+[0m[38;2;80;80;80m[48;2;55;55;55m❯[0m[48;2;55;55;55m [0m[38;2;255;255;255m[48;2;55;55;55m/clear[0m[48;2;55;55;55m                                                                                                                                               [0m
+
+[0m[38;2;80;80;80m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mLet's plan for the weekend. Send me multi questions, some free text or multiple choice[0m[48;2;55;55;55m                                                               [0m
+[0m[38;2;153;153;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[38;2;153;153;153mPlanning: /home/cv/.claude/plans/let-s-plan-for-the-sorted-zephyr.md[0m
+[0m[38;2;153;153;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[38;2;153;153;153m← [0m[38;2;0;0;0m[48;2;177;185;249m ☒ Existing work [0m ☒ Work type  ☒ Time budget  ☒ Top outcome  ✔ Submit  →
+
+[0m[1m[38;2;255;255;255mThere's a big pile of uncommitted changes already in the repo (approval.go, dispatch.go, question parser, TerminalView, agents.ts, etc.) — is [0m
+[0m[1m[38;2;255;255;255mfinishing/shipping that work part of the weekend plan?[0m
+
+[0m[38;2;177;185;249m❯ [0m[38;2;153;153;153m1.[0m [0m[38;2;177;185;249mYes, top priority[0m
+     [0m[38;2;153;153;153mGet the current uncommitted changes reviewed, tested, and merged/released first[0m
+  [0m[38;2;153;153;153m2.[0m Yes, but secondary
+     [0m[38;2;153;153;153mWorth wrapping up if time allows, but not the main focus[0m
+  [0m[38;2;153;153;153m3.[0m No, that's already handled
+     [0m[38;2;153;153;153mThose changes are someone else's or already being tracked separately[0m
+  [0m[38;2;153;153;153m4.[0m Not sure — investigate first
+     [0m[38;2;153;153;153mHave Claude look at git status/diff and summarize what's pending before deciding[0m
+  [0m[38;2;153;153;153m5. [0mwe [0m[38;2;78;186;101m✔[0m
+[0m[38;2;153;153;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  6. Chat about this
+
+[0m[38;2;153;153;153mEnter to select · Tab/Arrow keys to navigate · Esc to cancel[0m

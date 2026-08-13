@@ -311,6 +311,9 @@ func (d *Dispatcher) submitQuestion(ctx context.Context, receivedAt time.Time, r
 			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
 		interaction := question.Parse(string(read.Content), current.Agent)
+		if payload.OtherSelected && interaction != nil {
+			d.state.RecordCustomAnswer(paneID, interaction.Question, payload.OtherText)
+		}
 		if interaction == nil || interaction.ID != payload.InteractionID {
 			return EffectResult{Result: d.fail(requestID, action, paneID, "The question changed before the answer was applied")}
 		}
@@ -520,6 +523,22 @@ func (d *Dispatcher) watchQuestion(
 				continue
 			}
 			current := question.Parse(string(read.Content), agent.Agent)
+			if current != nil {
+				if text := strings.TrimSpace(current.Other.Text); text != "" {
+					d.state.RecordCustomAnswer(paneID, current.Question, text)
+				}
+				question.FillCustomAnswers(current, d.state.CustomAnswers(paneID))
+			}
+			expectsQuestion := original != nil && (navigation != "" ||
+				action == "answer_question" &&
+					original.QuestionIndex > 0 &&
+					original.QuestionIndex < original.QuestionTotal)
+			if current == nil && expectsQuestion && agent.Status == "blocked" &&
+				(agent.AttentionKind == "" ||
+					agent.AttentionKind == question.AttentionUnknown ||
+					agent.AttentionKind == question.AttentionQuestion) {
+				continue
+			}
 			if current == nil || original == nil || current.ID != original.ID {
 				d.finishQuestionWatch(ledgerKey, generation, requestID, action, paneID, original, navigation, current)
 				return

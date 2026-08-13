@@ -114,11 +114,12 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (!questionSubmitAllowed(interaction, draft)) {
-      relayStore.showToast('Complete the current question before submitting.', true);
+      relayStore.showToast('Complete the question first.', true);
       return;
     }
     try {
       const submittedKey = questionDraftKey(agent, interaction);
+      const final = interaction.submit_label !== 'Next';
       const result = await relayStore.answerQuestion(agent, interaction, draft);
       relayStore.clearResponding(agent.pane_id);
       const next = returnedInteraction(result);
@@ -126,14 +127,14 @@
         dirtyDrafts.delete(submittedKey);
         drafts.delete(submittedKey);
         relayStore.applyQuestionInteraction(agent, next);
-        relayStore.showToast('Answer saved. Continue with the next question.');
-      } else if (result.phase === 'confirmed') {
+        relayStore.showToast('Answer saved.');
+      } else if (result.phase === 'confirmed' && final) {
         dirtyDrafts.delete(submittedKey);
         drafts.delete(submittedKey);
         relayStore.applyQuestionInteraction(agent, null);
         relayStore.showToast('Answers submitted.');
       } else {
-        throw unexpectedResult('The relay returned an unexpected question result.', next);
+        throw unexpectedResult('Unexpected question result.', next);
       }
     } catch (caught) {
       handleQuestionError(caught);
@@ -149,12 +150,12 @@
         throw unexpectedResult(
           result.phase === 'unconfirmed'
             ? 'The agent still shows the same question; try again.'
-            : 'The relay did not return the previous question.',
+            : 'No previous question returned.',
           prior,
         );
       }
       relayStore.applyQuestionInteraction(agent, prior);
-      relayStore.showToast('Opened the previous question.');
+      relayStore.showToast('Opened previous question.');
     } catch (caught) {
       handleQuestionError(caught);
     }
@@ -197,7 +198,9 @@
         {/if}
         <span>
           <strong>{option.label || `Option ${position + 1}`}</strong>
-          {#if option.description}<small>{option.description}</small>{/if}
+          {#if option.summary?.length}
+            <small>{#each option.summary as entry, row (row)}<span><strong>{row + 1}. {entry.q}:</strong> {entry.a}</span>{/each}</small>
+          {:else if option.description}<small>{option.description}</small>{/if}
         </span>
       </label>
     {/each}
@@ -239,6 +242,6 @@
     {#if interaction.can_chat && !interaction.other}<Button type="button" variant="trust" disabled={responding} onclick={chat}>Chat about this</Button>{/if}
   </div>
   <p class="question-status" aria-live="polite">
-    {responding ? 'Waiting for agent…' : interaction.kind === 'multi_select' ? 'Selections are sent together when you submit.' : 'Choose one answer.'}
+    {responding ? 'Waiting for agent…' : interaction.kind === 'multi_select' ? 'Selections are sent when you submit.' : 'Choose one answer.'}
   </p>
 </form>

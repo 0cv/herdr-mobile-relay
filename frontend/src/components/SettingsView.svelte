@@ -283,7 +283,7 @@
       return { label: 'Verifying update…', detail: 'Checking release identity and transport compatibility.', warning: true };
     }
     if (update.state === 'deploying_app') {
-      return { label: 'Publishing phone app…', detail: 'Waiting up to two minutes for the public app origin to serve the verified bundle.', warning: true };
+      return { label: 'Publishing phone app…', detail: 'Waiting for the app origin to serve the verified bundle.', warning: true };
     }
     if (update.state === 'installing') {
       return { label: 'Installing update…', detail: 'The phone connection may briefly disconnect.', warning: true };
@@ -350,14 +350,14 @@
 
   async function copyUpdateCommand(command: string, installation: string) {
     if (!navigator.clipboard?.writeText) {
-      relayStore.showToast('Clipboard access is unavailable. Select the command manually.', true);
+      relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
       return;
     }
     try {
       await navigator.clipboard.writeText(command);
       relayStore.showToast(`${installation} update command copied.`);
     } catch {
-      relayStore.showToast('Could not copy the command. Select it manually.', true);
+      relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
 
@@ -386,7 +386,7 @@
         await relayStore.installRelayUpdate(action.relayId);
         relayStore.showToast(action.appRelayId
           ? 'Publishing the phone app before safely updating its relay.'
-          : 'Update scheduled. Remaining relays will follow from the progress screen.');
+          : 'Update scheduled. Remaining relays will follow.');
       }
     } catch (error) {
       relayStore.showToast((error as Error).message, true);
@@ -556,7 +556,7 @@
   <Card>
     <h3>Security</h3>
     <AppSwitch checked={deviceLock} disabled={$securityState.busy} label="Require Fingerprint / Device Unlock" onchange={changeDeviceLock} />
-    <p class="hint">{deviceVerificationSupported() ? $securityState.hint : 'Device verification needs HTTPS and a browser with WebAuthn support.'}</p>
+    <p class="hint">{deviceVerificationSupported() ? $securityState.hint : 'Device verification needs HTTPS and WebAuthn support.'}</p>
   </Card>
 
   <Card>
