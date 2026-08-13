@@ -21,6 +21,7 @@ type AgentState struct {
 	TabID                        string                 `json:"tab_id"`
 	TabLabel                     string                 `json:"tab_label"`
 	TabNumber                    int                    `json:"tab_number"`
+	TabOrder                     int                    `json:"tab_order,omitempty"`
 	WorkspaceID                  string                 `json:"workspace_id"`
 	Agent                        string                 `json:"agent"`
 	Name                         string                 `json:"name"`

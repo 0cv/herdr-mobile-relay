@@ -278,6 +278,61 @@ async function handshake(page: Page, index: number, overrides: Record<string, un
 
 const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' };
 
+test('groups working agents and synchronizes tab order in both directions', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'tab_reorder'],
+  });
+  const agents = [
+    {
+      pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', tab_number: 1, tab_order: 1,
+      tab_label: 'First', status: 'working', project: 'mobile', agent: 'codex',
+    },
+    {
+      pane_id: 'w1:p2', workspace_id: 'w1', tab_id: 'w1:t2', tab_number: 2, tab_order: 2,
+      tab_label: 'Second', status: 'working', project: 'mobile', agent: 'claude',
+    },
+  ];
+  await server(page, 0, { type: 'agents', agents });
+
+  const working = page.locator('.working-section');
+  await expect(working.getByText('mobile', { exact: true }).first()).toBeVisible();
+  await expect(working.locator('summary strong')).toHaveCount(1);
+  await expect(working.locator('.workspace-tab-header h3')).toHaveText(['First', 'Second']);
+
+  // Long-press the first tab's agent card, then drag below the second tab.
+  const source = working.locator('.workspace-tab').filter({ hasText: 'First' }).getByRole('button', { name: /^Open mobile/ });
+  const target = working.locator('.workspace-tab').filter({ hasText: 'Second' });
+  const sourceBox = await source.boundingBox();
+  const targetBox = await target.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(targetBox).not.toBeNull();
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(750);
+  await expect(working.locator('.workspace-tab.tab-dragging')).toHaveCount(1);
+  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height * .8, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'tab_reorder')).toMatchObject({
+    pane_id: 'w1:p1',
+    insert_index: 2,
+  });
+
+  // Desktop-side move arrives as refreshed visual positions; numbers stay.
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      { ...agents[0], tab_order: 2 },
+      { ...agents[1], tab_order: 1 },
+    ],
+  });
+  await expect(working.locator('.workspace-tab-header h3')).toHaveText(['Second', 'First']);
+
+  // The long press must not have opened the agent terminal.
+  await expect(page.locator('.working-section')).toBeVisible();
+});
+
 test('keeps activity cards inside the page and confirms permanent deletion', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -3479,7 +3534,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
     .toBe(refreshesBeforeBack + 1);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode' }] });
-  await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Working' })).toBeVisible();
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '     + Thought: 1.0s\n\u001b[38;5;6m     Safe <img src=x onerror=alert(1)>\u001b[0m\n     Docs https://example.com/report?q=1\n     Details\n     ▣ Build · model · 1s' });
   const terminal = page.getByRole('log');
@@ -3721,9 +3776,10 @@ test('resets the home page scroll offset before opening a terminal', async ({ pa
     })),
   });
 
-  const lastWorkspace = page.locator('.workspace-card').filter({ hasText: 'Scrollable agent 20' });
-  await lastWorkspace.locator('summary').click();
+  // Working workspace cards render expanded, so the last agent is reachable
+  // without toggling its card.
   const lastAgent = page.getByRole('button', { name: 'Open Scrollable agent 20 on Fedora' });
+  await expect(lastAgent).toBeVisible();
   await page.evaluate(() => {
     document.documentElement.style.minHeight = '300vh';
     window.scrollTo(0, 100);

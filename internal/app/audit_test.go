@@ -17,6 +17,7 @@ func TestAuditWriteDetailsKeepAttributionWithoutPayloadContent(t *testing.T) {
 		"keys":             []any{"Ctrl+C", strings.Repeat("k", 100)},
 		"selected_indices": indices,
 		"index":            float64(2),
+		"insert_index":     float64(3),
 		"unexpected":       strings.Repeat("secret", 1000),
 	})
 
@@ -41,13 +42,16 @@ func TestAuditWriteDetailsKeepAttributionWithoutPayloadContent(t *testing.T) {
 	if selected, ok := details["selected_indices"].([]int64); !ok || len(selected) != 128 {
 		t.Fatalf("selected_indices = %#v", details["selected_indices"])
 	}
+	if details["insert_index"] != int64(3) {
+		t.Fatalf("insert_index = %#v", details["insert_index"])
+	}
 }
 
 func TestAuditedWriteSetCoversRemoteAgentMutations(t *testing.T) {
 	for _, action := range []string{
 		"submit_prompt", "send_keys", "send_text", "respond", "answer_question",
 		"navigate_question", "clarify_question", "agent_stop", "agent_rename",
-		"agent_start", "agent_clear", "agent_restart", "upload_image",
+		"tab_reorder", "agent_start", "agent_clear", "agent_restart", "upload_image",
 	} {
 		if !isAuditedWrite(action) {
 			t.Fatalf("%s is not audited", action)

@@ -276,6 +276,7 @@ export function mergeAgentDetails(previous: Agent | undefined, next: Agent): Age
     tab_id: next.tab_id || previous.tab_id || '',
     tab_label: next.tab_label || previous.tab_label || '',
     tab_number: next.tab_number ?? previous.tab_number,
+    tab_order: next.tab_order ?? previous.tab_order,
     workspace_id: next.workspace_id || previous.workspace_id || '',
     updated_at: Math.max(agentUpdatedAt(previous), agentUpdatedAt(next)),
     activity_seq: Object.prototype.hasOwnProperty.call(next, 'activity_seq')

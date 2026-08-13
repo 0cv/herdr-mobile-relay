@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.15.2`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.2) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.15.3`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.3) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -89,9 +89,10 @@ The relay continues to support Herdr 0.7.5 or newer.
 - Monitor and control agents across several computers, with new, closed, and
   renamed agents, workspaces, and tabs reflected within seconds through a
   live Herdr event stream (15-second reconciliation backstop).
-- Group agents by relay workspace and tab, hoist agents that need input, search
-  every relay from the phone's search button, and keep a workspace agent rail
-  beside the terminal on wider displays.
+- Group agents by status and relay workspace: working agents stay visible at
+  the top inside their workspace and tab hierarchy, agents that need input
+  remain individually actionable, and idle workspaces stay in their own
+  section.
 - Start, rename, clear, restart, and stop agents from relay-provided launch
   profiles.
 - Send durable prompt drafts, terminal keys, slash commands, screenshots, and
@@ -120,11 +121,19 @@ The relay continues to support Herdr 0.7.5 or newer.
 
 ## Workspace Navigation and Inspection
 
-The home screen groups non-blocked agents under their relay-reported workspace
-and tab. Agents that need input remain at the top. On a phone, tap the
-magnifying-glass button to search projects, workspaces, paths, tabs, sessions,
-agents, hosts, and relays. At 900 CSS pixels and wider, an agent rail keeps
-those workspace groups beside the open terminal.
+The home screen keeps working agents and agents that need input visible at the
+top. Working agents retain their workspace and tab hierarchy; remaining agents
+stay in a separate Idle section. On a phone, tap the magnifying-glass button to
+search projects, workspaces, paths, tabs, sessions, agents, hosts, and relays.
+At 900 CSS pixels and wider, an agent rail keeps those workspace groups beside
+the open terminal.
+
+When the relay advertises tab ordering, press and hold an agent card until its
+tab lifts, then drag to reorder the tab in Herdr; a plain tap still opens the
+agent, and Alt+arrow keys on a focused card provide the same control. The
+change is applied to the desktop immediately. Tab moves made on the desktop
+arrive through the Herdr event stream and update the mobile order.
+
 Opened workspace cards remain expanded after visiting an agent and returning to
 the home screen.
 

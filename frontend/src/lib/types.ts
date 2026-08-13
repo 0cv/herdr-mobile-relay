@@ -148,6 +148,7 @@ export interface Agent {
   tab_id?: string;
   tab_label?: string;
   tab_number?: number;
+  tab_order?: number;
   workspace_id?: string;
   [key: string]: unknown;
 }

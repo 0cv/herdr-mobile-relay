@@ -69,6 +69,13 @@ func (c *socketAPIClient) readPane(
 	if source == "recent-unwrapped" {
 		source = "recent_unwrapped"
 	}
+	params := map[string]any{
+		"pane_id":    paneID,
+		"source":     source,
+		"lines":      lines,
+		"format":     format,
+		"strip_ansi": format != "ansi",
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -78,9 +85,15 @@ func (c *socketAPIClient) readPane(
 			lastErr = err
 			break
 		}
-		content, err := c.readPaneConnected(ctx, paneID, lines, format, source)
+		response, err := c.requestConnected(ctx, "pane.read", params)
+		if err == nil && response.Result.Type != "pane_read" {
+			err = fmt.Errorf("Herdr socket API returned %q for pane.read", response.Result.Type)
+		}
 		if err == nil {
-			return content, nil
+			return PaneRead{
+				Content:   []byte(response.Result.Read.Text),
+				Truncated: response.Result.Read.Truncated,
+			}, nil
 		}
 		lastErr = err
 		_ = c.closeLocked()
@@ -101,63 +114,76 @@ func (c *socketAPIClient) connect(ctx context.Context) error {
 	return nil
 }
 
-func (c *socketAPIClient) readPaneConnected(
+func (c *socketAPIClient) requestConnected(
 	ctx context.Context,
-	paneID string,
-	lines int,
-	format string,
-	source string,
-) (PaneRead, error) {
+	method string,
+	params map[string]any,
+) (socketAPIResponse, error) {
+	var response socketAPIResponse
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		deadline = time.Now().Add(defaultTimeout)
 	}
 	if err := c.conn.SetDeadline(deadline); err != nil {
-		return PaneRead{}, fmt.Errorf("set Herdr socket API deadline: %w", err)
+		return response, fmt.Errorf("set Herdr socket API deadline: %w", err)
 	}
 
 	c.seq++
-	requestID := fmt.Sprintf("mobile-relay-read-%d", c.seq)
-	request := map[string]any{
-		"id":     requestID,
-		"method": "pane.read",
-		"params": map[string]any{
-			"pane_id":    paneID,
-			"source":     source,
-			"lines":      lines,
-			"format":     format,
-			"strip_ansi": format != "ansi",
-		},
-	}
-	payload, err := json.Marshal(request)
+	requestID := fmt.Sprintf("mobile-relay-api-%d", c.seq)
+	payload, err := json.Marshal(map[string]any{
+		"id": requestID, "method": method, "params": params,
+	})
 	if err != nil {
-		return PaneRead{}, fmt.Errorf("encode Herdr socket API request: %w", err)
+		return response, fmt.Errorf("encode Herdr socket API request: %w", err)
 	}
 	payload = append(payload, '\n')
 	if _, err := c.conn.Write(payload); err != nil {
-		return PaneRead{}, fmt.Errorf("write Herdr socket API request: %w", err)
+		return response, fmt.Errorf("write Herdr socket API request: %w", err)
 	}
 	line, err := readSocketAPILine(c.reader)
 	if err != nil {
-		return PaneRead{}, fmt.Errorf("read Herdr socket API response: %w", err)
+		return response, fmt.Errorf("read Herdr socket API response: %w", err)
 	}
-	var response socketAPIResponse
 	if err := json.Unmarshal(line, &response); err != nil {
-		return PaneRead{}, fmt.Errorf("decode Herdr socket API response: %w", err)
+		return response, fmt.Errorf("decode Herdr socket API response: %w", err)
 	}
 	if response.ID != requestID {
-		return PaneRead{}, errors.New("Herdr socket API response ID mismatch")
+		return response, errors.New("Herdr socket API response ID mismatch")
 	}
 	if response.Error != nil {
-		return PaneRead{}, fmt.Errorf("Herdr socket API %s: %s", response.Error.Code, response.Error.Message)
+		return response, fmt.Errorf("Herdr socket API %s: %s", response.Error.Code, response.Error.Message)
 	}
-	if response.Result.Type != "pane_read" {
-		return PaneRead{}, fmt.Errorf("Herdr socket API returned %q for pane.read", response.Result.Type)
+	return response, nil
+}
+
+// tabMove retries once on transport errors: Herdr closes the socket after
+// every response, so a connection cached by an earlier request reads EOF.
+// Repeating the move is safe because Herdr treats a satisfied insert_index
+// as a no-op.
+func (c *socketAPIClient) tabMove(ctx context.Context, tabID string, insertIndex int) error {
+	if c == nil || c.path == "" {
+		return errors.New("Herdr socket path is unavailable")
 	}
-	return PaneRead{
-		Content:   []byte(response.Result.Read.Text),
-		Truncated: response.Result.Read.Truncated,
-	}, nil
+	params := map[string]any{"tab_id": tabID, "insert_index": insertIndex}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var lastErr error
+	for range 2 {
+		if err := c.connect(ctx); err != nil {
+			lastErr = err
+			break
+		}
+		response, err := c.requestConnected(ctx, "tab.move", params)
+		if err == nil {
+			if response.Result.Type != "tab_list" {
+				return fmt.Errorf("Herdr socket API returned %q for tab.move", response.Result.Type)
+			}
+			return nil
+		}
+		lastErr = err
+		_ = c.closeLocked()
+	}
+	return lastErr
 }
 
 func readSocketAPILine(reader *bufio.Reader) ([]byte, error) {

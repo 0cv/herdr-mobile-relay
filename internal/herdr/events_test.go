@@ -228,29 +228,42 @@ func TestSessionCacheIgnoresStalePaneUpdates(t *testing.T) {
 	}
 }
 
-func TestSessionCacheUpdatesMovedTabMetadata(t *testing.T) {
+func TestSessionCacheAppliesDesktopTabOrder(t *testing.T) {
 	cache := NewSessionCache(SessionSnapshot{
-		Tabs: []Tab{{
-			ID:          "tab-1",
-			WorkspaceID: "workspace-1",
-			Label:       "main",
-			Number:      1,
-		}},
+		Tabs: []Tab{
+			{ID: "tab-1", WorkspaceID: "workspace-1", Label: "1", Number: 1},
+			{ID: "tab-2", WorkspaceID: "workspace-1", Label: "second", Number: 2},
+		},
 	})
-	changed, err := cache.Apply(Event{
-		Event: "tab.moved",
-		Data:  json.RawMessage(`{"tab_id":"tab-1","workspace_id":"workspace-2","number":3}`),
-	})
+	// Captured from Herdr 0.8.0: numbers are stable identities and stay
+	// unchanged; the ordered tabs array and refreshed auto-labels are the
+	// only signals of the move.
+	var event Event
+	if err := json.Unmarshal([]byte(`{
+		"event":"tab_moved",
+		"data":{
+			"type":"tab_moved",
+			"tab_id":"tab-2",
+			"workspace_id":"workspace-1",
+			"insert_index":0,
+			"tabs":[
+				{"tab_id":"tab-2","workspace_id":"workspace-1","label":"second","number":2,"pane_count":1},
+				{"tab_id":"tab-1","workspace_id":"workspace-1","label":"2","number":1,"pane_count":1}
+			]
+		}
+	}`), &event); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := cache.Apply(event)
 	if err != nil || !changed {
 		t.Fatalf("Apply() changed=%v err=%v, want changed", changed, err)
 	}
-	snapshot := cache.Snapshot()
-	if len(snapshot.Tabs) != 1 {
-		t.Fatalf("tabs = %#v, want one tab", snapshot.Tabs)
+	tabs := cache.Snapshot().Tabs
+	if len(tabs) != 2 || tabs[0].ID != "tab-2" || tabs[1].ID != "tab-1" {
+		t.Fatalf("tabs = %+v, want desktop order tab-2 then tab-1", tabs)
 	}
-	tab := snapshot.Tabs[0]
-	if tab.WorkspaceID != "workspace-2" || tab.Number != 3 || tab.Label != "main" {
-		t.Fatalf("moved tab = %+v, want updated workspace/number and preserved label", tab)
+	if tabs[0].Number != 2 || tabs[1].Number != 1 || tabs[1].Label != "2" {
+		t.Fatalf("tabs = %+v, want stable numbers and refreshed auto-label", tabs)
 	}
 }
 

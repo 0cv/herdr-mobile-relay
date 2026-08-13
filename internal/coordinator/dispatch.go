@@ -21,6 +21,7 @@ const (
 	approvalDeadline   = 9 * time.Second
 	questionDeadline   = 16 * time.Second
 	agentStartDeadline = 40 * time.Second
+	maxTabInsertIndex  = 10_000
 	promptMaxChars     = 100000
 )
 
@@ -275,6 +276,8 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleStop(ctx, receivedAt, requestID, paneID)
 	case "agent_rename":
 		return d.handleTabRename(ctx, receivedAt, requestID, paneID, message)
+	case "tab_reorder":
+		return d.handleTabReorder(ctx, receivedAt, requestID, paneID, message)
 	case "acknowledge_pane":
 		return d.handleAcknowledge(requestID, paneID)
 	case "agent_start":
@@ -463,6 +466,41 @@ func (d *Dispatcher) handleTabRename(ctx context.Context, receivedAt time.Time, 
 	}))
 	if result.OK {
 		d.recordActivity("agent_rename", "renamed", "Renamed tab to "+label, paneID, requestID)
+		d.wake()
+	}
+	return result
+}
+
+func (d *Dispatcher) handleTabReorder(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+	insertIndex, valid := tabInsertIndex(message["insert_index"])
+	if paneID == "" {
+		return d.fail(requestID, "tab_reorder", paneID, "Agent is required")
+	}
+	if !valid {
+		return d.fail(requestID, "tab_reorder", paneID, "Tab position is invalid")
+	}
+	agent, ok := d.state.Agent(paneID)
+	if !ok || agent.TabID == "" {
+		return d.fail(requestID, "tab_reorder", paneID, "Tab is unavailable")
+	}
+	result := d.schedule(ctx, ScheduleOptions{
+		Command: d.command(ctx, receivedAt, requestID, CommandTabReorder, paneID, commandDeadline, insertIndex),
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "tab_reorder"); stale != nil {
+			return EffectResult{Result: stale}
+		}
+		if err := d.herdr.TabMove(effectCtx, agent.TabID, insertIndex); err != nil {
+			return EffectResult{Result: d.failErr(requestID, "tab_reorder", paneID, err)}
+		}
+		return EffectResult{Result: completed(
+			requestID,
+			"tab_reorder",
+			paneID,
+			map[string]any{"insert_index": insertIndex},
+		)}
+	}))
+	if result.OK {
+		d.recordActivity("tab_reorder", "reordered", "Reordered tab", paneID, requestID)
 		d.wake()
 	}
 	return result
@@ -1087,6 +1125,18 @@ func intValue(value any, fallback int) int {
 		return int(number)
 	default:
 		return fallback
+	}
+}
+
+func tabInsertIndex(value any) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, number >= 0 && number <= maxTabInsertIndex
+	case float64:
+		index := int(number)
+		return index, number >= 0 && number <= maxTabInsertIndex && number == float64(index)
+	default:
+		return 0, false
 	}
 }
 

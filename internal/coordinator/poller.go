@@ -136,11 +136,17 @@ func (p *Poller) poll(ctx context.Context) {
 
 func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*AgentState {
 	tabByID := make(map[string]herdr.Tab, len(tabs))
+	// 1-based visual position per workspace; tab numbers are stable
+	// identities and never reflect moves.
+	tabOrderByID := make(map[string]int, len(tabs))
+	perWorkspace := make(map[string]int)
 	for index, tab := range tabs {
 		if tab.Number == 0 {
 			tab.Number = index + 1
 		}
 		tabByID[tab.ID] = tab
+		perWorkspace[tab.WorkspaceID]++
+		tabOrderByID[tab.ID] = perWorkspace[tab.WorkspaceID]
 	}
 
 	agents := make([]*AgentState, 0, len(panes))
@@ -163,6 +169,7 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 			TabID:           pane.TabID,
 			TabLabel:        pane.TabLabel,
 			TabNumber:       pane.TabNumber,
+			TabOrder:        tabOrderByID[pane.TabID],
 			WorkspaceID:     pane.WorkspaceID,
 			Agent:           pane.Agent,
 			Name:            pane.Name,

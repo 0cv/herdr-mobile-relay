@@ -26,6 +26,7 @@ var mutatingTypes = map[string]bool{
 	"text":                true,
 	"agent_start":         true,
 	"agent_rename":        true,
+	"tab_reorder":         true,
 	"agent_stop":          true,
 	"agent_clear":         true,
 	"agent_restart":       true,
@@ -50,6 +51,7 @@ type Inbound struct {
 	Prompt           string          `json:"prompt,omitempty"`
 	EventID          string          `json:"event_id,omitempty"`
 	InteractionID    string          `json:"interaction_id,omitempty"`
+	InsertIndex      *int            `json:"insert_index,omitempty"`
 	Index            *int            `json:"index,omitempty"`
 	Total            *int            `json:"total,omitempty"`
 	Keys             []string        `json:"keys,omitempty"`

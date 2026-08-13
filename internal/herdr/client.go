@@ -333,6 +333,13 @@ func (c *Client) TabRename(ctx context.Context, tabID, label string) error {
 	return nil
 }
 
+func (c *Client) TabMove(ctx context.Context, tabID string, insertIndex int) error {
+	if err := c.api.tabMove(ctx, tabID, insertIndex); err != nil {
+		return fmt.Errorf("herdr tab move: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) PaneRun(ctx context.Context, paneID string, argv []string) error {
 	if len(argv) == 0 {
 		return errors.New("herdr pane run: empty profile argv")

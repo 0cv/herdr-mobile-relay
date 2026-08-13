@@ -17,7 +17,7 @@
   } from '$lib/agents';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig, RelayConnectionView } from '$lib/types';
-  import { workspaceGroups } from '$lib/workspaces';
+  import { workspaceGroups, type WorkspaceGroup, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents,
@@ -48,20 +48,277 @@
     return connection?.status === 'connected' && connection.inventory.state === 'ready';
   }));
 
-  const attentionDefinitions = [
+  const statusDefinitions = [
     ['attention', 'Needs inspection', 'warning'],
     ['blocked', 'Needs input', 'danger'],
   ] as const;
   let relativeNow = $state(Date.now());
+  let movingTab = $state('');
+  interface TabSlot {
+    id: string;
+    top: number;
+    height: number;
+  }
+  let tabDrag = $state<{
+    workspaceKey: string;
+    sourceTabId: string;
+    pointerId: number;
+    startY: number;
+    deltaY: number;
+    insertIdx: number;
+    items: TabSlot[];
+    gap: number;
+  } | null>(null);
+  // Optimistic arrangement applied between releasing a drag and the relay
+  // confirming the new order, so tabs never snap back while Herdr catches up.
+  let pendingTabOrder = $state<{ key: string; order: string[] } | null>(null);
+  const workingAgents = $derived(agents.filter((agent) => agentStatusGroup(agent) === 'working'));
+  const workingWorkspaces = $derived(workspaceGroups(workingAgents));
   const workspaces = $derived(workspaceGroups(agents.filter((agent) => {
     const group = agentStatusGroup(agent);
-    return group !== 'blocked' && group !== 'attention';
+    return group !== 'blocked' && group !== 'attention' && group !== 'working';
   })));
+
+  $effect(() => {
+    if (!pendingTabOrder) return;
+    const pending = pendingTabOrder;
+    const workspace = [...workingWorkspaces, ...workspaces].find((group) => group.key === pending.key);
+    if (!workspace || workspace.tabs.map((tab) => tab.id).join('\u0000') === pending.order.join('\u0000')) {
+      pendingTabOrder = null;
+    }
+  });
+
+  function displayTabs(workspace: WorkspaceGroup): WorkspaceTab[] {
+    if (pendingTabOrder?.key !== workspace.key) return workspace.tabs;
+    const rank = new Map(pendingTabOrder.order.map((id, index) => [id, index]));
+    return [...workspace.tabs].sort((left, right) =>
+      (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER));
+  }
 
   function rememberWorkspaceDisclosure(key: string, event: Event) {
     const details = event.currentTarget;
     if (!(details instanceof HTMLDetailsElement)) return;
     workspaceDisclosure[key] = details.open;
+  }
+
+  function tabOrderingAvailable(workspace: WorkspaceGroup): boolean {
+    const connection = connections.get(workspace.relayId);
+    return Boolean(
+      connection?.status === 'connected'
+      && connection.inventory.state === 'ready'
+      && connection.capabilities.includes('tab_reorder'),
+    );
+  }
+
+  async function commitReorder(workspace: WorkspaceGroup, sourceTabId: string, insertIndex: number, order: string[]) {
+    const agent = displayTabs(workspace).find((tab) => tab.id === sourceTabId)?.agents[0];
+    if (!agent) return;
+    pendingTabOrder = { key: workspace.key, order };
+    movingTab = sourceTabId;
+    try {
+      await relayStore.reorderTab(agent, insertIndex);
+      relayStore.showToast('Tab order updated on Herdr.');
+    } catch (error) {
+      pendingTabOrder = null;
+      relayStore.showToast((error as Error).message, true);
+    } finally {
+      movingTab = '';
+    }
+  }
+
+  const LONG_PRESS_MS = 550;
+  const PRESS_SLOP_PX = 12;
+  let suppressOpen = false;
+
+  // Long-press a working agent card to lift its tab, drag to reorder, and
+  // release to commit; a plain tap still opens the agent.
+  function reorderPress(node: HTMLElement, params: { workspace?: WorkspaceGroup; tabId: string }) {
+    let current = params;
+    let timer = 0;
+    let pointerId = -1;
+    let startX = 0;
+    let startY = 0;
+    let dragging = false;
+
+    function reset() {
+      if (timer) {
+        clearTimeout(timer);
+        timer = 0;
+      }
+      pointerId = -1;
+      dragging = false;
+    }
+
+    function onPointerDown(event: PointerEvent) {
+      suppressOpen = false;
+      const workspace = current.workspace;
+      if (!workspace || !event.isPrimary || event.button !== 0 || movingTab) return;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startY = event.clientY;
+      timer = window.setTimeout(() => {
+        timer = 0;
+        const items = measureTabSlots(node);
+        if (items.length < 2) {
+          reset();
+          return;
+        }
+        dragging = true;
+        suppressOpen = true;
+        navigator.vibrate?.(12);
+        node.setPointerCapture?.(pointerId);
+        const sourceIdx = items.findIndex((item) => item.id === current.tabId);
+        tabDrag = {
+          workspaceKey: workspace.key,
+          sourceTabId: current.tabId,
+          pointerId,
+          startY: startY + window.scrollY,
+          deltaY: 0,
+          insertIdx: Math.max(0, sourceIdx),
+          items,
+          gap: items.length > 1 ? Math.max(0, items[1].top - items[0].top - items[0].height) : 12,
+        };
+      }, LONG_PRESS_MS);
+    }
+
+    function onPointerMove(event: PointerEvent) {
+      if (event.pointerId !== pointerId) return;
+      if (!dragging) {
+        if (Math.hypot(event.clientX - startX, event.clientY - startY) > PRESS_SLOP_PX) reset();
+        return;
+      }
+      event.preventDefault();
+      if (current.workspace) trackTabDrag(event, current.workspace);
+    }
+
+    function onPointerUp(event: PointerEvent) {
+      if (event.pointerId !== pointerId) return;
+      if (dragging && current.workspace) finishTabDrag(event, current.workspace);
+      reset();
+    }
+
+    function onPointerCancel(event: PointerEvent) {
+      if (event.pointerId !== pointerId) return;
+      if (tabDrag?.pointerId === event.pointerId) tabDrag = null;
+      reset();
+    }
+
+    // Non-passive so an active drag can stop the browser from scrolling;
+    // Svelte's own touchmove handlers are passive.
+    function onTouchMove(event: TouchEvent) {
+      if (dragging) event.preventDefault();
+    }
+
+    function onContextMenu(event: Event) {
+      if (dragging || timer) event.preventDefault();
+    }
+
+    function onClick(event: MouseEvent) {
+      if (!suppressOpen) return;
+      suppressOpen = false;
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    node.addEventListener('pointerdown', onPointerDown);
+    node.addEventListener('pointermove', onPointerMove);
+    node.addEventListener('pointerup', onPointerUp);
+    node.addEventListener('pointercancel', onPointerCancel);
+    node.addEventListener('touchmove', onTouchMove, { passive: false });
+    node.addEventListener('contextmenu', onContextMenu);
+    node.addEventListener('click', onClick, true);
+    return {
+      update(next: { workspace?: WorkspaceGroup; tabId: string }) {
+        current = next;
+      },
+      destroy() {
+        node.removeEventListener('pointerdown', onPointerDown);
+        node.removeEventListener('pointermove', onPointerMove);
+        node.removeEventListener('pointerup', onPointerUp);
+        node.removeEventListener('pointercancel', onPointerCancel);
+        node.removeEventListener('touchmove', onTouchMove);
+        node.removeEventListener('contextmenu', onContextMenu);
+        node.removeEventListener('click', onClick, true);
+        reset();
+      },
+    };
+  }
+
+  // Slots are captured in document coordinates when the drag starts, so the
+  // preview stays correct while the page auto-scrolls under the pointer.
+  function measureTabSlots(node: HTMLElement): TabSlot[] {
+    const container = node.closest('.workspace-tabs');
+    if (!container) return [];
+    return [...container.querySelectorAll<HTMLElement>('.workspace-tab')].map((section) => {
+      const bounds = section.getBoundingClientRect();
+      return { id: section.dataset.tabId || '', top: bounds.top + window.scrollY, height: bounds.height };
+    });
+  }
+
+  function trackTabDrag(event: PointerEvent, workspace: WorkspaceGroup) {
+    if (!tabDrag || tabDrag.pointerId !== event.pointerId || tabDrag.workspaceKey !== workspace.key) return;
+    event.preventDefault();
+    if (event.clientY < 72) window.scrollBy(0, -12);
+    else if (event.clientY > window.innerHeight - 72) window.scrollBy(0, 12);
+    const pointerY = event.clientY + window.scrollY;
+    let insertIdx = 0;
+    for (const item of tabDrag.items) {
+      if (item.id === tabDrag.sourceTabId) continue;
+      if (pointerY > item.top + item.height / 2) insertIdx += 1;
+    }
+    tabDrag = { ...tabDrag, deltaY: pointerY - tabDrag.startY, insertIdx };
+  }
+
+  // The dragged tab follows the pointer; every other tab translates by the
+  // dragged tab's height to preview the drop slot.
+  function tabShift(workspace: WorkspaceGroup, tabId: string): string {
+    if (!tabDrag || tabDrag.workspaceKey !== workspace.key) return '';
+    if (tabId === tabDrag.sourceTabId) return `translateY(${tabDrag.deltaY}px)`;
+    const { items, sourceTabId, insertIdx, gap } = tabDrag;
+    const sourceIdx = items.findIndex((item) => item.id === sourceTabId);
+    const itemIdx = items.findIndex((item) => item.id === tabId);
+    if (sourceIdx < 0 || itemIdx < 0) return '';
+    const span = items[sourceIdx].height + gap;
+    const othersIdx = itemIdx > sourceIdx ? itemIdx - 1 : itemIdx;
+    const shift = (itemIdx > sourceIdx ? -span : 0) + (othersIdx >= insertIdx ? span : 0);
+    return shift ? `translateY(${shift}px)` : '';
+  }
+
+  function finishTabDrag(event: PointerEvent, workspace: WorkspaceGroup) {
+    if (!tabDrag || tabDrag.pointerId !== event.pointerId || tabDrag.workspaceKey !== workspace.key) return;
+    const completed = tabDrag;
+    tabDrag = null;
+    const sourceIdx = completed.items.findIndex((item) => item.id === completed.sourceTabId);
+    if (sourceIdx < 0 || completed.insertIdx === sourceIdx) return;
+    const others = completed.items.filter((item) => item.id !== completed.sourceTabId);
+    // Herdr's insert_index addresses the pre-move list and shifts the slot
+    // down by one itself when the source sits before it.
+    const insertIndex = completed.insertIdx >= others.length
+      ? completed.items.length
+      : completed.items.findIndex((item) => item.id === others[completed.insertIdx].id);
+    const order = [
+      ...others.slice(0, completed.insertIdx).map((item) => item.id),
+      completed.sourceTabId,
+      ...others.slice(completed.insertIdx).map((item) => item.id),
+    ];
+    void commitReorder(workspace, completed.sourceTabId, insertIndex, order);
+  }
+
+
+  function handleTabOrderKey(event: KeyboardEvent, workspace: WorkspaceGroup, tabId: string) {
+    if (!event.altKey) return;
+    const delta = event.key === 'ArrowUp' || event.key === 'ArrowLeft'
+      ? -1
+      : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : 0;
+    if (!delta || movingTab) return;
+    const tabs = displayTabs(workspace);
+    const index = tabs.findIndex((tab) => tab.id === tabId);
+    if (index < 0 || !tabs[index + delta]) return;
+    event.preventDefault();
+    const insertIndex = delta > 0 ? index + 2 : index - 1;
+    const order = tabs.map((tab) => tab.id);
+    [order[index], order[index + delta]] = [order[index + delta], order[index]];
+    void commitReorder(workspace, tabId, insertIndex, order);
   }
 
   async function respond(agent: Agent, index: number, total: number, option: string) {
@@ -103,7 +360,7 @@
   });
 </script>
 
-{#snippet agentGrid(visible: Agent[], compact: boolean)}
+{#snippet agentGrid(visible: Agent[], compact: boolean, reorderWorkspace?: WorkspaceGroup, reorderTabId?: string)}
   <div class:compact-agent-grid={compact} class="agent-grid">
     {#each visible as agent (agent.pane_id)}
       {@const interaction = questionInteraction(agent)}
@@ -120,7 +377,12 @@
           class="agent-open"
           aria-label={`Open ${displayName(agent)} on ${hostLabel(agent)}`}
           disabled={!inventoryReady}
-          title={!inventoryReady ? 'This cached agent is unavailable until Herdr inventory recovers.' : undefined}
+          title={!inventoryReady
+            ? 'This cached agent is unavailable until Herdr inventory recovers.'
+            : reorderWorkspace ? 'Hold to reorder this tab; Alt+arrow keys also work.' : undefined}
+          aria-keyshortcuts={reorderWorkspace ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
+          use:reorderPress={{ workspace: reorderWorkspace, tabId: reorderTabId ?? '' }}
+          onkeydown={reorderWorkspace ? (event) => handleTabOrderKey(event, reorderWorkspace, reorderTabId ?? '') : undefined}
           onclick={() => onopen(agent)}
         >
           <span class="agent-identity">
@@ -166,6 +428,65 @@
   </div>
 {/snippet}
 
+{#snippet workspaceGrid(groups: WorkspaceGroup[], defaultOpen: boolean, working: boolean)}
+  <div class="workspace-grid">
+    {#each groups as workspace (workspace.key)}
+      {@const disclosureKey = `${working ? 'working' : 'workspace'}:${workspace.key}`}
+      <details
+        class:working-workspace-card={working}
+        class="workspace-card"
+        open={workspaceDisclosure[disclosureKey] ?? defaultOpen}
+        ontoggle={(event) => rememberWorkspaceDisclosure(disclosureKey, event)}
+      >
+        <summary>
+          <span class="workspace-card-copy">
+            <strong>{workspace.label}</strong>
+            <small>{[workspace.cwd, `@${workspace.host}`].filter(Boolean).join(' · ')}</small>
+          </span>
+          <span
+            class="workspace-counts"
+            aria-label={working
+              ? `${workspace.agents.length} working agents in ${workspace.tabs.length} tabs`
+              : `${workspace.tabs.length} tabs and ${workspace.agents.length} agents`}
+          >
+            {#if working}<em class="workspace-working-count">{workspace.agents.length} working</em>{/if}
+            <span>{workspace.tabs.length} {workspace.tabs.length === 1 ? 'tab' : 'tabs'}</span>
+            {#if !working}<span>{workspace.agents.length} {workspace.agents.length === 1 ? 'agent' : 'agents'}</span>{/if}
+            {#if workspace.lastActiveAt}
+              <time
+                datetime={new Date(workspace.lastActiveAt).toISOString()}
+                title={`Last agent activity: ${new Date(workspace.lastActiveAt).toLocaleString()}`}
+                aria-label={`Last agent activity ${new Date(workspace.lastActiveAt).toLocaleString()}`}
+              >{relativeTimestamp(workspace.lastActiveAt)}</time>
+            {/if}
+          </span>
+        </summary>
+        <div class="workspace-tabs">
+          {#each displayTabs(workspace) as tab (tab.id)}
+            <section
+              class:tab-dragging={tabDrag?.workspaceKey === workspace.key && tabDrag.sourceTabId === tab.id}
+              class="workspace-tab"
+              data-tab-id={tab.id}
+              aria-label={`${tab.label} tab`}
+              style:transform={tabShift(workspace, tab.id) || undefined}
+            >
+              <header class="workspace-tab-header">
+                <h3>{tab.label}</h3>
+              </header>
+              {@render agentGrid(
+                tab.agents,
+                true,
+                workspace.tabs.length > 1 && tabOrderingAvailable(workspace) ? workspace : undefined,
+                tab.id,
+              )}
+            </section>
+          {/each}
+        </div>
+      </details>
+    {/each}
+  </div>
+{/snippet}
+
 <main class="agent-list" aria-label="Agents">
   {#each unavailableRelays as relay (relay.id)}
     {@const inventory = connections.get(relay.id)?.inventory}
@@ -195,7 +516,7 @@
     <div class="empty-state" role="status">Waiting for relays…</div>
   {/if}
 
-  {#each attentionDefinitions as [group, title, tone] (group)}
+  {#each statusDefinitions as [group, title, tone] (group)}
     {@const visible = sortedAgents(agents.filter((agent) => agentStatusGroup(agent) === group))}
     {#if visible.length}
       <section class="agent-section" aria-labelledby={`section-${group}`}>
@@ -208,48 +529,23 @@
     {/if}
   {/each}
 
+  {#if workingWorkspaces.length}
+    <section class="agent-section working-section" aria-labelledby="section-working">
+      <h2 id="section-working" class="section-heading">
+        <span class="status-dot status-warning"></span>Working
+        <span class="section-count" aria-hidden="true">{workingAgents.length}</span>
+      </h2>
+      {@render workspaceGrid(workingWorkspaces, true, true)}
+    </section>
+  {/if}
+
   {#if workspaces.length}
     <section class="agent-section workspace-section" aria-labelledby="workspace-section-title">
       <h2 id="workspace-section-title" class="section-heading">
-        Workspaces
+        <span class="status-dot hollow"></span>Idle
         <span class="section-count" aria-hidden="true">{workspaces.length}</span>
       </h2>
-      <div class="workspace-grid">
-        {#each workspaces as workspace (workspace.key)}
-          <details
-            class="workspace-card"
-            open={workspaceDisclosure[workspace.key] ?? (workspaces.length === 1)}
-            ontoggle={(event) => rememberWorkspaceDisclosure(workspace.key, event)}
-          >
-            <summary>
-              <span class="workspace-card-copy">
-                <strong>{workspace.label}</strong>
-                <small>{[workspace.cwd, `@${workspace.host}`].filter(Boolean).join(' · ')}</small>
-              </span>
-              <span class="workspace-counts" aria-label={`${workspace.tabs.length} tabs and ${workspace.agents.length} agents`}>
-                {#if workspace.attentionCount}<em class="workspace-attention">{workspace.attentionCount} need you</em>{/if}
-                <span>{workspace.tabs.length} {workspace.tabs.length === 1 ? 'tab' : 'tabs'}</span>
-                <span>{workspace.agents.length} {workspace.agents.length === 1 ? 'agent' : 'agents'}</span>
-                {#if workspace.lastActiveAt}
-                  <time
-                    datetime={new Date(workspace.lastActiveAt).toISOString()}
-                    title={`Last agent activity: ${new Date(workspace.lastActiveAt).toLocaleString()}`}
-                    aria-label={`Last agent activity ${new Date(workspace.lastActiveAt).toLocaleString()}`}
-                  >{relativeTimestamp(workspace.lastActiveAt)}</time>
-                {/if}
-              </span>
-            </summary>
-            <div class="workspace-tabs">
-              {#each workspace.tabs as tab (tab.id)}
-                <section class="workspace-tab" aria-label={`${tab.label} tab`}>
-                  <h3>{tab.label}</h3>
-                  {@render agentGrid(tab.agents, true)}
-                </section>
-              {/each}
-            </div>
-          </details>
-        {/each}
-      </div>
+      {@render workspaceGrid(workspaces, workspaces.length === 1, false)}
     </section>
   {/if}
 </main>

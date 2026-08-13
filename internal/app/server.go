@@ -248,7 +248,7 @@ func (s *Server) Run(ctx context.Context) error {
 			capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
 		}
 		if s.herdrC.SupportsRealtimePane(client.Context()) {
-			capabilities = append(capabilities, "pane_realtime_delta")
+			capabilities = append(capabilities, "pane_realtime_delta", "tab_reorder")
 		}
 		if s.appDeployM.State().Configured {
 			capabilities = append(capabilities, "app_deploy")
@@ -1830,8 +1830,8 @@ func isAuditedWrite(action string) bool {
 	switch action {
 	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
 		"respond", "answer_question", "navigate_question", "clarify_question",
-		"agent_stop", "agent_rename", "agent_start", "agent_clear", "agent_restart",
-		"upload_image":
+		"agent_stop", "agent_rename", "tab_reorder", "agent_start", "agent_clear",
+		"agent_restart", "upload_image":
 		return true
 	default:
 		return false
@@ -1914,7 +1914,7 @@ func auditWriteDetails(message map[string]any) map[string]any {
 			details[key+"_bytes"] = len(value)
 		}
 	}
-	for _, key := range []string{"index", "total", "_server_sequence"} {
+	for _, key := range []string{"index", "insert_index", "total", "_server_sequence"} {
 		if value, ok := auditInteger(message[key]); ok {
 			details[key] = value
 		}
@@ -2005,7 +2005,7 @@ func isCoordinatorMutation(action string) bool {
 	switch action {
 	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
 		"respond", "answer_question", "navigate_question", "clarify_question",
-		"agent_stop", "agent_rename", "acknowledge_pane", "agent_start",
+		"agent_stop", "agent_rename", "tab_reorder", "acknowledge_pane", "agent_start",
 		"agent_clear", "agent_restart", "lease_pane_size", "release_pane_size":
 		return true
 	default:

@@ -663,6 +663,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 
 .workspace-grid { display: grid; gap: .65rem; }
 .workspace-card { background: var(--card); border: 1px solid var(--border); border-radius: .8rem; overflow: hidden; }
+.working-workspace-card { border-color: color-mix(in srgb, var(--warning) 42%, var(--border)); }
 .workspace-card > summary { align-items: center; cursor: pointer; display: flex; gap: .7rem; list-style: none; padding: .8rem; }
 .workspace-card > summary::-webkit-details-marker { display: none; }
 .workspace-card > summary::before { color: var(--muted); content: '›'; flex: 0 0 auto; font-size: 1.1rem; transform: rotate(0); transition: transform .12s; }
@@ -671,9 +672,17 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-card-copy strong { font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-card-copy small { color: var(--muted); font-size: .65rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-counts { align-items: flex-end; color: var(--muted); display: flex; flex: 0 0 auto; flex-direction: column; font-size: .62rem; line-height: 1.35; }
-.workspace-counts em { color: var(--danger); font-style: normal; font-weight: 700; }
+.workspace-working-count { color: var(--warning); font-style: normal; font-weight: 700; }
 .workspace-tabs { border-top: 1px solid var(--border); display: grid; gap: .75rem; padding: .7rem; }
-.workspace-tab > h3 { color: var(--muted); font-size: .65rem; letter-spacing: .04em; margin: 0 0 .35rem .15rem; text-transform: uppercase; }
+/* Long-press starts a tab drag; selectable text would trigger the platform
+   text-selection and search sheets instead. */
+.agent-list, .agent-rail { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.workspace-tab { position: relative; transition: transform .18s ease; }
+.workspace-tab-header { align-items: center; display: flex; min-height: 2.4rem; }
+.workspace-tab-header h3 { color: var(--muted); flex: 1; font-size: .65rem; letter-spacing: .04em; margin: 0 0 .35rem .15rem; text-transform: uppercase; }
+.compact-agent-grid .agent-open { touch-action: pan-y; }
+.workspace-tab.tab-dragging { box-shadow: 0 .55rem 1.6rem rgb(0 0 0 / .38); border-radius: .8rem; opacity: .95; transition: none; z-index: 2; }
+.workspace-tab.tab-dragging .agent-card { background: var(--card-hover); }
 
 .jump-search { display: block; margin-bottom: .65rem; }
 .jump-results { display: flex; flex-direction: column; gap: .8rem; max-height: min(62dvh, 34rem); overflow-y: auto; }

@@ -66,23 +66,24 @@ const RECONNECT_BASE_DELAY_MS = 3_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
 const PANE_READ_RETRY_MS = 35_000;
 const IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
-const INVENTORY_REQUIRED_COMMANDS = new Set([
-  'answer_question',
-  'navigate_question',
-  'respond',
-  'clarify_question',
-  'submit_prompt',
-  'send_keys',
-  'send_text',
-  'agent_start',
-  'agent_rename',
-  'agent_stop',
-  'agent_clear',
-  'agent_restart',
-  'acknowledge_pane',
-  'upload_image',
-  'copy_agent_response',
-]);
+const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
+  answer_question: true,
+  navigate_question: true,
+  respond: true,
+  clarify_question: true,
+  submit_prompt: true,
+  send_keys: true,
+  send_text: true,
+  agent_start: true,
+  agent_rename: true,
+  tab_reorder: true,
+  agent_stop: true,
+  agent_clear: true,
+  agent_restart: true,
+  acknowledge_pane: true,
+  upload_image: true,
+  copy_agent_response: true,
+};
 
 function normalizeAgentInventory(
   value: unknown,
@@ -879,7 +880,7 @@ class RelayStore {
     }
     const protocolError = relayProtocolError(connection);
     if (protocolError && !allowProtocolMismatch) return Promise.reject(new CommandError(protocolError));
-    if (INVENTORY_REQUIRED_COMMANDS.has(String(payload.type)) && connection.inventory.state !== 'ready') {
+    if (INVENTORY_REQUIRED_COMMANDS[String(payload.type)] && connection.inventory.state !== 'ready') {
       return Promise.reject(new CommandError(
         connection.inventory.message || 'Herdr agent inventory is not ready on this computer',
       ));
@@ -909,6 +910,17 @@ class RelayStore {
 
   sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number): Promise<CommandResult> {
     return this.sendCommand(agent.relay_id, { ...payload, pane_id: agent.raw_pane_id }, timeoutMs);
+  }
+
+  reorderTab(agent: Agent, insertIndex: number): Promise<CommandResult> {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    if (!connection?.capabilities.includes('tab_reorder')) {
+      return Promise.reject(new CommandError('This relay does not support tab ordering'));
+    }
+    if (!Number.isInteger(insertIndex) || insertIndex < 0) {
+      return Promise.reject(new CommandError('Tab position is invalid'));
+    }
+    return this.sendToAgent(agent, { type: 'tab_reorder', insert_index: insertIndex });
   }
 
   async checkRelayUpdate(relayId: string): Promise<void> {

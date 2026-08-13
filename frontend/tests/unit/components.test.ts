@@ -6,7 +6,7 @@ import ActivityView from '$components/ActivityView.svelte';
 import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
-import type { Agent, QuestionInteraction } from '$lib/types';
+import type { Agent, QuestionInteraction, RelayConnectionView } from '$lib/types';
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
@@ -208,16 +208,66 @@ describe('accessible Svelte interactions', () => {
     expect(screen.getByText('Loading agents…')).toBeInTheDocument();
   });
 
-  it('shows the Herdr tab once above its agent tile with session metadata and logo', () => {
+  it('groups working agents by workspace while keeping inactive workspaces separate', () => {
     const named: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w2:p1', pane_id: 'fedora::w2:p1',
-      project: 'relay', agent: 'codex', status: 'working', tab_id: 'tab-1', tab_label: 'my-tab', session: 'my-session',
+      workspace_id: 'work-1', project: 'relay', agent: 'codex', status: 'working',
+      tab_id: 'tab-1', tab_number: 1, tab_label: 'my-tab', session: 'my-session',
     };
-    const { container } = render(AgentList, { agents: [named], relays: [], responding: new Set<string>(), onopen: vi.fn() });
-    expect(screen.getByRole('heading', { name: 'my-tab' })).toBeInTheDocument();
-    expect(container.querySelector('.agent-meta')?.textContent).toBe('my-session');
-    expect(screen.getByRole('img', { name: 'Codex' })).toBeInTheDocument();
-    expect(container.querySelector('.agent-project')?.textContent).toContain('relay');
+    const peer: Agent = {
+      ...named, raw_pane_id: 'w2:p2', pane_id: 'fedora::w2:p2', session: '',
+      tab_id: 'tab-2', tab_number: 2, tab_label: 'review',
+    };
+    const ready: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w3:p1', pane_id: 'fedora::w3:p1',
+      workspace_id: 'work-2', project: 'docs', agent: 'codex', status: 'idle',
+    };
+    const { container } = render(AgentList, { agents: [named, peer, ready], relays: [], responding: new Set<string>(), onopen: vi.fn() });
+    const working = screen.getByRole('heading', { name: 'Working' }).closest('section')!;
+    const workspaces = screen.getByRole('heading', { name: 'Idle' }).closest('section')!;
+    expect(within(working).getAllByText('relay', { selector: 'summary strong' })).toHaveLength(1);
+    expect(within(working).getByRole('heading', { name: 'my-tab' })).toBeInTheDocument();
+    expect(within(working).getByRole('heading', { name: 'review' })).toBeInTheDocument();
+    expect(within(working).getByText('my-session')).toBeInTheDocument();
+    expect(within(workspaces).getByText('docs', { selector: 'summary strong' })).toBeInTheDocument();
+    expect(container.querySelectorAll('.agent-logo')).toHaveLength(3);
+  });
+
+  it('orders tabs by Herdr position and reorders with Alt+arrow keys on a card', async () => {
+    // tab_number contradicts tab_order on purpose: numbers are stable Herdr
+    // identities while tab_order carries the visual position.
+    const first: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w2:p1', pane_id: 'fedora::w2:p1',
+      workspace_id: 'work-1', project: 'relay', agent: 'codex', status: 'working',
+      tab_id: 'tab-1', tab_number: 7, tab_order: 1, tab_label: 'First',
+    };
+    const second: Agent = {
+      ...first, raw_pane_id: 'w2:p2', pane_id: 'fedora::w2:p2',
+      tab_id: 'tab-2', tab_number: 3, tab_order: 2, tab_label: 'Second',
+    };
+    // AgentList reads only connection readiness and capabilities in this fixture.
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' }, capabilities: ['tab_reorder'],
+    } as unknown as RelayConnectionView;
+    const connections = new Map([['fedora', connection]]);
+    const reorder = vi.spyOn(relayStore, 'reorderTab').mockResolvedValue({
+      type: 'command_result', request_id: 'move-1', ok: true,
+    });
+    render(AgentList, {
+      agents: [second, first], relays: [], connections,
+      responding: new Set<string>(), onopen: vi.fn(),
+    });
+    const headings = screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent);
+    expect(headings).toEqual(['First', 'Second']);
+    const cards = screen.getAllByRole('button', { name: 'Open relay on Fedora' });
+    await fireEvent.keyDown(cards[0], { key: 'ArrowDown', altKey: true });
+    expect(reorder).toHaveBeenCalledWith(first, 2);
+    // The new arrangement shows immediately, before the relay confirms.
+    expect(screen.getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent))
+      .toEqual(['Second', 'First']);
+    await fireEvent.keyDown(cards[0], { key: 'ArrowDown' });
+    expect(reorder).toHaveBeenCalledTimes(1);
+    reorder.mockRestore();
   });
 
   it('uses the logo instead of an agent text suffix when card metadata is empty', () => {

@@ -13,6 +13,7 @@ export interface WorkspaceTab {
   id: string;
   label: string;
   number: number;
+  order: number;
   agents: Agent[];
 }
 
@@ -77,8 +78,14 @@ export function workspaceGroups(agents: Agent[]): WorkspaceGroup[] {
       id,
       label: tabName(tabAgents[0]) || displayName(tabAgents[0]),
       number: Number(tabAgents[0].tab_number) || Number.MAX_SAFE_INTEGER,
+      // Herdr's visual position; tab numbers are stable identities that
+      // never change when a tab moves.
+      order: Number(tabAgents[0].tab_order) || Number.MAX_SAFE_INTEGER,
       agents: sortedAgents(tabAgents),
-    })).sort((left, right) => left.number - right.number || left.label.localeCompare(right.label));
+    })).sort((left, right) =>
+      left.order - right.order
+      || left.number - right.number
+      || left.label.localeCompare(right.label));
     const statuses = ordered.map(agentStatusGroup);
     return {
       key,

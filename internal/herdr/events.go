@@ -432,6 +432,10 @@ func (q *eventQueue) drain() []Event {
 type SessionCache struct {
 	panes map[string]Pane
 	tabs  map[string]Tab
+	// tabOrder holds tab IDs in Herdr's visual order. Numbers are stable
+	// identities that never change when a tab moves, so array order is the
+	// only truth for on-screen position.
+	tabOrder []string
 }
 
 func NewSessionCache(snapshot SessionSnapshot) *SessionCache {
@@ -440,7 +444,7 @@ func NewSessionCache(snapshot SessionSnapshot) *SessionCache {
 		tabs:  make(map[string]Tab, len(snapshot.Tabs)),
 	}
 	for _, tab := range snapshot.Tabs {
-		cache.tabs[tab.ID] = tab
+		cache.setTab(tab)
 	}
 	for _, pane := range snapshot.Panes {
 		if pane.ID != "" {
@@ -460,15 +464,11 @@ func (c *SessionCache) Snapshot() TopologySnapshot {
 	}
 	sort.Slice(panes, func(i, j int) bool { return panes[i].ID < panes[j].ID })
 	tabs := make([]Tab, 0, len(c.tabs))
-	for _, tab := range c.tabs {
-		tabs = append(tabs, tab)
-	}
-	sort.Slice(tabs, func(i, j int) bool {
-		if tabs[i].Number != tabs[j].Number {
-			return tabs[i].Number < tabs[j].Number
+	for _, id := range c.tabOrder {
+		if tab, ok := c.tabs[id]; ok {
+			tabs = append(tabs, tab)
 		}
-		return tabs[i].ID < tabs[j].ID
-	})
+	}
 	return TopologySnapshot{Panes: panes, Tabs: tabs}
 }
 
@@ -575,25 +575,19 @@ func (c *SessionCache) Apply(event Event) (bool, error) {
 			return false, err
 		}
 		if data.Tab.ID != "" {
-			c.tabs[data.Tab.ID] = data.Tab
+			c.setTab(data.Tab)
 			return true, nil
 		}
 		if data.TabID == "" {
 			return false, nil
 		}
-		tab := c.tabs[data.TabID]
-		tab.ID = data.TabID
-		tab.WorkspaceID = firstNonEmpty(data.WorkspaceID, tab.WorkspaceID)
-		if data.Label != "" {
-			tab.Label = data.Label
-		}
-		if data.Number != 0 {
-			tab.Number = data.Number
-		}
-		if data.Cwd != "" {
-			tab.Cwd = data.Cwd
-		}
-		c.tabs[tab.ID] = tab
+		c.setTab(Tab{
+			ID:          data.TabID,
+			WorkspaceID: data.WorkspaceID,
+			Label:       data.Label,
+			Number:      data.Number,
+			Cwd:         data.Cwd,
+		})
 		return true, nil
 	case "tab.moved":
 		var data struct {
@@ -608,24 +602,22 @@ func (c *SessionCache) Apply(event Event) (bool, error) {
 		}
 		changed := false
 		if data.Tab.ID != "" {
-			c.tabs[data.Tab.ID] = data.Tab
+			c.setTab(data.Tab)
 			changed = true
 		}
 		for _, tab := range data.Tabs {
-			if tab.ID == "" {
-				continue
-			}
-			c.tabs[tab.ID] = tab
+			c.setTab(tab)
+		}
+		if len(data.Tabs) > 0 {
+			c.reorderTabs(data.Tabs)
 			changed = true
 		}
 		if data.TabID != "" {
-			tab := c.tabs[data.TabID]
-			tab.ID = data.TabID
-			tab.WorkspaceID = firstNonEmpty(data.WorkspaceID, tab.WorkspaceID)
-			if data.Number != 0 {
-				tab.Number = data.Number
-			}
-			c.tabs[tab.ID] = tab
+			c.setTab(Tab{
+				ID:          data.TabID,
+				WorkspaceID: data.WorkspaceID,
+				Number:      data.Number,
+			})
 			changed = true
 		}
 		return changed, nil
@@ -733,6 +725,7 @@ func (c *SessionCache) removeTab(tabID string) {
 		return
 	}
 	delete(c.tabs, tabID)
+	c.pruneTabOrder()
 	for paneID, pane := range c.panes {
 		if pane.TabID == tabID {
 			delete(c.panes, paneID)
@@ -749,9 +742,71 @@ func (c *SessionCache) removeWorkspace(workspaceID string) {
 			delete(c.tabs, tabID)
 		}
 	}
+	c.pruneTabOrder()
 	for paneID, pane := range c.panes {
 		if pane.WorkspaceID == workspaceID {
 			delete(c.panes, paneID)
 		}
 	}
+}
+
+// setTab upserts tab metadata, keeping previously known fields that the
+// incoming payload omits, and registers unseen tabs at the end of the order.
+func (c *SessionCache) setTab(tab Tab) {
+	if tab.ID == "" {
+		return
+	}
+	previous, exists := c.tabs[tab.ID]
+	if exists {
+		if tab.WorkspaceID == "" {
+			tab.WorkspaceID = previous.WorkspaceID
+		}
+		if tab.Label == "" {
+			tab.Label = previous.Label
+		}
+		if tab.Number == 0 {
+			tab.Number = previous.Number
+		}
+		if tab.Cwd == "" {
+			tab.Cwd = previous.Cwd
+		}
+	}
+	c.tabs[tab.ID] = tab
+	if !exists {
+		c.tabOrder = append(c.tabOrder, tab.ID)
+	}
+}
+
+// reorderTabs applies the authoritative post-move order from a tab.moved
+// event. The event lists one workspace's tabs; tabs from other workspaces
+// keep their relative order, which is all downstream grouping depends on.
+func (c *SessionCache) reorderTabs(ordered []Tab) {
+	moved := make(map[string]bool, len(ordered))
+	for _, tab := range ordered {
+		if tab.ID != "" {
+			moved[tab.ID] = true
+		}
+	}
+	next := make([]string, 0, len(c.tabOrder))
+	for _, id := range c.tabOrder {
+		if !moved[id] {
+			next = append(next, id)
+		}
+	}
+	for _, tab := range ordered {
+		if tab.ID != "" {
+			next = append(next, tab.ID)
+		}
+	}
+	c.tabOrder = next
+}
+
+func (c *SessionCache) pruneTabOrder() {
+	kept := c.tabOrder[:0]
+	for _, id := range c.tabOrder {
+		if _, ok := c.tabs[id]; ok {
+			kept = append(kept, id)
+		}
+	}
+	c.tabOrder = kept
 }

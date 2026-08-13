@@ -5,6 +5,21 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-08-13
+
+### Changed
+
+- Keep working agents visible in a workspace-grouped home-screen section and
+  rename the remaining home-screen group to **Idle**.
+- Reorder Herdr tabs from the phone by pressing and holding an agent card,
+  then dragging: tabs slide around the lifted card as it follows the finger,
+  and the new arrangement stays put while Herdr confirms. A plain tap still
+  opens the agent, and Alt+arrow keys offer the same control. Desktop tab
+  moves mirror back to the mobile order, which follows Herdr's visual
+  positions instead of stable tab numbers.
+- Make home-screen text unselectable so a long press starts a tab drag
+  instead of the platform text-selection and search sheets.
+
 ## [0.15.2] - 2026-08-13
 
 ### Fixed
@@ -469,7 +484,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.2...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.3...HEAD
+[0.15.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.2...v0.15.3
 [0.15.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.14.11...v0.15.0

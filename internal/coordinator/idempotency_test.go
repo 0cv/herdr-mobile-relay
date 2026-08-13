@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -210,6 +211,70 @@ func TestTabRenameAcceptsNaturalLabel(t *testing.T) {
 	}
 	if strings.Contains(string(data), "agent rename") {
 		t.Fatalf("tab label was sent through agent rename: %q", data)
+	}
+}
+
+func TestTabReorderUsesHerdrSocketAPI(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverResult := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverResult <- acceptErr
+			return
+		}
+		defer conn.Close()
+		var request struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				TabID       string `json:"tab_id"`
+				InsertIndex int    `json:"insert_index"`
+			} `json:"params"`
+		}
+		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+			serverResult <- decodeErr
+			return
+		}
+		if request.Method != "tab.move" || request.Params.TabID != "tab-1" || request.Params.InsertIndex != 2 {
+			serverResult <- fmt.Errorf("unexpected tab move request: %+v", request)
+			return
+		}
+		serverResult <- json.NewEncoder(conn).Encode(map[string]any{
+			"id": request.ID,
+			"result": map[string]any{
+				"type": "tab_list",
+				"tabs": []any{},
+			},
+		})
+	}()
+
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{
+		PaneID: "pane-1", TabID: "tab-1", Status: "working",
+	}}, state.RevisionCounter())
+	client := herdr.NewClient("/binary/must-not-run", socketPath)
+	defer client.Close()
+	dispatcher := NewDispatcher(client, state, nil, testLogger())
+	result := dispatcher.Handle(context.Background(), map[string]any{
+		"action": "tab_reorder", "request_id": "move-1", "pane_id": "pane-1", "insert_index": 2,
+	})
+	if !result.OK {
+		t.Fatalf("tab reorder failed: %+v", result)
+	}
+	if serverErr := <-serverResult; serverErr != nil {
+		t.Fatal(serverErr)
+	}
+	invalid := dispatcher.Handle(context.Background(), map[string]any{
+		"action": "tab_reorder", "request_id": "move-invalid", "pane_id": "pane-1", "insert_index": 1.5,
+	})
+	if invalid.OK || invalid.Error != "Tab position is invalid" {
+		t.Fatalf("fractional tab position accepted: %+v", invalid)
 	}
 }
 
