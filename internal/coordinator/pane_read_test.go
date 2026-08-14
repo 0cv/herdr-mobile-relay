@@ -11,7 +11,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
-func TestHandleReadPaneKeepsFullHistoryForResizedPane(t *testing.T) {
+func TestHandleReadPaneUsesVisibleRowsForResizedPane(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "invocations.log")
 	visiblePath := filepath.Join(dir, "visible.ansi")
@@ -51,14 +51,17 @@ func TestHandleReadPaneKeepsFullHistoryForResizedPane(t *testing.T) {
 		"pane_id": "pane-1", "lines": float64(150), "format": "ansi",
 		"terminal_columns": float64(20), "terminal_rows": float64(46),
 	})
-	if response["content"] != historyContent {
-		t.Fatalf("pane content has %d lines, want complete %d-line history",
+	if response["content"] != visible {
+		t.Fatalf("pane content has %d lines, want clean %d-line viewport",
 			strings.Count(response["content"].(string), "\n"),
-			len(historyLines),
+			len(visibleLines),
 		)
 	}
-	if _, ok := response["viewport_only"]; ok {
-		t.Fatalf("viewport_only = %#v, want full history response", response["viewport_only"])
+	if response["viewport_only"] != true {
+		t.Fatalf("viewport_only = %#v, want true", response["viewport_only"])
+	}
+	if response["viewport_rows"] != 46 {
+		t.Fatalf("viewport_rows = %#v, want 46", response["viewport_rows"])
 	}
 	if response["truncated"] != false {
 		t.Fatalf("pane truncation = %#v, want false", response["truncated"])
@@ -67,7 +70,7 @@ func TestHandleReadPaneKeepsFullHistoryForResizedPane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(invocations), "--source recent-unwrapped --format ansi") {
-		t.Fatalf("pane read did not request full unwrapped history: %s", invocations)
+	if !strings.Contains(string(invocations), "--source visible --format ansi") {
+		t.Fatalf("pane read did not request the clean resized viewport: %s", invocations)
 	}
 }

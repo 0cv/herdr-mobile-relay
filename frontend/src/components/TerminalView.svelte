@@ -1820,7 +1820,11 @@
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
     {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
-    {#if frame?.truncated}<p class="upload-status" role="status">Older terminal history is not shown; this pane response was limited.</p>{/if}
+    {#if frame?.viewportOnly}
+      <p class="upload-status" role="status">Showing the clean current screen; older redraws at other widths are hidden. Use Copy or Conversation History for complete response text.</p>
+    {:else if frame?.truncated}
+      <p class="upload-status" role="status">Older terminal history is not shown; this pane response was limited.</p>
+    {/if}
 
     {#if visibleTerminalMenu}
       <section class="generic-menu-actions" aria-label={`Terminal menu: ${visibleTerminalMenu.title}`} aria-busy={keySending}>

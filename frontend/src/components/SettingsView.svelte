@@ -523,7 +523,7 @@
         >{item}</button>
       {/each}
     </fieldset>
-    <p class="hint">Lines requested per terminal. 5,000–10,000 lines can use substantially more network data and rendering work.</p>
+    <p class="hint">Lines requested when full pane history is available. Resize Session shows the clean current screen instead of mixing terminal redraws captured at incompatible widths; use Copy or Conversation History for complete response text.</p>
     <fieldset class="choice-grid history-grid refresh-grid">
       <legend>Terminal Refresh</legend>
       {#each TERMINAL_REFRESH_OPTIONS as item (item)}

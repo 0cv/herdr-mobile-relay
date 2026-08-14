@@ -944,7 +944,11 @@ func (d *Dispatcher) readPaneForDisplay(
 	paneID string,
 	lines int,
 	format string,
+	resized bool,
 ) (herdr.PaneRead, error) {
+	if resized {
+		return d.herdr.ReadPaneVisible(ctx, paneID, lines, format)
+	}
 	agent, ok := d.state.Agent(paneID)
 	if ok && isQoderAgent(agent.Agent) {
 		return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
@@ -987,7 +991,7 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	}
 	d.readMu.Unlock()
 	if owner {
-		call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format)
+		call.read, call.err = d.readPaneForDisplay(readCtx, paneID, lines, format, terminalColumns > 0)
 		d.readMu.Lock()
 		delete(d.reads, key)
 		close(call.done)
@@ -1010,11 +1014,15 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 		return map[string]any{"type": "pane_content", "pane_id": paneID, "content": "", "format": format, "error": "The agent state changed while the pane was being read"}
 	}
 	content := capPaneContentLines(read.Content, lines)
-	return map[string]any{
+	response := map[string]any{
 		"type": "pane_content", "pane_id": paneID, "content": string(content),
-		"format": format, "truncated": read.Truncated,
+		"format": format, "truncated": read.Truncated, "viewport_only": terminalColumns > 0,
 		"interaction": nil, "question_layout": false,
 	}
+	if terminalRows := intValue(message["terminal_rows"], 0); terminalRows > 0 {
+		response["viewport_rows"] = terminalRows
+	}
+	return response
 }
 
 func (d *Dispatcher) HandleProbePane(ctx context.Context, message map[string]any) map[string]any {

@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.15.4`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.4) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.15.5`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.5) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -161,12 +161,12 @@ the relay leases the live PTY at the measured phone width so full-screen agents
 redraw for the phone. The relay restores the previous width when the terminal
 closes, the phone disconnects, the lease expires, or the relay shuts down.
 
-Terminal History requests 100, 1,000, 5,000, or 10,000 lines per pane; 1,000 is
-the default. The relay enforces the selected limit after any Claude or Qoder
-history merge. Larger histories increase network transfer and rendering work.
-When older rows are left out — either because Herdr clipped the pane's
-scrollback or because the selected line limit did — the terminal reports that
-older history is not shown.
+Terminal History requests 100, 1,000, 5,000, or 10,000 lines when full pane
+history is available; 1,000 is the default. During **Resize Session**, the relay
+shows the clean current screen instead of combining terminal redraws captured at
+incompatible widths, which can interleave text from full-screen agents. Use
+**Copy** for the latest response or **Conversation History** for clean,
+searchable earlier turns.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. The relay reads that harness's local transcript,
@@ -186,14 +186,14 @@ Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 computer and phone CPU use while output is changing.
 
 Returning to an unchanged Resize Session paints its cached rendered frame
-immediately, then reacquires the lease and reconciles current content in the
-background. The selected history remains available while resized. Long tokens
-and grids captured at a wider width wrap for the phone, while grids redrawn at
-the leased width remain aligned.
+immediately, then reacquires the lease and replaces it with the clean current
+screen in the background. The terminal reports that older redraws are hidden;
+they remain available through the agent's native transcript rather than being
+mixed into the resized screen.
 
-**Find** searches every loaded terminal row, highlights visible matches, and
-moves between matches even when the terminal has virtualized them off-screen.
-Its scope is the output supplied by the selected Terminal History limit.
+**Find** searches every row loaded into the current terminal view, highlights
+visible matches, and moves between matches even when the terminal has
+virtualized them off-screen.
 
 Explicit HTTP(S) URLs in terminal output become external links with opener and
 referrer isolation. When the last terminal lines name supported key hints such

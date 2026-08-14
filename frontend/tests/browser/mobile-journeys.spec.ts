@@ -2204,7 +2204,7 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     .filter((command) => command.type === 'release_pane_size').length).toBe(2);
 });
 
-test('renders the selected full history while Resize Session is active', async ({ page }) => {
+test('renders the clean current screen while Resize Session is active', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -2212,34 +2212,37 @@ test('renders the selected full history while Resize Session is active', async (
   });
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize history', agent: 'omp' }],
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize viewport', agent: 'omp' }],
   });
-  await page.getByRole('button', { name: 'Open Resize history on Fedora' }).click();
+  await page.getByRole('button', { name: 'Open Resize viewport on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
 
-  const historyRows = Array.from(
-    { length: 1_000 },
-    (_, index) => `complete resize history row ${String(index + 1).padStart(4, '0')}`,
+  const visibleRows = Array.from(
+    { length: 46 },
+    (_, index) => `clean resized viewport row ${String(index + 1).padStart(2, '0')}`,
   );
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: historyRows.join('\n'),
+    content: visibleRows.join('\n'),
+    viewport_only: true,
+    viewport_rows: visibleRows.length,
   });
 
   const terminal = page.getByRole('log');
   const screen = terminal.locator('.term-screen');
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '1000');
-  await expect(terminal).toContainText('complete resize history row 1000');
+  await expect(screen).toHaveAttribute('data-terminal-row-count', String(visibleRows.length));
+  await expect(terminal).toContainText('clean resized viewport row 46');
+  await expect(page.getByRole('status').filter({ hasText: 'Showing the clean current screen' })).toBeVisible();
   await terminal.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
   });
-  await expect(terminal).toContainText('complete resize history row 0001');
+  await expect(terminal).toContainText('clean resized viewport row 01');
   expect((await commands(page)).find((command) => command.type === 'read_pane'))
     .toMatchObject({ lines: 1_000 });
 });
