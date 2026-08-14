@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.15.5`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.5) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.15.6`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.6) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -161,12 +161,13 @@ the relay leases the live PTY at the measured phone width so full-screen agents
 redraw for the phone. The relay restores the previous width when the terminal
 closes, the phone disconnects, the lease expires, or the relay shuts down.
 
-Terminal History requests 100, 1,000, 5,000, or 10,000 lines when full pane
-history is available; 1,000 is the default. During **Resize Session**, the relay
-shows the clean current screen instead of combining terminal redraws captured at
-incompatible widths, which can interleave text from full-screen agents. Use
-**Copy** for the latest response or **Conversation History** for clean,
-searchable earlier turns.
+Terminal History requests 100, 1,000, 5,000, or 10,000 lines; 1,000 is the
+default. Before **Resize Session** changes the PTY width, the app loads that
+history and separates its scrollback from the old desktop viewport. The
+terminal then keeps the scrollback and replaces only the viewport with the
+clean current screen at the phone width, avoiding interleaved full-screen
+redraws without discarding earlier output. Use **Copy** for the latest response
+or **Conversation History** for clean, searchable earlier turns.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. The relay reads that harness's local transcript,
@@ -186,10 +187,8 @@ Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 computer and phone CPU use while output is changing.
 
 Returning to an unchanged Resize Session paints its cached rendered frame
-immediately, then reacquires the lease and replaces it with the clean current
-screen in the background. The terminal reports that older redraws are hidden;
-they remain available through the agent's native transcript rather than being
-mixed into the resized screen.
+immediately, then reacquires the lease and refreshes the preserved history and
+clean current screen in the background.
 
 **Find** searches every row loaded into the current terminal view, highlights
 visible matches, and moves between matches even when the terminal has

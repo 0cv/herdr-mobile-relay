@@ -1568,6 +1568,9 @@ test('uses Resize Session as the only terminal layout', async ({ page }) => {
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize-only app', agent: 'omp' }],
   });
   await page.getByRole('button', { name: 'Open Resize-only app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'terminal history before resize',
+  });
 
   await expect(page.getByRole('navigation', { name: 'Application' })
     .getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
@@ -1962,6 +1965,9 @@ test('restores a non-bottom anchor after a Resize Session width change', async (
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize anchor', agent: 'omp' }],
   });
   await page.getByRole('button', { name: 'Open Resize anchor on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'resize anchor baseline',
+  });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
   await page.waitForTimeout(300);
@@ -2058,6 +2064,9 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
   });
   await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'resizable terminal baseline',
+  });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
   const acquire = (await commands(page))
@@ -2204,7 +2213,7 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     .filter((command) => command.type === 'release_pane_size').length).toBe(2);
 });
 
-test('renders the clean current screen while Resize Session is active', async ({ page }) => {
+test('preserves deep history with a clean current Resize Session viewport', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -2216,9 +2225,21 @@ test('renders the clean current screen while Resize Session is active', async ({
   });
   await page.getByRole('button', { name: 'Open Resize viewport on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
+
+  const historyRows = Array.from(
+    { length: 1_000 },
+    (_, index) => `preserved history row ${String(index + 1).padStart(4, '0')}`,
+  );
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: historyRows.join('\n'),
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+  await page.waitForTimeout(300);
 
   const visibleRows = Array.from(
     { length: 46 },
@@ -2235,14 +2256,19 @@ test('renders the clean current screen while Resize Session is active', async ({
 
   const terminal = page.getByRole('log');
   const screen = terminal.locator('.term-screen');
-  await expect(screen).toHaveAttribute('data-terminal-row-count', String(visibleRows.length));
+  await expect(screen).toHaveAttribute('data-terminal-row-count', '1000');
   await expect(terminal).toContainText('clean resized viewport row 46');
-  await expect(page.getByRole('status').filter({ hasText: 'Showing the clean current screen' })).toBeVisible();
+  const transcript = await page.getByLabel('Full terminal transcript').inputValue();
+  expect(transcript).toContain('preserved history row 0001');
+  expect(transcript).toContain('preserved history row 0954');
+  expect(transcript).not.toContain('preserved history row 0955');
+  expect(transcript).toContain('clean resized viewport row 01');
+  await expect(page.getByRole('status').filter({ hasText: 'Showing the clean current screen' })).toHaveCount(0);
   await terminal.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
   });
-  await expect(terminal).toContainText('clean resized viewport row 01');
+  await expect(terminal).toContainText('preserved history row 0001');
   expect((await commands(page)).find((command) => command.type === 'read_pane'))
     .toMatchObject({ lines: 1_000 });
 });
@@ -2258,6 +2284,19 @@ test('wraps stale wide grids but preserves current grids in Resize Session', asy
     agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Qoder grid', agent: 'qodercli' }],
   });
   await page.getByRole('button', { name: 'Open Qoder grid on Fedora' }).click();
+
+  const staleTable = [
+    `┌${'─'.repeat(180)}┐`,
+    `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(178)}│`,
+    `└${'─'.repeat(180)}┘`,
+  ];
+  const desktopViewport = Array.from({ length: 46 }, (_, index) => `desktop viewport row ${index + 1}`);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: staleTable.concat(desktopViewport).join('\n'),
+  });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
   await expect.poll(async () => (await commands(page))
@@ -2265,40 +2304,31 @@ test('wraps stale wide grids but preserves current grids in Resize Session', asy
   const lease = (await commands(page))
     .find((command) => command.type === 'lease_pane_size')!;
   const columns = Number(lease.columns);
+  const terminal = page.getByRole('log');
+  await page.waitForTimeout(300);
 
-  const staleTable = [
-    `┌${'─'.repeat(columns + 78)}┐`,
-    `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(columns + 76)}│`,
-    `└${'─'.repeat(columns + 78)}┘`,
-  ].join('\n');
+  const currentTable = [
+    `┌${'─'.repeat(columns - 2)}┐`,
+    `│ ${'Current grid'.padEnd(columns - 4)}│`,
+    `└${'─'.repeat(columns - 2)}┘`,
+  ];
+  const currentViewport = Array.from({ length: 43 }, (_, index) => `current viewport row ${index + 1}`)
+    .concat(currentTable);
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: staleTable,
+    content: currentViewport.join('\n'),
+    viewport_only: true,
+    viewport_rows: currentViewport.length,
   });
-
-  const terminal = page.getByRole('log');
-  await expect(terminal.locator('.terminal-grid-line')).toHaveCount(0);
+  await expect(terminal.locator('.terminal-grid-line')).toHaveCount(3);
   await expect(terminal).toContainText('Lookback | Sharpe | Max DD | 2x-cost Sharpe');
   const wrappedGeometry = await terminal.evaluate((element) => ({
     clientWidth: element.clientWidth,
     scrollWidth: element.scrollWidth,
   }));
   expect(wrappedGeometry.scrollWidth).toBeLessThanOrEqual(wrappedGeometry.clientWidth);
-
-  const currentTable = [
-    `┌${'─'.repeat(columns - 2)}┐`,
-    `│ ${'Current grid'.padEnd(columns - 4)}│`,
-    `└${'─'.repeat(columns - 2)}┘`,
-  ].join('\n');
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: currentTable,
-  });
-  await expect(terminal.locator('.terminal-grid-line')).toHaveCount(3);
   const lineHeights = await terminal.locator('.terminal-grid-line').evaluateAll((lines) => {
     const lineHeight = Number.parseFloat(getComputedStyle(lines[0]).lineHeight);
     return {

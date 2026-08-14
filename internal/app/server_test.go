@@ -152,26 +152,32 @@ func TestPaneWatchUpdateSendsMetadataOnlyDelta(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponseAppliesHistoryLimitDuringResizeSession(t *testing.T) {
+func TestPreparePaneResponsePreservesHistoryDuringResizeSession(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",
 	}}, s.state.RevisionCounter())
+	baseline := "history 1\nhistory 2\nhistory 3\nhistory 4\nhistory 5\nhistory 6\nhistory 7\nhistory 8"
+	s.historyM.Merge("pane-1", baseline)
 
-	message := map[string]any{"pane_id": "pane-1", "lines": 2, "terminal_columns": 59}
 	response := map[string]any{
 		"type": "pane_content", "pane_id": "pane-1",
-		"content": "line1\nline2", "format": "ansi", "truncated": false,
+		"content": "current 1\ncurrent 2", "format": "ansi",
+		"truncated": false, "viewport_only": true,
 	}
-	s.preparePaneResponse(message, response)
-	if response["truncated"] != false {
-		t.Fatalf("exact history truncation = %#v, want false", response["truncated"])
-	}
+	s.preparePaneResponse(
+		map[string]any{"pane_id": "pane-1", "lines": 100, "terminal_columns": 59},
+		response,
+	)
 
-	message["lines"] = 1
-	s.preparePaneResponse(message, response)
-	if response["truncated"] != true {
-		t.Fatalf("limited history truncation = %#v, want true", response["truncated"])
+	if response["content"] != "current 1\ncurrent 2" {
+		t.Fatalf("resized content = %q, want clean current viewport", response["content"])
+	}
+	if response["truncated"] != false {
+		t.Fatalf("resized truncation = %#v, want false", response["truncated"])
+	}
+	if content := s.historyM.Content("pane-1", 100); content != baseline {
+		t.Fatalf("history changed during resized read:\n%s", content)
 	}
 }
 

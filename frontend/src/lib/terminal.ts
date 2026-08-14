@@ -694,6 +694,99 @@ function hasTerminalBoxCell(line: string): boolean {
   return false;
 }
 
+export interface ResizedTerminalHistory {
+  history: string[];
+  viewport: string[];
+  sourceTruncated: boolean;
+}
+
+export interface MergedResizedTerminalHistory {
+  state: ResizedTerminalHistory;
+  content: string;
+  truncated: boolean;
+}
+
+const MAX_RESIZED_TERMINAL_HISTORY_LINES = 10_000;
+
+function normalizedTerminalLine(line: string): string {
+  return stripAnsi(line).replace(/\r/g, '').trimEnd();
+}
+
+function terminalViewportOverlap(previous: string[], current: string[]): number {
+  const maximum = Math.min(previous.length, current.length);
+  for (let size = maximum; size >= 2; size -= 1) {
+    let nonEmpty = 0;
+    let matches = true;
+    for (let index = 0; index < size; index += 1) {
+      const before = normalizedTerminalLine(previous[previous.length - size + index]);
+      const after = normalizedTerminalLine(current[index]);
+      if (before !== after) {
+        matches = false;
+        break;
+      }
+      if (before) nonEmpty += 1;
+    }
+    if (matches && nonEmpty >= 2) return size;
+  }
+  return 0;
+}
+
+function terminalViewportLines(content: string, rows: number): string[] {
+  const lines = content.split('\n');
+  return lines.slice(Math.max(0, lines.length - Math.max(1, rows)));
+}
+
+export function mergeResizedTerminalHistory(
+  baselineContent: string,
+  currentContent: string,
+  viewportRows: number,
+  limit: number,
+  previous?: ResizedTerminalHistory,
+  sourceTruncated = false,
+): MergedResizedTerminalHistory {
+  const rows = Math.max(1, Math.floor(viewportRows));
+  const viewport = terminalViewportLines(currentContent, rows);
+  let history: string[];
+  let baselineTruncated = sourceTruncated;
+
+  if (previous) {
+    history = previous.history;
+    baselineTruncated ||= previous.sourceTruncated;
+    const overlap = terminalViewportOverlap(previous.viewport, viewport);
+    if (overlap > 0 && overlap < previous.viewport.length) {
+      history = history.concat(previous.viewport.slice(0, previous.viewport.length - overlap));
+    }
+  } else {
+    const baseline = baselineContent.split('\n');
+    history = baseline.slice(0, Math.max(0, baseline.length - rows));
+  }
+
+  let retainedHistory = history;
+  let historyTruncated = false;
+  if (retainedHistory.length > MAX_RESIZED_TERMINAL_HISTORY_LINES) {
+    retainedHistory = retainedHistory.slice(-MAX_RESIZED_TERMINAL_HISTORY_LINES);
+    historyTruncated = true;
+  }
+
+  const available = retainedHistory.length + viewport.length;
+  const boundedLimit = Math.max(1, Math.floor(limit));
+  const visibleViewport = viewport.length > boundedLimit
+    ? viewport.slice(-boundedLimit)
+    : viewport;
+  const visibleHistoryCount = Math.max(0, boundedLimit - visibleViewport.length);
+  const visibleHistory = retainedHistory.slice(Math.max(0, retainedHistory.length - visibleHistoryCount));
+  const state = {
+    history: retainedHistory,
+    viewport,
+    sourceTruncated: baselineTruncated || historyTruncated,
+  };
+  return {
+    state,
+    content: visibleHistory.concat(visibleViewport).join('\n'),
+    truncated: state.sourceTruncated || available > boundedLimit,
+  };
+}
+
 export interface RenderedTerminalRow {
   html: string;
   text: string;

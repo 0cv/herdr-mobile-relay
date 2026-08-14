@@ -1680,6 +1680,9 @@ func (s *Server) preparePaneResponse(message, response map[string]any) map[strin
 		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
 		return response
 	}
+	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly {
+		return response
+	}
 	historyLimit := messageInt(message["lines"], 30)
 	if historyLimit < 1 {
 		historyLimit = 1

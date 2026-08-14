@@ -37,6 +37,7 @@ import {
   compactRepeatedCharacterRuns,
   isSeparatorOnlyLine,
   latestCompletedResponse,
+  mergeResizedTerminalHistory,
   renderTerminalContent,
   stripAnsi,
   TERMINAL_REPEATED_RUN_LIMIT,
@@ -253,6 +254,42 @@ describe('terminal rendering', () => {
     ].join('\n'), 'ansi', true, false, 40);
     expect(currentTable.rows.every((row) => row.fixedGrid)).toBe(true);
     expect(currentTable.html.match(/terminal-grid-line/g)).toHaveLength(3);
+  });
+
+  it('preserves deep pre-resize history while replacing the live viewport', () => {
+    const baseline = Array.from({ length: 1_000 }, (_, index) => `history row ${index}`);
+    const first = mergeResizedTerminalHistory(
+      baseline.join('\n'),
+      baseline.slice(900).join('\n'),
+      100,
+      1_000,
+    );
+    expect(first.content.split('\n')).toEqual(baseline);
+    expect(first.truncated).toBe(false);
+
+    const scrolledViewport = Array.from({ length: 100 }, (_, index) => `history row ${903 + index}`);
+    const second = mergeResizedTerminalHistory(
+      baseline.join('\n'),
+      scrolledViewport.join('\n'),
+      100,
+      1_000,
+      first.state,
+    );
+    const lines = second.content.split('\n');
+    expect(lines).toHaveLength(1_000);
+    expect(lines[0]).toBe('history row 3');
+    expect(lines.at(-1)).toBe('history row 1002');
+    expect(lines.filter((line) => line === 'history row 903')).toHaveLength(1);
+    expect(second.truncated).toBe(true);
+
+    const unchanged = mergeResizedTerminalHistory(
+      baseline.join('\n'),
+      scrolledViewport.join('\n'),
+      100,
+      1_000,
+      second.state,
+    );
+    expect(unchanged.content).toBe(second.content);
   });
 
 

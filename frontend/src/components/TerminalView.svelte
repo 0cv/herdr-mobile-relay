@@ -58,9 +58,11 @@
   import { relayStore } from '$lib/store';
   import {
     latestCompletedResponse,
+    mergeResizedTerminalHistory,
     stripAnsi,
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
+    type ResizedTerminalHistory,
   } from '$lib/terminal';
   import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
   import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
@@ -107,6 +109,11 @@
   let sendingPrompt = $state(false);
   let draftPersistenceWarning = $state('');
   let resizeFrameBaseline: TerminalFrame | undefined;
+  let resizeHistoryBaseline: TerminalFrame | undefined;
+  let resizeBaselineRequestPane = '';
+  let resizeBaselineRequestFrame: TerminalFrame | undefined;
+  let resizeHistoryState: ResizedTerminalHistory | undefined;
+  let resizeHistoryTruncated = $state(false);
   let showingCachedResizeFrame = false;
   let displayed = $state('');
   let renderedHtml = $state('');
@@ -349,7 +356,8 @@
     resizeFrameBaseline = undefined;
     resizeExpectedLines = 0;
     resizeSettleDeadline = 0;
-    untrack(() => { void applyFrame(next, preserve, preserveLineEnds); });
+    const renderFrame = resizedTerminalHistoryFrame(next);
+    untrack(() => { void applyFrame(renderFrame, preserve, preserveLineEnds, next); });
   });
 
   $effect(() => {
@@ -369,6 +377,7 @@
     const connection = $connections.get(agent.relay_id);
     const interfaceSizeValue = $interfaceSize;
     const paneId = agent.pane_id;
+    const baselineFrame = frame;
     void interfaceSizeValue;
     if (questionMode) {
       releasePaneSizeLease(componentMounted);
@@ -386,6 +395,24 @@
       return;
     }
     if (leaseTarget && leaseTarget.pane_id !== paneId) releasePaneSizeLease(componentMounted);
+    const validBaseline = Boolean(
+      baselineFrame && baselineFrame.paneId === paneId && !baselineFrame.viewportOnly,
+    );
+    if (!leaseTarget && !validBaseline) {
+      paneSizeLeaseError = '';
+      if (resizeBaselineRequestPane !== paneId) {
+        resizeBaselineRequestPane = paneId;
+        resizeBaselineRequestFrame = baselineFrame;
+        relayStore.readPane(agent, true);
+        return;
+      }
+      if (baselineFrame === resizeBaselineRequestFrame) return;
+    }
+    if (!resizeHistoryBaseline && validBaseline && baselineFrame) {
+      resizeHistoryBaseline = baselineFrame;
+      resizeBaselineRequestPane = '';
+      resizeBaselineRequestFrame = undefined;
+    }
     paneSizeLeaseError = '';
     void tick().then(() => requestPaneSizeLease(false));
   });
@@ -541,11 +568,12 @@
     next: TerminalFrame,
     preserve = true,
     preserveLineEnds = preserve && !resizeSessionActive,
+    cacheFrame = next,
   ) {
     const layoutChanged = preserve !== lastPreserveLayout
       || preserveLineEnds !== lastPreserveLineEnds;
     if (next.content === lastContent && next.format === lastFormat && !layoutChanged) {
-      rememberCurrentResizeFrame(next, displayed, renderedHtml, renderedRows);
+      rememberCurrentResizeFrame(cacheFrame, displayed, renderedHtml, renderedRows);
       return;
     }
     const rendered = renderTerminalContent(
@@ -558,7 +586,7 @@
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
       && next.format === lastFormat && !layoutChanged) {
-      rememberCurrentResizeFrame(next, rendered.display, rendered.html, rendered.rows);
+      rememberCurrentResizeFrame(cacheFrame, rendered.display, rendered.html, rendered.rows);
       return;
     }
     const frameStick = terminalElement
@@ -588,7 +616,7 @@
       stick ? Number.POSITIVE_INFINITY : previousTop,
       previousAnchor,
     );
-    rememberCurrentResizeFrame(next, rendered.display, rendered.html, rendered.rows);
+    rememberCurrentResizeFrame(cacheFrame, rendered.display, rendered.html, rendered.rows);
     await tick();
     if (!terminalElement) {
       virtualScrollResetPending = false;
@@ -1411,6 +1439,33 @@
     return cached;
   }
 
+  function resizedTerminalHistoryFrame(next: TerminalFrame): TerminalFrame {
+    if (!next.viewportOnly) {
+      resizeHistoryTruncated = Boolean(next.truncated);
+      return next;
+    }
+    const rows = next.viewportRows || 0;
+    if (!resizeHistoryBaseline || rows < 1) {
+      resizeHistoryTruncated = Boolean(next.truncated);
+      return next;
+    }
+    const merged = mergeResizedTerminalHistory(
+      resizeHistoryBaseline.content,
+      next.content,
+      rows,
+      $terminalHistoryLines,
+      resizeHistoryState,
+      Boolean(resizeHistoryBaseline.truncated || next.truncated),
+    );
+    resizeHistoryState = merged.state;
+    resizeHistoryTruncated = merged.truncated;
+    return {
+      ...next,
+      content: merged.content,
+      truncated: merged.truncated,
+    };
+  }
+
   function terminalFrameLineCount(value: TerminalFrame | undefined): number {
     if (!value?.content) return 0;
     let lines = 1;
@@ -1459,6 +1514,11 @@
     leaseTarget = null;
     lastLeasedColumns = 0;
     resizeFrameBaseline = undefined;
+    resizeHistoryBaseline = undefined;
+    resizeBaselineRequestPane = '';
+    resizeBaselineRequestFrame = undefined;
+    resizeHistoryState = undefined;
+    resizeHistoryTruncated = false;
     clearResizeSettling();
     queuedLease = null;
   }
@@ -1512,7 +1572,10 @@
         leaseTarget = target;
         try {
           const resizing = request.columns !== lastLeasedColumns;
-          if (resizing) beginResizeSettling();
+          if (resizing) {
+            if (!resizeHistoryBaseline && frame && !frame.viewportOnly) resizeHistoryBaseline = frame;
+            beginResizeSettling();
+          }
           const appliedColumns = await relayStore.leasePaneSize(target, request.columns);
           if (generation !== leaseGeneration
             || leaseTarget?.pane_id !== target.pane_id
@@ -1820,9 +1883,7 @@
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
     {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
-    {#if frame?.viewportOnly}
-      <p class="upload-status" role="status">Showing the clean current screen; older redraws at other widths are hidden. Use Copy or Conversation History for complete response text.</p>
-    {:else if frame?.truncated}
+    {#if resizeHistoryTruncated || (!frame?.viewportOnly && frame?.truncated)}
       <p class="upload-status" role="status">Older terminal history is not shown; this pane response was limited.</p>
     {/if}
 
