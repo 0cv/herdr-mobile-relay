@@ -11,6 +11,8 @@ import (
 	"encoding/pem"
 	"log/slog"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -367,6 +369,64 @@ func TestSendFinishedHonorsSubscriptionOptIn(t *testing.T) {
 
 	if !reflect.DeepEqual(sent, []string{"https://push.example.com/enabled"}) {
 		t.Fatalf("finished push endpoints = %v, want only opted-in subscription", sent)
+	}
+}
+
+func TestSendOneUsesRoutableVAPIDSubject(t *testing.T) {
+	var authorization string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	manager, err := NewManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.httpClient = server.Client()
+
+	subscriptionKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authSecret := make([]byte, 16)
+	if _, err := rand.Read(authSecret); err != nil {
+		t.Fatal(err)
+	}
+	sub := Subscription{Endpoint: server.URL}
+	sub.Keys.P256dh = base64.RawURLEncoding.EncodeToString(elliptic.Marshal(
+		elliptic.P256(),
+		subscriptionKey.X,
+		subscriptionKey.Y,
+	))
+	sub.Keys.Auth = base64.RawURLEncoding.EncodeToString(authSecret)
+
+	if err := manager.sendOne(t.Context(), sub, []byte("test")); err != nil {
+		t.Fatal(err)
+	}
+
+	const prefix = "vapid t="
+	if !strings.HasPrefix(authorization, prefix) {
+		t.Fatalf("Authorization = %q, want VAPID token", authorization)
+	}
+	token := strings.TrimPrefix(strings.SplitN(authorization, ",", 2)[0], prefix)
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("VAPID token has %d parts, want 3", len(parts))
+	}
+	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claims struct {
+		Subject string `json:"sub"`
+	}
+	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://github.com/0cv/herdr-mobile-relay"; claims.Subject != want {
+		t.Fatalf("VAPID subject = %q, want %q", claims.Subject, want)
 	}
 }
 

@@ -501,7 +501,7 @@ func (m *Manager) sendOne(ctx context.Context, sub Subscription, payload []byte)
 
 	resp, err := webpush.SendNotificationWithContext(ctx, payload, wpSub, &webpush.Options{
 		HTTPClient:      m.httpClient,
-		Subscriber:      "relay@herdr.local",
+		Subscriber:      "https://github.com/0cv/herdr-mobile-relay",
 		VAPIDPublicKey:  m.vapidPublic,
 		VAPIDPrivateKey: m.vapidPrivate,
 		TTL:             300,
