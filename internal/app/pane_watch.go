@@ -12,6 +12,12 @@ import (
 
 const defaultPaneWatchInterval = 250 * time.Millisecond
 
+// paneResizeSettleWindow bounds how long after an actual leased-width change
+// pane frames are marked resize_settling. Full-screen agents re-render their
+// transcript on SIGWINCH and can push redrawn rows into the scrollback for a
+// couple of seconds; observed up to ~2s for omp under load.
+const paneResizeSettleWindow = 3 * time.Second
+
 type paneWatchFrame struct {
 	content             string
 	contentFingerprint  string

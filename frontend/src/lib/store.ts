@@ -728,6 +728,7 @@ class RelayStore {
         truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
         viewportOnly: typeof message.viewport_only === 'boolean' ? message.viewport_only : frame?.viewportOnly,
         viewportRows: typeof message.viewport_rows === 'number' ? message.viewport_rows : frame?.viewportRows,
+        resizeSettling: message.resize_settling === true,
       });
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);
@@ -748,6 +749,7 @@ class RelayStore {
       if (message.truncated === true) nextFrame.truncated = true;
       if (message.viewport_only === true) nextFrame.viewportOnly = true;
       if (typeof message.viewport_rows === 'number') nextFrame.viewportRows = message.viewport_rows;
+      if (message.resize_settling === true) nextFrame.resizeSettling = true;
       this.terminalFramesValue.set(paneId, nextFrame);
       this.terminalFrames.set(new Map(this.terminalFramesValue));
       this.mergePaneInteraction(paneId, message);

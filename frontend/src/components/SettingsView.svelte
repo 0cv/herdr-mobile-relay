@@ -523,7 +523,7 @@
         >{item}</button>
       {/each}
     </fieldset>
-    <p class="hint">Lines requested for terminal history. During Resize Session, older scrollback is preserved while only the current screen redraws at phone width. Use Copy or Conversation History for clean response text.</p>
+    <p class="hint">Lines kept in the terminal view. Opening a pane loads the newest rows Herdr serves per read (about 1,000); larger limits preserve rows beyond that while the terminal stays open and output streams. Use Copy or Conversation History for clean response text.</p>
     <fieldset class="choice-grid history-grid refresh-grid">
       <legend>Terminal Refresh</legend>
       {#each TERMINAL_REFRESH_OPTIONS as item (item)}

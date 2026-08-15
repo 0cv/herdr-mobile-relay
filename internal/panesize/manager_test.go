@@ -135,6 +135,51 @@ func TestAcquireUsesForegroundTTYAndChangesColumnsOnly(t *testing.T) {
 	}
 }
 
+// The settle window opens only when a lease actually changes the width:
+// renewals at the same columns do not signal the application and must not
+// re-open it.
+func TestResizedWithinTracksActualColumnChanges(t *testing.T) {
+	now := time.Unix(400, 0)
+	provider := &fakeProcessInfoProvider{infos: map[string]*herdr.PaneProcessInfo{
+		"pane-1": processInfo("pane-1", 621),
+	}}
+	runner := &fakeCommandRunner{
+		ttyByPID: map[int]string{621: "pts/5"},
+		sizes:    map[string]terminalSize{"/dev/pts/5": {rows: 48, columns: 151}},
+	}
+	manager := testManager(provider, runner, func() time.Time { return now })
+
+	if manager.ResizedWithin("pane-1", 3*time.Second) {
+		t.Fatal("untracked pane reported as resized")
+	}
+	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 46); err != nil {
+		t.Fatal(err)
+	}
+	if !manager.ResizedWithin("pane-1", 3*time.Second) {
+		t.Fatal("width change did not open the settle window")
+	}
+
+	now = now.Add(5 * time.Second)
+	if manager.ResizedWithin("pane-1", 3*time.Second) {
+		t.Fatal("settle window did not close after the timeout")
+	}
+	// Renewal at the same columns: no SIGWINCH, no re-render, no window.
+	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 46); err != nil {
+		t.Fatal(err)
+	}
+	if manager.ResizedWithin("pane-1", 3*time.Second) {
+		t.Fatal("same-width renewal re-opened the settle window")
+	}
+
+	// A genuine width change re-opens it.
+	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 44); err != nil {
+		t.Fatal(err)
+	}
+	if !manager.ResizedWithin("pane-1", 3*time.Second) {
+		t.Fatal("width change after renewal did not open the settle window")
+	}
+}
+
 func TestMultipleClientsApplyMinimumAndRestoreBaselineOnRelease(t *testing.T) {
 	now := time.Unix(200, 0)
 	provider := &fakeProcessInfoProvider{infos: map[string]*herdr.PaneProcessInfo{

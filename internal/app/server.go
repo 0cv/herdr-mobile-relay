@@ -1675,6 +1675,13 @@ func (s *Server) preparePaneResponse(message, response map[string]any) map[strin
 		}
 		question.FillCustomAnswers(interaction, s.state.CustomAnswers(paneID))
 	}
+	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly &&
+		s.paneSizeM != nil && s.paneSizeM.ResizedWithin(paneID, paneResizeSettleWindow) {
+		// The agent re-renders its transcript after a width change and can push
+		// a redrawn block into the scrollback for a while; the app must not
+		// commit rows from frames read inside this window as history.
+		response["resize_settling"] = true
+	}
 	agentLower := strings.ToLower(agent)
 	if classification.Interaction != nil ||
 		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {

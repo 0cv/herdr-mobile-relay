@@ -4,7 +4,7 @@ import { constants, gzipSync } from 'node:zlib';
 
 // Release guard, not a platform limit: catch accidental bootstrap growth.
 // Push-only notification art loads inside the service worker, not the page.
-const limitKiB = 107;
+const limitKiB = 108;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

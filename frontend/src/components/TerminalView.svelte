@@ -59,6 +59,7 @@
   import {
     latestCompletedResponse,
     mergeResizedTerminalHistory,
+    renderedRowShift,
     stripAnsi,
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
@@ -113,6 +114,7 @@
   let resizeBaselineRequestPane = '';
   let resizeBaselineRequestFrame: TerminalFrame | undefined;
   let resizeHistoryState: ResizedTerminalHistory | undefined;
+  let resizeHistorySkipCommit = false;
   let resizeHistoryTruncated = $state(false);
   let showingCachedResizeFrame = false;
   let displayed = $state('');
@@ -131,7 +133,6 @@
   let pendingResizeStick: boolean | null = null;
   let pendingLayoutStick: boolean | null = null;
   let virtualScrollTop = 0;
-  let virtualScrollHeight = 0;
   let virtualClientHeight = 0;
   let virtualWindowFrame = 0;
   let virtualRowObserver: ResizeObserver | undefined;
@@ -428,7 +429,6 @@
 
   function rememberVirtualScrollGeometry(element: HTMLElement) {
     virtualScrollTop = element.scrollTop;
-    virtualScrollHeight = element.scrollHeight;
     virtualClientHeight = element.clientHeight;
   }
 
@@ -598,9 +598,15 @@
         ? pendingLayoutStick
         : frameStick;
     const previousTop = terminalElement?.scrollTop || 0;
-    const previousAnchor = stick
+    let previousAnchor = stick
       ? null
       : pendingResizeAnchor || currentVirtualAnchor(previousTop);
+    // Rows cropped from the front shift every index; keep the anchor on the
+    // same row so appended output cannot move the reader's position.
+    const rowShift = previousAnchor ? renderedRowShift(renderedRows, rendered.rows) : 0;
+    if (previousAnchor && rowShift) {
+      previousAnchor = { ...previousAnchor, index: Math.max(0, previousAnchor.index - rowShift) };
+    }
     pendingResizeStick = null;
     pendingResizeAnchor = null;
     if (layoutChanged) pendingLayoutStick = null;
@@ -1333,9 +1339,10 @@
     const scrollHeight = terminalElement.scrollHeight;
     const clientHeight = terminalElement.clientHeight;
     const atBottom = scrollHeight - scrollTop - clientHeight < 48;
-    const geometryChanged = Math.abs(scrollHeight - virtualScrollHeight) >= 1
-      || Math.abs(clientHeight - virtualClientHeight) >= 1;
-    const movedTowardHistory = !geometryChanged && scrollTop < virtualScrollTop - 1;
+    // Only a viewport/controls height change may re-pin: content growth also
+    // changes scrollHeight, and a user scrolling up during a stream must win.
+    const layoutChanged = Math.abs(clientHeight - virtualClientHeight) >= 1;
+    const movedTowardHistory = !layoutChanged && scrollTop < virtualScrollTop - 1;
     rememberVirtualScrollGeometry(terminalElement);
     if (atBottom) {
       virtualStickToBottom = true;
@@ -1455,8 +1462,10 @@
       rows,
       $terminalHistoryLines,
       resizeHistoryState,
-      Boolean(resizeHistoryBaseline.truncated || next.truncated),
+      Boolean(resizeHistoryBaseline.truncated),
+      resizeHistorySkipCommit || next.resizeSettling === true,
     );
+    resizeHistorySkipCommit = false;
     resizeHistoryState = merged.state;
     resizeHistoryTruncated = merged.truncated;
     return {
@@ -1518,6 +1527,7 @@
     resizeBaselineRequestPane = '';
     resizeBaselineRequestFrame = undefined;
     resizeHistoryState = undefined;
+    resizeHistorySkipCommit = false;
     resizeHistoryTruncated = false;
     clearResizeSettling();
     queuedLease = null;
@@ -1580,10 +1590,17 @@
           if (generation !== leaseGeneration
             || leaseTarget?.pane_id !== target.pane_id
             || !paneSizeLeaseSupported(target)) continue;
-          const changed = appliedColumns !== lastLeasedColumns;
+          const previousColumns = lastLeasedColumns;
+          const changed = appliedColumns !== previousColumns;
           lastLeasedColumns = appliedColumns;
           paneSizeLeaseError = '';
-          if (changed) scheduleSettledPaneRead(target, generation);
+          if (changed) {
+            // The agent re-renders its transcript at the new width and pushes
+            // a redrawn block into the scrollback; the next merged frame must
+            // not commit it as history.
+            if (previousColumns > 0 || resizeHistoryState) resizeHistorySkipCommit = true;
+            scheduleSettledPaneRead(target, generation);
+          }
         } catch (error) {
           if (generation === leaseGeneration
             && leaseTarget?.pane_id === target.pane_id

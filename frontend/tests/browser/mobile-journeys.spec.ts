@@ -2227,10 +2227,8 @@ test('preserves deep history with a clean current Resize Session viewport', asyn
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
 
-  const historyRows = Array.from(
-    { length: 1_000 },
-    (_, index) => `preserved history row ${String(index + 1).padStart(4, '0')}`,
-  );
+  const historyRow = (index: number) => `preserved history row ${String(index).padStart(4, '0')}`;
+  const historyRows = Array.from({ length: 1_000 }, (_, index) => historyRow(index + 1));
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
@@ -2241,36 +2239,176 @@ test('preserves deep history with a clean current Resize Session viewport', asyn
     .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
   await page.waitForTimeout(300);
 
-  const visibleRows = Array.from(
-    { length: 46 },
-    (_, index) => `clean resized viewport row ${String(index + 1).padStart(2, '0')}`,
-  );
+  // Resized reads return the recent window: scrollback rows captured before
+  // the lease followed by the clean current screen at the phone width.
+  const preLease = historyRows.slice(800, 954);
+  const screenRows = historyRows.slice(954);
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: visibleRows.join('\n'),
+    content: preLease.concat(screenRows).join('\n'),
     viewport_only: true,
-    viewport_rows: visibleRows.length,
+    viewport_rows: screenRows.length,
   });
 
   const terminal = page.getByRole('log');
   const screen = terminal.locator('.term-screen');
   await expect(screen).toHaveAttribute('data-terminal-row-count', '1000');
-  await expect(terminal).toContainText('clean resized viewport row 46');
   const transcript = await page.getByLabel('Full terminal transcript').inputValue();
-  expect(transcript).toContain('preserved history row 0001');
-  expect(transcript).toContain('preserved history row 0954');
-  expect(transcript).not.toContain('preserved history row 0955');
-  expect(transcript).toContain('clean resized viewport row 01');
-  await expect(page.getByRole('status').filter({ hasText: 'Showing the clean current screen' })).toHaveCount(0);
+  expect(transcript).toContain(historyRow(1));
+  expect(transcript).toContain(historyRow(1000));
+  expect(transcript.split(historyRow(955)).length).toBe(2);
+  const clippedNotice = page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' });
+  await expect(clippedNotice).toBeHidden();
   await terminal.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
   });
-  await expect(terminal).toContainText('preserved history row 0001');
+  await expect(terminal).toContainText(historyRow(1));
   expect((await commands(page)).find((command) => command.type === 'read_pane'))
     .toMatchObject({ lines: 1_000 });
+
+  // A fast burst scrolls rows into the stable window and redraws the screen
+  // with rows that never overlapped the previous one: nothing may be lost.
+  const streamedRows = Array.from({ length: 100 }, (_, index) => `streamed burst row ${index + 1}`);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: preLease
+      .concat(screenRows, streamedRows.slice(0, 54))
+      .join('\n'),
+    viewport_only: true,
+    viewport_rows: 46,
+  });
+  const streamed = await page.getByLabel('Full terminal transcript').inputValue();
+  expect(streamed).toContain(historyRow(1000));
+  expect(streamed).toContain('streamed burst row 1');
+  expect(streamed).toContain('streamed burst row 54');
+  expect(streamed.split(historyRow(955)).length).toBe(2);
+  await expect(clippedNotice).toBeVisible();
+
+  // A frame read inside the relay's resize settle window carries the agent's
+  // redrawn scrollback block: it must not be committed to history.
+  const junk = Array.from({ length: 20 }, (_, index) => `redrawn junk row ${index + 1}`);
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: preLease
+      .concat(screenRows, streamedRows.slice(0, 54), junk, streamedRows.slice(8, 54))
+      .join('\n'),
+    viewport_only: true,
+    viewport_rows: 46,
+    resize_settling: true,
+  });
+  const settling = await page.getByLabel('Full terminal transcript').inputValue();
+  expect(settling).not.toContain('redrawn junk');
+  expect(settling).toContain('streamed burst row 54');
+
+  // After the window closes, commits resume from the re-based anchor and the
+  // skipped block stays out of history.
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: preLease
+      .concat(screenRows, streamedRows.slice(0, 54), junk, streamedRows.slice(8, 100))
+      .join('\n'),
+    viewport_only: true,
+    viewport_rows: 46,
+  });
+  const resumed = await page.getByLabel('Full terminal transcript').inputValue();
+  expect(resumed).toContain('streamed burst row 100');
+  expect(resumed).not.toContain('redrawn junk');
+  expect(resumed.split('streamed burst row 54').length).toBe(2);
+});
+
+test('keeps the reader anchored while streamed output grows and unsticks on scroll-up', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Anchored stream', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Anchored stream on Fedora' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
+
+  // Rows 401-700 are three-character rows: too short for anchor text
+  // matching, so only correct index math can keep the reader anchored there.
+  const historyRow = (index: number) => (index > 400 && index <= 700
+    ? String(index)
+    : `anchored history row ${String(index).padStart(4, '0')}`);
+  const historyRows = Array.from({ length: 1_000 }, (_, index) => historyRow(index + 1));
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: historyRows.join('\n'),
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+  await page.waitForTimeout(300);
+
+  const preLease = historyRows.slice(800, 954);
+  const screenRows = historyRows.slice(954);
+  const streamedRows = Array.from({ length: 100 }, (_, index) => `anchored burst row ${index + 1}`);
+  const frame = (extra: string[]) => server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    content: preLease.concat(screenRows, extra).join('\n'),
+    viewport_only: true,
+    viewport_rows: 46,
+  });
+  await frame([]);
+  const terminal = page.getByRole('log');
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '1000');
+
+  // Pinned at the bottom: appended output is shown immediately.
+  await frame(streamedRows.slice(0, 54));
+  await expect(terminal).toContainText('anchored burst row 54');
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
+
+  // Scrolling up leaves sticky mode.
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight / 2;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  const firstVisibleRow = () => terminal.evaluate((element) => {
+    const top = element.getBoundingClientRect().top;
+    const row = [...element.querySelectorAll('[data-terminal-row]')]
+      .find((candidate) => candidate.getBoundingClientRect().bottom > top + 1);
+    return {
+      text: row?.textContent || '',
+      offset: row ? Math.round(row.getBoundingClientRect().top - top) : 0,
+    };
+  });
+  // The virtual window re-renders on the next animation frame.
+  await expect.poll(async () => (await firstVisibleRow()).offset).toBeLessThanOrEqual(1);
+  const before = await firstVisibleRow();
+  expect(before.text.trim()).toMatch(/^\d{3}$/);
+
+  // More output arrives and the visible window crops rows from the front:
+  // the reader's position must not move and sticky mode must stay off.
+  await frame(streamedRows);
+  await expect.poll(async () => (await firstVisibleRow()).text).toBe(before.text);
+  const after = await firstVisibleRow();
+  expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+
+  // Returning to the bottom re-engages sticky mode.
+  await terminal.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
 test('wraps stale wide grids but preserves current grids in Resize Session', async ({ page }) => {
@@ -2323,12 +2461,6 @@ test('wraps stale wide grids but preserves current grids in Resize Session', asy
     viewport_rows: currentViewport.length,
   });
   await expect(terminal.locator('.terminal-grid-line')).toHaveCount(3);
-  await expect(terminal).toContainText('Lookback | Sharpe | Max DD | 2x-cost Sharpe');
-  const wrappedGeometry = await terminal.evaluate((element) => ({
-    clientWidth: element.clientWidth,
-    scrollWidth: element.scrollWidth,
-  }));
-  expect(wrappedGeometry.scrollWidth).toBeLessThanOrEqual(wrappedGeometry.clientWidth);
   const lineHeights = await terminal.locator('.terminal-grid-line').evaluateAll((lines) => {
     const lineHeight = Number.parseFloat(getComputedStyle(lines[0]).lineHeight);
     return {
@@ -2337,6 +2469,18 @@ test('wraps stale wide grids but preserves current grids in Resize Session', asy
     };
   });
   expect(Math.max(...lineHeights.heights)).toBeLessThan(lineHeights.lineHeight * 1.2);
+  // The kept desktop-width history is virtualized above the screen; the stale
+  // grid only enters the DOM once it is scrolled into view.
+  await terminal.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(terminal).toContainText('Lookback | Sharpe | Max DD | 2x-cost Sharpe');
+  const wrappedGeometry = await terminal.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(wrappedGeometry.scrollWidth).toBeLessThanOrEqual(wrappedGeometry.clientWidth);
 });
 
 test('surfaces one explicit error when a pane-size lease fails', async ({ page }) => {

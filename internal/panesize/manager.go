@@ -61,6 +61,7 @@ type paneState struct {
 	baselineRows    int
 	baselineColumns int
 	appliedColumns  int
+	resizedAt       time.Time
 	leases          map[string]Lease
 }
 
@@ -161,6 +162,9 @@ func (m *Manager) Acquire(
 		}
 		return 0, err
 	}
+	if target != state.appliedColumns {
+		state.resizedAt = now
+	}
 	state.appliedColumns = target
 	if newState {
 		m.panes[paneID] = state
@@ -190,6 +194,22 @@ func (m *Manager) ActiveColumns(paneID string) (int, bool) {
 		}
 	}
 	return minimum, minimum != 0
+}
+
+// ResizedWithin reports whether a lease actually changed the pane's terminal
+// width within the given window. Renewals that keep the same columns do not
+// count: they do not signal the application, so it does not re-render.
+func (m *Manager) ResizedWithin(paneID string, window time.Duration) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return false
+	}
+	state := m.panes[paneID]
+	if state == nil || state.resizedAt.IsZero() {
+		return false
+	}
+	return m.now().Sub(state.resizedAt) < window
 }
 
 // ActiveRows reports the unchanged terminal height for an actively leased pane.
@@ -471,6 +491,7 @@ func (m *Manager) reconcile(ctx context.Context, paneID string, state *paneState
 	if err := m.setColumns(ctx, state.tty, target); err != nil {
 		return err
 	}
+	state.resizedAt = m.now()
 	state.appliedColumns = target
 	return nil
 }

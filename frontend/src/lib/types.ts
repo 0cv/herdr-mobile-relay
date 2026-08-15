@@ -303,6 +303,8 @@ export interface TerminalFrame {
   truncated?: boolean;
   viewportOnly?: boolean;
   viewportRows?: number;
+  /** Frame read inside the post-resize settle window; its rows must not be committed to history. */
+  resizeSettling?: boolean;
 }
 
 export interface ToastMessage {

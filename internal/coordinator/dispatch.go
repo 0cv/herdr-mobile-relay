@@ -939,6 +939,16 @@ func capPaneContentLines(content []byte, limit int) []byte {
 	return content
 }
 
+func isClaudeAgent(agent string) bool {
+	return strings.Contains(strings.ToLower(agent), "claude")
+}
+
+// readPaneForDisplay returns physical rows ("recent") for every display read:
+// the visible screen alone loses rows that scroll past between watch polls,
+// and the Resize Session baseline must share row semantics with the resized
+// frames so the trailing desktop screen — including agent chrome — can be cut
+// by exact row count. Claude keeps logical lines ("recent-unwrapped") because
+// its alternate-screen history merge depends on them.
 func (d *Dispatcher) readPaneForDisplay(
 	ctx context.Context,
 	paneID string,
@@ -946,14 +956,12 @@ func (d *Dispatcher) readPaneForDisplay(
 	format string,
 	resized bool,
 ) (herdr.PaneRead, error) {
-	if resized {
-		return d.herdr.ReadPaneVisible(ctx, paneID, lines, format)
+	if !resized {
+		if agent, ok := d.state.Agent(paneID); ok && isClaudeAgent(agent.Agent) {
+			return d.herdr.ReadPane(ctx, paneID, lines, format)
+		}
 	}
-	agent, ok := d.state.Agent(paneID)
-	if ok && isQoderAgent(agent.Agent) {
-		return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
-	}
-	return d.herdr.ReadPane(ctx, paneID, lines, format)
+	return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
 }
 
 func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {

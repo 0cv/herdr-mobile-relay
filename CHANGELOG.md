@@ -5,6 +5,36 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-08-15
+
+### Fixed
+
+- Stop losing terminal rows in **Resize Session** when output streams faster
+  than the refresh interval: resized reads now return the recent scrollback
+  window instead of only the live screen, and rows are committed to history
+  once they scroll out of the viewport.
+- Keep the history above the live viewport intact when opening a resized
+  terminal, instead of cutting a screenful of pre-resize lines that the
+  phone-width screen does not cover.
+- Keep agent status bars, input boxes, and duplicated redraws out of resized
+  terminal history: display reads now return physical rows, the pre-resize
+  screen is cut from the baseline by exact row count, and the redrawn
+  transcript block an agent pushes into scrollback on a width change is
+  skipped instead of committed.
+- Close the timing hole that let a late resize re-render reach history: the
+  relay now marks pane frames read within three seconds of an actual leased
+  width change, and the app skips committing rows from marked frames instead
+  of relying on a one-shot skip that the agent's redraw could outlive.
+- Document that Herdr serves at most about 1,000 rows per pane read: the
+  5,000 and 10,000 Terminal History limits preserve rows beyond that while
+  the terminal stays open and output streams, not when a pane is opened.
+- Honour scrolling up while output is streaming: content growth no longer
+  re-pins the terminal to the bottom, only a viewport or controls height
+  change does. Reaching the bottom re-engages the pinned mode.
+- Keep the reading position fixed while new output arrives: when the loaded
+  window drops its oldest rows, the scroll anchor follows the same row instead
+  of its stale index.
+
 ## [0.15.6] - 2026-08-14
 
 ### Fixed
@@ -505,7 +535,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.6...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...HEAD
+[0.15.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.6...v0.15.7
 [0.15.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.5...v0.15.6
 [0.15.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.4...v0.15.5
 [0.15.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.3...v0.15.4
