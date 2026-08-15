@@ -5,7 +5,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.15.10] - 2026-08-15
+## [0.15.11] - 2026-08-15
 
 ### Added
 
@@ -16,6 +16,13 @@ project follows [Semantic Versioning](https://semver.org/).
   its most notable session — done, then working, then idle — and no section
   heading, since the per-card dots already carry that information. Agents
   needing input stay on top in both layouts.
+
+### Fixed
+
+- Retry a browser journey once on GitHub's CI runners if WebKit crashes
+  mid-suite, so a transient runner-level crash unrelated to any test's
+  assertions no longer blocks a release. Local runs are unaffected and stay
+  at zero retries.
 
 ## [0.15.8] - 2026-08-15
 
@@ -555,8 +562,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.10...HEAD
-[0.15.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...v0.15.10
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.11...HEAD
+[0.15.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...v0.15.11
 [0.15.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.6...v0.15.7
 [0.15.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.5...v0.15.6
