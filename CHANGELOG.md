@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.8] - 2026-08-15
+
+### Fixed
+
+- Make the deployed-app reload journey wait for the reloaded document instead
+  of a URL that already matches before the navigation commits, so WebKit
+  release validation no longer fails intermittently.
+
 ## [0.15.7] - 2026-08-15
 
 ### Fixed
@@ -535,7 +543,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...HEAD
+[0.15.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.6...v0.15.7
 [0.15.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.5...v0.15.6
 [0.15.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.4...v0.15.5
