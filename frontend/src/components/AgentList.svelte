@@ -15,9 +15,10 @@
     sortedAgents,
     tabName,
   } from '$lib/agents';
+  import { homeLayout } from '$lib/preferences';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig, RelayConnectionView } from '$lib/types';
-  import { workspaceGroups, type WorkspaceGroup, type WorkspaceTab } from '$lib/workspaces';
+  import { workspaceGroups, workspaceStateTone, type WorkspaceGroup, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents,
@@ -72,17 +73,26 @@
   // Optimistic arrangement applied between releasing a drag and the relay
   // confirming the new order, so tabs never snap back while Herdr catches up.
   let pendingTabOrder = $state<{ key: string; order: string[] } | null>(null);
-  const workingAgents = $derived(agents.filter((agent) => agentStatusGroup(agent) === 'working'));
-  const workingWorkspaces = $derived(workspaceGroups(workingAgents));
-  const workspaces = $derived(workspaceGroups(agents.filter((agent) => {
+  const backgroundAgents = $derived(agents.filter((agent) => {
     const group = agentStatusGroup(agent);
-    return group !== 'blocked' && group !== 'attention' && group !== 'working';
+    return group !== 'blocked' && group !== 'attention';
+  }));
+  const workingAgents = $derived(backgroundAgents.filter((agent) => agentStatusGroup(agent) === 'working'));
+  const doneAgents = $derived(backgroundAgents.filter((agent) => agentStatusGroup(agent) === 'done'));
+  const mixedLayout = $derived($homeLayout === 'mixed');
+  const doneWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(doneAgents));
+  const workingWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(workingAgents));
+  const idleWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(backgroundAgents.filter((agent) => {
+    const group = agentStatusGroup(agent);
+    return group !== 'working' && group !== 'done';
   })));
+  const mixedWorkspaces = $derived(mixedLayout ? workspaceGroups(backgroundAgents) : []);
 
   $effect(() => {
     if (!pendingTabOrder) return;
     const pending = pendingTabOrder;
-    const workspace = [...workingWorkspaces, ...workspaces].find((group) => group.key === pending.key);
+    const workspace = [...doneWorkspaces, ...workingWorkspaces, ...idleWorkspaces, ...mixedWorkspaces]
+      .find((group) => group.key === pending.key);
     if (!workspace || workspace.tabs.map((tab) => tab.id).join('\u0000') === pending.order.join('\u0000')) {
       pendingTabOrder = null;
     }
@@ -428,30 +438,45 @@
   </div>
 {/snippet}
 
-{#snippet workspaceGrid(groups: WorkspaceGroup[], defaultOpen: boolean, working: boolean)}
+{#snippet workspaceGrid(groups: WorkspaceGroup[], defaultOpen: boolean, kind: 'working' | 'done' | 'idle' | 'mixed')}
   <div class="workspace-grid">
     {#each groups as workspace (workspace.key)}
-      {@const disclosureKey = `${working ? 'working' : 'workspace'}:${workspace.key}`}
+      {@const working = kind === 'working'}
+      {@const done = kind === 'done'}
+      {@const stateTone = kind === 'mixed' ? workspaceStateTone(workspace) : ''}
+      {@const disclosureKey = `${working ? 'working' : done ? 'done' : 'workspace'}:${workspace.key}`}
       <details
         class:working-workspace-card={working}
+        class:done-workspace-card={done}
         class="workspace-card"
         open={workspaceDisclosure[disclosureKey] ?? defaultOpen}
         ontoggle={(event) => rememberWorkspaceDisclosure(disclosureKey, event)}
       >
         <summary>
+          {#if stateTone}
+            <span
+              class={`status-dot workspace-state-dot status-${stateTone}`}
+              class:hollow={stateTone === 'muted'}
+              role="img"
+              aria-label={stateTone === 'success'
+                ? 'Has a done session'
+                : stateTone === 'warning' ? 'Has a working session' : 'All sessions idle'}
+            ></span>
+          {/if}
           <span class="workspace-card-copy">
             <strong>{workspace.label}</strong>
             <small>{[workspace.cwd, `@${workspace.host}`].filter(Boolean).join(' · ')}</small>
           </span>
           <span
             class="workspace-counts"
-            aria-label={working
-              ? `${workspace.agents.length} working agents in ${workspace.tabs.length} tabs`
+            aria-label={working || done
+              ? `${workspace.agents.length} ${kind} agents in ${workspace.tabs.length} tabs`
               : `${workspace.tabs.length} tabs and ${workspace.agents.length} agents`}
           >
             {#if working}<em class="workspace-working-count">{workspace.agents.length} working</em>{/if}
+            {#if done}<em class="workspace-done-count">{workspace.agents.length} done</em>{/if}
             <span>{workspace.tabs.length} {workspace.tabs.length === 1 ? 'tab' : 'tabs'}</span>
-            {#if !working}<span>{workspace.agents.length} {workspace.agents.length === 1 ? 'agent' : 'agents'}</span>{/if}
+            {#if !working && !done}<span>{workspace.agents.length} {workspace.agents.length === 1 ? 'agent' : 'agents'}</span>{/if}
             {#if workspace.lastActiveAt}
               <time
                 datetime={new Date(workspace.lastActiveAt).toISOString()}
@@ -529,23 +554,40 @@
     {/if}
   {/each}
 
+  {#if doneWorkspaces.length}
+    <section class="agent-section done-section" aria-labelledby="section-done">
+      <h2 id="section-done" class="section-heading">
+        <span class="status-dot status-success"></span>Done
+        <span class="section-count" aria-hidden="true">{doneAgents.length}</span>
+      </h2>
+      {@render workspaceGrid(doneWorkspaces, true, 'done')}
+    </section>
+  {/if}
+
   {#if workingWorkspaces.length}
     <section class="agent-section working-section" aria-labelledby="section-working">
       <h2 id="section-working" class="section-heading">
         <span class="status-dot status-warning"></span>Working
         <span class="section-count" aria-hidden="true">{workingAgents.length}</span>
       </h2>
-      {@render workspaceGrid(workingWorkspaces, true, true)}
+      {@render workspaceGrid(workingWorkspaces, true, 'working')}
     </section>
   {/if}
 
-  {#if workspaces.length}
+  {#if idleWorkspaces.length}
     <section class="agent-section workspace-section" aria-labelledby="workspace-section-title">
       <h2 id="workspace-section-title" class="section-heading">
         <span class="status-dot hollow"></span>Idle
-        <span class="section-count" aria-hidden="true">{workspaces.length}</span>
+        <span class="section-count" aria-hidden="true">{idleWorkspaces.length}</span>
       </h2>
-      {@render workspaceGrid(workspaces, workspaces.length === 1, false)}
+      {@render workspaceGrid(idleWorkspaces, idleWorkspaces.length === 1, 'idle')}
+    </section>
+  {/if}
+
+  {#if mixedWorkspaces.length}
+    <!-- No visible heading: the per-card state dots already tell the story. -->
+    <section class="agent-section workspace-section" aria-label="Workspaces">
+      {@render workspaceGrid(mixedWorkspaces, mixedWorkspaces.length === 1, 'mixed')}
     </section>
   {/if}
 </main>

@@ -5,6 +5,17 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.9] - 2026-08-15
+
+### Added
+
+- Separate **Done** home-screen section for workspaces with finished sessions,
+  between the input queue and Working.
+- **Home Workspaces** setting: **By State** (default) keeps Done, Working, and
+  Idle workspace sections; **Mixed** shows each workspace once with a dot for
+  its most notable session — done, then working, then idle. Agents needing
+  input stay on top in both layouts.
+
 ## [0.15.8] - 2026-08-15
 
 ### Fixed
@@ -543,7 +554,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.9...HEAD
+[0.15.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...v0.15.9
 [0.15.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.6...v0.15.7
 [0.15.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.5...v0.15.6

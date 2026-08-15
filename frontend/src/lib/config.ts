@@ -8,6 +8,7 @@ export const INTERFACE_SIZE_KEY = 'herdr_terminal_font_size';
 export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
+export const HOME_LAYOUT_KEY = 'herdr_home_workspace_layout';
 export const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
 export const DEVICE_CREDENTIAL_KEY = 'herdr_device_unlock_credential';
 export const PUSH_ENABLED_KEY = 'herdr_push_enabled';
@@ -28,6 +29,12 @@ export const TERMINAL_HISTORY_OPTIONS = [100, 1_000, 5_000, 10_000] as const;
 export type TerminalHistoryLines = (typeof TERMINAL_HISTORY_OPTIONS)[number];
 export const TERMINAL_REFRESH_OPTIONS = [100, 250, 500, 1_000] as const;
 export type TerminalRefreshInterval = (typeof TERMINAL_REFRESH_OPTIONS)[number];
+export const HOME_LAYOUTS = ['state', 'mixed'] as const;
+export type HomeLayout = (typeof HOME_LAYOUTS)[number];
+export const HOME_LAYOUT_LABELS: Record<HomeLayout, string> = {
+  state: 'By State',
+  mixed: 'Mixed',
+};
 export const TERMINAL_REFRESH_LABELS: Record<TerminalRefreshInterval, string> = {
   100: '100 ms',
   250: '250 ms',

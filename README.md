@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.15.8`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.8) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.15.9`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.9) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -89,10 +89,10 @@ The relay continues to support Herdr 0.7.5 or newer.
 - Monitor and control agents across several computers, with new, closed, and
   renamed agents, workspaces, and tabs reflected within seconds through a
   live Herdr event stream (15-second reconciliation backstop).
-- Group agents by status and relay workspace: working agents stay visible at
-  the top inside their workspace and tab hierarchy, agents that need input
-  remain individually actionable, and idle workspaces stay in their own
-  section.
+- Group agents by status and relay workspace: done, working, and idle
+  workspaces sit in their own sections, and agents that need input remain
+  individually actionable on top. A Mixed setting shows each workspace once
+  with a dot for its most notable session state.
 - Start, rename, clear, restart, and stop agents from relay-provided launch
   profiles.
 - Send durable prompt drafts, terminal keys, slash commands, screenshots, and
@@ -121,10 +121,13 @@ The relay continues to support Herdr 0.7.5 or newer.
 
 ## Workspace Navigation and Inspection
 
-The home screen keeps working agents and agents that need input visible at the
-top. Working agents retain their workspace and tab hierarchy; remaining agents
-stay in a separate Idle section. On a phone, tap the magnifying-glass button to
-search projects, workspaces, paths, tabs, sessions, agents, hosts, and relays.
+The home screen keeps agents that need input visible at the top. By default,
+workspaces below them are separated into Done, Working, and Idle sections that
+retain the workspace and tab hierarchy. The **Home Workspaces** setting can mix
+them instead: each workspace appears once with a dot for its most notable
+session — done, then working, then idle. On a phone, tap the magnifying-glass
+button to search projects, workspaces, paths, tabs, sessions, agents, hosts,
+and relays.
 At 900 CSS pixels and wider, an agent rail keeps those workspace groups beside
 the open terminal.
 

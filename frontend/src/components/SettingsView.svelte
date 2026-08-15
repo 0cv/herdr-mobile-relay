@@ -6,18 +6,23 @@
   import Card from '$components/ui/Card.svelte';
   import {
     APP_VERSION,
+    HOME_LAYOUTS,
+    HOME_LAYOUT_LABELS,
     INTERFACE_SIZES,
     TERMINAL_HISTORY_OPTIONS,
     TERMINAL_REFRESH_LABELS,
     TERMINAL_REFRESH_OPTIONS,
     THEMES,
+    type HomeLayout,
     type InterfaceSize,
     type TerminalHistoryLines,
     type TerminalRefreshInterval,
     type Theme,
   } from '$lib/config';
   import {
+    homeLayout,
     interfaceSize,
+    setHomeLayout,
     setInterfaceSize,
     setTerminalHistoryLines,
     setTerminalRefreshInterval,
@@ -512,6 +517,18 @@
         <button class:active={$interfaceSize === item} type="button" aria-pressed={$interfaceSize === item} onclick={() => setInterfaceSize(item as InterfaceSize)}>{item.charAt(0).toUpperCase() + item.slice(1)}</button>
       {/each}
     </fieldset>
+    <fieldset class="choice-grid compact-grid">
+      <legend>Home Workspaces</legend>
+      {#each HOME_LAYOUTS as item (item)}
+        <button
+          class:active={$homeLayout === item}
+          type="button"
+          aria-pressed={$homeLayout === item}
+          onclick={() => setHomeLayout(item as HomeLayout)}
+        >{HOME_LAYOUT_LABELS[item]}</button>
+      {/each}
+    </fieldset>
+    <p class="hint">By State separates Done, Working, and Idle workspace sections. Mixed shows each workspace once with a dot for its most notable session: done, then working, then idle. Agents needing input always stay on top.</p>
     <fieldset class="choice-grid history-grid">
       <legend>Terminal History</legend>
       {#each TERMINAL_HISTORY_OPTIONS as item (item)}

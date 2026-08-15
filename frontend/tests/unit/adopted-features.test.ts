@@ -4,7 +4,7 @@ import { safeMarkdownHtml } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent } from '$lib/types';
-import { workspaceGroups } from '$lib/workspaces';
+import { workspaceGroups, workspaceStateTone } from '$lib/workspaces';
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -51,6 +51,19 @@ describe('workspace navigation', () => {
     ]);
 
     expect(groups.map((group) => group.label)).toEqual(['new', 'old']);
+  });
+
+  it('counts done sessions apart from idle and ranks the workspace state dot', () => {
+    const [group] = workspaceGroups([
+      agent({ workspace_id: 'work-1', status: 'done', project: 'mobile' }),
+      agent({ pane_id: 'relay-a::pane-2', raw_pane_id: 'pane-2', workspace_id: 'work-1', status: 'working' }),
+      agent({ pane_id: 'relay-a::pane-3', raw_pane_id: 'pane-3', workspace_id: 'work-1', status: 'idle' }),
+    ]);
+    expect(group).toMatchObject({ doneCount: 1, workingCount: 1, readyCount: 1 });
+    // done > working > idle
+    expect(workspaceStateTone(group)).toBe('success');
+    expect(workspaceStateTone({ ...group, doneCount: 0 })).toBe('warning');
+    expect(workspaceStateTone({ ...group, doneCount: 0, workingCount: 0 })).toBe('muted');
   });
 });
 

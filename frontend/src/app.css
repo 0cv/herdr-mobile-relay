@@ -673,6 +673,9 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-card-copy small { color: var(--muted); font-size: .65rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-counts { align-items: flex-end; color: var(--muted); display: flex; flex: 0 0 auto; flex-direction: column; font-size: .62rem; line-height: 1.35; }
 .workspace-working-count { color: var(--warning); font-style: normal; font-weight: 700; }
+.workspace-done-count { color: var(--success); font-style: normal; font-weight: 700; }
+.done-workspace-card { border-color: color-mix(in srgb, var(--success) 42%, var(--border)); }
+.workspace-state-dot { margin-inline-start: -.1rem; }
 .workspace-tabs { border-top: 1px solid var(--border); display: grid; gap: .75rem; padding: .7rem; }
 /* Long-press starts a tab drag; selectable text would trigger the platform
    text-selection and search sheets instead. */

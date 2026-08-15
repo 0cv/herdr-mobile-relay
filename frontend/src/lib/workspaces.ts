@@ -29,6 +29,7 @@ export interface WorkspaceGroup {
   tabs: WorkspaceTab[];
   attentionCount: number;
   workingCount: number;
+  doneCount: number;
   readyCount: number;
   lastActiveAt: number;
   lastActivitySeq: number;
@@ -99,7 +100,8 @@ export function workspaceGroups(agents: Agent[]): WorkspaceGroup[] {
       tabs: tabGroups,
       attentionCount: statuses.filter((status) => status === 'blocked' || status === 'attention').length,
       workingCount: statuses.filter((status) => status === 'working').length,
-      readyCount: statuses.filter((status) => status === 'ready' || status === 'done').length,
+      doneCount: statuses.filter((status) => status === 'done').length,
+      readyCount: statuses.filter((status) => status === 'ready').length,
       lastActiveAt: Math.max(0, ...ordered.map(agentLastActiveAt)),
       lastActivitySeq: Math.max(0, ...ordered.map(agentActivitySeq)),
     };
@@ -111,6 +113,16 @@ export function workspaceGroups(agents: Agent[]): WorkspaceGroup[] {
     || (left.relayId === right.relayId ? right.lastActivitySeq - left.lastActivitySeq : 0)
     || left.label.localeCompare(right.label, undefined, { sensitivity: 'base' })
     || left.host.localeCompare(right.host, undefined, { sensitivity: 'base' }));
+}
+
+/**
+ * The most notable session state in a mixed workspace card, by the
+ * done > working > idle precedence.
+ */
+export function workspaceStateTone(group: WorkspaceGroup): 'success' | 'warning' | 'muted' {
+  if (group.doneCount) return 'success';
+  if (group.workingCount) return 'warning';
+  return 'muted';
 }
 
 export function workspaceMetadataSearchText(group: WorkspaceGroup): string {

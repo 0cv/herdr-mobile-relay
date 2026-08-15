@@ -1,6 +1,8 @@
 import { writable } from 'svelte/store';
 import {
   LEGACY_FONT_KEY,
+  HOME_LAYOUT_KEY,
+  HOME_LAYOUTS,
   INTERFACE_SIZE_KEY,
   INTERFACE_SIZES,
   TERMINAL_HISTORY_KEY,
@@ -10,6 +12,7 @@ import {
   THEME_COLORS,
   THEME_KEY,
   THEMES,
+  type HomeLayout,
   type InterfaceSize,
   type TerminalHistoryLines,
   type TerminalRefreshInterval,
@@ -41,11 +44,17 @@ function savedTerminalRefreshInterval(): TerminalRefreshInterval {
     : 250;
 }
 
+function savedHomeLayout(): HomeLayout {
+  const value = localStorage.getItem(HOME_LAYOUT_KEY);
+  return HOME_LAYOUTS.includes(value as HomeLayout) ? value as HomeLayout : 'state';
+}
+
 
 export const theme = writable<Theme>(savedTheme());
 export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
 export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
 export const terminalRefreshInterval = writable<TerminalRefreshInterval>(savedTerminalRefreshInterval());
+export const homeLayout = writable<HomeLayout>(savedHomeLayout());
 
 export function setTheme(value: Theme): void {
   localStorage.setItem(THEME_KEY, value);
@@ -69,6 +78,11 @@ export function setTerminalHistoryLines(value: TerminalHistoryLines): void {
 export function setTerminalRefreshInterval(value: TerminalRefreshInterval): void {
   localStorage.setItem(TERMINAL_REFRESH_KEY, String(value));
   terminalRefreshInterval.set(value);
+}
+
+export function setHomeLayout(value: HomeLayout): void {
+  localStorage.setItem(HOME_LAYOUT_KEY, value);
+  homeLayout.set(value);
 }
 
 

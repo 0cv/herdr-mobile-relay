@@ -333,6 +333,60 @@ test('groups working agents and synchronizes tab order in both directions', asyn
   await expect(page.locator('.working-section')).toBeVisible();
 });
 
+test('separates done sessions and offers the mixed workspace layout', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['attention_classification'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      { pane_id: 'w1:p1', workspace_id: 'w1', status: 'done', project: 'alpha', agent: 'codex' },
+      { pane_id: 'w1:p2', workspace_id: 'w1', status: 'idle', project: 'alpha', agent: 'claude' },
+      { pane_id: 'w2:p1', workspace_id: 'w2', status: 'working', project: 'beta', agent: 'codex' },
+      { pane_id: 'w2:p2', workspace_id: 'w2', status: 'idle', project: 'beta', agent: 'claude' },
+      { pane_id: 'w4:p1', workspace_id: 'w4', status: 'idle', project: 'delta', agent: 'codex' },
+      {
+        pane_id: 'w3:p1', workspace_id: 'w3', status: 'blocked', attention_kind: 'approval',
+        project: 'gamma', agent: 'codex', prompt: 'Approve the plan?', options: ['Yes', 'No'],
+      },
+    ],
+  });
+
+  // Default: sections separated by state, done first after the input queue.
+  await expect(page.locator('section.agent-section').first()).toContainText('Needs input');
+  const done = page.locator('.done-section');
+  await expect(done.getByRole('heading', { name: 'Done' })).toBeVisible();
+  await expect(done.locator('summary strong')).toHaveText(['alpha']);
+  await expect(done.locator('.workspace-done-count')).toHaveText('1 done');
+  const working = page.locator('.working-section');
+  await expect(working.locator('summary strong')).toHaveText(['beta']);
+  await expect(page.getByRole('heading', { name: 'Idle' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeHidden();
+
+  // Mixed: one headingless list, one card per workspace with a state dot,
+  // blocked stays on top.
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: 'Mixed' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('region', { name: 'Workspaces' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeHidden();
+  await expect(page.getByRole('heading', { name: 'Done' })).toBeHidden();
+  await expect(page.getByRole('heading', { name: 'Working' })).toBeHidden();
+  await expect(page.getByRole('heading', { name: 'Idle' })).toBeHidden();
+  await expect(page.locator('section.agent-section').first()).toContainText('Needs input');
+  const card = (project: string) => page.locator('.workspace-card').filter({ hasText: project });
+  await expect(card('alpha').getByRole('img', { name: 'Has a done session' })).toBeVisible();
+  await expect(card('beta').getByRole('img', { name: 'Has a working session' })).toBeVisible();
+  await expect(card('delta').getByRole('img', { name: 'All sessions idle' })).toBeVisible();
+  await expect(page.locator('.workspace-card summary strong')).toHaveText(['alpha', 'beta', 'delta']);
+
+  // Back to the default layout.
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: 'By State' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('heading', { name: 'Done' })).toBeVisible();
+});
+
 test('keeps activity cards inside the page and confirms permanent deletion', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
