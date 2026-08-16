@@ -18,6 +18,8 @@
     ? [activity.relay_label, activity.project, activity.session, activity.agent, activity.status].filter(Boolean).join(' · ')
     : '');
   const when = $derived(activity ? new Date(Number(activity.timestamp)) : null);
+  const extractLabel = $derived(activity?.kind === 'finished' ? 'response' : 'excerpt');
+  const extractAction = $derived(`Copy ${extractLabel}`);
 
   // A cold deep-link (reload on #activity=… or a push that launched the app)
   // may arrive before the relay's activity history streams in.
@@ -32,14 +34,14 @@
   async function copyExtract() {
     if (!activity?.extract) return;
     if (!navigator.clipboard?.writeText) {
-      relayStore.showToast('Clipboard access is unavailable. Select the text manually.', true);
+      relayStore.showToast(`Clipboard access is unavailable. Select the ${extractLabel} manually.`, true);
       return;
     }
     try {
       await navigator.clipboard.writeText(activity.extract);
-      relayStore.showToast('Excerpt copied.');
+      relayStore.showToast(`${extractLabel[0].toLocaleUpperCase()}${extractLabel.slice(1)} copied.`);
     } catch {
-      relayStore.showToast('Could not copy. Select it manually.', true);
+      relayStore.showToast(`Could not copy. Select the ${extractLabel} manually.`, true);
     }
   }
 </script>
@@ -68,9 +70,9 @@
       {/if}
     </div>
 
-    <section class="activity-extract" aria-label="Captured excerpt">
+    <section class="activity-extract" aria-label={`Captured ${extractLabel}`}>
       {#if activity.extract}
-        <Button variant="ghost" size="icon" class="copy-extract" title="Copy excerpt" aria-label="Copy excerpt" onclick={copyExtract}>
+        <Button variant="ghost" size="icon" class="copy-extract" title={extractAction} aria-label={extractAction} onclick={copyExtract}>
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="9" y="9" width="13" height="13" rx="2"></rect>
             <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
@@ -78,7 +80,7 @@
         </Button>
         <pre>{activity.extract}</pre>
       {:else}
-        <p class="empty-state">No excerpt was captured for this event.</p>
+        <p class="empty-state">No {extractLabel} was captured for this event.</p>
       {/if}
     </section>
   {/if}

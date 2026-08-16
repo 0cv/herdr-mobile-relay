@@ -844,6 +844,7 @@ func (s *Server) handleTransition(
 	}
 	agentState, agentExists := s.state.Agent(paneID)
 	var session string
+	var sessionID string
 	var blockedEventID string
 	var paneGeneration uint64
 	var blockedContentRevision int64
@@ -851,6 +852,7 @@ func (s *Server) handleTransition(
 		if status != "working" || s.state.TransitionCurrent(paneID, status, revision) {
 			session = agentState.Session
 		}
+		sessionID = agentState.SessionID
 		blockedEventID = agentState.BlockedEventID
 		blockedContentRevision = s.state.ContentRevision(paneID)
 	}
@@ -988,7 +990,7 @@ func (s *Server) handleTransition(
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
-	extract := s.captureFinishedPane(ctx, paneID, agent)
+	extract := s.captureFinishedPane(ctx, paneID, agent, sessionID)
 	if !transitionCurrent() {
 		return
 	}
@@ -1334,7 +1336,27 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 	}
 }
 
-func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent string) string {
+// Conversation logs preserve the full assistant message; the terminal pane is
+// only a bounded fallback for agents without a readable transcript.
+func (s *Server) latestConversationResponse(agent, sessionID string) string {
+	if s.conversationM == nil || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
+		return ""
+	}
+	page, err := s.conversationM.Read(agent, sessionID, "", 1)
+	if err != nil || !page.Available || len(page.Entries) == 0 {
+		return ""
+	}
+	entry := page.Entries[len(page.Entries)-1]
+	if entry.Role != "assistant" || strings.TrimSpace(entry.Text) == "" {
+		return ""
+	}
+	return entry.Text
+}
+
+func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, sessionID string) string {
+	if response := s.latestConversationResponse(agent, sessionID); response != "" {
+		return response
+	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	read, err := s.herdrC.ReadPane(readCtx, paneID, history.MaxLines, "ansi")
@@ -2415,12 +2437,71 @@ func parseTimestamp(s string) int64 {
 
 func (s *Server) recentActivities(limit int) []activity.Entry {
 	s.activityMu.RLock()
-	defer s.activityMu.RUnlock()
 	if limit <= 0 || limit > len(s.activityView) {
 		limit = len(s.activityView)
 	}
 	start := len(s.activityView) - limit
-	return append([]activity.Entry(nil), s.activityView[start:]...)
+	entries := append([]activity.Entry(nil), s.activityView[start:]...)
+	s.activityMu.RUnlock()
+	return s.enrichActivityResponses(entries)
+}
+
+func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.Entry {
+	if s.conversationM == nil || len(entries) == 0 {
+		return entries
+	}
+	agents := make(map[string]*coordinator.AgentState)
+	for _, agent := range s.state.Snapshot() {
+		agents[agent.PaneID] = agent
+	}
+	pages := make(map[string]conversation.Page)
+	for index := range entries {
+		entry := entries[index]
+		if strings.ToLower(strings.TrimSpace(entry.Kind)) != "finished" {
+			continue
+		}
+		agentName := strings.TrimSpace(entry.Agent)
+		sessionID := strings.TrimSpace(entry.Session)
+		if current := agents[entry.PaneID]; current != nil {
+			if strings.TrimSpace(current.Agent) != "" {
+				agentName = current.Agent
+			}
+			if strings.TrimSpace(current.SessionID) != "" {
+				sessionID = current.SessionID
+			}
+		}
+		if agentName == "" || sessionID == "" || !conversation.Supported(agentName) {
+			continue
+		}
+		cacheKey := agentName + "\x00" + sessionID
+		page, loaded := pages[cacheKey]
+		if !loaded {
+			page, _ = s.conversationM.Read(agentName, sessionID, "", 200)
+			pages[cacheKey] = page
+		}
+		if response := conversationResponseAt(page.Entries, int64(entry.Timestamp)); response != "" {
+			entries[index].Extract = response
+		}
+	}
+	return entries
+}
+
+func conversationResponseAt(entries []conversation.Entry, activityTimestamp int64) string {
+	for index := len(entries) - 1; index >= 0; index-- {
+		entry := entries[index]
+		if entry.Role != "assistant" || strings.TrimSpace(entry.Text) == "" {
+			continue
+		}
+		if activityTimestamp <= 0 {
+			return entry.Text
+		}
+		timestamp, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
+		if err != nil || timestamp.UnixMilli() > activityTimestamp {
+			continue
+		}
+		return entry.Text
+	}
+	return ""
 }
 
 func messageInt(value any, fallback int) int {

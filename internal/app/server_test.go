@@ -17,6 +17,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
+	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
@@ -67,6 +68,80 @@ func TestResolveAgentSessionName(t *testing.T) {
 	if unnamed.SessionName != "" || unnamed.Session != "missing-session" ||
 		unnamed.SessionID != "missing-session" || !unnamed.ConversationHistoryAvailable {
 		t.Fatalf("unnamed session = %#v, want preserved history identity", unnamed)
+	}
+}
+
+func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
+	home := t.TempDir()
+	sessionID := "01a00af4-9706-7000-81b5-390a66466563"
+	path := filepath.Join(home, ".omp", "agent", "sessions", "-relay", "session_"+sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder := json.NewEncoder(file)
+	rows := []map[string]any{
+		{
+			"type": "message",
+			"message": map[string]any{
+				"role":    "user",
+				"content": []any{map[string]any{"type": "text", "text": "Review the change"}},
+			},
+		},
+		{
+			"type":      "message",
+			"timestamp": "2026-08-16T14:24:45.112Z",
+			"message": map[string]any{
+				"role": "assistant",
+				"content": []any{map[string]any{"type": "text", "text": strings.Join([]string{
+					"Here is the complete response.",
+					"",
+					"1. The first detail.",
+					"2. The second detail.",
+					"3. The third detail.",
+					"4. The fourth detail.",
+					"5. The fifth detail.",
+					"6. The sixth detail.",
+					"7. The seventh detail.",
+					"8. The eighth detail.",
+					"9. The ninth detail.",
+					"10. The tenth detail.",
+					"11. The eleventh detail.",
+					"12. The twelfth detail.",
+				}, "\n")}},
+			},
+		},
+	}
+	for _, row := range rows {
+		if err := encoder.Encode(row); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := testServer()
+	s.conversationM = conversation.NewReader(home)
+	want := rows[1]["message"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "omp", sessionID); got != want {
+		t.Fatalf("captured response = %q, want full conversation response %q", got, want)
+	}
+
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "omp", Status: "idle", SessionID: path,
+	}}, s.state.RevisionCounter())
+	s.activityView = []activity.Entry{{
+		ID: "old-finished", Timestamp: activity.MilliTimestamp(time.Date(2026, time.August, 16, 14, 24, 46, 0, time.UTC).UnixMilli()),
+		Kind: "finished", Status: "completed", Agent: "omp", PaneID: "pane-1", Session: "Old title",
+	}}
+	backfilled := s.recentActivities(1)
+	if len(backfilled) != 1 || backfilled[0].Extract != want {
+		t.Fatalf("backfilled activity = %#v, want full conversation response", backfilled)
 	}
 }
 

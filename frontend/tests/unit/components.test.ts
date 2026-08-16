@@ -35,6 +35,35 @@ describe('accessible Svelte interactions', () => {
     relayStore.activities.set([]);
   });
 
+  it('hides generic working transitions from the activity list', () => {
+    relayStore.activities.set([
+      {
+        timestamp: 123,
+        kind: 'working',
+        status: 'working',
+        summary: 'omp started working',
+        relay_id: 'fedora',
+        relay_label: 'Fedora',
+        activity_key: 'fedora:working',
+      },
+      {
+        timestamp: 124,
+        kind: 'finished',
+        status: 'completed',
+        summary: 'omp completed',
+        extract: 'The complete response',
+        relay_id: 'fedora',
+        relay_label: 'Fedora',
+        activity_key: 'fedora:finished',
+      },
+    ]);
+    render(ActivityView);
+
+    expect(screen.queryByText('omp started working')).not.toBeInTheDocument();
+    expect(screen.getByText('omp completed')).toBeInTheDocument();
+    relayStore.activities.set([]);
+  });
+
   it('filters slash commands and fills the composer without submitting', async () => {
     const user = userEvent.setup();
     const agent: Agent = {

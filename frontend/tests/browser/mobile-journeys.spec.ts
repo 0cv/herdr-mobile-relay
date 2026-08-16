@@ -393,10 +393,16 @@ test('keeps activity cards inside the page and confirms permanent deletion', asy
   await handshake(page, 0);
   await server(page, 0, {
     type: 'activity_history',
-    activities: [{
-      id: 'activity-1', timestamp: Date.now(), kind: 'finished', summary: 'codex completed',
-      pane_id: 'w1:p1', project: 'herdr-mobile-relay', agent: 'codex', status: 'completed',
-    }],
+    activities: [
+      {
+        id: 'activity-working', timestamp: Date.now(), kind: 'working', summary: 'omp working',
+        pane_id: 'w1:p1', project: 'herdr-mobile-relay', agent: 'omp', status: 'working',
+      },
+      {
+        id: 'activity-1', timestamp: Date.now(), kind: 'finished', summary: 'codex completed',
+        pane_id: 'w1:p1', project: 'herdr-mobile-relay', agent: 'codex', status: 'completed',
+      },
+    ],
   });
 
   await page.getByRole('button', { name: 'Activity history' }).click();
@@ -404,6 +410,7 @@ test('keeps activity cards inside the page and confirms permanent deletion', asy
   await expect(page.getByRole('heading', { name: 'Last 24 hours' })).toBeVisible();
   await expect(page.locator('.activity-summary-metrics > div').filter({ hasText: 'Completed' })).toContainText('1');
   await expect(activity).toBeVisible();
+  await expect(page.getByRole('button', { name: /omp working/ })).toHaveCount(0);
   const headingBox = await page.getByRole('heading', { name: 'Activity', level: 2 }).boundingBox();
   const deleteBox = await page.getByRole('button', { name: 'Delete all' }).boundingBox();
   const box = await activity.boundingBox();
@@ -433,22 +440,24 @@ test('sizes captured activity text with terminal typography', async ({ page }) =
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
+  const fullResponse = Array.from({ length: 16 }, (_, index) => `Response line ${index + 1}`).join('\n');
   await server(page, 0, {
     type: 'activity_history',
     activities: [{
       id: 'activity-typography',
+      kind: 'finished',
       timestamp: Date.now(),
       summary: 'omp completed',
       agent: 'omp',
       status: 'completed',
-      extract: '\ue0b0 status\nCaptured activity output',
+      extract: `\ue0b0 status\n${fullResponse}`,
     }],
   });
 
   await page.getByRole('button', { name: 'Activity history' }).click();
   await page.getByRole('button', { name: /omp completed/ }).click();
-  const extract = page.getByRole('region', { name: 'Captured excerpt' }).locator('pre');
-  await expect(extract).toContainText('Captured activity output');
+  const extract = page.getByRole('region', { name: 'Captured response' }).locator('pre');
+  await expect(extract).toContainText('Response line 16');
 
   const typography = await extract.evaluate((element) => {
     const root = document.documentElement;

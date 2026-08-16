@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-08-16
+
+### Changed
+
+- Activity completion entries now capture and backfill the latest full
+  conversation response for retained sessions, while generic working
+  transitions remain available to the 24-hour summary but stay out of the
+  activity list.
+
 ## [0.16.1] - 2026-08-16
 
 ### Fixed
@@ -603,8 +612,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.1...HEAD
-[0.16.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.0...v0.16.1
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.2...HEAD
+[0.16.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.1...v0.16.2
 [0.15.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...v0.15.11
 [0.15.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.6...v0.15.7

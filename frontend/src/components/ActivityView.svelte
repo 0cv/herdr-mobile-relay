@@ -14,7 +14,11 @@
   let confirmOpen = $state(false);
   let deleting = $state(false);
   let now = $state(Date.now());
-  const visible = $derived($activities.filter((activity) => activityMatchesSearch(activity, search.trim())));
+  function activityIsDisplayable(activity: Activity): boolean {
+    return String(activity.kind || '').toLocaleLowerCase() !== 'working';
+  }
+  const displayedActivities = $derived($activities.filter(activityIsDisplayable));
+  const visible = $derived(displayedActivities.filter((activity) => activityMatchesSearch(activity, search.trim())));
   const daily = $derived(dailyActivitySummary($activities, $agents, now));
 
   onMount(() => {
@@ -79,7 +83,7 @@
   <label class="sr-only" for="activity-search">Search activity</label>
   <input id="activity-search" class="activity-search" bind:value={search} type="search" placeholder="Search activity…" />
   <div class="activity-list" aria-live="polite">
-    {#if !$activities.length}
+    {#if !displayedActivities.length}
       <div class="empty-state">No activity yet.</div>
     {:else if !visible.length}
       <div class="empty-state">No matching activity.</div>
