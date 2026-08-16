@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.15.11`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.15.11) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.16.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.16.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -164,16 +164,14 @@ the relay leases the live PTY at the measured phone width so full-screen agents
 redraw for the phone. The relay restores the previous width when the terminal
 closes, the phone disconnects, the lease expires, or the relay shuts down.
 
-Terminal History keeps 100, 1,000, 5,000, or 10,000 lines in the terminal
-view; 1,000 is the default. Herdr serves about 1,000 rows per pane read, so
-opening a terminal starts from the newest rows of that window. The larger
-limits preserve additional rows while the terminal stays open: rows that
-scroll out of the live screen are committed to history as output streams,
-and the "older history" notice reports when rows beyond the loaded window
-exist. Before **Resize Session** changes the PTY width, the app loads the
-pre-resize history, cuts its trailing desktop screen, and replaces it with
-the clean current screen at the phone width. Use **Copy** for the latest
-response or **Conversation History** for clean, searchable earlier turns.
+Terminal History keeps 100, 500, or 1,000 lines in the terminal view; 1,000 is
+the default and matches the most Herdr serves per pane read. The view renders
+Herdr's window exactly as served: Herdr re-wraps its entire scrollback to the
+current pty width on every read, so while the phone holds the lease the whole
+visible history is already phone-shaped — nothing is stitched, reconciled, or
+retained on the phone across width changes. The "older history" notice reports
+when rows beyond the served window exist. Use **Copy** for the latest response
+or **Conversation History** for clean, searchable earlier turns.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. The relay reads that harness's local transcript,

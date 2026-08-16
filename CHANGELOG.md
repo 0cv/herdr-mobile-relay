@@ -5,6 +5,30 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-16
+
+### Changed
+
+- Terminal history now renders Herdr's own pane window exactly as served.
+  Herdr reflows its entire window (up to the newest 1,000 rows) to the current
+  pty width on every read, so while a phone holds the Resize Session lease the
+  whole visible history is already phone-shaped — no client-side stitching,
+  no text matching across reads, and no rows spliced or silently dropped. The
+  merge machinery that reconstructed history on the phone is deleted.
+- Terminal History options are now 100, 500, or 1,000 lines (default 1,000),
+  matching the most Herdr serves per pane read. The 5,000 and 10,000 options
+  preserved rows client-side across width changes, which cannot be done
+  faithfully: Herdr re-wraps its scrollback whenever the width changes, so
+  retained rows from an earlier width never align with later reads. Saved
+  larger preferences fall back to 1,000.
+
+### Fixed
+
+- Collapse desktop-width table borders (`┌──┬──┐`, `├──┼──┤`) to thin rules
+  when history renders narrower than the width that produced them, instead of
+  wrapping them into stacked ruler fragments. Cell text still re-wraps; a row
+  of empty cells stays content.
+
 ## [0.15.11] - 2026-08-15
 
 ### Added
@@ -562,7 +586,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.11...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.11...v0.16.0
 [0.15.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...v0.15.11
 [0.15.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.6...v0.15.7

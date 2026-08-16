@@ -694,152 +694,6 @@ function hasTerminalBoxCell(line: string): boolean {
   return false;
 }
 
-export interface ResizedTerminalHistory {
-  history: string[];
-  /** Raw tail of the last stable (scrolled-off) region; anchors the next merge. */
-  anchor: string[];
-  viewport: string[];
-  sourceTruncated: boolean;
-}
-
-export interface MergedResizedTerminalHistory {
-  state: ResizedTerminalHistory;
-  content: string;
-  truncated: boolean;
-}
-
-const MAX_RESIZED_TERMINAL_HISTORY_LINES = 10_000;
-
-function normalizedTerminalLine(line: string): string {
-  return stripAnsi(line).replace(/\r/g, '').trimEnd();
-}
-
-
-const RESIZED_ANCHOR_ROWS = 32;
-
-
-/**
- * Tail block of the stable region used to locate it inside the next read.
- * Extends past RESIZED_ANCHOR_ROWS until it holds two non-empty rows so a
- * blank-heavy tail cannot produce spurious matches.
- */
-function resizedStableAnchor(stable: string[]): string[] {
-  let nonEmpty = 0;
-  let start = stable.length;
-  while (start > 0 && (nonEmpty < 2 || stable.length - start < RESIZED_ANCHOR_ROWS)) {
-    start -= 1;
-    if (normalizedTerminalLine(stable[start])) nonEmpty += 1;
-  }
-  return stable.slice(start);
-}
-
-/**
- * Index in `stable` just past the last occurrence of `anchor`, or -1 when the
- * anchor cannot be trusted or no longer appears (the window advanced past it).
- */
-function resizedAnchorMatchEnd(anchor: string[], stable: string[]): number {
-  const needle = anchor.slice(Math.max(0, anchor.length - stable.length)).map(normalizedTerminalLine);
-  if (needle.filter((line) => line).length < 2) return -1;
-  const rows = stable.map(normalizedTerminalLine);
-  for (let end = stable.length; end >= needle.length; end -= 1) {
-    let index = needle.length;
-    while (index > 0 && rows[end - needle.length + index - 1] === needle[index - 1]) index -= 1;
-    if (!index) return end;
-  }
-  return -1;
-}
-
-function terminalViewportOverlap(previous: string[], current: string[]): number {
-  const maximum = Math.min(previous.length, current.length);
-  for (let size = maximum; size >= 2; size -= 1) {
-    let nonEmpty = 0;
-    let matches = true;
-    for (let index = 0; index < size; index += 1) {
-      const before = normalizedTerminalLine(previous[previous.length - size + index]);
-      const after = normalizedTerminalLine(current[index]);
-      if (before !== after) {
-        matches = false;
-        break;
-      }
-      if (before) nonEmpty += 1;
-    }
-    if (matches && nonEmpty >= 2) return size;
-  }
-  return 0;
-}
-
-export function mergeResizedTerminalHistory(
-  baselineContent: string,
-  currentContent: string,
-  viewportRows: number,
-  limit: number,
-  previous?: ResizedTerminalHistory,
-  sourceTruncated = false,
-  skipCommit = false,
-): MergedResizedTerminalHistory {
-  const rows = Math.max(1, Math.floor(viewportRows));
-  const contentLines = currentContent.split('\n');
-  const cut = Math.max(0, contentLines.length - rows);
-  const viewport = contentLines.slice(cut);
-  const stable = contentLines.slice(0, cut);
-  let history: string[];
-  let baselineTruncated = sourceTruncated;
-
-  if (previous) {
-    history = previous.history;
-    baselineTruncated ||= previous.sourceTruncated;
-    if (skipCommit) {
-      // A width change makes the agent re-render its transcript, pushing a
-      // redrawn block with stale chrome into the scrollback. Drop this
-      // frame's newly scrolled rows and re-anchor past them.
-    } else if (stable.length) {
-      // -1: the window advanced past the anchor, so rows between the anchor
-      // and the window start were never observed and cannot be recovered.
-      const matchEnd = previous.anchor.length ? resizedAnchorMatchEnd(previous.anchor, stable) : 0;
-      history = history.concat(stable.slice(Math.max(0, matchEnd)));
-      baselineTruncated ||= matchEnd < 0;
-    } else {
-      // Viewport-only feed: recover rows that scrolled off between reads.
-      const overlap = terminalViewportOverlap(previous.viewport, viewport);
-      if (overlap > 0 && overlap < previous.viewport.length) {
-        history = history.concat(previous.viewport.slice(0, previous.viewport.length - overlap));
-      }
-    }
-  } else {
-    // First resized frame. The baseline is the pre-lease read in physical
-    // rows, so its trailing screen — the desktop-rendered frame including
-    // agent chrome such as status bars and input boxes — is exactly its last
-    // `rows` rows: cut it; the phone screen replaces it. This frame's stable
-    // region is never committed: the agent's resize re-render has already
-    // pushed a redrawn transcript block into the scrollback, and committing
-    // it would pin duplicated renders and status-bar chrome into history.
-    // The anchor below re-bases on this frame's scrollback tail instead.
-    const baselineLines = baselineContent.split('\n');
-    history = baselineLines.slice(0, Math.max(0, baselineLines.length - rows));
-  }
-
-  let retainedHistory = history;
-  let historyTruncated = false;
-  if (retainedHistory.length > MAX_RESIZED_TERMINAL_HISTORY_LINES) {
-    retainedHistory = retainedHistory.slice(-MAX_RESIZED_TERMINAL_HISTORY_LINES);
-    historyTruncated = true;
-  }
-
-  const available = retainedHistory.length + viewport.length;
-  const boundedLimit = Math.max(1, Math.floor(limit));
-  const visible = retainedHistory.concat(viewport).slice(Math.max(0, available - boundedLimit));
-  const state = {
-    history: retainedHistory,
-    anchor: stable.length ? resizedStableAnchor(stable) : previous?.anchor ?? [],
-    viewport,
-    sourceTruncated: baselineTruncated || historyTruncated,
-  };
-  return {
-    state,
-    content: visible.join('\n'),
-    truncated: state.sourceTruncated || available > boundedLimit,
-  };
-}
 
 export interface RenderedTerminalRow {
   html: string;
@@ -890,11 +744,35 @@ function terminalTextColumns(text: string): number {
   return column;
 }
 
+/**
+ * A stale-width horizontal border — a table rule such as ┌──┬──┐ — cannot be
+ * word-wrapped meaningfully, so it degrades to the same thin rule as a plain
+ * separator. Pure vertical bars are cell walls, not borders: a row of empty
+ * table cells stays content. At least half the glyphs must carry a horizontal
+ * stroke so junction-only noise never qualifies.
+ */
+function isHorizontalBorderLine(line: string): boolean {
+  const characters = [...stripAnsi(line).replace(/\s+/g, '')];
+  if (characters.length < 8) return false;
+  let strokes = 0;
+  for (const character of characters) {
+    if (TERMINAL_HORIZONTAL_CELLS[character]) {
+      strokes += 1;
+      continue;
+    }
+    const cell = TERMINAL_BOX_CELLS[character];
+    if (!cell) return false;
+    const [up, right, down, left] = cell;
+    if (up && down && !left && !right) return false;
+  }
+  return strokes * 2 >= characters.length;
+}
+
 function responsiveTerminalGridLine(line: string, maxColumns: number): string {
   if (maxColumns < 1
     || !hasTerminalBoxCell(line)
     || terminalTextColumns(stripAnsi(line)) <= maxColumns) return line;
-  if (isSeparatorOnlyLine(line)) return TERMINAL_SEPARATOR_TOKEN;
+  if (isSeparatorOnlyLine(line) || isHorizontalBorderLine(line)) return TERMINAL_SEPARATOR_TOKEN;
   return trimTerminalChrome(line, true);
 }
 
@@ -972,7 +850,8 @@ export function renderTerminalContent(
     .map((line) => responsiveTerminalGridLine(line, maxFixedGridColumns))
     .join('\n');
   if (format !== 'ansi') {
-    const plainDisplay = display.replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
+    const plainDisplay = display
+      .replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
     return {
       display,
       html: linkifyTerminalText(plainDisplay),

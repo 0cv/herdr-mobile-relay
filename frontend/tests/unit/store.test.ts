@@ -458,12 +458,12 @@ describe('relay command store', () => {
       content_fingerprint: '',
     });
 
-    setTerminalHistoryLines(5_000);
+    setTerminalHistoryLines(500);
     relayStore.readPane(agent, true);
     expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
       type: 'read_pane',
       pane_id: 'w1:p1',
-      lines: 5_000,
+      lines: 500,
       format: 'ansi',
       content_fingerprint: '',
     });

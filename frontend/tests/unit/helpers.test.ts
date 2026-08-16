@@ -37,7 +37,6 @@ import {
   compactRepeatedCharacterRuns,
   isSeparatorOnlyLine,
   latestCompletedResponse,
-  mergeResizedTerminalHistory,
   renderTerminalContent,
   renderedRowShift,
   stripAnsi,
@@ -257,187 +256,50 @@ describe('terminal rendering', () => {
     expect(currentTable.html.match(/terminal-grid-line/g)).toHaveLength(3);
   });
 
-  it('preserves deep pre-resize history while replacing the live viewport', () => {
-    const baseline = Array.from({ length: 1_000 }, (_, index) => `history row ${index}`);
-    // First resized read: pre-lease scrollback captured at the desktop width
-    // followed by the clean phone-width screen.
-    const junk = Array.from({ length: 200 }, (_, index) => `desktop redraw ${index}`);
-    const screen = (start: number) => Array.from({ length: 100 }, (_, index) => `history row ${start + index}`);
-    const first = mergeResizedTerminalHistory(
-      baseline.join('\n'),
-      junk.concat(screen(900)).join('\n'),
-      100,
-      1_000,
-    );
-    expect(first.content.split('\n')).toEqual(baseline);
-    expect(first.truncated).toBe(false);
+  it('collapses stale-width junctioned table borders to rules instead of wrapping them', () => {
+    const table = [
+      `┌${'─'.repeat(30)}┬${'─'.repeat(30)}┐`,
+      `│ ${'Period'.padEnd(29)}│ ${'Trades'.padEnd(29)}│`,
+      `├${'─'.repeat(30)}┼${'─'.repeat(30)}┤`,
+      `│ ${'Combined'.padEnd(27)}│ ${'156'.padEnd(32)}│`,
+      `└${'─'.repeat(30)}┴${'─'.repeat(30)}┘`,
+    ].join('\n');
+    const resized = renderTerminalContent(table, 'ansi', true, false, 40);
+    expect(resized.rows.filter((row) => row.separator)).toHaveLength(3);
+    expect(resized.display).not.toContain('┬');
+    expect(resized.display).not.toContain('┼');
+    expect(resized.display).toContain('Period');
+    expect(resized.display).toContain('Combined');
 
-    // Three rows scrolled from the screen into the stable window.
-    const scrolled = junk.concat(screen(900).slice(0, 3));
-    const second = mergeResizedTerminalHistory(
-      baseline.join('\n'),
-      scrolled.concat(screen(903)).join('\n'),
-      100,
-      1_000,
-      first.state,
-    );
-    const lines = second.content.split('\n');
-    expect(lines).toHaveLength(1_000);
-    expect(lines[0]).toBe('history row 3');
-    expect(lines.at(-1)).toBe('history row 1002');
-    expect(lines.filter((line) => line === 'history row 903')).toHaveLength(1);
-    expect(lines.some((line) => line.startsWith('desktop redraw'))).toBe(false);
-    expect(second.truncated).toBe(true);
+    // A current-width junctioned table keeps its exact grid.
+    const narrow = renderTerminalContent([
+      `┌${'─'.repeat(17)}┬${'─'.repeat(17)}┐`,
+      `│ ${'x'.padEnd(16)}│ ${'y'.padEnd(16)}│`,
+      `└${'─'.repeat(17)}┴${'─'.repeat(17)}┘`,
+    ].join('\n'), 'ansi', true, false, 40);
+    expect(narrow.rows.every((row) => row.fixedGrid)).toBe(true);
 
-    const unchanged = mergeResizedTerminalHistory(
-      baseline.join('\n'),
-      scrolled.concat(screen(903)).join('\n'),
-      100,
-      1_000,
-      second.state,
-    );
-    expect(unchanged.content).toBe(second.content);
-  });
-
-  it('commits rows that never appeared in any sampled viewport during fast streams', () => {
-    const screen = (start: number) => Array.from({ length: 50 }, (_, index) => `stream line ${start + index}`);
-    const window = (start: number, length: number) =>
-      Array.from({ length }, (_, index) => `stream line ${start + index}`);
-    const first = mergeResizedTerminalHistory(
-      window(0, 500).join('\n'),
-      window(0, 500).join('\n'),
-      50,
-      10_000,
-    );
-    expect(first.content.split('\n')).toEqual(window(0, 500));
-    // 400 rows scroll past between reads: the screens share no rows.
-    const second = mergeResizedTerminalHistory(
-      window(0, 500).join('\n'),
-      window(100, 800).concat(screen(900)).join('\n'),
-      50,
-      10_000,
-      first.state,
-    );
-    const lines = second.content.split('\n');
-    expect(lines).toEqual(window(0, 950));
-    expect(second.truncated).toBe(false);
-  });
-
-  it('reports a gap when the stable window advances past the previous anchor', () => {
-    const window = (start: number, length: number) =>
-      Array.from({ length }, (_, index) => `burst line ${start + index}`);
-    const first = mergeResizedTerminalHistory(
-      window(0, 150).join('\n'),
-      window(0, 150).join('\n'),
-      50,
-      10_000,
-    );
-    expect(first.content.split('\n')).toEqual(window(0, 150));
-    // The whole 150-row window moved beyond the previous read: rows 150-4999
-    // were never observable.
-    const second = mergeResizedTerminalHistory(
-      window(0, 150).join('\n'),
-      window(5_000, 150).join('\n'),
-      50,
-      10_000,
-      first.state,
-    );
-    expect(second.content.split('\n')).toEqual(window(0, 100).concat(window(5_000, 150)));
-    expect(second.truncated).toBe(true);
-  });
-
-  it('recovers scrolled-off rows from a viewport-only feed without scrollback', () => {
-    const baseline = Array.from({ length: 300 }, (_, index) => `history row ${index}`);
-    const screen = (start: number) => Array.from({ length: 100 }, (_, index) => `history row ${start + index}`);
-    const first = mergeResizedTerminalHistory(baseline.join('\n'), screen(200).join('\n'), 100, 1_000);
-    expect(first.content.split('\n')).toEqual(baseline);
-    const second = mergeResizedTerminalHistory(
-      baseline.join('\n'),
-      screen(203).join('\n'),
-      100,
-      1_000,
-      first.state,
-    );
-    expect(second.content.split('\n')).toEqual(
-      baseline.concat(['history row 300', 'history row 301', 'history row 302']),
-    );
-    expect(second.truncated).toBe(false);
-  });
-
-  it('cuts the desktop screen with its chrome from the baseline tail', () => {
-    const transcript = Array.from({ length: 100 }, (_, index) => `transcript row ${index}`);
-    // The baseline is physical rows: its last `rows` rows are the desktop
-    // screen, ending with agent chrome the phone screen redraws differently.
-    const desktopScreen = [
-      'result line one is quite wide on the desktop',
-      'result line two',
-      '│ ❯ input box                              │',
-      '╭─ π ❯ GPT-Model · max ❯ ~/repo ❯ $1.23 (sub)',
-    ];
-    const phoneScreen = [
-      'result line one is quite',
-      ' wide on the desktop',
-      'result line two',
-      '╭─ π ❯ GPT-Model ❯ $1.23',
-    ];
-    const merged = mergeResizedTerminalHistory(
-      transcript.concat(desktopScreen).join('\n'),
-      transcript.concat(phoneScreen).join('\n'),
-      4,
-      1_000,
-    );
-    expect(merged.content.split('\n')).toEqual(transcript.concat(phoneScreen));
-    expect(merged.content).not.toContain('input box');
-    expect(merged.truncated).toBe(false);
-  });
-
-  it('drops the redrawn scrollback block from resize transitions', () => {
-    const rows = (start: number, length: number) =>
-      Array.from({ length }, (_, index) => `session row ${start + index}`);
-    // Acquisition: the agent's resize re-render pushed rows 60-79 (a redrawn
-    // transcript block with chrome) into the scrollback after the baseline
-    // read. The first frame must not commit them.
-    const junk = ['╭─ redrawn banner ─╮', ...rows(0, 18), '╰─ π ❯ footer ❯ (sub)'];
-    const first = mergeResizedTerminalHistory(
-      rows(0, 60).join('\n'),
-      rows(0, 60).concat(junk, rows(60, 10)).join('\n'),
-      10,
-      1_000,
-    );
-    expect(first.content.split('\n')).toEqual(rows(0, 50).concat(rows(60, 10)));
-
-    // Steady output afterwards commits from the re-based anchor.
-    const second = mergeResizedTerminalHistory(
-      rows(0, 60).join('\n'),
-      rows(0, 60).concat(junk, rows(60, 15)).join('\n'),
-      10,
-      1_000,
-      first.state,
-    );
-    expect(second.content.split('\n')).toEqual(rows(0, 50).concat(rows(60, 15)));
-    expect(second.content).not.toContain('footer');
-
-    // A width change re-renders again: the skip flag drops that block too.
-    const rotated = mergeResizedTerminalHistory(
-      rows(0, 60).join('\n'),
-      rows(0, 60).concat(junk, rows(60, 5), junk, rows(65, 10)).join('\n'),
-      10,
-      1_000,
-      second.state,
-      false,
+    // A wide row of empty cells is content (cell walls), never a border rule.
+    const emptyCells = renderTerminalContent(
+      `│${' '.repeat(30)}│${' '.repeat(30)}│`,
+      'ansi',
       true,
+      false,
+      40,
     );
-    expect(rotated.content.split('\n')).toEqual(rows(0, 50).concat(rows(60, 5), rows(65, 10)));
-    expect(rotated.truncated).toBe(false);
-    // Rows appended after the rotation commit normally from the new anchor.
-    const resumed = mergeResizedTerminalHistory(
-      rows(0, 60).join('\n'),
-      rows(0, 60).concat(junk, rows(60, 5), junk, rows(65, 20)).join('\n'),
-      10,
-      1_000,
-      rotated.state,
-    );
-    expect(resumed.content.split('\n')).toEqual(rows(0, 50).concat(rows(60, 5), rows(65, 20)));
+    expect(emptyCells.rows.filter((row) => row.separator)).toHaveLength(0);
+  });
+
+  it('renders long prose lines so they re-wrap at the phone width', () => {
+    // Herdr reflows the pane window to the pty width on every read: no hard
+    // wrap is baked in, so the row keeps its full text and the browser wraps it.
+    const prose = '\x1b[1mBoth questions answered\x1b[0m — the pane window reflows to the '
+      + 'current width, so history rows re-wrap on the phone.';
+    const rendered = renderTerminalContent(prose, 'ansi', true, false, 40);
+    expect(rendered.rows).toHaveLength(1);
+    expect(rendered.rows[0].fixedGrid).toBe(false);
+    expect(rendered.rows[0].text).toBe(stripAnsi(prose));
+    expect(rendered.html).toContain('font-weight:700');
   });
 
   it('detects rows cropped from the front of a growing log', () => {

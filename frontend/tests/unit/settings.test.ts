@@ -185,9 +185,9 @@ describe('settings relay status', () => {
     const history = within(screen.getByRole('group', { name: 'Terminal History' }));
 
     expect(history.getByRole('button', { name: '1000' })).toHaveAttribute('aria-pressed', 'true');
-    await user.click(history.getByRole('button', { name: '10000' }));
-    expect(history.getByRole('button', { name: '10000' })).toHaveAttribute('aria-pressed', 'true');
-    expect(localStorage.getItem(TERMINAL_HISTORY_KEY)).toBe('10000');
+    await user.click(history.getByRole('button', { name: '500' }));
+    expect(history.getByRole('button', { name: '500' })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem(TERMINAL_HISTORY_KEY)).toBe('500');
 
     await user.click(history.getByRole('button', { name: '1000' }));
   });

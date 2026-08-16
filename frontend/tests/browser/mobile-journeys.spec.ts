@@ -2233,9 +2233,9 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(leaseCountBeforeReentry + 1);
-  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
-  await expect(terminal).toContainText('stored resize history row 120');
-  await expect(terminal).not.toContainText('Resizing terminal…');
+  // Reopening re-leases the pane; the resized screen is awaited, never guessed
+  // from a stale render.
+  await expect(terminal).toContainText('Resizing terminal…');
 
   const reentryLease = (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').at(-1)!;
@@ -2249,6 +2249,8 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readCountBeforeReentry);
   await page.waitForTimeout(300);
+  // A frame the relay read while the agent was still repainting is transient:
+  // it must not replace the stable screen.
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
@@ -2257,8 +2259,10 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
       { length: 46 },
       (_, index) => `transient viewport row ${index + 1}`,
     ).join('\n'),
+    viewport_only: true,
+    viewport_rows: 46,
+    resize_settling: true,
   });
-  await expect(terminal).toContainText('stored resize history row 120');
   await expect(terminal).not.toContainText('transient viewport row');
   await page.waitForTimeout(300);
   await server(page, 0, {
@@ -2268,6 +2272,7 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     content: storedHistory,
   });
   await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
+  await expect(terminal).toContainText('stored resize history row 120');
 
   await setAutoCommands(page, true);
   await page.getByRole('button', { name: 'Back' }).click();
@@ -2275,165 +2280,98 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     .filter((command) => command.type === 'release_pane_size').length).toBe(2);
 });
 
-test('preserves deep history with a clean current Resize Session viewport', async ({ page }) => {
+const resizeCapabilities = [
+  'attention_classification', 'pane_size_lease', 'slash_commands',
+];
+
+async function openResizePane(page: Page, project: string) {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
-  });
+  await handshake(page, 0, { capabilities: resizeCapabilities });
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resize viewport', agent: 'omp' }],
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project, agent: 'omp' }],
   });
-  await page.getByRole('button', { name: 'Open Resize viewport on Fedora' }).click();
+  await page.getByRole('button', { name: `Open ${project} on Fedora` }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
+}
 
-  const historyRow = (index: number) => `preserved history row ${String(index).padStart(4, '0')}`;
-  const historyRows = Array.from({ length: 1_000 }, (_, index) => historyRow(index + 1));
+test('renders the raw pane window as terminal history', async ({ page }) => {
+  await openResizePane(page, 'Raw window');
+  const windowRow = (index: number) => `raw window row ${String(index).padStart(3, '0')}`;
+  const windowRows = Array.from({ length: 120 }, (_, index) => windowRow(index + 1));
   await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: historyRows.join('\n'),
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: windowRows.join('\n'),
   });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  await page.waitForTimeout(300);
-
-  // Resized reads return the recent window: scrollback rows captured before
-  // the lease followed by the clean current screen at the phone width.
-  const preLease = historyRows.slice(800, 954);
-  const screenRows = historyRows.slice(954);
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: preLease.concat(screenRows).join('\n'),
+    content: windowRows.join('\n'),
     viewport_only: true,
-    viewport_rows: screenRows.length,
+    viewport_rows: 20,
   });
 
   const terminal = page.getByRole('log');
-  const screen = terminal.locator('.term-screen');
-  await expect(screen).toHaveAttribute('data-terminal-row-count', '1000');
-  const transcript = await page.getByLabel('Full terminal transcript').inputValue();
-  expect(transcript).toContain(historyRow(1));
-  expect(transcript).toContain(historyRow(1000));
-  expect(transcript.split(historyRow(955)).length).toBe(2);
-  const clippedNotice = page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' });
-  await expect(clippedNotice).toBeHidden();
-  await terminal.evaluate((element) => {
-    element.scrollTop = 0;
-    element.dispatchEvent(new Event('scroll'));
-  });
-  await expect(terminal).toContainText(historyRow(1));
-  expect((await commands(page)).find((command) => command.type === 'read_pane'))
-    .toMatchObject({ lines: 1_000 });
+  // The raw window renders exactly as read: scrolled-back rows included.
+  await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
+  await expect(terminal).toContainText(windowRow(120));
 
-  // A fast burst scrolls rows into the stable window and redraws the screen
-  // with rows that never overlapped the previous one: nothing may be lost.
-  const streamedRows = Array.from({ length: 100 }, (_, index) => `streamed burst row ${index + 1}`);
+  // A window shorter than the requested history carries the truncation flag.
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: preLease
-      .concat(screenRows, streamedRows.slice(0, 54))
-      .join('\n'),
+    content: windowRows.concat('raw window row 121').join('\n'),
     viewport_only: true,
-    viewport_rows: 46,
+    viewport_rows: 20,
+    truncated: true,
   });
-  const streamed = await page.getByLabel('Full terminal transcript').inputValue();
-  expect(streamed).toContain(historyRow(1000));
-  expect(streamed).toContain('streamed burst row 1');
-  expect(streamed).toContain('streamed burst row 54');
-  expect(streamed.split(historyRow(955)).length).toBe(2);
-  await expect(clippedNotice).toBeVisible();
-
-  // A frame read inside the relay's resize settle window carries the agent's
-  // redrawn scrollback block: it must not be committed to history.
-  const junk = Array.from({ length: 20 }, (_, index) => `redrawn junk row ${index + 1}`);
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: preLease
-      .concat(screenRows, streamedRows.slice(0, 54), junk, streamedRows.slice(8, 54))
-      .join('\n'),
-    viewport_only: true,
-    viewport_rows: 46,
-    resize_settling: true,
-  });
-  const settling = await page.getByLabel('Full terminal transcript').inputValue();
-  expect(settling).not.toContain('redrawn junk');
-  expect(settling).toContain('streamed burst row 54');
-
-  // After the window closes, commits resume from the re-based anchor and the
-  // skipped block stays out of history.
-  await server(page, 0, {
-    type: 'pane_content',
-    pane_id: 'w1:p1',
-    format: 'ansi',
-    content: preLease
-      .concat(screenRows, streamedRows.slice(0, 54), junk, streamedRows.slice(8, 100))
-      .join('\n'),
-    viewport_only: true,
-    viewport_rows: 46,
-  });
-  const resumed = await page.getByLabel('Full terminal transcript').inputValue();
-  expect(resumed).toContain('streamed burst row 100');
-  expect(resumed).not.toContain('redrawn junk');
-  expect(resumed.split('streamed burst row 54').length).toBe(2);
+  await expect(page.getByRole('status').filter({ hasText: 'Older terminal history is not shown' }))
+    .toBeVisible();
 });
 
 test('keeps the reader anchored while streamed output grows and unsticks on scroll-up', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Anchored stream', agent: 'omp' }],
-  });
-  await page.getByRole('button', { name: 'Open Anchored stream on Fedora' }).click();
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
-
   // Rows 401-700 are three-character rows: too short for anchor text
   // matching, so only correct index math can keep the reader anchored there.
   const historyRow = (index: number) => (index > 400 && index <= 700
     ? String(index)
     : `anchored history row ${String(index).padStart(4, '0')}`);
   const historyRows = Array.from({ length: 1_000 }, (_, index) => historyRow(index + 1));
+  await openResizePane(page, 'Anchored stream');
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: historyRows.join('\n'),
+    content: historyRows[0],
   });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
   await page.waitForTimeout(300);
 
-  const preLease = historyRows.slice(800, 954);
-  const screenRows = historyRows.slice(954);
   const streamedRows = Array.from({ length: 100 }, (_, index) => `anchored burst row ${index + 1}`);
-  const frame = (extra: string[]) => server(page, 0, {
+  const stream = historyRows.concat(streamedRows);
+  // Herdr always serves the newest 1,000-row window: streamed output appends
+  // at the bottom and crops the oldest rows off the front.
+  const frame = (streamed: number) => server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: preLease.concat(screenRows, extra).join('\n'),
+    content: stream
+      .slice(Math.max(0, historyRows.length + streamed - 1_000), historyRows.length + streamed)
+      .join('\n'),
     viewport_only: true,
     viewport_rows: 46,
   });
-  await frame([]);
+  await frame(0);
   const terminal = page.getByRole('log');
   await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '1000');
 
   // Pinned at the bottom: appended output is shown immediately.
-  await frame(streamedRows.slice(0, 54));
+  await frame(54);
   await expect(terminal).toContainText('anchored burst row 54');
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 
@@ -2457,12 +2395,18 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
   const before = await firstVisibleRow();
   expect(before.text.trim()).toMatch(/^\d{3}$/);
 
-  // More output arrives and the visible window crops rows from the front:
+  // More output arrives and the served window crops rows from the front:
   // the reader's position must not move and sticky mode must stay off.
-  await frame(streamedRows);
+  await frame(100);
   await expect.poll(async () => (await firstVisibleRow()).text).toBe(before.text);
   const after = await firstVisibleRow();
-  expect(Math.abs(after.offset - before.offset)).toBeLessThanOrEqual(2);
+  // Same row, and within a row of the same position: cropped rows shift every
+  // index, so only exact index math keeps this stable.
+  const rowHeight = await terminal.evaluate((element) => {
+    const row = element.querySelector<HTMLElement>('[data-terminal-row]');
+    return row ? row.getBoundingClientRect().height : 20;
+  });
+  expect(Math.abs(after.offset - before.offset)).toBeLessThan(rowHeight);
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
 
   // Returning to the bottom re-engages sticky mode.
@@ -2474,33 +2418,21 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
 });
 
 test('wraps stale wide grids but preserves current grids in Resize Session', async ({ page }) => {
-  await boot(page, [fedora]);
-  await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
-  });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Qoder grid', agent: 'qodercli' }],
-  });
-  await page.getByRole('button', { name: 'Open Qoder grid on Fedora' }).click();
-
   const staleTable = [
     `┌${'─'.repeat(180)}┐`,
     `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(178)}│`,
     `└${'─'.repeat(180)}┘`,
   ];
-  const desktopViewport = Array.from({ length: 46 }, (_, index) => `desktop viewport row ${index + 1}`);
+  const desktopHistory = Array.from({ length: 46 }, (_, index) => `desktop history row ${index + 1}`);
+  await openResizePane(page, 'Qoder grid');
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: staleTable.concat(desktopViewport).join('\n'),
+    content: desktopHistory.join('\n'),
   });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
-  await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
   const lease = (await commands(page))
     .find((command) => command.type === 'lease_pane_size')!;
   const columns = Number(lease.columns);
@@ -2514,14 +2446,17 @@ test('wraps stale wide grids but preserves current grids in Resize Session', asy
   ];
   const currentViewport = Array.from({ length: 43 }, (_, index) => `current viewport row ${index + 1}`)
     .concat(currentTable);
+  // The stale table was captured at 188 columns before the lease and is still
+  // in the window Herdr serves, above the current-width screen.
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
-    content: currentViewport.join('\n'),
+    content: staleTable.concat(desktopHistory, currentViewport).join('\n'),
     viewport_only: true,
     viewport_rows: currentViewport.length,
   });
+  await expect(terminal).toContainText('Current grid');
   await expect(terminal.locator('.terminal-grid-line')).toHaveCount(3);
   const lineHeights = await terminal.locator('.terminal-grid-line').evaluateAll((lines) => {
     const lineHeight = Number.parseFloat(getComputedStyle(lines[0]).lineHeight);
@@ -2531,8 +2466,8 @@ test('wraps stale wide grids but preserves current grids in Resize Session', asy
     };
   });
   expect(Math.max(...lineHeights.heights)).toBeLessThan(lineHeights.lineHeight * 1.2);
-  // The kept desktop-width history is virtualized above the screen; the stale
-  // grid only enters the DOM once it is scrolled into view.
+  // The desktop-width rows sit above the screen; the stale grid enters the
+  // DOM once it is scrolled into view and wraps instead of overflowing.
   await terminal.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
@@ -3064,8 +2999,8 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await expect(page.getByRole('button', { name: 'Original Columns' })).toHaveCount(0);
   await expect(page.getByText(/Resize Session automatically leases/)).toBeVisible();
 
-  await history.getByRole('button', { name: '10000' }).click();
-  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_history_lines'))).toBe('10000');
+  await history.getByRole('button', { name: '500' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_history_lines'))).toBe('500');
   await refresh.getByRole('button', { name: '100 ms' }).click();
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_refresh_ms'))).toBe('100');
   await handshake(page, 0, {
@@ -3078,7 +3013,7 @@ test('scales the whole interface from accessible settings', async ({ page }) => 
   await page.getByRole('button', { name: 'Back' }).click();
   await page.getByRole('button', { name: 'Open History app on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
-    .some((command) => command.type === 'read_pane' && command.lines === 10000)).toBe(true);
+    .some((command) => command.type === 'read_pane' && command.lines === 500)).toBe(true);
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',

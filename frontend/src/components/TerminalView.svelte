@@ -1,30 +1,3 @@
-<script lang="ts" module>
-  import type { TerminalFrame as CachedTerminalFrame } from '$lib/types';
-  import type { RenderedTerminalRow } from '$lib/terminal';
-
-  interface ResizedTerminalFrame {
-    frame: CachedTerminalFrame;
-    columns: number;
-    display: string;
-    html: string;
-    rows: RenderedTerminalRow[];
-    historyLines: number;
-    interfaceSize: string;
-    viewportWidth: number;
-  }
-
-  const MAX_RESIZED_TERMINAL_FRAMES = 8;
-  const resizedTerminalFrames = new Map<string, ResizedTerminalFrame>();
-
-  function rememberResizedTerminalFrame(paneId: string, cached: ResizedTerminalFrame) {
-    resizedTerminalFrames.delete(paneId);
-    resizedTerminalFrames.set(paneId, cached);
-    if (resizedTerminalFrames.size <= MAX_RESIZED_TERMINAL_FRAMES) return;
-    const oldestPaneId = resizedTerminalFrames.keys().next().value;
-    if (oldestPaneId) resizedTerminalFrames.delete(oldestPaneId);
-  }
-</script>
-
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import Button from '$components/ui/Button.svelte';
@@ -50,23 +23,24 @@
     terminalRowOffsets,
     terminalSearchText,
   } from '$lib/terminal-find';
-  import {
-    interfaceSize,
-    terminalHistoryLines,
-  } from '$lib/preferences';
+  import { interfaceSize } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
   import {
     latestCompletedResponse,
-    mergeResizedTerminalHistory,
     renderedRowShift,
     stripAnsi,
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
-    type ResizedTerminalHistory,
   } from '$lib/terminal';
   import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
-  import type { Agent, SlashCommand, SlashCommandCatalog, TerminalFrame } from '$lib/types';
+  import type {
+    Agent,
+    SlashCommand,
+    SlashCommandCatalog,
+    TerminalFrame,
+  } from '$lib/types';
+  import type { RenderedTerminalRow } from '$lib/terminal';
   import { VirtualTerminalIndex } from '$lib/virtual-terminal';
 
   const connections = relayStore.connections;
@@ -109,14 +83,11 @@
   let composerFocused = $state(false);
   let sendingPrompt = $state(false);
   let draftPersistenceWarning = $state('');
-  let resizeFrameBaseline: TerminalFrame | undefined;
-  let resizeHistoryBaseline: TerminalFrame | undefined;
-  let resizeBaselineRequestPane = '';
-  let resizeBaselineRequestFrame: TerminalFrame | undefined;
-  let resizeHistoryState: ResizedTerminalHistory | undefined;
-  let resizeHistorySkipCommit = false;
-  let resizeHistoryTruncated = $state(false);
-  let showingCachedResizeFrame = false;
+  let historyTruncated = $state(false);
+  // Pre-resize frame kept only to suppress display of transient frames while
+  // the agent repaints at the new width.
+  // Raw state: the effect compares frame identity, which a deep proxy breaks.
+  let resizeFrameBaseline = $state.raw<TerminalFrame | undefined>(undefined);
   let displayed = $state('');
   let renderedHtml = $state('');
   let renderedRows = $state<RenderedTerminalRow[]>([]);
@@ -167,9 +138,6 @@
   const CELL_MEASURE_TEXT = '0000000000';
   const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
   const PANE_REALTIME_RESYNC_MS = 15_000;
-  const PANE_SIZE_SETTLE_MS = 250;
-  const PANE_SIZE_SETTLE_TIMEOUT_MS = 1_500;
-  const PANE_SIZE_SETTLE_MIN_HISTORY = 100;
   const RESPONSE_COPY_AGENT_IDS = new Set([
     'claude', 'claudecode', 'codex', 'openaicodex', 'kimi', 'kimicode',
     'omp', 'ohmypi', 'pi', 'picodingagent', 'qoder', 'qodercli',
@@ -185,10 +153,6 @@
   let lastLeasedColumns = $state(0);
   let renderedResizeColumns = $state(0);
   let queuedLease: { columns: number; force: boolean } | null = null;
-  let resizeReadPending = $state(false);
-  let resizeExpectedLines = 0;
-  let resizeSettleDeadline = 0;
-  let resizeReadTimer: ReturnType<typeof setTimeout> | undefined;
   const keyQueue: QueuedKeyCommand[] = [];
   let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   let keyReadTimer: ReturnType<typeof setTimeout> | undefined;
@@ -218,7 +182,8 @@
     && slashQuery !== null
     && dismissedSlashQuery !== composer);
   const terminalPlainText = $derived(
-    stripAnsi(displayed).replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
+    stripAnsi(displayed)
+      .replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
   const terminalTextMode = $derived(inspectionMode && terminalTextInputActive(terminalPlainText));
   const composerLocked = $derived(responsePending || (inspectionMode && !terminalTextMode));
@@ -300,35 +265,13 @@
     const next = frame;
     const preserve = true;
     const preserveLineEnds = !resizeSessionActive;
-    const cachedResizeFrame = validResizedTerminalFrame(next);
-    if (resizeSessionActive
-      && cachedResizeFrame
-      && (lastLeasedColumns === 0
-        || resizeReadPending
-        || next === resizeFrameBaseline)) {
-      renderedResizeColumns = cachedResizeFrame.columns;
-      showingCachedResizeFrame = true;
-      const cachedLayoutChanged = !lastPreserveLayout || lastPreserveLineEnds;
-      if (cachedLayoutChanged || !lastContent) {
-        untrack(() => { void applyCachedResizeFrame(cachedResizeFrame); });
-      }
-      return;
-    }
-    const incompleteResizeHistory = resizeSessionActive
-      && !resizeReadPending
-      && resizeExpectedLines >= PANE_SIZE_SETTLE_MIN_HISTORY
-      && next !== resizeFrameBaseline
-      && !next?.viewportOnly
-      && terminalFrameLineCount(next) * 2 < resizeExpectedLines
-      && Date.now() < resizeSettleDeadline;
-    if (incompleteResizeHistory) scheduleSettledPaneRead(agent, leaseGeneration);
+    // A frame read while the agent repaints at a new width shows a half-drawn
+    // screen; hold the placeholder until a stable frame at the new width lands.
     const waitingForResizedFrame = resizeSessionActive
       && !paneSizeLeaseError
       && (lastLeasedColumns === 0
-        || resizeReadPending
-        || next === resizeFrameBaseline
-        || incompleteResizeHistory);
-    if (waitingForResizedFrame && showingCachedResizeFrame) return;
+        || (Boolean(resizeFrameBaseline)
+          && (next === resizeFrameBaseline || next?.resizeSettling === true)));
     if (!next || next.paneId !== agent.pane_id || waitingForResizedFrame) {
       untrack(() => {
         if (waitingForResizedFrame && pendingResizeStick === null) {
@@ -352,13 +295,9 @@
       });
       return;
     }
-    showingCachedResizeFrame = false;
     if (resizeSessionActive && lastLeasedColumns > 0) renderedResizeColumns = lastLeasedColumns;
-    resizeFrameBaseline = undefined;
-    resizeExpectedLines = 0;
-    resizeSettleDeadline = 0;
-    const renderFrame = resizedTerminalHistoryFrame(next);
-    untrack(() => { void applyFrame(renderFrame, preserve, preserveLineEnds, next); });
+    historyTruncated = Boolean(next.truncated);
+    untrack(() => { void applyFrame(next, preserve, preserveLineEnds) });
   });
 
   $effect(() => {
@@ -378,7 +317,6 @@
     const connection = $connections.get(agent.relay_id);
     const interfaceSizeValue = $interfaceSize;
     const paneId = agent.pane_id;
-    const baselineFrame = frame;
     void interfaceSizeValue;
     if (questionMode) {
       releasePaneSizeLease(componentMounted);
@@ -396,27 +334,10 @@
       return;
     }
     if (leaseTarget && leaseTarget.pane_id !== paneId) releasePaneSizeLease(componentMounted);
-    const validBaseline = Boolean(
-      baselineFrame && baselineFrame.paneId === paneId && !baselineFrame.viewportOnly,
-    );
-    if (!leaseTarget && !validBaseline) {
-      paneSizeLeaseError = '';
-      if (resizeBaselineRequestPane !== paneId) {
-        resizeBaselineRequestPane = paneId;
-        resizeBaselineRequestFrame = baselineFrame;
-        relayStore.readPane(agent, true);
-        return;
-      }
-      if (baselineFrame === resizeBaselineRequestFrame) return;
-    }
-    if (!resizeHistoryBaseline && validBaseline && baselineFrame) {
-      resizeHistoryBaseline = baselineFrame;
-      resizeBaselineRequestPane = '';
-      resizeBaselineRequestFrame = undefined;
-    }
     paneSizeLeaseError = '';
     void tick().then(() => requestPaneSizeLease(false));
   });
+
   $effect.pre(() => {
     const interfaceSizeValue = $interfaceSize;
     void interfaceSizeValue;
@@ -568,14 +489,10 @@
     next: TerminalFrame,
     preserve = true,
     preserveLineEnds = preserve && !resizeSessionActive,
-    cacheFrame = next,
   ) {
     const layoutChanged = preserve !== lastPreserveLayout
       || preserveLineEnds !== lastPreserveLineEnds;
-    if (next.content === lastContent && next.format === lastFormat && !layoutChanged) {
-      rememberCurrentResizeFrame(cacheFrame, displayed, renderedHtml, renderedRows);
-      return;
-    }
+    if (next.content === lastContent && next.format === lastFormat && !layoutChanged) return;
     const rendered = renderTerminalContent(
       next.content,
       next.format,
@@ -585,10 +502,7 @@
     );
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
-      && next.format === lastFormat && !layoutChanged) {
-      rememberCurrentResizeFrame(cacheFrame, rendered.display, rendered.html, rendered.rows);
-      return;
-    }
+      && next.format === lastFormat && !layoutChanged) return;
     const frameStick = terminalElement
       ? terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48
       : virtualStickToBottom;
@@ -602,8 +516,10 @@
       ? null
       : pendingResizeAnchor || currentVirtualAnchor(previousTop);
     // Rows cropped from the front shift every index; keep the anchor on the
-    // same row so appended output cannot move the reader's position.
-    const rowShift = previousAnchor ? renderedRowShift(renderedRows, rendered.rows) : 0;
+    // same row.
+    const rowShift = previousAnchor
+      ? renderedRowShift(renderedRows, rendered.rows)
+      : 0;
     if (previousAnchor && rowShift) {
       previousAnchor = { ...previousAnchor, index: Math.max(0, previousAnchor.index - rowShift) };
     }
@@ -622,7 +538,6 @@
       stick ? Number.POSITIVE_INFINITY : previousTop,
       previousAnchor,
     );
-    rememberCurrentResizeFrame(cacheFrame, rendered.display, rendered.html, rendered.rows);
     await tick();
     if (!terminalElement) {
       virtualScrollResetPending = false;
@@ -715,7 +630,8 @@
     scrollTop: number,
     previousAnchor = currentVirtualAnchor(scrollTop),
   ) {
-    const width = terminalElement?.clientWidth || Math.round(currentViewportWidth());
+    const width = terminalElement?.clientWidth
+      || Math.round(window.visualViewport?.width || window.innerWidth);
     const layoutSignature = [
       lastPreserveLayout ? 'preserve' : 'readable',
       resizeSessionActive ? 'resize' : 'fixed',
@@ -1379,156 +1295,18 @@
     );
   }
 
-  function currentViewportWidth(): number {
-    return window.visualViewport?.width || window.innerWidth;
-  }
-
-  async function applyCachedResizeFrame(cached: ResizedTerminalFrame) {
-    const stick = pendingResizeStick ?? virtualStickToBottom;
-    const previousTop = terminalElement?.scrollTop || 0;
-    const previousAnchor = stick
-      ? null
-      : pendingResizeAnchor || currentVirtualAnchor(previousTop);
-    pendingResizeStick = null;
-    pendingResizeAnchor = null;
-    virtualStickToBottom = stick;
-    virtualScrollResetPending = Boolean(terminalElement);
-    displayed = cached.display;
-    renderedHtml = cached.html;
-    renderedRows = cached.rows;
-    lastContent = cached.frame.content;
-    lastFormat = cached.frame.format;
-    lastPreserveLayout = true;
-    lastPreserveLineEnds = false;
-    const nextTop = resetVirtualRows(
-      stick ? Number.POSITIVE_INFINITY : previousTop,
-      previousAnchor,
-    );
-    await tick();
-    if (!terminalElement) {
-      virtualScrollResetPending = false;
-      return;
-    }
-    terminalElement.scrollLeft = 0;
-    terminalElement.scrollTop = stick ? terminalElement.scrollHeight : nextTop;
-    rememberVirtualScrollGeometry(terminalElement);
-    virtualScrollResetPending = false;
-    jumpVisible = !stick;
-    observeVirtualRows();
-  }
-
-  function rememberCurrentResizeFrame(
-    next: TerminalFrame,
-    display: string,
-    html: string,
-    rows: RenderedTerminalRow[],
-  ) {
-    if (!resizeSessionActive || lastLeasedColumns < 1) return;
-    rememberResizedTerminalFrame(agent.pane_id, {
-      frame: next,
-      columns: lastLeasedColumns,
-      display,
-      html,
-      rows,
-      historyLines: $terminalHistoryLines,
-      interfaceSize: $interfaceSize,
-      viewportWidth: currentViewportWidth(),
-    });
-  }
-
-  function validResizedTerminalFrame(value: TerminalFrame | undefined): ResizedTerminalFrame | null {
-    const cached = resizedTerminalFrames.get(agent.pane_id);
-    if (!value
-      || value !== cached?.frame
-      || cached.historyLines !== $terminalHistoryLines
-      || cached.interfaceSize !== $interfaceSize
-      || Math.abs(cached.viewportWidth - currentViewportWidth()) >= 1) return null;
-    return cached;
-  }
-
-  function resizedTerminalHistoryFrame(next: TerminalFrame): TerminalFrame {
-    if (!next.viewportOnly) {
-      resizeHistoryTruncated = Boolean(next.truncated);
-      return next;
-    }
-    const rows = next.viewportRows || 0;
-    if (!resizeHistoryBaseline || rows < 1) {
-      resizeHistoryTruncated = Boolean(next.truncated);
-      return next;
-    }
-    const merged = mergeResizedTerminalHistory(
-      resizeHistoryBaseline.content,
-      next.content,
-      rows,
-      $terminalHistoryLines,
-      resizeHistoryState,
-      Boolean(resizeHistoryBaseline.truncated),
-      resizeHistorySkipCommit || next.resizeSettling === true,
-    );
-    resizeHistorySkipCommit = false;
-    resizeHistoryState = merged.state;
-    resizeHistoryTruncated = merged.truncated;
-    return {
-      ...next,
-      content: merged.content,
-      truncated: merged.truncated,
-    };
-  }
-
-  function terminalFrameLineCount(value: TerminalFrame | undefined): number {
-    if (!value?.content) return 0;
-    let lines = 1;
-    for (let index = 0; index < value.content.length; index += 1) {
-      if (value.content.charCodeAt(index) === 10) lines += 1;
-    }
-    return lines;
-  }
-
   function beginResizeSettling() {
-    if (resizeReadTimer) clearTimeout(resizeReadTimer);
-    resizeReadTimer = undefined;
     resizeFrameBaseline = frame;
-    resizeExpectedLines = Math.min(terminalFrameLineCount(frame), $terminalHistoryLines);
-    resizeSettleDeadline = Date.now() + PANE_SIZE_SETTLE_TIMEOUT_MS;
-    resizeReadPending = true;
-  }
-
-  function scheduleSettledPaneRead(target: Agent, generation: number) {
-    if (resizeReadTimer) clearTimeout(resizeReadTimer);
-    resizeReadPending = true;
-    resizeReadTimer = setTimeout(() => {
-      resizeReadTimer = undefined;
-      if (generation !== leaseGeneration
-        || leaseTarget?.pane_id !== target.pane_id
-        || !paneSizeLeaseSupported(target)) {
-        resizeReadPending = false;
-        return;
-      }
-      resizeFrameBaseline = frame;
-      resizeReadPending = false;
-      relayStore.readPane(target, true);
-    }, PANE_SIZE_SETTLE_MS);
   }
 
   function clearResizeSettling() {
-    if (resizeReadTimer) clearTimeout(resizeReadTimer);
-    resizeReadTimer = undefined;
-    resizeReadPending = false;
-    resizeExpectedLines = 0;
-    resizeSettleDeadline = 0;
+    resizeFrameBaseline = undefined;
   }
 
   function discardPaneSizeLease() {
     leaseGeneration += 1;
     leaseTarget = null;
     lastLeasedColumns = 0;
-    resizeFrameBaseline = undefined;
-    resizeHistoryBaseline = undefined;
-    resizeBaselineRequestPane = '';
-    resizeBaselineRequestFrame = undefined;
-    resizeHistoryState = undefined;
-    resizeHistorySkipCommit = false;
-    resizeHistoryTruncated = false;
     clearResizeSettling();
     queuedLease = null;
   }
@@ -1581,11 +1359,7 @@
         const generation = leaseGeneration;
         leaseTarget = target;
         try {
-          const resizing = request.columns !== lastLeasedColumns;
-          if (resizing) {
-            if (!resizeHistoryBaseline && frame && !frame.viewportOnly) resizeHistoryBaseline = frame;
-            beginResizeSettling();
-          }
+          if (request.columns !== lastLeasedColumns) beginResizeSettling();
           const appliedColumns = await relayStore.leasePaneSize(target, request.columns);
           if (generation !== leaseGeneration
             || leaseTarget?.pane_id !== target.pane_id
@@ -1595,11 +1369,9 @@
           lastLeasedColumns = appliedColumns;
           paneSizeLeaseError = '';
           if (changed) {
-            // The agent re-renders its transcript at the new width and pushes
-            // a redrawn block into the scrollback; the next merged frame must
-            // not commit it as history.
-            if (previousColumns > 0 || resizeHistoryState) resizeHistorySkipCommit = true;
-            scheduleSettledPaneRead(target, generation);
+            // The pane repaints at the new width: read again so the live
+            // screen is the resized one. History stays with the relay journal.
+            relayStore.readPane(target, true);
           }
         } catch (error) {
           if (generation === leaseGeneration
@@ -1900,7 +1672,7 @@
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
     {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
-    {#if resizeHistoryTruncated || (!frame?.viewportOnly && frame?.truncated)}
+    {#if historyTruncated}
       <p class="upload-status" role="status">Older terminal history is not shown; this pane response was limited.</p>
     {/if}
 
