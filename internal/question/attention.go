@@ -37,45 +37,54 @@ var (
 			`(?:esc|escape)\s+(?:to\s+)?(?:cancel|reject|deny|exit)|` +
 			`(?:↑/↓|up/down).*(?:navigate|select)|tab\s+to\s+(?:edit|amend))`,
 	)
-	normalPromptPattern = regexp.MustCompile(`^\s*[❯›>]\s*(?:$|(?:ask|describe|type|send)\b.*)$`)
+	normalPromptPattern = regexp.MustCompile(`(?i)^\s*[❯›>]\s*(?:$|(?:ask|describe|type|send|use)\b.*)$`)
 	statusFooterPattern = regexp.MustCompile(
 		`(?i)(?:\bcontext\s+\d+%\s+used\b|\bctx\s*:?\s*(?:\d+%|-+)|` +
 			`\?\s+for\s+shortcuts|\b(?:manual|plan)\s+mode\b|` +
 			`\b(?:shift\+tab|ctrl\+|cmd\+)|\b\d+\s+agents?\b)`,
 	)
-	ompPlanMenuPattern  = regexp.MustCompile(`(?i)^plan mode\s*[-–—]\s*next step$`)
-	ompPlanFocusPattern = regexp.MustCompile(`^[❯›>\x{f054}]\s+`)
+	ompPlanMenuPattern         = regexp.MustCompile(`(?i)^plan mode\s*[-–—]\s*next step$`)
+	ompPlanFocusPattern        = regexp.MustCompile(`^[❯›>\x{f054}]\s+`)
+	ompInputHeaderPattern      = regexp.MustCompile(`^╭[─━═]{2}.*╮$`)
+	ompInputFooterPattern      = regexp.MustCompile(`^╰[─━═].*[─━═]╯$`)
+	openCodeInputPromptPattern = regexp.MustCompile(`(?i)\bask anything\.\.\.`)
+	piInputStatusPattern       = regexp.MustCompile(`(?i)\d+(?:\.\d+)?%/\d+[km]\b`)
+	terminalRulePattern        = regexp.MustCompile(`^[─━═_—]{8,}$`)
 )
 
 // Classify determines what, if anything, the live control region is asking
 // the user to do. A blocked agent status is deliberately not an input.
 func Classify(text, agent string) Classification {
-	if !Supports(agent) {
+	structuredControls := Supports(agent)
+	inputReady := normalInputPrompt(text, agent)
+	if !structuredControls && !inputReady {
 		return Classification{
 			Kind:   AttentionUnknown,
 			Prompt: compact(PaneSummary(text), 500),
 		}
 	}
-	if interaction := Parse(text, agent); interaction != nil {
-		return Classification{
-			Kind:           AttentionQuestion,
-			Prompt:         interaction.Question,
-			Command:        interaction.Question,
-			Interaction:    interaction,
-			QuestionLayout: true,
+	if structuredControls {
+		if interaction := Parse(text, agent); interaction != nil {
+			return Classification{
+				Kind:           AttentionQuestion,
+				Prompt:         interaction.Question,
+				Command:        interaction.Question,
+				Interaction:    interaction,
+				QuestionLayout: true,
+			}
+		}
+		if options, focus := liveApprovalDetails(text, agent); len(options) > 0 {
+			summaryLines := paneSummaryLines(text)
+			return Classification{
+				Kind:          AttentionApproval,
+				Prompt:        compact(strings.Join(summaryLines, "\n"), 500),
+				Command:       compact(approvalCommand(summaryLines), 240),
+				Options:       options,
+				ApprovalFocus: focus,
+			}
 		}
 	}
-	if options, focus := liveApprovalDetails(text, agent); len(options) > 0 {
-		summaryLines := paneSummaryLines(text)
-		return Classification{
-			Kind:          AttentionApproval,
-			Prompt:        compact(strings.Join(summaryLines, "\n"), 500),
-			Command:       compact(approvalCommand(summaryLines), 240),
-			Options:       options,
-			ApprovalFocus: focus,
-		}
-	}
-	if normalInputPrompt(text, agent) {
+	if inputReady {
 		response := LatestCompletedResponse(text)
 		if response == "" {
 			response = PaneSummary(text)
@@ -341,10 +350,16 @@ func qoderApprovalTailLine(line string) bool {
 
 func normalInputPrompt(text, agent string) bool {
 	normalized := strings.ToLower(agent)
-	if !Supports(normalized) {
+	if !Supports(normalized) && !strings.Contains(normalized, "kimi") {
 		return false
 	}
 	lines := cleanLines(text)
+	if ompInputFramePrompt(lines, normalized) ||
+		piInputFramePrompt(lines, normalized) ||
+		openCodeInputPrompt(lines, normalized) ||
+		kimiInputFramePrompt(lines, normalized) {
+		return true
+	}
 	for index := len(lines) - 1; index >= 0 && index >= len(lines)-10; index-- {
 		if !normalPromptPattern.MatchString(lines[index]) {
 			continue
@@ -358,6 +373,87 @@ func normalInputPrompt(text, agent string) bool {
 			break
 		}
 		if validTail {
+			return true
+		}
+	}
+	return false
+}
+
+func ompInputFramePrompt(lines []string, agent string) bool {
+	if !ompAskAgent(agent) {
+		return false
+	}
+	last := len(lines) - 1
+	for last >= 0 && lines[last] == "" {
+		last--
+	}
+	if last < 1 || !ompInputFooterPattern.MatchString(lines[last]) {
+		return false
+	}
+	previous := last - 1
+	for previous >= 0 && lines[previous] == "" {
+		previous--
+	}
+	return previous >= 0 && ompInputHeaderPattern.MatchString(lines[previous])
+}
+
+func piInputFramePrompt(lines []string, agent string) bool {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	if agent != "pi" && !strings.HasPrefix(agent, "pi-") {
+		return false
+	}
+	last := len(lines) - 1
+	for last >= 0 && lines[last] == "" {
+		last--
+	}
+	if last < 1 || !piInputStatusPattern.MatchString(lines[last]) {
+		return false
+	}
+	rules := 0
+	for index := last - 1; index >= 0 && index >= last-6; index-- {
+		if !terminalRulePattern.MatchString(lines[index]) {
+			continue
+		}
+		rules++
+		if rules == 2 {
+			return true
+		}
+	}
+	return false
+}
+
+func openCodeInputPrompt(lines []string, agent string) bool {
+	if !strings.Contains(strings.ToLower(agent), "opencode") {
+		return false
+	}
+	for index := len(lines) - 1; index >= 0 && index >= len(lines)-12; index-- {
+		if openCodeInputPromptPattern.MatchString(lines[index]) {
+			return true
+		}
+	}
+	return false
+}
+
+func kimiInputFramePrompt(lines []string, agent string) bool {
+	if !strings.Contains(strings.ToLower(agent), "kimi") {
+		return false
+	}
+	for footer := len(lines) - 1; footer >= 2 && footer >= len(lines)-12; footer-- {
+		if !ompInputFooterPattern.MatchString(lines[footer]) {
+			continue
+		}
+		prompt := footer - 1
+		for prompt >= 0 && lines[prompt] == "" {
+			prompt--
+		}
+		if prompt < 1 || !normalPromptPattern.MatchString(lines[prompt]) {
+			continue
+		}
+		header := prompt - 1
+		for header >= 0 && lines[header] == "" {
+			header--
+		}
+		if header >= 0 && ompInputHeaderPattern.MatchString(lines[header]) {
 			return true
 		}
 	}

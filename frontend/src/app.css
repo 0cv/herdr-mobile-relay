@@ -425,8 +425,8 @@ textarea { min-height: 6.5rem; resize: vertical; }
   min-height: 0;
   overflow: auto;
   overflow-wrap: anywhere;
-  overscroll-behavior: contain;
-  padding: 10px 16px;
+  overscroll-behavior: none;
+  padding: 10px 16px 0;
   white-space: pre-wrap;
   word-break: normal;
 }

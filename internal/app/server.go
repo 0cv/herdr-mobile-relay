@@ -1723,6 +1723,7 @@ func paneFrameFingerprint(response map[string]any) string {
 		response["truncated"],
 		response["viewport_only"],
 		response["viewport_rows"],
+		response["resize_settling"],
 		response["attention_kind"],
 		response["prompt"],
 		response["command"],

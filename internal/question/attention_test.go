@@ -150,6 +150,56 @@ gpt-5.6-sol xhigh · ~/project · main · Context 30% used
 	}
 }
 
+func TestClassifyIdleInputAfterProviderErrorAsChat(t *testing.T) {
+	tests := []struct {
+		agent string
+		tail  string
+	}{
+		{agent: "claude", tail: "❯\nOpus 5 | ctx: 31% | main"},
+		{agent: "codex", tail: "› Use /skills to list available skills\ngpt-5.6-sol · Context 27% used"},
+		{agent: "omp", tail: "╭── GPT-5.6-Luna · xhi · ~/project · main ╮\n╰─                                      ─╯"},
+		{agent: "pi", tail: "────────────────\n\n────────────────\n~/project (main)\n$0.000 (sub) 0.0%/272k (auto) · gpt-5.6-luna"},
+		{agent: "opencode", tail: "┃ Ask anything... \"Fix broken tests\" ┃\n┃ Build · Qwen3.6-27B ┃"},
+		{agent: "kimi", tail: "╭────────────────╮\n│ >              │\n╰────────────────╯\n~/project main\ncontext: 0%"},
+		{agent: "qodercli", tail: "> Type your message or @path/to/file\nctx 22% of 200k"},
+	}
+	for _, test := range tests {
+		t.Run(test.agent, func(t *testing.T) {
+			content := "Error: Retry failed after 1 attempts: Provider requested a long wait.\n\n" + test.tail
+			got := Classify(content, test.agent)
+			if got.Kind != AttentionChat || len(got.Options) != 0 || got.Interaction != nil {
+				t.Fatalf("classification = %+v, want chat without controls", got)
+			}
+		})
+	}
+}
+
+func TestClassifyCapturedIdleAgentPromptsAsChat(t *testing.T) {
+	tests := []struct {
+		agent   string
+		fixture string
+	}{
+		{agent: "claude", fixture: "claude-direct-real.ansi"},
+		{agent: "codex", fixture: "codex-direct-real.ansi"},
+		{agent: "omp", fixture: "omp-direct-real.ansi"},
+		{agent: "pi", fixture: "pi-direct-real.ansi"},
+		{agent: "qodercli", fixture: "qoder-direct-real.ansi"},
+	}
+	for _, test := range tests {
+		t.Run(test.agent, func(t *testing.T) {
+			path := filepath.Join("..", "copyresponse", "testdata", test.fixture)
+			content, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := Classify(string(content), test.agent)
+			if got.Kind != AttentionChat || len(got.Options) != 0 || got.Interaction != nil {
+				t.Fatalf("classification = %+v, want chat without controls", got)
+			}
+		})
+	}
+}
+
 func TestClassifyHistoricalAndSupersededApprovalsSafely(t *testing.T) {
 	historical := codexApprovalView + `
 • The checks passed. What would you like to do next?

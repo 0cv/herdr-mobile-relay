@@ -1523,6 +1523,31 @@ test('applies relay-watched terminal deltas and pauses the watcher when hidden',
   const hiddenCommandCount = (await commands(page)).length;
   await page.waitForTimeout(750);
   expect(await commands(page)).toHaveLength(hiddenCommandCount);
+  const terminal = page.getByRole('log');
+  const cachedScreen = await terminal.locator('.term-screen').innerHTML();
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(async () =>
+    (await commands(page)).findLast((command) => command.type === 'read_pane')).toMatchObject({
+    type: 'read_pane',
+    pane_id: 'w1:p1',
+    content_fingerprint: 'content-2',
+  });
+  await expect(terminal.locator('.term-screen')).toHaveJSProperty('innerHTML', cachedScreen);
+  await server(page, 0, {
+    type: 'pane_unchanged',
+    pane_id: 'w1:p1',
+    content_fingerprint: 'content-2',
+  });
+  await expect(terminal.locator('.term-screen')).toHaveJSProperty('innerHTML', cachedScreen);
+  await expect.poll(async () =>
+    (await commands(page)).findLast((command) => command.type === 'watch_pane')).toMatchObject({
+    type: 'watch_pane',
+    pane_id: 'w1:p1',
+    content_fingerprint: 'content-2',
+  });
 });
 
 test('resets drafts and terminal output when moving to another agent', async ({ page }) => {
@@ -1551,14 +1576,21 @@ test('resets drafts and terminal output when moving to another agent', async ({ 
 test('replaces a half-open socket immediately when a sleeping phone resumes', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
-  await handshake(page, 0);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
   await server(page, 0, {
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume app', agent: 'codex' }],
   });
   await page.getByRole('button', { name: 'Open Resume app on Fedora' }).click();
-  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'cached terminal output' });
-  await expect(page.getByRole('log')).toContainText('cached terminal output');
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
+    content: 'cached terminal output', content_fingerprint: 'resume-cache-1',
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('cached terminal output');
+  const cachedScreen = await terminal.locator('.term-screen').innerHTML();
 
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
@@ -1575,11 +1607,16 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(() => socketCount(page)).toBe(2);
-  await handshake(page, 1);
+  await handshake(page, 1, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
   await expect.poll(async () =>
     (await commandsForSocket(page, 1)).some((command) => command.type === 'read_pane')).toBe(true);
+  await expect(terminal.locator('.term-screen')).toHaveJSProperty('innerHTML', cachedScreen);
+  await expect(terminal).not.toContainText('Resizing terminal…');
   await server(page, 1, {
-    type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: 'fresh output after resume',
+    type: 'pane_content', pane_id: 'w1:p1', format: 'plain',
+    content: 'fresh output after resume', content_fingerprint: 'resume-cache-2',
   });
   await expect(page.getByRole('log')).toContainText('fresh output after resume');
   await server(page, 1, {
@@ -2080,7 +2117,8 @@ test('restores a non-bottom anchor after a Resize Session width change', async (
   await page.setViewportSize({ width: viewport.width + 160, height: viewport.height });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
-  await expect(terminal).toContainText('Resizing terminal…');
+  await expect(terminal).toContainText(anchor.text);
+  await expect(terminal).not.toContainText('Resizing terminal…');
   const lease = (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').at(-1)!;
   const readsBeforeResult = (await commands(page))
@@ -2094,6 +2132,8 @@ test('restores a non-bottom anchor after a Resize Session width change', async (
   });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readsBeforeResult);
+  await expect(terminal).toContainText(anchor.text);
+  await expect(terminal).not.toContainText('Resizing terminal…');
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
@@ -2197,6 +2237,22 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   });
   await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
   await expect(terminal).toContainText('stored resize history row 120');
+  await expect.poll(async () => terminal.evaluate((element) => {
+    const lastRow = element.querySelector<HTMLElement>('[data-terminal-row="119"]');
+    if (!lastRow) return Number.POSITIVE_INFINITY;
+    return element.getBoundingClientRect().bottom - lastRow.getBoundingClientRect().bottom;
+  })).toBeLessThan(1);
+  const stableBottomScreen = await terminal.locator('.term-screen').innerHTML();
+  await terminal.evaluate((element) => {
+    const bottom = Math.max(0, element.scrollHeight - element.clientHeight);
+    element.scrollTop = Math.max(0, bottom - 12);
+    element.dispatchEvent(new Event('scroll'));
+    element.scrollTop = Math.max(0, bottom - 6);
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(1);
+  await expect(terminal.locator('.term-screen')).toHaveJSProperty('innerHTML', stableBottomScreen);
 
   const viewport = page.viewportSize()!;
   await page.setViewportSize({ width: viewport.width + 200, height: viewport.height });
@@ -2233,9 +2289,10 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBe(leaseCountBeforeReentry + 1);
-  // Reopening re-leases the pane; the resized screen is awaited, never guessed
-  // from a stale render.
-  await expect(terminal).toContainText('Resizing terminal…');
+  // Reopening keeps the phone's cached pane painted while the relay restores
+  // the shared width and checks for a newer stable frame.
+  await expect(terminal).toContainText('stored resize history row 120');
+  await expect(terminal).not.toContainText('Resizing terminal…');
 
   const reentryLease = (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').at(-1)!;
@@ -2262,14 +2319,32 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     viewport_only: true,
     viewport_rows: 46,
     resize_settling: true,
+    content_fingerprint: 'resize-settling',
   });
   await expect(terminal).not.toContainText('transient viewport row');
+  await expect(terminal).toContainText('stored resize history row 120');
+  const readsBeforeSettledUpdate = (await commands(page))
+    .filter((command) => command.type === 'read_pane').length;
+  // The content can stop changing before the relay's resize settle window
+  // closes. Its metadata-only delta must trigger a stable frame resync.
+  await server(page, 0, {
+    type: 'pane_delta',
+    pane_id: 'w1:p1',
+    format: 'ansi',
+    base_fingerprint: 'resize-settling',
+    content_fingerprint: 'resize-settling',
+    segments: null,
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length)
+    .toBeGreaterThan(readsBeforeSettledUpdate);
   await page.waitForTimeout(300);
   await server(page, 0, {
     type: 'pane_content',
     pane_id: 'w1:p1',
     format: 'ansi',
     content: storedHistory,
+    content_fingerprint: 'resize-settled',
   });
   await expect(terminal.locator('.term-screen')).toHaveAttribute('data-terminal-row-count', '120');
   await expect(terminal).toContainText('stored resize history row 120');

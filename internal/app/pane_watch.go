@@ -23,6 +23,7 @@ type paneWatchFrame struct {
 	contentFingerprint  string
 	frameFingerprint    string
 	classificationAgent string
+	resizeSettling      bool
 }
 
 type paneWatch struct {
@@ -163,8 +164,12 @@ func (s *Server) pollPaneWatch(watch *paneWatch) {
 	}
 	probeFingerprint := paneFingerprint(probeContent)
 	classificationAgentID, _ := s.agentInfo(watch.paneID)
-	if previousProbe != "" && probeFingerprint == previousProbe &&
-		(acknowledged == nil || acknowledged.classificationAgent == classificationAgentID) {
+	if !paneWatchNeedsFrameRead(
+		previousProbe,
+		probeFingerprint,
+		acknowledged,
+		classificationAgentID,
+	) {
 		return
 	}
 
@@ -201,13 +206,28 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 	contentFingerprint := paneFingerprint(content)
 	frameFingerprint := paneFrameFingerprint(response)
 	classificationAgentID, _ := s.agentInfo(watch.paneID)
+	resizeSettling, _ := response["resize_settling"].(bool)
 	response["content_fingerprint"] = contentFingerprint
 	return response, &paneWatchFrame{
 		content:             content,
 		contentFingerprint:  contentFingerprint,
 		frameFingerprint:    frameFingerprint,
 		classificationAgent: classificationAgentID,
+		resizeSettling:      resizeSettling,
 	}
+}
+
+func paneWatchNeedsFrameRead(
+	previousProbe, probeFingerprint string,
+	acknowledged *paneWatchFrame,
+	classificationAgentID string,
+) bool {
+	if previousProbe == "" || probeFingerprint != previousProbe {
+		return true
+	}
+	return acknowledged != nil &&
+		(acknowledged.resizeSettling ||
+			acknowledged.classificationAgent != classificationAgentID)
 }
 
 func (s *Server) paneWatchCurrent(watch *paneWatch) bool {

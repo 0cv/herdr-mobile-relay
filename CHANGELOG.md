@@ -5,6 +5,23 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-08-16
+
+### Fixed
+
+- Reopening a previously viewed pane no longer leaves **Resize Session** stuck
+  on “Resizing terminal…” when the terminal content stops changing before the
+  resize settle window closes.
+- Waking a sleeping phone or reopening a pane now keeps the cached terminal
+  painted while the relay checks for a newer frame, then preserves the user's
+  scroll anchor while a changed pane is redrawn.
+- The terminal now reaches and snaps to its exact bottom without rubber-band
+  overscroll, removing the persistent gap and flicker below the final row.
+- Idle input prompts for Claude, Codex, OMP, Pi, OpenCode, Qoder, and Kimi are
+  recognized after provider rate-limit failures, so the terminal returns to
+  the chat composer instead of remaining in **Needs inspection** with text
+  input disabled.
+
 ## [0.16.0] - 2026-08-16
 
 ### Changed
@@ -586,8 +603,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.0...HEAD
-[0.16.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.11...v0.16.0
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.0...v0.16.1
 [0.15.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...v0.15.11
 [0.15.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...v0.15.8
 [0.15.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.6...v0.15.7

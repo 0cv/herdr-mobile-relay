@@ -152,6 +152,47 @@ func TestPaneWatchUpdateSendsMetadataOnlyDelta(t *testing.T) {
 	}
 }
 
+func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
+	settlingResponse := map[string]any{
+		"type":            "pane_content",
+		"content":         "unchanged terminal",
+		"resize_settling": true,
+	}
+	settledResponse := map[string]any{
+		"type":    "pane_content",
+		"content": "unchanged terminal",
+	}
+	acknowledged := &paneWatchFrame{
+		content:            "unchanged terminal",
+		contentFingerprint: "content-1",
+		frameFingerprint:   paneFrameFingerprint(settlingResponse),
+		resizeSettling:     true,
+	}
+	current := &paneWatchFrame{
+		content:            "unchanged terminal",
+		contentFingerprint: "content-1",
+		frameFingerprint:   paneFrameFingerprint(settledResponse),
+	}
+	if acknowledged.frameFingerprint == current.frameFingerprint {
+		t.Fatal("resize settling state did not change the pane frame fingerprint")
+	}
+
+	if !paneWatchNeedsFrameRead("probe-1", "probe-1", acknowledged, "") {
+		t.Fatal("settling pane frame would not be re-read after an unchanged probe")
+	}
+	if paneWatchNeedsFrameRead("probe-1", "probe-1", current, "") {
+		t.Fatal("settled pane frame would be re-read after an unchanged probe")
+	}
+	update := paneWatchUpdate(settledResponse, acknowledged, current)
+	if update["type"] != "pane_delta" ||
+		update["base_fingerprint"] != "content-1" {
+		t.Fatalf("resize settled update = %#v", update)
+	}
+	if update["resize_settling"] == true {
+		t.Fatalf("resize settled update remained transient: %#v", update)
+	}
+}
+
 func TestPreparePaneResponsePreservesHistoryDuringResizeSession(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{

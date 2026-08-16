@@ -263,23 +263,40 @@
 
   $effect(() => {
     const next = frame;
+    const matchingFrame = next?.paneId === agent.pane_id ? next : undefined;
     const preserve = true;
     const preserveLineEnds = !resizeSessionActive;
-    // A frame read while the agent repaints at a new width shows a half-drawn
-    // screen; hold the placeholder until a stable frame at the new width lands.
+    // A frame read while the agent repaints at a new width is transient. Keep
+    // the phone's last stable frame painted until the new stable frame lands.
     const waitingForResizedFrame = resizeSessionActive
       && !paneSizeLeaseError
       && (lastLeasedColumns === 0
         || (Boolean(resizeFrameBaseline)
           && (next === resizeFrameBaseline || next?.resizeSettling === true)));
-    if (!next || next.paneId !== agent.pane_id || waitingForResizedFrame) {
+    const cachedFrame = waitingForResizedFrame
+      && matchingFrame
+      && matchingFrame.resizeSettling !== true
+      && (!resizeFrameBaseline || matchingFrame === resizeFrameBaseline)
+        ? matchingFrame
+        : undefined;
+    if (waitingForResizedFrame) {
       untrack(() => {
-        if (waitingForResizedFrame && pendingResizeStick === null) {
-          pendingResizeStick = virtualStickToBottom;
-          pendingResizeAnchor = virtualStickToBottom
-            ? null
-            : currentVirtualAnchor(terminalElement?.scrollTop || 0);
-        } else if (!waitingForResizedFrame) {
+        if (pendingResizeStick !== null) return;
+        pendingResizeStick = virtualStickToBottom;
+        pendingResizeAnchor = virtualStickToBottom
+          ? null
+          : currentVirtualAnchor(terminalElement?.scrollTop || 0);
+      });
+      if (cachedFrame) {
+        historyTruncated = Boolean(cachedFrame.truncated);
+        untrack(() => { void applyFrame(cachedFrame, preserve, preserveLineEnds) });
+        return;
+      }
+      if (renderedRows.length) return;
+    }
+    if (!matchingFrame || waitingForResizedFrame) {
+      untrack(() => {
+        if (!waitingForResizedFrame) {
           pendingResizeStick = null;
           pendingResizeAnchor = null;
         }
@@ -296,8 +313,8 @@
       return;
     }
     if (resizeSessionActive && lastLeasedColumns > 0) renderedResizeColumns = lastLeasedColumns;
-    historyTruncated = Boolean(next.truncated);
-    untrack(() => { void applyFrame(next, preserve, preserveLineEnds) });
+    historyTruncated = Boolean(matchingFrame.truncated);
+    untrack(() => { void applyFrame(matchingFrame, preserve, preserveLineEnds) });
   });
 
   $effect(() => {
@@ -438,7 +455,7 @@
         return;
       }
       lastRefreshAt = Date.now();
-      relayStore.readPane(agent, true);
+      relayStore.readPane(agent);
       relayStore.watchPane(agent);
     };
     const findShortcut = (event: KeyboardEvent) => {
@@ -1254,17 +1271,24 @@
     const scrollTop = terminalElement.scrollTop;
     const scrollHeight = terminalElement.scrollHeight;
     const clientHeight = terminalElement.clientHeight;
-    const atBottom = scrollHeight - scrollTop - clientHeight < 48;
+    const bottomDistance = scrollHeight - scrollTop - clientHeight;
+    const atBottom = bottomDistance < 48;
     // Only a viewport/controls height change may re-pin: content growth also
     // changes scrollHeight, and a user scrolling up during a stream must win.
     const layoutChanged = Math.abs(clientHeight - virtualClientHeight) >= 1;
     const movedTowardHistory = !layoutChanged && scrollTop < virtualScrollTop - 1;
     rememberVirtualScrollGeometry(terminalElement);
-    if (atBottom) {
+    if (movedTowardHistory) {
+      virtualStickToBottom = false;
+      jumpVisible = true;
+    } else if (atBottom) {
+      if (bottomDistance > 0.5) {
+        jumpToBottom();
+        return;
+      }
       virtualStickToBottom = true;
       jumpVisible = false;
-    } else if (!virtualStickToBottom || movedTowardHistory) {
-      virtualStickToBottom = false;
+    } else if (!virtualStickToBottom) {
       jumpVisible = true;
     } else {
       jumpToBottom();
