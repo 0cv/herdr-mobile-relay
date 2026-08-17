@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -306,7 +307,12 @@ func paneWatchUpdate(
 		return response
 	}
 	if acknowledged.contentFingerprint == current.contentFingerprint {
-		return paneDeltaResponse(response, acknowledged.contentFingerprint, nil)
+		// Preserve the frame through a tiny copy segment. Released clients
+		// reconstruct an empty segment list as empty terminal content.
+		segments := []panedelta.Segment{{
+			CopyLines: strings.Count(current.content, "\n") + 1,
+		}}
+		return paneDeltaResponse(response, acknowledged.contentFingerprint, segments)
 	}
 	segments := panedelta.Build(acknowledged.content, current.content)
 	if panedelta.Efficient(segments, current.content) {

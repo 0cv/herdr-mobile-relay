@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-08-17
+
+### Fixed
+
+- Opening an unchanged terminal no longer loops between a metadata-only pane
+  update and a full resynchronization, which retransmitted the complete
+  terminal history continuously and made idle data use scale with scrollback.
+
 ## [0.16.2] - 2026-08-16
 
 ### Changed
@@ -612,7 +620,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.2...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.3...HEAD
+[0.16.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.1...v0.16.2
 [0.15.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...v0.15.11
 [0.15.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.7...v0.15.8

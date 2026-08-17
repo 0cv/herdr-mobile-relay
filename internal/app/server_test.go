@@ -185,22 +185,22 @@ func TestPaneDeltaResponsePreservesTruncation(t *testing.T) {
 func TestPaneWatchUpdateSendsMetadataOnlyDelta(t *testing.T) {
 	response := map[string]any{
 		"type":           "pane_content",
-		"content":        "unchanged question",
+		"content":        "unchanged\nquestion\n",
 		"attention_kind": question.AttentionQuestion,
 		"interaction":    map[string]any{"id": "question-1"},
 	}
 	previous := map[string]any{
 		"type":           "pane_content",
-		"content":        "unchanged question",
+		"content":        "unchanged\nquestion\n",
 		"attention_kind": question.AttentionUnknown,
 	}
 	acknowledged := &paneWatchFrame{
-		content:            "unchanged question",
+		content:            "unchanged\nquestion\n",
 		contentFingerprint: "content-1",
 		frameFingerprint:   paneFrameFingerprint(previous),
 	}
 	current := &paneWatchFrame{
-		content:            "unchanged question",
+		content:            "unchanged\nquestion\n",
 		contentFingerprint: "content-1",
 		frameFingerprint:   paneFrameFingerprint(response),
 	}
@@ -222,8 +222,20 @@ func TestPaneWatchUpdateSendsMetadataOnlyDelta(t *testing.T) {
 		t.Fatal("metadata delta unexpectedly included full terminal content")
 	}
 	segments, ok := update["segments"].([]panedelta.Segment)
-	if !ok || len(segments) != 0 {
-		t.Fatalf("metadata delta segments = %#v, want empty", update["segments"])
+	if !ok || len(segments) != 1 || segments[0].CopyStart != 0 ||
+		segments[0].CopyLines != 3 || segments[0].Text != "" {
+		t.Fatalf("metadata delta segments = %#v, want one whole-frame copy", update["segments"])
+	}
+	applied, appliedOK := panedelta.Apply(acknowledged.content, segments)
+	if !appliedOK || applied != current.content {
+		t.Fatalf("metadata delta applied = %q, %v; want %q, true", applied, appliedOK, current.content)
+	}
+	encoded, err := json.Marshal(update)
+	if err != nil {
+		t.Fatalf("marshal metadata delta: %v", err)
+	}
+	if strings.Contains(string(encoded), `"segments":null`) {
+		t.Fatalf("metadata delta encoded a null segment list: %s", encoded)
 	}
 }
 

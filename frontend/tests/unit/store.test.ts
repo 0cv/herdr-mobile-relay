@@ -516,6 +516,23 @@ describe('relay command store', () => {
       pane_id: 'w1:p1',
       format: 'ansi',
       base_fingerprint: 'content-1',
+      content_fingerprint: 'content-1',
+      segments: null,
+      question_layout: true,
+    });
+    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)?.content)
+      .toBe('one\ntwo\nthree\nfour\n');
+    expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
+      type: 'pane_applied',
+      pane_id: 'w1:p1',
+      content_fingerprint: 'content-1',
+    });
+
+    socket.message({
+      type: 'pane_delta',
+      pane_id: 'w1:p1',
+      format: 'ansi',
+      base_fingerprint: 'content-1',
       content_fingerprint: 'content-2',
       segments: [
         { copy_lines: 4 },

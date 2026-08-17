@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects directly and merges all agents
 into one installable web app.
 
-**Current version:** [`0.16.2`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.16.2) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.16.3`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.16.3) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -189,6 +189,8 @@ bound nor removed those turns.
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second. The 250 ms default balances responsiveness with
 computer and phone CPU use while output is changing.
+Unchanged checks do not retransmit terminal history to the phone; the relay
+sends terminal bytes only when the pane frame changes.
 
 Returning to an unchanged Resize Session paints its cached rendered frame
 immediately, then reacquires the lease and refreshes the preserved history and
