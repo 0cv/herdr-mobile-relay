@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-08-18
+
 ### Fixed
 
 - Creating an agent from the phone no longer fails on computers with a slow
@@ -635,7 +637,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.3...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.4...HEAD
+[0.16.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.1...v0.16.2
 [0.15.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.15.8...v0.15.11
