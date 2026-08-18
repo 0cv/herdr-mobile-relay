@@ -7,10 +7,7 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- A key-row **A** control opens the phone keyboard without focusing the prompt
-  composer, so typed characters are sent to the terminal as keys. This lets
-  modal editors such as pi-vim leave normal mode (`i`) before a prompt is
-  submitted.
+- Key-row **A** focuses the existing key capture so typed characters go to the terminal without using the prompt composer.
 
 ## [0.16.4] - 2026-08-18
 

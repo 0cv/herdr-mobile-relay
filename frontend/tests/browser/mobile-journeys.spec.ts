@@ -3692,7 +3692,6 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
   await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
   await expect(altKey).toHaveAttribute('aria-pressed', 'false');
-  await expect(typeChars).toHaveAttribute('aria-pressed', 'false');
   await expect(attachImage).not.toContainText('▧');
   await expect(arrowKeys).not.toContainText('⌨');
   await arrowKeys.click();
@@ -3791,14 +3790,12 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
   await expect(modifierLetter).not.toBeFocused();
   await typeChars.click();
-  await expect(typeChars).toHaveAttribute('aria-pressed', 'true');
   await expect(modifierLetter).toBeFocused();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).not.toBeFocused();
   await modifierLetter.press('i');
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'send_keys'
       && JSON.stringify(command.keys) === JSON.stringify(['i'])).length).toBe(1);
-  await expect(typeChars).toHaveAttribute('aria-pressed', 'true');
   await expect(modifierLetter).toBeFocused();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).not.toBeFocused();
   const refreshesBeforeBack = (await commands(page)).filter((command) => command.type === 'refresh_agents').length;

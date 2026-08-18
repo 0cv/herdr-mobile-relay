@@ -121,7 +121,6 @@
   let ctrlArmed = $state(false);
   let shiftArmed = $state(false);
   let altArmed = $state(false);
-  let charsArmed = $state(false);
   let keyFeedback = $state('');
   let keyFeedbackError = $state(false);
   let keySending = $state(false);
@@ -209,9 +208,7 @@
   ].filter(Boolean).join('+'));
   const keyControlStatus = $derived(armedModifierLabel
     ? `${armedModifierLabel} armed${keyFeedback ? ` · ${keyFeedback}` : ' — choose a key or type a character'}`
-    : charsArmed
-      ? `Type characters${keyFeedback ? ` · ${keyFeedback}` : ' — keys go to the terminal'}`
-      : keyFeedback);
+    : keyFeedback);
   const agentResponseCopySupported = $derived.by(() => {
     const connection = $connections.get(agent.relay_id);
     return Boolean(
@@ -1174,7 +1171,6 @@
   }
   function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
     arrowsOpen = false;
-    charsArmed = false;
     if (which === 'ctrl') ctrlArmed = !ctrlArmed;
     else if (which === 'alt') altArmed = !altArmed;
     else shiftArmed = !shiftArmed;
@@ -1188,15 +1184,9 @@
 
   function toggleChars() {
     arrowsOpen = false;
-    if (charsArmed) {
-      charsArmed = false;
-      modifierInputElement.blur();
-      return;
-    }
     ctrlArmed = false;
     altArmed = false;
     shiftArmed = false;
-    charsArmed = true;
     modifierInputElement.value = '';
     modifierInputElement.focus();
   }
@@ -1229,7 +1219,6 @@
     ctrlArmed = false;
     altArmed = false;
     shiftArmed = false;
-    charsArmed = false;
     modifierInputElement.blur();
   }
 
@@ -1262,7 +1251,6 @@
         ctrlArmed = false;
         altArmed = false;
         shiftArmed = false;
-        charsArmed = false;
       }
     });
   }
@@ -1765,13 +1753,10 @@
         <input
           id="modifier-key-input"
           class="modifier-key-input"
-          class:char-armed={charsArmed}
           bind:this={modifierInputElement}
           aria-label="Modifier shortcut character"
           autocomplete="off"
           autocapitalize="none"
-          autocorrect="off"
-          inputmode="text"
           maxlength="1"
           spellcheck="false"
           oninput={modifierInput}
@@ -1782,9 +1767,7 @@
           variant="secondary"
           size="sm"
           aria-controls="modifier-key-input"
-          aria-pressed={charsArmed}
           aria-label="Type characters"
-          title="Open the keyboard and send each character to the terminal"
           onpointerdown={(event) => event.preventDefault()}
           onclick={toggleChars}
         >A</Button>

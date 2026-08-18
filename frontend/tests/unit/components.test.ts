@@ -126,7 +126,6 @@ describe('accessible Svelte interactions', () => {
     const composer = screen.getByRole('combobox', { name: 'Prompt' });
     const capture = screen.getByRole('textbox', { name: 'Modifier shortcut character' });
     await user.click(screen.getByRole('button', { name: 'Type characters' }));
-    expect(screen.getByRole('button', { name: 'Type characters' })).toHaveAttribute('aria-pressed', 'true');
     expect(capture).toHaveFocus();
     expect(composer).not.toHaveFocus();
     await user.type(capture, 'i');
