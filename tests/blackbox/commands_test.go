@@ -470,9 +470,13 @@ func readJSON(t *testing.T, conn *websocket.Conn, ctx context.Context, timeout t
 		if err := json.Unmarshal(data, &msg); err != nil {
 			continue
 		}
-		// Skip broadcasts and handshake messages, wait for the response we care about
+		// Skip broadcasts and handshake messages, wait for the response we care
+		// about. "blocked" belongs here: an attention transition can reach the
+		// socket between a command being sent and its reply, and reading it as
+		// the reply fails the test for a reason the command never caused.
 		switch msg["type"] {
-		case "agents", "agent_update", "activity", "push_config", "activity_history", "inventory_status":
+		case "agents", "agent_update", "activity", "push_config", "activity_history",
+			"inventory_status", "blocked":
 			continue
 		}
 		return msg
