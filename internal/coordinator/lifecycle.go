@@ -15,9 +15,23 @@ import (
 )
 
 const (
+	// agentStartProcessTimeoutMS caps the --timeout handed to a single
+	// `herdr agent start`. The effective value is the caller's remaining
+	// budget, so a retry can never ask Herdr to outlive the request.
 	agentStartProcessTimeoutMS = 30000
-	agentStartCleanupReserve   = 5 * time.Second
-	customAgentPollInterval    = 250 * time.Millisecond
+	// agentStartResponseReserve keeps the startup work ahead of the command
+	// deadline, so a failure is classified precisely instead of surfacing as a
+	// context timeout the phone cannot act on.
+	agentStartResponseReserve = 5 * time.Second
+	customAgentPollInterval   = 250 * time.Millisecond
+	// agentStartRetryInitial and agentStartRetryMax bound the wait between
+	// start attempts while Herdr refuses the freshly created pane: its shell
+	// has not reached a prompt yet. Herdr answers agent_pane_busy in about a
+	// millisecond, before its own --timeout applies, and every attempt forks a
+	// subprocess through an 8-slot semaphore shared with every other pane
+	// command. The interval therefore grows instead of polling flat out.
+	agentStartRetryInitial = 150 * time.Millisecond
+	agentStartRetryMax     = 1500 * time.Millisecond
 )
 
 var agentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
@@ -75,7 +89,7 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 	if !ok {
 		return StartResult{}, errors.New("agent start requires an absolute deadline")
 	}
-	startupDeadline := deadline.Add(-agentStartCleanupReserve)
+	startupDeadline := deadline.Add(-agentStartResponseReserve)
 	if !time.Now().Before(startupDeadline) {
 		return StartResult{}, herdr.ErrNotStarted
 	}
@@ -99,7 +113,11 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 
 	startErr := l.startInTarget(startupCtx, profile, request.Name, target.PaneID)
 	if startErr != nil {
-		return StartResult{}, l.cleanupFailedTarget(ctx, target.PaneID, startErr)
+		// The target stays open. Herdr created it, so closing it would destroy
+		// the workspace the user asked for and leave nothing to retry into. An
+		// uncertain dispatch may also have left an agent running in it, and
+		// the phone is told to review that agent before retrying.
+		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd}, startErr
 	}
 
 	l.profiles.Remember(target.PaneID, profile.ID)
@@ -130,8 +148,7 @@ func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd st
 
 func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile, name, paneID string) error {
 	if profile.Kind != "" {
-		_, err := l.herdr.StartAgent(ctx, name, profile.Kind, paneID, agentStartProcessTimeoutMS)
-		return err
+		return l.startKindAgent(ctx, profile.Kind, name, paneID)
 	}
 	if len(profile.Argv) == 0 {
 		return errors.New("profile has no executable argv")
@@ -156,15 +173,44 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 	}
 }
 
-func (l *Lifecycle) cleanupFailedTarget(ctx context.Context, paneID string, startErr error) error {
-	if paneID == "" {
-		return startErr
+// startKindAgent retries while Herdr refuses the target pane. A pane created
+// milliseconds earlier is still running shell startup, and Herdr rejects the
+// start with agent_pane_busy before its own --timeout window opens, so the
+// timeout the relay passes cannot cover it. The refusal proves nothing ran,
+// which makes the retry safe.
+func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID string) error {
+	delay := agentStartRetryInitial
+	for {
+		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx))
+		if err == nil || !herdr.IsRefused(err) {
+			return err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			// The refusal, not the context error: it is the actual cause and
+			// it keeps the safe-to-retry classification the phone acts on.
+			return err
+		case <-timer.C:
+		}
+		delay = min(delay*2, agentStartRetryMax)
 	}
-	if err := l.herdr.StopPane(ctx, paneID); err != nil {
-		return fmt.Errorf("%w; unused target cleanup failed: %v", startErr, err)
+}
+
+// remainingTimeoutMS is the budget the caller still holds. Handing Herdr a
+// fixed timeout would let one attempt outlive the request, so a retry could
+// never run; it would also outlive the phone's own deadline.
+func remainingTimeoutMS(ctx context.Context) int {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return agentStartProcessTimeoutMS
 	}
-	l.profiles.Forget(paneID)
-	return startErr
+	remaining := time.Until(deadline).Milliseconds()
+	if remaining <= 0 {
+		return 0
+	}
+	return int(min(remaining, agentStartProcessTimeoutMS))
 }
 
 func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, request StartRequest) string {

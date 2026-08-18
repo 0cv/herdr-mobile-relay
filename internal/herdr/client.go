@@ -70,6 +70,31 @@ func (e *CLIError) Error() string {
 	return e.Code + ": " + e.Message
 }
 
+// refusalCodes are Herdr CLI error codes returned before the command changed
+// any state. Herdr validates the request and refuses it, so no input reached
+// an agent and no target was mutated: retrying is safe, and the caller may
+// retry in place while the condition is transient.
+var refusalCodes = map[string]struct{}{
+	// The Herdr server is not accepting commands at all.
+	"server_not_running": {},
+	// The target pane is not an available shell yet. A pane created moments
+	// earlier is still running shell startup, so this clears on its own.
+	"agent_pane_busy": {},
+}
+
+// IsRefused reports whether err carries a Herdr CLI error code that proves the
+// command was rejected before it changed anything. It outranks the
+// ErrDispatchedUnknown that OutcomeError.Unwrap derives from the subprocess
+// boundary alone: the subprocess ran, but Herdr answered with a refusal.
+func IsRefused(err error) bool {
+	var cliErr *CLIError
+	if !errors.As(err, &cliErr) || cliErr == nil {
+		return false
+	}
+	_, refused := refusalCodes[cliErr.Code]
+	return refused
+}
+
 type cliErrorEnvelope struct {
 	ID    string `json:"id"`
 	Error *struct {

@@ -5,6 +5,21 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Creating an agent from the phone no longer fails on computers with a slow
+  interactive shell. Herdr refuses `agent.start` with `agent_pane_busy` while
+  the freshly created pane is still running shell startup, and it answers
+  before its own `--timeout` window opens, so the relay now retries the
+  refusal with a growing backoff until the request's budget runs out and hands
+  Herdr the remaining budget instead of a fixed timeout.
+- A failed agent start keeps the workspace Herdr created. The empty pane is
+  reported with the failure and published to the phone, so a retry starts into
+  it instead of the user losing the workspace and receiving only an error.
+- `agent_pane_busy` is reported as a safe retry. It proves Herdr refused the
+  command before anything ran, so the phone no longer advises reviewing an
+  agent that was never created.
+
 ## [0.16.3] - 2026-08-17
 
 ### Fixed

@@ -325,6 +325,64 @@ func TestPartiallyAppliedOutranksServerNotRunning(t *testing.T) {
 	}
 }
 
+// Issue #8: Herdr refuses agent.start with agent_pane_busy when the target
+// pane has not reached a prompt. The refusal proves nothing ran, so telling
+// the user to review an agent that never existed both misleads them and blocks
+// the retry the situation calls for.
+func TestAgentPaneBusyIsSafeRetry(t *testing.T) {
+	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := d.Close(ctx); err != nil {
+			t.Fatalf("close dispatcher: %v", err)
+		}
+	})
+
+	result := d.failErr(
+		"request-1",
+		"agent_start",
+		"pane-1",
+		&herdr.OutcomeError{Started: true, Err: &herdr.CLIError{
+			Code:    "agent_pane_busy",
+			Message: "agent target pane wH:p1 is not an available shell",
+		}},
+	)
+	if result.Phase != "not_started" || result.Error != "Command was not sent; retry is safe" {
+		t.Fatalf("result = %+v, want safe retry classification", result)
+	}
+	if result.Data != nil {
+		t.Fatalf("data = %+v, want no dispatched_unknown guard on a refused command", result.Data)
+	}
+}
+
+// The refusal classification must not become an escape hatch: a refused later
+// step still leaves the earlier applied input in place.
+func TestPartiallyAppliedOutranksAgentPaneBusy(t *testing.T) {
+	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := d.Close(ctx); err != nil {
+			t.Fatalf("close dispatcher: %v", err)
+		}
+	})
+
+	stepErr := &herdr.OutcomeError{Started: true, Err: &herdr.CLIError{Code: "agent_pane_busy", Message: "not a shell"}}
+	result := d.failErr(
+		"request-1",
+		"agent_clear",
+		"pane-1",
+		partiallyApplied("replacement agent was already started", stepErr),
+	)
+	if result.Phase != "dispatched_unknown" {
+		t.Fatalf("phase = %q, want dispatched_unknown for a partially applied mutation", result.Phase)
+	}
+	if result.Error != "Part of the command already reached the agent; review it before retrying" {
+		t.Fatalf("error = %q, want partially-applied warning", result.Error)
+	}
+}
+
 func TestCapPaneContentLines(t *testing.T) {
 	tests := []struct {
 		name    string

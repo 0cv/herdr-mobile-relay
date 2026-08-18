@@ -566,11 +566,20 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 			started = StartResult{PaneID: returned, Name: request.Name, Cwd: request.Cwd}
 		}
 		if err != nil {
-			return EffectResult{Result: d.failErr(requestID, "agent_start", "", err)}
+			// started.PaneID is set when Herdr created the target before the
+			// start failed. The pane is kept, so it must travel with the
+			// failure: the phone shows it instead of losing the workspace.
+			return EffectResult{Result: d.failErr(requestID, "agent_start", started.PaneID, err)}
 		}
 		return EffectResult{Result: completed(requestID, "agent_start", started.PaneID, started)}
 	}))
 	if !result.OK {
+		if result.PaneID != "" {
+			// A target survived the failure. Publish the topology so the empty
+			// pane appears on the phone and a retry can start into it.
+			d.state.MarkTopologyChanged()
+			d.wake()
+		}
 		return result
 	}
 	if result.replayed {
@@ -744,16 +753,15 @@ func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *Comma
 	phase := "failed"
 	public := "Command failed"
 	var data any
-	var cliErr *herdr.CLIError
 	switch {
-	// Must precede the server_not_running case: a started subprocess always
-	// carries ErrDispatchedUnknown, so an earlier applied step would otherwise
-	// be advertised as safe to retry and duplicate the input that landed.
 	case errors.Is(err, herdr.ErrPartiallyApplied):
 		phase = "dispatched_unknown"
 		public = "Part of the command already reached the agent; review it before retrying"
 		data = map[string]any{"dispatched_unknown": true}
-	case errors.As(err, &cliErr) && cliErr.Code == "server_not_running":
+	// Must follow ErrPartiallyApplied: a started subprocess always carries
+	// ErrDispatchedUnknown, so an earlier applied step would otherwise be
+	// advertised as safe to retry and duplicate the input that landed.
+	case herdr.IsRefused(err):
 		phase = "not_started"
 		public = "Command was not sent; retry is safe"
 	case errors.Is(err, herdr.ErrCreatedTargetUnknown):
