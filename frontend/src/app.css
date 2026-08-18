@@ -593,6 +593,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .term-keys .spacer { flex: 1; }
 .modifier-menu, .arrow-menu { position: relative; }
 .modifier-key-input { border: 0; height: 1px; left: 50%; opacity: 0; padding: 0; pointer-events: none; position: absolute; width: 1px; }
+.modifier-key-input.char-armed { font-size: 16px; height: 16px; left: 0; opacity: .01; pointer-events: auto; width: 100%; }
 .modifier-menu .button[aria-pressed='true'] { background: var(--primary); color: var(--primary-foreground); }
 .arrow-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(3, 2.3rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
 .arrow-popup button { background: var(--secondary); border: 0; border-radius: .4rem; color: var(--foreground); height: 2.3rem; }

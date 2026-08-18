@@ -105,6 +105,39 @@ describe('accessible Svelte interactions', () => {
     vi.restoreAllMocks();
   });
 
+  it('sends typed characters as keys without focusing the prompt', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p2', pane_id: 'fedora::w1:p2',
+      project: 'relay', agent: 'pi', status: 'idle', cwd: '/home/test/relay',
+    };
+    vi.spyOn(relayStore, 'readPane').mockImplementation(() => undefined);
+    vi.spyOn(relayStore, 'loadSlashCommands').mockResolvedValue({ commands: [], truncated: false });
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'keys-1', ok: true,
+    });
+    render(TerminalView, {
+      agent,
+      allAgents: [agent],
+      frame: { paneId: agent.pane_id, content: 'ready', format: 'plain' },
+      responding: new Set<string>(),
+    });
+
+    const composer = screen.getByRole('combobox', { name: 'Prompt' });
+    const capture = screen.getByRole('textbox', { name: 'Modifier shortcut character' });
+    await user.click(screen.getByRole('button', { name: 'Type characters' }));
+    expect(screen.getByRole('button', { name: 'Type characters' })).toHaveAttribute('aria-pressed', 'true');
+    expect(capture).toHaveFocus();
+    expect(composer).not.toHaveFocus();
+    await user.type(capture, 'i');
+    expect(send).toHaveBeenCalledWith(agent, {
+      type: 'send_keys', keys: ['i'], activity_label: 'i',
+    });
+    expect(composer).toHaveValue('');
+    expect(composer).not.toHaveFocus();
+    vi.restoreAllMocks();
+  });
+
   it('opens agents and submits approval buttons by role', async () => {
     const user = userEvent.setup();
     const onopen = vi.fn();

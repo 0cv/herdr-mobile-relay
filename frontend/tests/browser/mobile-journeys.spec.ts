@@ -3678,6 +3678,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   const ctrlKey = page.getByRole('button', { name: 'Ctrl', exact: true });
   const shiftKey = page.getByRole('button', { name: 'Shift', exact: true });
   const altKey = page.getByRole('button', { name: 'Alt', exact: true });
+  const typeChars = page.getByRole('button', { name: 'Type characters' });
   const modifierLetter = page.getByRole('textbox', { name: 'Modifier shortcut character' });
   const copyOutput = page.getByRole('button', { name: 'Copy', exact: true });
   await expect(attachImage.locator('svg')).toBeVisible();
@@ -3686,10 +3687,12 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect(ctrlKey).toBeVisible();
   await expect(shiftKey).toBeVisible();
   await expect(altKey).toBeVisible();
+  await expect(typeChars).toBeVisible();
   await expect(copyOutput).toBeVisible();
   await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
   await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
   await expect(altKey).toHaveAttribute('aria-pressed', 'false');
+  await expect(typeChars).toHaveAttribute('aria-pressed', 'false');
   await expect(attachImage).not.toContainText('▧');
   await expect(arrowKeys).not.toContainText('⌨');
   await arrowKeys.click();
@@ -3787,6 +3790,17 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await page.getByRole('combobox', { name: 'Prompt' }).focus();
   await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
   await expect(modifierLetter).not.toBeFocused();
+  await typeChars.click();
+  await expect(typeChars).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).not.toBeFocused();
+  await modifierLetter.press('i');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'send_keys'
+      && JSON.stringify(command.keys) === JSON.stringify(['i'])).length).toBe(1);
+  await expect(typeChars).toHaveAttribute('aria-pressed', 'true');
+  await expect(modifierLetter).toBeFocused();
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).not.toBeFocused();
   const refreshesBeforeBack = (await commands(page)).filter((command) => command.type === 'refresh_agents').length;
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
