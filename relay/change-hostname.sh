@@ -94,6 +94,19 @@ if ! command -v cloudflared >/dev/null 2>&1; then
     exit 1
 fi
 
+# A local resolver may retain the NXDOMAIN from before the route was created.
+# Prefer a fresh public DNS answer for both edge checks; older curl builds that
+# lack DNS-over-HTTPS keep the system-resolver behavior.
+PUBLIC_CURL_ARGS=()
+if curl --help all 2>/dev/null | grep -q -- '--doh-url'; then
+    PUBLIC_CURL_ARGS=(--doh-url "${HERDR_DOH_URL:-https://cloudflare-dns.com/dns-query}")
+fi
+
+public_curl() {
+    curl "${PUBLIC_CURL_ARGS[@]}" "$@"
+}
+
+
 # cloudflared's origin certificate is issued for exactly one zone, and it will
 # happily turn a name outside that zone into a subdomain of it. The certificate
 # says which zone it covers, so the mismatch can be refused before any record
@@ -218,7 +231,7 @@ fi
 # ingress moves the tunnel replies 404, which is exactly the proof needed.
 printf '▸ Waiting for the edge to answer %s' "$NEW_HOSTNAME"
 DNS_DEADLINE=$((SECONDS + ${HERDR_STABLE_DNS_TIMEOUT:-60}))
-while ! curl -sS --max-time 5 -o /dev/null "https://$NEW_HOSTNAME/healthz" 2>/dev/null; do
+while ! public_curl -sS --max-time 5 -o /dev/null "https://$NEW_HOSTNAME/healthz" 2>/dev/null; do
     if [ "$SECONDS" -ge "$DNS_DEADLINE" ]; then
         echo ""
         echo "✗ $NEW_HOSTNAME does not resolve to Cloudflare yet." >&2
@@ -279,7 +292,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 printf '▸ Waiting for https://%s/healthz' "$NEW_HOSTNAME"
 while true; do
     if curl -fsS --max-time 5 "http://127.0.0.1:$PORT/healthz" > "$WORK_DIR/local.json" 2>/dev/null &&
-        curl -fsS --max-time 5 "https://$NEW_HOSTNAME/healthz" > "$WORK_DIR/public.json" 2>/dev/null &&
+        public_curl -fsS --max-time 5 "https://$NEW_HOSTNAME/healthz" > "$WORK_DIR/public.json" 2>/dev/null &&
         "$(relay_binary)" stable-state health-match "$WORK_DIR/local.json" "$WORK_DIR/public.json" \
             2>/dev/null; then
         echo " ✓"

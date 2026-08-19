@@ -711,6 +711,18 @@ exit 0
 EOF
 cat > "$MOVE_BIN/curl" <<'EOF'
 #!/bin/sh
+case "$*" in
+    "--help all")
+        printf '%s\n' '     --doh-url <URL>  Resolve host names over DNS-over-HTTPS'
+        exit 0
+        ;;
+    *"relay-fedora.new.test"*)
+        case "$*" in
+            *"--doh-url "*) ;;
+            *) exit 6 ;;
+        esac
+        ;;
+esac
 printf '{"status":"ok","instance":"same","version":"9.9.9","protocol":2}\n'
 EOF
 cat > "$MOVE_BIN/relay-stub" <<'EOF'
