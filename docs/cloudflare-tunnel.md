@@ -26,9 +26,11 @@ The URL before `#setup=...` is the phone-app origin; it must stay identical on
 every computer because installed-app identity and relay storage are
 origin-scoped. The relay's own `wss://` hostname remains inside the private
 fragment. On a new computer the wizard checks `https://herdr.<authorized-zone>`
-for an existing Herdr app and uses it when found. If the app has another
-hostname, choose **An existing installed Herdr app** and enter that exact
-origin. `configure-app-deploy` records its selected origin for later QRs.
+for an existing Herdr app and uses it when found. In the setup menu, choose
+**Choose Phone App and Show QR** to keep or change this origin. Use **Configure
+App Deployment** only on the one computer that should publish app updates; its
+configured deployment origin is authoritative and cannot be replaced by an
+older relay-hosted app reconnecting in the background.
 
 `cloudflared` login authorizes one zone at a time. The wizard reads and
 preselects that domain from `~/.cloudflared/cert.pem`; choose **Sign in to

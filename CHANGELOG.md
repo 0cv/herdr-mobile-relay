@@ -137,8 +137,11 @@ project follows [Semantic Versioning](https://semver.org/).
 - Stable Tunnel setup keeps multi-computer pairing on one installed app. A new
   computer probes `https://herdr.<authorized-zone>` for an existing Herdr app
   before falling back to its relay hostname, while the relay WebSocket remains
-  inside the setup fragment. App-deployment configuration also records its
-  selected origin, so later QRs reopen the same origin-scoped app and storage.
+  inside the setup fragment. A configured deployment origin is authoritative:
+  the setup menu reloads it after configuration and a connected relay-hosted
+  app can no longer overwrite it in the background. The QR menu is now named
+  **Choose Phone App and Show QR**, distinguishing origin selection from
+  assigning a computer as the app deployment owner.
 
 ## [0.16.4] - 2026-08-18
 

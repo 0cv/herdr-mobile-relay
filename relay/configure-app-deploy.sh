@@ -36,8 +36,8 @@ NPX_BIN="$NODE_DIR/npx"
 echo "Using Node.js $("$NODE_BIN" --version) from $NODE_DIR"
 
 RECORDED_ORIGIN="$(dirname "$ENV_FILE")/phone-app-origin"
-DEFAULT_ORIGIN=""
-if [ -r "$RECORDED_ORIGIN" ]; then
+DEFAULT_ORIGIN="${HERDR_APP_DEPLOY_ORIGIN:-}"
+if [ -z "$DEFAULT_ORIGIN" ] && [ -r "$RECORDED_ORIGIN" ]; then
     DEFAULT_ORIGIN="$(head -1 "$RECORDED_ORIGIN")"
 fi
 
@@ -45,6 +45,8 @@ echo "🐑 Configure Phone App Deployment"
 echo ""
 echo "This computer will be allowed to deploy one separately hosted Cloudflare"
 echo "Pages app. It never sends Cloudflare credentials to the phone."
+echo "Its app origin also becomes the shared origin used by this relay's setup QR."
+echo "Use setup-menu option 6 instead when this computer should not own deployments."
 echo ""
 
 # The origin and the project have to agree: only a project that already serves

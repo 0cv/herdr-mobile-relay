@@ -135,11 +135,11 @@ render_menu() {
     echo ""
     echo "Phone app"
     echo ""
-    menu_item 6 "Show Phone Setup QR"
-    echo "     Reprint the private link and QR for the installed relay, tunnel or gateway."
+    menu_item 6 "Choose Phone App and Show QR"
+    echo "     Keep or change the shared app origin, then reprint the private setup QR."
     echo ""
     menu_item 7 "Configure App Deployment"
-    echo "     Let this computer deploy one separately hosted Cloudflare Pages app."
+    echo "     Designate this computer as the deployment owner and pin its shared app origin."
     echo ""
     echo "Diagnostics"
     echo ""
@@ -162,6 +162,7 @@ run_action() {
     echo ""
     trap 'printf "\n"' INT
     HERDR_SETUP_MENU=1 "$action" || true
+    load_relay_env "$ENV_FILE"
     trap - INT
     if [ -t 0 ]; then
         echo ""

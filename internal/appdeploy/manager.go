@@ -108,6 +108,12 @@ func (m *Manager) Required() bool {
 	return m.required
 }
 
+// ConfiguredOrigin returns the immutable app origin loaded when the relay
+// started. Browser connections must not replace this deployment-owned origin.
+func (m *Manager) ConfiguredOrigin() string {
+	return m.origin
+}
+
 // ValidateOrigin pins a phone-triggered deployment to this relay's configured
 // public app origin.
 func (m *Manager) ValidateOrigin(expected string) error {

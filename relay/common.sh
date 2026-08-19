@@ -1037,7 +1037,7 @@ build_transport_setup_fragment() {
 phone_app_base_url() {
     local relay_fallback="$1"
     local env_file="${2:-${HERDR_RELAY_ENV:-}}"
-    local app_url="${HERDR_PHONE_APP_URL:-}"
+    local app_url="${HERDR_PHONE_APP_URL:-${HERDR_APP_DEPLOY_ORIGIN:-}}"
     local normalized
     local recorded_origin
 
@@ -1046,9 +1046,6 @@ phone_app_base_url() {
         if [ -r "$recorded_origin" ]; then
             app_url="$(head -1 "$recorded_origin")"
         fi
-    fi
-    if [ -z "$app_url" ]; then
-        app_url="${HERDR_APP_DEPLOY_ORIGIN:-}"
     fi
     if [ -z "$app_url" ] || [ "$app_url" = "relay" ]; then
         app_url="$relay_fallback"

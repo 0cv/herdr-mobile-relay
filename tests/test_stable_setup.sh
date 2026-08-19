@@ -343,6 +343,7 @@ test_deployed_phone_app_origin() {
 HERDR_RELAY_TOKEN=fake-token
 HERDR_APP_DEPLOY_ORIGIN=https://app.example.test
 EOF
+    printf 'https://relay-workstation.example.test\n' > "$HOME/phone-app-origin"
     run_setup
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with deployed phone app"; }
     assert_contains "$OUTPUT" 'https://app.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'

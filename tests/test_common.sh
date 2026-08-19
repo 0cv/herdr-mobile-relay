@@ -241,6 +241,11 @@ run_configure_app_deploy 'app.example.test\nherdr-0cv\n' >/dev/null 2>&1 || true
 test "$(env_file_value "$DEPLOY_ENV" HERDR_APP_DEPLOY_ORIGIN)" = "https://app.example.test"
 test "$(env_file_value "$DEPLOY_ENV" HERDR_CLOUDFLARE_PAGES_PROJECT)" = "herdr-0cv"
 test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin")" = "https://app.example.test"
+printf 'https://relay.example.test\n' > "$(dirname "$DEPLOY_ENV")/phone-app-origin"
+DEPLOY_REOPEN_OUTPUT="$(
+    run_configure_app_deploy '\nherdr-0cv\nn\n' 2>&1 || true
+)"
+test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin")" = "https://app.example.test"
 
 # With a token, the action attaches the domain itself instead of sending the
 # person to the dashboard, and then records the configuration it just made
@@ -681,8 +686,8 @@ MENU_ENV="$WORK_DIR/config/menu.env"
 MENU_ROOT="$WORK_DIR/menu-release"
 mkdir -p "$MENU_BIN_DIR" "$MENU_ROOT/current"
 printf '{\n  "version": "9.9.9"\n}\n' > "$MENU_ROOT/current/release-manifest.json"
-printf "HERDR_GATEWAY_URL='wss://gw-a.example.test,wss://gw-b.example.test'\n" > "$MENU_ENV"
-printf 'https://app.example.test\n' > "$WORK_DIR/config/phone-app-origin"
+printf "HERDR_GATEWAY_URL='wss://gw-a.example.test,wss://gw-b.example.test'\nHERDR_APP_DEPLOY_ORIGIN='https://app.example.test'\n" > "$MENU_ENV"
+printf 'https://relay.example.test\n' > "$WORK_DIR/config/phone-app-origin"
 cat > "$MENU_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
@@ -724,6 +729,10 @@ esac
 case "$MENU_OUTPUT" in
     *"Exit, change nothing"*) ;;
     *) echo "setup menu did not offer a way out" >&2; exit 1 ;;
+esac
+case "$MENU_OUTPUT" in
+    *"Choose Phone App and Show QR"*) ;;
+    *) echo "setup menu did not expose the phone app origin chooser" >&2; exit 1 ;;
 esac
 
 # Moving a relay to a new domain must not mean tearing down the tunnel and
