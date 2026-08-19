@@ -94,6 +94,93 @@ if ! command -v cloudflared >/dev/null 2>&1; then
     exit 1
 fi
 
+# cloudflared's origin certificate is issued for exactly one zone, and it will
+# happily turn a name outside that zone into a subdomain of it. The certificate
+# says which zone it covers, so the mismatch can be refused before any record
+# exists rather than discovered afterwards from a stray CNAME.
+ORIGIN_CERT="${TUNNEL_ORIGIN_CERT:-$HOME/.cloudflared/cert.pem}"
+
+cert_zone_name() {
+    local payload
+    local zone_id
+    local api_token
+
+    [ -r "$ORIGIN_CERT" ] || return 1
+    payload="$(
+        sed -n '/BEGIN ARGO TUNNEL TOKEN/,/END ARGO TUNNEL TOKEN/p' "$ORIGIN_CERT" |
+            sed '1d;$d' | tr -d '\n' | base64 -d 2>/dev/null
+    )" || return 1
+    zone_id="$(printf '%s' "$payload" | sed -n 's/.*"zoneID":"\([^"]*\)".*/\1/p')"
+    api_token="$(printf '%s' "$payload" | sed -n 's/.*"apiToken":"\([^"]*\)".*/\1/p')"
+    [ -n "$zone_id" ] && [ -n "$api_token" ] || return 1
+    curl --fail --silent --show-error --max-time 10 \
+        -H "Authorization: Bearer $api_token" \
+        "https://api.cloudflare.com/client/v4/zones/$zone_id" 2>/dev/null |
+        sed -n 's/.*"result":{"id":"[^"]*","name":"\([^"]*\)".*/\1/p' | head -1
+}
+
+# Signing in for another zone replaces the certificate, so the old one is kept:
+# routes in the previous zone still need it, and a cancelled sign-in must leave
+# this machine exactly as it was.
+relogin_for_zone() {
+    local zone="$1"
+    local backup="$ORIGIN_CERT.$(date +%Y%m%d%H%M%S)"
+
+    echo "▸ Signing in to Cloudflare for $zone."
+    echo "  The current certificate is kept as $backup."
+    mv "$ORIGIN_CERT" "$backup" || return 1
+    if ! cloudflared tunnel login; then
+        mv -f "$backup" "$ORIGIN_CERT"
+        echo "✗ Sign-in did not finish; the previous certificate is back." >&2
+        return 1
+    fi
+    [ -r "$ORIGIN_CERT" ] || {
+        mv -f "$backup" "$ORIGIN_CERT"
+        echo "✗ Sign-in produced no certificate; the previous one is back." >&2
+        return 1
+    }
+    return 0
+}
+
+hostname_in_zone() {
+    case "$1" in
+        "$2" | *".$2") return 0 ;;
+    esac
+    return 1
+}
+
+CERT_ZONE="$(cert_zone_name || true)"
+if [ -n "$CERT_ZONE" ] && ! hostname_in_zone "$NEW_HOSTNAME" "$CERT_ZONE"; then
+    echo ""
+    echo "▸ This tunnel's Cloudflare certificate covers $CERT_ZONE, not"
+    echo "  $NEW_HOSTNAME. Routing it now would create"
+    echo "  $NEW_HOSTNAME.$CERT_ZONE instead, so it has to be signed in first."
+    if [ "${HERDR_CHANGE_HOSTNAME_RELOGIN:-}" = "false" ] || [ ! -t 0 ]; then
+        echo "✗ Run 'cloudflared tunnel login' and pick the zone that owns" >&2
+        echo "  $NEW_HOSTNAME, then run this again. Nothing was changed." >&2
+        exit 1
+    fi
+    if ! read -r -p "Sign in to Cloudflare for ${NEW_HOSTNAME#*.} now? [Y/n]: " RELOGIN_ANSWER; then
+        RELOGIN_ANSWER=n
+    fi
+    case "${RELOGIN_ANSWER:-y}" in
+        y | Y | yes | YES) ;;
+        *)
+            echo "Left unchanged." >&2
+            exit 1
+            ;;
+    esac
+    if ! relogin_for_zone "${NEW_HOSTNAME#*.}"; then
+        exit 1
+    fi
+    CERT_ZONE="$(cert_zone_name || true)"
+    if [ -n "$CERT_ZONE" ] && ! hostname_in_zone "$NEW_HOSTNAME" "$CERT_ZONE"; then
+        echo "✗ The new certificate covers $CERT_ZONE, still not $NEW_HOSTNAME." >&2
+        echo "  Nothing was changed." >&2
+        exit 1
+    fi
+fi
+
 echo ""
 printf '▸ Routing %s to %s..' "$NEW_HOSTNAME" "$TUNNEL"
 if ! ROUTE_OUTPUT="$(cloudflared tunnel route dns "$TUNNEL" "$NEW_HOSTNAME" 2>&1)"; then

@@ -41,8 +41,15 @@ deployment owner for a separately hosted Cloudflare Pages app — see
 `change-hostname` moves the relay to another name — a new domain, say — by
 routing it to the same tunnel and rewriting the ingress. The tunnel, its
 credentials, and the relay token stay, so phones only need the new link, and
-the old record keeps answering until you delete it in Cloudflare. The new name
-has to be on the same Cloudflare account.
+the old record keeps answering until you delete it in Cloudflare.
+
+A tunnel's origin certificate covers one zone, and `cloudflared` turns a name
+outside it into a subdomain of it: ask for `relay.new.example` and get
+`relay.new.example.old.example`. The action reads the zone out of
+`~/.cloudflared/cert.pem`, refuses before anything is created, and offers to
+sign in for the right zone — keeping the old certificate, which routes in the
+previous zone still need. Nothing local changes until the new name answers at
+the edge, and a failed move restores the previous hostname.
 
 ## Teardown
 

@@ -837,4 +837,49 @@ esac
 grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
     { echo "the old hostname was lost while the new one was unreachable" >&2; exit 1; }
 
+# The certificate names the only zone cloudflared can route into. When the new
+# hostname is outside it, the refusal has to come before any record exists.
+reset_move_config
+: > "$MOVE_ROUTE_LOG"
+MOVE_CERT="$MOVE_HOME/cert.pem"
+{
+    printf -- '-----BEGIN ARGO TUNNEL TOKEN-----\n'
+    printf '{"zoneID":"zone1","apiToken":"token1","accountID":"acct1"}' | base64
+    printf -- '-----END ARGO TUNNEL TOKEN-----\n'
+} > "$MOVE_CERT"
+cat > "$MOVE_BIN/curl" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *"/zones/zone1"*)
+        printf '{"result":{"id":"zone1","name":"old.test"},"success":true}\n'
+        ;;
+    *) printf '{"status":"ok","instance":"same","version":"9.9.9","protocol":2}\n' ;;
+esac
+EOF
+cat > "$MOVE_BIN/cloudflared" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MOVE_ROUTE_LOG"
+exit 0
+EOF
+chmod 700 "$MOVE_BIN/curl" "$MOVE_BIN/cloudflared"
+MOVE_OUTPUT="$(
+    printf 'relay-fedora.elsewhere.test\n' |
+        HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
+        HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
+        TUNNEL_ORIGIN_CERT="$MOVE_CERT" HERDR_CHANGE_HOSTNAME_RELOGIN=false \
+        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+)"
+case "$MOVE_OUTPUT" in
+    *"certificate covers old.test"*"cloudflared tunnel login"*) ;;
+    *)
+        echo "a hostname outside the certificate's zone was not refused" >&2
+        printf '%s\n' "$MOVE_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+[ ! -s "$MOVE_ROUTE_LOG" ] ||
+    { echo "a record was created before the zone was checked" >&2; exit 1; }
+grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
+    { echo "the refused move still touched the ingress" >&2; exit 1; }
+
 echo "common shell tests passed"
