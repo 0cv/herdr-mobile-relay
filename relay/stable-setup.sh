@@ -151,6 +151,149 @@ dns_has_record() {
     return 1
 }
 
+select_cloudflare_domain() {
+    local cert_zone
+    local choice
+
+    SELECTED_DOMAIN=""
+    cert_zone="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
+    if [ -z "$cert_zone" ]; then
+        read -r -p "Cloudflare domain (for example, example.com): " SELECTED_DOMAIN
+        return
+    fi
+
+    echo ""
+    echo "Cloudflare domain authorized by the current login:"
+    echo "  1. $cert_zone"
+    echo "  2. Sign in to Cloudflare for another domain"
+    while true; do
+        read -r -p "Choice [1]: " choice || choice=""
+        case "${choice:-1}" in
+            1)
+                SELECTED_DOMAIN="$cert_zone"
+                return
+                ;;
+            2)
+                if [ ! -t 0 ]; then
+                    echo "✗ Cloudflare sign-in requires an interactive run." >&2
+                    return 1
+                fi
+                if ! relogin_for_cloudflare_zone "$ORIGIN_CERT" "another domain"; then
+                    return 1
+                fi
+                cert_zone="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
+                if [ -z "$cert_zone" ]; then
+                    echo "✗ Cloudflare sign-in completed, but its authorized domain could not be read." >&2
+                    return 1
+                fi
+                echo "✓ Cloudflare authorized $cert_zone."
+                SELECTED_DOMAIN="$cert_zone"
+                return
+                ;;
+            *) echo "Enter 1 or 2." ;;
+        esac
+    done
+}
+
+ensure_hostname_certificate_zone() {
+    local hostname="$1"
+    local cert_zone
+    local confirmation
+
+    cert_zone="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
+    if [ -z "$cert_zone" ]; then
+        echo "▸ The Cloudflare login domain could not be read; the created route will be verified exactly."
+        return
+    fi
+    if hostname_in_zone "$hostname" "$cert_zone"; then
+        return
+    fi
+
+    echo ""
+    echo "✗ The current Cloudflare login authorizes $cert_zone, not $hostname." >&2
+    echo "  Continuing would create $hostname.$cert_zone instead." >&2
+    case "${HERDR_STABLE_RELOGIN:-}" in
+        1|true) confirmation="y" ;;
+        0|false) confirmation="n" ;;
+        *)
+            if [ ! -t 0 ]; then
+                echo "  Run interactively to authorize the correct domain." >&2
+                return 1
+            fi
+            read -r -p "Sign in to Cloudflare for this hostname now? [Y/n] " confirmation ||
+                confirmation=""
+            ;;
+    esac
+    case "$confirmation" in
+        ""|y|Y|yes|YES) ;;
+        *) return 1 ;;
+    esac
+
+    if ! relogin_for_cloudflare_zone "$ORIGIN_CERT" "${hostname#*.}"; then
+        return 1
+    fi
+    cert_zone="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
+    if [ -z "$cert_zone" ] || ! hostname_in_zone "$hostname" "$cert_zone"; then
+        echo "✗ The new Cloudflare login still does not authorize $hostname." >&2
+        return 1
+    fi
+    echo "✓ Cloudflare authorized $cert_zone."
+}
+
+reconcile_dns_route_state() {
+    local cert_zone
+    local intended_status
+    local stray_status
+
+    MISROUTED_HOSTNAME="$(state_get misrouted_hostname)"
+    cert_zone="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
+    if [ -z "$MISROUTED_HOSTNAME" ] &&
+       [ "$CREATED_DNS" = true ] &&
+       [ -n "$RELAY_HOSTNAME" ] &&
+       [ -n "$cert_zone" ] &&
+       ! hostname_in_zone "$RELAY_HOSTNAME" "$cert_zone"; then
+        set +e
+        dns_has_record "$RELAY_HOSTNAME"
+        intended_status=$?
+        set -e
+        if [ "$intended_status" -eq 2 ]; then
+            echo "✗ Could not verify the recorded hostname $RELAY_HOSTNAME." >&2
+            return 1
+        fi
+        if [ "$intended_status" -eq 1 ]; then
+            MISROUTED_HOSTNAME="$RELAY_HOSTNAME.$cert_zone"
+        fi
+    fi
+
+    if [ -z "$MISROUTED_HOSTNAME" ]; then
+        return
+    fi
+    set +e
+    dns_has_record "$MISROUTED_HOSTNAME"
+    stray_status=$?
+    set -e
+    if [ "$stray_status" -ne 1 ]; then
+        state_update \
+            "stage=route_mismatch" \
+            "misrouted_hostname=$MISROUTED_HOSTNAME" \
+            "created_dns=false"
+        echo "✗ An earlier Cloudflare route created the wrong hostname:" >&2
+        echo "  $MISROUTED_HOSTNAME" >&2
+        echo "  Delete that DNS record in the Cloudflare dashboard, then rerun setup." >&2
+        echo "  The tunnel and local config were preserved." >&2
+        return 1
+    fi
+
+    echo "✓ The previous misrouted DNS record is gone; retrying $RELAY_HOSTNAME."
+    state_update \
+        "stage=hostname_selected" \
+        "misrouted_hostname=" \
+        "created_dns=false" \
+        "dns_route_attempted=false"
+    CREATED_DNS=false
+    PREVIOUS_STAGE=hostname_selected
+}
+
 choose_hostname() {
     local recorded_hostname="$1"
     local previous_stage="$2"
@@ -169,7 +312,10 @@ choose_hostname() {
             if [ -n "${HERDR_STABLE_DOMAIN:-}" ]; then
                 domain="$HERDR_STABLE_DOMAIN"
             else
-                read -r -p "Cloudflare domain (for example, example.com): " domain
+                if ! select_cloudflare_domain; then
+                    return 1
+                fi
+                domain="$SELECTED_DOMAIN"
             fi
             domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
             domain="${domain#https://}"
@@ -192,6 +338,12 @@ choose_hostname() {
         candidate="${candidate%.}"
         if ! valid_hostname "$candidate" || [[ "$candidate" != *.* ]]; then
             echo "✗ Enter a valid full hostname such as relay-workstation.example.com." >&2
+            [ -z "${HERDR_STABLE_HOSTNAME:-}" ] || return 1
+            recorded_hostname=""
+            continue
+        fi
+
+        if ! ensure_hostname_certificate_zone "$candidate"; then
             [ -z "${HERDR_STABLE_HOSTNAME:-}" ] || return 1
             recorded_hostname=""
             continue
@@ -447,6 +599,7 @@ if [ -z "$(state_get service_preexisting)" ]; then
 fi
 
 load_relay_env "$ENV_FILE"
+ORIGIN_CERT="${TUNNEL_ORIGIN_CERT:-$HOME/.cloudflared/cert.pem}"
 PORT="${HERDR_RELAY_PORT:-8375}"
 case "$PORT" in
     ""|*[!0-9]*|0)
@@ -533,6 +686,11 @@ else
     fi
     CONFIG="$(canonical_file_path "$CONFIG")"
     CREDENTIALS_PATH="$(canonical_file_path "$CREDENTIALS_PATH")"
+
+    if ! reconcile_dns_route_state; then
+        fail_resumable
+        exit 1
+    fi
 
     if [ "$CREATED_DNS" != true ] && [ "$PREVIOUS_STAGE" != routing_dns ]; then
         if ! ensure_tunnel_management; then
@@ -688,15 +846,38 @@ else
         fi
         state_update "stage=routing_dns" "dns_route_attempted=true"
         echo "▸ Routing $RELAY_HOSTNAME to tunnel $TUNNEL_UUID..."
-        if ! cloudflared tunnel route dns "$TUNNEL_UUID" "$RELAY_HOSTNAME"; then
+        if ! ROUTE_OUTPUT="$(cloudflared tunnel route dns "$TUNNEL_UUID" "$RELAY_HOSTNAME" 2>&1)"; then
+            printf '%s\n' "$ROUTE_OUTPUT" >&2
             echo "✗ Cloudflare could not create the DNS route." >&2
             echo "  The domain must belong to the zone selected during cloudflared tunnel login." >&2
-            echo "  A conflicting DNS record also must be removed or replaced with another hostname." >&2
-            echo "  The original cloudflared error is shown above." >&2
+            echo "  A conflicting DNS record must be removed or another hostname selected." >&2
             fail_resumable
             exit 1
         fi
-        state_update "stage=dns_routed" "created_dns=true"
+        printf '%s\n' "$ROUTE_OUTPUT"
+        ROUTED_NAME="$(cloudflare_routed_hostname "$ROUTE_OUTPUT")"
+        if [ -z "$ROUTED_NAME" ]; then
+            state_update "stage=route_unverified" "created_dns=false"
+            echo "✗ Cloudflare returned success without naming the routed hostname." >&2
+            echo "  Setup will not assume that the requested DNS record was created." >&2
+            fail_resumable
+            exit 1
+        fi
+        if [ "$ROUTED_NAME" != "$RELAY_HOSTNAME" ]; then
+            state_update \
+                "stage=route_mismatch" \
+                "misrouted_hostname=$ROUTED_NAME" \
+                "created_dns=false"
+            echo "✗ Cloudflare created $ROUTED_NAME, not $RELAY_HOSTNAME." >&2
+            echo "  Delete $ROUTED_NAME in Cloudflare DNS, then rerun setup." >&2
+            echo "  The tunnel and local config were preserved." >&2
+            fail_resumable
+            exit 1
+        fi
+        state_update \
+            "stage=dns_routed" \
+            "misrouted_hostname=" \
+            "created_dns=true"
     fi
 fi
 

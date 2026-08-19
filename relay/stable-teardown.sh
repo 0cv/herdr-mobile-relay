@@ -110,6 +110,15 @@ CONFIG="$(state_get config_path)"
 CREDENTIALS="$(state_get credentials_path)"
 ENV_CREATED="$(state_get env_created_by_wizard)"
 TUNNEL_DELETED="$(state_get tunnel_deleted)"
+MISROUTED_HOSTNAME="$(state_get misrouted_hostname)"
+ORIGIN_CERT="${TUNNEL_ORIGIN_CERT:-$HOME/.cloudflared/cert.pem}"
+if [ -z "$MISROUTED_HOSTNAME" ] && [ -n "$HOSTNAME" ]; then
+    CERT_ZONE="$(cloudflare_cert_zone_name "$ORIGIN_CERT" || true)"
+    if [ -n "$CERT_ZONE" ] && ! hostname_in_zone "$HOSTNAME" "$CERT_ZONE"; then
+        MISROUTED_HOSTNAME="$HOSTNAME.$CERT_ZONE"
+        state_update "misrouted_hostname=$MISROUTED_HOSTNAME"
+    fi
+fi
 
 
 case "$(uname -s)" in
@@ -189,23 +198,28 @@ elif [ -n "$CONFIG" ]; then
 fi
 
 DNS_REMAINS=false
-if [ -n "$HOSTNAME" ]; then
+REMAINING_DNS=()
+for dns_name in "$HOSTNAME" "$MISROUTED_HOSTNAME"; do
+    if [ -z "$dns_name" ] || [[ " ${REMAINING_DNS[*]-} " == *" $dns_name "* ]]; then
+        continue
+    fi
     set +e
-    dns_has_record "$HOSTNAME"
+    dns_has_record "$dns_name"
     dns_status=$?
     set -e
     if [ "$dns_status" -ne 1 ]; then
         DNS_REMAINS=true
+        REMAINING_DNS+=("$dns_name")
     fi
-fi
+done
 
 if [ "$DNS_REMAINS" = true ]; then
     state_update "dns_cleanup_required=true" "stage=teardown_dns_remaining"
     echo "" >&2
-    echo "⚠ The DNS record for $HOSTNAME still exists or could not be verified as removed." >&2
+    echo "⚠ Cloudflare DNS records still exist or could not be verified as removed." >&2
     echo "  cloudflared has no dependable DNS-route deletion command." >&2
-    echo "  Open the Cloudflare dashboard for this zone, go to DNS > Records, and delete:" >&2
-    echo "  $HOSTNAME" >&2
+    echo "  Open the Cloudflare dashboard, go to DNS > Records, and delete:" >&2
+    printf '  %s\n' "${REMAINING_DNS[@]}" >&2
     echo "  Diagnostic state remains at: $STATE_FILE" >&2
     exit 1
 fi

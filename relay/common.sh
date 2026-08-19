@@ -222,6 +222,59 @@ read_cloudflared_relay_config() {
     TUNNEL_NAME="$configured_tunnel"
 }
 
+cloudflare_cert_zone_name() {
+    local origin_cert="$1"
+    local payload
+    local zone_id
+    local api_token
+
+    [ -r "$origin_cert" ] || return 1
+    payload="$(
+        sed -n '/BEGIN ARGO TUNNEL TOKEN/,/END ARGO TUNNEL TOKEN/p' "$origin_cert" |
+            sed '1d;$d' | tr -d '\n' | base64 -d 2>/dev/null
+    )" || return 1
+    zone_id="$(printf '%s' "$payload" | sed -n 's/.*"zoneID":"\([^"]*\)".*/\1/p')"
+    api_token="$(printf '%s' "$payload" | sed -n 's/.*"apiToken":"\([^"]*\)".*/\1/p')"
+    [ -n "$zone_id" ] && [ -n "$api_token" ] || return 1
+    curl --fail --silent --show-error --max-time 10 \
+        -H "Authorization: Bearer $api_token" \
+        "https://api.cloudflare.com/client/v4/zones/$zone_id" 2>/dev/null |
+        sed -n 's/.*"result":{"id":"[^"]*","name":"\([^"]*\)".*/\1/p' | head -1
+}
+
+relogin_for_cloudflare_zone() {
+    local origin_cert="$1"
+    local zone="$2"
+    local backup="$origin_cert.$(date +%Y%m%d%H%M%S)"
+
+    echo "▸ Signing in to Cloudflare for $zone."
+    echo "  The current certificate is kept as $backup."
+    mv "$origin_cert" "$backup" || return 1
+    if ! cloudflared tunnel login; then
+        mv -f "$backup" "$origin_cert"
+        echo "✗ Sign-in did not finish; the previous certificate is back." >&2
+        return 1
+    fi
+    if [ ! -r "$origin_cert" ]; then
+        mv -f "$backup" "$origin_cert"
+        echo "✗ Sign-in produced no certificate; the previous one is back." >&2
+        return 1
+    fi
+}
+
+hostname_in_zone() {
+    case "$1" in
+        "$2" | *".$2") return 0 ;;
+    esac
+    return 1
+}
+
+cloudflare_routed_hostname() {
+    printf '%s\n' "$1" |
+        sed -n 's/.*Added CNAME \([^ ]*\) which will route.*/\1/p;s/.*INF \([^ ]*\) is already configured.*/\1/p' |
+        head -1
+}
+
 installed_service_env_file() {
     local service_file
 

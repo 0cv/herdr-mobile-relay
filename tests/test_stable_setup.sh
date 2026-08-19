@@ -81,6 +81,8 @@ case "$args" in
         fi
         if [ -n "${STUB_LIST_JSON:-}" ] && [ -f "$STUB_LIST_JSON" ]; then
             cat "$STUB_LIST_JSON"
+        elif [ -f "$STUB_CREATED_TUNNEL_MARKER" ]; then
+            cat "$STUB_CREATED_TUNNEL_MARKER"
         else
             echo 'null'
         fi
@@ -89,6 +91,14 @@ case "$args" in
     *" login "*)
         echo 'Please open https://dash.cloudflare.com/argotunnel?callback=test'
         touch "$STUB_LOGIN_MARKER"
+        if [ -n "${STUB_LOGIN_ZONE_ID:-}" ]; then
+            mkdir -p "$HOME/.cloudflared"
+            {
+                printf '%s\n' '-----BEGIN ARGO TUNNEL TOKEN-----'
+                printf '{"zoneID":"%s","apiToken":"test-token","accountID":"test-account"}' "$STUB_LOGIN_ZONE_ID" | base64 | tr -d '\n'
+                printf '\n%s\n' '-----END ARGO TUNNEL TOKEN-----'
+            } > "$HOME/.cloudflared/cert.pem"
+        fi
         exit 0
         ;;
     *" create "*)
@@ -115,6 +125,7 @@ case "$args" in
         done
         mkdir -p "$(dirname "$credentials")"
         printf '{"AccountTag":"account","TunnelID":"%s","TunnelSecret":"secret"}\n' "$STUB_TUNNEL_UUID" > "$credentials"
+        printf '[{"id":"%s","name":"%s"}]\n' "$STUB_TUNNEL_UUID" "$name" > "$STUB_CREATED_TUNNEL_MARKER"
         printf '{"id":"%s","name":"%s"}\n' "$STUB_TUNNEL_UUID" "$name"
         exit 0
         ;;
@@ -123,7 +134,9 @@ case "$args" in
             echo 'API error: zone authorization failed for test zone' >&2
             exit 1
         fi
-        touch "$STUB_ROUTE_MARKER"
+        route_name="${STUB_ROUTE_NAME:-${!#}}"
+        printf '%s\n' "$route_name" > "$STUB_ROUTE_MARKER"
+        echo "INF Added CNAME $route_name which will route to this tunnel"
         exit 0
         ;;
     *" delete "*)
@@ -131,7 +144,7 @@ case "$args" in
             echo 'ERR Cannot determine default origin certificate path' >&2
             exit 1
         fi
-        rm -f "$STUB_ROUTE_MARKER"
+        rm -f "$STUB_ROUTE_MARKER" "$STUB_CREATED_TUNNEL_MARKER"
         exit 0
         ;;
 esac
@@ -157,12 +170,23 @@ case "$url" in
             exit 22
         fi
         ;;
+    https://api.cloudflare.com/client/v4/zones/*)
+        zone_id="${url##*/}"
+        case "$zone_id" in
+            zone-new) zone_name="${STUB_LOGIN_ZONE_NAME:-herdr-mobile.dev}" ;;
+            *) zone_name="${STUB_CERT_ZONE_NAME:-example.test}" ;;
+        esac
+        printf '{"success":true,"result":{"id":"%s","name":"%s"}}\n' "$zone_id" "$zone_name"
+        ;;
     https://cloudflare-dns.com/*)
         case "${STUB_DNS_MODE:-route}" in
             always|occupied|persists) echo '{"Status":0,"Answer":[{"type":1,"data":"192.0.2.1"}]}' ;;
             never) echo '{"Status":0}' ;;
             route)
-                if [ -f "$STUB_ROUTE_MARKER" ]; then
+                query_name="${url#*name=}"
+                query_name="${query_name%%&*}"
+                if [ -f "$STUB_ROUTE_MARKER" ] &&
+                   [ "$(cat "$STUB_ROUTE_MARKER")" = "$query_name" ]; then
                     echo '{"Status":0,"Answer":[{"type":1,"data":"192.0.2.1"}]}'
                 else
                     echo '{"Status":0}'
@@ -184,6 +208,17 @@ case "$url" in
 esac
 EOF
     chmod 700 "$BIN"/*
+}
+
+write_origin_cert() {
+    local zone_id="$1"
+
+    mkdir -p "$HOME/.cloudflared"
+    {
+        printf '%s\n' '-----BEGIN ARGO TUNNEL TOKEN-----'
+        printf '{"zoneID":"%s","apiToken":"test-token","accountID":"test-account"}' "$zone_id" | base64 | tr -d '\n'
+        printf '\n%s\n' '-----END ARGO TUNNEL TOKEN-----'
+    } > "$HOME/.cloudflared/cert.pem"
 }
 
 new_case() {
@@ -214,10 +249,12 @@ new_case() {
     export STUB_TUNNEL_UUID="$TUNNEL_UUID"
     export STUB_LOGIN_MARKER="$CASE_DIR/login-complete"
     export STUB_ROUTE_MARKER="$CASE_DIR/dns-routed"
+    export STUB_CREATED_TUNNEL_MARKER="$CASE_DIR/created-tunnel.json"
     unset CLOUDFLARED_CONFIG DISPLAY WAYLAND_DISPLAY HERDR_PHONE_APP_URL
-    unset HERDR_STABLE_REUSE_CONFIG
+    unset HERDR_STABLE_REUSE_CONFIG HERDR_STABLE_RELOGIN
     unset STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
-    unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL
+    unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL STUB_ROUTE_NAME
+    unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME
 }
 
 run_setup() {
@@ -225,6 +262,15 @@ run_setup() {
     # Keep confirmation cases deterministic when the parent test runner has a
     # TTY (for example, `make check` inside a Herdr pane).
     "$ROOT/relay/stable-setup.sh" < /dev/null > "$OUTPUT" 2>&1
+    STATUS=$?
+    set -e
+}
+
+run_setup_with_input() {
+    local input="$1"
+
+    set +e
+    printf '%b' "$input" | "$ROOT/relay/stable-setup.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
 }
@@ -329,6 +375,68 @@ test_existing_config_reuse() {
     assert_not_contains "$STUB_LOG" ' route dns '
     pass "existing config requires explicit reuse and remains untouched"
 }
+
+test_cloudflare_zone_selection_and_route_verification() {
+    new_case
+    unset HERDR_STABLE_DOMAIN HERDR_STABLE_HOSTNAME
+    write_origin_cert zone-old
+    export STUB_CERT_ZONE_NAME=example.test
+    run_setup_with_input '\n\n'
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "preloaded Cloudflare domain"; }
+    assert_contains "$OUTPUT" 'Cloudflare domain authorized by the current login'
+    assert_contains "$OUTPUT" '1. example.test'
+    assert_contains "$HOME/cloudflared/config.yml" 'hostname: relay-workstation.example.test'
+
+    new_case
+    write_origin_cert zone-old
+    export STUB_CERT_ZONE_NAME=150283.xyz
+    export HERDR_STABLE_DOMAIN=herdr-mobile.dev
+    export HERDR_STABLE_HOSTNAME=herdr-mac.herdr-mobile.dev
+    export HERDR_STABLE_RELOGIN=false
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "wrong-zone certificate should fail before creation"
+    assert_contains "$OUTPUT" 'current Cloudflare login authorizes 150283.xyz'
+    assert_contains "$OUTPUT" 'Continuing would create herdr-mac.herdr-mobile.dev.150283.xyz instead'
+    assert_not_contains "$STUB_LOG" ' tunnel create '
+
+    new_case
+    write_origin_cert zone-old
+    export STUB_CERT_ZONE_NAME=example.test
+    export STUB_ROUTE_NAME=relay-workstation.example.test.150283.xyz
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "misrouted hostname should be rejected"
+    assert_contains "$OUTPUT" 'Cloudflare created relay-workstation.example.test.150283.xyz, not relay-workstation.example.test'
+    assert_contains "$OUTPUT" 'Delete relay-workstation.example.test.150283.xyz in Cloudflare DNS'
+
+    "$TEST_RELAY_BIN" stable-state update "$HERDR_STABLE_STATE_FILE" \
+        'stage=waiting_for_dns' \
+        'hostname=herdr-mac.herdr-mobile.dev' \
+        'created_dns=true' \
+        'misrouted_hostname='
+    printf '%s\n' 'herdr-mac.herdr-mobile.dev.150283.xyz' > "$STUB_ROUTE_MARKER"
+    write_origin_cert zone-old
+    export STUB_CERT_ZONE_NAME=150283.xyz
+    export HERDR_STABLE_DOMAIN=herdr-mobile.dev
+    export HERDR_STABLE_HOSTNAME=herdr-mac.herdr-mobile.dev
+    unset STUB_ROUTE_NAME
+    run_setup
+    [ "$STATUS" -ne 0 ] || fail "legacy misrouted DNS should block recovery"
+    assert_contains "$OUTPUT" 'An earlier Cloudflare route created the wrong hostname'
+    assert_contains "$OUTPUT" 'herdr-mac.herdr-mobile.dev.150283.xyz'
+
+    rm -f "$STUB_ROUTE_MARKER"
+    export HERDR_STABLE_RELOGIN=1
+    export STUB_LOGIN_ZONE_ID=zone-new
+    export STUB_LOGIN_ZONE_NAME=herdr-mobile.dev
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "wrong-zone recovery"; }
+    assert_contains "$OUTPUT" 'previous misrouted DNS record is gone'
+    assert_contains "$OUTPUT" 'Cloudflare authorized herdr-mobile.dev'
+    assert_contains "$HOME/cloudflared/config.yml" 'hostname: herdr-mac.herdr-mobile.dev'
+    assert_contains "$STUB_LOG" ' tunnel login'
+    pass "Cloudflare domain selection prevents and repairs wrong-zone DNS routes"
+}
+
 
 test_login_guidance() {
     new_case
@@ -522,17 +630,18 @@ test_teardown_ownership_and_dns_retention() {
     STATUS=$?
     set -e
     [ "$STATUS" -ne 0 ] || fail "remaining DNS should be reported"
-    assert_contains "$OUTPUT" 'DNS record for relay-workstation.example.test still exists'
+    assert_contains "$OUTPUT" 'Cloudflare DNS records still exist'
     assert_contains "$OUTPUT" 'Cloudflare dashboard'
     [ -f "$HERDR_STABLE_STATE_FILE" ] || fail "diagnostic state was removed"
     pass "teardown protects foreign state, removes recorded relays, and retains DNS diagnosis"
 }
 
-echo "1..13"
+echo "1..14"
 test_success_and_alternate_port
 test_existing_phone_app_origin
 test_creation_confirmation
 test_existing_config_reuse
+test_cloudflare_zone_selection_and_route_verification
 test_login_guidance
 test_malformed_tunnel_list_stops_before_prompt
 test_zone_failure_preserves_state

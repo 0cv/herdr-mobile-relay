@@ -22,6 +22,18 @@ herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
 The wizard ends by printing the private phone QR. Run it once per computer with
 a distinct hostname, then add every QR to the same phone app.
 
+`cloudflared` login authorizes one zone at a time. The wizard reads and
+preselects that domain from `~/.cloudflared/cert.pem`; choose **Sign in to
+Cloudflare for another domain** to use Cloudflare's account-zone picker and
+replace the active authorization. Manual domain entry remains available when
+the certificate's zone cannot be resolved.
+
+The wizard refuses a hostname outside the authorized zone before creating a
+tunnel. It also compares the exact CNAME reported by `cloudflared` with the
+requested hostname: the CLI can otherwise exit successfully after silently
+appending its old zone. A prior affected run names the stray record to delete,
+then resumes with the same tunnel after the correct zone is authorized.
+
 If the default `cloudflared` config already exists, the wizard displays its
 tunnel, hostname, and public DNS status before asking whether to reuse it. It
 does not adopt the config unattended; `HERDR_STABLE_REUSE_CONFIG=1` is the
@@ -49,12 +61,12 @@ credentials, and the relay token stay, so phones only need the new link, and
 the old record keeps answering until you delete it in Cloudflare.
 
 A tunnel's origin certificate covers one zone, and `cloudflared` turns a name
-outside it into a subdomain of it: ask for `relay.new.example` and get
-`relay.new.example.old.example`. The action reads the zone out of
-`~/.cloudflared/cert.pem`, refuses before anything is created, and offers to
-sign in for the right zone — keeping the old certificate, which routes in the
-previous zone still need. Nothing local changes until the new name answers at
-the edge, and a failed move restores the previous hostname.
+outside it into a subdomain of that zone: ask for `relay.new.example` and get
+`relay.new.example.old.example`. Both stable setup and `change-hostname` read
+the authorized zone, refuse before creating the wrong route, and offer to sign
+in for the right zone. The old certificate is retained as a backup because
+routes in the previous zone may still need it. A failed hostname move restores
+the previous local config.
 
 ## Teardown
 
