@@ -1,8 +1,8 @@
 # Local development
 
-How to build and run this checkout from source, which make targets matter, and
-how to fix the local runtime problems that come up while doing it. Read this if
-you are changing the relay, not just using it.
+How to build, run, and test this project from a checkout, and how to fix the
+local runtime problems that come up while doing it. Read this if you are changing
+the relay rather than using it.
 
 ## Running from a checkout
 
@@ -27,49 +27,21 @@ make relay-plugin      # link this checkout as a Herdr plugin
 make stable-setup      # install a checkout-managed stable relay
 ```
 
-## Installing a private canary
+## Testing a release candidate
 
-A private repository's assets need a GitHub token with read access to it:
-
-```bash
-GH_TOKEN=<token> herdr plugin install 0cv/herdr-mobile-relay-dev
-```
-
-The token is stored as `github-token` beside `relay.env`, readable only by the
-installing user; the relay, `cloudflared`, and agent subprocesses never inherit
-it. Managed self-updates still track this project's public releases, so a
-canary newer than the public tag reports that it is up to date.
-
-## Shipping a release candidate
-
-Work lands on `dev` with no tag; the check workflow runs on that branch. Tag
-`vX.Y.Z` on `dev` only when testers have to install it. The release workflow
-publishes that tag as a prerelease, which ordinary relays never see: their
-update check resolves the latest stable release only.
+Candidates are published as prereleases, which ordinary relays never install:
+their update check resolves the latest stable release only. To run one:
 
 ```bash
 herdr plugin install 0cv/herdr-mobile-relay --ref dev
 ```
 
-Testers move to a newer candidate by re-running that same command.
+Rerun that command to move to a newer candidate.
 
-Promote a candidate by merging `dev` into `main` with a merge commit or a
-fast-forward — never a squash, because `install.sh` pins the installed manifest
-revision to the tag's commit and the published tag has to stay an ancestor of
-`main`. Then flip the release:
+## Contributing
 
-```bash
-gh release edit vX.Y.Z --prerelease=false --latest
-```
-
-A published tag is never moved, and it is never reused. GitHub's immutable
-releases make the second rule permanent: publishing a release for `vX.Y.Z`
-locks that tag name in the repository forever, so deleting the release does
-not free it and a withdrawn candidate is replaced by the next version number,
-never by a retag. Check a repository with
-`gh api repos/<owner>/<repo>/releases/latest --jq .immutable`;
-`0cv/herdr-mobile-relay-dev` has immutable releases enabled and
-`0cv/herdr-mobile-relay` does not.
+Work lands on `dev`; open pull requests against it and make sure `make check`
+passes first.
 
 ## Toolchains
 

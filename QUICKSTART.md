@@ -1,8 +1,8 @@
 # Herdr Mobile Relay Quick Start
 
-Connect one Linux or macOS computer to your phone, either through a blind
-gateway with no Cloudflare account (see **Skip Cloudflare** below) or through a
-temporary TryCloudflare tunnel. You need Herdr 0.7.5 or newer, Git, and `curl`.
+Connect one Linux or macOS computer to your phone, either through a gateway that
+needs no Cloudflare account (see **Skip Cloudflare** below) or through a temporary
+Cloudflare tunnel. You need Herdr 0.7.5 or newer, Git, and `curl`.
 
 ## 1. Install
 
@@ -44,39 +44,26 @@ agent lifecycle.
 ## Skip Cloudflare
 
 Choose **Choose Connection Method → Community gateway** in the setup menu and
-Quick Start never installs, launches, or needs `cloudflared`. The gateway is run
-by the project, free, shared, and best-effort: no account, no domain, and nothing
-to type. Point at a different one by setting a gateway URL yourself:
+Quick Start never installs, launches, or needs `cloudflared`. That gateway is run
+by the project: free, shared, best-effort, with no account and no domain to set
+up. Point at a different one yourself with:
 
 ```bash
 HERDR_GATEWAY_URL=wss://gw.example.com make quick-start
 ```
 
-The relay registers with that gateway itself and the QR appears as soon as the
-registration is confirmed. The gateway holds no secrets and cannot read your
-traffic: it only copies frames that are already encrypted between the phone and
-the relay, under an id derived from the relay key. It is a single static binary
-you can self-host, and the menu can deploy one to your own server over SSH — see
-[docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) and
-[docs/transports.md](docs/transports.md).
+Either way the QR appears as soon as the registration is confirmed. A gateway
+cannot read your traffic: it only copies frames that are already encrypted between
+the phone and the relay. Right after connecting, the phone and the computer try to
+cut it out of the path entirely, moving the same frames onto a direct WebRTC
+connection and returning to the gateway if that fails.
 
-Right after connecting, the phone and computer try to cut the gateway out: they
-exchange a WebRTC offer, answer, and ICE candidates inside the encrypted channel
-and move the same frames onto a direct DataChannel. If the direct path cannot
-form, or breaks later, the session stays on (or returns to) the gateway without
-reconnecting.
+[docs/transports.md](docs/transports.md) covers the settings that control the
+direct path; [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) covers
+running your own gateway.
 
-That direct path opens a UDP socket on the computer, where the tunnel was
-strictly outbound. Reaching it is not enough to talk to the relay: ICE requires
-the session credentials that travel only inside the encrypted channel, the DTLS
-certificate is pinned by the fingerprint in the exchanged SDP, and the Herdr
-end-to-end handshake is still the only authorization for control. Set
-`HERDR_REACHABILITY_PORT_MAPPING=0` to stop the relay from asking your router
-for a port mapping, `HERDR_WEBRTC_UDP_PORT` to fix the port, or
-`HERDR_TRANSPORT_FORCE_RELAY=1` to keep everything on the gateway.
-
-The phone app itself is not served by the gateway. Point `HERDR_PHONE_APP_URL`
-at an installed Herdr app, or host one yourself with `make web-deploy`.
+The phone app itself is not served by the gateway. Point `HERDR_PHONE_APP_URL` at
+an installed Herdr app, or host one yourself with `make web-deploy`.
 
 ## Make It Permanent
 

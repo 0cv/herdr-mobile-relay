@@ -28,12 +28,10 @@ credentials on that computer only.
 
 ## Release checks and app reloads
 
-Release checks use the GitHub API and fall back to the public GitHub Atom
-release and commit feeds when an unauthenticated API request is rate-limited.
-Loading a newly deployed phone app uses a versioned navigation, so a sleeping
-browser or installed PWA does not have to reuse a stale document.
-Transport-breaking changes require a bridge release that supports both
-transports.
+Release checks use the GitHub API and fall back to the public GitHub Atom release
+and commit feeds when an unauthenticated API request is rate-limited. Loading a
+newly deployed phone app uses a versioned navigation, so a sleeping browser or
+installed PWA does not reuse a stale document.
 
 ## Herdr version compatibility
 

@@ -7,13 +7,13 @@ this before exposing a relay beyond your own machine.
 ## Ports and exposed surface
 
 The relay binds to `127.0.0.1:8375`; its event hook uses loopback UDP port 8376.
-Cloudflare Tunnel supplies HTTPS/WSS without opening an inbound port. On the
-hybrid transport the outbound gateway connection replaces the tunnel and the
-direct WebRTC path adds one UDP socket, guarded by ICE credentials and a pinned
-DTLS fingerprint exchanged only inside the E2EE channel; see
-[transports.md](transports.md). Browser origins
-are checked, tokens use constant-time comparison, uploads are limited, and
-launch requests cannot provide arbitrary executables or shell commands.
+A Cloudflare tunnel supplies HTTPS/WSS without opening an inbound port. On the
+gateway transport, an outbound connection to the gateway replaces the tunnel, and
+the direct WebRTC path adds one UDP socket, guarded by ICE credentials and a
+pinned DTLS fingerprint exchanged only inside the encrypted channel; see
+[transports.md](transports.md). Browser origins are checked, tokens use
+constant-time comparison, uploads are limited, and launch requests cannot provide
+arbitrary executables or shell commands.
 
 Runtime data stays in the relay's private config and cache roots. The phone
 stores its relay list locally. There is no central broker and relays do not
@@ -35,9 +35,9 @@ P-256 ECDH handshake with that key, derive per-connection keys with
 HKDF-SHA-256, and encrypt every subsequent WebSocket message with AES-256-GCM.
 The phone sends encrypted key confirmation before the relay registers the
 connection. The relay key stays in the QR/setup URL fragment and phone storage;
-it is never placed in the WebSocket URL or an HTTP header. Cloudflare — or, on
-the hybrid transport, the gateway — can still observe connection metadata such
-as endpoints, timing, and encrypted frame sizes, but not relay commands,
+it is never placed in the WebSocket URL or an HTTP header. Cloudflare — or, on the
+gateway transport, the gateway — can still observe connection metadata such as
+endpoints, timing, and encrypted frame sizes, but not relay commands,
 terminal output, uploads, or push-subscription details. On the direct WebRTC
 path even that metadata stays off the gateway. Tokenless loopback development
 connections do not add application-layer encryption.
