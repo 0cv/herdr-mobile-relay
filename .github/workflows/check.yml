@@ -42,7 +42,9 @@ jobs:
           cache: true
       - run: npm ci --prefix frontend
       - run: make frontend-check
-      - run: npm --prefix frontend exec -- playwright install --with-deps chromium webkit
+      - name: Install Playwright browsers
+        timeout-minutes: 10
+        run: npm --prefix frontend exec -- playwright install --with-deps chromium webkit
       - run: make frontend-browser
       - run: make web-release-check
 
