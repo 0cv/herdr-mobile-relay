@@ -13,11 +13,14 @@ STATE_FILE="${HERDR_STABLE_STATE_FILE:-$(dirname "$ENV_FILE")/stable-setup.json}
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-stable-setup.XXXXXX")"
 ENV_WAS_PRESENT=false
 ENV_CONFIG_WAS_PRESENT=false
+STATE_WAS_PRESENT=false
 LIST_READY=false
 DNS_ROUTE_NEEDS_IDENTITY_PROOF=false
+EXISTING_CONFIG_DNS_STATUS=2
 SERVICE_WAS_INSTALLED=false
 
 [ ! -f "$ENV_FILE" ] || ENV_WAS_PRESENT=true
+[ ! -f "$STATE_FILE" ] || STATE_WAS_PRESENT=true
 if [ -f "$ENV_FILE" ] && grep -q '^CLOUDFLARED_CONFIG=' "$ENV_FILE"; then
     ENV_CONFIG_WAS_PRESENT=true
 fi
@@ -80,6 +83,44 @@ confirm_cloudflare_creation() {
             echo "Setup cancelled before creating Cloudflare resources."
             return 1
             ;;
+    esac
+}
+
+confirm_existing_config_reuse() {
+    local confirmation
+
+    echo ""
+    echo "An existing Cloudflare relay config was found:"
+    echo "  Config:   $CONFIG"
+    echo "  Tunnel:   $TUNNEL_NAME ($TUNNEL_UUID)"
+    echo "  Hostname: $CONFIG_HOST"
+    set +e
+    dns_has_record "$CONFIG_HOST"
+    EXISTING_CONFIG_DNS_STATUS=$?
+    set -e
+    case "$EXISTING_CONFIG_DNS_STATUS" in
+        1) echo "  DNS:      no public record currently exists" ;;
+        2) echo "  DNS:      could not be verified" ;;
+        *) echo "  DNS:      public record exists" ;;
+    esac
+    echo ""
+    echo "This config was not created by the current stable-setup state. Reusing it"
+    echo "keeps the same tunnel and hostname; it does not create a new relay."
+
+    case "${HERDR_STABLE_REUSE_CONFIG:-}" in
+        1|true) return 0 ;;
+        0|false) return 1 ;;
+    esac
+    if [ ! -t 0 ]; then
+        echo "✗ Explicit confirmation is required before reusing this config." >&2
+        echo "  Run interactively, or set HERDR_STABLE_REUSE_CONFIG=1." >&2
+        return 1
+    fi
+    read -r -p "Reuse this existing tunnel and hostname? [y/N] " confirmation ||
+        confirmation=""
+    case "$confirmation" in
+        y|Y|yes|YES) return 0 ;;
+        *) return 1 ;;
     esac
 }
 
@@ -522,11 +563,35 @@ fi
 
 if [ "$STATE_CREATED_CONFIG" != true ] && [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; then
     CONFIG="$(canonical_file_path "$CONFIG")"
-    echo "▸ Reusing existing Cloudflare tunnel config without modifying it: $CONFIG"
     if ! validate_tunnel_config "$CONFIG" "$PORT"; then
         fail_resumable
         exit 1
     fi
+    if [ "$(state_get existing_config_reuse_confirmed)" != true ]; then
+        if ! confirm_existing_config_reuse; then
+            [ "$STATE_WAS_PRESENT" = true ] || rm -f "$STATE_FILE"
+            echo "" >&2
+            echo "Left unchanged; the existing tunnel and config were not adopted." >&2
+            echo "To keep this tunnel but move it, choose Change Tunnel Hostname." >&2
+            echo "To create a different tunnel, first remove the preserved custom" >&2
+            echo "Cloudflare tunnel and config, then run Stable Tunnel again." >&2
+            exit 1
+        fi
+        state_update "existing_config_reuse_confirmed=true"
+    else
+        set +e
+        dns_has_record "$CONFIG_HOST"
+        EXISTING_CONFIG_DNS_STATUS=$?
+        set -e
+    fi
+    if [ "$EXISTING_CONFIG_DNS_STATUS" -eq 1 ]; then
+        echo "✗ The existing config points to $CONFIG_HOST, but that hostname has no public DNS record." >&2
+        echo "  Stable setup will not silently recreate an old route." >&2
+        echo "  Choose Change Tunnel Hostname, or restore its DNS record explicitly." >&2
+        fail_resumable
+        exit 1
+    fi
+    echo "▸ Reusing confirmed Cloudflare tunnel config without modifying it: $CONFIG"
     RELAY_HOSTNAME="$CONFIG_HOST"
     state_update \
         "stage=config_validated" \

@@ -86,7 +86,7 @@ herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
 herdr plugin action invoke uninstall --plugin herdr-mobile-relay.events
 ```
 
-Run `stable-teardown` before uninstall if the wizard-owned Cloudflare tunnel and
+Run `stable-teardown` before uninstall if the configured Cloudflare tunnel and
 DNS route should also be removed.
 
 ## Troubleshooting

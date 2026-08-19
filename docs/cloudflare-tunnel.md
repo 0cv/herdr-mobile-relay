@@ -22,6 +22,11 @@ herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
 The wizard ends by printing the private phone QR. Run it once per computer with
 a distinct hostname, then add every QR to the same phone app.
 
+If the default `cloudflared` config already exists, the wizard displays its
+tunnel, hostname, and public DNS status before asking whether to reuse it. It
+does not adopt the config unattended; `HERDR_STABLE_REUSE_CONFIG=1` is the
+explicit opt-in for automation.
+
 ## Useful actions
 
 ```bash
@@ -53,9 +58,21 @@ the edge, and a failed move restores the previous hostname.
 
 ## Teardown
 
-Run `stable-teardown` before uninstall if Cloudflare resources should also be
-removed. Full uninstall removes the service, releases, relay state, push
-credentials, cache, and plugin registration.
+Run `stable-teardown` before uninstall if its Cloudflare resources should also
+be removed. After the explicit `teardown` confirmation, it removes the service,
+tunnel, config, credentials, and matching local config pointer recorded in the
+validated Herdr stable state. Historical `created_by_wizard` flags do not
+authorize the operation: a relay previously adopted from an existing config is
+still the configured relay and is removed. The state ownership marker, service
+environment match, and Herdr tunnel-name namespace protect unrelated resources.
+
+`cloudflared` cannot dependably delete a DNS route. If the record remains,
+teardown preserves its diagnostic state and names the exact record to remove
+in the Cloudflare dashboard. Rerun teardown afterward to finish. Use
+`change-hostname` instead when the tunnel should be retained under a new name.
+
+Full uninstall removes the service, releases, relay state, push credentials,
+cache, and plugin registration.
 
 ## Troubleshooting
 

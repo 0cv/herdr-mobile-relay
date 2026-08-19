@@ -215,6 +215,7 @@ new_case() {
     export STUB_LOGIN_MARKER="$CASE_DIR/login-complete"
     export STUB_ROUTE_MARKER="$CASE_DIR/dns-routed"
     unset CLOUDFLARED_CONFIG DISPLAY WAYLAND_DISPLAY HERDR_PHONE_APP_URL
+    unset HERDR_STABLE_REUSE_CONFIG
     unset STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL
 }
@@ -308,14 +309,25 @@ test_existing_config_reuse() {
     write_existing_config 8401
     checksum_before="$(cksum "$HOME/custom-config.yml")"
     export STUB_DNS_MODE=always
+
     run_setup
-    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "existing config reuse"; }
+    [ "$STATUS" -ne 0 ] || fail "unconfirmed existing config reuse should fail"
+    assert_contains "$OUTPUT" 'An existing Cloudflare relay config was found'
+    assert_contains "$OUTPUT" 'Explicit confirmation is required before reusing this config'
+    assert_contains "$OUTPUT" 'existing.example.test'
+    [ ! -f "$HERDR_STABLE_STATE_FILE" ] || fail "declined config reuse left adoption state"
+    assert_not_contains "$STUB_LOG" ' tunnel create '
+    assert_not_contains "$STUB_LOG" ' route dns '
+
+    export HERDR_STABLE_REUSE_CONFIG=1
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "confirmed existing config reuse"; }
     [ "$checksum_before" = "$(cksum "$HOME/custom-config.yml")" ] || fail "custom config changed"
-    assert_contains "$OUTPUT" 'Reusing existing Cloudflare tunnel config without modifying it'
+    assert_contains "$OUTPUT" 'Reusing confirmed Cloudflare tunnel config without modifying it'
     assert_contains "$OUTPUT" 'cert.pem is unavailable'
     assert_not_contains "$STUB_LOG" ' tunnel create '
     assert_not_contains "$STUB_LOG" ' route dns '
-    pass "existing credentials-based config is validated and left untouched without cert.pem"
+    pass "existing config requires explicit reuse and remains untouched"
 }
 
 test_login_guidance() {
@@ -445,8 +457,41 @@ test_teardown_ownership_and_dns_retention() {
     STATUS=$?
     set -e
     [ "$STATUS" -ne 0 ] || fail "foreign tunnel teardown should fail"
-    assert_contains "$OUTPUT" 'recorded tunnel name is not Herdr-owned'
+    assert_contains "$OUTPUT" 'recorded tunnel is outside the Herdr stable-tunnel namespace'
     assert_not_contains "$STUB_LOG" ' tunnel delete '
+
+    new_case
+    write_existing_config 8401
+    "$TEST_RELAY_BIN" stable-state init "$HERDR_STABLE_STATE_FILE" "$HERDR_RELAY_ENV"
+    "$TEST_RELAY_BIN" stable-state update "$HERDR_STABLE_STATE_FILE" \
+        "stage=config_validated" \
+        "tunnel_name=herdr-mobile-relay-existing" \
+        "tunnel_uuid=$TUNNEL_UUID" \
+        "hostname=existing.example.test" \
+        "config_path=$HOME/custom-config.yml" \
+        "credentials_path=$HOME/custom-credentials.json"
+    export STUB_DNS_MODE=never
+    set +e
+    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
+    STATUS=$?
+    set -e
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "recorded relay teardown"; }
+    assert_contains "$OUTPUT" 'Deleting configured stable tunnel herdr-mobile-relay-existing'
+    assert_contains "$OUTPUT" 'Removed stable relay config'
+    assert_contains "$OUTPUT" 'Removed stable relay credentials'
+    assert_contains "$STUB_LOG" "tunnel delete --force $TUNNEL_UUID"
+    [ ! -f "$HERDR_STABLE_STATE_FILE" ] || fail "recorded relay teardown retained state"
+    [ ! -f "$HOME/custom-config.yml" ] || fail "recorded relay teardown retained config"
+    [ ! -f "$HOME/custom-credentials.json" ] || fail "recorded relay teardown retained credentials"
+    assert_not_contains "$HERDR_RELAY_ENV" 'CLOUDFLARED_CONFIG='
+
+    export STUB_DNS_MODE=route
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "clean setup after recorded teardown"; }
+    assert_contains "$OUTPUT" 'About to create Cloudflare resources'
+    assert_contains "$OUTPUT" 'DNS route: relay-workstation.example.test'
+    assert_contains "$STUB_LOG" ' tunnel create '
+    assert_not_contains "$OUTPUT" 'Reusing confirmed Cloudflare tunnel config'
 
     new_case
     run_setup
@@ -473,7 +518,7 @@ test_teardown_ownership_and_dns_retention() {
     assert_contains "$OUTPUT" 'DNS record for relay-workstation.example.test still exists'
     assert_contains "$OUTPUT" 'Cloudflare dashboard'
     [ -f "$HERDR_STABLE_STATE_FILE" ] || fail "diagnostic state was removed"
-    pass "teardown refuses foreign ownership and retains diagnosis when DNS remains"
+    pass "teardown protects foreign state, removes recorded relays, and retains DNS diagnosis"
 }
 
 echo "1..13"

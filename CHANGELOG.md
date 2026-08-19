@@ -117,6 +117,13 @@ project follows [Semantic Versioning](https://semver.org/).
 - Relay update checks ignore prereleases even when GitHub's API is rate-limited:
   the fallback now resolves the latest stable tag through the `releases/latest`
   redirect instead of the release feed, which cannot mark one.
+- Stable Tunnel setup no longer silently adopts a surviving custom
+  `cloudflared` config after teardown. Reuse now requires explicit confirmation
+  and reports the retained tunnel, hostname, and public DNS status. Stable
+  teardown treats the validated Herdr state as the resource identity,
+  not the historical `created_by_wizard` flags: one explicit confirmation
+  removes the recorded tunnel, config, credentials, service, and local config
+  pointer so the next install creates a clean relay.
 
 ## [0.16.4] - 2026-08-18
 

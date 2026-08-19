@@ -8,11 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "🐑 Herdr Mobile Relay stable tunnel teardown"
 echo ""
-echo "This removes only resources recorded as wizard-owned. Run it before"
-echo "uninstalling the plugin when you also want to remove its stable tunnel."
+echo "This removes the service, tunnel, config, and credentials recorded for"
+echo "this stable relay, regardless of how an earlier setup created them."
 echo ""
 
-if ! "$SCRIPT_DIR/stable-teardown.sh"; then
+if ! HERDR_STABLE_TEARDOWN_WRAPPED=1 "$SCRIPT_DIR/stable-teardown.sh"; then
     echo ""
     echo "Stable teardown did not complete. The plugin can remain installed while"
     echo "you correct the reported problem and invoke this action again."

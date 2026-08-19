@@ -131,7 +131,7 @@ render_menu() {
     echo "     Move this relay to a different tunnel hostname and reprint the QR."
     echo ""
     menu_item 5 "Remove Stable Tunnel"
-    echo "     Tear down only resources recorded as wizard-owned."
+    echo "     Remove this relay's recorded service, tunnel, config, and credentials."
     echo ""
     echo "Phone app"
     echo ""
