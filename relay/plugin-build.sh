@@ -415,7 +415,16 @@ cleanup_plugin_build() {
 }
 trap cleanup_plugin_build EXIT
 
-INSTALL_TOKEN=${GH_TOKEN:-}
+# A private plugin may clone through SSH while its release API still requires an
+# HTTPS token. Reuse an existing gh login when no explicit or plugin-configured
+# token exists. An SSH key cannot be converted into an API credential.
+gh_release_token() {
+    command -v gh >/dev/null 2>&1 || return 1
+    gh auth token --hostname github.com 2>/dev/null
+}
+
+
+INSTALL_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
 if [ -z "$INSTALL_TOKEN" ]; then
     for TOKEN_ENV in "$TARGET_ENV" "${SOURCE_ENV:-}"; do
         [ -n "$TOKEN_ENV" ] && [ -f "$TOKEN_ENV" ] || continue
@@ -436,6 +445,11 @@ if [ -z "$INSTALL_TOKEN" ]; then
             [ -z "$INSTALL_TOKEN" ] || break
         fi
     done
+fi
+if [ -z "$INSTALL_TOKEN" ] &&
+   [ -n "$RELEASE_REPOSITORY" ] &&
+   [ "$RELEASE_REPOSITORY" != "0cv/herdr-mobile-relay" ]; then
+    INSTALL_TOKEN="$(gh_release_token || true)"
 fi
 
 rollback_armed=true

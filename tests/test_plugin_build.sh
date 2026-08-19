@@ -19,6 +19,8 @@ HEALTH_FILE="$WORK_DIR/health.json"
 CONFIG_RECORD="$WORK_DIR/installer-config-root"
 TOKEN_RECORD="$WORK_DIR/installer-token"
 REPO_RECORD="$WORK_DIR/installer-repository"
+FRESH_TOKEN_RECORD="$WORK_DIR/fresh-installer-token"
+FRESH_REPO_RECORD="$WORK_DIR/fresh-installer-repository"
 RESTART_LOG="$WORK_DIR/restarts"
 SETUP_RECORD="$WORK_DIR/setup-invocations"
 mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$SOURCE_CONFIG/push" \
@@ -142,6 +144,15 @@ cat > "$FAKE_BIN/sleep" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+cat > "$FAKE_BIN/gh" <<'EOF'
+#!/bin/sh
+if [ "$*" = "auth token --hostname github.com" ]; then
+    printf '%s\n' 'private-clone-api-token'
+    exit 0
+fi
+exit 1
+EOF
+chmod 700 "$FAKE_BIN/gh"
 chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr" "$FAKE_BIN/sleep"
 
 export SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
@@ -311,6 +322,8 @@ FRESH_INSTALLER="$WORK_DIR/fresh-install.sh"
 cat > "$FRESH_INSTALLER" <<EOF
 #!/bin/sh
 set -eu
+printf '%s\n' "\${GH_TOKEN:-}" > "$FRESH_TOKEN_RECORD"
+printf '%s\n' "\${HERDR_RELEASE_REPOSITORY:-}" > "$FRESH_REPO_RECORD"
 temp="\$INSTALL_ROOT/.current-install"
 rm -f "\$temp"
 ln -s "$FRESH_RELEASE" "\$temp"
@@ -330,14 +343,20 @@ run_fresh_build() {
         UNIT_FILE="$FRESH_HOME/.config/systemd/user/herdr-mobile-relay.service" \
         REPLACEMENT_REVISION=new-revision \
         FORCE_INACTIVE=1 \
+        GH_TOKEN= \
+        GITHUB_TOKEN= \
         "$@" \
         bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/fresh-output" 2>&1
 }
 
-if ! run_fresh_build env; then
+if ! run_fresh_build env HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay-dev; then
     cat "$WORK_DIR/fresh-output" >&2
     exit 1
 fi
+test "$(cat "$FRESH_TOKEN_RECORD")" = "private-clone-api-token" ||
+    { echo "a private checkout did not reuse the gh API credential" >&2; exit 1; }
+test "$(cat "$FRESH_REPO_RECORD")" = "0cv/herdr-mobile-relay-dev" ||
+    { echo "a private checkout downloaded from the wrong release repository" >&2; exit 1; }
 # The action is scheduled detached, so give it the moment it waits out.
 sleep 1
 grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP_RECORD" ||

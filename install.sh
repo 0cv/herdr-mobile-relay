@@ -371,15 +371,16 @@ main() {
     stage="$work_dir/release"
     commit_json_path="$work_dir/commit.json"
 
-    info "Downloading ${BINARY} ${version} (${target})"
+    info "Resolving ${BINARY} ${version} (${target}) from ${REPO}"
     fetch_json "https://api.github.com/repos/${REPO}/commits/${tag}" > "$commit_json_path" ||
-        fatal "could not resolve release tag from GitHub API"
+        fatal "could not resolve release tag from GitHub API (private repositories require GH_TOKEN; SSH access authenticates Git only)"
     commit_json=$(awk '{ printf "%s", $0 }' "$commit_json_path")
     tag_revision=$(resolve_tag_revision "$commit_json")
     case "$tag_revision" in
         ????????????????????????????????????????) ;;
         *) fatal "release tag did not resolve to an exact commit" ;;
     esac
+    info "Downloading ${archive} from ${REPO}"
     if [ -n "${GH_TOKEN:-}" ]; then
         api_url="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
         release_json_path="$work_dir/release.json"
