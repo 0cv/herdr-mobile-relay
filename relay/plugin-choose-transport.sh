@@ -25,27 +25,27 @@ echo "Whichever you pick, traffic stays end-to-end encrypted and the phone"
 echo "upgrades to a direct connection whenever the network allows it. The"
 echo "choice only decides who carries the fallback when it cannot."
 echo ""
-echo "  1. Cloudflare tunnel (recommended)"
+menu_item 1 "Cloudflare tunnel (recommended)"
 echo "     The original transport, and the default. Quick Start opens a"
 echo "     temporary URL with no Cloudflare account and no domain."
 echo ""
-echo "  2. Community gateway"
+menu_item 2 "Community gateway"
 echo "     Run by the project, free, shared, no account and no domain needed."
 echo "     Best-effort capacity: fine for normal use, not for heavy transfers."
 if [ -z "$COMMUNITY" ]; then
     echo "     (No community gateway is published yet — choose 1, 3, or 4.)"
 fi
 echo ""
-echo "  3. Stable Cloudflare tunnel"
+menu_item 3 "Stable Cloudflare tunnel"
 echo "     A permanent hostname, a dedicated tunnel, and a background service."
 echo "     Needs a Cloudflare account with a domain; the wizard is resumable."
 echo ""
-echo "  4. Your own gateway"
+menu_item 4 "Your own gateway"
 echo "     Best performance and privacy: you own the box, the bandwidth, and"
 echo "     the logs. Deploy one to a small VPS from here over SSH, or point at"
 echo "     one you already run."
 echo ""
-echo "  q. Leave the current setting unchanged"
+menu_item q "Leave the current setting unchanged"
 echo ""
 
 # Every path into here normalizes every candidate first: the relay only accepts
@@ -121,10 +121,16 @@ choose_own_gateway() {
                 ;;
             b|B)
                 while true; do
-                    if ! read -r -p "Gateway address(es), comma-separated: " entered; then
+                    if ! read -r -p "Gateway address(es), comma-separated, or q to cancel: " entered; then
                         echo ""
                         return 1
                     fi
+                    case "$entered" in
+                        q | Q)
+                            echo "Left unchanged."
+                            return 1
+                            ;;
+                    esac
                     [ -n "$entered" ] || continue
                     # An operator's own list is a priority order, not a pool of
                     # equivalents: entry one is theirs and must win.

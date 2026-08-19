@@ -124,6 +124,12 @@ printf "HERDR_APP_DEPLOY_NODE_DIR='%s'\n" "$NODE_HOME/half/bin" > "$NODE_ENV_FIL
 test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_dir "$NODE_ENV_FILE")" = \
     "$NODE_HOME/.nvm/current/bin"
 
+# Titles are bold on a terminal only. A pipe is not one, so logs, tests, and
+# non-terminal panes keep the plain text they parse, and NO_COLOR is honoured
+# even when a terminal is present.
+test "$(NO_COLOR= menu_item 3 "Stable Tunnel")" = "  3. Stable Tunnel"
+test "$(NO_COLOR=1 menu_item q "Exit, change nothing")" = "  q. Exit, change nothing"
+
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"

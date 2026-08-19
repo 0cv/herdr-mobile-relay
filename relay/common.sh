@@ -318,6 +318,20 @@ node_bin_dir() {
     return 1
 }
 
+# A menu reads as a wall of text when the choice and its explanation carry the
+# same weight. Bold the choice, but only when a terminal will render it: piped
+# output stays plain for logs and tests, and NO_COLOR is honoured.
+menu_item() {
+    local key="$1"
+    local title="$2"
+
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+        printf '  \033[1m%s. %s\033[0m\n' "$key" "$title"
+        return 0
+    fi
+    printf '  %s. %s\n' "$key" "$title"
+}
+
 generate_token() {
     if command -v openssl >/dev/null 2>&1; then
         openssl rand -hex 16
@@ -909,13 +923,20 @@ prompt_phone_app_base_url() {
     local normalized
 
     while true; do
-        if ! read -r -p "Installed app domain or URL (for example, app.example.com): " entered_url; then
+        if ! read -r -p "Installed app domain or URL, or q to cancel: " entered_url; then
             echo "" >&2
             echo "Setup cancelled." >&2
             return 1
         fi
+        case "$entered_url" in
+            q | Q)
+                echo "Setup cancelled." >&2
+                return 1
+                ;;
+        esac
         if [ -z "$entered_url" ]; then
-            echo "✗ Enter the domain shown in the installed app's Site settings." >&2
+            echo "✗ Enter the domain shown in the installed app's Site settings," >&2
+            echo "  for example app.example.com, or q to cancel." >&2
             continue
         fi
         if ! normalized="$(
@@ -994,15 +1015,17 @@ choose_phone_app_base_url() {
         fi
     fi
     if [ "$setup_kind" = "temporary" ]; then
-        echo "  1. This temporary relay (recommended for trying one relay)" >&2
+        menu_item 1 "This temporary relay (recommended for trying one relay)" >&2
         echo "     Opens the TryCloudflare app. Its address changes after restart." >&2
     else
-        echo "  1. This relay (recommended for one relay)" >&2
+        menu_item 1 "This relay (recommended for one relay)" >&2
         echo "     Uses this computer's verified hostname as the installed app." >&2
     fi
     echo "" >&2
-    echo "  2. An existing installed Herdr app" >&2
+    menu_item 2 "An existing installed Herdr app" >&2
     echo "     Adds this computer to the same app as your other relays." >&2
+    echo "" >&2
+    menu_item q "Cancel, change nothing" >&2
     echo "" >&2
     while true; do
         if [ -n "$current_origin" ]; then
@@ -1028,8 +1051,12 @@ choose_phone_app_base_url() {
                 prompt_phone_app_base_url "$relay_fallback" "$env_file"
                 return
                 ;;
+            q | Q)
+                echo "Setup cancelled." >&2
+                return 1
+                ;;
             *)
-                echo "✗ Choose 1 or 2." >&2
+                echo "✗ Choose 1, 2, or q." >&2
                 ;;
         esac
     done

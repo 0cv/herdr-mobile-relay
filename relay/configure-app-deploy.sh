@@ -60,8 +60,11 @@ fi
 
 echo ""
 echo "Checking Cloudflare Pages access..."
+# npx is a #!/usr/bin/env node script, so the interpreter has to be findable
+# too: calling it by absolute path is not enough when this pane's PATH has no
+# node. The relay's own deployment worker prepends the same directory.
 if ! PROJECTS_JSON="$(
-    "$NPX_BIN" --yes "wrangler@$WRANGLER_VERSION" pages project list --json
+    PATH="$NODE_DIR:$PATH" "$NPX_BIN" --yes "wrangler@$WRANGLER_VERSION" pages project list --json
 )"; then
     echo ""
     echo "✗ Wrangler could not list Pages projects." >&2

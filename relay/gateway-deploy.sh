@@ -121,18 +121,21 @@ valid_acme_email() {
 # like a typed one: a recorded value can be stale, or hand-edited.
 prompt_gateway_host() {
     local default_host="${1:-}"
-    local label="Public hostname for the gateway (for example gw.example.com)"
+    local label="Public hostname for the gateway, or q to cancel"
     local entered
     local host
 
     if [ -n "$default_host" ]; then
-        label="Public hostname for the gateway [$default_host]"
+        label="Public hostname for the gateway [$default_host], or q to cancel"
     fi
     while true; do
         if ! read -r -p "$label: " entered; then
             echo "" >&2
             return 1
         fi
+        case "$entered" in
+            q | Q) return 1 ;;
+        esac
         entered="${entered:-$default_host}"
         [ -n "$entered" ] || continue
         if host="$(public_gateway_host "$entered")"; then

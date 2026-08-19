@@ -107,46 +107,46 @@ render_menu() {
     echo ""
     echo "Choose how you want to start:"
     echo ""
-    echo "  1. Choose Connection Method"
+    menu_item 1 "Choose Connection Method"
     echo "     Decide how your phone reaches this computer: the community gateway"
     echo "     (free, shared, run by the project), your own gateway (best"
     echo "     performance, you own the bandwidth and the logs), or a Cloudflare"
     echo "     tunnel."
     echo ""
-    echo "  2. Quick Start (recommended)"
+    menu_item 2 "Quick Start (recommended)"
     echo "     Installs missing tools, starts the relay, and prints the phone setup"
     echo "     QR code using whichever connection method is configured."
     echo ""
-    echo "  3. Stable Tunnel"
+    menu_item 3 "Stable Tunnel"
     echo "     Guided permanent Cloudflare hostname, dedicated tunnel, and background service."
     echo ""
-    echo "  4. Show Phone Setup QR"
+    menu_item 4 "Show Phone Setup QR"
     echo "     Reprint the private link and QR for the installed relay, tunnel or gateway."
     echo ""
-    echo "  5. Remove Stable Tunnel"
+    menu_item 5 "Remove Stable Tunnel"
     echo "     Tear down only resources recorded as wizard-owned."
     echo ""
-    echo "  6. Configure App Deployment"
+    menu_item 6 "Configure App Deployment"
     echo "     Let this computer deploy one separately hosted Cloudflare Pages app."
     echo ""
-    echo "  7. Show Full Status"
+    menu_item 7 "Show Full Status"
     echo "     Service, health, and a sanitized support snapshot."
     echo ""
-    echo "  q. Exit, change nothing"
+    menu_item q "Exit, change nothing"
     echo ""
 }
 
 # Every action runs as a child, so finishing one comes back here with the status
-# recomputed instead of ending the pane. The menu ignores SIGINT while a child
-# holds the terminal: Ctrl-C out of a foreground relay or a wizard step belongs
-# to that step, and must not take the menu with it. Actions pause here rather
-# than inside each script, which is why pause_before_close stands down under
-# HERDR_SETUP_MENU.
+# recomputed instead of ending the pane. Ctrl-C belongs to the action: the menu
+# must survive it without swallowing it. A handler, never `trap '' INT` - an
+# ignored signal is inherited by children as SIG_IGN, which would leave a
+# prompt loop with no way out at all. Actions pause here rather than inside each
+# script, which is why pause_before_close stands down under HERDR_SETUP_MENU.
 run_action() {
     local action="$1"
 
     echo ""
-    trap '' INT
+    trap 'printf "\n"' INT
     HERDR_SETUP_MENU=1 "$action" || true
     trap - INT
     if [ -t 0 ]; then
