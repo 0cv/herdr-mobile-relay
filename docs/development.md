@@ -7,8 +7,8 @@ you are changing the relay, not just using it.
 ## Running from a checkout
 
 ```bash
-git clone https://github.com/0cv/herdr-mobile-relay.git
-cd herdr-mobile-relay
+git clone git@github.com:0cv/herdr-mobile-relay-dev.git
+cd herdr-mobile-relay-dev
 make dev-tunnel
 ```
 

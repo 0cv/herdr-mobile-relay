@@ -11,7 +11,7 @@ project's gateway. One small VPS with flat egress runs your own.
 
 ## Fast path: deploy from the plugin menu
 
-`herdr plugin install 0cv/herdr-mobile-relay` already ships the deployer, so
+`herdr plugin install 0cv/herdr-mobile-relay-dev` already ships the deployer, so
 nothing is downloaded and no installer is piped into a shell. Open the setup
 menu and choose **Choose Connection Method → Your own gateway → Deploy one on my
 own server over SSH**. It asks for two things:

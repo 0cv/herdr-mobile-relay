@@ -58,7 +58,7 @@ away; the workspace then reports `workspace_not_found`.
 
 - **Update operation failed with `read canonical release: HTTP 403`:** an older
   relay's unauthenticated GitHub release check was rate-limited. Run
-  `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes`
+  `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay-dev --yes`
   once on that computer as the signed-in user; current releases retry through
   GitHub's public release feeds.
 - **Updated app still shows the previous version:** open Settings, choose

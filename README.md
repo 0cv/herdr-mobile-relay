@@ -1,12 +1,12 @@
 # Herdr Mobile Relay
 
-[![check](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml)
+[![check](https://github.com/0cv/herdr-mobile-relay-dev/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay-dev/actions/workflows/check.yml)
 
 Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.17.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.17.0) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.17.0`](https://github.com/0cv/herdr-mobile-relay-dev/releases/tag/v0.17.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -16,7 +16,7 @@ into one installable web app.
 Requirements: Herdr 0.7.5 or newer, Git, and `curl`.
 
 ```bash
-herdr plugin install 0cv/herdr-mobile-relay
+herdr plugin install 0cv/herdr-mobile-relay-dev
 ```
 
 Choose **Quick Start** from the setup menu. If the menu does not open:

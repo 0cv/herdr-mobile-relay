@@ -7,7 +7,7 @@ temporary TryCloudflare tunnel. You need Herdr 0.7.5 or newer, Git, and `curl`.
 ## 1. Install
 
 ```bash
-herdr plugin install 0cv/herdr-mobile-relay
+herdr plugin install 0cv/herdr-mobile-relay-dev
 ```
 
 Choose **Quick Start** when the setup menu opens. If it does not:

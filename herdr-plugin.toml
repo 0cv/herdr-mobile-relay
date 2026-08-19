@@ -1,5 +1,5 @@
 # herdr-plugin.toml registers Herdr Mobile Relay with herdr as a plugin.
-# Install it with `herdr plugin install 0cv/herdr-mobile-relay` (herdr clones
+# Install it with `herdr plugin install 0cv/herdr-mobile-relay-dev` (herdr clones
 # this repo, runs the [[build]] pre-warm below after confirmation, and
 # registers the entry points), or `herdr plugin link .` from a local checkout.
 #
@@ -27,7 +27,7 @@ platforms = ["macos", "linux"]
 # account at all; otherwise cloudflared remains an interactive Quick Start
 # decision because it opens a public tunnel.
 [[build]]
-command = ["bash", "relay/plugin-build.sh"]
+command = ["env", "HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay-dev", "bash", "relay/plugin-build.sh"]
 
 # setup — the post-install chooser. The build schedules this automatically
 # after Herdr registers the new manifest when it can identify a safe terminal
