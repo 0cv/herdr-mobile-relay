@@ -243,8 +243,10 @@ while ! public_curl -sS --max-time 5 -o /dev/null "https://$NEW_HOSTNAME/healthz
 done
 echo " ✓"
 
-# Only now does anything local move. Every failure below restores this copy, so
-# the relay is never left serving a name that answers nowhere.
+# Only now does anything local move. Add the new rule ahead of the old one
+# instead of replacing it: a DNS record still pointing at this tunnel must keep
+# serving already-paired phones until the operator deletes that record.
+# Every failure below restores the exact previous config.
 CONFIG_BACKUP="$CONFIG.herdr-previous"
 cp "$CONFIG" "$CONFIG_BACKUP"
 restore_config() {
@@ -255,19 +257,40 @@ restore_config() {
 
 TEMP_CONFIG="$CONFIG.herdr-new.$$"
 if [ -n "$CURRENT_HOSTNAME" ]; then
-    sed "s|^\([[:space:]]*-\{0,1\}[[:space:]]*hostname:[[:space:]]*\)$CURRENT_HOSTNAME|\1$NEW_HOSTNAME|" \
-        "$CONFIG" > "$TEMP_CONFIG"
+    if ! awk -v current="$CURRENT_HOSTNAME" -v replacement="$NEW_HOSTNAME" '
+        !moved && /^[[:space:]]*-[[:space:]]*hostname:[[:space:]]*/ {
+            start = index($0, current)
+            if (start > 0 && substr($0, start) == current) {
+                previous = $0
+                next_rule = substr($0, 1, start - 1) replacement
+                if ((getline service) <= 0) exit 2
+                print next_rule
+                print service
+                print previous
+                print service
+                moved = 1
+                next
+            }
+        }
+        { print }
+        END { if (!moved) exit 3 }
+    ' "$CONFIG" > "$TEMP_CONFIG"; then
+        rm -f "$TEMP_CONFIG"
+        echo "✗ Could not add the ingress hostname in $CONFIG." >&2
+        exit 1
+    fi
 else
     sed "s|^\([[:space:]]*-\{0,1\}[[:space:]]*hostname:[[:space:]]*\).*|\1$NEW_HOSTNAME|" \
         "$CONFIG" > "$TEMP_CONFIG"
 fi
 if ! grep -Fq "$NEW_HOSTNAME" "$TEMP_CONFIG"; then
     rm -f "$TEMP_CONFIG"
-    echo "✗ Could not rewrite the ingress hostname in $CONFIG." >&2
+    echo "✗ Could not add the ingress hostname in $CONFIG." >&2
     exit 1
 fi
 mv -f "$TEMP_CONFIG" "$CONFIG"
-echo "✓ $CONFIG now serves $NEW_HOSTNAME (previous copy: $CONFIG_BACKUP)"
+echo "✓ $CONFIG now serves $NEW_HOSTNAME and $CURRENT_HOSTNAME"
+echo "  (previous copy: $CONFIG_BACKUP)"
 
 # Whatever the wizard recorded has to agree, or a later teardown would chase the
 # old name and refuse to finish. Assignments are key=value.

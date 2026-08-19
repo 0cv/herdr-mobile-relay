@@ -769,6 +769,8 @@ grep -Fq 'tunnel route dns herdr-mobile-relay-fedora relay-fedora.new.test' "$MO
       printf '%s\n' "$MOVE_OUTPUT" >&2; exit 1; }
 grep -Fq 'hostname: relay-fedora.new.test' "$MOVE_CONFIG" ||
     { echo "the ingress still serves the old hostname" >&2; exit 1; }
+grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
+    { echo "the old hostname stopped serving before its record was deleted" >&2; exit 1; }
 grep -Fq 'tunnel: herdr-mobile-relay-fedora' "$MOVE_CONFIG" ||
     { echo "the move rewrote more than the hostname" >&2; exit 1; }
 test "$(cat "$MOVE_STATE_RECORD" 2>/dev/null)" = "relay-fedora.new.test" ||
