@@ -609,7 +609,7 @@ esac
 EOF
 chmod 700 "$CHOOSER_BIN_DIR/curl"
 CHOOSER_OUTPUT="$(
-    printf '2\n' |
+    printf '3\n' |
         PATH="$CHOOSER_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELAY_ENV="$CHOOSER_ENV" \
@@ -652,7 +652,7 @@ chmod 700 "$MENU_BIN_DIR/curl"
 # 7 shows the status, then the menu is redrawn and q leaves. Without a terminal
 # the return prompt is skipped, so the input carries no extra newline.
 MENU_OUTPUT="$(
-    printf '7\nq\n' |
+    printf '8\nq\n' |
         PATH="$MENU_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELEASE_ROOT="$MENU_ROOT" \
@@ -680,6 +680,93 @@ esac
 case "$MENU_OUTPUT" in
     *"Exit, change nothing"*) ;;
     *) echo "setup menu did not offer a way out" >&2; exit 1 ;;
+esac
+
+# Moving a relay to a new domain must not mean tearing down the tunnel and
+# re-pairing every phone: the route is added to the existing tunnel, the ingress
+# follows, and the recorded hostname keeps up so a later teardown still matches.
+MOVE_HOME="$WORK_DIR/move-home"
+MOVE_BIN="$WORK_DIR/move-bin"
+MOVE_ENV="$MOVE_HOME/relay.env"
+MOVE_CONFIG="$MOVE_HOME/cloudflared/config.yml"
+MOVE_STATE="$MOVE_HOME/stable-setup.json"
+MOVE_ROUTE_LOG="$WORK_DIR/route-log"
+mkdir -p "$MOVE_HOME/cloudflared" "$MOVE_BIN"
+export MOVE_ROUTE_LOG
+printf "HERDR_RELAY_TOKEN='move-token'\nCLOUDFLARED_CONFIG='%s'\n" "$MOVE_CONFIG" > "$MOVE_ENV"
+cat > "$MOVE_CONFIG" <<'EOF'
+tunnel: herdr-mobile-relay-fedora
+credentials-file: /somewhere/creds.json
+ingress:
+  - hostname: relay-fedora.old.test
+    service: http://localhost:8375
+  - service: http_status:404
+EOF
+printf '{"owner":"herdr-mobile-relay-stable-setup-v1","schema":1,"hostname":"relay-fedora.old.test"}\n' \
+    > "$MOVE_STATE"
+cat > "$MOVE_BIN/cloudflared" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MOVE_ROUTE_LOG"
+exit 0
+EOF
+cat > "$MOVE_BIN/curl" <<'EOF'
+#!/bin/sh
+printf '{"status":"ok","instance":"same","version":"9.9.9","protocol":2}\n'
+EOF
+cat > "$MOVE_BIN/relay-stub" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+    "stable-state health-match") exit 0 ;;
+    "stable-state update")
+        printf '%s\n' "$5" > "$MOVE_STATE_RECORD"
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
+EOF
+printf '#!/bin/sh\nexit 0\n' > "$MOVE_BIN/service.sh"
+chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl" "$MOVE_BIN/relay-stub" "$MOVE_BIN/service.sh"
+MOVE_STATE_RECORD="$WORK_DIR/state-hostname"
+export MOVE_STATE_RECORD
+# setup-link and service.sh are the two things this action hands off to; both
+# are stubbed so the test observes the move itself.
+cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"
+
+MOVE_OUTPUT="$(
+    printf 'relay-fedora.new.test\n' |
+        HOME="$MOVE_HOME" \
+        PATH="$MOVE_BIN:$PATH" \
+        HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
+        HERDR_RELAY_ENV="$MOVE_ENV" \
+        HERDR_STABLE_STATE_FILE="$MOVE_STATE" \
+        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+)"
+grep -Fq 'tunnel route dns herdr-mobile-relay-fedora relay-fedora.new.test' "$MOVE_ROUTE_LOG" ||
+    { echo "the new hostname was never routed to the existing tunnel" >&2
+      printf '%s\n' "$MOVE_OUTPUT" >&2; exit 1; }
+grep -Fq 'hostname: relay-fedora.new.test' "$MOVE_CONFIG" ||
+    { echo "the ingress still serves the old hostname" >&2; exit 1; }
+grep -Fq 'tunnel: herdr-mobile-relay-fedora' "$MOVE_CONFIG" ||
+    { echo "the move rewrote more than the hostname" >&2; exit 1; }
+test "$(cat "$MOVE_STATE_RECORD" 2>/dev/null)" = "relay-fedora.new.test" ||
+    { echo "the recorded hostname was not updated" >&2; exit 1; }
+[ -f "$MOVE_CONFIG.herdr-previous" ] ||
+    { echo "the previous config was not kept" >&2; exit 1; }
+
+# A gateway relay has no hostname to move, and saying so beats editing a config
+# that is not in use.
+printf "HERDR_RELAY_TOKEN='move-token'\n" > "$MOVE_ENV"
+MOVE_OUTPUT="$(
+    HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" \
+        HERDR_RELAY_ENV="$MOVE_ENV" bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+)"
+case "$MOVE_OUTPUT" in
+    *"does not run a Cloudflare tunnel"*) ;;
+    *)
+        echo "a gateway relay was not told hostnames do not apply" >&2
+        printf '%s\n' "$MOVE_OUTPUT" >&2
+        exit 1
+        ;;
 esac
 
 echo "common shell tests passed"

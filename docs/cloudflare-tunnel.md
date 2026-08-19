@@ -26,6 +26,7 @@ a distinct hostname, then add every QR to the same phone app.
 
 ```bash
 herdr plugin action invoke setup-link --plugin herdr-mobile-relay.events
+herdr plugin action invoke change-hostname --plugin herdr-mobile-relay.events
 herdr plugin action invoke status --plugin herdr-mobile-relay.events
 herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events
 herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
@@ -36,6 +37,12 @@ herdr plugin action invoke uninstall --plugin herdr-mobile-relay.events
 current state. `configure-app-deploy` designates this stable relay as the
 deployment owner for a separately hosted Cloudflare Pages app — see
 [docs/updates.md](updates.md).
+
+`change-hostname` moves the relay to another name — a new domain, say — by
+routing it to the same tunnel and rewriting the ingress. The tunnel, its
+credentials, and the relay token stay, so phones only need the new link, and
+the old record keeps answering until you delete it in Cloudflare. The new name
+has to be on the same Cloudflare account.
 
 ## Teardown
 

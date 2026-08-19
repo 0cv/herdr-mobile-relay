@@ -21,24 +21,30 @@ else
     echo "Currently using a Cloudflare tunnel."
 fi
 echo ""
-echo "Whichever you pick, traffic stays end-to-end encrypted and the phone"
-echo "upgrades to a direct connection whenever the network allows it. The"
-echo "choice only decides who carries the fallback when it cannot."
+echo "Both carry end-to-end encrypted traffic and both upgrade to a direct"
+echo "connection when the network allows; this only picks the fallback carrier."
 echo ""
-menu_item 1 "Cloudflare tunnel (recommended)"
+# The two carriers are unrelated worlds — one needs Cloudflare, the other a
+# WebRTC gateway — so the options are grouped under their carrier instead of
+# being interleaved by recommendation.
+echo "Cloudflare tunnel"
+echo ""
+menu_item 1 "Temporary tunnel (recommended)"
 echo "     The original transport, and the default. Quick Start opens a"
 echo "     temporary URL with no Cloudflare account and no domain."
 echo ""
-menu_item 2 "Community gateway"
+menu_item 2 "Stable tunnel"
+echo "     A permanent hostname, a dedicated tunnel, and a background service."
+echo "     Needs a Cloudflare account with a domain; the wizard is resumable."
+echo ""
+echo "WebRTC gateway"
+echo ""
+menu_item 3 "Community gateway"
 echo "     Run by the project, free, shared, no account and no domain needed."
 echo "     Best-effort capacity: fine for normal use, not for heavy transfers."
 if [ -z "$COMMUNITY" ]; then
-    echo "     (No community gateway is published yet — choose 1, 3, or 4.)"
+    echo "     (No community gateway is published yet — choose 1, 2, or 4.)"
 fi
-echo ""
-menu_item 3 "Stable Cloudflare tunnel"
-echo "     A permanent hostname, a dedicated tunnel, and a background service."
-echo "     Needs a Cloudflare account with a domain; the wizard is resumable."
 echo ""
 menu_item 4 "Your own gateway"
 echo "     Best performance and privacy: you own the box, the bandwidth, and"
@@ -163,6 +169,14 @@ while true; do
             exit 0
             ;;
         2)
+            # The stable wizard owns the Cloudflare path end to end, so the
+            # gateway switch has to be cleared before it runs: a leftover
+            # HERDR_GATEWAY_URL would send start.sh and the QR down the gateway
+            # path and ignore the tunnel it just provisioned.
+            set_gateway_url "$ENV_FILE" ""
+            exec "$SCRIPT_DIR/plugin-install-service.sh"
+            ;;
+        3)
             if [ -z "$COMMUNITY" ]; then
                 echo "✗ No community gateway is published yet."
                 echo "  Choose 4 to run your own, or 1 to keep using Cloudflare."
@@ -173,14 +187,6 @@ while true; do
             if use_gateways "$COMMUNITY" latency; then
                 exit 0
             fi
-            ;;
-        3)
-            # The stable wizard owns the Cloudflare path end to end, so the
-            # gateway switch has to be cleared before it runs: a leftover
-            # HERDR_GATEWAY_URL would send start.sh and the QR down the gateway
-            # path and ignore the tunnel it just provisioned.
-            set_gateway_url "$ENV_FILE" ""
-            exec "$SCRIPT_DIR/plugin-install-service.sh"
             ;;
         4)
             if choose_own_gateway; then

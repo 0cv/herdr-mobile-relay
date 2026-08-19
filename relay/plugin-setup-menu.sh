@@ -107,6 +107,11 @@ render_menu() {
     echo ""
     echo "Choose how you want to start:"
     echo ""
+    # Grouped by which world the entry belongs to: the tunnel entries only make
+    # sense together, and a reader scanning for one of them should not have to
+    # read the gateway and phone-app entries to find it.
+    echo "Connection"
+    echo ""
     menu_item 1 "Choose Connection Method"
     echo "     Decide how your phone reaches this computer: the community gateway"
     echo "     (free, shared, run by the project), your own gateway (best"
@@ -117,19 +122,28 @@ render_menu() {
     echo "     Installs missing tools, starts the relay, and prints the phone setup"
     echo "     QR code using whichever connection method is configured."
     echo ""
+    echo "Cloudflare tunnel"
+    echo ""
     menu_item 3 "Stable Tunnel"
     echo "     Guided permanent Cloudflare hostname, dedicated tunnel, and background service."
     echo ""
-    menu_item 4 "Show Phone Setup QR"
-    echo "     Reprint the private link and QR for the installed relay, tunnel or gateway."
+    menu_item 4 "Change Tunnel Hostname"
+    echo "     Move this relay to a different tunnel hostname and reprint the QR."
     echo ""
     menu_item 5 "Remove Stable Tunnel"
     echo "     Tear down only resources recorded as wizard-owned."
     echo ""
-    menu_item 6 "Configure App Deployment"
+    echo "Phone app"
+    echo ""
+    menu_item 6 "Show Phone Setup QR"
+    echo "     Reprint the private link and QR for the installed relay, tunnel or gateway."
+    echo ""
+    menu_item 7 "Configure App Deployment"
     echo "     Let this computer deploy one separately hosted Cloudflare Pages app."
     echo ""
-    menu_item 7 "Show Full Status"
+    echo "Diagnostics"
+    echo ""
+    menu_item 8 "Show Full Status"
     echo "     Service, health, and a sanitized support snapshot."
     echo ""
     menu_item q "Exit, change nothing"
@@ -166,12 +180,13 @@ while true; do
             1) run_action "$SCRIPT_DIR/plugin-choose-transport.sh"; break ;;
             2) run_action "$SCRIPT_DIR/plugin-quick-start.sh"; break ;;
             3) run_action "$SCRIPT_DIR/plugin-install-service.sh"; break ;;
-            4) run_action "$SCRIPT_DIR/plugin-setup-link.sh"; break ;;
+            4) run_action "$SCRIPT_DIR/plugin-change-hostname.sh"; break ;;
             5) run_action "$SCRIPT_DIR/plugin-stable-teardown.sh"; break ;;
-            6) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
-            7) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
+            6) run_action "$SCRIPT_DIR/plugin-setup-link.sh"; break ;;
+            7) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
+            8) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
             q | Q) exit 0 ;;
-            *) echo "Enter 1, 2, 3, 4, 5, 6, 7, or q." ;;
+            *) echo "Enter 1, 2, 3, 4, 5, 6, 7, 8, or q." ;;
         esac
     done
 done
