@@ -7,8 +7,9 @@ on:
 
 jobs:
   go:
-    name: Go quality and black-box
+    name: Go quality
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -21,7 +22,36 @@ jobs:
         run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
       - run: go vet ./...
       - run: go test ./...
+
+  # The race detector more than doubles the Go suite, and the shell suites are
+  # unrelated to it. Both used to sit behind `go test` in one serial job and
+  # decided when every later job could start.
+  race:
+    name: Go race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.5
+          cache: true
       - run: go test -race ./...
+
+  shell:
+    name: Shell and production paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.26.5
+          cache: true
       - run: make shell-check production-path-audit
 
   frontend:
@@ -48,10 +78,13 @@ jobs:
       - run: make frontend-check
       - run: make web-release-check
 
+  # Bundles are one of the things this workflow checks, not something it
+  # publishes, so they no longer wait behind the test jobs: a red run fails on
+  # its own job and a green run stops paying for the serial hop.
   release:
     name: Complete release bundles
     runs-on: ubuntu-latest
-    needs: [go, frontend]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
