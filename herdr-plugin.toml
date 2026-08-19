@@ -38,26 +38,15 @@ id = "setup"
 title = "Herdr Mobile Relay: Setup"
 command = ["bash", "relay/open-plugin-pane.sh", "setup"]
 
-# choose-transport — the first decision: how the phone reaches this computer.
-# Either the free shared community gateway, a gateway the user owns (pointed at
-# an existing one or deployed from a generated bundle), or a Cloudflare tunnel.
-# It writes or clears HERDR_GATEWAY_URL, the single switch the rest of the
-# tooling reads, so every later action follows the choice made here.
-[[actions]]
-id = "choose-transport"
-title = "Herdr Mobile Relay: Choose Connection Method"
-command = ["bash", "relay/open-plugin-pane.sh", "choose-transport"]
 
-# quick-start — the trial path: creates private plugin config, offers to
-# install missing user-level tools, starts the relay, and prints the phone
-# setup QR code. With HERDR_GATEWAY_URL set the relay registers with that blind
-# gateway (no Cloudflare account needed) and the phone upgrades to a direct
-# WebRTC connection when the network allows it; without it a temporary
-# Cloudflare tunnel is started instead. Actions run headless, so this wrapper
-# immediately reopens itself as the managed pane below.
+# quick-start — starts a foreground trial when no service is installed. With an
+# existing background service it restarts that service and prints its current
+# setup QR rather than racing it for the relay port. The flattened Setup action
+# normally selects the transport and enters this path in one step; this action
+# remains as a direct fallback.
 [[actions]]
 id = "quick-start"
-title = "Herdr Mobile Relay: Quick Start (no Cloudflare account needed)"
+title = "Herdr Mobile Relay: Start or Restart Relay"
 command = ["bash", "relay/open-plugin-pane.sh", "quick-start"]
 
 # install-service — the permanent Cloudflare path: provisions or resumes a
@@ -119,15 +108,10 @@ title = "Herdr Mobile Relay: Setup"
 placement = "zoomed"
 command = ["bash", "relay/plugin-setup-menu.sh"]
 
-[[panes]]
-id = "choose-transport"
-title = "Herdr Mobile Relay: Choose Connection Method"
-placement = "zoomed"
-command = ["bash", "relay/plugin-choose-transport.sh"]
 
 [[panes]]
 id = "quick-start"
-title = "Herdr Mobile Relay: Quick Start (no Cloudflare account needed)"
+title = "Herdr Mobile Relay: Start or Restart Relay"
 placement = "zoomed"
 command = ["bash", "relay/plugin-quick-start.sh"]
 

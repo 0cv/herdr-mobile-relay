@@ -607,12 +607,16 @@ test "$(HERDR_COMMUNITY_GATEWAY_URL="wss://a.example.test,wss://b.example.test" 
     "wss://a.example.test,wss://b.example.test"
 test -z "$(HERDR_COMMUNITY_GATEWAY_URL="" community_gateway_url)"
 
-# The installed chooser accepts the managed candidate list without asking for
-# addresses, retains an unavailable cold fallback, and requires one healthy
-# gateway before saving anything.
+# Each flattened transport entry is complete: Community accepts the managed
+# candidate list without asking for addresses, retains an unavailable cold
+# fallback, saves the latency policy, and immediately enters Quick Start.
 CHOOSER_BIN_DIR="$WORK_DIR/chooser-bin"
+CHOOSER_SCRIPT_DIR="$WORK_DIR/chooser-scripts"
 CHOOSER_ENV="$WORK_DIR/config/chooser.env"
-mkdir -p "$CHOOSER_BIN_DIR"
+CHOOSER_START_MARKER="$WORK_DIR/chooser-started"
+mkdir -p "$CHOOSER_BIN_DIR" "$CHOOSER_SCRIPT_DIR"
+cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-choose-transport.sh" \
+    "$CHOOSER_SCRIPT_DIR/"
 cat > "$CHOOSER_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
@@ -625,14 +629,20 @@ case "$*" in
 esac
 EOF
 chmod 700 "$CHOOSER_BIN_DIR/curl"
+cat > "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh" <<'EOF'
+#!/bin/sh
+printf 'started\n' > "$CHOOSER_START_MARKER"
+EOF
+chmod 700 "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh"
+export CHOOSER_START_MARKER
 CHOOSER_OUTPUT="$(
-    printf '3\n' |
-        PATH="$CHOOSER_BIN_DIR:$PATH" \
+    PATH="$CHOOSER_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELAY_ENV="$CHOOSER_ENV" \
         HERDR_COMMUNITY_GATEWAY_URL="gw-a.example.test,https://gw-b.example.test" \
-        bash "$REPO_DIR/relay/plugin-choose-transport.sh"
+        bash "$CHOOSER_SCRIPT_DIR/plugin-choose-transport.sh" community
 )"
+test -f "$CHOOSER_START_MARKER"
 test "$(env_file_value "$CHOOSER_ENV" HERDR_GATEWAY_URL)" = \
     "wss://gw-a.example.test,wss://gw-b.example.test"
 # The published candidates are interchangeable, so this is the one option that
@@ -646,9 +656,69 @@ case "$CHOOSER_OUTPUT" in
         ;;
 esac
 
-# Stable Tunnel is also a top-level menu action, not only a transport-chooser
-# branch. Either entry point must clear a gateway before stable setup and the QR
-# decide which transport to use.
+# Quick Start must never race an installed background service for the relay
+# port. It restarts that service, waits for health, and prints the existing
+# endpoint's QR without launching the packaged relay binary.
+START_SCRIPT_DIR="$WORK_DIR/start-scripts"
+START_HOME="$WORK_DIR/start-home"
+START_BIN_DIR="$START_HOME/.local/bin"
+START_ENV="$WORK_DIR/config/start.env"
+START_SERVICE_LOG="$WORK_DIR/start-service.log"
+START_RELAY_LOG="$WORK_DIR/start-relay.log"
+mkdir -p "$START_SCRIPT_DIR" "$START_BIN_DIR"
+cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/start.sh" "$START_SCRIPT_DIR/"
+printf "HERDR_RELAY_TOKEN='start-token'\nHERDR_RELAY_INSTANCE_ID='start-instance'\n" \
+    > "$START_ENV"
+cat > "$START_SCRIPT_DIR/setup-link.sh" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'setup QR printed'
+EOF
+cat > "$START_BIN_DIR/systemctl" <<'EOF'
+#!/bin/sh
+case "$*" in
+    "--user is-active --quiet herdr-mobile-relay.service")
+        exit 0
+        ;;
+    "--user restart herdr-mobile-relay.service")
+        printf 'restarted\n' > "$START_SERVICE_LOG"
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+cat > "$START_BIN_DIR/curl" <<'EOF'
+#!/bin/sh
+printf '%s\n' '{"status":"ok","instance":"start-instance","version":"9.9.9","protocol":2}'
+EOF
+cat > "$START_BIN_DIR/herdr" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat > "$START_BIN_DIR/relay-bin" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$START_RELAY_LOG"
+exit 1
+EOF
+chmod 700 "$START_SCRIPT_DIR/setup-link.sh" "$START_BIN_DIR/systemctl" \
+    "$START_BIN_DIR/curl" "$START_BIN_DIR/herdr" "$START_BIN_DIR/relay-bin"
+export START_SERVICE_LOG START_RELAY_LOG
+START_OUTPUT="$(
+    HOME="$START_HOME" \
+        PATH="$START_BIN_DIR:$PATH" \
+        HERDR_RELAY_BIN="$START_BIN_DIR/relay-bin" \
+        HERDR_RELAY_ENV="$START_ENV" \
+        bash "$START_SCRIPT_DIR/start.sh"
+)"
+test -f "$START_SERVICE_LOG"
+test ! -e "$START_RELAY_LOG"
+case "$START_OUTPUT" in
+    *"Restarting the installed background relay"*"Background relay ready"*"setup QR printed"*) ;;
+    *) echo "Quick Start did not reuse the installed background service" >&2; exit 1 ;;
+esac
+
+# The top-level Stable Tunnel action clears a gateway before stable setup, so
+# the service and QR cannot accidentally retain the previous transport.
 STABLE_SWITCH_DIR="$WORK_DIR/stable-switch"
 STABLE_SWITCH_ENV="$WORK_DIR/config/stable-switch.env"
 STABLE_SWITCH_MARKER="$WORK_DIR/stable-switch-called"
@@ -709,10 +779,10 @@ esac
 EOF
 chmod 700 "$MENU_BIN_DIR/curl"
 # Entering an action and finishing it has to come back here, not end the pane:
-# 7 shows the status, then the menu is redrawn and q leaves. Without a terminal
+# 9 shows the status, then the menu is redrawn and q leaves. Without a terminal
 # the return prompt is skipped, so the input carries no extra newline.
 MENU_OUTPUT="$(
-    printf '8\nq\n' |
+    printf '9\nq\n' |
         PATH="$MENU_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELEASE_ROOT="$MENU_ROOT" \
@@ -745,6 +815,67 @@ case "$MENU_OUTPUT" in
     *"Choose Phone App and Show QR"*) ;;
     *) echo "setup menu did not expose the phone app origin chooser" >&2; exit 1 ;;
 esac
+case "$MENU_OUTPUT" in
+    *"Temporary Cloudflare Tunnel"*"Community WebRTC Gateway"*"Your Own WebRTC Gateway"*"Stable Tunnel"*) ;;
+    *) echo "setup menu did not flatten every connection action" >&2; exit 1 ;;
+esac
+case "$MENU_OUTPUT" in
+    *"Choose Connection Method"*)
+        echo "setup menu retained the redundant connection submenu" >&2
+        exit 1
+        ;;
+esac
+
+# A setup pane can outlive an in-place plugin update. Replacing its script
+# directory leaves the shell in a deleted cwd; the next action must first enter
+# the newly installed directory rather than leaking getcwd/chdir failures.
+STALE_MENU_DIR="$WORK_DIR/stale-menu-scripts"
+STALE_MENU_OLD="$WORK_DIR/stale-menu-old"
+STALE_MENU_FIFO="$WORK_DIR/stale-menu-input"
+STALE_MENU_OUTPUT="$WORK_DIR/stale-menu-output"
+STALE_MENU_MARKER="$WORK_DIR/stale-menu-action"
+export STALE_MENU_MARKER
+mkdir -p "$STALE_MENU_DIR"
+cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-setup-menu.sh" \
+    "$STALE_MENU_DIR/"
+mkfifo "$STALE_MENU_FIFO"
+exec 7<> "$STALE_MENU_FIFO"
+(
+    HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$MENU_ENV" \
+        bash "$STALE_MENU_DIR/plugin-setup-menu.sh" <&7 \
+        > "$STALE_MENU_OUTPUT" 2>&1
+) &
+STALE_MENU_PID=$!
+STALE_MENU_RENDERED=false
+for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if grep -q "Exit, change nothing" "$STALE_MENU_OUTPUT" 2>/dev/null; then
+        STALE_MENU_RENDERED=true
+        break
+    fi
+    sleep 0.1
+done
+if [ "$STALE_MENU_RENDERED" != true ]; then
+    printf 'q\n' >&7
+    wait "$STALE_MENU_PID" || true
+    echo "setup menu did not render before cwd replacement" >&2
+    exit 1
+fi
+mv "$STALE_MENU_DIR" "$STALE_MENU_OLD"
+rm -rf "$STALE_MENU_OLD"
+mkdir -p "$STALE_MENU_DIR"
+cat > "$STALE_MENU_DIR/plugin-status.sh" <<'EOF'
+#!/bin/sh
+printf 'action ran\n' > "$STALE_MENU_MARKER"
+EOF
+chmod 700 "$STALE_MENU_DIR/plugin-status.sh"
+printf '9\nq\n' >&7
+wait "$STALE_MENU_PID"
+exec 7>&-
+test -f "$STALE_MENU_MARKER"
+if grep -qE 'getcwd|cannot access parent directories|chdir:' "$STALE_MENU_OUTPUT"; then
+    echo "setup action inherited the replaced plugin working directory" >&2
+    exit 1
+fi
 
 # Moving a relay to a new domain must not mean tearing down the tunnel and
 # re-pairing every phone: the route is added to the existing tunnel, the ingress

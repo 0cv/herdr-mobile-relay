@@ -10,7 +10,8 @@ Cloudflare tunnel. You need Herdr 0.7.5 or newer, Git, and `curl`.
 herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-Choose **Quick Start** when the setup menu opens. If it does not:
+Choose **Temporary Cloudflare Tunnel** when the setup menu opens. If it does
+not:
 
 ```bash
 herdr plugin action invoke setup --plugin herdr-mobile-relay.events
@@ -43,10 +44,11 @@ agent lifecycle.
 
 ## Skip Cloudflare
 
-Choose **Choose Connection Method → Community gateway** in the setup menu and
-Quick Start never installs, launches, or needs `cloudflared`. That gateway is run
-by the project: free, shared, best-effort, with no account and no domain to set
-up. Point at a different one yourself with:
+Choose **Community WebRTC Gateway** in the setup menu. It checks the published
+gateways, saves the healthy candidates, then starts the relay and prints its QR
+without installing, launching, or needing `cloudflared`. The gateway is run by
+the project: free, shared, best-effort, with no account and no domain to set up.
+Point at a different one yourself with:
 
 ```bash
 HERDR_GATEWAY_URL=wss://gw.example.com make quick-start

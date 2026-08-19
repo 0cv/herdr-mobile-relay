@@ -29,7 +29,7 @@ CONFIG="${CLOUDFLARED_CONFIG:-}"
 if [ -z "$CONFIG" ] || [ ! -f "$CONFIG" ]; then
     echo "✗ This relay does not run a Cloudflare tunnel." >&2
     echo "  Hostnames only apply to the tunnel path; a gateway relay is reached" >&2
-    echo "  through its gateway. Use Choose Connection Method instead." >&2
+    echo "  through its gateway. Choose a WebRTC Gateway action instead." >&2
     exit 1
 fi
 

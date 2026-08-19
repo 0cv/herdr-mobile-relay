@@ -6,53 +6,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/common.sh"
+
+MODE="${1:-}"
+case "$MODE" in
+    temporary | stable | community | own) ;;
+    *)
+        echo "Usage: $0 {temporary|stable|community|own}" >&2
+        exit 2
+        ;;
+esac
 
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 CURRENT="$(gateway_urls "$ENV_FILE")"
 COMMUNITY="$(community_gateway_url)"
 
-echo "🐑 Choose how your phone reaches this computer"
-echo ""
-if [ -n "$CURRENT" ]; then
-    echo "Currently using gateway candidates: $CURRENT"
-else
-    echo "Currently using a Cloudflare tunnel."
-fi
-echo ""
-echo "Both carry end-to-end encrypted traffic and both upgrade to a direct"
-echo "connection when the network allows; this only picks the fallback carrier."
-echo ""
-# The two carriers are unrelated worlds — one needs Cloudflare, the other a
-# WebRTC gateway — so the options are grouped under their carrier instead of
-# being interleaved by recommendation.
-echo "Cloudflare tunnel"
-echo ""
-menu_item 1 "Temporary tunnel (recommended)"
-echo "     The original transport, and the default. Quick Start opens a"
-echo "     temporary URL with no Cloudflare account and no domain."
-echo ""
-menu_item 2 "Stable tunnel"
-echo "     A permanent hostname, a dedicated tunnel, and a background service."
-echo "     Needs a Cloudflare account with a domain; the wizard is resumable."
-echo ""
-echo "WebRTC gateway"
-echo ""
-menu_item 3 "Community gateway"
-echo "     Run by the project, free, shared, no account and no domain needed."
-echo "     Best-effort capacity: fine for normal use, not for heavy transfers."
-if [ -z "$COMMUNITY" ]; then
-    echo "     (No community gateway is published yet — choose 1, 2, or 4.)"
-fi
-echo ""
-menu_item 4 "Your own gateway"
-echo "     Best performance and privacy: you own the box, the bandwidth, and"
-echo "     the logs. Deploy one to a small VPS from here over SSH, or point at"
-echo "     one you already run."
-echo ""
-menu_item q "Leave the current setting unchanged"
-echo ""
 
 # Every path into here normalizes every candidate first: the relay only accepts
 # ws:// or wss:// entries, so community constants or typed addresses written in
@@ -107,7 +77,6 @@ use_gateways() {
         echo "✓ Saved $count gateway candidates."
         echo "  The relay will register with the first healthy one in that order."
     fi
-    echo "  Run Quick Start to register and print the phone QR."
     return 0
 }
 
@@ -123,7 +92,11 @@ choose_own_gateway() {
         read -r -p "Choice [a]: " sub
         case "${sub:-a}" in
             a|A)
-                exec "$SCRIPT_DIR/gateway-deploy.sh"
+                if "$SCRIPT_DIR/gateway-deploy.sh" &&
+                    [ -n "$(gateway_urls "$ENV_FILE")" ]; then
+                    return 0
+                fi
+                return 1
                 ;;
             b|B)
                 while true; do
@@ -155,44 +128,34 @@ choose_own_gateway() {
     done
 }
 
-while true; do
-    if ! read -r -p "Choice [1]: " choice; then
-        echo ""
-        exit 0
-    fi
-    case "${choice:-1}" in
-        1)
-            set_gateway_url "$ENV_FILE" ""
-            echo ""
-            echo "✓ This relay will use a Cloudflare tunnel."
-            echo "  Run Quick Start for a temporary URL."
-            exit 0
-            ;;
-        2)
-            exec "$SCRIPT_DIR/plugin-install-service.sh"
-            ;;
-        3)
-            if [ -z "$COMMUNITY" ]; then
-                echo "✗ No community gateway is published yet."
-                echo "  Choose 4 to run your own, or 1 to keep using Cloudflare."
-                continue
-            fi
-            # The published candidates are interchangeable, so the closest one
-            # is the right one — this is the only path that ranks by latency.
-            if use_gateways "$COMMUNITY" latency; then
-                exit 0
-            fi
-            ;;
-        4)
-            if choose_own_gateway; then
-                exit 0
-            fi
-            ;;
-        q|Q)
-            exit 0
-            ;;
-        *)
-            echo "Enter 1, 2, 3, 4, or q."
-            ;;
-    esac
-done
+case "$MODE" in
+    temporary)
+        set_gateway_url "$ENV_FILE" ""
+        echo "✓ Temporary Cloudflare tunnel selected."
+        if installed_relay_service_active; then
+            echo "  A background relay is already installed, so Quick Start will"
+            echo "  restart it and show its current QR instead of binding a second relay."
+        fi
+        exec "$SCRIPT_DIR/plugin-quick-start.sh"
+        ;;
+    stable)
+        exec "$SCRIPT_DIR/plugin-install-service.sh"
+        ;;
+    community)
+        if [ -z "$COMMUNITY" ]; then
+            echo "✗ No community gateway is published yet."
+            echo "  Choose Your Own Gateway or a Cloudflare tunnel instead."
+            exit 1
+        fi
+        if use_gateways "$COMMUNITY" latency; then
+            exec "$SCRIPT_DIR/plugin-quick-start.sh"
+        fi
+        exit 1
+        ;;
+    own)
+        if choose_own_gateway; then
+            exec "$SCRIPT_DIR/plugin-quick-start.sh"
+        fi
+        exit 1
+        ;;
+esac

@@ -405,6 +405,35 @@ reload_launchd_service_definition() {
     launchctl kickstart -k "$service_target"
 }
 
+installed_relay_service_active() {
+    case "$(uname -s)" in
+        Darwin)
+            launchd_service_loaded "gui/$(id -u)/com.herdr-mobile-relay.service"
+            ;;
+        Linux)
+            command -v systemctl >/dev/null 2>&1 &&
+                systemctl --user is-active --quiet herdr-mobile-relay.service
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+restart_installed_relay_service() {
+    case "$(uname -s)" in
+        Darwin)
+            launchctl kickstart -k "gui/$(id -u)/com.herdr-mobile-relay.service"
+            ;;
+        Linux)
+            systemctl --user restart herdr-mobile-relay.service
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 assert_service_env_matches() {
     local resolved_env
     local service_env

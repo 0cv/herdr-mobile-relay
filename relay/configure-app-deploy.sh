@@ -49,7 +49,7 @@ echo ""
 echo "This computer will be allowed to deploy one separately hosted Cloudflare"
 echo "Pages app. It never sends Cloudflare credentials to the phone."
 echo "Its app origin also becomes the shared origin used by this relay's setup QR."
-echo "Use setup-menu option 6 instead when this computer should not own deployments."
+echo "Use setup-menu option 7 instead when this computer should not own deployments."
 echo ""
 
 # The origin and the project have to agree: only a project that already serves

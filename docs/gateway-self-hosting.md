@@ -14,9 +14,9 @@ You need a small VPS with Docker and a public hostname that resolves to it.
 
 ## Deploy it from the setup menu
 
-Open the setup menu and choose **Choose Connection Method → Your own gateway →
-Deploy one on my own server over SSH**. It asks for the public hostname phones
-will dial and the server's SSH address (`root@203.0.113.10`), then:
+Open the setup menu and choose **Your Own WebRTC Gateway → Deploy one on my
+own server over SSH**. It asks for the public hostname phones will dial and the
+server's SSH address (`root@203.0.113.10`), then:
 
 1. writes a compose bundle — `docker-compose.yml`, Caddy TLS configuration,
    `.env`, and the gateway source;

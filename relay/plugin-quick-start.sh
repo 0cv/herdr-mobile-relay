@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 if [ -n "${HERDR_BIN_PATH:-}" ]; then
     export HERDR_BIN="$HERDR_BIN_PATH"
 fi

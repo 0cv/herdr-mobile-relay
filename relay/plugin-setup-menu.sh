@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
 
@@ -92,7 +93,7 @@ print_status() {
         if [ -z "$deployed" ]; then
             printf '  Phone app:  %s (version unknown)\n' "$app_origin"
         elif [ -n "$installed" ] && [ "$deployed" != "$installed" ]; then
-            printf '  Phone app:  %s serves %s, this relay ships %s - deploy with 6\n' \
+            printf '  Phone app:  %s serves %s, this relay ships %s - deploy with 8\n' \
                 "$app_origin" "$deployed" "$installed"
         else
             printf '  Phone app:  %s serves %s\n' "$app_origin" "$deployed"
@@ -105,45 +106,44 @@ render_menu() {
     echo ""
     print_status
     echo ""
-    echo "Choose how you want to start:"
+    echo "Choose a complete setup action:"
     echo ""
-    # Grouped by which world the entry belongs to: the tunnel entries only make
-    # sense together, and a reader scanning for one of them should not have to
-    # read the gateway and phone-app entries to find it.
     echo "Connection"
     echo ""
-    menu_item 1 "Choose Connection Method"
-    echo "     Decide how your phone reaches this computer: the community gateway"
-    echo "     (free, shared, run by the project), your own gateway (best"
-    echo "     performance, you own the bandwidth and the logs), or a Cloudflare"
-    echo "     tunnel."
+    menu_item 1 "Temporary Cloudflare Tunnel"
+    echo "     Start a foreground relay and temporary URL, then print its QR."
+    echo "     An installed background relay is restarted instead of duplicated."
     echo ""
-    menu_item 2 "Quick Start (recommended)"
-    echo "     Installs missing tools, starts the relay, and prints the phone setup"
-    echo "     QR code using whichever connection method is configured."
+    menu_item 2 "Community WebRTC Gateway"
+    echo "     Check the project's shared gateways, save the healthy candidates,"
+    echo "     then start or restart the relay and print its QR."
     echo ""
-    echo "Cloudflare tunnel"
+    menu_item 3 "Your Own WebRTC Gateway"
+    echo "     Deploy a gateway over SSH or enter one you run, then start or restart"
+    echo "     the relay and print its QR."
     echo ""
-    menu_item 3 "Stable Tunnel"
-    echo "     Guided permanent Cloudflare hostname, dedicated tunnel, and background service."
+    echo "Stable Cloudflare tunnel"
     echo ""
-    menu_item 4 "Change Tunnel Hostname"
+    menu_item 4 "Stable Tunnel"
+    echo "     Guided permanent hostname, dedicated tunnel, and background service."
+    echo ""
+    menu_item 5 "Change Tunnel Hostname"
     echo "     Move this relay to a different tunnel hostname and reprint the QR."
     echo ""
-    menu_item 5 "Remove Stable Tunnel"
+    menu_item 6 "Remove Stable Tunnel"
     echo "     Remove this relay's recorded service, tunnel, config, and credentials."
     echo ""
     echo "Phone app"
     echo ""
-    menu_item 6 "Choose Phone App and Show QR"
+    menu_item 7 "Choose Phone App and Show QR"
     echo "     Keep or change the shared app origin, then reprint the private setup QR."
     echo ""
-    menu_item 7 "Configure App Deployment"
+    menu_item 8 "Configure App Deployment"
     echo "     Designate this computer as the deployment owner and pin its shared app origin."
     echo ""
     echo "Diagnostics"
     echo ""
-    menu_item 8 "Show Full Status"
+    menu_item 9 "Show Full Status"
     echo "     Service, health, and a sanitized support snapshot."
     echo ""
     menu_item q "Exit, change nothing"
@@ -158,10 +158,14 @@ render_menu() {
 # script, which is why pause_before_close stands down under HERDR_SETUP_MENU.
 run_action() {
     local action="$1"
+    shift
 
     echo ""
     trap 'printf "\n"' INT
-    HERDR_SETUP_MENU=1 "$action" || true
+    (
+        cd "$SCRIPT_DIR"
+        HERDR_SETUP_MENU=1 "$action" "$@"
+    ) || true
     load_relay_env "$ENV_FILE"
     trap - INT
     if [ -t 0 ]; then
@@ -178,16 +182,17 @@ while true; do
             exit 0
         fi
         case "${choice:-1}" in
-            1) run_action "$SCRIPT_DIR/plugin-choose-transport.sh"; break ;;
-            2) run_action "$SCRIPT_DIR/plugin-quick-start.sh"; break ;;
-            3) run_action "$SCRIPT_DIR/plugin-install-service.sh"; break ;;
-            4) run_action "$SCRIPT_DIR/plugin-change-hostname.sh"; break ;;
-            5) run_action "$SCRIPT_DIR/plugin-stable-teardown.sh"; break ;;
-            6) run_action "$SCRIPT_DIR/plugin-setup-link.sh"; break ;;
-            7) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
-            8) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
+            1) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" temporary; break ;;
+            2) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" community; break ;;
+            3) run_action "$SCRIPT_DIR/plugin-choose-transport.sh" own; break ;;
+            4) run_action "$SCRIPT_DIR/plugin-install-service.sh"; break ;;
+            5) run_action "$SCRIPT_DIR/plugin-change-hostname.sh"; break ;;
+            6) run_action "$SCRIPT_DIR/plugin-stable-teardown.sh"; break ;;
+            7) run_action "$SCRIPT_DIR/plugin-setup-link.sh"; break ;;
+            8) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
+            9) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
             q | Q) exit 0 ;;
-            *) echo "Enter 1, 2, 3, 4, 5, 6, 7, 8, or q." ;;
+            *) echo "Enter 1, 2, 3, 4, 5, 6, 7, 8, 9, or q." ;;
         esac
     done
 done

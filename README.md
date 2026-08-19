@@ -19,15 +19,16 @@ Requirements: Herdr 0.7.5 or newer, Git, and `curl`.
 herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-Choose **Quick Start** from the setup menu. If the menu does not open:
+Choose **Temporary Cloudflare Tunnel** from the setup menu. It installs any
+missing user-level tools with confirmation, starts the relay and bundled app,
+and prints a QR code. If the menu does not open:
 
 ```bash
 herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 ```
 
-Quick Start installs missing user-level tools with confirmation, starts the relay
-and the bundled app, and prints a QR code. Scan it with your phone. Keep the pane
-open; Ctrl-C stops everything.
+Scan the QR with your phone. Keep the pane open; Ctrl-C stops the temporary
+relay.
 
 That trial path needs no Cloudflare account, no domain, no Python, Node.js, or Go
 toolchain, no separate web deployment, and no `sudo`. Treat the QR and its setup
@@ -64,8 +65,7 @@ terminal controls, and notification settings.
 
 ## Choosing how your phone connects
 
-Quick Start's temporary tunnel is fine for trying the app. For everyday use, the
-setup menu's **Choose Connection Method** offers three transports:
+The setup menu exposes each complete connection path directly:
 
 | Choice | Needs | Best for |
 | --- | --- | --- |

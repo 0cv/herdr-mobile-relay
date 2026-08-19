@@ -144,6 +144,13 @@ project follows [Semantic Versioning](https://semver.org/).
   assigning a computer as the app deployment owner.
   When a current origin exists, submenu option 1 now explicitly keeps it;
   switching to the relay or another app requires options 2 or 3.
+- The setup menu now exposes Temporary Cloudflare, Stable Cloudflare,
+  Community WebRTC, and Own WebRTC as complete top-level actions instead of a
+  connection submenu followed by Quick Start. Gateway choices immediately
+  start or restart the relay and print its QR. Quick Start detects an installed
+  background service and restarts it instead of failing on its occupied port,
+  and menu actions enter the current plugin directory so an in-place plugin
+  update cannot leave them in a deleted working directory.
 
 ## [0.16.4] - 2026-08-18
 

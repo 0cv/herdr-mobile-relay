@@ -64,6 +64,20 @@ if [ "$TUNNEL_TARGET_HOST" = "0.0.0.0" ]; then
     TUNNEL_TARGET_HOST="127.0.0.1"
 fi
 
+if installed_relay_service_active; then
+    assert_service_env_matches "$ENV_FILE"
+    echo "▸ Restarting the installed background relay instead of starting a duplicate..."
+    restart_installed_relay_service
+    if ! HEALTH="$(wait_for_relay_health "$PORT")"; then
+        echo "✗ The installed relay did not become healthy after restart."
+        echo "  Run the Status action for service logs and diagnostics."
+        exit 1
+    fi
+    echo "✓ Background relay ready: $HEALTH"
+    echo ""
+    exec "$SCRIPT_DIR/setup-link.sh"
+fi
+
 # 1. Start the verified packaged relay.
 echo "▸ Starting relay on $HOST:$PORT..."
 "$RELAY_BIN" serve &

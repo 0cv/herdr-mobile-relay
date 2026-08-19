@@ -541,8 +541,8 @@ proxied because raw UDP cannot travel through Caddy's TLS.
 
 ## Bring it up
 
-The plugin menu (**Choose Connection Method → Your own gateway → Deploy one on
-my own server**) copies this directory to the server over SSH, brings it up, and
+The plugin menu (**Your Own WebRTC Gateway → Deploy one on my own server**)
+copies this directory to the server over SSH, brings it up, and
 verifies it. These are the same steps by hand:
 
 ```sh
@@ -889,8 +889,8 @@ report_public_health_failure() {
     echo "  Watch the certificate attempt with:"
     echo "    $SSH_CMD_HINT \"cd $REMOTE_DIR && docker compose logs -f caddy\""
     echo ""
-    echo "  Once it answers, run Choose Connection Method, pick \"Your own"
-    echo "  gateway\", and enter $GATEWAY_HOST."
+    echo "  Once it answers, choose \"Your Own WebRTC Gateway\", then \"Point at"
+    echo "  a gateway I already run\", and enter $GATEWAY_HOST."
 }
 
 # ssh only offers ~/.ssh/id_* and whatever ~/.ssh/config names, so a key kept
@@ -1200,7 +1200,7 @@ if [ -z "$SSH_TARGET" ]; then
     echo "for /probe. UDP 3478 is address discovery: without it phones and"
     echo "computers behind NAT stay on the relayed path."
     echo ""
-    echo "▸ Once it answers, run Choose Connection Method and enter $GATEWAY_HOST,"
+    echo "▸ Once it answers, choose Your Own WebRTC Gateway and enter $GATEWAY_HOST,"
     echo "  or set HERDR_GATEWAY_URL=$GATEWAY_WSS in the relay environment."
     exit 0
 fi
@@ -1257,7 +1257,7 @@ if [ "$GATEWAY_LIST" != "$GATEWAY_WSS" ]; then
     echo "  Yours is first; the community gateways behind it are only reached"
     echo "  when it is unhealthy."
 fi
-echo "  Run Quick Start to register and print the phone QR."
+echo "  Returning to start or restart the relay and print its phone QR."
 echo ""
 echo "Day-to-day on the server:"
 echo "  $SSH_CMD_HINT \"cd $REMOTE_DIR && docker compose logs -f --tail=50\""
