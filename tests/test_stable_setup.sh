@@ -316,10 +316,10 @@ test_success_and_alternate_port() {
     assert_contains "$OUTPUT" 'Stable relay verified'
     assert_contains "$OUTPUT" 'Herdr Mobile Relay phone setup'
     assert_contains "$OUTPUT" 'https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
-    assert_contains "$HOME/phone-app-origin" 'https://relay-workstation.example.test'
-    MODE="$(stat -c '%a' "$HOME/phone-app-origin" 2>/dev/null || stat -f '%Lp' "$HOME/phone-app-origin")"
+    assert_contains "$HOME/phone-app-origin-configured" 'https://relay-workstation.example.test'
+    MODE="$(stat -c '%a' "$HOME/phone-app-origin-configured" 2>/dev/null || stat -f '%Lp' "$HOME/phone-app-origin-configured")"
     [ "$MODE" = 600 ] \
-        || fail "phone app origin is not private"
+        || fail "configured phone app origin is not private"
     assert_contains "$STUB_LOG" 'cloudflared tunnel create --output json --credentials-file'
     assert_not_contains "$STUB_LOG" '--overwrite-dns'
     pass "successful creation uses the alternate relay port and prints QR only after verification"
@@ -333,7 +333,7 @@ test_existing_phone_app_origin() {
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with existing phone app"; }
     assert_contains "$OUTPUT" 'https://app.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
     assert_contains "$OUTPUT" 'Direct browser fallback:'
-    assert_contains "$HOME/phone-app-origin" 'https://app.example.test'
+    assert_contains "$HOME/phone-app-origin-configured" 'https://app.example.test'
     pass "guided setup records an existing installed app origin without baking it into the project"
 }
 
@@ -347,7 +347,8 @@ EOF
     run_setup
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with deployed phone app"; }
     assert_contains "$OUTPUT" 'https://app.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
-    assert_contains "$HOME/phone-app-origin" 'https://app.example.test'
+    assert_contains "$HOME/phone-app-origin-configured" 'https://app.example.test'
+    assert_contains "$HOME/phone-app-origin" 'https://relay-workstation.example.test'
     pass "stable setup reuses the configured deployment origin"
 }
 
@@ -361,7 +362,7 @@ test_discovered_phone_app_origin() {
     assert_contains "$OUTPUT" 'https://herdr.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
     assert_contains "$OUTPUT" 'Direct browser fallback:'
     assert_contains "$OUTPUT" 'https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
-    assert_contains "$HOME/phone-app-origin" 'https://herdr.example.test'
+    assert_contains "$HOME/phone-app-origin-configured" 'https://herdr.example.test'
     pass "stable setup discovers the shared phone app without changing the relay endpoint"
 }
 

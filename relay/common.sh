@@ -1039,12 +1039,16 @@ phone_app_base_url() {
     local env_file="${2:-${HERDR_RELAY_ENV:-}}"
     local app_url="${HERDR_PHONE_APP_URL:-${HERDR_APP_DEPLOY_ORIGIN:-}}"
     local normalized
-    local recorded_origin
+    local configured_origin
+    local observed_origin
 
     if [ -z "$app_url" ] && [ -n "$env_file" ]; then
-        recorded_origin="$(dirname "$env_file")/phone-app-origin"
-        if [ -r "$recorded_origin" ]; then
-            app_url="$(head -1 "$recorded_origin")"
+        configured_origin="$(dirname "$env_file")/phone-app-origin-configured"
+        observed_origin="$(dirname "$env_file")/phone-app-origin"
+        if [ -r "$configured_origin" ]; then
+            app_url="$(head -1 "$configured_origin")"
+        elif [ -r "$observed_origin" ]; then
+            app_url="$(head -1 "$observed_origin")"
         fi
     fi
     if [ -z "$app_url" ] || [ "$app_url" = "relay" ]; then
@@ -1172,10 +1176,12 @@ choose_phone_app_base_url() {
     local choice
     local current_origin=""
     local discovered_origin=""
-    local recorded_origin
+    local configured_origin
+    local observed_origin
 
-    recorded_origin="$(dirname "$env_file")/phone-app-origin"
-    if [ -z "${HERDR_PHONE_APP_URL:-}" ] && [ ! -s "$recorded_origin" ]; then
+    configured_origin="$(dirname "$env_file")/phone-app-origin-configured"
+    observed_origin="$(dirname "$env_file")/phone-app-origin"
+    if [ -z "${HERDR_PHONE_APP_URL:-}" ] && [ ! -s "$configured_origin" ]; then
         if [ -n "${HERDR_APP_DEPLOY_ORIGIN:-}" ]; then
             discovered_origin="$(
                 HERDR_PHONE_APP_URL="$HERDR_APP_DEPLOY_ORIGIN" \
@@ -1196,7 +1202,7 @@ choose_phone_app_base_url() {
 
     echo "Where should the phone setup link open?" >&2
     echo "" >&2
-    if [ -s "$recorded_origin" ]; then
+    if [ -s "$configured_origin" ]; then
         if ! current_origin="$(phone_app_base_url "$relay_fallback" "$env_file")"; then
             echo "  The saved phone app address is invalid; choose a replacement." >&2
             echo "" >&2
@@ -1204,6 +1210,10 @@ choose_phone_app_base_url() {
     elif [ -n "$discovered_origin" ]; then
         current_origin="$discovered_origin"
         echo "  Found an existing Herdr app in this Cloudflare zone." >&2
+    elif [ -s "$observed_origin" ]; then
+        current_origin="$(phone_app_base_url "$relay_fallback" "$env_file" || true)"
+        [ -z "$current_origin" ] ||
+            echo "  Last connected phone app: $current_origin" >&2
     fi
     if [ -n "$current_origin" ]; then
         echo "  Current phone app: $current_origin" >&2
@@ -1268,7 +1278,7 @@ record_phone_app_origin() {
         echo "✗ Cannot record the phone app origin without a relay environment path." >&2
         return 1
     fi
-    target="$(dirname "$env_file")/phone-app-origin"
+    target="$(dirname "$env_file")/phone-app-origin-configured"
     temporary="$target.tmp.$$"
     (
         umask 077

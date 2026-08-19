@@ -2076,11 +2076,6 @@ func (s *Server) storePhoneAppOrigin(raw string) error {
 		return fmt.Errorf("origin must not contain a path, query, or fragment")
 	}
 	origin := "https://" + parsed.Host
-	if s.appDeployM != nil {
-		if configuredOrigin := s.appDeployM.ConfiguredOrigin(); configuredOrigin != "" {
-			origin = configuredOrigin
-		}
-	}
 	if err := os.MkdirAll(s.cfg.RuntimeDir, 0o700); err != nil {
 		return err
 	}

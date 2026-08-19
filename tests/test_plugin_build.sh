@@ -31,6 +31,7 @@ printf "HERDR_RELAY_TOKEN='source-token'\nHERDR_RELAY_INSTANCE_ID='source-instan
     "$SOURCE_CONFIG" > "$SOURCE_ENV"
 printf 'source-subscriptions\n' > "$SOURCE_CONFIG/push/subscriptions.json"
 printf 'source-origin\n' > "$SOURCE_CONFIG/phone-app-origin"
+printf 'source-configured-origin\n' > "$SOURCE_CONFIG/phone-app-origin-configured"
 printf 'source-update\n' > "$SOURCE_CONFIG/update-state.json"
 printf 'source-app-deploy\n' > "$SOURCE_CONFIG/app-deploy-state.json"
 printf '{"owner":"herdr-mobile-relay-stable-setup-v1","env_file":"%s/.env","config_path":"%s/cloudflared/config.yml"}\n' \
@@ -225,6 +226,7 @@ test "$(cat "$TARGET_CONFIG/push/subscriptions.json")" = source-subscriptions
 test "$(cat "$TARGET_CONFIG/update-state.json")" = source-update
 test "$(cat "$TARGET_CONFIG/app-deploy-state.json")" = source-app-deploy
 test "$(cat "$TARGET_CONFIG/phone-app-origin")" = source-origin
+test "$(cat "$TARGET_CONFIG/phone-app-origin-configured")" = source-configured-origin
 grep -F "$TARGET_CONFIG/relay.env" "$TARGET_CONFIG/stable-setup.json" >/dev/null
 grep -F "$TARGET_CONFIG/cloudflared/config.yml" "$TARGET_CONFIG/stable-setup.json" >/dev/null
 grep -F "$TARGET_CONFIG/cloudflared/tunnel-credentials.json" \

@@ -35,10 +35,13 @@ NODE_BIN="$NODE_DIR/node"
 NPX_BIN="$NODE_DIR/npx"
 echo "Using Node.js $("$NODE_BIN" --version) from $NODE_DIR"
 
-RECORDED_ORIGIN="$(dirname "$ENV_FILE")/phone-app-origin"
+CONFIGURED_ORIGIN="$(dirname "$ENV_FILE")/phone-app-origin-configured"
+OBSERVED_ORIGIN="$(dirname "$ENV_FILE")/phone-app-origin"
 DEFAULT_ORIGIN="${HERDR_APP_DEPLOY_ORIGIN:-}"
-if [ -z "$DEFAULT_ORIGIN" ] && [ -r "$RECORDED_ORIGIN" ]; then
-    DEFAULT_ORIGIN="$(head -1 "$RECORDED_ORIGIN")"
+if [ -z "$DEFAULT_ORIGIN" ] && [ -r "$CONFIGURED_ORIGIN" ]; then
+    DEFAULT_ORIGIN="$(head -1 "$CONFIGURED_ORIGIN")"
+elif [ -z "$DEFAULT_ORIGIN" ] && [ -r "$OBSERVED_ORIGIN" ]; then
+    DEFAULT_ORIGIN="$(head -1 "$OBSERVED_ORIGIN")"
 fi
 
 echo "🐑 Configure Phone App Deployment"

@@ -254,6 +254,7 @@ migrate_source_config() {
     copy_migration_entry "$source_env" relay.env
     copy_migration_entry "$source_root/push" push
     copy_migration_entry "$source_root/phone-app-origin" phone-app-origin
+    copy_migration_entry "$source_root/phone-app-origin-configured" phone-app-origin-configured
     copy_migration_entry "$source_root/stable-setup.json" stable-setup.json
     copy_migration_entry "$source_root/cloudflared" cloudflared
     copy_migration_entry "$source_root/update-state.json" update-state.json

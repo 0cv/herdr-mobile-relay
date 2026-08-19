@@ -163,24 +163,6 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-func TestStorePhoneAppOriginPreservesConfiguredDeployment(t *testing.T) {
-	runtimeDir := t.TempDir()
-	t.Setenv("HERDR_APP_DEPLOY_ORIGIN", "https://herdr.example.test")
-	s := testServer()
-	s.cfg.RuntimeDir = runtimeDir
-
-	if err := s.storePhoneAppOrigin("https://relay-fedora.example.test"); err != nil {
-		t.Fatal(err)
-	}
-	content, err := os.ReadFile(filepath.Join(runtimeDir, "phone-app-origin"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.TrimSpace(string(content)); got != "https://herdr.example.test" {
-		t.Fatalf("phone app origin = %q, want configured deployment origin", got)
-	}
-}
-
 func TestPaneDeltaResponsePreservesTruncation(t *testing.T) {
 	delta := paneDeltaResponse(
 		map[string]any{
