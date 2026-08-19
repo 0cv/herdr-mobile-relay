@@ -642,18 +642,25 @@ func TestServerRunAndShutdown(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.Run(ctx) }()
 
-	// Wait for server to be ready
+	// One second of polling is not a startup budget on a loaded CI runner under
+	// -race, and a server that died immediately should say so instead of timing
+	// out with a connection refused.
+	deadline := time.Now().Add(15 * time.Second)
 	var resp *http.Response
 	var err error
-	for i := 0; i < 50; i++ {
-		resp, err = http.Get("http://127.0.0.1:18999/health")
-		if err == nil {
+	for time.Now().Before(deadline) {
+		select {
+		case runErr := <-done:
+			t.Fatalf("Run returned before the server answered: %v", runErr)
+		default:
+		}
+		if resp, err = http.Get("http://127.0.0.1:18999/health"); err == nil {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	if err != nil {
-		t.Fatalf("server did not start: %v", err)
+		t.Fatalf("server did not answer /health within 15s: %v", err)
 	}
 	resp.Body.Close()
 
