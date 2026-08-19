@@ -2,8 +2,107 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=common.sh
+. "$SCRIPT_DIR/common.sh"
+
+ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
+load_relay_env "$ENV_FILE"
+
+# The menu opens after every install, so it has to answer "what do I have" before
+# it asks "what next". Every probe is bounded and optional: a status line that
+# cannot be determined is omitted, never fatal.
+installed_release_version() {
+    local manifest="$(relay_release_root)/current/release-manifest.json"
+
+    [ -f "$manifest" ] || return 1
+    sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1
+}
+
+running_release_version() {
+    local port="${HERDR_RELAY_PORT:-8375}"
+    local health
+
+    health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null)" || return 1
+    printf '%s' "$health" |
+        sed -n 's/.*"release_version":"\([^"]*\)".*/\1/p' | head -1
+}
+
+service_state() {
+    case "$(uname -s)" in
+        Darwin)
+            [ -f "$HOME/Library/LaunchAgents/com.herdr-mobile-relay.service.plist" ] || return 1
+            launchd_service_loaded "gui/$(id -u)/com.herdr-mobile-relay.service" &&
+                printf 'installed (loaded)\n' || printf 'installed (not loaded)\n'
+            ;;
+        Linux)
+            [ -f "$HOME/.config/systemd/user/herdr-mobile-relay.service" ] || return 1
+            printf 'installed (%s)\n' \
+                "$(systemctl --user is-active herdr-mobile-relay.service 2>/dev/null || echo unknown)"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+transport_summary() {
+    local gateways
+    local count
+
+    gateways="$(gateway_urls "$ENV_FILE")"
+    if [ -n "$gateways" ]; then
+        # Commas, not lines: the list has no trailing newline for wc to count.
+        count=$(($(printf '%s' "$gateways" | tr -cd ',' | wc -c) + 1))
+        if [ "$count" -gt 1 ]; then
+            printf 'gateway %s (+%s fallback)\n' "${gateways%%,*}" "$((count - 1))"
+        else
+            printf 'gateway %s\n' "$gateways"
+        fi
+        return 0
+    fi
+    if [ -n "${CLOUDFLARED_CONFIG:-}" ] && [ -f "$CLOUDFLARED_CONFIG" ]; then
+        printf 'Cloudflare tunnel %s\n' \
+            "$(sed -n 's/^[[:space:]]*-\{0,1\}[[:space:]]*hostname:[[:space:]]*\(.*\)/\1/p' \
+                "$CLOUDFLARED_CONFIG" | head -1)"
+        return 0
+    fi
+    printf 'not chosen yet - start with 1\n'
+}
+
+print_status() {
+    local installed running service app_origin deployed
+
+    installed="$(installed_release_version || true)"
+    running="$(running_release_version || true)"
+    if [ -n "$installed" ]; then
+        if [ -z "$running" ]; then
+            printf '  Relay:      %s installed, not running\n' "$installed"
+        elif [ "$running" = "$installed" ]; then
+            printf '  Relay:      %s running\n' "$running"
+        else
+            printf '  Relay:      %s installed, %s still running - restart pending\n' \
+                "$installed" "$running"
+        fi
+    fi
+    service="$(service_state || true)"
+    [ -z "$service" ] || printf '  Service:    %s\n' "$service"
+    printf '  Phone path: %s\n' "$(transport_summary)"
+    app_origin="$(phone_app_base_url "" "$ENV_FILE" 2>/dev/null || true)"
+    if [ -n "$app_origin" ]; then
+        deployed="$(curl -fsS --max-time 3 "$app_origin/version.json" 2>/dev/null |
+            sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -1 || true)"
+        if [ -z "$deployed" ]; then
+            printf '  Phone app:  %s (version unknown)\n' "$app_origin"
+        elif [ -n "$installed" ] && [ "$deployed" != "$installed" ]; then
+            printf '  Phone app:  %s serves %s, this relay ships %s - deploy with 6\n' \
+                "$app_origin" "$deployed" "$installed"
+        else
+            printf '  Phone app:  %s serves %s\n' "$app_origin" "$deployed"
+        fi
+    fi
+}
 
 echo "🐑 Herdr Mobile Relay Setup"
+echo ""
+print_status
 echo ""
 echo "Choose how you want to start:"
 echo ""
@@ -29,7 +128,10 @@ echo ""
 echo "  6. Configure App Deployment"
 echo "     Let this computer deploy one separately hosted Cloudflare Pages app."
 echo ""
-echo "  q. Exit"
+echo "  7. Show Full Status"
+echo "     Service, health, and a sanitized support snapshot."
+echo ""
+echo "  q. Exit, change nothing"
 echo ""
 
 while true; do
@@ -53,11 +155,14 @@ while true; do
         6)
             exec "$SCRIPT_DIR/plugin-configure-app-deploy.sh"
             ;;
+        7)
+            exec "$SCRIPT_DIR/plugin-status.sh"
+            ;;
         q|Q)
             exit 0
             ;;
         *)
-            echo "Enter 1, 2, 3, 4, 5, 6, or q."
+            echo "Enter 1, 2, 3, 4, 5, 6, 7, or q."
             ;;
     esac
 done

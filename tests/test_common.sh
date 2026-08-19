@@ -434,4 +434,48 @@ case "$CHOOSER_OUTPUT" in
         ;;
 esac
 
+# The setup menu opens after every install, including upgrades, so it has to
+# report what exists before offering to change it: a stale phone app is exactly
+# the thing a person cannot otherwise see.
+MENU_BIN_DIR="$WORK_DIR/menu-bin"
+MENU_ENV="$WORK_DIR/config/menu.env"
+MENU_ROOT="$WORK_DIR/menu-release"
+mkdir -p "$MENU_BIN_DIR" "$MENU_ROOT/current"
+printf '{\n  "version": "9.9.9"\n}\n' > "$MENU_ROOT/current/release-manifest.json"
+printf "HERDR_GATEWAY_URL='wss://gw-a.example.test,wss://gw-b.example.test'\n" > "$MENU_ENV"
+printf 'https://app.example.test\n' > "$WORK_DIR/config/phone-app-origin"
+cat > "$MENU_BIN_DIR/curl" <<'EOF'
+#!/bin/sh
+case "$*" in
+    *127.0.0.1*healthz*) printf '{"status":"ok","release_version":"9.9.9"}\n' ;;
+    *app.example.test/version.json*) printf '{"version":"9.9.8","assets":1}\n' ;;
+    *) exit 22 ;;
+esac
+EOF
+chmod 700 "$MENU_BIN_DIR/curl"
+MENU_OUTPUT="$(
+    printf 'q\n' |
+        PATH="$MENU_BIN_DIR:$PATH" \
+        HERDR_RELAY_BIN="$NORMALIZE_BIN" \
+        HERDR_RELEASE_ROOT="$MENU_ROOT" \
+        HERDR_RELAY_ENV="$MENU_ENV" \
+        bash "$REPO_DIR/relay/plugin-setup-menu.sh"
+)"
+case "$MENU_OUTPUT" in
+    *"Relay:      9.9.9 running"*) ;;
+    *) echo "setup menu did not report the running release" >&2; exit 1 ;;
+esac
+case "$MENU_OUTPUT" in
+    *"gateway wss://gw-a.example.test (+1 fallback)"*) ;;
+    *) echo "setup menu did not report the configured gateway list" >&2; exit 1 ;;
+esac
+case "$MENU_OUTPUT" in
+    *"serves 9.9.8, this relay ships 9.9.9"*) ;;
+    *) echo "setup menu did not report the stale phone app" >&2; exit 1 ;;
+esac
+case "$MENU_OUTPUT" in
+    *"Exit, change nothing"*) ;;
+    *) echo "setup menu did not offer a way out" >&2; exit 1 ;;
+esac
+
 echo "common shell tests passed"

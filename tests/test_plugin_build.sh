@@ -290,15 +290,14 @@ test "$(wc -l < "$RESTART_LOG")" -eq 2
 grep -F "previous service recovered successfully" \
     "$WORK_DIR/recovery-rollback-output" >/dev/null
 
-# --- The setup menu opens itself, but only for a first install ---------------
+# --- Every install opens the setup menu --------------------------------------
 # Nobody sees this script's output, so an install that stops after "release is
-# ready" leaves a person with no relay and no instruction. Every run above was
-# an upgrade or a recovery over an existing release, so none of them may have
-# opened it.
-if [ -e "$SETUP_RECORD" ]; then
-    echo "an upgrade opened the setup menu" >&2
-    exit 1
-fi
+# ready" leaves a person with no idea what exists or what is still missing. The
+# menu answers both and costs one keystroke to leave, so an upgrade opens it too.
+sleep 1
+grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP_RECORD" ||
+    { echo "an upgrade did not open the setup menu" >&2; exit 1; }
+rm -f "$SETUP_RECORD"
 
 FRESH_HOME="$WORK_DIR/fresh-home"
 FRESH_ROOT="$FRESH_HOME/releases"
@@ -344,8 +343,8 @@ sleep 1
 grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP_RECORD" ||
     { echo "a first install did not open the setup menu" >&2; exit 1; }
 
-# Opting out has to be honoured, and so does a relay that already has a
-# transport: reinstalling over a working setup must not hijack the terminal.
+# Only the documented opt-out suppresses it; a configured relay still gets the
+# menu, because seeing the current state is the point.
 rm -f "$SETUP_RECORD" "$FRESH_ROOT/current" "$RESTART_LOG"
 if ! run_fresh_build env HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1; then
     cat "$WORK_DIR/fresh-output" >&2
@@ -364,9 +363,7 @@ if ! run_fresh_build env; then
     exit 1
 fi
 sleep 1
-if [ -e "$SETUP_RECORD" ]; then
-    echo "a configured relay still opened the setup menu" >&2
-    exit 1
-fi
+grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP_RECORD" ||
+    { echo "a configured relay did not open the setup menu" >&2; exit 1; }
 
 echo "plugin build migration, rollback, and recovery tests passed"
