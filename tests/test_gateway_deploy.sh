@@ -85,6 +85,18 @@ chmod 700 "$STUB_DIR/curl"
 PATH="$STUB_DIR:$PATH"
 export PATH
 
+NORMALIZE_BIN="$STUB_DIR/herdr-mobile-relay"
+cat > "$NORMALIZE_BIN" <<'EOF'
+#!/bin/sh
+# Isolates this shell test from any relay binary in the developer's data dir.
+test "$1" = "normalize-origin" || exit 2
+test "$2" = "--allow-loopback-http" || exit 2
+test "$3" = "gw.example.test" || exit 2
+printf 'https://gw.example.test\n'
+EOF
+chmod 700 "$NORMALIZE_BIN"
+export HERDR_RELAY_BIN="$NORMALIZE_BIN"
+
 HOSTNAME_UNDER_TEST="gw.example.test"
 export HERDR_GATEWAY_DEPLOY_HOST="$HOSTNAME_UNDER_TEST"
 export HERDR_GATEWAY_DEPLOY_EMAIL="ops@example.test"
