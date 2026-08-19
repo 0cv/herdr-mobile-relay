@@ -169,11 +169,6 @@ while true; do
             exit 0
             ;;
         2)
-            # The stable wizard owns the Cloudflare path end to end, so the
-            # gateway switch has to be cleared before it runs: a leftover
-            # HERDR_GATEWAY_URL would send start.sh and the QR down the gateway
-            # path and ignore the tunnel it just provisioned.
-            set_gateway_url "$ENV_FILE" ""
             exec "$SCRIPT_DIR/plugin-install-service.sh"
             ;;
         3)

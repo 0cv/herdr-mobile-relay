@@ -480,8 +480,10 @@ install_service() {
     fi
 }
 
-echo "🐑 Herdr Mobile Relay stable tunnel setup"
-echo ""
+if [ "${HERDR_STABLE_SETUP_WRAPPED:-}" != 1 ]; then
+    echo "🐑 Herdr Mobile Relay stable tunnel setup"
+    echo ""
+fi
 
 require_supported_platform
 assert_service_env_matches "$ENV_FILE"

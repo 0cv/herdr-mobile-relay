@@ -629,6 +629,49 @@ case "$CHOOSER_OUTPUT" in
         ;;
 esac
 
+# Stable Tunnel is also a top-level menu action, not only a transport-chooser
+# branch. Either entry point must clear a gateway before stable setup and the QR
+# decide which transport to use.
+STABLE_SWITCH_DIR="$WORK_DIR/stable-switch"
+STABLE_SWITCH_ENV="$WORK_DIR/config/stable-switch.env"
+STABLE_SWITCH_MARKER="$WORK_DIR/stable-switch-called"
+mkdir -p "$STABLE_SWITCH_DIR"
+cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-install-service.sh" \
+    "$STABLE_SWITCH_DIR/"
+cat > "$STABLE_SWITCH_DIR/stable-setup.sh" <<'EOF'
+#!/bin/bash
+if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$HERDR_RELAY_ENV" ||
+    [ -n "${HERDR_GATEWAY_URL:-}" ]; then
+    echo "stable setup still inherited the gateway" >&2
+    exit 1
+fi
+if [ "${HERDR_STABLE_SETUP_WRAPPED:-}" != 1 ]; then
+    echo "🐑 Herdr Mobile Relay stable tunnel setup"
+fi
+printf 'called\n' > "$STABLE_SWITCH_MARKER"
+EOF
+chmod 700 "$STABLE_SWITCH_DIR/stable-setup.sh"
+printf "HERDR_GATEWAY_URL='wss://gw.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" \
+    > "$STABLE_SWITCH_ENV"
+export STABLE_SWITCH_MARKER
+STABLE_SWITCH_OUTPUT="$(
+    HERDR_RELAY_ENV="$STABLE_SWITCH_ENV" HERDR_GATEWAY_URL="wss://inherited.example.test" \
+        bash "$STABLE_SWITCH_DIR/plugin-install-service.sh" 2>&1
+)"
+[ -f "$STABLE_SWITCH_MARKER" ] ||
+    { echo "the stable tunnel action did not run stable setup" >&2; exit 1; }
+if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$STABLE_SWITCH_ENV"; then
+    echo "the direct stable tunnel action left the gateway configured" >&2
+    exit 1
+fi
+case "$STABLE_SWITCH_OUTPUT" in
+    *"Switching this relay from the WebRTC gateway to Cloudflare."*) ;;
+    *) echo "the stable tunnel action did not explain the transport switch" >&2; exit 1 ;;
+esac
+test "$(printf '%s\n' "$STABLE_SWITCH_OUTPUT" |
+    grep -c 'Herdr Mobile Relay stable tunnel setup')" -eq 1 ||
+    { echo "stable tunnel action printed its heading more than once" >&2; exit 1; }
+
 # The setup menu opens after every install, including upgrades, so it has to
 # report what exists before offering to change it: a stale phone app is exactly
 # the thing a person cannot otherwise see.
