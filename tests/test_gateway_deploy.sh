@@ -51,6 +51,18 @@ case "$command" in
         fi
         exit 0
         ;;
+    *'docker version'*)
+        if [ -f "$STUB_STATE/old-docker" ]; then
+            printf '24.0.7\n'
+        else
+            printf '29.7.2\n'
+        fi
+        exit 0
+        ;;
+    *'curl -6'*)
+        [ ! -f "$STUB_STATE/no-v6" ] || exit 7
+        exit 0
+        ;;
     *get.docker.com*)
         rm -f "$STUB_STATE/docker-missing"
         exit 0
@@ -160,6 +172,11 @@ grep -Fq 'context: ${HERDR_GATEWAY_BUILD_CONTEXT:-./gateway-source}' \
 grep -Fq 'HERDR_GATEWAY_BUILD_CONTEXT="./gateway-source"' "$BUNDLE_DIR/.env" ||
     fail ".env lost the bundled build context"
 grep -Fq "email ops@example.test" "$BUNDLE_DIR/Caddyfile" || fail "Caddyfile lost the ACME contact"
+
+# A published port answers on IPv6 only from a v6-enabled network, and Let's
+# Encrypt validates over IPv6 whenever the name has an AAAA record.
+grep -Fq 'enable_ipv6: true' "$BUNDLE_DIR/docker-compose.yml" ||
+    fail "compose file does not give the stack an IPv6 network"
 
 # Address discovery is published directly on the host: Caddy cannot carry raw
 # UDP, so a bundle that loses this port loses off-LAN direct connections.
@@ -314,6 +331,28 @@ fi
 grep -Fq "HERDR_GATEWAY_SELECTION='ordered'" "$HERDR_RELAY_ENV" ||
     fail "declined fallback did not pin the ordered selection policy"
 unset HERDR_GATEWAY_DEPLOY_FALLBACK
+
+# --- The name has an AAAA the server does not answer -------------------------
+# Let's Encrypt prefers IPv6, so this is the failure that looks like nothing at
+# all over IPv4: the deployment has to name it instead of waiting in silence.
+: > "$SSH_LOG"
+rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz"
+: > "$STUB_STATE/no-v6"
+run_deploy
+rm -f "$STUB_STATE/no-v6"
+[ "$STATUS" -eq 0 ] || fail "unanswered-AAAA run exited $STATUS"
+grep -Fq 'publishes an AAAA record that answers nothing here' "$OUTPUT" ||
+    fail "deployment stayed silent about the unanswered AAAA record"
+
+# --- Docker too old to give the stack an IPv6 network ------------------------
+: > "$SSH_LOG"
+rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz"
+: > "$STUB_STATE/old-docker"
+run_deploy
+rm -f "$STUB_STATE/old-docker"
+[ "$STATUS" -eq 0 ] || fail "old-docker run exited $STATUS"
+grep -Fq 'older than 27' "$OUTPUT" ||
+    fail "deployment did not warn that the server's Docker has no IPv6 network"
 
 # --- A key ssh would never offer on its own ---------------------------------
 # Hosts that only accept a key outside ~/.ssh/id_* are the common case for

@@ -77,6 +77,16 @@ deploying:
 dig +short gw.example.com
 ```
 
+An `AAAA` record is only safe once the server actually answers on that address.
+Let's Encrypt prefers IPv6 whenever a name publishes one, so a record nothing
+listens on fails every certificate attempt while every IPv4 check keeps looking
+healthy — the gateway stays without a certificate and `/healthz` never answers
+over HTTPS. The bundle publishes both families, and the deployment probes the
+address from the server and says so when it does not answer, but the server
+still needs the address configured, its firewall open on TCP 80 and 443 for
+IPv6, and Docker 27 or newer, which is where automatic IPv6 networks and
+`ip6tables` became the default. Otherwise remove the `AAAA` record.
+
 A hostname your provider generated for the server also works, as long as it
 forward-resolves to it — reverse DNS alone does not. Prefer a name in a domain
 you own: Let's Encrypt's limit of 50 certificates per registered domain per week

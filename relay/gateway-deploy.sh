@@ -369,6 +369,16 @@ services:
       timeout: 3s
       retries: 12
 
+# Published ports only answer on IPv6 when the network behind them has it, and
+# Let's Encrypt validates over IPv6 whenever the name carries an AAAA record: a
+# published address nothing answers on fails every challenge while IPv4 keeps
+# looking healthy. Docker derives the unique-local subnet itself and its
+# ip6tables rules keep the client's real address, which the per-IP connect
+# limit depends on.
+networks:
+  default:
+    enable_ipv6: true
+
 volumes:
   # Certificates and the ACME account key. Keep it: throwing it away on every
   # recreate walks into Let's Encrypt rate limits.
@@ -786,18 +796,38 @@ wait_for_public_health() {
     done
 }
 
+remote_host_has_aaaa() {
+    remote_shell "getent ahostsv6 $GATEWAY_HOST >/dev/null 2>&1"
+}
+
+# The bundle's network asks Docker to derive an IPv6 subnet for itself, which
+# arrived in Engine 27 together with ip6tables on by default. An older engine
+# rejects that network, so this is worth saying before a build rather than
+# after one.
+remote_docker_supports_ipv6() {
+    local major
+
+    major="$(remote_shell "docker version --format '{{.Server.Version}}' 2>/dev/null" | cut -d. -f1)"
+    case "$major" in
+        '' | *[!0-9]*) return 0 ;;
+        *) [ "$major" -ge 27 ] ;;
+    esac
+}
+
 # Let's Encrypt prefers IPv6 whenever the name publishes an AAAA record, so an
 # address nothing answers on fails every challenge while every IPv4 check keeps
-# looking perfect. The probe runs on the server, which is exactly where that
-# address is supposed to be served.
+# looking perfect. The compose network publishes both families, so what remains
+# is the server's own address or its firewall. The probe runs on the server,
+# which is exactly where that address is supposed to be served.
 report_ipv6_gap() {
-    remote_shell "getent ahostsv6 $GATEWAY_HOST >/dev/null 2>&1" || return 1
+    remote_host_has_aaaa || return 1
     remote_shell "curl -6 -fsS --max-time 8 http://$GATEWAY_HOST/ >/dev/null 2>&1" && return 1
     echo ""
     echo "▸ $GATEWAY_HOST publishes an AAAA record that answers nothing here."
     echo "  Let's Encrypt prefers IPv6 when a name has one, so the certificate"
-    echo "  attempt fails over IPv6 while IPv4 keeps looking healthy. Remove the"
-    echo "  AAAA record, or serve the gateway on IPv6 as well."
+    echo "  attempt fails over IPv6 while IPv4 keeps looking healthy. Give the"
+    echo "  server that address and open TCP 80 and 443 on it, or remove the"
+    echo "  AAAA record."
     return 0
 }
 
@@ -928,6 +958,13 @@ deploy_bundle() {
             return 1
         fi
         echo "✓ Docker installed."
+    fi
+
+    if remote_host_has_aaaa && ! remote_docker_supports_ipv6; then
+        echo "▸ $GATEWAY_HOST has an AAAA record, but this server runs a Docker"
+        echo "  older than 27, which cannot give the stack an IPv6 network."
+        echo "  Let's Encrypt prefers IPv6 and its challenge will fail there."
+        echo "  Upgrade Docker on the server, or remove the AAAA record."
     fi
 
     printf '▸ Copying the bundle to %s:%s..' "$SSH_TARGET" "$REMOTE_DIR"
