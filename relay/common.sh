@@ -49,6 +49,27 @@ release_repository() {
     esac
 }
 
+# Resolves a key a person named at a prompt. Keys live in ~/.ssh, so a bare
+# name means one of those, not a file in whatever directory the setup menu was
+# started from; an explicit path, absolute or relative, is taken as typed.
+ssh_key_path() {
+    local entered="$1"
+    local candidate
+
+    [ -n "$entered" ] || return 1
+    candidate="${entered/#\~/$HOME}"
+    if [ -r "$candidate" ] && [ ! -d "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    case "$candidate" in
+        */*) return 1 ;;
+    esac
+    candidate="$HOME/.ssh/$entered"
+    [ -r "$candidate" ] && [ ! -d "$candidate" ] || return 1
+    printf '%s\n' "$candidate"
+}
+
 relay_env_file() {
     local script_dir="$1"
     local config_dir

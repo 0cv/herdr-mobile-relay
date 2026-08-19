@@ -811,18 +811,18 @@ report_public_health_failure() {
 # the same key works when the user passes -i by hand. Asking for it once beats
 # making them find an environment variable, and the answer is remembered.
 retry_with_identity() {
+    local entered
     local key
 
     have_tty || return 1
     echo "  ssh offered no key this host accepts." >&2
-    if ! read -r -p "  Key file to use (empty to give up): " key; then
+    if ! read -r -p "  Key file to use, name or path (empty to give up): " entered; then
         echo "" >&2
         return 1
     fi
-    key="${key/#\~/$HOME}"
-    [ -n "$key" ] || return 1
-    if [ ! -r "$key" ]; then
-        echo "✗ No readable key at $key." >&2
+    [ -n "$entered" ] || return 1
+    if ! key="$(ssh_key_path "$entered")"; then
+        echo "✗ No readable key called $entered, in ~/.ssh or as a path." >&2
         return 1
     fi
     SSH_BIN=(ssh -i "$key")
@@ -834,7 +834,8 @@ explain_ssh_failure() {
     echo "✗ Could not open an SSH session to $SSH_TARGET." >&2
     echo "  Cloud images usually refuse root: the same server often answers as" >&2
     echo "  debian@, ubuntu@, admin@, or ec2-user@ instead." >&2
-    echo "  A key outside ~/.ssh/id_* is never offered unless it is named:" >&2
+    echo "  ssh offers only the default ~/.ssh/id_* keys and whatever" >&2
+    echo "  ~/.ssh/config names for this host. Any other key has to be named:" >&2
     echo "    HERDR_GATEWAY_DEPLOY_SSH=\"ssh -i ~/.ssh/yourkey\" rerun this" >&2
 }
 

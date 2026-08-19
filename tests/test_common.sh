@@ -69,6 +69,22 @@ if release_repository "$CHECKOUT" >/dev/null 2>&1; then
     exit 1
 fi
 
+# A key named at a prompt is a name, not a path: "ovh" means ~/.ssh/ovh, which
+# is the only place it plausibly is.
+FAKE_HOME="$WORK_DIR/keyhome"
+mkdir -p "$FAKE_HOME/.ssh"
+printf 'key\n' > "$FAKE_HOME/.ssh/ovh"
+printf 'key\n' > "$WORK_DIR/local-key"
+test "$(HOME="$FAKE_HOME" ssh_key_path ovh)" = "$FAKE_HOME/.ssh/ovh"
+test "$(HOME="$FAKE_HOME" ssh_key_path '~/.ssh/ovh')" = "$FAKE_HOME/.ssh/ovh"
+test "$(HOME="$FAKE_HOME" ssh_key_path "$WORK_DIR/local-key")" = "$WORK_DIR/local-key"
+for MISSING in absent "$WORK_DIR/absent" "~/.ssh/absent" "" ".ssh"; do
+    if HOME="$FAKE_HOME" ssh_key_path "$MISSING" >/dev/null 2>&1; then
+        echo "ssh key resolver accepted '$MISSING'" >&2
+        exit 1
+    fi
+done
+
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"
