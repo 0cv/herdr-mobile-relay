@@ -20,6 +20,7 @@ CONFIG_RECORD="$WORK_DIR/installer-config-root"
 TOKEN_RECORD="$WORK_DIR/installer-token"
 REPO_RECORD="$WORK_DIR/installer-repository"
 RESTART_LOG="$WORK_DIR/restarts"
+SETUP_RECORD="$WORK_DIR/setup-invocations"
 mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$SOURCE_CONFIG/push" \
     "$SOURCE_CONFIG/cloudflared" \
     "$TARGET_CONFIG/push" "$(dirname "$UNIT_FILE")" "$FAKE_BIN"
@@ -107,7 +108,7 @@ case " $* " in
         ;;
     *" restart "*)
         printf 'restart\n' >> "$RESTART_LOG"
-        if grep -Fx "ExecStart=$SOURCE_CONFIG/herdr-mobile-relay-service.sh" "$UNIT_FILE" >/dev/null ||
+        if grep -Fx "ExecStart=$SOURCE_CONFIG/herdr-mobile-relay-service.sh" "$UNIT_FILE" 2>/dev/null >/dev/null ||
            [ "$(readlink -f "$RELEASE_ROOT/current" 2>/dev/null || true)" = "$OLD_RELEASE" ]; then
             printf '{"status":"ok","instance":"test","version":"0.8.6","protocol":2,"release_version":"0.8.6","revision":"old-revision","bundle_hash":"old-web"}\n' > "$HEALTH_FILE"
         else
@@ -129,6 +130,12 @@ if [ "$*" = "plugin config-dir herdr-mobile-relay.events" ]; then
     printf '%s\n' "$TARGET_CONFIG"
     exit 0
 fi
+case "$*" in
+    'plugin action invoke setup --plugin herdr-mobile-relay.events')
+        printf '%s\n' "$*" >> "$SETUP_RECORD"
+        exit 0
+        ;;
+esac
 exit 1
 EOF
 cat > "$FAKE_BIN/sleep" <<'EOF'
@@ -138,6 +145,7 @@ EOF
 chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr" "$FAKE_BIN/sleep"
 
 export SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
+export SETUP_RECORD
 export RELEASE_ROOT OLD_RELEASE
 if HOME="$TEST_HOME" \
     PATH="$FAKE_BIN:$PATH" \
@@ -281,5 +289,84 @@ grep -Fx "Environment=HERDR_RELAY_ENV=$TARGET_CONFIG/relay.env" "$UNIT_FILE" >/d
 test "$(wc -l < "$RESTART_LOG")" -eq 2
 grep -F "previous service recovered successfully" \
     "$WORK_DIR/recovery-rollback-output" >/dev/null
+
+# --- The setup menu opens itself, but only for a first install ---------------
+# Nobody sees this script's output, so an install that stops after "release is
+# ready" leaves a person with no relay and no instruction. Every run above was
+# an upgrade or a recovery over an existing release, so none of them may have
+# opened it.
+if [ -e "$SETUP_RECORD" ]; then
+    echo "an upgrade opened the setup menu" >&2
+    exit 1
+fi
+
+FRESH_HOME="$WORK_DIR/fresh-home"
+FRESH_ROOT="$FRESH_HOME/releases"
+FRESH_CONFIG="$FRESH_HOME/config"
+FRESH_RELEASE="$FRESH_ROOT/releases/$TEST_VERSION-new"
+mkdir -p "$FRESH_RELEASE/relay" "$FRESH_CONFIG"
+cp "$NEW_RELEASE/release-manifest.json" "$FRESH_RELEASE/"
+cp "$NEW_RELEASE/herdr-mobile-relay" "$FRESH_RELEASE/"
+cp "$NEW_RELEASE/relay/herdr-mobile-relay-service.sh" "$FRESH_RELEASE/relay/"
+FRESH_INSTALLER="$WORK_DIR/fresh-install.sh"
+cat > "$FRESH_INSTALLER" <<EOF
+#!/bin/sh
+set -eu
+temp="\$INSTALL_ROOT/.current-install"
+rm -f "\$temp"
+ln -s "$FRESH_RELEASE" "\$temp"
+mv -Tf "\$temp" "\$INSTALL_ROOT/current"
+EOF
+chmod 700 "$FRESH_INSTALLER"
+rm -f "$RESTART_LOG"
+
+# A machine that never ran this relay: no unit file, nothing active, no release
+# under the root.
+run_fresh_build() {
+    HOME="$FRESH_HOME" \
+        PATH="$FAKE_BIN:$PATH" \
+        HERDR_RELEASE_ROOT="$FRESH_ROOT" \
+        HERDR_PLUGIN_CONFIG_DIR="$FRESH_CONFIG" \
+        HERDR_PLUGIN_INSTALLER="$FRESH_INSTALLER" \
+        UNIT_FILE="$FRESH_HOME/.config/systemd/user/herdr-mobile-relay.service" \
+        REPLACEMENT_REVISION=new-revision \
+        FORCE_INACTIVE=1 \
+        "$@" \
+        bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/fresh-output" 2>&1
+}
+
+if ! run_fresh_build env; then
+    cat "$WORK_DIR/fresh-output" >&2
+    exit 1
+fi
+# The action is scheduled detached, so give it the moment it waits out.
+sleep 1
+grep -Fq 'plugin action invoke setup --plugin herdr-mobile-relay.events' "$SETUP_RECORD" ||
+    { echo "a first install did not open the setup menu" >&2; exit 1; }
+
+# Opting out has to be honoured, and so does a relay that already has a
+# transport: reinstalling over a working setup must not hijack the terminal.
+rm -f "$SETUP_RECORD" "$FRESH_ROOT/current" "$RESTART_LOG"
+if ! run_fresh_build env HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1; then
+    cat "$WORK_DIR/fresh-output" >&2
+    exit 1
+fi
+sleep 1
+if [ -e "$SETUP_RECORD" ]; then
+    echo "HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 still opened the setup menu" >&2
+    exit 1
+fi
+
+rm -f "$FRESH_ROOT/current" "$RESTART_LOG"
+printf "HERDR_GATEWAY_URL='wss://gw.example.test'\n" >> "$FRESH_CONFIG/relay.env"
+if ! run_fresh_build env; then
+    cat "$WORK_DIR/fresh-output" >&2
+    exit 1
+fi
+sleep 1
+if [ -e "$SETUP_RECORD" ]; then
+    echo "a configured relay still opened the setup menu" >&2
+    exit 1
+fi
 
 echo "plugin build migration, rollback, and recovery tests passed"

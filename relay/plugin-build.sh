@@ -541,7 +541,32 @@ if [ "$service_restarted" = true ]; then
 fi
 
 rollback_armed=false
+
+# A first install has nothing to run yet: a transport still has to be chosen and
+# a phone paired, and this script's own output is never shown to the person who
+# typed the install command. So open the setup menu instead of describing it.
+# An upgrade stays silent, because its relay is already configured. The action
+# is invoked detached and after this build exits, since herdr will not open a
+# pane for a plugin whose build is still running.
+transport_configured() {
+    [ -f "$TARGET_ENV" ] || return 1
+    [ -z "$(env_file_value "$TARGET_ENV" HERDR_GATEWAY_URL)" ] || return 0
+    [ -n "$(env_file_value "$TARGET_ENV" CLOUDFLARED_CONFIG)" ]
+}
+
+schedule_setup_menu() {
+    [ "${HERDR_MOBILE_RELAY_NO_AUTO_SETUP:-}" != 1 ] || return 0
+    [ "$current_was_present" != true ] || return 0
+    command -v herdr >/dev/null 2>&1 || return 0
+    ! transport_configured || return 0
+    (
+        sleep 2
+        herdr plugin action invoke setup --plugin herdr-mobile-relay.events
+    ) >/dev/null 2>&1 &
+}
+
 echo "" >&2
 echo "herdr-mobile-relay: release $VERSION is ready." >&2
+schedule_setup_menu
 echo "herdr-mobile-relay: start setup with:" >&2
 echo "  herdr plugin action invoke setup --plugin herdr-mobile-relay.events" >&2

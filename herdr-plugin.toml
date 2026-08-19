@@ -3,8 +3,9 @@
 # this repo, runs the [[build]] pre-warm below after confirmation, and
 # registers the entry points), or `herdr plugin link .` from a local checkout.
 #
-# The build schedules the Setup action after registration when a safe terminal
-# destination is identifiable. Invoke it explicitly as a universal fallback:
+# A first install opens the Setup action once the build finishes; an upgrade
+# does not, because its relay is already configured. Invoke it explicitly as a
+# universal fallback, or set HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 to suppress it:
 #   herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 # or bind keys in herdr's config.toml and `herdr server reload-config`:
 #   [[keys.command]]
