@@ -18,6 +18,7 @@ FAKE_BIN="$WORK_DIR/bin"
 HEALTH_FILE="$WORK_DIR/health.json"
 CONFIG_RECORD="$WORK_DIR/installer-config-root"
 TOKEN_RECORD="$WORK_DIR/installer-token"
+REPO_RECORD="$WORK_DIR/installer-repository"
 RESTART_LOG="$WORK_DIR/restarts"
 mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$SOURCE_CONFIG/push" \
     "$SOURCE_CONFIG/cloudflared" \
@@ -84,6 +85,7 @@ cat > "$FAKE_INSTALLER" <<EOF
 set -eu
 printf '%s\n' "\$HERDR_PLUGIN_CONFIG_DIR" > "$CONFIG_RECORD"
 printf '%s\n' "\${GH_TOKEN:-}" > "$TOKEN_RECORD"
+printf '%s\n' "\${HERDR_RELEASE_REPOSITORY:-}" > "$REPO_RECORD"
 [ "\${FAIL_INSTALLER:-}" != 1 ] || exit 1
 temp="\$INSTALL_ROOT/.current-install"
 rm -f "\$temp"
@@ -177,12 +179,16 @@ if ! HOME="$TEST_HOME" \
     HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 \
     FORCE_INACTIVE=1 \
     REPLACEMENT_REVISION=new-revision \
+    HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay-dev \
     bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/success-output" 2>&1; then
     cat "$WORK_DIR/success-output" >&2
     exit 1
 fi
 
 test "$(readlink -f "$RELEASE_ROOT/current")" = "$NEW_RELEASE"
+# The release comes from the repository the plugin was installed from, so a
+# private canary or a fork never downloads this project's bundle.
+test "$(cat "$REPO_RECORD")" = 0cv/herdr-mobile-relay-dev
 grep -Fx "ExecStart=$RELEASE_ROOT/current/relay/herdr-mobile-relay-service.sh" "$UNIT_FILE" >/dev/null
 grep -Fx "WorkingDirectory=$RELEASE_ROOT/current" "$UNIT_FILE" >/dev/null
 grep -Fx "Environment=HERDR_RELAY_ENV=$TARGET_CONFIG/relay.env" "$UNIT_FILE" >/dev/null

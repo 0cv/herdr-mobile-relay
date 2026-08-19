@@ -33,6 +33,21 @@ vet, tests, the race detector, and shell checks. The frontend build shipped in
 `web/` is produced by `make web-release` and verified against the committed
 bundle by `make web-release-check`, which also browser-tests it.
 
+## Installing a private canary
+
+`herdr plugin install` clones the named repository, and the plugin then
+installs the verified release of that same repository. A private repository's
+assets need a GitHub token with read access to it:
+
+```bash
+GH_TOKEN=<token> herdr plugin install 0cv/herdr-mobile-relay-dev
+```
+
+The token is stored as `github-token` beside `relay.env`, readable only by the
+installing user; the relay, `cloudflared`, and agent subprocesses never inherit
+it. Managed self-updates still track this project's public releases, so a
+canary newer than the public tag reports that it is up to date.
+
 ## Toolchains
 
 Backend development uses Go 1.26.5; frontend development uses Node.js 24.

@@ -25,6 +25,30 @@ relay_binary() {
     printf '%s\n' "$binary"
 }
 
+# The plugin is installed from a git clone, so its verified release belongs to
+# the repository that checkout points at: a fork or a private canary installs
+# its own bundle instead of this project's. Anything that is not a plain GitHub
+# owner/repo fails, leaving the installer's compiled default in place.
+release_repository() {
+    local checkout="$1"
+    local url
+    local owner_repo
+
+    command -v git >/dev/null 2>&1 || return 1
+    url="$(git -C "$checkout" remote get-url origin 2>/dev/null)" || return 1
+    case "$url" in
+        *github.com[:/]*) owner_repo="${url##*github.com}" ;;
+        *) return 1 ;;
+    esac
+    owner_repo="${owner_repo#[:/]}"
+    owner_repo="${owner_repo%.git}"
+    case "$owner_repo" in
+        */*/* | /* | */ | *[!A-Za-z0-9._/-]*) return 1 ;;
+        */*) printf '%s\n' "$owner_repo" ;;
+        *) return 1 ;;
+    esac
+}
+
 relay_env_file() {
     local script_dir="$1"
     local config_dir

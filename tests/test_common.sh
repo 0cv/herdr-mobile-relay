@@ -39,6 +39,36 @@ PACKAGED_BINARY="$(
 )"
 test "$PACKAGED_BINARY" = "$PACKAGED_RELEASE/herdr-mobile-relay"
 
+# A plugin checkout installs the release of the repository it was cloned from,
+# in whichever URL form git recorded, and nothing else may pass for one.
+CHECKOUT="$WORK_DIR/checkout"
+git init -q "$CHECKOUT"
+for REMOTE_URL in \
+    "git@github.com:0cv/herdr-mobile-relay-dev.git" \
+    "https://github.com/0cv/herdr-mobile-relay-dev.git" \
+    "https://github.com/0cv/herdr-mobile-relay-dev" \
+    "ssh://git@github.com/0cv/herdr-mobile-relay-dev.git"; do
+    git -C "$CHECKOUT" remote remove origin 2>/dev/null || true
+    git -C "$CHECKOUT" remote add origin "$REMOTE_URL"
+    test "$(release_repository "$CHECKOUT")" = "0cv/herdr-mobile-relay-dev"
+done
+for REJECTED_URL in \
+    "https://gitlab.com/0cv/herdr-mobile-relay-dev.git" \
+    "https://github.com/0cv/herdr-mobile-relay-dev/extra" \
+    "https://github.com/0cv"; do
+    git -C "$CHECKOUT" remote remove origin
+    git -C "$CHECKOUT" remote add origin "$REJECTED_URL"
+    if release_repository "$CHECKOUT" >/dev/null 2>&1; then
+        echo "release repository accepted '$REJECTED_URL'" >&2
+        exit 1
+    fi
+done
+git -C "$CHECKOUT" remote remove origin
+if release_repository "$CHECKOUT" >/dev/null 2>&1; then
+    echo "release repository resolved a checkout without an origin" >&2
+    exit 1
+fi
+
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"

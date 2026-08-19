@@ -23,6 +23,13 @@ VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_DIR/herdr-plugin.toml")
 INSTALL_ROOT=${HERDR_RELEASE_ROOT:-"${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay"}
 BIN_DIR=${HERDR_RELAY_BIN_DIR:-"$HOME/.local/bin"}
 INSTALLER=${HERDR_PLUGIN_INSTALLER:-"$REPO_DIR/install.sh"}
+RELEASE_REPOSITORY=${HERDR_RELEASE_REPOSITORY:-}
+if [ -z "$RELEASE_REPOSITORY" ]; then
+    RELEASE_REPOSITORY=$(release_repository "$REPO_DIR" || true)
+fi
+if [ -n "$RELEASE_REPOSITORY" ]; then
+    export HERDR_RELEASE_REPOSITORY="$RELEASE_REPOSITORY"
+fi
 TARGET_CONFIG_ROOT=${HERDR_PLUGIN_CONFIG_DIR:-}
 if [ -z "$TARGET_CONFIG_ROOT" ] && command -v herdr >/dev/null 2>&1; then
     TARGET_CONFIG_ROOT="$(herdr plugin config-dir herdr-mobile-relay.events 2>/dev/null || true)"
