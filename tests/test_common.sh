@@ -114,13 +114,15 @@ rm -rf "$NODE_HOME/recorded"
 test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_dir "$NODE_ENV_FILE")" = \
     "$NODE_HOME/.nvm/current/bin"
 
-EMPTY_NODE_HOME="$WORK_DIR/nodehome-empty"
-mkdir -p "$EMPTY_NODE_HOME"
-if HOME="$EMPTY_NODE_HOME" NVM_DIR="$EMPTY_NODE_HOME/.nvm" PATH="$EMPTY_NODE_HOME" \
-    node_bin_dir >/dev/null 2>&1; then
-    echo "node discovery invented an installation" >&2
-    exit 1
-fi
+# Both binaries or nothing: wrangler is run through npx, so a directory that
+# only carries node is not an installation. This cannot assert "found nothing",
+# because the system paths it also searches genuinely hold node on some hosts.
+mkdir -p "$NODE_HOME/half/bin"
+printf '#!/bin/sh\nexit 0\n' > "$NODE_HOME/half/bin/node"
+chmod 700 "$NODE_HOME/half/bin/node"
+printf "HERDR_APP_DEPLOY_NODE_DIR='%s'\n" "$NODE_HOME/half/bin" > "$NODE_ENV_FILE"
+test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_dir "$NODE_ENV_FILE")" = \
+    "$NODE_HOME/.nvm/current/bin"
 
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
