@@ -760,10 +760,11 @@ func TestGatewayClientSelectsLowestLatencyAndKeepsOneRegistration(t *testing.T) 
 	fast := newFakeGatewayWithHealthDelay(t, relayID, 5*time.Millisecond)
 	hub := NewHub(&config.Config{Token: gatewayTestRelayKey}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	client, err := NewGatewayClient(hub, GatewayOptions{
-		URL:      slow.url,
-		URLs:     []string{slow.url, fast.url},
-		RelayKey: gatewayTestRelayKey,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		URL:       slow.url,
+		URLs:      []string{slow.url, fast.url},
+		Selection: config.GatewaySelectionLatency,
+		RelayKey:  gatewayTestRelayKey,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -829,8 +830,9 @@ func TestGatewayLatencySelectionProbesConcurrentlyAndKeepsCloseTiesOrdered(t *te
 			"wss://b.example.com",
 			"wss://c.example.com",
 		},
-		RelayKey: gatewayTestRelayKey,
-		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Selection: config.GatewaySelectionLatency,
+		RelayKey:  gatewayTestRelayKey,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -846,7 +848,7 @@ func TestGatewayLatencySelectionProbesConcurrentlyAndKeepsCloseTiesOrdered(t *te
 		return 50 * time.Millisecond, nil
 	}
 	selected := make(chan bool, 1)
-	go func() { selected <- client.selectLowestLatency(context.Background(), -1) }()
+	go func() { selected <- client.selectGateway(context.Background(), -1) }()
 	for range 3 {
 		select {
 		case <-entered:
@@ -871,7 +873,7 @@ func TestGatewayLatencySelectionProbesConcurrentlyAndKeepsCloseTiesOrdered(t *te
 			return 10 * time.Millisecond, nil
 		}
 	}
-	if !client.selectLowestLatency(context.Background(), -1) {
+	if !client.selectGateway(context.Background(), -1) {
 		t.Fatal("close-tie gateway selection failed")
 	}
 	if client.CurrentURL() != "wss://b.example.com" {
@@ -882,11 +884,154 @@ func TestGatewayLatencySelectionProbesConcurrentlyAndKeepsCloseTiesOrdered(t *te
 	client.probe = func(_ context.Context, gateway string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s has no health response", gateway)
 	}
-	if client.selectLowestLatency(context.Background(), -1) {
+	if client.selectGateway(context.Background(), -1) {
 		t.Fatal("all-failed probes reported a selected gateway")
 	}
 	if client.CurrentURL() != "wss://a.example.com" {
 		t.Fatalf("all-failed probes changed configured fallback to %q", client.CurrentURL())
+	}
+}
+
+// TestGatewayOrderedSelectionRegistersWithTheFirstEntry exercises the
+// production health probe rather than a timing mock. The first configured entry
+// answers 75 ms slower than the second, far outside the tie window, and must
+// still receive the registration: a hand-listed gateway is a priority, not a
+// preference.
+func TestGatewayOrderedSelectionRegistersWithTheFirstEntry(t *testing.T) {
+	relayID, err := gatewaywire.DeriveRelayID(gatewayTestRelayKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := newFakeGatewayWithHealthDelay(t, relayID, 80*time.Millisecond)
+	community := newFakeGatewayWithHealthDelay(t, relayID, 5*time.Millisecond)
+	hub := NewHub(&config.Config{Token: gatewayTestRelayKey}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client, err := NewGatewayClient(hub, GatewayOptions{
+		URL:       mine.url,
+		URLs:      []string{mine.url, community.url},
+		Selection: config.GatewaySelectionOrdered,
+		RelayKey:  gatewayTestRelayKey,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.backoffBase = 10 * time.Millisecond
+	client.backoffMax = 40 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(gatewayTestTimeout):
+			t.Error("gateway client did not stop")
+		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), gatewayTestTimeout)
+		defer shutdownCancel()
+		if err := hub.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("hub shutdown: %v", err)
+		}
+	})
+
+	mine.nextLink(t)
+	waitFor(t, "order-selected gateway status", func() bool {
+		status := client.Status()
+		return status.Registered && status.URL == mine.url &&
+			slices.Equal(status.URLs, []string{mine.url, community.url})
+	})
+	select {
+	case <-community.links:
+		t.Fatal("faster later entry received a registration in ordered mode")
+	default:
+	}
+	if client.Selection() != config.GatewaySelectionOrdered {
+		t.Fatalf("reported selection %q, want ordered", client.Selection())
+	}
+}
+
+// TestGatewayOrderedSelectionSkipsUnhealthyEntriesInOrder covers the two
+// remaining ordered rules with a fake probe, so the outcome cannot depend on
+// real timing: an unresponsive leading entry is skipped, and a failed active
+// entry hands over to the next healthy entry in configured order rather than to
+// the fastest one.
+func TestGatewayOrderedSelectionSkipsUnhealthyEntriesInOrder(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), gatewayTestTimeout)
+		defer cancel()
+		if err := hub.Shutdown(ctx); err != nil {
+			t.Errorf("hub shutdown: %v", err)
+		}
+	})
+	client, err := NewGatewayClient(hub, GatewayOptions{
+		URLs: []string{
+			"wss://a.example.com",
+			"wss://b.example.com",
+			"wss://c.example.com",
+		},
+		Selection: config.GatewaySelectionOrdered,
+		RelayKey:  gatewayTestRelayKey,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A is silent and C answers 395 ms sooner than B; ordered must still land on
+	// B, the first entry that answered at all.
+	client.probe = func(_ context.Context, gateway string) (time.Duration, error) {
+		switch {
+		case strings.Contains(gateway, "a.example.com"):
+			return 0, fmt.Errorf("%s has no health response", gateway)
+		case strings.Contains(gateway, "b.example.com"):
+			return 400 * time.Millisecond, nil
+		default:
+			return 5 * time.Millisecond, nil
+		}
+	}
+	if !client.selectGateway(context.Background(), -1) {
+		t.Fatal("ordered gateway selection failed")
+	}
+	if client.CurrentURL() != "wss://b.example.com" {
+		t.Fatalf("ordered selection chose %q, want the first healthy entry", client.CurrentURL())
+	}
+
+	// Every entry is healthy now and A leads, so failover from A may only move
+	// forward in configured order: C is 395 ms faster and must lose to B.
+	client.setActive(0)
+	client.probe = func(_ context.Context, gateway string) (time.Duration, error) {
+		if strings.Contains(gateway, "b.example.com") {
+			return 400 * time.Millisecond, nil
+		}
+		return 5 * time.Millisecond, nil
+	}
+	if !client.selectGateway(context.Background(), 0) {
+		t.Fatal("ordered failover selection failed")
+	}
+	if client.CurrentURL() != "wss://b.example.com" {
+		t.Fatalf("ordered failover chose %q, want the next healthy entry in order", client.CurrentURL())
+	}
+
+	// With B unresponsive the same failover skips to C: exclusion of the failed
+	// active entry lasts exactly one pass and never resurrects it.
+	client.setActive(0)
+	client.probe = func(_ context.Context, gateway string) (time.Duration, error) {
+		if strings.Contains(gateway, "b.example.com") {
+			return 0, fmt.Errorf("%s has no health response", gateway)
+		}
+		return 5 * time.Millisecond, nil
+	}
+	if !client.selectGateway(context.Background(), 0) {
+		t.Fatal("ordered failover past an unhealthy entry failed")
+	}
+	if client.CurrentURL() != "wss://c.example.com" {
+		t.Fatalf("ordered failover chose %q, want the next healthy entry after the unhealthy one",
+			client.CurrentURL())
 	}
 }
 

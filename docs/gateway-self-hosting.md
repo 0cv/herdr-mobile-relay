@@ -48,6 +48,15 @@ dedicated bandwidth and control of the gateway's transport logs; the gateway
 still cannot read application plaintext because E2EE terminates at the phone
 and relay.
 
+Running your own gateway does not mean giving up the community ones. The
+deployment offers to keep them, and writes `HERDR_GATEWAY_URL` with your own
+entries first and the community gateways after;
+`HERDR_GATEWAY_DEPLOY_FALLBACK=false` declines them non-interactively. Because
+a configured list is ordered by priority (`HERDR_GATEWAY_SELECTION=ordered`,
+the default), a community gateway is reached only when every one of your own is
+unhealthy: it is a cold fallback, not a faster alternative that can pull
+traffic off your box.
+
 ## The hostname phones dial
 
 The gateway needs one public name that resolves to the server, and it can live at

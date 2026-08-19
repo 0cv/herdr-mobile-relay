@@ -359,9 +359,28 @@ CHOICE_ENV="$WORK_DIR/config/choice.env"
 set_gateway_url "$CHOICE_ENV" "wss://gw.example.test"
 test "$(env_file_value "$CHOICE_ENV" HERDR_GATEWAY_URL)" = "wss://gw.example.test"
 test "$(unset HERDR_GATEWAY_URL; gateway_url "$CHOICE_ENV")" = "wss://gw.example.test"
+
+# The selection policy is a second, independent switch with exactly two legal
+# values. Anything else is refused without touching the file, because writing a
+# policy nobody understands would silently change which gateway carries traffic.
+set_gateway_selection "$CHOICE_ENV" ordered
+test "$(env_file_value "$CHOICE_ENV" HERDR_GATEWAY_SELECTION)" = "ordered"
+set_gateway_selection "$CHOICE_ENV" latency
+test "$(env_file_value "$CHOICE_ENV" HERDR_GATEWAY_SELECTION)" = "latency"
+SELECTION_ENV_BEFORE="$(cat "$CHOICE_ENV")"
+for REJECTED_SELECTION in "fastest" "Ordered" "ordered latency" ""; do
+    if set_gateway_selection "$CHOICE_ENV" "$REJECTED_SELECTION"; then
+        echo "gateway selection accepted '$REJECTED_SELECTION'" >&2
+        exit 1
+    fi
+    test "$(cat "$CHOICE_ENV")" = "$SELECTION_ENV_BEFORE"
+done
+
+# Leaving the gateway path drops the policy along with the list, so a later
+# choice cannot inherit a stale one.
 set_gateway_url "$CHOICE_ENV" ""
-if grep -q '^HERDR_GATEWAY_URL=' "$CHOICE_ENV"; then
-    echo "clearing the gateway URL left the key behind" >&2
+if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$CHOICE_ENV"; then
+    echo "clearing the gateway URL left a gateway key behind" >&2
     exit 1
 fi
 test -z "$(unset HERDR_GATEWAY_URL; gateway_url "$CHOICE_ENV")"
@@ -404,6 +423,9 @@ CHOOSER_OUTPUT="$(
 )"
 test "$(env_file_value "$CHOOSER_ENV" HERDR_GATEWAY_URL)" = \
     "wss://gw-a.example.test,wss://gw-b.example.test"
+# The published candidates are interchangeable, so this is the one option that
+# asks for latency ranking.
+test "$(env_file_value "$CHOOSER_ENV" HERDR_GATEWAY_SELECTION)" = "latency"
 case "$CHOOSER_OUTPUT" in
     *"gw-b.example.test.. unavailable"*"Saved 2 gateway candidates."*) ;;
     *)

@@ -96,13 +96,23 @@ NORMALIZE_BIN="$STUB_DIR/herdr-mobile-relay"
 cat > "$NORMALIZE_BIN" <<'EOF'
 #!/bin/sh
 # Isolates this shell test from any relay binary in the developer's data dir.
+# Callers pass either a bare host or the https:// form the wss:// entries are
+# rewritten to, exactly as the compiled normalizer sees them.
 test "$1" = "normalize-origin" || exit 2
 test "$2" = "--allow-loopback-http" || exit 2
-test "$3" = "gw.example.test" || exit 2
-printf 'https://gw.example.test\n'
+host="${3#https://}"
+case "$host" in
+    gw.example.test | community-a.example.test | community-b.example.test)
+        printf 'https://%s\n' "$host"
+        ;;
+    *) exit 2 ;;
+esac
 EOF
 chmod 700 "$NORMALIZE_BIN"
 export HERDR_RELAY_BIN="$NORMALIZE_BIN"
+# A published community list, so the deployment's fallback offer has something
+# to keep. The compiled default is a real hostname and must never be reached.
+export HERDR_COMMUNITY_GATEWAY_URL="wss://community-a.example.test,wss://community-b.example.test"
 
 HOSTNAME_UNDER_TEST="gw.example.test"
 export HERDR_GATEWAY_DEPLOY_HOST="$HOSTNAME_UNDER_TEST"
@@ -202,9 +212,14 @@ grep -Fq './gateway-source/Dockerfile.gateway' "$WORK_DIR/uploaded.list" ||
 grep -Fq 'sudo -n true' "$SSH_LOG" || fail "deployment never checked passwordless sudo"
 grep -Fq 'sudo -n sh -c ' "$SSH_LOG" || fail "remote commands dropped the sudo prefix"
 
-# Only a verified public /healthz may switch this relay onto the gateway.
-grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test'" "$HERDR_RELAY_ENV" ||
-    fail "verified deployment did not record the gateway URL"
+# Only a verified public /healthz may switch this relay onto the gateway, and it
+# lands ahead of the community entries rather than replacing them.
+grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test,wss://community-a.example.test,wss://community-b.example.test'" \
+    "$HERDR_RELAY_ENV" || fail "verified deployment did not record the ordered gateway list"
+grep -Fq "HERDR_GATEWAY_SELECTION='ordered'" "$HERDR_RELAY_ENV" ||
+    fail "verified deployment did not pin the ordered selection policy"
+grep -Fq 'community gateways behind it are only reached' "$OUTPUT" ||
+    fail "deployment did not explain the fallback ordering"
 
 # --- Public endpoint never answers: keep the transport unchanged --------------
 : > "$SSH_LOG"
@@ -280,8 +295,25 @@ grep -Fq 'mkdir -p /srv/herdr-gateway && tar -xzf - -C /srv/herdr-gateway' "$SSH
     fail "rerun did not reuse the remembered directory on the server"
 grep -Fq "email ops@example.test" "$REMEMBERED_BUNDLE/Caddyfile" ||
     fail "rerun did not reuse the remembered ACME contact"
+grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test,wss://community-a.example.test,wss://community-b.example.test'" \
+    "$HERDR_RELAY_ENV" || fail "remembered rerun did not record the verified gateway list"
+
+# --- Declining the community fallback leaves only the deployed gateway -------
+: > "$SSH_LOG"
+rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz"
+export HERDR_RELAY_ENV="$WORK_DIR/relay-no-fallback.env"
+: > "$HERDR_RELAY_ENV"
+export HERDR_GATEWAY_DEPLOY_FALLBACK=false
+run_deploy
+[ "$STATUS" -eq 0 ] || fail "declined-fallback run exited $STATUS"
 grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test'" "$HERDR_RELAY_ENV" ||
-    fail "remembered rerun did not record the verified gateway URL"
+    fail "declining the fallback did not leave the deployed gateway alone"
+if grep -Fq 'community-a.example.test' "$HERDR_RELAY_ENV"; then
+    fail "declined fallback still recorded the community gateways"
+fi
+grep -Fq "HERDR_GATEWAY_SELECTION='ordered'" "$HERDR_RELAY_ENV" ||
+    fail "declined fallback did not pin the ordered selection policy"
+unset HERDR_GATEWAY_DEPLOY_FALLBACK
 
 # --- A key ssh would never offer on its own ---------------------------------
 # Hosts that only accept a key outside ~/.ssh/id_* are the common case for

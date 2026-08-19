@@ -79,13 +79,18 @@ project follows [Semantic Versioning](https://semver.org/).
   Wi-Fi/cellular network change. A healthy path remains open; a half-open path
   gets 2 s to answer before reconnecting.
 - With multiple `HERDR_GATEWAY_URL` entries, the relay now probes all gateway
-  health endpoints concurrently at startup, then keeps one registration with
-  the lowest-latency healthy gateway. After a failure it excludes that gateway
-  and reselects from the cold fallbacks. Configured order breaks close ties.
-  The selected gateway is advertised first and saved by connected
-  phones without interrupting their current session.
-  The setup chooser accepts the managed list, validates every entry, and saves
-  it when at least one gateway is healthy.
+  health endpoints concurrently at startup, then registers with the first
+  healthy entry in configured order: a list you configure is a priority list,
+  not a preference, so a gateway you own is not displaced by a faster one
+  further down. After a failure it excludes that entry and takes the next
+  healthy one. `HERDR_GATEWAY_SELECTION=latency` asks for the lowest-latency
+  healthy entry instead, with configured order breaking ties within 20 ms; the
+  setup chooser writes it for the community list, whose gateways are
+  interchangeable, and `ordered` is the default everywhere else. The selected
+  gateway is advertised first and saved by connected phones without
+  interrupting their current session. The setup chooser accepts the managed
+  list, validates every entry, and saves it when at least one gateway is
+  healthy.
 - A relay reached over its existing Cloudflare URL now advertises its gateway,
   and the app records it and prefers the hybrid path on the next connection —
   no QR re-scan. The original URL is kept and is used automatically if the

@@ -182,6 +182,42 @@ func TestLoadParsesOrderedGatewayList(t *testing.T) {
 	}
 }
 
+// TestLoadNormalisesGatewaySelection pins the rule the gateway transport reads
+// without re-validating it. Only an explicit "latency" opts into RTT ranking,
+// so a typo or an env file from a newer release still honours the configured
+// order instead of silently ranking a hand-listed gateway away.
+func TestLoadNormalisesGatewaySelection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		unset bool
+		value string
+		want  string
+	}{
+		{name: "absent", unset: true, want: GatewaySelectionOrdered},
+		{name: "empty", want: GatewaySelectionOrdered},
+		{name: "ordered", value: "ordered", want: GatewaySelectionOrdered},
+		{name: "upper case latency", value: " LATENCY ", want: GatewaySelectionLatency},
+		{name: "unrecognised", value: "fastest-wins", want: GatewaySelectionOrdered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
+			t.Setenv("HERDR_GATEWAY_URL", "wss://mine.example.com,wss://community.example.com")
+			t.Setenv("HERDR_GATEWAY_SELECTION", tc.value)
+			if tc.unset {
+				os.Unsetenv("HERDR_GATEWAY_SELECTION")
+			}
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.GatewaySelection != tc.want {
+				t.Errorf("gateway selection = %q, want %q", cfg.GatewaySelection, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidSecondGatewayURL(t *testing.T) {
 	t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
 	t.Setenv("HERDR_GATEWAY_URL", "wss://a.example.com,https://b.example.com")

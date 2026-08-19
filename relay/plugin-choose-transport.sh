@@ -1,7 +1,8 @@
 #!/bin/bash
 # Guided chooser for how the phone reaches this computer. Every option ends by
 # writing (or clearing) the HERDR_GATEWAY_URL candidate list in the relay
-# environment, which is the single switch the rest of the tooling reads.
+# environment, which is the single switch the rest of the tooling reads, plus
+# the HERDR_GATEWAY_SELECTION policy that decides how that list is read.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -51,8 +52,11 @@ echo ""
 # ws:// or wss:// entries, so community constants or typed addresses written in
 # https:// form must be canonicalized before they reach the env file. Setup
 # checks each health endpoint but requires only one to answer; an unavailable
-# entry remains useful as a cold fallback.
+# entry remains useful as a cold fallback. The selection policy is a parameter
+# because both the community list and an operator's own list arrive here, and
+# only the community one wants its candidates ranked by latency.
 use_gateways() {
+    local selection="$2"
     local urls
     local old_ifs
     local url
@@ -86,12 +90,16 @@ use_gateways() {
         return 1
     fi
     set_gateway_url "$ENV_FILE" "$urls"
+    set_gateway_selection "$ENV_FILE" "$selection"
     echo ""
     if [ "$count" -eq 1 ]; then
         echo "✓ This relay will use $urls."
-    else
+    elif [ "$selection" = "latency" ]; then
         echo "✓ Saved $count gateway candidates."
         echo "  The relay will register with the lowest-latency healthy one."
+    else
+        echo "✓ Saved $count gateway candidates."
+        echo "  The relay will register with the first healthy one in that order."
     fi
     echo "  Run Quick Start to register and print the phone QR."
     return 0
@@ -118,7 +126,9 @@ choose_own_gateway() {
                         return 1
                     fi
                     [ -n "$entered" ] || continue
-                    if use_gateways "$entered"; then
+                    # An operator's own list is a priority order, not a pool of
+                    # equivalents: entry one is theirs and must win.
+                    if use_gateways "$entered" ordered; then
                         return 0
                     fi
                 done
@@ -152,7 +162,9 @@ while true; do
                 echo "  Choose 4 to run your own, or 1 to keep using Cloudflare."
                 continue
             fi
-            if use_gateways "$COMMUNITY"; then
+            # The published candidates are interchangeable, so the closest one
+            # is the right one — this is the only path that ranks by latency.
+            if use_gateways "$COMMUNITY" latency; then
                 exit 0
             fi
             ;;

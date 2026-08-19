@@ -737,16 +737,37 @@ gateway_answers_healthz() {
 }
 
 # Persists the transport choice. An empty URL removes the key, which returns
-# the relay to the Cloudflare tunnel path.
+# the relay to the Cloudflare tunnel path — and takes the selection policy with
+# it, so a relay that leaves the gateway path keeps no stale policy to revive
+# behind a later, differently chosen list.
 set_gateway_url() {
     local env_file="$1"
     local url="$2"
 
     if [ -z "$url" ]; then
         remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
+        remove_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION
         return 0
     fi
     set_env_value_atomic "$env_file" HERDR_GATEWAY_URL "$url"
+}
+
+# Records how the relay picks among the configured candidates. "ordered" keeps
+# the configured order, so an operator who lists their own gateway first keeps
+# it even when a community one answers faster; "latency" ranks by measured RTT,
+# which is the point for the interchangeable public candidates. The relay
+# defaults to "ordered" when the key is absent, so only the community path has
+# to write anything. Any other value is a caller bug that would quietly change
+# which gateway carries traffic, so nothing is written.
+set_gateway_selection() {
+    local env_file="$1"
+    local selection="$2"
+
+    case "$selection" in
+        ordered|latency) ;;
+        *) return 1 ;;
+    esac
+    set_env_value_atomic "$env_file" HERDR_GATEWAY_SELECTION "$selection"
 }
 
 # Percent-encodes one fragment value with the compiled encoder, so an entry of

@@ -19,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/framing"
 	"github.com/0cv/herdr-mobile-relay/internal/gatewaywire"
 )
@@ -84,14 +85,18 @@ type GatewayStatus struct {
 // GatewayOptions configures the outbound registration.
 type GatewayOptions struct {
 	// URL is the gateway base, for example wss://gw.example.com. It is the
-	// first tie-break entry, and must be the first element of URLs when both are
-	// set.
+	// first entry of the candidate list, and must be the first element of URLs
+	// when both are set.
 	URL string
 	// URLs is the gateway candidate list. At startup the relay probes every
-	// entry concurrently and registers with the lowest-latency healthy one;
-	// list order breaks close ties and remains the fallback when probes fail.
+	// entry concurrently and registers with one healthy entry; Selection
+	// decides which, and list order remains the fallback when probes fail.
 	// URL stays for single-gateway callers.
 	URLs []string
+	// Selection is config.GatewaySelectionOrdered or
+	// config.GatewaySelectionLatency. Empty means ordered: a caller that did
+	// not think about the rule gets the configured list honoured.
+	Selection string
 	// RelayKey is the relay's pairing secret. Both gateway identifiers are
 	// derived from it; the key itself never leaves the process.
 	RelayKey string
@@ -106,9 +111,12 @@ type GatewayOptions struct {
 // phone happens here, against the locally derived rendezvous key.
 type GatewayClient struct {
 	hub *Hub
-	// urls is the configured tie-break order; active indexes the selected entry
-	// and is guarded by mu because cold selection runs beside status readers.
-	urls          []string
+	// urls is the configured order; active indexes the selected entry and is
+	// guarded by mu because cold selection runs beside status readers.
+	urls []string
+	// selection is the rule for picking among healthy candidates. Anything but
+	// config.GatewaySelectionLatency is ordered.
+	selection     string
 	relayID       string
 	rendezvousKey []byte
 	maxClients    int
@@ -176,6 +184,7 @@ func NewGatewayClient(hub *Hub, opts GatewayOptions) (*GatewayClient, error) {
 	return &GatewayClient{
 		hub:           hub,
 		urls:          urls,
+		selection:     opts.Selection,
 		relayID:       relayID,
 		rendezvousKey: rendezvousKey,
 		maxClients:    maxClients,
@@ -191,7 +200,7 @@ func NewGatewayClient(hub *Hub, opts GatewayOptions) (*GatewayClient, error) {
 // gatewayURLs normalizes the configured endpoints into a validated candidate
 // list. URLs wins over URL so a caller that fills both can never end up dialing
 // an endpoint the list does not name, and the two must agree on the first
-// tie-break entry.
+// candidate.
 func gatewayURLs(opts GatewayOptions) ([]string, error) {
 	primary := strings.TrimRight(strings.TrimSpace(opts.URL), "/")
 	list := make([]string, 0, len(opts.URLs))
@@ -273,11 +282,30 @@ type gatewayProbeResult struct {
 	err   error
 }
 
-// selectLowestLatency probes equivalent candidates without maintaining extra
-// registrations. A failed active entry may be excluded for one selection pass;
-// this prevents a working /healthz route from immediately winning after its
-// WebSocket registration path failed.
-func (c *GatewayClient) selectLowestLatency(parent context.Context, excluded int) bool {
+// latencyRanked reports whether measured round trip decides the winner. Only
+// an interchangeable list, such as the community gateways, opts into it.
+func (c *GatewayClient) latencyRanked() bool {
+	return c.selection == config.GatewaySelectionLatency
+}
+
+// Selection reports the rule in force, so status output can answer "why that
+// gateway" without the log. A nil client has no gateway to pick.
+func (c *GatewayClient) Selection() string {
+	if c == nil {
+		return ""
+	}
+	if c.latencyRanked() {
+		return config.GatewaySelectionLatency
+	}
+	return config.GatewaySelectionOrdered
+}
+
+// selectGateway probes every candidate concurrently and commits to one healthy
+// entry. A failed active entry may be excluded for one selection pass; this
+// prevents a working /healthz route from immediately winning after its
+// WebSocket registration path failed. Probing is identical in both selection
+// modes: ordered still has to learn which entries answer at all.
+func (c *GatewayClient) selectGateway(parent context.Context, excluded int) bool {
 	candidates := make([]int, 0, len(c.urls))
 	for index := range c.urls {
 		if index != excluded {
@@ -307,21 +335,26 @@ func (c *GatewayClient) selectLowestLatency(parent context.Context, excluded int
 		select {
 		case result := <-results:
 			if result.err != nil {
-				c.logger.Debug("gateway latency probe failed",
+				c.logger.Debug("gateway probe failed",
 					"url", c.urls[result.index], "error", result.err)
 				continue
 			}
 			successful = append(successful, result)
 		case <-ctx.Done():
-			return c.applyLowestLatency(successful)
+			return c.applyProbeResults(successful)
 		}
 	}
-	return c.applyLowestLatency(successful)
+	return c.applyProbeResults(successful)
 }
 
-func (c *GatewayClient) applyLowestLatency(results []gatewayProbeResult) bool {
+// applyProbeResults commits the winner among the healthy candidates. This is
+// the only step the selection rule changes.
+func (c *GatewayClient) applyProbeResults(results []gatewayProbeResult) bool {
 	if len(results) == 0 {
 		return false
+	}
+	if !c.latencyRanked() {
+		return c.applyConfiguredOrder(results)
 	}
 	minRTT := results[0].rtt
 	for _, result := range results[1:] {
@@ -338,6 +371,24 @@ func (c *GatewayClient) applyLowestLatency(results []gatewayProbeResult) bool {
 	}
 	c.setActive(bestIndex)
 	c.logger.Info("gateway selected by latency", "url", c.urls[bestIndex], "rtt", bestRTT)
+	return true
+}
+
+// applyConfiguredOrder takes the earliest healthy entry, however slow it is: an
+// explicitly listed gateway is a priority, not a suggestion. The log names the
+// position it landed on and how many entries answered, so "why is it not on my
+// first gateway" is answerable from the log alone.
+func (c *GatewayClient) applyConfiguredOrder(results []gatewayProbeResult) bool {
+	best := results[0]
+	for _, result := range results[1:] {
+		if result.index < best.index {
+			best = result
+		}
+	}
+	c.setActive(best.index)
+	c.logger.Info("gateway selected by configured order",
+		"url", c.urls[best.index], "position", best.index+1, "candidates", len(c.urls),
+		"healthy", len(results), "rtt", best.rtt)
 	return true
 }
 
@@ -440,7 +491,7 @@ func (c *GatewayClient) Status() GatewayStatus {
 func (c *GatewayClient) Run(ctx context.Context) {
 	delay := c.backoffBase
 	if len(c.urls) > 1 {
-		c.selectLowestLatency(ctx, -1)
+		c.selectGateway(ctx, -1)
 	}
 	for {
 		if ctx.Err() != nil {
@@ -460,10 +511,10 @@ func (c *GatewayClient) Run(ctx context.Context) {
 			} else {
 				c.logger.Warn("gateway link failed", "error", err)
 			}
-			// The entry that just failed is excluded for this pass. With one
-			// remaining candidate this is the old ordered failover; with more,
-			// the healthy candidate with the lowest measured latency wins.
-			if !c.selectLowestLatency(ctx, failedIndex) {
+			// The entry that just failed is excluded for this pass, so failover
+			// lands on the next healthy entry the selection rule prefers rather
+			// than back on the gateway that just dropped us.
+			if !c.selectGateway(ctx, failedIndex) {
 				c.advance()
 			}
 		}

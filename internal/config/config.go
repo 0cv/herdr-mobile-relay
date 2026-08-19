@@ -11,6 +11,16 @@ import (
 	"strings"
 )
 
+// Accepted HERDR_GATEWAY_SELECTION values.
+const (
+	// GatewaySelectionOrdered registers with the first healthy entry in
+	// configured order: an explicit list is a priority, not a preference.
+	GatewaySelectionOrdered = "ordered"
+	// GatewaySelectionLatency ranks healthy entries by measured round trip. It
+	// only fits interchangeable endpoints, such as the community gateway list.
+	GatewaySelectionLatency = "latency"
+)
+
 type Config struct {
 	Host           string
 	Port           int
@@ -30,8 +40,13 @@ type Config struct {
 	// GatewayURL is the configured tie-break leader, kept equal to
 	// GatewayURLs[0] so readers that only know one gateway keep working. The
 	// transport may select another healthy entry at runtime.
-	GatewayURL          string
-	GatewayURLs         []string
+	GatewayURL  string
+	GatewayURLs []string
+	// GatewaySelection is how the transport picks among GatewayURLs: "ordered"
+	// registers with the first healthy entry in configured order, "latency"
+	// with the lowest-latency healthy one. The loader normalises it, so no
+	// reader validates it again.
+	GatewaySelection    string
 	WebRTCUDPPort       int
 	ForceRelayTransport bool
 	PortMappingEnabled  bool
@@ -69,13 +84,13 @@ func Load() (*Config, error) {
 	}
 
 	// HERDR_GATEWAY_URL is an ordered candidate list. The relay probes the
-	// entries concurrently and uses the lowest-latency healthy gateway; the
-	// configured order breaks close ties and remains the no-probe fallback. A
-	// single value is one entry and behaves exactly as it always did.
+	// entries concurrently; HERDR_GATEWAY_SELECTION decides what the order
+	// means. A single value is one entry and behaves exactly as it always did.
 	cfg.GatewayURLs = parseGatewayURLs(os.Getenv("HERDR_GATEWAY_URL"))
 	if len(cfg.GatewayURLs) > 0 {
 		cfg.GatewayURL = cfg.GatewayURLs[0]
 	}
+	cfg.GatewaySelection = parseGatewaySelection(os.Getenv("HERDR_GATEWAY_SELECTION"))
 
 	cfg.ConfigHome = envOr("XDG_CONFIG_HOME", filepath.Join(homeDir(), ".config"))
 	cacheHome := envOr("XDG_CACHE_HOME", filepath.Join(homeDir(), ".cache"))
@@ -238,6 +253,17 @@ func parseGatewayURLs(raw string) []string {
 		}
 	}
 	return urls
+}
+
+// parseGatewaySelection normalises the selection rule. Only the community
+// gateway list is a set of interchangeable endpoints where latency ranking is
+// the point; a hand-listed gateway is a choice the relay must honour, so
+// absent, empty and unrecognised values all mean configured order.
+func parseGatewaySelection(raw string) string {
+	if strings.ToLower(strings.TrimSpace(raw)) == GatewaySelectionLatency {
+		return GatewaySelectionLatency
+	}
+	return GatewaySelectionOrdered
 }
 
 func envOr(key, fallback string) string {

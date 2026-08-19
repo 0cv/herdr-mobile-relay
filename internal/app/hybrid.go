@@ -107,9 +107,10 @@ func (s *Server) startHybridTransport(ctx context.Context) *hybridTransport {
 	}
 
 	gateway, err := transport.NewGatewayClient(s.hub, transport.GatewayOptions{
-		URLs:     s.cfg.GatewayURLs,
-		RelayKey: s.cfg.Token,
-		Logger:   s.logger,
+		URLs:      s.cfg.GatewayURLs,
+		Selection: s.cfg.GatewaySelection,
+		RelayKey:  s.cfg.Token,
+		Logger:    s.logger,
 	})
 	if err != nil {
 		s.recordSafeError("gateway transport unavailable", err)
@@ -329,17 +330,18 @@ func (h *hybridTransport) status() map[string]any {
 	}
 	gateway := h.gateway.Status()
 	out := map[string]any{
-		"enabled":       gateway.Enabled,
-		"registered":    gateway.Registered,
-		"relay_id":      gateway.RelayID,
-		"url":           gateway.URL,
-		"urls":          gateway.URLs,
-		"clients":       gateway.Clients,
-		"direct":        h.directEnabled(),
-		"forced_relay":  h.forced,
-		"last_error":    gateway.LastError,
-		"last_notice":   gateway.LastNotice,
-		"webrtc_active": 0,
+		"enabled":           gateway.Enabled,
+		"registered":        gateway.Registered,
+		"relay_id":          gateway.RelayID,
+		"url":               gateway.URL,
+		"urls":              gateway.URLs,
+		"gateway_selection": h.gateway.Selection(),
+		"clients":           gateway.Clients,
+		"direct":            h.directEnabled(),
+		"forced_relay":      h.forced,
+		"last_error":        gateway.LastError,
+		"last_notice":       gateway.LastNotice,
+		"webrtc_active":     0,
 	}
 	if h.webrtc != nil {
 		out["webrtc_active"] = h.webrtc.SessionCount()

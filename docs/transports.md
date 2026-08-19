@@ -79,16 +79,24 @@ each NAT already created for the outbound probe is what the peer uses.
 
 - `HERDR_GATEWAY_URL` — one or more gateway base URLs, separated by commas
   (`wss://gw.example.com,wss://backup.example.com`). Empty (the default) keeps
-  the Cloudflare tunnel path. At startup the relay probes every candidate
-  concurrently over HTTPS and keeps exactly one registration with the
-  lowest-latency healthy gateway. After a failure it excludes that gateway and
-  repeats the choice among the remaining fallbacks; configured order breaks
-  ties within 20 ms and remains the fallback if every probe fails. The
-  relay advertises the selected gateway first, so the phone saves the same
-  active-first list. The pairing QR also carries the whole configured list, so
-  either side can fail over without a re-scan.
+  the Cloudflare tunnel path. A list you configure yourself is a priority list:
+  at startup the relay probes every candidate concurrently over HTTPS and keeps
+  exactly one registration with the first healthy entry in configured order,
+  whatever its latency. After a failure it excludes that entry for the pass and
+  takes the next healthy one. The relay advertises the selected gateway first,
+  so the phone saves the same active-first list. The pairing QR also carries the
+  whole configured list, so either side can fail over without a re-scan.
   The setup chooser validates every managed candidate and requires at least one
   to answer, while retaining unavailable entries as cold fallbacks.
+- `HERDR_GATEWAY_SELECTION` — how the relay picks among healthy candidates.
+  `ordered`, the default and what an absent, empty, or unrecognised value
+  means, takes the first healthy entry in configured order. `latency` keeps the
+  lowest-latency healthy entry, with configured order breaking ties within
+  20 ms. The setup chooser writes `latency` only for the project's community
+  list, whose entries are interchangeable public gateways where the closest one
+  is the right one; every other writer leaves the list ordered. Probing happens
+  in both modes, because an entry has to be healthy before it can be chosen,
+  and configured order remains the fallback if every probe fails.
 - `HERDR_WEBRTC_UDP_PORT` — fixed UDP port for the direct path; `0` (default)
   uses an ephemeral port.
 - `HERDR_REACHABILITY_PORT_MAPPING` — ask the router for a UPnP/NAT-PMP mapping

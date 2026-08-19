@@ -786,6 +786,55 @@ wait_for_public_health() {
     done
 }
 
+# Let's Encrypt prefers IPv6 whenever the name publishes an AAAA record, so an
+# address nothing answers on fails every challenge while every IPv4 check keeps
+# looking perfect. The probe runs on the server, which is exactly where that
+# address is supposed to be served.
+report_ipv6_gap() {
+    remote_shell "getent ahostsv6 $GATEWAY_HOST >/dev/null 2>&1" || return 1
+    remote_shell "curl -6 -fsS --max-time 8 http://$GATEWAY_HOST/ >/dev/null 2>&1" && return 1
+    echo ""
+    echo "▸ $GATEWAY_HOST publishes an AAAA record that answers nothing here."
+    echo "  Let's Encrypt prefers IPv6 when a name has one, so the certificate"
+    echo "  attempt fails over IPv6 while IPv4 keeps looking healthy. Remove the"
+    echo "  AAAA record, or serve the gateway on IPv6 as well."
+    return 0
+}
+
+# Caddy already logged why the certificate did not arrive. Printing the matching
+# lines turns "it did not answer" into the actual obstacle.
+report_caddy_acme_errors() {
+    local lines
+
+    lines="$(remote_shell "cd $REMOTE_DIR && docker compose logs --no-color --tail=200 caddy 2>/dev/null" |
+        grep -Ei 'acme|challenge|certificate|obtain' |
+        grep -Ei 'error|fail|problem|retry' | tail -8)"
+    [ -n "$lines" ] || return 0
+    echo "  Caddy reported:"
+    printf '%s\n' "$lines" | sed 's/^/    /'
+    echo ""
+}
+
+# Your own gateway first, the community ones behind it. Under the ordered
+# policy they are reached only when yours is unhealthy, so keeping them turns a
+# dead VPS into a slow path instead of no path at all.
+keep_community_fallback() {
+    local answer
+
+    case "${HERDR_GATEWAY_DEPLOY_FALLBACK:-}" in
+        false) return 1 ;;
+        true) return 0 ;;
+    esac
+    have_tty || return 0
+    echo ""
+    read -r -p "Keep the community gateways as fallback after yours? [Y/n]: " answer ||
+        answer=""
+    case "${answer:-y}" in
+        y | Y | yes | YES) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 report_public_health_failure() {
     echo ""
     echo "▸ The gateway runs on the server, but $GATEWAY_HTTPS/healthz did not"
@@ -794,7 +843,10 @@ report_public_health_failure() {
     echo "    - Inbound TCP 80 or 443 is blocked, so Caddy cannot finish ACME."
     echo "      ufw allow 80/tcp && ufw allow 443/tcp && ufw allow 3478/udp"
     echo "    - Another service already holds 80 or 443."
+    echo "    - An AAAA record for $GATEWAY_HOST that nothing answers: ACME"
+    echo "      validation prefers IPv6 and fails there while IPv4 looks fine."
     echo ""
+    report_caddy_acme_errors
     echo "  Inbound UDP 3478 does not affect /healthz, but the gateway answers"
     echo "  address discovery there. Blocked, phones and computers never learn"
     echo "  their own address and every session stays on the relayed path."
@@ -904,6 +956,7 @@ deploy_bundle() {
     fi
     echo " ✓"
 
+    report_ipv6_gap
     printf '▸ Waiting for the certificate and %s' "$GATEWAY_HTTPS/healthz"
     if ! wait_for_public_health; then
         report_public_health_failure
@@ -1144,9 +1197,24 @@ case "$DEPLOY_STATUS" in
     *) exit 1 ;;
 esac
 
-set_gateway_url "$ENV_FILE" "$GATEWAY_WSS"
+GATEWAY_LIST="$GATEWAY_WSS"
+COMMUNITY_FALLBACK="$(community_gateway_url)"
+if [ -n "$COMMUNITY_FALLBACK" ] && keep_community_fallback; then
+    if MERGED_GATEWAYS="$(normalize_gateway_urls "$GATEWAY_WSS,$COMMUNITY_FALLBACK")"; then
+        GATEWAY_LIST="$MERGED_GATEWAYS"
+    fi
+fi
+set_gateway_url "$ENV_FILE" "$GATEWAY_LIST"
+# Ordered, so the community entries behind yours are a cold fallback rather
+# than a faster alternative that could pull traffic off the box you just paid
+# for.
+set_gateway_selection "$ENV_FILE" ordered
 echo ""
-echo "✓ $GATEWAY_HTTPS/healthz answered and this relay will use $GATEWAY_WSS."
+echo "✓ $GATEWAY_HTTPS/healthz answered and this relay will use $GATEWAY_LIST."
+if [ "$GATEWAY_LIST" != "$GATEWAY_WSS" ]; then
+    echo "  Yours is first; the community gateways behind it are only reached"
+    echo "  when it is unhealthy."
+fi
 echo "  Run Quick Start to register and print the phone QR."
 echo ""
 echo "Day-to-day on the server:"
