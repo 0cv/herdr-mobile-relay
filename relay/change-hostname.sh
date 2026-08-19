@@ -100,16 +100,59 @@ if ! ROUTE_OUTPUT="$(cloudflared tunnel route dns "$TUNNEL" "$NEW_HOSTNAME" 2>&1
     echo ""
     echo "✗ Cloudflare refused the route:" >&2
     printf '%s\n' "$ROUTE_OUTPUT" >&2
-    echo "  A name already pointing somewhere else has to be freed first, and the" >&2
-    echo "  domain has to be on the same account as the tunnel." >&2
+    echo "  A name already pointing somewhere else has to be freed first." >&2
     exit 1
 fi
 echo " ✓"
 
-# The config is rewritten in place so an operator's own edits elsewhere in it
-# survive; only the first ingress hostname moves.
+# cloudflared exits 0 even when it did something else than asked: an origin
+# certificate is scoped to one zone, and a name outside it becomes a subdomain
+# of the zone the certificate covers - ask for relay.new.example and get
+# relay.new.example.old.example, silently. It names what it created, so compare
+# before anything local changes; nothing has been touched yet at this point.
+ROUTED_NAME="$(
+    printf '%s\n' "$ROUTE_OUTPUT" |
+        sed -n 's/.*Added CNAME \([^ ]*\) which will route.*/\1/p;s/.*INF \([^ ]*\) is already configured.*/\1/p' |
+        head -1
+)"
+if [ -n "$ROUTED_NAME" ] && [ "$ROUTED_NAME" != "$NEW_HOSTNAME" ]; then
+    echo "✗ Cloudflare created $ROUTED_NAME, not $NEW_HOSTNAME." >&2
+    echo "  This tunnel's origin certificate only covers one zone, so a name" >&2
+    echo "  outside it is treated as a subdomain of that zone. Nothing here was" >&2
+    echo "  changed; the relay still serves $CURRENT_HOSTNAME." >&2
+    echo "  Run 'cloudflared tunnel login' and pick the zone that owns" >&2
+    echo "  $NEW_HOSTNAME, then run this again. Delete the stray $ROUTED_NAME" >&2
+    echo "  record in Cloudflare." >&2
+    exit 1
+fi
+
+# The edge has to answer for the new name before the ingress stops serving the
+# old one. Any HTTP status proves DNS and the tunnel are wired: until the
+# ingress moves the tunnel replies 404, which is exactly the proof needed.
+printf '▸ Waiting for the edge to answer %s' "$NEW_HOSTNAME"
+DNS_DEADLINE=$((SECONDS + ${HERDR_STABLE_DNS_TIMEOUT:-60}))
+while ! curl -sS --max-time 5 -o /dev/null "https://$NEW_HOSTNAME/healthz" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$DNS_DEADLINE" ]; then
+        echo ""
+        echo "✗ $NEW_HOSTNAME does not resolve to Cloudflare yet." >&2
+        echo "  Nothing here was changed; the relay still serves $CURRENT_HOSTNAME." >&2
+        exit 1
+    fi
+    printf '.'
+    sleep 2
+done
+echo " ✓"
+
+# Only now does anything local move. Every failure below restores this copy, so
+# the relay is never left serving a name that answers nowhere.
 CONFIG_BACKUP="$CONFIG.herdr-previous"
 cp "$CONFIG" "$CONFIG_BACKUP"
+restore_config() {
+    cp "$CONFIG_BACKUP" "$CONFIG"
+    "$SCRIPT_DIR/service.sh" install >/dev/null 2>&1 || true
+    echo "▸ Restored $CURRENT_HOSTNAME; the relay is reachable again." >&2
+}
+
 TEMP_CONFIG="$CONFIG.herdr-new.$$"
 if [ -n "$CURRENT_HOSTNAME" ]; then
     sed "s|^\([[:space:]]*-\{0,1\}[[:space:]]*hostname:[[:space:]]*\)$CURRENT_HOSTNAME|\1$NEW_HOSTNAME|" \
@@ -127,10 +170,10 @@ mv -f "$TEMP_CONFIG" "$CONFIG"
 echo "✓ $CONFIG now serves $NEW_HOSTNAME (previous copy: $CONFIG_BACKUP)"
 
 # Whatever the wizard recorded has to agree, or a later teardown would chase the
-# old name and refuse to finish.
+# old name and refuse to finish. Assignments are key=value.
 STATE_FILE="${HERDR_STABLE_STATE_FILE:-$(dirname "$ENV_FILE")/stable-setup.json}"
 if [ -f "$STATE_FILE" ]; then
-    if "$(relay_binary)" stable-state update "$STATE_FILE" hostname "$NEW_HOSTNAME" >/dev/null 2>&1; then
+    if "$(relay_binary)" stable-state update "$STATE_FILE" "hostname=$NEW_HOSTNAME" >/dev/null 2>&1; then
         echo "✓ Recorded the new hostname in $STATE_FILE"
     else
         echo "▸ Could not update $STATE_FILE; teardown may still name the old host."
@@ -157,9 +200,9 @@ while true; do
     fi
     if [ "$SECONDS" -ge "$DEADLINE" ]; then
         echo ""
-        echo "✗ $NEW_HOSTNAME did not answer as this relay yet." >&2
-        echo "  DNS and the certificate can take a minute; the old hostname still" >&2
-        echo "  works, so nothing is broken. Reprint the QR once it answers." >&2
+        echo "✗ $NEW_HOSTNAME did not answer as this relay." >&2
+        restore_config
+        echo "  The route to $NEW_HOSTNAME stays; try again once it answers." >&2
         exit 1
     fi
     printf '.'

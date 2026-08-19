@@ -718,7 +718,7 @@ cat > "$MOVE_BIN/relay-stub" <<'EOF'
 case "$1 $2" in
     "stable-state health-match") exit 0 ;;
     "stable-state update")
-        printf '%s\n' "$5" > "$MOVE_STATE_RECORD"
+        printf '%s\n' "${4#hostname=}" > "$MOVE_STATE_RECORD"
         exit 0
         ;;
     *) exit 0 ;;
@@ -728,6 +728,17 @@ printf '#!/bin/sh\nexit 0\n' > "$MOVE_BIN/service.sh"
 chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl" "$MOVE_BIN/relay-stub" "$MOVE_BIN/service.sh"
 MOVE_STATE_RECORD="$WORK_DIR/state-hostname"
 export MOVE_STATE_RECORD
+reset_move_config() {
+    cat > "$MOVE_CONFIG" <<'YAML'
+tunnel: herdr-mobile-relay-fedora
+credentials-file: /somewhere/creds.json
+ingress:
+  - hostname: relay-fedora.old.test
+    service: http://localhost:8375
+  - service: http_status:404
+YAML
+    printf "HERDR_RELAY_TOKEN='move-token'\nCLOUDFLARED_CONFIG='%s'\n" "$MOVE_CONFIG" > "$MOVE_ENV"
+}
 # setup-link and service.sh are the two things this action hands off to; both
 # are stubbed so the test observes the move itself.
 cp "$MOVE_BIN/service.sh" "$WORK_DIR/move-service.sh"
@@ -768,5 +779,62 @@ case "$MOVE_OUTPUT" in
         exit 1
         ;;
 esac
+
+# cloudflared exits 0 while creating a different name when its certificate does
+# not cover the zone. Believing it once left a live relay serving a hostname
+# that answered nowhere, so a mismatch must change nothing at all.
+reset_move_config
+cat > "$MOVE_BIN/cloudflared" <<'EOF'
+#!/bin/sh
+printf 'INF Added CNAME relay-fedora.new.test.old.test which will route to your tunnel\n'
+exit 0
+EOF
+chmod 700 "$MOVE_BIN/cloudflared"
+MOVE_OUTPUT="$(
+    printf 'relay-fedora.new.test\n' |
+        HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
+        HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
+        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+)"
+case "$MOVE_OUTPUT" in
+    *"created relay-fedora.new.test.old.test, not relay-fedora.new.test"*) ;;
+    *)
+        echo "a mis-zoned route was accepted" >&2
+        printf '%s\n' "$MOVE_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+grep -Fq 'hostname: relay-fedora.new.test' "$MOVE_CONFIG" &&
+    { echo "a mis-zoned route still rewrote the ingress" >&2; exit 1; }
+
+# A new name the edge never answers must not take the old one out of service.
+reset_move_config
+cat > "$MOVE_BIN/cloudflared" <<'EOF'
+#!/bin/sh
+printf 'INF Added CNAME relay-fedora.unreachable.test which will route to your tunnel\n'
+exit 0
+EOF
+cat > "$MOVE_BIN/curl" <<'EOF'
+#!/bin/sh
+exit 6
+EOF
+chmod 700 "$MOVE_BIN/cloudflared" "$MOVE_BIN/curl"
+MOVE_OUTPUT="$(
+    printf 'relay-fedora.unreachable.test\n' |
+        HOME="$MOVE_HOME" PATH="$MOVE_BIN:$PATH" \
+        HERDR_RELAY_BIN="$MOVE_BIN/relay-stub" HERDR_RELAY_ENV="$MOVE_ENV" \
+        HERDR_STABLE_DNS_TIMEOUT=0 \
+        bash "$REPO_DIR/relay/change-hostname.sh" 2>&1 || true
+)"
+case "$MOVE_OUTPUT" in
+    *"does not resolve to Cloudflare yet"*) ;;
+    *)
+        echo "an unresolvable new hostname was accepted" >&2
+        printf '%s\n' "$MOVE_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
+    { echo "the old hostname was lost while the new one was unreachable" >&2; exit 1; }
 
 echo "common shell tests passed"
