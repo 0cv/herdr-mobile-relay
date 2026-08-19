@@ -110,14 +110,100 @@ MATCHING_PROJECTS="$(
     printf '%s' "$PROJECTS_JSON" | "$(relay_binary)" pages-projects matching "$APP_ORIGIN" || true
 )"
 
-# No project serves this origin, so no answer to the project question can be
-# accepted: say which of the two things is wrong instead of asking again.
+# Wrangler 4 has no Pages custom-domain command, so attaching one means the REST
+# API, which needs a token the OAuth login does not expose. With a token this
+# does the work; without one it says exactly what to click. Either way the
+# person is never told to go and fix something with no instructions.
+cloudflare_account_id() {
+    local token="$1"
+
+    if [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+        printf '%s\n' "$CLOUDFLARE_ACCOUNT_ID"
+        return 0
+    fi
+    curl --fail --silent --show-error --max-time 15 \
+        -H "Authorization: Bearer $token" \
+        https://api.cloudflare.com/client/v4/accounts 2>/dev/null |
+        grep -o '"id":"[0-9a-f]\{32\}"' | head -1 | cut -d'"' -f4
+}
+
+attach_pages_domain() {
+    local project="$1"
+    local host="${2#https://}"
+    local token="${CLOUDFLARE_API_TOKEN:-}"
+    local account
+    local response
+
+    [ -n "$token" ] || return 2
+    account="$(cloudflare_account_id "$token")"
+    [ -n "$account" ] || return 2
+    if ! response="$(
+        curl --fail --silent --show-error --max-time 30 -X POST \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json" \
+            --data "{\"name\":\"$host\"}" \
+            "https://api.cloudflare.com/client/v4/accounts/$account/pages/projects/$project/domains" 2>&1
+    )"; then
+        echo "✗ Cloudflare refused the domain: $response" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Attaching a domain changes the Cloudflare account, so it is never silent:
+# a terminal is asked, and a script has to say so with
+# HERDR_APP_DEPLOY_ATTACH_DOMAIN=true.
+attach_requested() {
+    local answer
+
+    case "${HERDR_APP_DEPLOY_ATTACH_DOMAIN:-}" in
+        true) return 0 ;;
+        false) return 1 ;;
+    esac
+    [ -t 0 ] || return 1
+    read -r -p "Add ${APP_ORIGIN#https://} to $ATTACH_PROJECT now? [Y/n]: " answer ||
+        return 1
+    case "${answer:-y}" in
+        y | Y | yes | YES) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# No project serves this origin. Offer to attach it to one, and otherwise say
+# which of the two things is wrong instead of asking the same question again.
 if [ -z "$(printf '%s\n' "$MATCHING_PROJECTS" | sed '/^$/d')" ]; then
+    ACCOUNT_PROJECTS="$(
+        printf '%s' "$PROJECTS_JSON" | "$(relay_binary)" pages-projects names || true
+    )"
+    ATTACH_PROJECT=""
+    if [ "$(printf '%s\n' "$ACCOUNT_PROJECTS" | sed '/^$/d' | wc -l)" -eq 1 ]; then
+        ATTACH_PROJECT="$(printf '%s\n' "$ACCOUNT_PROJECTS" | sed -n '1p')"
+    fi
     echo ""
     echo "✗ No Pages project above serves $APP_ORIGIN." >&2
-    echo "  Either add that domain to a project in Cloudflare (Pages → the" >&2
-    echo "  project → Custom domains) and rerun this action, or enter an origin" >&2
-    echo "  one of the listed projects already serves." >&2
+    if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "$ATTACH_PROJECT" ] && attach_requested; then
+        if attach_pages_domain "$ATTACH_PROJECT" "$APP_ORIGIN"; then
+            echo "✓ Added ${APP_ORIGIN#https://} to $ATTACH_PROJECT."
+            echo "  Cloudflare issues its certificate in the background."
+            PROJECTS_JSON="$(
+                PATH="$NODE_DIR:$PATH" "$NPX_BIN" --yes "wrangler@$WRANGLER_VERSION" \
+                    pages project list --json
+            )"
+            MATCHING_PROJECTS="$(
+                printf '%s' "$PROJECTS_JSON" |
+                    "$(relay_binary)" pages-projects matching "$APP_ORIGIN" || true
+            )"
+        fi
+    elif [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+        echo "  This action can attach it for you with a Cloudflare API token that" >&2
+        echo "  has the Pages:Edit permission: set CLOUDFLARE_API_TOKEN in" >&2
+        echo "  $ENV_FILE and rerun. The wrangler login alone cannot do it." >&2
+    fi
+fi
+
+if [ -z "$(printf '%s\n' "$MATCHING_PROJECTS" | sed '/^$/d')" ]; then
+    echo "  Otherwise add the domain in Cloudflare (Pages → the project →" >&2
+    echo "  Custom domains), or enter an origin a listed project already serves." >&2
     echo "" >&2
     if ! prompt_app_origin; then
         echo "Configuration cancelled." >&2

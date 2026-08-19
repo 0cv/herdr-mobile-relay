@@ -24,7 +24,16 @@ before it installs and restarts the relay; a failed download, compatibility
 check, deployment, or public-origin check leaves the current relay running.
 
 The optional deployment-owner role requires Node.js 24 and Cloudflare
-credentials on that computer only.
+credentials on that computer only. The action looks for `node` where nvm, fnm,
+volta, and asdf put it, not only on `PATH`.
+
+A Pages project can only deploy a domain it already serves. When the origin you
+enter is not one of them, the action attaches it for you if `relay.env` carries
+a `CLOUDFLARE_API_TOKEN` with Pages:Edit — the `wrangler login` alone cannot,
+since Wrangler 4 has no custom-domain command. Set
+`HERDR_APP_DEPLOY_ATTACH_DOMAIN=true` to allow that without being asked, or
+`false` to refuse. Without a token it names the credential to set and offers to
+take a different origin.
 
 ## Release checks and app reloads
 

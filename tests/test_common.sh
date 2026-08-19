@@ -147,10 +147,16 @@ case "$1 $2" in
     "pages-projects list") printf '  herdr-0cv (herdr-0cv.pages.dev, app.example.test)\n' ;;
     "pages-projects names") printf 'herdr-0cv\n' ;;
     "pages-projects matching")
-        [ "$3" = "https://app.example.test" ] && printf 'herdr-0cv\n'
+        if [ "$3" = "https://app.example.test" ] ||
+            { [ -f "$DEPLOY_ATTACHED" ] && [ "$3" = "https://$(cat "$DEPLOY_ATTACHED")" ]; }; then
+            printf 'herdr-0cv\n'
+        fi
+        exit 0
         ;;
     "pages-projects validate")
-        test "$3" = herdr-0cv && test "$4" = "https://app.example.test"
+        test "$3" = herdr-0cv || exit 1
+        test "$4" = "https://app.example.test" ||
+            { [ -f "$DEPLOY_ATTACHED" ] && [ "$4" = "https://$(cat "$DEPLOY_ATTACHED")" ]; }
         ;;
     *) exit 2 ;;
 esac
@@ -158,7 +164,26 @@ EOF
 chmod 700 "$DEPLOY_BIN/relay-stub"
 printf '#!/bin/sh\nprintf "{}\\n"\n' > "$DEPLOY_BIN/npx"
 printf '#!/bin/sh\nexit 0\n' > "$DEPLOY_BIN/node"
-chmod 700 "$DEPLOY_BIN/npx" "$DEPLOY_BIN/node"
+# Stands in for the Cloudflare API: records the attach request and reports the
+# domain as served from then on.
+cat > "$DEPLOY_BIN/curl" <<'EOF'
+#!/bin/sh
+for argument in "$@"; do
+    case "$argument" in
+        *"/pages/projects/"*"/domains")
+            printf '%s\n' "$argument" > "$DEPLOY_ATTACH_LOG"
+            ;;
+        '{"name":"'*)
+            printf '%s' "$argument" | sed 's/.*"name":"//;s/".*//' > "$DEPLOY_ATTACHED"
+            ;;
+    esac
+done
+printf '{"success":true}\n'
+EOF
+chmod 700 "$DEPLOY_BIN/npx" "$DEPLOY_BIN/node" "$DEPLOY_BIN/curl"
+DEPLOY_ATTACHED="$WORK_DIR/attached-domain"
+DEPLOY_ATTACH_LOG="$WORK_DIR/attach-url"
+export DEPLOY_ATTACHED DEPLOY_ATTACH_LOG
 
 run_configure_app_deploy() {
     printf '%b' "$1" | HOME="$DEPLOY_HOME" \
@@ -215,6 +240,45 @@ chmod 700 "$DEPLOY_BIN/systemctl"
 run_configure_app_deploy 'app.example.test\nherdr-0cv\n' >/dev/null 2>&1 || true
 test "$(env_file_value "$DEPLOY_ENV" HERDR_APP_DEPLOY_ORIGIN)" = "https://app.example.test"
 test "$(env_file_value "$DEPLOY_ENV" HERDR_CLOUDFLARE_PAGES_PROJECT)" = "herdr-0cv"
+
+# With a token, the action attaches the domain itself instead of sending the
+# person to the dashboard, and then records the configuration it just made
+# possible.
+printf "HERDR_RELAY_TOKEN='deploy-token'\n" > "$DEPLOY_ENV"
+rm -f "$DEPLOY_ATTACHED" "$DEPLOY_ATTACH_LOG"
+CLOUDFLARE_API_TOKEN=test-token \
+    CLOUDFLARE_ACCOUNT_ID=0123456789abcdef0123456789abcdef \
+    HERDR_APP_DEPLOY_ATTACH_DOMAIN=true \
+    run_configure_app_deploy 'new.example.test\nherdr-0cv\n' >/dev/null 2>&1 || true
+test "$(cat "$DEPLOY_ATTACHED" 2>/dev/null)" = "new.example.test" ||
+    { echo "the domain was never sent to Cloudflare" >&2; exit 1; }
+case "$(cat "$DEPLOY_ATTACH_LOG" 2>/dev/null)" in
+    *"/accounts/0123456789abcdef0123456789abcdef/pages/projects/herdr-0cv/domains") ;;
+    *)
+        echo "the attach request went to the wrong endpoint" >&2
+        cat "$DEPLOY_ATTACH_LOG" >&2 || true
+        exit 1
+        ;;
+esac
+test "$(env_file_value "$DEPLOY_ENV" HERDR_APP_DEPLOY_ORIGIN)" = "https://new.example.test"
+
+# Without a token it must not pretend: it says what to set, and changes nothing.
+printf "HERDR_RELAY_TOKEN='deploy-token'\n" > "$DEPLOY_ENV"
+rm -f "$DEPLOY_ATTACHED" "$DEPLOY_ATTACH_LOG"
+DEPLOY_OUTPUT="$(
+    HERDR_APP_DEPLOY_ATTACH_DOMAIN=true \
+        run_configure_app_deploy 'other.example.test\nq\n' || true
+)"
+case "$DEPLOY_OUTPUT" in
+    *"set CLOUDFLARE_API_TOKEN in"*) ;;
+    *)
+        echo "app deploy did not name the credential it needs to attach a domain" >&2
+        printf '%s\n' "$DEPLOY_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+[ ! -e "$DEPLOY_ATTACHED" ] ||
+    { echo "a domain was attached without a token" >&2; exit 1; }
 
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
