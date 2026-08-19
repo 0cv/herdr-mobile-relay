@@ -31,6 +31,8 @@ for an existing Herdr app and uses it when found. In the setup menu, choose
 App Deployment** only on the one computer that should publish app updates; its
 configured deployment origin is authoritative and cannot be replaced by an
 older relay-hosted app reconnecting in the background.
+When a current origin is shown, option **1** keeps it. Option **2** deliberately
+switches to this relay's hostname, and option **3** selects another app.
 
 `cloudflared` login authorizes one zone at a time. The wizard reads and
 preselects that domain from `~/.cloudflared/cert.pem`; choose **Sign in to

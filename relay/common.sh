@@ -1169,10 +1169,33 @@ gateway_phone_app_base_url() {
     prompt_phone_app_base_url "" "$env_file"
 }
 
+phone_app_choice_action() {
+    local current_origin="$1"
+    local choice="${2:-1}"
+
+    if [ -n "$current_origin" ]; then
+        case "$choice" in
+            1) printf 'keep\n' ;;
+            2) printf 'relay\n' ;;
+            3) printf 'existing\n' ;;
+            q | Q) printf 'cancel\n' ;;
+            *) printf 'invalid\n' ;;
+        esac
+        return
+    fi
+    case "$choice" in
+        1) printf 'relay\n' ;;
+        2) printf 'existing\n' ;;
+        q | Q) printf 'cancel\n' ;;
+        *) printf 'invalid\n' ;;
+    esac
+}
+
 choose_phone_app_base_url() {
     local relay_fallback="$1"
     local env_file="$2"
     local setup_kind="${3:-stable}"
+    local action
     local choice
     local current_origin=""
     local discovered_origin=""
@@ -1217,52 +1240,65 @@ choose_phone_app_base_url() {
     fi
     if [ -n "$current_origin" ]; then
         echo "  Current phone app: $current_origin" >&2
-        echo "  Press Enter to keep it, or choose another option below." >&2
         echo "" >&2
-    fi
-    if [ "$setup_kind" = "temporary" ]; then
-        menu_item 1 "This temporary relay (recommended for trying one relay)" >&2
-        echo "     Opens the TryCloudflare app. Its address changes after restart." >&2
+        menu_item 1 "Keep current phone app (recommended)" >&2
+        echo "     $current_origin" >&2
+        echo "" >&2
+        if [ "$setup_kind" = "temporary" ]; then
+            menu_item 2 "Use this temporary relay instead" >&2
+            echo "     Opens the TryCloudflare app. Its address changes after restart." >&2
+        else
+            menu_item 2 "Use this relay instead" >&2
+            echo "     Switches the app origin to this computer's relay hostname." >&2
+        fi
+        echo "" >&2
+        menu_item 3 "Use another installed Herdr app" >&2
     else
-        menu_item 1 "This relay (recommended for one relay)" >&2
-        echo "     Uses this computer's verified hostname as the installed app." >&2
+        if [ "$setup_kind" = "temporary" ]; then
+            menu_item 1 "This temporary relay (recommended for trying one relay)" >&2
+            echo "     Opens the TryCloudflare app. Its address changes after restart." >&2
+        else
+            menu_item 1 "This relay (recommended for one relay)" >&2
+            echo "     Uses this computer's verified hostname as the installed app." >&2
+        fi
+        echo "" >&2
+        menu_item 2 "An existing installed Herdr app" >&2
     fi
-    echo "" >&2
-    menu_item 2 "An existing installed Herdr app" >&2
     echo "     Adds this computer to the same app as your other relays." >&2
     echo "" >&2
     menu_item q "Cancel, change nothing" >&2
     echo "" >&2
     while true; do
-        if [ -n "$current_origin" ]; then
-            read -r -p "Choice [keep current]: " choice || choice="cancel"
-        else
-            read -r -p "Choice [1]: " choice || choice="cancel"
-        fi
+        read -r -p "Choice [1]: " choice || choice="cancel"
         if [ "$choice" = "cancel" ]; then
             echo "" >&2
             echo "Setup cancelled." >&2
             return 1
         fi
-        if [ -z "$choice" ] && [ -n "$current_origin" ]; then
-            printf '%s\n' "$current_origin"
-            return
-        fi
-        case "${choice:-1}" in
-            1)
+        action="$(phone_app_choice_action "$current_origin" "$choice")"
+        case "$action" in
+            keep)
+                printf '%s\n' "$current_origin"
+                return
+                ;;
+            relay)
                 HERDR_PHONE_APP_URL=relay phone_app_base_url "$relay_fallback" "$env_file"
                 return
                 ;;
-            2)
+            existing)
                 prompt_phone_app_base_url "$relay_fallback" "$env_file"
                 return
                 ;;
-            q | Q)
+            cancel)
                 echo "Setup cancelled." >&2
                 return 1
                 ;;
-            *)
-                echo "✗ Choose 1, 2, or q." >&2
+            invalid)
+                if [ -n "$current_origin" ]; then
+                    echo "✗ Choose 1, 2, 3, or q." >&2
+                else
+                    echo "✗ Choose 1, 2, or q." >&2
+                fi
                 ;;
         esac
     done

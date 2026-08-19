@@ -130,6 +130,16 @@ test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_
 test "$(NO_COLOR= menu_item 3 "Stable Tunnel")" = "  3. Stable Tunnel"
 test "$(NO_COLOR=1 menu_item q "Exit, change nothing")" = "  q. Exit, change nothing"
 
+# Once a shared app is configured, numeric choice 1 must keep it. The previous
+# implicit Enter-only default made the surrounding menu's usual "1" habit
+# silently switch the QR back to this relay.
+test "$(phone_app_choice_action https://app.example.test 1)" = keep
+test "$(phone_app_choice_action https://app.example.test '')" = keep
+test "$(phone_app_choice_action https://app.example.test 2)" = relay
+test "$(phone_app_choice_action https://app.example.test 3)" = existing
+test "$(phone_app_choice_action '' 1)" = relay
+test "$(phone_app_choice_action '' 2)" = existing
+
 # A phone-app origin no Pages project serves used to demand a project that
 # could not exist, with no way out but killing the pane.
 DEPLOY_HOME="$WORK_DIR/deploy-home"

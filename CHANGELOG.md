@@ -142,6 +142,8 @@ project follows [Semantic Versioning](https://semver.org/).
   app can no longer overwrite it in the background. The QR menu is now named
   **Choose Phone App and Show QR**, distinguishing origin selection from
   assigning a computer as the app deployment owner.
+  When a current origin exists, submenu option 1 now explicitly keeps it;
+  switching to the relay or another app requires options 2 or 3.
 
 ## [0.16.4] - 2026-08-18
 
