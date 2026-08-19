@@ -124,6 +124,9 @@ project follows [Semantic Versioning](https://semver.org/).
   not the historical `created_by_wizard` flags: one explicit confirmation
   removes the recorded tunnel, config, credentials, service, and local config
   pointer so the next install creates a clean relay.
+  If an older no-op teardown already discarded that state, teardown reconstructs
+  it from the retained Herdr config only after its namespace, loopback origin,
+  hostname, and credential UUID validate.
 
 ## [0.16.4] - 2026-08-18
 

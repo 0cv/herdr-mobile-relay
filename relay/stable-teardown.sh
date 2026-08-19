@@ -40,17 +40,59 @@ dns_has_record() {
     return 1
 }
 
+recover_state_from_config() {
+    local config
+    local port
 
-if [ ! -f "$STATE_FILE" ]; then
-    echo "✗ No Herdr stable-setup state exists at $STATE_FILE." >&2
-    echo "  Teardown will not guess which Cloudflare resources belong to Herdr." >&2
-    exit 1
-fi
+    load_relay_env "$ENV_FILE"
+    port="${HERDR_RELAY_PORT:-8375}"
+    config="${CLOUDFLARED_CONFIG:-}"
+    if [ -z "$config" ] && [ -r "$HOME/.cloudflared/config-herdr-mobile-relay.yml" ]; then
+        config="$HOME/.cloudflared/config-herdr-mobile-relay.yml"
+    fi
+    if [ -z "$config" ] || [ ! -r "$config" ]; then
+        echo "✗ No stable state or readable Herdr Cloudflare config was found." >&2
+        echo "  Checked state:  $STATE_FILE" >&2
+        echo "  Checked config: ${config:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}" >&2
+        return 1
+    fi
+
+    config="$(canonical_file_path "$config")"
+    if ! read_cloudflared_relay_config "$config" "$port"; then
+        echo "✗ Refusing to recover teardown identity from $config." >&2
+        return 1
+    fi
+    case "$TUNNEL_NAME" in
+        herdr-mobile-relay-*) ;;
+        *)
+            echo "✗ Refusing recovery: config tunnel is outside the Herdr stable-tunnel namespace: $TUNNEL_NAME" >&2
+            return 1
+            ;;
+    esac
+
+    state_command init "$STATE_FILE" "$ENV_FILE"
+    state_update \
+        "stage=recovered_for_teardown" \
+        "tunnel_uuid=$TUNNEL_UUID" \
+        "tunnel_name=$TUNNEL_NAME" \
+        "hostname=$CONFIG_HOST" \
+        "credentials_path=$CREDENTIALS_PATH" \
+        "config_path=$config"
+    echo "▸ Recovered teardown identity from the retained Herdr Cloudflare config."
+    echo "  This repairs state cleared by older no-op teardown behavior."
+}
 
 require_supported_platform
 
-# The first read validates the ownership marker before any local or Cloudflare
-# mutation. A malformed or foreign JSON file is never adopted.
+
+if [ ! -f "$STATE_FILE" ]; then
+    if ! recover_state_from_config; then
+        exit 1
+    fi
+fi
+
+# Every state read validates the Herdr ownership marker. Missing legacy state is
+# rebuilt only after the config, loopback origin, namespace, and credentials agree.
 TUNNEL_NAME="$(state_get tunnel_name)"
 case "$TUNNEL_NAME" in
     herdr-mobile-relay-*) ;;

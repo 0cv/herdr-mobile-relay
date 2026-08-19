@@ -132,54 +132,7 @@ service_file_present() {
     esac
 }
 
-yaml_scalar() {
-    local key="$1"
-    local config="$2"
-    local value
 
-    value="$(sed -nE "s/^[[:space:]]*-?[[:space:]]*${key}:[[:space:]]*([^#]+).*/\\1/p" "$config" | head -1)"
-    value="$(printf '%s' "$value" | sed 's/[[:space:]]*$//')"
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
-    printf '%s\n' "$value"
-}
-
-expand_config_path() {
-    local path="$1"
-    local config="$2"
-
-    case "$path" in
-        \~/*) path="$HOME/${path#\~/}" ;;
-        \$HOME/*) path="$HOME/${path#\$HOME/}" ;;
-        /*) ;;
-        *) path="$(dirname "$config")/$path" ;;
-    esac
-    canonical_file_path "$path"
-}
-
-valid_hostname() {
-    local hostname="$1"
-    local old_ifs
-    local label
-
-    [ "${#hostname}" -le 253 ] || return 1
-    case "$hostname" in
-        ""|.*|*.|*..*|*[!A-Za-z0-9.-]*) return 1 ;;
-    esac
-    old_ifs="$IFS"
-    IFS=.
-    # shellcheck disable=SC2086
-    set -- $hostname
-    IFS="$old_ifs"
-    for label in "$@"; do
-        [ "${#label}" -le 63 ] || return 1
-        case "$label" in
-            ""|-*|*-) return 1 ;;
-        esac
-    done
-}
 
 dns_has_record() {
     local hostname="$1"
@@ -313,65 +266,14 @@ ensure_tunnel_management() {
 validate_tunnel_config() {
     local config="$1"
     local expected_port="$2"
-    local service_url
-    local origin
-    local configured_tunnel
-    local credentials_value
     local certificate_value
     local certificate_path=""
     local list_output="$WORK_DIR/config-tunnel-list.json"
     local list_error="$WORK_DIR/config-tunnel-list.err"
 
-    if [ ! -r "$config" ]; then
-        echo "✗ Cloudflare tunnel config is not readable: $config" >&2
+    if ! read_cloudflared_relay_config "$config" "$expected_port"; then
         return 1
     fi
-    if ! cloudflared tunnel --config "$config" ingress validate; then
-        echo "✗ cloudflared rejected the ingress syntax in $config." >&2
-        return 1
-    fi
-
-    configured_tunnel="$(yaml_scalar tunnel "$config")"
-    credentials_value="$(yaml_scalar credentials-file "$config")"
-    CONFIG_HOST="$(yaml_scalar hostname "$config")"
-    service_url="$(yaml_scalar service "$config")"
-    if [ -z "$configured_tunnel" ]; then
-        echo "✗ No tunnel identifier found in $config." >&2
-        return 1
-    fi
-    if [ -z "$credentials_value" ]; then
-        echo "✗ No credentials-file found in $config." >&2
-        return 1
-    fi
-    if [ -z "$CONFIG_HOST" ] || ! valid_hostname "$CONFIG_HOST"; then
-        echo "✗ No valid ingress hostname found in $config." >&2
-        return 1
-    fi
-    if [[ "$service_url" != http://* ]]; then
-        echo "✗ The first ingress origin in $config is not an HTTP loopback service." >&2
-        return 1
-    fi
-    origin="${service_url#http://}"
-    origin="${origin%%/*}"
-    case "$origin" in
-        "127.0.0.1:$expected_port"|"localhost:$expected_port") ;;
-        *)
-            echo "✗ Ingress origin $service_url does not match HERDR_RELAY_PORT=$expected_port." >&2
-            return 1
-            ;;
-    esac
-
-    CREDENTIALS_PATH="$(expand_config_path "$credentials_value" "$config")"
-    if [ ! -r "$CREDENTIALS_PATH" ]; then
-        echo "✗ Tunnel credentials are not readable: $CREDENTIALS_PATH" >&2
-        return 1
-    fi
-    TUNNEL_UUID="$(state_command credential-id "$CREDENTIALS_PATH")"
-    if [[ "$configured_tunnel" =~ ^[0-9a-fA-F-]{36}$ ]] && [ "$(printf '%s' "$configured_tunnel" | tr '[:upper:]' '[:lower:]')" != "$TUNNEL_UUID" ]; then
-        echo "✗ Config tunnel $configured_tunnel does not match credentials for $TUNNEL_UUID." >&2
-        return 1
-    fi
-    TUNNEL_NAME="$configured_tunnel"
 
     certificate_value="$(yaml_scalar origincert "$config")"
     if [ -n "${TUNNEL_ORIGIN_CERT:-}" ]; then

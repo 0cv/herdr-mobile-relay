@@ -462,20 +462,27 @@ test_teardown_ownership_and_dns_retention() {
 
     new_case
     write_existing_config 8401
-    "$TEST_RELAY_BIN" stable-state init "$HERDR_STABLE_STATE_FILE" "$HERDR_RELAY_ENV"
-    "$TEST_RELAY_BIN" stable-state update "$HERDR_STABLE_STATE_FILE" \
-        "stage=config_validated" \
-        "tunnel_name=herdr-mobile-relay-existing" \
-        "tunnel_uuid=$TUNNEL_UUID" \
-        "hostname=existing.example.test" \
-        "config_path=$HOME/custom-config.yml" \
-        "credentials_path=$HOME/custom-credentials.json"
+    sed 's/herdr-mobile-relay-existing/someone-elses-tunnel/' "$HOME/custom-config.yml" > "$HOME/foreign-config.yml"
+    mv "$HOME/foreign-config.yml" "$HOME/custom-config.yml"
+    set +e
+    HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
+    STATUS=$?
+    set -e
+    [ "$STATUS" -ne 0 ] || fail "foreign config recovery should fail"
+    assert_contains "$OUTPUT" 'config tunnel is outside the Herdr stable-tunnel namespace'
+    [ -f "$HOME/custom-config.yml" ] || fail "foreign config recovery removed config"
+    assert_not_contains "$STUB_LOG" ' tunnel delete '
+
+    new_case
+    write_existing_config 8401
+    assert_not_contains "$STUB_LOG" ' tunnel delete '
     export STUB_DNS_MODE=never
     set +e
     HERDR_STABLE_TEARDOWN_YES=1 "$ROOT/relay/stable-teardown.sh" > "$OUTPUT" 2>&1
     STATUS=$?
     set -e
     [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "recorded relay teardown"; }
+    assert_contains "$OUTPUT" 'Recovered teardown identity from the retained Herdr Cloudflare config'
     assert_contains "$OUTPUT" 'Deleting configured stable tunnel herdr-mobile-relay-existing'
     assert_contains "$OUTPUT" 'Removed stable relay config'
     assert_contains "$OUTPUT" 'Removed stable relay credentials'
