@@ -1,5 +1,0 @@
-HERDR_GATEWAY_DEPLOY_HOST='gw1.herdr-mobile.dev'
-HERDR_GATEWAY_DEPLOY_SERVER='root@gw1.herdr-mobile.dev'
-HERDR_GATEWAY_DEPLOY_REMOTE_DIR='/opt/herdr-gateway'
-HERDR_GATEWAY_DEPLOY_DIR='/home/cv/Development/herdr-mobile-relay/herdr-gateway-deploy'
-HERDR_GATEWAY_DEPLOY_SSH='ssh -i /home/cv/.ssh/ovh'
