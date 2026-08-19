@@ -14,9 +14,9 @@ decides who carries the fallback.
 | **Community gateway** | Nothing — no account, no domain. | A gateway operated by the project | Free, shared, best-effort; not for heavy transfers. Pick it to avoid Cloudflare setup entirely. |
 | **Your own gateway** | A small VPS with Docker and a public hostname. | Your own gateway | Dedicated bandwidth, and the transport logs stay on your machine. See [gateway-self-hosting.md](gateway-self-hosting.md). |
 
-Pick from the setup menu under **Choose Connection Method**, which writes or
-clears `HERDR_GATEWAY_URL` for you. The community gateway appears there only when
-the build has one published.
+Pick from the setup menu under **Choose Connection Method**; it records the choice
+for you. The community gateway appears there only when the build has one
+published.
 
 ## The gateway path
 
