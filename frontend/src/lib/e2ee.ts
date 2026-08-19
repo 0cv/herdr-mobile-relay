@@ -5,6 +5,9 @@ export const E2EE_SUBPROTOCOL = 'herdr-e2ee-v1';
 const E2EE_VERSION = 1;
 const NONCE_BYTES = 32;
 const PUBLIC_KEY_BYTES = 65;
+const BINARY_FRAME_VERSION = 1;
+const BINARY_FRAME_KIND_DATA = 0;
+const BINARY_FRAME_HEADER_BYTES = 10;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const clientProofLabel = encoder.encode('herdr-e2ee-v1 client\0');
@@ -12,6 +15,17 @@ const serverProofLabel = encoder.encode('herdr-e2ee-v1 server\0');
 const keySaltLabel = encoder.encode('herdr-e2ee-v1 key\0');
 const clientKeyInfo = encoder.encode('herdr-e2ee-v1 c2s');
 const serverKeyInfo = encoder.encode('herdr-e2ee-v1 s2c');
+
+/**
+ * Encrypted-frame encoding. `json` is the original text envelope spoken by the
+ * browser WebSocket path. `binary` prefixes raw ciphertext with a fixed header
+ * and is used by the gateway and WebRTC paths, where dropping base64 (+33 %)
+ * and the JSON envelope directly reduces relayed bandwidth.
+ */
+export type E2EECodec = 'json' | 'binary';
+
+/** One encrypted frame as handed to a transport. */
+export type E2EEWireFrame = string | Uint8Array<ArrayBuffer>;
 
 type Bytes = Base64UrlBytes;
 
@@ -30,7 +44,7 @@ export interface E2EEClientHandshake {
 
 export interface E2EEClientHandshakeResult {
   session: E2EESession;
-  finish: string;
+  finish: E2EEWireFrame;
 }
 
 export interface E2EEClientEphemeral {
@@ -47,21 +61,22 @@ export class E2EESession {
   constructor(
     private readonly sendKey: CryptoKey,
     private readonly receiveKey: CryptoKey,
+    readonly codec: E2EECodec = 'json',
   ) {}
 
-  encrypt(plaintext: string): Promise<string> {
+  encrypt(plaintext: string): Promise<E2EEWireFrame> {
     const operation = this.sendQueue.then(() => this.encryptNext(plaintext));
     this.sendQueue = operation.then(() => undefined, () => undefined);
     return operation;
   }
 
-  decrypt(rawFrame: string): Promise<string> {
+  decrypt(rawFrame: E2EEWireFrame): Promise<string> {
     const operation = this.receiveQueue.then(() => this.decryptNext(rawFrame));
     this.receiveQueue = operation.then(() => undefined, () => undefined);
     return operation;
   }
 
-  private async encryptNext(plaintext: string): Promise<string> {
+  private async encryptNext(plaintext: string): Promise<E2EEWireFrame> {
     if (!Number.isSafeInteger(this.sendSequence)) throw new Error('Encrypted send sequence exhausted.');
     const sequence = this.sendSequence;
     const ciphertext = new Uint8Array(await crypto.subtle.encrypt({
@@ -71,6 +86,7 @@ export class E2EESession {
       tagLength: 128,
     }, this.sendKey, encoder.encode(plaintext)));
     this.sendSequence += 1;
+    if (this.codec === 'binary') return encodeBinaryFrame(sequence, ciphertext);
     return JSON.stringify({
       type: 'e2ee',
       version: E2EE_VERSION,
@@ -79,16 +95,13 @@ export class E2EESession {
     });
   }
 
-  private async decryptNext(rawFrame: string): Promise<string> {
-    const frame = asRecord(JSON.parse(rawFrame));
-    if (frame.type !== 'e2ee' || frame.version !== E2EE_VERSION) {
-      throw new Error('Relay sent an unsupported encrypted frame.');
-    }
-    const sequence = Number(frame.sequence);
-    if (!Number.isSafeInteger(sequence) || sequence < 0 || sequence !== this.receiveSequence) {
+  private async decryptNext(rawFrame: E2EEWireFrame): Promise<string> {
+    const { sequence, ciphertext } = this.codec === 'binary'
+      ? decodeBinaryFrame(rawFrame)
+      : decodeJsonFrame(rawFrame);
+    if (sequence !== this.receiveSequence) {
       throw new Error('Relay sent an invalid encrypted frame sequence.');
     }
-    const ciphertext = base64UrlDecode(String(frame.ciphertext || ''));
     const plaintext = await crypto.subtle.decrypt({
       name: 'AES-GCM',
       iv: frameNonce(sequence),
@@ -100,9 +113,50 @@ export class E2EESession {
   }
 }
 
+interface ParsedFrame {
+  sequence: number;
+  ciphertext: Bytes;
+}
+
+function encodeBinaryFrame(sequence: number, ciphertext: Bytes): Bytes {
+  const frame = new Uint8Array(new ArrayBuffer(BINARY_FRAME_HEADER_BYTES + ciphertext.length));
+  frame[0] = BINARY_FRAME_VERSION;
+  frame[1] = BINARY_FRAME_KIND_DATA;
+  new DataView(frame.buffer).setBigUint64(2, BigInt(sequence), false);
+  frame.set(ciphertext, BINARY_FRAME_HEADER_BYTES);
+  return frame;
+}
+
+function decodeBinaryFrame(rawFrame: E2EEWireFrame): ParsedFrame {
+  if (typeof rawFrame === 'string') throw new Error('Relay sent a text frame on a binary transport.');
+  if (rawFrame.length < BINARY_FRAME_HEADER_BYTES) throw new Error('Relay sent a truncated encrypted frame.');
+  if (rawFrame[0] !== BINARY_FRAME_VERSION || rawFrame[1] !== BINARY_FRAME_KIND_DATA) {
+    throw new Error('Relay sent an unsupported encrypted frame.');
+  }
+  const sequence = Number(new DataView(rawFrame.buffer, rawFrame.byteOffset).getBigUint64(2, false));
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new Error('Relay sent an invalid encrypted frame sequence.');
+  }
+  return { sequence, ciphertext: rawFrame.slice(BINARY_FRAME_HEADER_BYTES) as Bytes };
+}
+
+function decodeJsonFrame(rawFrame: E2EEWireFrame): ParsedFrame {
+  if (typeof rawFrame !== 'string') throw new Error('Relay sent a binary frame on a text transport.');
+  const frame = asRecord(JSON.parse(rawFrame));
+  if (frame.type !== 'e2ee' || frame.version !== E2EE_VERSION) {
+    throw new Error('Relay sent an unsupported encrypted frame.');
+  }
+  const sequence = Number(frame.sequence);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new Error('Relay sent an invalid encrypted frame sequence.');
+  }
+  return { sequence, ciphertext: base64UrlDecode(String(frame.ciphertext || '')) };
+}
+
 export async function createE2EEClientHandshake(
   token: string,
   ephemeral?: E2EEClientEphemeral,
+  codec: E2EECodec = 'json',
 ): Promise<E2EEClientHandshake> {
   const tokenBytes = encoder.encode(token);
   if (tokenBytes.byteLength < 16) throw new Error('Relay keys must be at least 16 bytes.');
@@ -186,7 +240,7 @@ export async function createE2EEClientHandshake(
       ]);
       sharedSecret.fill(0);
       completed = true;
-      const session = new E2EESession(sendKey, receiveKey);
+      const session = new E2EESession(sendKey, receiveKey, codec);
       const finish = await session.encrypt(JSON.stringify({
         type: 'e2ee_client_finish',
         version: E2EE_VERSION,

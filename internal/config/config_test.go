@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -93,5 +95,102 @@ func TestLoadIsolatesAllXDGPaths(t *testing.T) {
 	}
 	if cfg.ReleaseRoot != filepath.Join(dataHome, "herdr-mobile-relay") {
 		t.Fatalf("release root = %q", cfg.ReleaseRoot)
+	}
+}
+
+func TestLoadGatewayDefaults(t *testing.T) {
+	t.Setenv("HERDR_GATEWAY_URL", "")
+	t.Setenv("HERDR_WEBRTC_UDP_PORT", "")
+	t.Setenv("HERDR_TRANSPORT_FORCE_RELAY", "")
+	t.Setenv("HERDR_REACHABILITY_PORT_MAPPING", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GatewayURL != "" {
+		t.Errorf("gateway url = %q, want empty", cfg.GatewayURL)
+	}
+	if cfg.WebRTCUDPPort != 0 {
+		t.Errorf("webrtc udp port = %d, want 0", cfg.WebRTCUDPPort)
+	}
+	if cfg.ForceRelayTransport {
+		t.Error("force relay transport = true, want false")
+	}
+	if !cfg.PortMappingEnabled {
+		t.Error("port mapping enabled = false, want true")
+	}
+}
+
+func TestLoadGatewaySettings(t *testing.T) {
+	t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("HERDR_GATEWAY_URL", "wss://gw.example.com/")
+	t.Setenv("HERDR_WEBRTC_UDP_PORT", "41234")
+	t.Setenv("HERDR_TRANSPORT_FORCE_RELAY", "true")
+	t.Setenv("HERDR_REACHABILITY_PORT_MAPPING", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GatewayURL != "wss://gw.example.com" {
+		t.Errorf("gateway url = %q, want trailing slash trimmed", cfg.GatewayURL)
+	}
+	if cfg.WebRTCUDPPort != 41234 {
+		t.Errorf("webrtc udp port = %d, want 41234", cfg.WebRTCUDPPort)
+	}
+	if !cfg.ForceRelayTransport {
+		t.Error("force relay transport = false, want true")
+	}
+	if cfg.PortMappingEnabled {
+		t.Error("port mapping enabled = true, want false")
+	}
+}
+
+func TestLoadRejectsNonWebSocketGatewayURL(t *testing.T) {
+	t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("HERDR_GATEWAY_URL", "https://gw.example.com")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for non-websocket gateway url")
+	}
+}
+
+func TestLoadRejectsTokenlessGateway(t *testing.T) {
+	t.Setenv("HERDR_RELAY_TOKEN", "")
+	t.Setenv("HERDR_GATEWAY_URL", "wss://gw.example.com")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for tokenless gateway registration")
+	}
+}
+
+func TestLoadParsesOrderedGatewayList(t *testing.T) {
+	t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("HERDR_GATEWAY_URL", " wss://a.example.com , wss://b.example.com/ ,")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"wss://a.example.com", "wss://b.example.com"}
+	if !slices.Equal(cfg.GatewayURLs, want) {
+		t.Errorf("gateway urls = %v, want %v", cfg.GatewayURLs, want)
+	}
+	if cfg.GatewayURL != want[0] {
+		t.Errorf("gateway url = %q, want the first list entry %q", cfg.GatewayURL, want[0])
+	}
+}
+
+func TestLoadRejectsInvalidSecondGatewayURL(t *testing.T) {
+	t.Setenv("HERDR_RELAY_TOKEN", "0123456789abcdef0123456789abcdef")
+	t.Setenv("HERDR_GATEWAY_URL", "wss://a.example.com,https://b.example.com")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected an error for a non-websocket second gateway url")
+	}
+	if !strings.Contains(err.Error(), "https://b.example.com") {
+		t.Errorf("error = %v, want the offending entry named", err)
 	}
 }

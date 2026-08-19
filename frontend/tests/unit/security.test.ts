@@ -13,6 +13,7 @@ describe('device verification lifecycle', () => {
   const secureContextDescriptor = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
   const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
   const publicKeyCredentialDescriptor = Object.getOwnPropertyDescriptor(window, 'PublicKeyCredential');
+  const connectionDescriptor = Object.getOwnPropertyDescriptor(navigator, 'connection');
   let getCredential: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -29,6 +30,7 @@ describe('device verification lifecycle', () => {
     vi.spyOn(relayStore, 'connectAll').mockImplementation(() => {});
     vi.spyOn(relayStore, 'destroy').mockImplementation(() => {});
     vi.spyOn(relayStore, 'revalidateConnections').mockImplementation(() => {});
+    vi.spyOn(relayStore, 'resetReconnectBackoff').mockImplementation(() => {});
     localStorage.setItem(DEVICE_LOCK_KEY, 'true');
     localStorage.setItem(DEVICE_CREDENTIAL_KEY, 'AQID');
     securityState.set({
@@ -47,6 +49,7 @@ describe('device verification lifecycle', () => {
     restoreProperty(window, 'isSecureContext', secureContextDescriptor);
     restoreProperty(window, 'PublicKeyCredential', publicKeyCredentialDescriptor);
     restoreProperty(document, 'visibilityState', visibilityDescriptor);
+    restoreProperty(navigator, 'connection', connectionDescriptor);
   });
 
   it('does not verify again when the authenticator returns focus to an unlocked app', async () => {
@@ -100,6 +103,31 @@ describe('device verification lifecycle', () => {
     expect(relayStore.connectAll).toHaveBeenNthCalledWith(2, true);
     expect(relayStore.revalidateConnections).toHaveBeenCalledOnce();
     expect(relayStore.revalidateConnections).toHaveBeenCalledWith(2_000);
+    // The backoff must be cleared before the probe, or a relay that failed
+    // while the phone slept keeps waiting out a stale delay.
+    expect(relayStore.resetReconnectBackoff).toHaveBeenCalledOnce();
+    expect(vi.mocked(relayStore.resetReconnectBackoff).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(relayStore.revalidateConnections).mock.invocationCallOrder[0]);
+    stopSecurity();
+  });
+
+  it('probes a visible connection when the browser reports a network change', () => {
+    localStorage.removeItem(DEVICE_LOCK_KEY);
+    localStorage.removeItem(DEVICE_CREDENTIAL_KEY);
+    const connection = new EventTarget();
+    Object.defineProperty(navigator, 'connection', { configurable: true, value: connection });
+    const stopSecurity = initializeDeviceSecurity();
+
+    connection.dispatchEvent(new Event('change'));
+
+    expect(relayStore.resetReconnectBackoff).toHaveBeenCalledOnce();
+    expect(relayStore.revalidateConnections).toHaveBeenCalledWith(2_000);
+    expect(vi.mocked(relayStore.resetReconnectBackoff).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(relayStore.revalidateConnections).mock.invocationCallOrder[0]);
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    connection.dispatchEvent(new Event('change'));
+    expect(relayStore.revalidateConnections).toHaveBeenCalledOnce();
     stopSecurity();
   });
 

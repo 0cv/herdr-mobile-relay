@@ -3,15 +3,15 @@
 [![check](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml/badge.svg)](https://github.com/0cv/herdr-mobile-relay/actions/workflows/check.yml)
 
 Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
-computer runs its own relay; the phone connects directly and merges all agents
+computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.16.4`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.16.4) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.17.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.17.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
 
-## Install
+## Get started in two minutes
 
 Requirements: Herdr 0.7.5 or newer, Git, and `curl`.
 
@@ -25,334 +25,84 @@ Choose **Quick Start** from the setup menu. If the menu does not open:
 herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 ```
 
-Quick Start installs missing user-level tools with confirmation, starts the
-relay and bundled app, and opens a temporary TryCloudflare tunnel. Scan its QR
-code on your phone. Keep the pane open; Ctrl-C stops the relay and tunnel.
+Quick Start installs missing user-level tools with confirmation, starts the relay
+and the bundled app, and prints a QR code. Scan it with your phone. Keep the pane
+open; Ctrl-C stops everything.
 
-No Cloudflare account, domain, Python, Node.js, Go toolchain, separate web
-deployment, or `sudo` is required for this trial path. See
-[QUICKSTART.md](QUICKSTART.md) for the short walkthrough.
+That trial path needs no Cloudflare account, no domain, no Python, Node.js, or Go
+toolchain, no separate web deployment, and no `sudo`. Treat the QR and its setup
+link as secrets: they carry the relay key.
 
-## Mobile Onboarding
+[QUICKSTART.md](QUICKSTART.md) is the same thing with screenshots and
+troubleshooting.
+
+## What you get
+
+| | |
+| --- | --- |
+| <img src="images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="images/agent_plan.jpeg" alt="Structured plan question navigation" width="392"> |
+
+- Monitor and control agents across several computers, grouped by status and
+  workspace, with agents that need input pinned on top.
+- Start, rename, clear, restart, and stop agents from relay-provided launch
+  profiles.
+- Send prompts, terminal keys, slash commands, screenshots, and photos; answer
+  verified approvals and structured plan questions.
+- Read searchable native conversation history for Claude Code, Codex, Qoder, Pi,
+  and Oh My Pi, and inspect workspace files, images, and Git diffs read-only.
+- Receive blocked-agent notifications, with completion notifications optional.
+- Detects Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
+
+**[Full feature tour →](docs/mobile-app.md)**
+
+## Mobile onboarding
 
 https://github.com/user-attachments/assets/e52c4fd0-ef77-4852-bb43-078a7154eae8
 
-The walkthrough follows setup from scanning the relay QR through the agent list,
-terminal controls, and notification settings. The QR imports the relay URL,
-label, and relay key, so treat the QR and setup link as secrets. Enable
-notifications in the app's Settings; blocked-agent notifications are included,
-while completion notifications are optional.
+The walkthrough follows setup from scanning the QR through the agent list,
+terminal controls, and notification settings.
 
-## Stable Setup
+## Choosing how your phone connects
 
-For a permanent hostname and background service, add a domain to Cloudflare and
-run:
+Quick Start's temporary tunnel is fine for trying the app. For everyday use, the
+setup menu's **Choose Connection Method** offers three transports:
 
-```bash
-herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
-```
+| Choice | Needs | Best for |
+| --- | --- | --- |
+| Cloudflare tunnel | nothing, or a domain for the stable variant | the default; a permanent hostname with a background service |
+| Community gateway | nothing at all | free, shared, best-effort; no account and no domain |
+| Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
 
-The wizard creates or resumes a dedicated tunnel, checks the DNS route, installs
-a user service, verifies the public relay identity, and then prints the private
-phone QR. Run it once per computer with a distinct hostname, then add every QR
-to the same phone app.
+Whichever you pick, traffic is end-to-end encrypted and the phone upgrades to a
+direct peer-to-peer connection whenever the network allows, so the transport only
+carries the fallback.
 
-Useful actions:
+- **[Transports explained →](docs/transports.md)**
+- **[Permanent Cloudflare tunnel →](docs/cloudflare-tunnel.md)**
+- **[Run your own gateway →](docs/gateway-self-hosting.md)**
 
-```bash
-herdr plugin action invoke setup-link --plugin herdr-mobile-relay.events
-herdr plugin action invoke status --plugin herdr-mobile-relay.events
-herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events
-herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
-herdr plugin action invoke uninstall --plugin herdr-mobile-relay.events
-```
+## Documentation
 
-Run `stable-teardown` before uninstall if Cloudflare resources should also be
-removed. Full uninstall removes the service, releases, relay state, push
-credentials, cache, and plugin registration.
-
-## Herdr 0.8.0
-
-Herdr 0.8.0 and newer can resume restored agent sessions without a TUI
-attached ([#2064](https://github.com/herdrdev/herdr/issues/2064)) and keep the
-desktop user's focus when a background workspace closes
-([#1328](https://github.com/herdrdev/herdr/issues/1328),
-[#1621](https://github.com/herdrdev/herdr/issues/1621)). These upstream
-behaviors keep relay startup and phone-driven workspace management
-non-disruptive. Phone-driven **Stop** still cascades a single-tab workspace
-away; the workspace then reports `workspace_not_found`.
-
-The relay continues to support Herdr 0.7.5 or newer.
-
-## What It Does
-
-- Monitor and control agents across several computers, with new, closed, and
-  renamed agents, workspaces, and tabs reflected within seconds through a
-  live Herdr event stream (15-second reconciliation backstop).
-- Group agents by status and relay workspace: done, working, and idle
-  workspaces sit in their own sections, and agents that need input remain
-  individually actionable on top. A Mixed setting shows each workspace once
-  with a dot for its most notable session state.
-- Start, rename, clear, restart, and stop agents from relay-provided launch
-  profiles.
-- Send durable prompt drafts, terminal keys, slash commands, screenshots, and
-  photos; search loaded terminal output and open explicit HTTP(S) links.
-- Answer verified Codex, Claude Code, and Qoder approvals, plus structured
-  questions from those agents, OpenCode, OMP, and Pi.
-- Inspect the current agent's workspace files, images, Git status, and unified
-  diffs without exposing a write action.
-- Read searchable native conversations for Claude Code, Codex, Qoder, Pi, and
-  Oh My Pi in focused conversation or full-history form; review a retained
-  24-hour activity summary and receive blocked or completion notifications.
-- Require device verification before reconnecting relays.
-- Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
-
-| Agents | Native Resize |
+| Page | What is in it |
 | --- | --- |
-| <img src="images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="images/native_mobile_resolution.jpeg" alt="OMP terminal rendered at native mobile width" width="392"> |
+| [QUICKSTART.md](QUICKSTART.md) | The fast path, start to paired phone |
+| [docs/mobile-app.md](docs/mobile-app.md) | Every feature: agent list, workspace inspection, mobile terminal |
+| [docs/transports.md](docs/transports.md) | Cloudflare, community gateway, own gateway, direct WebRTC |
+| [docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) | The stable tunnel wizard, DNS, and teardown |
+| [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) | Deploying and operating a gateway |
+| [docs/updates.md](docs/updates.md) | Verified releases, phone-driven upgrades, Herdr compatibility |
+| [docs/security.md](docs/security.md) | What is encrypted, what an intermediary sees, the audit log |
+| [docs/development.md](docs/development.md) | Building, testing, and contributing |
 
-| Plan Questions | Notifications |
-| --- | --- |
-| <img src="images/agent_plan.jpeg" alt="Structured plan question navigation" width="392"> | <img src="images/notifications.jpg" alt="Blocked-agent notification" width="392"> |
+## Security in one paragraph
 
-| Git Inspection | Native Conversations |
-| --- | --- |
-| <img src="images/git-history.jpeg" alt="Read-only mobile Git diff with syntax-aware colors and zoom controls" width="392"> | <img src="images/conversations.jpeg" alt="Mobile native conversation history rendered from the agent transcript" width="392"> |
-
-## Workspace Navigation and Inspection
-
-The home screen keeps agents that need input visible at the top. By default,
-workspaces below them are separated into Done, Working, and Idle sections that
-retain the workspace and tab hierarchy. The **Home Workspaces** setting can mix
-them instead: each workspace appears once with a dot for its most notable
-session — done, then working, then idle. On a phone, tap the magnifying-glass
-button to search projects, workspaces, paths, tabs, sessions, agents, hosts,
-and relays.
-At 900 CSS pixels and wider, an agent rail keeps those workspace groups beside
-the open terminal.
-
-When the relay advertises tab ordering, press and hold an agent card until its
-tab lifts, then drag to reorder the tab in Herdr; a plain tap still opens the
-agent, and Alt+arrow keys on a focused card provide the same control. The
-change is applied to the desktop immediately. Tab moves made on the desktop
-arrive through the Herdr event stream and update the mobile order.
-
-Opened workspace cards remain expanded after visiting an agent and returning to
-the home screen.
-
-**Inspect Workspace** is read-only and is available only when the connected
-relay advertises workspace inspection and the agent reports a working
-directory. The relay confines reads to that directory, skips symlinks and
-common generated directories, and returns at most 4,000 tree entries. Text
-previews are limited to 1 MiB and image previews to 5 MiB.
-
-Git inspection disables hooks, pagers, text conversion, external diffs, lazy
-fetches, and user/system Git configuration. Status is limited to 2,000 changed
-files, individual unified diffs to 1 MiB, and Git commands to eight seconds.
-The inspector has no save, stage, commit, or shell control.
-On narrow screens, swipe the file or changed-file sidebar left to collapse it;
-the adjacent sidebar button restores it. Unified diffs use theme-aware colors
-for headers, hunks, additions, and deletions. Pinch the diff or use its zoom
-controls to resize it without changing the rest of the app.
-
-
-
-## Mobile Terminal
-
-The mobile terminal always uses **Resize Session**. While a terminal is open,
-the relay leases the live PTY at the measured phone width so full-screen agents
-redraw for the phone. The relay restores the previous width when the terminal
-closes, the phone disconnects, the lease expires, or the relay shuts down.
-
-Terminal History keeps 100, 500, or 1,000 lines in the terminal view; 1,000 is
-the default and matches the most Herdr serves per pane read. The view renders
-Herdr's window exactly as served: Herdr re-wraps its entire scrollback to the
-current pty width on every read, so while the phone holds the lease the whole
-visible history is already phone-shaped — nothing is stitched, reconciled, or
-retained on the phone across width changes. The "older history" notice reports
-when rows beyond the served window exist. Use **Copy** for the latest response
-or **Conversation History** for clean, searchable earlier turns.
-
-For supported agents, the terminal header opens **Conversation History** after
-the agent reports a session. The relay reads that harness's local transcript,
-associates bounded tool calls with their recorded results, and pages the newest
-80 user or assistant messages at a time. **Conversation** keeps each user prompt
-and the latest agent answer from that exchange. **Full history** shows every
-recorded message with collapsible tool activity. Both use an escaped Markdown
-subset, search filters the currently displayed view, and each message can copy
-its original Markdown. Hidden reasoning, injected system records, and sidechain
-turns remain excluded. Reads are confined to known session directories and the
-newest 16 MiB of very large logs. When that bound omits older turns, they remain
-in the harness log on the computer; restarting the relay neither caused the
-bound nor removed those turns.
-
-Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
-250 ms, 500 ms, or 1 second. The 250 ms default balances responsiveness with
-computer and phone CPU use while output is changing.
-Unchanged checks do not retransmit terminal history to the phone; the relay
-sends terminal bytes only when the pane frame changes.
-
-Returning to an unchanged Resize Session paints its cached rendered frame
-immediately, then reacquires the lease and refreshes the preserved history and
-clean current screen in the background.
-
-**Find** searches every row loaded into the current terminal view, highlights
-visible matches, and moves between matches even when the terminal has
-virtualized them off-screen.
-
-Explicit HTTP(S) URLs in terminal output become external links with opener and
-referrer isolation. When the last terminal lines name supported key hints such
-as arrows, Enter, Esc, Tab, Y/N, or a modifier chord, the app offers matching
-one-tap actions through the same ordered key path. Detected actions can be
-dismissed and never replace verified approval or structured-question controls.
-
-
-The terminal controls send **Esc**, **Tab**, **Enter**, and arrow keys.
-**Shift**, **Ctrl**, and **Alt** can be combined, remain armed for repeated
-input, and apply to typed characters or any available terminal key. Sends are
-ordered, and a live status confirms the exact chord. Toggle the modifiers off
-or move focus to the composer to disarm them.
-When an unclassified blocked pane needs inspection, the composer inserts
-literal terminal text and sends **Enter** as one ordered action instead of
-starting a new agent prompt.
-
-**Copy** runs the agent's own copy command (Claude Code, Codex, Kimi, OMP, Pi,
-and Qoder) to capture its latest
-completed response without ANSI control sequences, falling back to the
-visible terminal output for other agents such as OpenCode. Copy is disabled
-while the agent is still working, so it can no longer interrupt an in-flight
-turn.
-
-## Updates
-
-The plugin installs a pre-built, checksum- and manifest-verified bundle for the
-exact version in `herdr-plugin.toml`. Users never compile the relay. Updates
-atomically activate the executable, web app, and runtime wrappers, verify their
-exact version, revision, and web hash after restart, and roll back the complete
-release if verification fails.
-
-Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
-to the release commit. The same plugin build hook can restore stale service
-paths from the persistent plugin config, including when no usable local release
-remains.
-
-The relay-hosted app updates with its relay. For a separately hosted Cloudflare
-Pages app, configure exactly one stable relay as deployment owner with the
-`configure-app-deploy` action. From relays running this release onward, the
-worker downloads and verifies the target release without activating it, checks
-that the current and target apps and relays share a transport, deploys the
-target web bundle, and verifies the public Pages version. Only then does it
-install and restart the relay. A failed download, compatibility check,
-deployment, or public-origin check leaves the current relay running.
-
-Release checks use the GitHub API and fall back to the public GitHub Atom
-release and commit feeds when an unauthenticated API request is rate-limited.
-Loading a newly deployed phone app uses a versioned navigation, so a sleeping
-browser or installed PWA does not have to reuse a stale document.
-Transport-breaking changes require a bridge release that supports both
-transports. This release retains the existing E2EE v1 transport, so the upgrade
-into it remains compatible with the previous phone app. The optional
-deployment-owner role requires Node.js 24 and Cloudflare credentials on that
-computer only.
-
-## Local Development
-
-```bash
-git clone https://github.com/0cv/herdr-mobile-relay.git
-cd herdr-mobile-relay
-make dev-tunnel
-```
-
-`make dev-tunnel` builds the current Go source and frontend, uses isolated ports
-and state under `relay/.dev/`, and opens a temporary tunnel. It never uses the
-installed production relay.
-
-Common targets:
-
-```bash
-make check             # all backend, frontend, browser, and release checks
-make backend-check     # format, vet, tests, race detector, shell checks
-make web-release       # replace committed web/ with a verified frontend build
-make web-release-check # compare and browser-test the shipped web/ bundle
-make relay-plugin      # link this checkout as a Herdr plugin
-make stable-setup      # install a checkout-managed stable relay
-```
-
-Backend development uses Go 1.26.5; frontend development uses Node.js 24.
-Packaged users need neither toolchain.
-
-The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
-failure injection, and process-control traces for black-box tests. It is not
-included in release archives.
-
-## Runtime and Security
-
-The relay binds to `127.0.0.1:8375`; its event hook uses loopback UDP port 8376.
-Cloudflare Tunnel supplies HTTPS/WSS without opening an inbound port. Browser
-origins are checked, tokens use constant-time comparison, uploads are limited,
-and launch requests cannot provide arbitrary executables or shell commands.
-
-Runtime data stays in the relay's private config and cache roots. The phone
-stores its relay list locally. There is no central broker and relays do not
-connect to one another.
-
-Remote agent writes append private JSONL attempt and result records under
-`<cache>/audit/remote-writes.jsonl`. Each record correlates the stable phone
-client, WebSocket connection, request, pane, agent context, outcome, payload
-size, and SHA-256 digest without retaining prompt, response, or upload content.
-The file is mode `0600` inside a mode `0700` directory and rotates at 5 MiB with
-three retained rotations.
-
-
-When a relay key is configured, the phone and relay authenticate an ephemeral
-P-256 ECDH handshake with that key, derive per-connection keys with
-HKDF-SHA-256, and encrypt every subsequent WebSocket message with AES-256-GCM.
-The phone sends encrypted key confirmation before the relay registers the
-connection. The relay key stays in the QR/setup URL fragment and phone storage;
-it is never placed in the WebSocket URL or an HTTP header. Cloudflare can still
-observe connection metadata such as endpoints, timing, and encrypted frame
-sizes, but not relay commands, terminal output, uploads, or push-subscription
-details. Tokenless loopback development connections do not add
-application-layer encryption.
-
-As with any browser E2EE app, this assumes the phone is running trusted app
-code. A provider that actively replaces the JavaScript before it reaches the
-phone could capture the relay key; use an already installed app or an
-independently controlled app origin when that threat is in scope.
-
-Relay keys shorter than 16 bytes are rejected, but length alone is not entropy.
-The visible handshake proof permits offline guesses, so use the random,
-relay-unique key generated by setup rather than a human-chosen value.
-
-Health endpoints:
-
-- `GET /health` — process liveness.
-- `GET /healthz` — version, revision, web bundle, instance, and inventory state.
-- `GET /readyz` — HTTP 200 only after a successful Herdr inventory.
-
-## Troubleshooting
-
-- **No setup menu:** invoke the `setup` action shown above.
-- **Port 8375 is busy:** stop the earlier Quick Start or installed service.
-- **Temporary URL fails:** keep the pane open and rerun Quick Start for a new
-  hostname if `cloudflared` stopped.
-- **App opens but stays disconnected:** reopen the complete setup link,
-  including its `#setup=...` fragment.
-- **Update operation failed with `read canonical release: HTTP 403`:** an older
-  relay's unauthenticated GitHub release check was rate-limited. Run
-  `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes`
-  once on that computer as the signed-in user; current releases retry through
-  GitHub's public release feeds.
-- **Updated app still shows the previous version:** open Settings, choose
-  **Check for Updates**, then **Load Update**. Current releases use a fresh
-  versioned navigation and preserve the saved relay list.
-- **Herdr is not running:** start it with `herdr`, then retry the operation.
-- **Agents are unavailable:** inspect `/healthz`; after a Herdr protocol update,
-  run `herdr server live-handoff` and wait for the next relay poll.
-- **Stable setup stops:** keep its state and rerun the exact command printed.
-- **Need the stable QR:** invoke the `setup-link` action.
+Prompts, terminal output, uploads, and push details are encrypted end to end
+between the phone and the relay. Whatever carries the traffic — a Cloudflare
+tunnel or a gateway — observes connection metadata only, never plaintext; on the
+direct path it sees nothing at all. The relay never exposes a write action to the
+workspace inspector, and device verification is required before reconnecting.
+[Details →](docs/security.md)
 
 ## License
 
-Herdr Mobile Relay is licensed under the
 [GNU Affero General Public License v3.0 or later](LICENSE).

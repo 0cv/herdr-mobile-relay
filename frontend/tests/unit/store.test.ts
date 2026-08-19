@@ -2,7 +2,27 @@ import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setTerminalHistoryLines, setTerminalRefreshInterval } from '$lib/preferences';
 import { relayStore } from '$lib/store';
+import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
+import type { RelayConfig } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
+
+type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
+
+/**
+ * Lets one test swap in a transport the store cannot otherwise reach, such as
+ * a path that reports a fatal failure. Every other test keeps the real
+ * WebSocket transport and the MockWebSocket below.
+ */
+const transportHijack = vi.hoisted(() => ({ current: null as TransportFactory | null }));
+
+vi.mock('$lib/transports', async (importOriginal) => {
+  const actual = await importOriginal() as { createRelayTransport: TransportFactory };
+  return {
+    ...actual,
+    createRelayTransport: (relay: RelayConfig, handlers: TransportHandlers) =>
+      (transportHijack.current ?? actual.createRelayTransport)(relay, handlers),
+  };
+});
 
 class MockWebSocket {
   static CONNECTING = 0;
@@ -25,6 +45,7 @@ class MockWebSocket {
 
 describe('relay command store', () => {
   beforeEach(() => {
+    transportHijack.current = null;
     MockWebSocket.instances = [];
     sessionStorage.clear();
     vi.stubGlobal('WebSocket', MockWebSocket);
@@ -35,6 +56,7 @@ describe('relay command store', () => {
   });
 
   afterEach(() => {
+    transportHijack.current = null;
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
     vi.useRealTimers();
@@ -753,6 +775,40 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances).toHaveLength(2);
   });
 
+  it('gives a foregrounded page two seconds to answer its app-level ping', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+
+    relayStore.revalidateConnections();
+    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it('waits longer for the ping while the page is hidden', async () => {
+    vi.useFakeTimers();
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    try {
+      const socket = MockWebSocket.instances.at(-1)!;
+      socket.open();
+      socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+
+      relayStore.revalidateConnections();
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(MockWebSocket.instances).toHaveLength(2);
+    } finally {
+      if (visibility) Object.defineProperty(document, 'visibilityState', visibility);
+      else Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
   it('replaces a half-open socket after the relay announces its update restart', async () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
@@ -801,17 +857,194 @@ describe('relay command store', () => {
     first.open();
     first.serverClose();
 
-    await vi.advanceTimersByTimeAsync(2_999);
+    await vi.advanceTimersByTimeAsync(999);
     expect(MockWebSocket.instances).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(MockWebSocket.instances).toHaveLength(2);
 
     const second = MockWebSocket.instances.at(-1)!;
     second.serverClose();
-    await vi.advanceTimersByTimeAsync(5_999);
+    await vi.advanceTimersByTimeAsync(1_999);
     expect(MockWebSocket.instances).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(MockWebSocket.instances).toHaveLength(3);
+  });
+
+  it('drops the reconnect backoff so a resumed page retries at once', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const first = MockWebSocket.instances.at(-1)!;
+    first.open();
+    first.serverClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    MockWebSocket.instances.at(-1)!.serverClose();
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    relayStore.resetReconnectBackoff();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+
+    relayStore.revalidateConnections();
+    expect(MockWebSocket.instances).toHaveLength(3);
+
+    // The cleared attempt counter also puts the next failure back on the base delay.
+    MockWebSocket.instances.at(-1)!.serverClose();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(MockWebSocket.instances).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(MockWebSocket.instances).toHaveLength(4);
+  });
+
+  it('stops retrying a transport that reports a fatal failure', async () => {
+    vi.useFakeTimers();
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    let attempts = 0;
+    let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'gateway',
+      connect: () => {
+        attempts += 1;
+        report = handlers.onStatus;
+        handlers.onStatus('connecting');
+      },
+      send: () => false,
+      close: () => {},
+    });
+    relayStore.addRelay({ label: 'Gateway', url: 'wss://gateway.example', token: '' });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    expect(attempts).toBe(1);
+
+    report('closed', { reason: 'Relay key rejected', fatal: true });
+    expect(get(relayStore.connections).get(relayId)?.status).toBe('disconnected');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(attempts).toBe(1);
+
+    // A plain failure on the same connection still backs off and retries.
+    report('closed', { reason: 'Relay disconnected' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(attempts).toBe(2);
+  });
+
+  it('halves terminal refresh while traffic is relayed, and restores it on the direct path', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    setTerminalRefreshInterval(100);
+    let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
+    let deliver: (message: Record<string, any>) => void = () => {};
+    const sent: Record<string, unknown>[] = [];
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'gateway',
+      connect: () => {
+        report = handlers.onStatus;
+        deliver = handlers.onMessage;
+        handlers.onStatus('connecting');
+      },
+      send: (payload) => {
+        sent.push(payload);
+        return true;
+      },
+      close: () => {},
+    });
+    relayStore.addRelay({ label: 'Gateway', url: '', token: '', transport: 'hybrid', gatewayUrl: 'wss://gw.example' });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+
+    report('connected', { path: 'gateway' });
+    deliver({ type: 'push_config', protocol: 2, capabilities: ['pane_realtime_delta'], agent_profiles: [] });
+    expect(get(relayStore.connections).get(relayId)?.path).toBe('gateway');
+
+    const agent = {
+      relay_id: relayId,
+      relay_label: 'Gateway',
+      raw_pane_id: 'w1:p1',
+      pane_id: `${relayId}::w1:p1`,
+    };
+    relayStore.watchPane(agent as never);
+    deliver({
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      content: 'one\n',
+      format: 'ansi',
+      content_fingerprint: 'content-1',
+    });
+    // Metered relayed bandwidth floors the 100 ms preference at 500 ms.
+    expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 500, lines: 1_000 });
+
+    // Promotion to the direct path rewatches at the user's full fidelity.
+    report('connected', { path: 'webrtc' });
+    expect(get(relayStore.connections).get(relayId)?.path).toBe('webrtc');
+    expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 100 });
+  });
+
+  it('adopts an advertised hybrid descriptor without a QR re-scan', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    expect(get(relayStore.relayConfigs)[0].transport).toBeUndefined();
+
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      capabilities: [],
+      agent_profiles: [],
+      hybrid: {
+        transport: 'herdr-hybrid-v1',
+        gateway_url: 'wss://gw.example',
+        gateway_urls: [
+          'wss://gw.example',
+          'wss://backup.example',
+          'https://not-a-websocket.example',
+          'wss://backup.example',
+        ],
+        relay_id: 'Ccy3nT9AULlAceTEnhTvoQ',
+        direct: true,
+      },
+    });
+
+    const stored = get(relayStore.relayConfigs).find((entry) => entry.id === relayId)!;
+    expect(stored.transport).toBe('hybrid');
+    expect(stored.gatewayUrl).toBe('wss://gw.example');
+    expect(stored.gatewayUrls).toEqual(['wss://gw.example', 'wss://backup.example']);
+    // The legacy URL survives so the hybrid path can fall back to it.
+    expect(stored.url).toBe('wss://fedora.example');
+    expect(JSON.parse(localStorage.getItem('herdr_relays')!)).toContainEqual(
+      expect.objectContaining({
+        transport: 'hybrid',
+        gatewayUrl: 'wss://gw.example',
+        gatewayUrls: ['wss://gw.example', 'wss://backup.example'],
+      }),
+    );
+
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      capabilities: [],
+      agent_profiles: [],
+      hybrid: {
+        transport: 'herdr-hybrid-v1',
+        gateway_url: 'wss://backup.example',
+        gateway_urls: ['wss://backup.example', 'wss://gw.example'],
+        relay_id: 'Ccy3nT9AULlAceTEnhTvoQ',
+        direct: true,
+      },
+    });
+    const reordered = get(relayStore.relayConfigs).find((entry) => entry.id === relayId)!;
+    expect(reordered.gatewayUrl).toBe('wss://backup.example');
+    expect(reordered.gatewayUrls).toEqual(['wss://backup.example', 'wss://gw.example']);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  it('ignores a hybrid descriptor that does not name a WebSocket gateway', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      capabilities: [],
+      agent_profiles: [],
+      hybrid: { transport: 'herdr-hybrid-v1', gateway_url: 'https://gw.example' },
+    });
+    expect(get(relayStore.relayConfigs)[0].transport).toBeUndefined();
   });
 
   it('rejects an image upload when its relay disconnects', async () => {

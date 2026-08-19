@@ -8,6 +8,9 @@ import (
 const (
 	Version                       = 2
 	EncryptedWebSocketSubprotocol = "herdr-e2ee-v1"
+	// HybridTransportCapability identifies the gateway + WebRTC hybrid
+	// transport in release manifests (app_transports/relay_transports).
+	HybridTransportCapability = "herdr-hybrid-v1"
 )
 
 var mutatingTypes = map[string]bool{
@@ -186,6 +189,10 @@ type PushConfig struct {
 	Capabilities   []string `json:"capabilities"`
 	Inventory      any      `json:"inventory"`
 	AgentProfiles  any      `json:"agent_profiles"`
+	// Hybrid advertises the gateway + direct WebRTC descriptor to an app that
+	// connected over the legacy WSS URL, so the bridge window needs no QR
+	// re-scan. Omitted entirely when the relay has no gateway configured.
+	Hybrid map[string]any `json:"hybrid,omitempty"`
 }
 
 const AgentResponseCopyCapability = "agent_response_copy"

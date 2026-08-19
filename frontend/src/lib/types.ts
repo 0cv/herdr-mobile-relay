@@ -1,3 +1,5 @@
+import type { TransportKind } from './transports/types';
+
 export type RelayStatus = 'connecting' | 'connected' | 'disconnected';
 export type AttentionKind = 'approval' | 'question' | 'chat' | 'unknown';
 
@@ -15,8 +17,23 @@ export interface AgentInventoryStatus {
 export interface RelayConfig {
   id: string;
   label: string;
+  /** Direct relay WebSocket URL. Empty for gateway-reachable computers. */
   url: string;
   token: string;
+  /**
+   * Which path reaches this computer. A missing value means the legacy setup:
+   * a plain WSS URL in `url`. `'hybrid'` means the computer is reachable
+   * through `gatewayUrl`, with a direct WebRTC upgrade attempted on top.
+   */
+  transport?: 'websocket' | 'hybrid';
+  /** Preferred gateway address, e.g. `wss://gw.example.com`. Hybrid relays only. */
+  gatewayUrl?: string;
+  /**
+   * Every gateway this computer answers on, most preferred first, and always
+   * starting with `gatewayUrl`. A config stored before the list existed
+   * normalizes to its single primary, so both fields always agree.
+   */
+  gatewayUrls?: string[];
 }
 
 export interface AgentProfile {
@@ -203,6 +220,12 @@ export interface ConversationPage {
 export interface RelayConnectionView {
   relay: RelayConfig;
   status: RelayStatus;
+  /**
+   * Physical path currently carrying traffic. `gateway` means the blind WSS
+   * fallback, `webrtc` the direct DataChannel, `websocket` the legacy relay
+   * URL. Empty until the first successful connection.
+   */
+  path: TransportKind | '';
   host: string;
   protocol: number;
   version: string;

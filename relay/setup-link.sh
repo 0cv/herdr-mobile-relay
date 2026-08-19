@@ -19,6 +19,25 @@ if [ -z "${HERDR_RELAY_TOKEN:-}" ]; then
     exit 1
 fi
 
+# A gateway-configured relay has no tunnel hostname and no cloudflared config:
+# the phone finds it through the gateway, so the link only needs the app origin.
+GATEWAY_URL="$(gateway_url "$ENV_FILE")"
+if [ -n "$GATEWAY_URL" ]; then
+    HOST_LABEL="$(host_label)"
+    SETUP_FRAGMENT="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
+    PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
+    record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
+
+    echo "🐑 Herdr Mobile Relay phone setup"
+    echo ""
+    print_phone_setup "$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+    echo ""
+    echo "  Gateway: $GATEWAY_URL"
+    echo "  The relay must be running for the link to work:"
+    echo "  make service-status"
+    exit 0
+fi
+
 # The stable hostname: explicit argument wins, otherwise the first ingress
 # hostname in the cloudflared config the background service uses.
 TUNNEL_HOST="${1:-}"

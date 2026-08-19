@@ -17,8 +17,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/coder/websocket"
-
 	relayprotocol "github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
@@ -33,6 +31,68 @@ const (
 	e2eeClientDirection = "c2s"
 	e2eeServerDirection = "s2c"
 )
+
+// FrameCodec selects how an encrypted frame is encoded on a transport.
+type FrameCodec int
+
+const (
+	// CodecJSON wraps the ciphertext in a JSON envelope with a base64url
+	// field. It is the original browser WebSocket encoding.
+	CodecJSON FrameCodec = iota
+	// CodecBinary prefixes raw ciphertext with a fixed header. The gateway
+	// and WebRTC paths use it to drop the base64 (+33 %) expansion and the
+	// JSON envelope of CodecJSON.
+	CodecBinary
+)
+
+const (
+	binaryFrameVersion    = 1
+	binaryFrameKindData   = 0
+	binaryFrameHeaderSize = 1 + 1 + 8
+)
+
+// encodeFrame renders one encrypted frame for the wire.
+func (c FrameCodec) encodeFrame(sequence uint64, ciphertext []byte) ([]byte, error) {
+	if c == CodecBinary {
+		frame := make([]byte, binaryFrameHeaderSize+len(ciphertext))
+		frame[0] = binaryFrameVersion
+		frame[1] = binaryFrameKindData
+		binary.BigEndian.PutUint64(frame[2:], sequence)
+		copy(frame[binaryFrameHeaderSize:], ciphertext)
+		return frame, nil
+	}
+	return json.Marshal(e2eeFrame{
+		Type:       "e2ee",
+		Version:    e2eeVersion,
+		Sequence:   sequence,
+		Ciphertext: base64.RawURLEncoding.EncodeToString(ciphertext),
+	})
+}
+
+// decodeFrame parses one encrypted frame from the wire.
+func (c FrameCodec) decodeFrame(rawFrame []byte) (uint64, []byte, error) {
+	if c == CodecBinary {
+		if len(rawFrame) < binaryFrameHeaderSize {
+			return 0, nil, errors.New("invalid encrypted frame")
+		}
+		if rawFrame[0] != binaryFrameVersion || rawFrame[1] != binaryFrameKindData {
+			return 0, nil, errors.New("unsupported encrypted frame")
+		}
+		return binary.BigEndian.Uint64(rawFrame[2:]), rawFrame[binaryFrameHeaderSize:], nil
+	}
+	var frame e2eeFrame
+	if err := json.Unmarshal(rawFrame, &frame); err != nil {
+		return 0, nil, errors.New("invalid encrypted frame")
+	}
+	if frame.Type != "e2ee" || frame.Version != e2eeVersion {
+		return 0, nil, errors.New("unsupported encrypted frame")
+	}
+	ciphertext, err := base64.RawURLEncoding.DecodeString(frame.Ciphertext)
+	if err != nil {
+		return 0, nil, errors.New("invalid encrypted frame ciphertext")
+	}
+	return frame.Sequence, ciphertext, nil
+}
 
 var (
 	e2eeClientProofLabel = []byte("herdr-e2ee-v1 client\x00")
@@ -77,22 +137,20 @@ type e2eeFrame struct {
 type e2eeSession struct {
 	send             cipher.AEAD
 	receive          cipher.AEAD
+	codec            FrameCodec
 	sendDirection    string
 	receiveDirection string
 	sendSequence     uint64
 	receiveSequence  uint64
 }
 
-func performServerE2EEHandshake(parent context.Context, conn *websocket.Conn, token string) (*e2eeSession, error) {
+func performServerE2EEHandshake(parent context.Context, conn FrameConn, token string) (*e2eeSession, error) {
 	ctx, cancel := context.WithTimeout(parent, e2eeHandshakeTimeout)
 	defer cancel()
 
-	messageType, rawHello, err := conn.Read(ctx)
+	rawHello, err := conn.ReadFrame(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read client hello: %w", err)
-	}
-	if messageType != websocket.MessageText {
-		return nil, errors.New("client hello must be a text frame")
 	}
 	clientHello, err := parseE2EEClientHello(rawHello, token)
 	if err != nil {
@@ -130,6 +188,7 @@ func performServerE2EEHandshake(parent context.Context, conn *websocket.Conn, to
 	if err != nil {
 		return nil, err
 	}
+	session.codec = conn.Codec()
 
 	response, err := json.Marshal(e2eeServerHello{
 		Type:      "e2ee_server_hello",
@@ -141,15 +200,12 @@ func performServerE2EEHandshake(parent context.Context, conn *websocket.Conn, to
 	if err != nil {
 		return nil, fmt.Errorf("encode server hello: %w", err)
 	}
-	if err := conn.Write(ctx, websocket.MessageText, response); err != nil {
+	if err := conn.WriteFrame(ctx, response); err != nil {
 		return nil, fmt.Errorf("write server hello: %w", err)
 	}
-	messageType, rawFinish, err := conn.Read(ctx)
+	rawFinish, err := conn.ReadFrame(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read client finish: %w", err)
-	}
-	if messageType != websocket.MessageText {
-		return nil, errors.New("client finish must be a text frame")
 	}
 	plaintextFinish, err := session.open(rawFinish)
 	if err != nil {
@@ -209,6 +265,9 @@ func parseE2EEClientHello(rawHello []byte, token string) (*parsedE2EEClientHello
 	}, nil
 }
 
+// newE2EESession builds a directional AEAD pair. The zero FrameCodec is
+// CodecJSON, the browser WebSocket encoding; transports that carry raw
+// ciphertext set codec after construction.
 func newE2EESession(sendKey, receiveKey []byte, sendDirection, receiveDirection string) (*e2eeSession, error) {
 	send, err := newE2EEAEAD(sendKey)
 	if err != nil {
@@ -241,12 +300,7 @@ func (s *e2eeSession) seal(plaintext []byte) ([]byte, error) {
 	sequence := s.sendSequence
 	nonce := e2eeFrameNonce(sequence)
 	ciphertext := s.send.Seal(nil, nonce[:], plaintext, e2eeAAD(s.sendDirection, sequence))
-	frame, err := json.Marshal(e2eeFrame{
-		Type:       "e2ee",
-		Version:    e2eeVersion,
-		Sequence:   sequence,
-		Ciphertext: base64.RawURLEncoding.EncodeToString(ciphertext),
-	})
+	frame, err := s.codec.encodeFrame(sequence, ciphertext)
 	if err != nil {
 		return nil, err
 	}
@@ -255,22 +309,15 @@ func (s *e2eeSession) seal(plaintext []byte) ([]byte, error) {
 }
 
 func (s *e2eeSession) open(rawFrame []byte) ([]byte, error) {
-	var frame e2eeFrame
-	if err := json.Unmarshal(rawFrame, &frame); err != nil {
-		return nil, errors.New("invalid encrypted frame")
+	sequence, ciphertext, err := s.codec.decodeFrame(rawFrame)
+	if err != nil {
+		return nil, err
 	}
-	if frame.Type != "e2ee" || frame.Version != e2eeVersion {
-		return nil, errors.New("unsupported encrypted frame")
-	}
-	if frame.Sequence > maxE2EESequence || frame.Sequence != s.receiveSequence {
+	if sequence > maxE2EESequence || sequence != s.receiveSequence {
 		return nil, errors.New("invalid encrypted frame sequence")
 	}
-	ciphertext, err := base64.RawURLEncoding.DecodeString(frame.Ciphertext)
-	if err != nil {
-		return nil, errors.New("invalid encrypted frame ciphertext")
-	}
-	nonce := e2eeFrameNonce(frame.Sequence)
-	plaintext, err := s.receive.Open(nil, nonce[:], ciphertext, e2eeAAD(s.receiveDirection, frame.Sequence))
+	nonce := e2eeFrameNonce(sequence)
+	plaintext, err := s.receive.Open(nil, nonce[:], ciphertext, e2eeAAD(s.receiveDirection, sequence))
 	if err != nil {
 		return nil, errors.New("encrypted frame authentication failed")
 	}

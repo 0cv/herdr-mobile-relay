@@ -133,7 +133,7 @@ export async function registerPushSubscription(relayId: string): Promise<boolean
     relayStore.setPushStatus(relayId, 'missing-config');
     return false;
   }
-  if (!connection.ws || connection.ws.readyState !== 1) {
+  if (connection.status !== 'connected') {
     relayStore.setPushStatus(relayId, 'failed');
     return false;
   }
@@ -221,7 +221,7 @@ async function unsubscribePushSubscription(relayId: string): Promise<boolean> {
   } catch {
     // Relay-side cleanup still proceeds for any endpoint we could collect.
   }
-  if (connection?.ws?.readyState === 1 && !relayProtocolError(connection)) {
+  if (connection?.status === 'connected' && !relayProtocolError(connection)) {
     relayStore.sendRaw(relayId, {
       type: 'push_unsubscribe',
       protocol: APP_PROTOCOL_VERSION,

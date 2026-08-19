@@ -9,7 +9,7 @@ WRANGLER_VERSION ?= 4.114.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs web-bundle-check web-release web-release-check web-deploy web-preview
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs web-bundle-check web-release web-release-check web-deploy web-preview
 
 help:
 	@echo "Common targets:"
@@ -28,6 +28,7 @@ help:
 	@echo "  make service-status             Show relay service status"
 	@echo "  make service-logs               Tail relay service logs"
 	@echo "  make service-uninstall          Stop/remove the relay service"
+	@echo "  make gateway                    Build the self-hostable blind gateway binary"
 	@echo "  make check                      Run backend and frontend checks"
 
 setup:
@@ -55,6 +56,21 @@ stable-setup:
 stable-teardown:
 	relay/stable-teardown.sh
 
+# The blind gateway is deployed separately from the relay bundle: one static
+# binary a user can self-host.
+gateway:
+	@mkdir -p bin
+	CGO_ENABLED=0 go build -trimpath -o bin/herdr-gateway ./cmd/herdr-gateway
+
+# The NAT-behaviour matrix runs the relay, the gateway and a phone in Linux
+# network namespaces behind simulated NATs. It is deliberately outside `check`:
+# it needs root, and it skips instead of failing wherever it cannot have it.
+.PHONY: nat-matrix
+nat-matrix:
+	@echo "▸ Needs root: network namespaces, veth pairs and nftables rules are privileged."
+	@echo "  Without it the suite skips with the reason; run 'sudo -E make nat-matrix' to run it."
+	HERDR_NAT_MATRIX=1 go test ./tests/blackbox/ -run TestNATMatrix -count=1 -v -timeout 20m
+
 check: backend-check frontend-check frontend-browser web-release-check cross-build release-bundle-check
 
 go-check:
@@ -71,6 +87,7 @@ shell-check:
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done
 	sh tests/test_install.sh
 	bash tests/test_common.sh
+	bash tests/test_gateway_deploy.sh
 	bash tests/test_plugin_build.sh
 	sh tests/test_release_scripts.sh
 	bash tests/test_uninstall.sh
@@ -90,8 +107,10 @@ cross-build:
 	@tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 	for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
 		os="$${target%/*}"; arch="$${target#*/}"; \
-		CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" go build -trimpath \
-			-o "$$tmp/herdr-mobile-relay-$$os-$$arch" ./cmd/herdr-mobile-relay || exit; \
+		for command in ./cmd/herdr-mobile-relay ./cmd/herdr-gateway; do \
+			CGO_ENABLED=0 GOOS="$$os" GOARCH="$$arch" go build -trimpath \
+				-o "$$tmp/$$(basename $$command)-$$os-$$arch" "$$command" || exit; \
+		done; \
 	done
 
 release-bundle-check:

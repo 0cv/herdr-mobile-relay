@@ -83,11 +83,19 @@ install_tool() {
     esac
 }
 
+GATEWAY_URL="$(gateway_url "$ENV_FILE")"
+
 missing_tools=()
 find_missing_tools() {
     missing_tools=()
     local command
-    for command in herdr cloudflared; do
+    local required=(herdr)
+    # A gateway-configured relay dials the gateway itself, so cloudflared is
+    # neither installed nor required on that path.
+    if [ -z "$GATEWAY_URL" ]; then
+        required+=(cloudflared)
+    fi
+    for command in "${required[@]}"; do
         if [ "$command" = "herdr" ] && [ -x "${HERDR_BIN:-}" ]; then
             continue
         fi
@@ -99,6 +107,12 @@ find_missing_tools() {
         missing_tools+=("relay-release")
     fi
 }
+
+if [ -n "$GATEWAY_URL" ]; then
+    echo "Gateway transport configured: $GATEWAY_URL"
+    echo "Skipping the cloudflared prerequisite; no Cloudflare account is needed."
+    echo ""
+fi
 
 find_missing_tools
 if [ "${#missing_tools[@]}" -ne 0 ] && [ "$INSTALL_MISSING" -eq 1 ]; then
@@ -142,7 +156,9 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
     fi
     echo "  Herdr:       https://herdr.dev"
     echo "  Relay:       rerun the exact version installer from this plugin"
-    echo "  cloudflared: https://developers.cloudflare.com/tunnel/downloads/"
+    if [ -z "$GATEWAY_URL" ]; then
+        echo "  cloudflared: https://developers.cloudflare.com/tunnel/downloads/"
+    fi
     exit 1
 fi
 
@@ -159,6 +175,9 @@ fi
 echo ""
 echo "Prerequisites and local configuration are ready."
 echo "  Relay config: $ENV_FILE"
+if [ -n "$GATEWAY_URL" ]; then
+    echo "  Gateway:      $GATEWAY_URL"
+fi
 if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
     echo "  Web config:   $WEB_ENV_FILE"
 fi

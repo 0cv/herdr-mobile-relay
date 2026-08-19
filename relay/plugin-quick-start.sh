@@ -9,7 +9,9 @@ fi
 echo "🐑 Herdr Mobile Relay plugin setup"
 echo ""
 echo "This pane installs missing user-level tools, creates private plugin"
-echo "configuration, and starts a temporary relay with a phone setup QR code."
+echo "configuration, and starts a relay with a phone setup QR code. It uses"
+echo "whichever connection method the chooser configured: the community"
+echo "gateway, your own gateway, or a Cloudflare tunnel."
 echo ""
 
 "$SCRIPT_DIR/setup.sh" --install-missing

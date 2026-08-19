@@ -58,6 +58,7 @@ if ! command -v herdr >/dev/null 2>&1 && [ -z "${HERDR_BIN:-}" ]; then
 fi
 PORT="${HERDR_RELAY_PORT:-8375}"
 HOST="${HERDR_RELAY_HOST:-127.0.0.1}"
+GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 TUNNEL_TARGET_HOST="$HOST"
 if [ "$TUNNEL_TARGET_HOST" = "0.0.0.0" ]; then
     TUNNEL_TARGET_HOST="127.0.0.1"
@@ -74,8 +75,43 @@ if ! kill -0 $RELAY_PID 2>/dev/null; then
     exit 1
 fi
 
-# 2. Start tunnel
-if command -v cloudflared >/dev/null 2>&1; then
+# 2. Reach the phone. A configured gateway replaces the tunnel entirely: the
+# relay dials the gateway itself, so nothing here has to be installed or
+# supervised, and the QR is printed once the relay confirms registration.
+if [ -n "$GATEWAY_URL" ]; then
+    printf '▸ Registering with the gateway at %s..' "$GATEWAY_URL"
+    if ! wait_for_gateway_registration "$PORT" 30 1; then
+        echo ""
+        echo "✗ The relay did not register with the gateway at $GATEWAY_URL."
+        echo "  Check the URL and this computer's outbound HTTPS access, then rerun."
+        exit 1
+    fi
+    echo " ✓"
+
+    HOST_LABEL="$(host_label)"
+    SETUP_FRAGMENT="$(build_transport_setup_fragment "$HERDR_RELAY_TOKEN" "$HOST_LABEL")"
+    PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
+    record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
+    PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
+
+    echo ""
+    echo "✓ Relay ready!"
+    echo ""
+    print_phone_setup "$PHONE_URL"
+    echo ""
+    echo "  No Cloudflare account, domain, or cloudflared install is involved."
+    echo "  The gateway only copies encrypted frames it cannot read, and the phone"
+    echo "  upgrades to a direct connection whenever the network allows it."
+    echo "  The link configures this relay automatically and removes the token from the address bar."
+    echo "  Keep this terminal open; press Ctrl-C here to stop the quick start."
+    echo ""
+    echo "  Manual setup details:"
+    echo "  Gateway:    $GATEWAY_URL"
+    echo "  Token:      $HERDR_RELAY_TOKEN"
+    echo ""
+
+    wait "$RELAY_PID"
+elif command -v cloudflared >/dev/null 2>&1; then
     echo "▸ Starting Cloudflare tunnel..."
     LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/herdr-cloudflared.XXXXXX")"
     cloudflared tunnel --config /dev/null --url "http://$TUNNEL_TARGET_HOST:$PORT" >"$LOG_FILE" 2>&1 &

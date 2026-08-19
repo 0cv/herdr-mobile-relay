@@ -3,8 +3,11 @@ package release
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	relayprotocol "github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
 func testRelease(t *testing.T) string {
@@ -47,10 +50,11 @@ func TestBuildAndVerifyManifest(t *testing.T) {
 	if manifest.WebHash == "" {
 		t.Fatal("web hash is empty")
 	}
-	if len(manifest.AppTransports) != 1 ||
-		manifest.AppTransports[0] != "herdr-e2ee-v1" ||
-		len(manifest.RelayTransports) != 1 ||
-		manifest.RelayTransports[0] != "herdr-e2ee-v1" {
+	bridge := []string{
+		relayprotocol.EncryptedWebSocketSubprotocol,
+		relayprotocol.HybridTransportCapability,
+	}
+	if !slices.Equal(manifest.AppTransports, bridge) || !slices.Equal(manifest.RelayTransports, bridge) {
 		t.Fatalf("transport capabilities = app %v, relay %v", manifest.AppTransports, manifest.RelayTransports)
 	}
 	verified, err := Verify(root, "linux/amd64")

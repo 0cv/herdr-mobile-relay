@@ -59,8 +59,11 @@ export function relayLabelFromUrl(url: string): string {
   }
 }
 
-export function makeRelayId(label: string, url: string): string {
-  return `${label || relayLabelFromUrl(url)}-${url}`
+export function makeRelayId(label: string, url: string, gatewayUrl = ''): string {
+  // A hybrid relay has no URL of its own, so its identity is the gateway it
+  // answers on plus the label from its setup link.
+  const target = url || gatewayUrl;
+  return `${label || relayLabelFromUrl(target)}-${target}`
     .toLowerCase()
     .replace(/^wss?:\/\//, '')
     .replace(/[^a-z0-9]+/g, '-')
@@ -68,15 +71,68 @@ export function makeRelayId(label: string, url: string): string {
     .slice(0, 48) || 'relay';
 }
 
+/**
+ * Accepts only a bare wss origin (ws when the page itself is insecure): no
+ * credentials, no path, no query, no fragment. Anything else in a setup link
+ * is treated as hostile.
+ */
+function safeSocketOrigin(value: string, pageProtocol: string): string | null {
+  try {
+    const parsed = new URL(value.trim());
+    const allowedProtocol = parsed.protocol === 'wss:' || (pageProtocol === 'http:' && parsed.protocol === 'ws:');
+    if (
+      !allowedProtocol
+      || parsed.username
+      || parsed.password
+      || !parsed.hostname
+      || !['', '/'].includes(parsed.pathname)
+      || parsed.search
+      || parsed.hash
+    ) return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ordered gateway origins: unusable entries are dropped and repeats collapsed,
+ * so the failover never dials the same address twice in one pass.
+ */
+function gatewayOrigins(values: readonly string[], pageProtocol: string): string[] {
+  const origins: string[] = [];
+  for (const value of values) {
+    const origin = safeSocketOrigin(String(value || ''), pageProtocol);
+    if (!origin || origins.includes(origin)) continue;
+    origins.push(origin);
+  }
+  return origins;
+}
+
 export function normalizeRelayConfig(relay: Partial<RelayConfig>): RelayConfig {
   const url = String(relay.url || '').trim();
-  const label = String(relay.label || relayLabelFromUrl(url)).trim();
-  return {
-    id: relay.id || makeRelayId(label, url),
+  // The primary leads: a relay that advertises a new gateway address while it
+  // is connected is fresher than the list stored beside it, and a config
+  // written before the list existed carries the primary alone. Stored entries
+  // were checked against the page protocol when they were imported, so
+  // re-reading them uses the permissive rule and a LAN gateway paired over
+  // plain http keeps its ws: address.
+  const listed = Array.isArray(relay.gatewayUrls) ? relay.gatewayUrls : [];
+  const gateways = gatewayOrigins([String(relay.gatewayUrl || ''), ...listed], 'http:');
+  const gatewayUrl = gateways[0] || '';
+  const label = String(relay.label || relayLabelFromUrl(url || gatewayUrl)).trim();
+  const config: RelayConfig = {
+    id: relay.id || makeRelayId(label, url, gatewayUrl),
     label,
     url,
     token: relay.token || '',
   };
+  // Legacy entries keep their exact stored shape: no transport field at all.
+  if (relay.transport !== 'hybrid' && (url || !gatewayUrl)) return config;
+  config.transport = 'hybrid';
+  config.gatewayUrl = gatewayUrl;
+  if (gateways.length) config.gatewayUrls = gateways;
+  return config;
 }
 
 export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[] {
@@ -87,7 +143,7 @@ export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[]
       if (Array.isArray(parsed)) {
         return parsed
           .filter((relay): relay is Partial<RelayConfig> => Boolean(
-            relay && typeof relay === 'object' && 'url' in relay && relay.url,
+            relay && typeof relay === 'object' && (relay.url || relay.gatewayUrl),
           ))
           .map(normalizeRelayConfig);
       }
@@ -115,28 +171,27 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
   const token = params.get('setup') || '';
   if (token.length < 16 || token.length > 512) return null;
   if (!['http:', 'https:'].includes(locationValue.protocol)) return null;
+  const label = (params.get('label') || 'This computer').trim().slice(0, 48) || 'This computer';
+  const configuredGateways = params.get('gateways');
+  const configuredGateway = params.get('gateway');
+  if (configuredGateways !== null || configuredGateway) {
+    // `gateways=` carries the complete ordered list, so it decides the order
+    // and the primary; a link with only `gateway=` is a one-entry list. The
+    // separator stays literal, each entry is percent-encoded on its own.
+    const entries = configuredGateways === null
+      ? [String(configuredGateway)]
+      : configuredGateways.split(',');
+    const gatewayUrls = gatewayOrigins(entries, locationValue.protocol);
+    if (!gatewayUrls.length) return null;
+    return { label, url: '', token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls };
+  }
   const configuredRelay = params.get('relay');
   let url = `${locationValue.protocol === 'https:' ? 'wss:' : 'ws:'}//${locationValue.host}`;
   if (configuredRelay) {
-    try {
-      const parsed = new URL(configuredRelay);
-      const allowedProtocol = parsed.protocol === 'wss:'
-        || (locationValue.protocol === 'http:' && parsed.protocol === 'ws:');
-      if (
-        !allowedProtocol
-        || parsed.username
-        || parsed.password
-        || !parsed.hostname
-        || !['', '/'].includes(parsed.pathname)
-        || parsed.search
-        || parsed.hash
-      ) return null;
-      url = parsed.origin;
-    } catch {
-      return null;
-    }
+    const origin = safeSocketOrigin(configuredRelay, locationValue.protocol);
+    if (!origin) return null;
+    url = origin;
   }
-  const label = (params.get('label') || 'This computer').trim().slice(0, 48) || 'This computer';
   return { label, url, token };
 }
 
@@ -146,12 +201,23 @@ export function importQuickSetup(
 ): RelayConfig[] | null {
   const setup = quickSetupConfig(locationValue);
   if (!setup) return null;
-  const existing = relays.find((relay) => relay.url === setup.url);
+  // A shared gateway hosts many computers, so a hybrid entry is matched on the
+  // credential or the label rather than on the gateway address alone. Any
+  // shared entry counts: a relay that gained a gateway or reordered its list
+  // updates its entry instead of pairing itself a second time.
+  const existing = setup.transport === 'hybrid'
+    ? relays.find((relay) => relay.transport === 'hybrid'
+      && (relay.gatewayUrls ?? [relay.gatewayUrl ?? '']).some((entry) => setup.gatewayUrls?.includes(entry))
+      && (relay.token === setup.token || relay.label === setup.label))
+    : relays.find((relay) => relay.url === setup.url);
   const next = normalizeRelayConfig({
     id: existing?.id,
     label: existing?.label || setup.label,
     url: setup.url,
     token: setup.token,
+    transport: setup.transport,
+    gatewayUrl: setup.gatewayUrl,
+    gatewayUrls: setup.gatewayUrls,
   });
   return existing ? relays.map((relay) => (relay.id === existing.id ? next : relay)) : [...relays, next];
 }

@@ -1,0 +1,40 @@
+# Blind WSS rendezvous gateway for Herdr Mobile Relay.
+#
+# Build:  docker build -f Dockerfile.gateway -t herdr-gateway .
+# Run:    docker run -p 8443:8443 -e HERDR_GATEWAY_ADDR=:8443 herdr-gateway
+#
+# The image contains a single static binary and no shell. Put TLS in front of it
+# (see docs/gateway-self-hosting.md); the gateway itself speaks plain HTTP so a
+# reverse proxy owns certificates.
+
+FROM golang:1.26.5-alpine AS build
+
+WORKDIR /src
+
+# Dependencies first so a source-only change reuses the module layer.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/herdr-gateway ./cmd/herdr-gateway
+COPY internal/gateway ./internal/gateway
+COPY internal/gatewaywire ./internal/gatewaywire
+
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/herdr-gateway ./cmd/herdr-gateway
+
+FROM gcr.io/distroless/static:nonroot
+
+COPY --from=build /out/herdr-gateway /usr/local/bin/herdr-gateway
+
+USER nonroot:nonroot
+EXPOSE 8443
+# Address discovery is raw STUN on UDP, so it cannot go through the TLS reverse
+# proxy in front of 8443: publish this port straight to the host. Set
+# HERDR_GATEWAY_STUN_ADDR= (empty) to turn the listener off instead.
+EXPOSE 3478/udp
+
+# HERDR_GATEWAY_STATE is unset by default: counters live in memory only. Mount a
+# writable volume and point it there to keep quotas across restarts.
+ENV HERDR_GATEWAY_ADDR=:8443 \
+    HERDR_GATEWAY_LOG_FORMAT=json
+
+ENTRYPOINT ["/usr/local/bin/herdr-gateway"]

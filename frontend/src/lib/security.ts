@@ -44,6 +44,7 @@ export function initializeDeviceSecurity(): () => void {
 
   let backgroundedAt: number | null = null;
   let lastForcedReconnectAt: number | null = null;
+  const networkConnection = (navigator as Navigator & { connection?: EventTarget }).connection;
   const markBackgrounded = () => {
     if (backgroundedAt === null) backgroundedAt = Date.now();
   };
@@ -53,9 +54,15 @@ export function initializeDeviceSecurity(): () => void {
     const backgroundDuration = backgroundedAt === null ? 0 : Math.max(0, now - backgroundedAt);
     backgroundedAt = null;
     if (!force && backgroundDuration < FORCE_RECONNECT_AFTER_BACKGROUND_MS) {
+      // The page just came back. A backoff computed while the device was
+      // asleep must not delay the first attempt made while someone watches,
+      // and revalidation reconnects every dropped relay right away.
+      relayStore.resetReconnectBackoff();
       relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
       return;
     }
+    // connectAll rebuilds every connection and clears the attempt counters,
+    // so the forced path needs no separate backoff reset.
     if (lastForcedReconnectAt !== null && now - lastForcedReconnectAt < RESUME_RECONNECT_DEDUP_MS) return;
     lastForcedReconnectAt = now;
     relayStore.connectAll(true);
@@ -98,6 +105,16 @@ export function initializeDeviceSecurity(): () => void {
     }
     reconnectAfterBackground(true);
   };
+  const onNetworkChange = () => {
+    if (document.visibilityState !== 'visible') return;
+    if (deviceVerificationEnabled() && get(securityState).locked) return;
+    // Wi-Fi/cellular handoffs often stay "online", so the window event never
+    // fires. Probe the current application path before deciding to replace it:
+    // a healthy connection answers and stays open; a half-open one gets two
+    // seconds before the existing reconnect path takes over.
+    relayStore.resetReconnectBackoff();
+    relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
+  };
   const onFreeze = () => {
     markBackgrounded();
     if (deviceVerificationEnabled()) lockForDevice('resume');
@@ -117,6 +134,7 @@ export function initializeDeviceSecurity(): () => void {
   window.addEventListener('pageshow', onPageShow);
   window.addEventListener('focus', onFocus);
   window.addEventListener('online', onOnline);
+  networkConnection?.addEventListener('change', onNetworkChange);
   return () => {
     document.removeEventListener('visibilitychange', onVisibility);
     document.removeEventListener('freeze', onFreeze);
@@ -124,6 +142,7 @@ export function initializeDeviceSecurity(): () => void {
     window.removeEventListener('pageshow', onPageShow);
     window.removeEventListener('focus', onFocus);
     window.removeEventListener('online', onOnline);
+    networkConnection?.removeEventListener('change', onNetworkChange);
   };
 }
 

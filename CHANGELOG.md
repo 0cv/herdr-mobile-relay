@@ -3,7 +3,109 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.17.0] - 2026-08-18
+
+### Added
+
+- Hybrid transport: set `HERDR_GATEWAY_URL` and the relay registers with a
+  blind WSS gateway instead of a Cloudflare tunnel, so Quick Start no longer
+  installs, launches, or requires `cloudflared` and needs no Cloudflare
+  account. The gateway holds no secrets — the relay registers under an
+  HKDF-derived id, the relay itself verifies the phone's challenge response,
+  and the gateway only copies already-encrypted frames. It is a single static
+  binary you can self-host (`make gateway`,
+  [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md)).
+- Direct WebRTC upgrade: after connecting, phone and computer negotiate a
+  reliable ordered DataChannel inside the encrypted channel and move traffic
+  off the gateway, falling back to it automatically when the direct path is
+  unavailable or breaks. `HERDR_WEBRTC_UDP_PORT`,
+  `HERDR_REACHABILITY_PORT_MAPPING`, and `HERDR_TRANSPORT_FORCE_RELAY` tune
+  and, for testing, disable it. This is the first path that opens a UDP socket
+  on the computer; ICE credentials travel only inside the encrypted channel and
+  DTLS certificates are pinned by SDP fingerprint. See the README security
+  section.
+- `GET /healthz` reports gateway registration state, and releases declare both
+  `herdr-e2ee-v1` and `herdr-hybrid-v1` so existing phones keep working across
+  the upgrade in either order. Cloudflare tunnels remain fully supported.
+- Gateway deployment from the setup menu: **Choose Connection Method → Your own
+  gateway → Deploy one on my own server over SSH** asks for the public hostname
+  and the server's SSH address, then writes a compose bundle, copies it over one
+  authenticated SSH connection, optionally installs Docker, builds and starts the
+  gateway there, and records the `wss://` URL only after the public `/healthz`
+  answers. The bundle carries the gateway source it builds, so the server needs
+  nothing but Docker — no Go toolchain, no registry, and nothing fetched from
+  GitHub — and the relay key never leaves the computer.
+- Gateway address discovery on UDP 3478 (`HERDR_GATEWAY_STUN_ADDR`, empty
+  disables it): the gateway reflects the address it already sees a peer coming
+  from, so the phone and the relay both gather reflexive ICE candidates and the
+  direct WebRTC path now forms off the LAN without router configuration — a
+  phone on a cellular network reaches a home computer directly instead of
+  falling back to the relayed path. No third-party service is involved, only the
+  port is advertised (each peer combines it with the gateway host it already
+  dialed), and self-hosted gateways need inbound UDP 3478 open; UPnP/NAT-PMP
+  port mapping still helps but is no longer required.
+- A community gateway is now published and offered as the second connection
+  choice, after the Cloudflare tunnel: free, shared, best-effort, with no
+  account, no domain, and nothing to configure. `HERDR_COMMUNITY_GATEWAY_URL`
+  overrides it, and an explicitly empty value means a build runs none.
+- Whole-gateway ceilings for shared instances: `HERDR_GATEWAY_MAX_RELAYS`
+  (default 1024) and `HERDR_GATEWAY_MAX_CLIENTS` (default 512) refuse new
+  registrations and connections with `at_capacity`, bounding memory that the
+  per-relay and per-IP limits could not. Address discovery also gains a global
+  ceiling. There is deliberately no per-IP concurrency cap, because carrier NAT
+  shares one address across thousands of unrelated phones.
+- Per-session ICE candidate types and the nominated pair are reported in the
+  relay's `/healthz` as `webrtc_sessions`, which answers whether a session is
+  direct and over which candidate type. Types only: no address ever appears.
+- Direct-path telemetry in the relay's `/healthz`: `sessions_direct_total` and
+  `sessions_relayed_total` count how often the direct path actually formed
+  since the relay started. Local only, counts only, nothing leaves the machine.
+- Ordered gateway lists: `HERDR_GATEWAY_URL` accepts several comma-separated
+  gateways, the QR carries the whole list, and both relay and phone move to the
+  next one when a gateway is unreachable. Pairing links produced now always
+  carry the list, so adding a second gateway later needs no re-scan.
+- Documentation restructured: the README is now a short overview that gets a new
+  user to a paired phone, with the detail split into `docs/mobile-app.md`,
+  `docs/transports.md`, `docs/cloudflare-tunnel.md`, `docs/updates.md`,
+  `docs/security.md`, and `docs/development.md`.
+
+### Changed
+
+- Faster resume: returning to the app resets the reconnect backoff instead of
+  waiting out the previous delay, the base delay drops from 3 s to 1 s, and a
+  foregrounded page now gives a relay 2 s to answer an app-level ping before
+  reconnecting, rather than the previous flat 10 s half-dead detection.
+- A visible phone now probes the application connection when Chromium reports a
+  Wi-Fi/cellular network change. A healthy path remains open; a half-open path
+  gets 2 s to answer before reconnecting.
+- With multiple `HERDR_GATEWAY_URL` entries, the relay now probes all gateway
+  health endpoints concurrently at startup, then keeps one registration with
+  the lowest-latency healthy gateway. After a failure it excludes that gateway
+  and reselects from the cold fallbacks. Configured order breaks close ties.
+  The selected gateway is advertised first and saved by connected
+  phones without interrupting their current session.
+  The setup chooser accepts the managed list, validates every entry, and saves
+  it when at least one gateway is healthy.
+- A relay reached over its existing Cloudflare URL now advertises its gateway,
+  and the app records it and prefers the hybrid path on the next connection —
+  no QR re-scan. The original URL is kept and is used automatically if the
+  gateway turns out to be unreachable from that phone.
+- Terminal refresh is floored at 500 ms and scrollback capped at 1,000 lines
+  while traffic is relayed through the gateway, and returns to the configured
+  settings as soon as the direct path takes over. Cloudflare and direct
+  connections are unaffected.
+- A gateway no longer displaces a relay registration that is still alive: the
+  incumbent link is pinged first and keeps its id if it answers, so anyone who
+  learns a relay id cannot evict the real computer in a loop. A crashed or
+  disconnected relay still reclaims its id immediately.
+- A phone told the shared gateway is full now says so and offers to retry or
+  switch connection method, instead of reporting a generic failure.
+- Address discovery re-probes a learned NAT mapping every 10 s instead of every
+  30 minutes, so a mapping that the router drops while the session is idle is
+  noticed and republished rather than advertised dead until the next self-test.
+  Newly discovered mappings are also trickled into sessions already negotiating,
+  including port-preserving NATs, rather than waiting for an attempt to time out
+  and retry.
 
 ## [0.16.4] - 2026-08-18
 
@@ -637,7 +739,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.4...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.4...v0.17.0
 [0.16.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.1...v0.16.2

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,6 +27,15 @@ type Config struct {
 	ReleaseRoot    string
 	ServiceName    string
 
+	// GatewayURL is the configured tie-break leader, kept equal to
+	// GatewayURLs[0] so readers that only know one gateway keep working. The
+	// transport may select another healthy entry at runtime.
+	GatewayURL          string
+	GatewayURLs         []string
+	WebRTCUDPPort       int
+	ForceRelayTransport bool
+	PortMappingEnabled  bool
+
 	CacheDir   string
 	ConfigHome string
 	DataHome   string
@@ -44,6 +54,10 @@ func Load() (*Config, error) {
 		PollInterval: envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
 		LogFormat:    envOr("HERDR_RELAY_LOG_FORMAT", "text"),
 		ServiceName:  envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+
+		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
+		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
+		PortMappingEnabled:  envBoolOr("HERDR_REACHABILITY_PORT_MAPPING", true),
 	}
 
 	if origins := os.Getenv("HERDR_ALLOWED_ORIGINS"); origins != "" {
@@ -52,6 +66,15 @@ func Load() (*Config, error) {
 				cfg.AllowedOrigins = append(cfg.AllowedOrigins, trimmed)
 			}
 		}
+	}
+
+	// HERDR_GATEWAY_URL is an ordered candidate list. The relay probes the
+	// entries concurrently and uses the lowest-latency healthy gateway; the
+	// configured order breaks close ties and remains the no-probe fallback. A
+	// single value is one entry and behaves exactly as it always did.
+	cfg.GatewayURLs = parseGatewayURLs(os.Getenv("HERDR_GATEWAY_URL"))
+	if len(cfg.GatewayURLs) > 0 {
+		cfg.GatewayURL = cfg.GatewayURLs[0]
 	}
 
 	cfg.ConfigHome = envOr("XDG_CONFIG_HOME", filepath.Join(homeDir(), ".config"))
@@ -100,6 +123,15 @@ func (c *Config) validate() error {
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("invalid port %d", c.Port)
+	}
+	for _, gateway := range c.GatewayURLs {
+		parsed, err := url.Parse(gateway)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "ws" && parsed.Scheme != "wss") {
+			return fmt.Errorf("invalid gateway url %q: want ws:// or wss:// base url", gateway)
+		}
+	}
+	if len(c.GatewayURLs) > 0 && c.Token == "" {
+		return fmt.Errorf("gateway url requires a relay key: the gateway path derives its credentials from it")
 	}
 	return nil
 }
@@ -195,6 +227,19 @@ func homeDir() string {
 	return h
 }
 
+// parseGatewayURLs splits the ordered gateway list. Empty entries are dropped
+// so a trailing comma or a stray space in a hand-edited env file configures a
+// working relay instead of a phantom gateway.
+func parseGatewayURLs(raw string) []string {
+	var urls []string
+	for _, entry := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimRight(strings.TrimSpace(entry), "/"); trimmed != "" {
+			urls = append(urls, trimmed)
+		}
+	}
+	return urls
+}
+
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -206,6 +251,15 @@ func envIntOr(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func envBoolOr(key string, fallback bool) bool {
+	if v := os.Getenv(key); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return fallback

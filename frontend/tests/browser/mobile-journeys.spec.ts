@@ -1636,6 +1636,31 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await expect(page.getByRole('main', { name: 'Terminal for Resume app' })).toBeVisible();
 });
 
+test('replaces a half-open socket when the browser reports a network handoff', async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'connection', {
+      configurable: true,
+      value: new EventTarget(),
+    });
+  });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  const refreshesBefore = (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'refresh_agents').length;
+
+  await page.evaluate(() => {
+    (navigator as Navigator & { connection: EventTarget }).connection.dispatchEvent(new Event('change'));
+  });
+
+  await expect.poll(async () =>
+    (await commandsForSocket(page, 0))
+      .filter((command) => command.type === 'refresh_agents').length).toBe(refreshesBefore + 1);
+  // The old socket deliberately never answers the probe. The foreground
+  // health deadline replaces it without waiting for WebSocket/TCP timeouts.
+  await expect.poll(() => socketCount(page)).toBe(2);
+});
+
 test('keeps Claude desktop prompt and status in the shared terminal output', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);

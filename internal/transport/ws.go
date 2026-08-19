@@ -26,19 +26,24 @@ const (
 )
 
 type ClientConn struct {
-	id       string
-	conn     *websocket.Conn
-	buf      *sendBuffer
-	secure   *e2eeSession
-	logger   *slog.Logger
-	ctx      context.Context
-	cancel   context.CancelFunc
-	done     chan struct{}
-	closeOne sync.Once
+	id        string
+	conn      FrameConn
+	transport string
+	buf       *sendBuffer
+	secure    *e2eeSession
+	logger    *slog.Logger
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	closeOne  sync.Once
 }
 
 func (c *ClientConn) ID() string               { return c.id }
 func (c *ClientConn) Context() context.Context { return c.ctx }
+
+// Transport reports the path this client is connected over: TransportWebSocket,
+// TransportGateway, or TransportWebRTC.
+func (c *ClientConn) Transport() string { return c.transport }
 
 type MessageHandler func(client *ClientConn, msg map[string]any, admitted func())
 type ConnectHandler func(client *ClientConn)
@@ -50,13 +55,14 @@ type inboundMessage struct {
 }
 
 type Metrics struct {
-	IngressHighWater      uint64 `json:"ingress_high_water"`
-	IngressRejected       uint64 `json:"ingress_rejected"`
-	OutboundHighWaterItem uint64 `json:"outbound_high_water_items"`
-	OutboundHighWaterByte uint64 `json:"outbound_high_water_bytes"`
-	Coalesced             uint64 `json:"coalesced"`
-	SlowClientEvictions   uint64 `json:"slow_client_evictions"`
-	ConnectedClients      int    `json:"connected_clients"`
+	IngressHighWater      uint64         `json:"ingress_high_water"`
+	IngressRejected       uint64         `json:"ingress_rejected"`
+	OutboundHighWaterItem uint64         `json:"outbound_high_water_items"`
+	OutboundHighWaterByte uint64         `json:"outbound_high_water_bytes"`
+	Coalesced             uint64         `json:"coalesced"`
+	SlowClientEvictions   uint64         `json:"slow_client_evictions"`
+	ConnectedClients      int            `json:"connected_clients"`
+	ConnectedByTransport  map[string]int `json:"connected_by_transport,omitempty"`
 }
 
 type Hub struct {
@@ -65,7 +71,7 @@ type Hub struct {
 	register     sync.Mutex
 	mu           sync.RWMutex
 	clients      map[string]*ClientConn
-	pending      map[*websocket.Conn]struct{}
+	pending      map[FrameConn]struct{}
 	nextID       int
 	handler      MessageHandler
 	onConnect    ConnectHandler
@@ -94,7 +100,7 @@ func NewHub(cfg *config.Config, logger *slog.Logger) *Hub {
 		cfg:            cfg,
 		logger:         logger,
 		clients:        make(map[string]*ClientConn),
-		pending:        make(map[*websocket.Conn]struct{}),
+		pending:        make(map[FrameConn]struct{}),
 		orderedIngress: make(chan inboundMessage, orderedIngressCapacity),
 		handlerSlots:   make(chan struct{}, handlerCapacity),
 		ingressDone:    make(chan struct{}),
@@ -139,7 +145,15 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(wsMaxReadBytes)
+	h.Serve(r.Context(), newWebSocketConn(conn, h.cfg.Token != ""))
+}
 
+// Serve runs one logical connection for its whole lifetime: encrypted
+// handshake, registration under the admission barrier, read pump, and close.
+// Every transport — browser WebSocket, gateway-relayed, WebRTC DataChannel —
+// enters the hub here, so admission ordering, send buffers, slow-client
+// eviction, metrics, and shutdown are shared.
+func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 	h.mu.Lock()
 	if h.closing {
 		h.mu.Unlock()
@@ -153,18 +167,20 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	var secure *e2eeSession
 	if h.cfg.Token != "" {
-		secure, err = performServerE2EEHandshake(r.Context(), conn, h.cfg.Token)
+		var err error
+		secure, err = performServerE2EEHandshake(parent, conn, h.cfg.Token)
 		if err != nil {
 			h.mu.Lock()
 			delete(h.pending, conn)
 			h.mu.Unlock()
-			h.logger.Debug("encrypted websocket handshake failed", "error", err)
+			h.logger.Debug("encrypted handshake failed",
+				"transport", conn.TransportName(), "error", err)
 			conn.CloseNow()
 			return
 		}
 	}
 
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithCancel(parent)
 	h.register.Lock()
 	h.mu.Lock()
 	delete(h.pending, conn)
@@ -178,14 +194,15 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.nextID++
 	clientID := fmt.Sprintf("client-%d", h.nextID)
 	client := &ClientConn{
-		id:     clientID,
-		conn:   conn,
-		secure: secure,
-		buf:    newSendBuffer(clientOutboundMaxItems, clientOutboundMaxBytes),
-		logger: h.logger.With("client_id", clientID),
-		ctx:    ctx,
-		cancel: cancel,
-		done:   make(chan struct{}),
+		id:        clientID,
+		conn:      conn,
+		transport: conn.TransportName(),
+		secure:    secure,
+		buf:       newSendBuffer(clientOutboundMaxItems, clientOutboundMaxBytes),
+		logger:    h.logger.With("client_id", clientID),
+		ctx:       ctx,
+		cancel:    cancel,
+		done:      make(chan struct{}),
 	}
 	go h.writePump(client)
 	h.mu.Unlock()
@@ -203,39 +220,23 @@ func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 	h.register.Unlock()
 
-	h.logger.Info("client connected", "client_id", clientID)
+	h.logger.Info("client connected", "client_id", clientID, "transport", client.transport)
 	h.readPump(client)
 	h.removeClient(client)
-
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), wsCloseTimeout)
-	defer closeCancel()
-	closed := make(chan struct{})
-	go func() {
-		_ = conn.Close(websocket.StatusNormalClosure, "")
-		close(closed)
-	}()
-	select {
-	case <-closed:
-	case <-closeCtx.Done():
-		conn.CloseNow()
-	}
+	conn.Close(CloseNormal, "")
 	<-client.done
 }
 
 func (h *Hub) readPump(client *ClientConn) {
 	for {
-		messageType, data, err := client.conn.Read(client.ctx)
+		data, err := client.conn.ReadFrame(client.ctx)
 		if err != nil {
-			if websocket.CloseStatus(err) == -1 && client.ctx.Err() == nil {
+			if !errors.Is(err, ErrFrameConnClosed) && client.ctx.Err() == nil {
 				client.logger.Debug("read error", "error", err)
 			}
 			return
 		}
 		if client.secure != nil {
-			if messageType != websocket.MessageText {
-				client.logger.Debug("non-text encrypted frame rejected")
-				return
-			}
 			data, err = client.secure.open(data)
 			if err != nil {
 				client.logger.Debug("encrypted frame rejected", "error", err)
@@ -333,7 +334,7 @@ func (h *Hub) writePump(client *ClientConn) {
 			}
 		}
 		ctx, cancel := context.WithTimeout(client.ctx, wsSendTimeout)
-		err := client.conn.Write(ctx, websocket.MessageText, data)
+		err := client.conn.WriteFrame(ctx, data)
 		cancel()
 		if err != nil {
 			client.logger.Debug("write failed, evicting", "error", err)
@@ -446,6 +447,13 @@ func (h *Hub) ClientCount() int {
 }
 
 func (h *Hub) Metrics() Metrics {
+	h.mu.RLock()
+	byTransport := make(map[string]int, 3)
+	for _, client := range h.clients {
+		byTransport[client.transport]++
+	}
+	connected := len(h.clients)
+	h.mu.RUnlock()
 	return Metrics{
 		IngressHighWater:      h.ingressHighWater.Load(),
 		IngressRejected:       h.ingressRejected.Load(),
@@ -453,7 +461,8 @@ func (h *Hub) Metrics() Metrics {
 		OutboundHighWaterByte: h.outboundHighWaterByte.Load(),
 		Coalesced:             h.coalesced.Load(),
 		SlowClientEvictions:   h.slowClientEvictions.Load(),
-		ConnectedClients:      h.ClientCount(),
+		ConnectedClients:      connected,
+		ConnectedByTransport:  byTransport,
 	}
 }
 
@@ -473,7 +482,7 @@ func (h *Hub) removeClient(client *ClientConn) {
 		h.mu.Unlock()
 		client.cancel()
 		client.buf.Close()
-		h.logger.Info("client disconnected", "client_id", client.id)
+		h.logger.Info("client disconnected", "client_id", client.id, "transport", client.transport)
 		if h.onDisconnect != nil {
 			h.onDisconnect(client)
 		}
@@ -499,7 +508,7 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 		clients = append(clients, client)
 		delete(h.clients, client.id)
 	}
-	pending := make([]*websocket.Conn, 0, len(h.pending))
+	pending := make([]FrameConn, 0, len(h.pending))
 	for conn := range h.pending {
 		pending = append(pending, conn)
 		delete(h.pending, conn)
@@ -512,18 +521,7 @@ func (h *Hub) Shutdown(ctx context.Context) error {
 
 	for _, client := range clients {
 		go func(c *ClientConn) {
-			closeCtx, cancel := context.WithTimeout(context.Background(), wsCloseTimeout)
-			defer cancel()
-			done := make(chan struct{})
-			go func() {
-				_ = c.conn.Close(websocket.StatusGoingAway, "server shutting down")
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-closeCtx.Done():
-				c.conn.CloseNow()
-			}
+			c.conn.Close(CloseGoingAway, "server shutting down")
 			h.removeClient(c)
 		}(client)
 	}

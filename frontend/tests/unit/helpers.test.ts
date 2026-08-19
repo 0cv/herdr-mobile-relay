@@ -96,6 +96,23 @@ describe('protocol and setup parsing', () => {
       protocol: 'https:',
       host: 'app.example.com',
     } as Location)).toBeNull();
+    expect(quickSetupConfig({
+      hash: '#setup=0123456789abcdef0123456789abcdef&label=Fedora&gateway=wss%3A%2F%2Fgw.example.com',
+      protocol: 'https:',
+      host: 'app.example.com',
+    } as Location)).toEqual({
+      label: 'Fedora',
+      url: '',
+      token: '0123456789abcdef0123456789abcdef',
+      transport: 'hybrid',
+      gatewayUrl: 'wss://gw.example.com',
+      gatewayUrls: ['wss://gw.example.com'],
+    });
+    expect(quickSetupConfig({
+      hash: '#setup=0123456789abcdef0123456789abcdef&gateway=wss%3A%2F%2Fgw.example.com%2Fconnect%3Fkey%3Dleak',
+      protocol: 'https:',
+      host: 'app.example.com',
+    } as Location)).toBeNull();
 
     const encoded = encodeURIComponent(JSON.stringify({ pane_id: 'w1:p1', host: 'Fedora', action: 'approve', index: 0, total: 3 }));
     expect(parseNotificationTarget(encoded)).toMatchObject({ pane_id: 'w1:p1', action: 'approve', index: 0, total: 3 });

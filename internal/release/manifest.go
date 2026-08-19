@@ -216,14 +216,22 @@ func Build(root, version, revision, target string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
+	// The bridge release speaks both transports so app-first and relay-first
+	// rollout windows both stay connected; see ValidateUpgradeCompatibility.
 	manifest := Manifest{
-		Schema:          ManifestSchema,
-		Version:         version,
-		Revision:        revision,
-		Target:          target,
-		AppTransports:   []string{relayprotocol.EncryptedWebSocketSubprotocol},
-		RelayTransports: []string{relayprotocol.EncryptedWebSocketSubprotocol},
-		Files:           files,
+		Schema:   ManifestSchema,
+		Version:  version,
+		Revision: revision,
+		Target:   target,
+		AppTransports: []string{
+			relayprotocol.EncryptedWebSocketSubprotocol,
+			relayprotocol.HybridTransportCapability,
+		},
+		RelayTransports: []string{
+			relayprotocol.EncryptedWebSocketSubprotocol,
+			relayprotocol.HybridTransportCapability,
+		},
+		Files: files,
 	}
 	manifest.WebHash = hashFileMap(files, "web/")
 	if err := writeManifest(root, manifest); err != nil {

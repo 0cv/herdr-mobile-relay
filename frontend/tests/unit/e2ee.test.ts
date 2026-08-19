@@ -50,7 +50,7 @@ describe('relay end-to-end encryption', () => {
     const encrypted = await session.encrypt(plaintext);
     expect(encrypted).not.toContain('submit_prompt');
     expect(encrypted).not.toContain('private prompt');
-    const clientFrame = JSON.parse(encrypted) as Record<string, unknown>;
+    const clientFrame = JSON.parse(String(encrypted)) as Record<string, unknown>;
     const decryptedClient = await crypto.subtle.decrypt({
       name: 'AES-GCM',
       iv: frameNonce(0),
@@ -104,10 +104,10 @@ describe('relay end-to-end encryption', () => {
     expect(handshake.hello).toEqual(vector.client.hello);
 
     const completed = await handshake.complete(vector.server.hello);
-    expect(JSON.parse(completed.finish)).toEqual(vector.records.client_finish.frame);
+    expect(JSON.parse(String(completed.finish))).toEqual(vector.records.client_finish.frame);
     const { session } = completed;
     const frame = await session.encrypt(vector.records.c2s.plaintext);
-    expect(JSON.parse(frame)).toEqual(vector.records.c2s.frame);
+    expect(JSON.parse(String(frame))).toEqual(vector.records.c2s.frame);
     await expect(session.decrypt(JSON.stringify(vector.records.s2c.frame)))
       .resolves.toBe(vector.records.s2c.plaintext);
   });

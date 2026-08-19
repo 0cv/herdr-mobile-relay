@@ -450,6 +450,53 @@ json_string_field() {
         head -1
 }
 
+# Reads the relay's own /healthz gateway object, which reports
+# {"enabled":bool,"registered":bool,"relay_id":"...","clients":int}. Only the
+# registered flag is echoed; the relay id stays out of terminal output.
+gateway_registration_state() {
+    local health="$1"
+    printf '%s\n' "$health" |
+        tr -d ' \t\n' |
+        sed -n 's/.*"gateway":{\([^}]*\)}.*/\1/p' |
+        sed -n 's/.*"registered":\([a-z]*\).*/\1/p' |
+        head -1
+}
+
+# Blocks until the relay reports a live gateway registration, so the QR is only
+# printed for a relay the phone can actually reach.
+wait_for_gateway_registration() {
+    local port="${1:-8375}"
+    local attempts="${2:-30}"
+    local delay="${3:-1}"
+    local attempt
+    local health
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "curl is required to verify the gateway registration." >&2
+        return 1
+    fi
+
+    case "$attempts" in
+        ""|*[!0-9]*|0)
+            echo "Gateway registration attempts must be a positive integer." >&2
+            return 1
+            ;;
+    esac
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null)"; then
+            if [ "$(gateway_registration_state "$health")" = "true" ]; then
+                return 0
+            fi
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then
+            sleep "$delay"
+        fi
+    done
+
+    return 1
+}
+
 verify_relay_release_health() {
     local health="$1"
     local expected_version="$2"
@@ -510,6 +557,197 @@ build_setup_fragment() {
     "$(relay_binary)" setup-fragment "$1" "$2" "${3:-}"
 }
 
+# The configured blind gateway base URLs as a comma-separated candidate list —
+# the same shape HERDR_GATEWAY_URL takes. The relay measures healthy candidates
+# concurrently; configured order breaks close ties and is the fallback when no
+# probe succeeds. Empty means the relay keeps using a Cloudflare tunnel.
+gateway_urls() {
+    local env_file="${1:-${HERDR_RELAY_ENV:-}}"
+    local raw="${HERDR_GATEWAY_URL:-}"
+    local old_ifs
+    local list=""
+    local entry
+
+    if [ -z "$raw" ] && [ -n "$env_file" ]; then
+        raw="$(env_file_value "$env_file" HERDR_GATEWAY_URL)"
+    fi
+    old_ifs="$IFS"
+    IFS=','
+    # shellcheck disable=SC2086
+    set -- $raw
+    IFS="$old_ifs"
+    for entry in "$@"; do
+        # A URL never contains whitespace, so dropping all of it is the same as
+        # trimming what a hand-edited env file leaves around a comma.
+        entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
+        entry="${entry%/}"
+        if [ -n "$entry" ]; then
+            list="${list:+$list,}$entry"
+        fi
+    done
+    printf '%s\n' "$list"
+}
+
+# The configured tie-break leader. Terminal output and the gateway= fragment key
+# each name exactly one gateway; the live relay advertises its selected entry.
+gateway_url() {
+    local list
+
+    list="$(gateway_urls "${1:-}")"
+    printf '%s\n' "${list%%,*}"
+}
+
+# The gateway candidates this project operates for the community. They are
+# compiled in so the free shared path costs a user no hostname, no account, and
+# no typing: picking it in the chooser is the whole setup. The value has the
+# same comma-separated shape as HERDR_GATEWAY_URL. An operator points elsewhere
+# with HERDR_COMMUNITY_GATEWAY_URL; an explicitly empty value means "no
+# community gateway", which is how a test or fork switches the option off.
+HERDR_COMMUNITY_GATEWAY_DEFAULT="wss://gw.66556644.xyz"
+
+community_gateway_url() {
+    if [ "${HERDR_COMMUNITY_GATEWAY_URL+set}" = "set" ]; then
+        printf '%s\n' "$HERDR_COMMUNITY_GATEWAY_URL"
+        return
+    fi
+    printf '%s\n' "$HERDR_COMMUNITY_GATEWAY_DEFAULT"
+}
+
+# Canonicalizes anything a person might reasonably type — gw.example.com,
+# https://gw.example.com, wss://gw.example.com — into the wss:// base URL the
+# relay and the QR fragment use. It reuses the compiled origin normalizer, so a
+# gateway URL is held to the same rules as the phone app origin: no
+# credentials, no path, no query, no fragment.
+normalize_gateway_url() {
+    local input="$1"
+    local origin
+
+    case "$input" in
+        wss://*) input="https://${input#wss://}" ;;
+        ws://*) input="http://${input#ws://}" ;;
+    esac
+    if ! origin="$("$(relay_binary)" normalize-origin --allow-loopback-http "$input")"; then
+        return 1
+    fi
+    case "$origin" in
+        https://*) printf 'wss://%s\n' "${origin#https://}" ;;
+        http://*) printf 'ws://%s\n' "${origin#http://}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Canonicalizes and deduplicates a comma-separated candidate list. One invalid
+# entry rejects the choice: silently dropping a typo would make the advertised
+# disaster-recovery path look configured when it is not.
+normalize_gateway_urls() {
+    local raw="$1"
+    local old_ifs
+    local entry
+    local normalized
+    local list=""
+
+    old_ifs="$IFS"
+    IFS=','
+    # shellcheck disable=SC2086
+    set -- $raw
+    IFS="$old_ifs"
+    for entry in "$@"; do
+        entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
+        if ! normalized="$(normalize_gateway_url "$entry")"; then
+            return 1
+        fi
+        case ",$list," in
+            *,"$normalized",*) ;;
+            *) list="${list:+$list,}$normalized" ;;
+        esac
+    done
+    [ -n "$list" ] || return 1
+    printf '%s\n' "$list"
+}
+
+# The HTTPS base for the gateway's own endpoints: /healthz, /probe, /whoami.
+gateway_http_base() {
+    case "$1" in
+        wss://*) printf 'https://%s\n' "${1#wss://}" ;;
+        ws://*) printf 'http://%s\n' "${1#ws://}" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+# Confirms a gateway is actually answering before its URL is written into the
+# relay environment, so a typo or a dead host fails during setup rather than at
+# the first phone connection.
+gateway_answers_healthz() {
+    local body
+
+    if ! body="$(
+        curl --fail --silent --show-error \
+            --connect-timeout 3 \
+            --max-time 8 \
+            "$(gateway_http_base "$1")/healthz" 2>/dev/null
+    )"; then
+        return 1
+    fi
+    printf '%s\n' "$body" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'
+}
+
+# Persists the transport choice. An empty URL removes the key, which returns
+# the relay to the Cloudflare tunnel path.
+set_gateway_url() {
+    local env_file="$1"
+    local url="$2"
+
+    if [ -z "$url" ]; then
+        remove_env_value_atomic "$env_file" HERDR_GATEWAY_URL
+        return 0
+    fi
+    set_env_value_atomic "$env_file" HERDR_GATEWAY_URL "$url"
+}
+
+# Percent-encodes one fragment value with the compiled encoder, so an entry of
+# the gateway list is escaped exactly like the keys the phone already parses.
+# Values escape '=' and '&', so the only literal "relay=" in the helper's output
+# is the key whose value is being extracted.
+encode_fragment_value() {
+    build_setup_fragment "" "" "$1" | sed -e 's/.*relay=//' -e 's/&.*//'
+}
+
+# build_setup_fragment for either transport: a gateway-configured relay is
+# reached through the gateway, so the fragment carries gateway=<url> instead of
+# relay=<wss url>, plus gateways=<the whole ordered list>. The compiled helper
+# still does the percent-encoding, and because it escapes '=' inside values, the
+# only "relay=" in its output is the key itself. All secrets stay inside the
+# fragment either way.
+build_transport_setup_fragment() {
+    local token="$1"
+    local label="$2"
+    local relay_url="${3:-}"
+    local gateways
+    local fragment
+    local encoded=""
+    local old_ifs
+    local entry
+
+    gateways="$(gateway_urls)"
+    if [ -z "$gateways" ]; then
+        build_setup_fragment "$token" "$label" "$relay_url"
+        return
+    fi
+    fragment="$(build_setup_fragment "$token" "$label" "${gateways%%,*}" |
+        sed -e 's/^relay=/gateway=/' -e 's/&relay=/\&gateway=/')"
+    old_ifs="$IFS"
+    IFS=','
+    # shellcheck disable=SC2086
+    set -- $gateways
+    IFS="$old_ifs"
+    for entry in "$@"; do
+        encoded="${encoded:+$encoded,}$(encode_fragment_value "$entry")"
+    done
+    # The complete list travels even when it holds a single entry, so a relay
+    # that gains a second gateway later costs no paired phone a re-scan.
+    printf '%s&gateways=%s\n' "$fragment" "$encoded"
+}
+
 phone_app_base_url() {
     local relay_fallback="$1"
     local env_file="${2:-${HERDR_RELAY_ENV:-}}"
@@ -549,15 +787,81 @@ phone_app_origin_serves_herdr() {
         | grep -Eq '"name"[[:space:]]*:[[:space:]]*"Herdr Mobile Relay"'
 }
 
+# Asks for the origin of an already-installed Herdr app and validates it with
+# the same normalizer the setup link uses. Shared by the tunnel chooser below
+# and the gateway path, which has no relay-served origin of its own.
+prompt_phone_app_base_url() {
+    local relay_fallback="$1"
+    local env_file="$2"
+    local confirmation
+    local entered_url
+    local normalized
+
+    while true; do
+        if ! read -r -p "Installed app domain or URL (for example, app.example.com): " entered_url; then
+            echo "" >&2
+            echo "Setup cancelled." >&2
+            return 1
+        fi
+        if [ -z "$entered_url" ]; then
+            echo "✗ Enter the domain shown in the installed app's Site settings." >&2
+            continue
+        fi
+        if ! normalized="$(
+            HERDR_PHONE_APP_URL="$entered_url" \
+                phone_app_base_url "$relay_fallback" "$env_file"
+        )"; then
+            continue
+        fi
+        if ! phone_app_origin_serves_herdr "$normalized"; then
+            echo "✗ No Herdr app was found at $normalized." >&2
+            echo "  Enter the exact domain shown in the installed app's Site settings." >&2
+            if ! read -r -p "Use this address anyway? [y/N]: " confirmation; then
+                echo "" >&2
+                echo "Setup cancelled." >&2
+                return 1
+            fi
+            case "$confirmation" in
+                y|Y|yes|YES|Yes)
+                    ;;
+                *)
+                    continue
+                    ;;
+            esac
+        fi
+        printf '%s\n' "$normalized"
+        return 0
+    done
+}
+
+# The phone app origin for a gateway-configured relay. The gateway only copies
+# encrypted frames, so it serves no app and there is no relay hostname to fall
+# back to: the origin has to be recorded, configured, or entered.
+gateway_phone_app_base_url() {
+    local env_file="$1"
+    local base
+
+    if base="$(phone_app_base_url "" "$env_file" 2>/dev/null)" && [ -n "$base" ]; then
+        printf '%s\n' "$base"
+        return 0
+    fi
+    if [ -n "${HERDR_PHONE_APP_URL:-}" ] || [ ! -t 0 ]; then
+        echo "✗ Set HERDR_PHONE_APP_URL to the HTTPS origin that serves the Herdr phone app." >&2
+        echo "  The gateway carries relay traffic only; it does not host the app." >&2
+        return 1
+    fi
+    echo "The gateway carries relay traffic only, so the phone app needs its own" >&2
+    echo "HTTPS origin. Enter an installed Herdr app, or host one with make web-deploy." >&2
+    echo "" >&2
+    prompt_phone_app_base_url "" "$env_file"
+}
+
 choose_phone_app_base_url() {
     local relay_fallback="$1"
     local env_file="$2"
     local setup_kind="${3:-stable}"
     local choice
-    local confirmation
     local current_origin=""
-    local entered_url
-    local normalized
     local recorded_origin
 
     recorded_origin="$(dirname "$env_file")/phone-app-origin"
@@ -610,41 +914,8 @@ choose_phone_app_base_url() {
                 return
                 ;;
             2)
-                while true; do
-                    if ! read -r -p "Installed app domain or URL (for example, app.example.com): " entered_url; then
-                        echo "" >&2
-                        echo "Setup cancelled." >&2
-                        return 1
-                    fi
-                    if [ -z "$entered_url" ]; then
-                        echo "✗ Enter the domain shown in the installed app's Site settings." >&2
-                        continue
-                    fi
-                    if ! normalized="$(
-                        HERDR_PHONE_APP_URL="$entered_url" \
-                            phone_app_base_url "$relay_fallback" "$env_file"
-                    )"; then
-                        continue
-                    fi
-                    if ! phone_app_origin_serves_herdr "$normalized"; then
-                        echo "✗ No Herdr app was found at $normalized." >&2
-                        echo "  Enter the exact domain shown in the installed app's Site settings." >&2
-                        if ! read -r -p "Use this address anyway? [y/N]: " confirmation; then
-                            echo "" >&2
-                            echo "Setup cancelled." >&2
-                            return 1
-                        fi
-                        case "$confirmation" in
-                            y|Y|yes|YES|Yes)
-                                ;;
-                            *)
-                                continue
-                                ;;
-                        esac
-                    fi
-                    printf '%s\n' "$normalized"
-                    return
-                done
+                prompt_phone_app_base_url "$relay_fallback" "$env_file"
+                return
                 ;;
             *)
                 echo "✗ Choose 1 or 2." >&2

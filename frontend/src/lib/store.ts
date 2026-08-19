@@ -21,12 +21,12 @@ import {
   stabilizeBlockedSnapshot,
 } from './agents';
 import { relayProtocolError } from './protocol';
-import {
-  createE2EEClientHandshake,
-  E2EE_SUBPROTOCOL,
-  type E2EEClientHandshake,
-  type E2EESession,
-} from './e2ee';
+import { createRelayTransport } from './transports';
+import type {
+  RelayTransport,
+  TransportStatus,
+  TransportStatusDetail,
+} from './transports';
 import { terminalHistoryLines, terminalRefreshInterval } from './preferences';
 import {
   clearPendingRelayUpdate,
@@ -59,13 +59,18 @@ import type {
 const COMMAND_TIMEOUT_MS = 15_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
 const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
-const CONNECTION_HEALTH_TIMEOUT_MS = 10_000;
-const E2EE_HANDSHAKE_TIMEOUT_MS = 10_000;
+const BACKGROUND_HEALTH_TIMEOUT_MS = 10_000;
+const FOREGROUND_HEALTH_TIMEOUT_MS = 2_000;
 const UPDATE_RESTART_RECONNECT_DELAY_MS = 1_000;
-const RECONNECT_BASE_DELAY_MS = 3_000;
+const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
 const PANE_READ_RETRY_MS = 35_000;
 const IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+// Gateway-relayed traffic is metered project bandwidth. Halving the terminal
+// refresh rate and capping scrollback keeps the fallback affordable; the
+// direct and legacy paths are unmetered and keep full fidelity.
+const RELAYED_REFRESH_INTERVAL_MS = 500;
+const RELAYED_HISTORY_LINES = 1_000;
 const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   answer_question: true,
   navigate_question: true,
@@ -84,6 +89,18 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   upload_image: true,
   copy_agent_response: true,
 };
+
+/**
+ * How long an app-level ping may go unanswered before the socket counts as
+ * half dead. A foregrounded page is what the person is looking at, so it pays
+ * a short deadline to notice a stalled resume; a hidden page waits longer
+ * rather than churning sockets in the background.
+ */
+function healthTimeoutMs(): number {
+  return document.visibilityState === 'visible'
+    ? FOREGROUND_HEALTH_TIMEOUT_MS
+    : BACKGROUND_HEALTH_TIMEOUT_MS;
+}
 
 function normalizeAgentInventory(
   value: unknown,
@@ -104,16 +121,10 @@ function normalizeAgentInventory(
 }
 
 interface RelayConnection extends RelayConnectionView {
-  ws: WebSocket | null;
+  transport: RelayTransport | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   healthTimer: ReturnType<typeof setTimeout> | null;
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
-  e2eeHandshake: E2EEClientHandshake | null;
-  e2eeSession: E2EESession | null;
-  e2eeTimer: number | null;
-  e2eeFailed: boolean;
-  sendQueue: Promise<void>;
-  receiveQueue: Promise<void>;
   closed: boolean;
   directoryGeneration: number;
 }
@@ -232,9 +243,12 @@ class RelayStore {
 
   addRelay(input: Partial<RelayConfig>): void {
     const next = normalizeRelayConfig(input);
-    if (!next.url) return;
+    // A hybrid relay is addressed by its gateway, not by a relay URL.
+    if (!next.url && !next.gatewayUrl) return;
     const relays = get(this.relayConfigs);
-    const existing = relays.find((relay) => relay.url === next.url);
+    const existing = relays.find((relay) => (next.url
+      ? relay.url === next.url
+      : relay.gatewayUrl === next.gatewayUrl && relay.token === next.token));
     const updated = existing
       ? relays.map((relay) => (relay.id === existing.id ? { ...next, id: existing.id } : relay))
       : [...relays, next];
@@ -272,17 +286,12 @@ class RelayStore {
     this.disconnectRelay(relay.id);
     const connection: RelayConnection = {
       relay,
-      ws: null,
+      transport: null,
       status: 'connecting',
+      path: '',
       reconnectTimer: null,
       healthTimer: null,
       updateRestartTimer: null,
-      e2eeHandshake: null,
-      e2eeSession: null,
-      e2eeTimer: null,
-      e2eeFailed: false,
-      sendQueue: Promise.resolve(),
-      receiveQueue: Promise.resolve(),
       closed: false,
       agentProfiles: [],
       capabilities: [],
@@ -303,98 +312,55 @@ class RelayStore {
     };
     this.connectionsValue.set(relay.id, connection);
     this.emitConnections();
-    try {
-      connection.ws = relay.token
-        ? new WebSocket(relay.url, E2EE_SUBPROTOCOL)
-        : new WebSocket(relay.url);
-    } catch {
-      if (!this.isCurrentConnection(relay.id, connection)) return;
-      connection.status = 'disconnected';
-      this.emitConnections();
-      this.scheduleReconnect(relay, connection);
+    connection.transport = createRelayTransport(relay, {
+      onMessage: (message) => {
+        if (!this.isCurrentConnection(relay.id, connection)) return;
+        // Inbound traffic proves the path is alive, whatever the message says.
+        this.clearHealthTimer(connection);
+        this.reconnectAttempts.delete(relay.id);
+        this.handleMessage(relay.id, message);
+      },
+      onStatus: (status, detail) => {
+        this.applyTransportStatus(relay, connection, status, detail);
+      },
+    });
+    connection.transport.connect();
+  }
+
+  private applyTransportStatus(
+    relay: RelayConfig,
+    connection: RelayConnection,
+    status: TransportStatus,
+    detail?: TransportStatusDetail,
+  ): void {
+    if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
+    if (status === 'connected') {
+      const previousPath = connection.path;
+      connection.path = detail?.path || connection.transport?.kind || 'websocket';
+      this.markConnectionReady(relay.id, connection);
+      // A path switch changes the relayed-fidelity budget, so panes have to be
+      // rewatched at the interval the new path can afford.
+      if (previousPath && previousPath !== connection.path) this.restartPaneWatches();
       return;
     }
-    connection.ws.onopen = () => {
-      if (!this.isCurrentConnection(relay.id, connection)) return;
-      if (!relay.token) {
-        this.markConnectionReady(relay.id, connection);
-        return;
-      }
-      if (typeof connection.ws?.protocol === 'string'
-        && connection.ws.protocol !== E2EE_SUBPROTOCOL) {
-        this.failEncryptedConnection(relay, connection, 'Relay did not negotiate encrypted transport');
-        return;
-      }
-      connection.e2eeTimer = window.setTimeout(() => {
-        this.failEncryptedConnection(relay, connection, 'Encrypted relay handshake timed out');
-      }, E2EE_HANDSHAKE_TIMEOUT_MS);
-      void createE2EEClientHandshake(relay.token).then((handshake) => {
-        if (!this.isCurrentConnection(relay.id, connection)
-          || connection.ws?.readyState !== WebSocket.OPEN) return;
-        connection.e2eeHandshake = handshake;
-        connection.ws.send(JSON.stringify(handshake.hello));
-      }).catch(() => {
-        this.failEncryptedConnection(relay, connection, 'Could not start encrypted relay handshake');
-      });
-    };
-    connection.ws.onclose = () => {
-      if (!this.isCurrentConnection(relay.id, connection)) return;
-      this.clearE2EETimer(connection);
-      this.clearHealthTimer(connection);
-      connection.status = 'disconnected';
-      this.rejectPendingOperations(relay.id, 'Relay disconnected');
+    if (status === 'connecting') {
+      if (connection.status === 'connecting') return;
+      connection.status = 'connecting';
       this.emitConnections();
-      this.scheduleReconnect(relay, connection);
-    };
-    connection.ws.onerror = () => {
-      if (!this.isCurrentConnection(relay.id, connection)) return;
-      this.clearE2EETimer(connection);
-      connection.status = 'disconnected';
-      this.rejectPendingOperations(relay.id, 'Relay connection failed');
-      this.emitConnections();
-      this.scheduleReconnect(relay, connection);
-    };
-    connection.ws.onmessage = (event) => {
-      if (!this.isCurrentConnection(relay.id, connection)) return;
-      if (connection.e2eeFailed) return;
-      const rawMessage = String(event.data);
-      if (!relay.token) {
-        this.clearHealthTimer(connection);
-        this.reconnectAttempts.delete(relay.id);
-        try {
-          this.handleMessage(relay.id, JSON.parse(rawMessage) as Record<string, any>);
-        } catch {
-          // Ignore malformed plaintext frames used by tokenless loopback development.
-        }
-        return;
-      }
-      connection.receiveQueue = connection.receiveQueue.then(async () => {
-        if (!this.isCurrentConnection(relay.id, connection) || connection.e2eeFailed) return;
-        if (!connection.e2eeSession) {
-          if (!connection.e2eeHandshake) throw new Error('Encrypted server hello arrived before client hello');
-          const completed = await connection.e2eeHandshake.complete(JSON.parse(rawMessage));
-          if (!this.isCurrentConnection(relay.id, connection)
-            || connection.e2eeFailed
-            || connection.ws?.readyState !== WebSocket.OPEN) return;
-          connection.e2eeSession = completed.session;
-          connection.e2eeHandshake = null;
-          connection.ws?.send(completed.finish);
-          this.markConnectionReady(relay.id, connection);
-          return;
-        }
-        const plaintext = await connection.e2eeSession.decrypt(rawMessage);
-        this.handleMessage(relay.id, JSON.parse(plaintext) as Record<string, any>);
-        this.clearHealthTimer(connection);
-        this.reconnectAttempts.delete(relay.id);
-      }).catch(() => {
-        this.failEncryptedConnection(relay, connection, 'Encrypted relay connection failed');
-      });
-    };
+      return;
+    }
+    this.clearHealthTimer(connection);
+    connection.status = 'disconnected';
+    this.rejectPendingOperations(relay.id, detail?.reason || 'Relay disconnected');
+    this.emitConnections();
+    // A fatal transport cannot succeed on retry with this configuration, so
+    // retrying it would only burn battery until the relay entry is fixed.
+    if (detail?.fatal) return;
+    this.scheduleReconnect(relay, connection);
   }
 
   private markConnectionReady(relayId: string, connection: RelayConnection): void {
-    if (!this.isCurrentConnection(relayId, connection)) return;
-    this.clearE2EETimer(connection);
+    if (!this.isCurrentConnection(relayId, connection) || connection.closed) return;
     connection.status = 'connected';
     this.emitConnections();
     if (runningAsInstalledApp()) {
@@ -407,28 +373,53 @@ class RelayStore {
     this.sendRaw(relayId, { type: 'refresh_agents' });
   }
 
-  private failEncryptedConnection(
-    relay: RelayConfig,
-    connection: RelayConnection,
-    reason: string,
-  ): void {
-    if (!this.isCurrentConnection(relay.id, connection) || connection.closed) return;
-    connection.e2eeFailed = true;
-    connection.e2eeHandshake = null;
-    connection.e2eeSession = null;
-    this.clearE2EETimer(connection);
-    this.clearHealthTimer(connection);
-    connection.status = 'disconnected';
-    this.rejectPendingOperations(relay.id, reason);
-    this.emitConnections();
-    connection.ws?.close();
-    this.scheduleReconnect(relay, connection);
+  /**
+   * Drops the reconnect backoff so a resumed page retries at once. The caller
+   * decides how to reconnect afterwards — this only removes the delay that
+   * earlier failures imposed.
+   */
+  resetReconnectBackoff(): void {
+    this.reconnectAttempts.clear();
+    for (const connection of this.connectionsValue.values()) {
+      if (!connection.reconnectTimer) continue;
+      clearTimeout(connection.reconnectTimer);
+      connection.reconnectTimer = null;
+    }
   }
 
-  private clearE2EETimer(connection: RelayConnection): void {
-    if (!connection.e2eeTimer) return;
-    window.clearTimeout(connection.e2eeTimer);
-    connection.e2eeTimer = null;
+  /**
+   * Bridge-window migration. A relay reached over its legacy WSS URL announces
+   * that it also speaks the hybrid transport; the app records its selected
+   * gateway first and the remaining cold fallbacks. The legacy relay URL is
+   * kept, and the live connection is never interrupted — no QR re-scan or
+   * reconnect merely because the relay selected a different gateway.
+   */
+  private adoptHybridDescriptor(connection: RelayConnection, descriptor: unknown): void {
+    if (!descriptor || typeof descriptor !== 'object') return;
+    const advertised = descriptor as Record<string, unknown>;
+    const gatewayUrl = String(advertised.gateway_url || '').trim();
+    if (!gatewayUrl.startsWith('wss://') && !gatewayUrl.startsWith('ws://')) return;
+    const gatewayUrls = Array.isArray(advertised.gateway_urls)
+      ? advertised.gateway_urls as string[]
+      : [];
+    const relay = connection.relay;
+    const upgraded = normalizeRelayConfig({
+      ...relay,
+      transport: 'hybrid',
+      gatewayUrl,
+      gatewayUrls,
+    });
+    const currentGateways = relay.gatewayUrls ?? (relay.gatewayUrl ? [relay.gatewayUrl] : []);
+    const nextGateways = upgraded.gatewayUrls ?? (upgraded.gatewayUrl ? [upgraded.gatewayUrl] : []);
+    if (
+      relay.transport === 'hybrid'
+      && relay.gatewayUrl === upgraded.gatewayUrl
+      && currentGateways.join() === nextGateways.join()
+    ) return;
+    connection.relay = upgraded;
+    const relays = get(this.relayConfigs).map((entry) => (entry.id === relay.id ? upgraded : entry));
+    this.relayConfigs.set(relays);
+    saveRelayConfigs(relays);
   }
 
   disconnectRelay(id: string): void {
@@ -444,21 +435,20 @@ class RelayStore {
     connection.closed = true;
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
     this.clearHealthTimer(connection);
-    this.clearE2EETimer(connection);
     this.clearUpdateRestartTimer(connection);
-    connection.ws?.close();
+    connection.transport?.close();
     this.rejectPendingOperations(id, 'Relay disconnected');
     this.connectionsValue.delete(id);
     this.emitConnections();
   }
 
-  revalidateConnections(timeoutMs = CONNECTION_HEALTH_TIMEOUT_MS): void {
+  revalidateConnections(timeoutMs = healthTimeoutMs()): void {
     if (!this.reconnectEnabled) return;
     const relays = get(this.relayConfigs);
     for (const relay of relays) {
       const connection = this.connectionsValue.get(relay.id);
-      if (connection?.ws?.readyState === WebSocket.CONNECTING) continue;
-      if (!connection?.ws || connection.ws.readyState !== WebSocket.OPEN) {
+      if (connection?.status === 'connecting') continue;
+      if (connection?.status !== 'connected') {
         this.connectRelay(relay);
         continue;
       }
@@ -552,6 +542,7 @@ class RelayStore {
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
+      this.adoptHybridDescriptor(connection, message.hybrid);
       const attentionCapable = connection.capabilities.includes('attention_classification');
       this.agentsValue = this.agentsValue.map((agent) =>
         agent.relay_id === relayId ? normalizeAgentAttention(agent, attentionCapable) : agent,
@@ -853,27 +844,8 @@ class RelayStore {
 
   sendRaw(relayId: string, payload: Record<string, unknown>): boolean {
     const connection = this.connectionsValue.get(relayId);
-    const socket = connection?.ws;
-    if (!connection || !socket || socket.readyState !== WebSocket.OPEN || connection.status !== 'connected') {
-      return false;
-    }
-    const plaintext = JSON.stringify(payload);
-    if (!connection.relay.token) {
-      socket.send(plaintext);
-      return true;
-    }
-    const session = connection.e2eeSession;
-    if (!session) return false;
-    connection.sendQueue = connection.sendQueue.then(async () => {
-      const encrypted = await session.encrypt(plaintext);
-      if (!this.isCurrentConnection(relayId, connection)
-        || connection.ws !== socket
-        || socket.readyState !== WebSocket.OPEN) return;
-      socket.send(encrypted);
-    }).catch(() => {
-      this.failEncryptedConnection(connection.relay, connection, 'Could not encrypt relay message');
-    });
-    return true;
+    if (!connection || connection.status !== 'connected') return false;
+    return connection.transport?.send(payload) ?? false;
   }
 
   sendCommand(
@@ -883,7 +855,7 @@ class RelayStore {
     allowProtocolMismatch = false,
   ): Promise<CommandResult> {
     const connection = this.connectionsValue.get(relayId);
-    if (!connection?.ws || connection.ws.readyState !== 1) {
+    if (!connection || connection.status !== 'connected') {
       return Promise.reject(new CommandError('Relay is not connected'));
     }
     const protocolError = relayProtocolError(connection);
@@ -1138,6 +1110,21 @@ class RelayStore {
     };
   }
 
+  /**
+   * Terminal fidelity the active path can afford. Gateway-relayed traffic is
+   * metered project bandwidth, so it refreshes at half the rate and caps
+   * scrollback; direct and legacy paths keep the user's full settings.
+   */
+  private paneBudget(relayId: string): { lines: number; intervalMs: number } {
+    const lines = get(terminalHistoryLines);
+    const intervalMs = get(terminalRefreshInterval);
+    if (this.connectionsValue.get(relayId)?.path !== 'gateway') return { lines, intervalMs };
+    return {
+      lines: Math.min(lines, RELAYED_HISTORY_LINES),
+      intervalMs: Math.max(intervalMs, RELAYED_REFRESH_INTERVAL_MS),
+    };
+  }
+
   readPane(agent: Agent, force = false): void {
     const requestedAt = this.pendingPaneReads.get(agent.pane_id);
     if (!force && requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
@@ -1145,7 +1132,7 @@ class RelayStore {
     const sent = this.sendRaw(agent.relay_id, {
       type: 'read_pane',
       pane_id: agent.raw_pane_id,
-      lines: get(terminalHistoryLines),
+      lines: this.paneBudget(agent.relay_id).lines,
       format: 'ansi',
       content_fingerprint: force ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
     });
@@ -1182,11 +1169,12 @@ class RelayStore {
     if (!connection?.capabilities.includes('pane_realtime_delta')) return;
     const contentFingerprint = this.paneContentFingerprints.get(paneId);
     if (!contentFingerprint) return;
+    const budget = this.paneBudget(agent.relay_id);
     const sent = this.sendRaw(agent.relay_id, {
       type: 'watch_pane',
       pane_id: agent.raw_pane_id,
-      lines: get(terminalHistoryLines),
-      interval_ms: get(terminalRefreshInterval),
+      lines: budget.lines,
+      interval_ms: budget.intervalMs,
       format: 'ansi',
       content_fingerprint: contentFingerprint,
     });
@@ -1514,13 +1502,13 @@ class RelayStore {
   async uploadImage(agent: Agent, file: File, timeoutMs = IMAGE_UPLOAD_TIMEOUT_MS): Promise<string> {
     if (file.size > IMAGE_UPLOAD_MAX_BYTES) throw new CommandError('Image is larger than 10 MB.');
     const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.ws || connection.ws.readyState !== 1) throw new CommandError('Relay is not connected.');
+    if (!connection || connection.status !== 'connected') throw new CommandError('Relay is not connected.');
     const protocolError = relayProtocolError(connection);
     if (protocolError) throw new CommandError(protocolError);
     const requestId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const data = await readFileAsDataUrl(file);
     if (!this.isCurrentConnection(agent.relay_id, connection)
-      || connection.ws?.readyState !== WebSocket.OPEN) {
+      || connection.status !== 'connected') {
       throw new CommandError('Relay disconnected before the image could be uploaded.');
     }
     return new Promise((resolve, reject) => {

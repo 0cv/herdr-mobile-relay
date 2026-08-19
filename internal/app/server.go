@@ -91,6 +91,7 @@ type Server struct {
 	dispatcher       *coordinator.Dispatcher
 	updateM          *relayupdate.Manager
 	appDeployM       *appdeploy.Manager
+	hybrid           *hybridTransport
 
 	mu        sync.RWMutex
 	ready     bool
@@ -253,6 +254,9 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.appDeployM.State().Configured {
 			capabilities = append(capabilities, "app_deploy")
 		}
+		if s.hybrid.directEnabled() {
+			capabilities = append(capabilities, "webrtc_direct")
+		}
 		s.hub.Send(client, protocol.PushConfig{
 			Type:           "push_config",
 			VAPIDPublicKey: vapidPublicKey,
@@ -266,6 +270,7 @@ func (s *Server) Run(ctx context.Context) error {
 			Capabilities:   capabilities,
 			Inventory:      inventory,
 			AgentProfiles:  s.profiles.Profiles(),
+			Hybrid:         s.hybridDescriptor(),
 		})
 		s.hub.Send(client, map[string]any{
 			"type":   "agents",
@@ -289,6 +294,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
 		s.stopPaneWatch(client.ID(), "")
+		if s.hybrid != nil {
+			s.hybrid.forgetClient(client.ID())
+		}
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.paneSizeM.ReleaseClient(releaseCtx, client.ID()); err != nil {
@@ -593,6 +601,8 @@ func (s *Server) Run(ctx context.Context) error {
 			s.refreshClients[client.ID()] = true
 			s.refreshMu.Unlock()
 			s.poller.Wake()
+		case "webrtc_offer", "webrtc_ice", "webrtc_close":
+			s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
 		default:
 			var result *coordinator.CommandResult
 			if coordinated {
@@ -754,6 +764,10 @@ func (s *Server) Run(ctx context.Context) error {
 	startBackground(func() { s.writeSupportLoop(ctx) })
 	startBackground(func() { s.watchJobStates(ctx) })
 	startBackground(func() { s.updateCheckLoop(ctx) })
+	s.hybrid = s.startHybridTransport(ctx)
+	if s.hybrid != nil {
+		s.hybrid.run(ctx, startBackground)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -789,6 +803,9 @@ func (s *Server) Run(ctx context.Context) error {
 		runErr = fmt.Errorf("websocket shutdown: %w", err)
 	}
 	cancelHub()
+	if s.hybrid != nil {
+		s.hybrid.close()
+	}
 	if s.udp != nil {
 		_ = s.udp.Close()
 	}
@@ -1426,6 +1443,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"revision":        s.revision,
 		"protocol":        protocol.Version,
 	}
+	resp["gateway"] = s.hybrid.status()
 
 	if s.webH != nil {
 		resp["bundle_hash"] = s.webH.BundleHash()
