@@ -130,6 +130,92 @@ test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_
 test "$(NO_COLOR= menu_item 3 "Stable Tunnel")" = "  3. Stable Tunnel"
 test "$(NO_COLOR=1 menu_item q "Exit, change nothing")" = "  q. Exit, change nothing"
 
+# A phone-app origin no Pages project serves used to demand a project that
+# could not exist, with no way out but killing the pane.
+DEPLOY_HOME="$WORK_DIR/deploy-home"
+DEPLOY_BIN="$WORK_DIR/deploy-bin"
+DEPLOY_ENV="$DEPLOY_HOME/relay.env"
+mkdir -p "$DEPLOY_HOME" "$DEPLOY_BIN"
+printf "HERDR_RELAY_TOKEN='deploy-token'\n" > "$DEPLOY_ENV"
+cat > "$DEPLOY_BIN/relay-stub" <<'EOF'
+#!/bin/sh
+case "$1 $2" in
+    "normalize-origin --allow-loopback-http")
+        host="${3#https://}"
+        printf 'https://%s\n' "${host#http://}"
+        ;;
+    "pages-projects list") printf '  herdr-0cv (herdr-0cv.pages.dev, app.example.test)\n' ;;
+    "pages-projects names") printf 'herdr-0cv\n' ;;
+    "pages-projects matching")
+        [ "$3" = "https://app.example.test" ] && printf 'herdr-0cv\n'
+        ;;
+    "pages-projects validate")
+        test "$3" = herdr-0cv && test "$4" = "https://app.example.test"
+        ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod 700 "$DEPLOY_BIN/relay-stub"
+printf '#!/bin/sh\nprintf "{}\\n"\n' > "$DEPLOY_BIN/npx"
+printf '#!/bin/sh\nexit 0\n' > "$DEPLOY_BIN/node"
+chmod 700 "$DEPLOY_BIN/npx" "$DEPLOY_BIN/node"
+
+run_configure_app_deploy() {
+    printf '%b' "$1" | HOME="$DEPLOY_HOME" \
+        PATH="$DEPLOY_BIN:$PATH" \
+        HERDR_RELAY_BIN="$DEPLOY_BIN/relay-stub" \
+        HERDR_APP_DEPLOY_NODE_DIR="$DEPLOY_BIN" \
+        HERDR_RELAY_ENV="$DEPLOY_ENV" \
+        bash "$REPO_DIR/relay/configure-app-deploy.sh" 2>&1
+}
+
+DEPLOY_OUTPUT="$(run_configure_app_deploy 'unserved.example.test\nq\n' || true)"
+case "$DEPLOY_OUTPUT" in
+    *"No Pages project above serves https://unserved.example.test"*"Configuration cancelled."*) ;;
+    *)
+        echo "app deploy did not explain or escape an unservable origin" >&2
+        printf '%s\n' "$DEPLOY_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+if grep -q 'HERDR_CLOUDFLARE_PAGES_PROJECT' "$DEPLOY_ENV"; then
+    echo "a cancelled app deploy configuration still wrote to relay.env" >&2
+    exit 1
+fi
+
+# Correcting the origin at that second chance has to get past the origin problem
+# and reach the project question, which is itself escapable. Prompts are
+# invisible here because bash prints them only to a terminal, so the evidence is
+# what the run did: it stopped at the project step without complaining about the
+# origin again, and wrote nothing.
+DEPLOY_OUTPUT="$(run_configure_app_deploy 'unserved.example.test\napp.example.test\nq\n' || true)"
+case "$DEPLOY_OUTPUT" in
+    *"No Pages project serves https://app.example.test either"*)
+        echo "a corrected origin was rejected" >&2
+        printf '%s\n' "$DEPLOY_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+case "$DEPLOY_OUTPUT" in
+    *"Configuration cancelled."*) ;;
+    *)
+        echo "the project question could not be escaped" >&2
+        printf '%s\n' "$DEPLOY_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+if grep -q 'HERDR_CLOUDFLARE_PAGES_PROJECT' "$DEPLOY_ENV"; then
+    echo "escaping the project question still wrote to relay.env" >&2
+    exit 1
+fi
+
+# The whole point of the flow: a matching origin and project are recorded.
+printf '#!/bin/sh\nexit 0\n' > "$DEPLOY_BIN/systemctl"
+chmod 700 "$DEPLOY_BIN/systemctl"
+run_configure_app_deploy 'app.example.test\nherdr-0cv\n' >/dev/null 2>&1 || true
+test "$(env_file_value "$DEPLOY_ENV" HERDR_APP_DEPLOY_ORIGIN)" = "https://app.example.test"
+test "$(env_file_value "$DEPLOY_ENV" HERDR_CLOUDFLARE_PAGES_PROJECT)" = "herdr-0cv"
+
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"

@@ -46,15 +46,37 @@ echo ""
 echo "This computer will be allowed to deploy one separately hosted Cloudflare"
 echo "Pages app. It never sends Cloudflare credentials to the phone."
 echo ""
-if [ -n "$DEFAULT_ORIGIN" ]; then
-    read -r -p "App origin [$DEFAULT_ORIGIN]: " APP_ORIGIN
-    APP_ORIGIN="${APP_ORIGIN:-$DEFAULT_ORIGIN}"
-else
-    read -r -p "App origin (for example, app.example.com): " APP_ORIGIN
-fi
-if ! APP_ORIGIN="$(
-    HERDR_PHONE_APP_URL="$APP_ORIGIN" phone_app_base_url "" "$ENV_FILE"
-)"; then
+
+# The origin and the project have to agree: only a project that already serves
+# that domain can deploy to it. Getting either wrong used to trap the person in
+# a loop demanding a project that cannot exist, so both are asked inside one
+# retry and either can be abandoned.
+prompt_app_origin() {
+    local entered
+
+    while true; do
+        if [ -n "$DEFAULT_ORIGIN" ]; then
+            read -r -p "App origin [$DEFAULT_ORIGIN], or q to cancel: " entered ||
+                return 1
+            entered="${entered:-$DEFAULT_ORIGIN}"
+        else
+            read -r -p "App origin, for example app.example.com, or q to cancel: " entered ||
+                return 1
+        fi
+        case "$entered" in
+            q | Q) return 1 ;;
+            '') continue ;;
+        esac
+        if APP_ORIGIN="$(
+            HERDR_PHONE_APP_URL="$entered" phone_app_base_url "" "$ENV_FILE"
+        )"; then
+            return 0
+        fi
+    done
+}
+
+if ! prompt_app_origin; then
+    echo "Configuration cancelled." >&2
     exit 1
 fi
 
@@ -82,12 +104,34 @@ if [ -z "$PROJECT_NAMES" ]; then
 fi
 echo "$PROJECT_NAMES"
 
-AVAILABLE_PROJECTS="$(
-    printf '%s' "$PROJECTS_JSON" | "$(relay_binary)" pages-projects names
-)"
+# An origin nothing serves is an answer, not a failure, so a non-zero status
+# here must not abort the script before it can say so.
 MATCHING_PROJECTS="$(
-    printf '%s' "$PROJECTS_JSON" | "$(relay_binary)" pages-projects matching "$APP_ORIGIN"
+    printf '%s' "$PROJECTS_JSON" | "$(relay_binary)" pages-projects matching "$APP_ORIGIN" || true
 )"
+
+# No project serves this origin, so no answer to the project question can be
+# accepted: say which of the two things is wrong instead of asking again.
+if [ -z "$(printf '%s\n' "$MATCHING_PROJECTS" | sed '/^$/d')" ]; then
+    echo ""
+    echo "✗ No Pages project above serves $APP_ORIGIN." >&2
+    echo "  Either add that domain to a project in Cloudflare (Pages → the" >&2
+    echo "  project → Custom domains) and rerun this action, or enter an origin" >&2
+    echo "  one of the listed projects already serves." >&2
+    echo "" >&2
+    if ! prompt_app_origin; then
+        echo "Configuration cancelled." >&2
+        exit 1
+    fi
+    MATCHING_PROJECTS="$(
+        printf '%s' "$PROJECTS_JSON" |
+            "$(relay_binary)" pages-projects matching "$APP_ORIGIN" || true
+    )"
+    if [ -z "$(printf '%s\n' "$MATCHING_PROJECTS" | sed '/^$/d')" ]; then
+        echo "✗ No Pages project serves $APP_ORIGIN either. Nothing was changed." >&2
+        exit 1
+    fi
+fi
 
 DEFAULT_PROJECT=""
 if [ -n "${HERDR_CLOUDFLARE_PAGES_PROJECT:-}" ] \
@@ -96,21 +140,26 @@ if [ -n "${HERDR_CLOUDFLARE_PAGES_PROJECT:-}" ] \
     DEFAULT_PROJECT="$HERDR_CLOUDFLARE_PAGES_PROJECT"
 elif [ "$(printf '%s\n' "$MATCHING_PROJECTS" | sed '/^$/d' | wc -l)" -eq 1 ]; then
     DEFAULT_PROJECT="$(printf '%s\n' "$MATCHING_PROJECTS" | sed -n '1p')"
-elif [ "$(printf '%s\n' "$AVAILABLE_PROJECTS" | sed '/^$/d' | wc -l)" -eq 1 ]; then
-    DEFAULT_PROJECT="$(printf '%s\n' "$AVAILABLE_PROJECTS" | sed -n '1p')"
 fi
 
 echo ""
 while true; do
     if [ -n "$DEFAULT_PROJECT" ]; then
-        read -r -p "Pages project [$DEFAULT_PROJECT]: " PAGES_PROJECT
+        read -r -p "Pages project [$DEFAULT_PROJECT], or q to cancel: " PAGES_PROJECT ||
+            PAGES_PROJECT=q
         PAGES_PROJECT="${PAGES_PROJECT:-$DEFAULT_PROJECT}"
     else
-        read -r -p "Pages project name: " PAGES_PROJECT
+        read -r -p "Pages project name, or q to cancel: " PAGES_PROJECT || PAGES_PROJECT=q
     fi
+    case "$PAGES_PROJECT" in
+        q | Q)
+            echo "Configuration cancelled." >&2
+            exit 1
+            ;;
+    esac
     if ! printf '%s' "$PAGES_PROJECT" \
         | grep -Eq '^[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?$'; then
-        echo "Project not available. Enter one of the project names shown above."
+        echo "Enter one of the project names listed above, or q to cancel."
         continue
     fi
 
@@ -118,7 +167,8 @@ while true; do
         | "$(relay_binary)" pages-projects validate "$PAGES_PROJECT" "$APP_ORIGIN"; then
         break
     fi
-    echo "Project unavailable or it does not serve $APP_ORIGIN. Choose a listed project with that domain."
+    echo "$PAGES_PROJECT cannot deploy $APP_ORIGIN. These can:"
+    printf '%s\n' "$MATCHING_PROJECTS" | sed '/^$/d;s/^/  /'
 done
 
 set_env_value_atomic "$ENV_FILE" HERDR_APP_DEPLOY_ORIGIN "$APP_ORIGIN"
