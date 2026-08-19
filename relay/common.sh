@@ -627,7 +627,7 @@ gateway_url() {
 # same comma-separated shape as HERDR_GATEWAY_URL. An operator points elsewhere
 # with HERDR_COMMUNITY_GATEWAY_URL; an explicitly empty value means "no
 # community gateway", which is how a test or fork switches the option off.
-HERDR_COMMUNITY_GATEWAY_DEFAULT="wss://gw.66556644.xyz"
+HERDR_COMMUNITY_GATEWAY_DEFAULT="wss://gw1.herdr-mobile.dev,wss://gw2.herdr-mobile.dev"
 
 community_gateway_url() {
     if [ "${HERDR_COMMUNITY_GATEWAY_URL+set}" = "set" ]; then

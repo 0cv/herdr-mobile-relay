@@ -102,15 +102,17 @@ restart wins because the dead link misses the ping; an attacker cannot evict a
 healthy relay. Effort **S**. **Blocks release: yes** — it is cheap and it
 protects the availability of every community-gateway user.
 
-**G6 — Community gateway operations.** The default is compiled in as
-`wss://gw.66556644.xyz`, which is a personal VPS on a throwaway-looking domain;
-installed apps and QR codes will depend on that name for years. The VPS also
-still runs the pre-ceilings build.
-*Fix:* (a) decide the permanent hostname — this is the last cheap moment to
-change it; (b) redeploy with the ceilings binary (`bash relay/gateway-deploy.sh`,
-five Enters); (c) a minimal ops runbook: `/healthz` watch, disk for
-`gateway-state`, certificate renewal is Caddy's, and the documented posture is
-best-effort with no uptime promise. Effort **S** plus a decision.
+**G6 — Community gateway operations.** Decided: the permanent names are
+`gw1.herdr-mobile.dev` (the original VPS) and `gw2.herdr-mobile.dev` (Canada),
+compiled in as the ordered default so the relay probes both and keeps the
+lowest-latency healthy one. The throwaway `gw.66556644.xyz` domain is gone and
+no longer resolves, so every relay shipped before this change falls back to
+nothing until it updates.
+*Remaining:* (a) redeploy `gw1` under its new hostname so Caddy issues a
+certificate for it — the old name's certificate is why it currently answers
+`tlsv1 alert internal error`; (b) deploy `gw2`; (c) a minimal ops runbook:
+`/healthz` watch, disk for `gateway-state`, certificate renewal is Caddy's, and
+the documented posture is best-effort with no uptime promise.
 **Blocks release: yes.**
 
 ### Product and UX

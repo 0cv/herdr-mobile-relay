@@ -806,14 +806,48 @@ report_public_health_failure() {
     echo "  gateway\", and enter $GATEWAY_HOST."
 }
 
+# ssh only offers ~/.ssh/id_* and whatever ~/.ssh/config names, so a key kept
+# anywhere else fails with a bare "Permission denied (publickey)" even though
+# the same key works when the user passes -i by hand. Asking for it once beats
+# making them find an environment variable, and the answer is remembered.
+retry_with_identity() {
+    local key
+
+    have_tty || return 1
+    echo "  ssh offered no key this host accepts." >&2
+    if ! read -r -p "  Key file to use (empty to give up): " key; then
+        echo "" >&2
+        return 1
+    fi
+    key="${key/#\~/$HOME}"
+    [ -n "$key" ] || return 1
+    if [ ! -r "$key" ]; then
+        echo "✗ No readable key at $key." >&2
+        return 1
+    fi
+    SSH_BIN=(ssh -i "$key")
+    printf '▸ Retrying %s with %s..' "$SSH_TARGET" "$key"
+    remote_run 'true'
+}
+
+explain_ssh_failure() {
+    echo "✗ Could not open an SSH session to $SSH_TARGET." >&2
+    echo "  Cloud images usually refuse root: the same server often answers as" >&2
+    echo "  debian@, ubuntu@, admin@, or ec2-user@ instead." >&2
+    echo "  A key outside ~/.ssh/id_* is never offered unless it is named:" >&2
+    echo "    HERDR_GATEWAY_DEPLOY_SSH=\"ssh -i ~/.ssh/yourkey\" rerun this" >&2
+}
+
 deploy_bundle() {
     ssh_session_start
 
     printf '▸ Connecting to %s..' "$SSH_TARGET"
     if ! remote_run 'true'; then
         echo ""
-        echo "✗ Could not open an SSH session to $SSH_TARGET." >&2
-        return 1
+        if ! retry_with_identity; then
+            explain_ssh_failure
+            return 1
+        fi
     fi
     echo " ✓"
 
@@ -937,6 +971,16 @@ elif have_tty; then
 elif [ -n "$REMEMBERED_SERVER" ] && valid_ssh_target "$REMEMBERED_SERVER"; then
     SSH_TARGET="$REMEMBERED_SERVER"
     echo "▸ Reusing the remembered server $SSH_TARGET"
+fi
+
+# The ssh command itself is an answer like any other: a host reached with a
+# named key stays reachable on the next run without retyping anything.
+if [ -z "${HERDR_GATEWAY_DEPLOY_SSH:-}" ]; then
+    REMEMBERED_SSH="$(remembered_answer HERDR_GATEWAY_DEPLOY_SSH)"
+    if [ -n "$REMEMBERED_SSH" ]; then
+        read -r -a SSH_BIN <<<"$REMEMBERED_SSH"
+        echo "▸ Reusing the remembered SSH command ${SSH_BIN[*]}"
+    fi
 fi
 
 REMOTE_DIR="${HERDR_GATEWAY_DEPLOY_REMOTE_DIR:-}"
@@ -1085,6 +1129,13 @@ echo "▸ Deploying to $SSH_TARGET:$REMOTE_DIR"
 
 DEPLOY_STATUS=0
 deploy_bundle || DEPLOY_STATUS=$?
+
+# Recorded after the attempt, not before it: the key that finally opened the
+# session is only known once one has.
+if [ "${SSH_BIN[*]}" != "ssh" ]; then
+    HERDR_GATEWAY_DEPLOY_SSH="${SSH_BIN[*]}"
+    remember_answers HERDR_GATEWAY_DEPLOY_SSH
+fi
 
 case "$DEPLOY_STATUS" in
     0) ;;

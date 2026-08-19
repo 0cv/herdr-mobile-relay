@@ -353,7 +353,8 @@ test -z "$(unset HERDR_GATEWAY_URL; gateway_url "$CHOICE_ENV")"
 # The community gateway is published, so an install that configures nothing gets
 # the shared one; an operator overrides it, and an explicitly empty value is the
 # documented way to say "this build runs no community gateway".
-test "$(unset HERDR_COMMUNITY_GATEWAY_URL; community_gateway_url)" = "wss://gw.66556644.xyz"
+test "$(unset HERDR_COMMUNITY_GATEWAY_URL; community_gateway_url)" = \
+    "wss://gw1.herdr-mobile.dev,wss://gw2.herdr-mobile.dev"
 test "$(HERDR_COMMUNITY_GATEWAY_URL="wss://community.example.test" community_gateway_url)" = "wss://community.example.test"
 test "$(HERDR_COMMUNITY_GATEWAY_URL="wss://a.example.test,wss://b.example.test" community_gateway_url)" = \
     "wss://a.example.test,wss://b.example.test"

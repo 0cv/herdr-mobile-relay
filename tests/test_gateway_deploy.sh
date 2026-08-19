@@ -20,8 +20,15 @@ cat > "$STUB_DIR/ssh" <<'EOF'
 set -uo pipefail
 target=""
 command=""
+skip_value=false
 for argument in "$@"; do
+    if [ "$skip_value" = true ]; then
+        skip_value=false
+        printf '%s\n' "$argument" > "$STUB_STATE/identity"
+        continue
+    fi
     case "$argument" in
+        -i) skip_value=true ;;
         -o | -O) continue ;;
         -*) continue ;;
         ControlMaster=* | ControlPath=* | ControlPersist=* | ConnectTimeout=* | exit) continue ;;
@@ -275,5 +282,50 @@ grep -Fq "email ops@example.test" "$REMEMBERED_BUNDLE/Caddyfile" ||
     fail "rerun did not reuse the remembered ACME contact"
 grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test'" "$HERDR_RELAY_ENV" ||
     fail "remembered rerun did not record the verified gateway URL"
+
+# --- A key ssh would never offer on its own ---------------------------------
+# Hosts that only accept a key outside ~/.ssh/id_* are the common case for
+# rented servers. Naming the ssh command has to reach the server, and the next
+# run has to keep using it without being told again.
+: > "$SSH_LOG"
+rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz" "$STUB_STATE/identity"
+NAMED_KEY="$WORK_DIR/named-key"
+printf 'not a real key\n' > "$NAMED_KEY"
+export HERDR_GATEWAY_DEPLOY_SSH="ssh -i $NAMED_KEY"
+run_deploy
+[ "$STATUS" -eq 0 ] || fail "named-key run exited $STATUS"
+test "$(cat "$STUB_STATE/identity")" = "$NAMED_KEY" ||
+    fail "the named key never reached ssh"
+grep -Fq "HERDR_GATEWAY_DEPLOY_SSH='ssh -i $NAMED_KEY'" "$STATE_FILE" ||
+    fail "the working ssh command was not remembered"
+
+: > "$SSH_LOG"
+rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz" "$STUB_STATE/identity"
+unset HERDR_GATEWAY_DEPLOY_SSH
+run_deploy
+[ "$STATUS" -eq 0 ] || fail "remembered-key rerun exited $STATUS"
+grep -Fq "Reusing the remembered SSH command ssh -i $NAMED_KEY" "$OUTPUT" ||
+    fail "rerun did not reuse the remembered ssh command"
+test "$(cat "$STUB_STATE/identity")" = "$NAMED_KEY" ||
+    fail "rerun did not pass the remembered key to ssh"
+
+# --- Unreachable without a key: the diagnosis has to name both causes --------
+: > "$SSH_LOG"
+rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz"
+cat > "$STUB_DIR/ssh" <<'EOF'
+#!/bin/sh
+exit 255
+EOF
+chmod 700 "$STUB_DIR/ssh"
+export HERDR_GATEWAY_DEPLOY_SSH="ssh"
+run_deploy
+[ "$STATUS" -ne 0 ] || fail "unreachable server reported success"
+grep -Fq 'Could not open an SSH session' "$OUTPUT" ||
+    fail "unreachable server printed no diagnosis"
+grep -Fq 'debian@' "$OUTPUT" ||
+    fail "diagnosis does not mention the non-root cloud-image accounts"
+grep -Fq 'HERDR_GATEWAY_DEPLOY_SSH="ssh -i ~/.ssh/yourkey"' "$OUTPUT" ||
+    fail "diagnosis does not show how to name a key"
+unset HERDR_GATEWAY_DEPLOY_SSH
 
 echo "gateway deploy tests passed"
