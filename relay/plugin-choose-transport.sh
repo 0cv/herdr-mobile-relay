@@ -131,6 +131,7 @@ choose_own_gateway() {
 case "$MODE" in
     temporary)
         set_gateway_url "$ENV_FILE" ""
+        unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
         echo "✓ Temporary Cloudflare tunnel selected."
         if installed_relay_service_active; then
             echo "  A background relay is already installed, so Quick Start will"

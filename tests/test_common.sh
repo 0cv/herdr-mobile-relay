@@ -601,7 +601,7 @@ test -z "$(unset HERDR_GATEWAY_URL; gateway_url "$CHOICE_ENV")"
 # the shared one; an operator overrides it, and an explicitly empty value is the
 # documented way to say "this build runs no community gateway".
 test "$(unset HERDR_COMMUNITY_GATEWAY_URL; community_gateway_url)" = \
-    "wss://gw1.herdr-mobile.dev,wss://gw2.herdr-mobile.dev"
+    "wss://gw2.herdr-mobile.dev"
 test "$(HERDR_COMMUNITY_GATEWAY_URL="wss://community.example.test" community_gateway_url)" = "wss://community.example.test"
 test "$(HERDR_COMMUNITY_GATEWAY_URL="wss://a.example.test,wss://b.example.test" community_gateway_url)" = \
     "wss://a.example.test,wss://b.example.test"
@@ -629,8 +629,15 @@ case "$*" in
 esac
 EOF
 chmod 700 "$CHOOSER_BIN_DIR/curl"
+CHOOSER_TRANSPORT_MARKER="$WORK_DIR/chooser-transport"
+export CHOOSER_TRANSPORT_MARKER
 cat > "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh" <<'EOF'
 #!/bin/sh
+if [ "${HERDR_GATEWAY_URL+x}" = x ]; then
+    printf 'gateway=%s\n' "$HERDR_GATEWAY_URL" > "$CHOOSER_TRANSPORT_MARKER"
+else
+    printf 'unset\n' > "$CHOOSER_TRANSPORT_MARKER"
+fi
 printf 'started\n' > "$CHOOSER_START_MARKER"
 EOF
 chmod 700 "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh"
@@ -654,6 +661,27 @@ case "$CHOOSER_OUTPUT" in
         echo "community chooser did not report the saved list and unavailable fallback" >&2
         exit 1
         ;;
+esac
+
+# Clearing the gateway file must also clear an inherited gateway variable
+# before Quick Start builds the setup fragment. Otherwise the background relay
+# switches to Cloudflare while the QR still sends the phone to the old gateway.
+TEMPORARY_OUTPUT="$(
+    PATH="$CHOOSER_BIN_DIR:$PATH" \
+        HERDR_RELAY_BIN="$NORMALIZE_BIN" \
+        HERDR_RELAY_ENV="$CHOOSER_ENV" \
+        HERDR_GATEWAY_URL="wss://stale.example.test" \
+        HERDR_GATEWAY_SELECTION="latency" \
+        bash "$CHOOSER_SCRIPT_DIR/plugin-choose-transport.sh" temporary
+)"
+test "$(cat "$CHOOSER_TRANSPORT_MARKER")" = "unset"
+if grep -qE '^HERDR_GATEWAY_(URL|SELECTION)=' "$CHOOSER_ENV"; then
+    echo "temporary tunnel selection left the gateway configured" >&2
+    exit 1
+fi
+case "$TEMPORARY_OUTPUT" in
+    *"Temporary Cloudflare tunnel selected."*) ;;
+    *) echo "temporary tunnel selection was not reported" >&2; exit 1 ;;
 esac
 
 # Quick Start must never race an installed background service for the relay
@@ -825,6 +853,37 @@ case "$MENU_OUTPUT" in
         exit 1
         ;;
 esac
+
+# The menu process itself is long-lived. After a transport action removes a
+# file-backed gateway, its inherited copy must be cleared before the next
+# action; re-sourcing a file cannot unset a variable that is no longer present.
+REFRESH_MENU_DIR="$WORK_DIR/refresh-menu-scripts"
+REFRESH_MENU_ENV="$WORK_DIR/config/refresh-menu.env"
+REFRESH_MENU_MARKER="$WORK_DIR/refresh-menu-state"
+mkdir -p "$REFRESH_MENU_DIR"
+cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-setup-menu.sh" \
+    "$REFRESH_MENU_DIR/"
+printf "HERDR_GATEWAY_URL='wss://stale.example.test'\nHERDR_GATEWAY_SELECTION='latency'\n" \
+    > "$REFRESH_MENU_ENV"
+cat > "$REFRESH_MENU_DIR/plugin-choose-transport.sh" <<'EOF'
+#!/bin/sh
+: > "$HERDR_RELAY_ENV"
+EOF
+cat > "$REFRESH_MENU_DIR/plugin-status.sh" <<'EOF'
+#!/bin/sh
+if [ "${HERDR_GATEWAY_URL+x}" = x ]; then
+    printf 'stale=%s\n' "$HERDR_GATEWAY_URL" > "$REFRESH_MENU_MARKER"
+else
+    printf 'unset\n' > "$REFRESH_MENU_MARKER"
+fi
+EOF
+chmod 700 "$REFRESH_MENU_DIR/plugin-choose-transport.sh" \
+    "$REFRESH_MENU_DIR/plugin-status.sh"
+export REFRESH_MENU_MARKER
+printf '1\n9\nq\n' |
+    HERDR_RELAY_BIN="$NORMALIZE_BIN" HERDR_RELAY_ENV="$REFRESH_MENU_ENV" \
+    bash "$REFRESH_MENU_DIR/plugin-setup-menu.sh" >/dev/null
+test "$(cat "$REFRESH_MENU_MARKER")" = "unset"
 
 # A setup pane can outlive an in-place plugin update. Replacing its script
 # directory leaves the shell in a deleted cwd; the next action must first enter

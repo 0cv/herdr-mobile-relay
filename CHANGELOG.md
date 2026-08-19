@@ -150,7 +150,15 @@ project follows [Semantic Versioning](https://semver.org/).
   start or restart the relay and print its QR. Quick Start detects an installed
   background service and restarts it instead of failing on its occupied port,
   and menu actions enter the current plugin directory so an in-place plugin
-  update cannot leave them in a deleted working directory.
+  update cannot leave them in a deleted working directory. Switching from a
+  gateway to Cloudflare also clears the menu's inherited gateway variables
+  before generating the QR, preventing a Cloudflare relay from being paired
+  through a gateway where it is no longer registered.
+- The published Community WebRTC list temporarily excludes
+  `gw1.herdr-mobile.dev`: its DNS, certificate, and Caddy listener are healthy,
+  but Caddy returns `502` because the gateway backend is unavailable. New
+  pairings use the healthy `gw2.herdr-mobile.dev` directly instead of waiting
+  for the dead first candidate.
 
 ## [0.16.4] - 2026-08-18
 

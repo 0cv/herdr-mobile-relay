@@ -166,6 +166,7 @@ run_action() {
         cd "$SCRIPT_DIR"
         HERDR_SETUP_MENU=1 "$action" "$@"
     ) || true
+    unset HERDR_GATEWAY_URL HERDR_GATEWAY_SELECTION
     load_relay_env "$ENV_FILE"
     trap - INT
     if [ -t 0 ]; then
