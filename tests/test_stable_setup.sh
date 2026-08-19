@@ -194,6 +194,13 @@ case "$url" in
                 ;;
         esac
         ;;
+    https://*/manifest.webmanifest)
+        if [ "${STUB_APP_ORIGIN:-}" = "${url%/manifest.webmanifest}" ]; then
+            echo '{"name":"Herdr Mobile Relay"}'
+        else
+            exit 22
+        fi
+        ;;
     https://*/healthz)
         case "${STUB_HTTP_MODE:-success}" in
             success) echo '{"status": "ok", "instance": "instance-a", "version": "abc1234", "protocol": 1}' ;;
@@ -251,8 +258,9 @@ new_case() {
     export STUB_ROUTE_MARKER="$CASE_DIR/dns-routed"
     export STUB_CREATED_TUNNEL_MARKER="$CASE_DIR/created-tunnel.json"
     unset CLOUDFLARED_CONFIG DISPLAY WAYLAND_DISPLAY HERDR_PHONE_APP_URL
-    unset HERDR_STABLE_REUSE_CONFIG HERDR_STABLE_RELOGIN
-    unset STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
+    unset HERDR_APP_DEPLOY_ORIGIN HERDR_STABLE_REUSE_CONFIG HERDR_STABLE_RELOGIN
+    unset STUB_APP_ORIGIN STUB_CREATE_FAIL STUB_DELETE_FAIL STUB_DNS_MODE
+    unset STUB_HTTP_MODE STUB_READY_MODE STUB_INGRESS_FAIL
     unset STUB_LIST_JSON STUB_LOGIN_REQUIRED STUB_ROUTE_FAIL STUB_ROUTE_NAME
     unset STUB_CERT_ZONE_NAME STUB_LOGIN_ZONE_ID STUB_LOGIN_ZONE_NAME
 }
@@ -327,6 +335,33 @@ test_existing_phone_app_origin() {
     assert_contains "$OUTPUT" 'Direct browser fallback:'
     assert_contains "$HOME/phone-app-origin" 'https://app.example.test'
     pass "guided setup records an existing installed app origin without baking it into the project"
+}
+
+test_deployed_phone_app_origin() {
+    new_case
+    cat > "$HERDR_RELAY_ENV" <<'EOF'
+HERDR_RELAY_TOKEN=fake-token
+HERDR_APP_DEPLOY_ORIGIN=https://app.example.test
+EOF
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with deployed phone app"; }
+    assert_contains "$OUTPUT" 'https://app.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
+    assert_contains "$HOME/phone-app-origin" 'https://app.example.test'
+    pass "stable setup reuses the configured deployment origin"
+}
+
+test_discovered_phone_app_origin() {
+    new_case
+    printf 'HERDR_RELAY_TOKEN=fake-token\n' > "$HERDR_RELAY_ENV"
+    write_origin_cert zone-old
+    export STUB_APP_ORIGIN="https://herdr.example.test"
+    run_setup
+    [ "$STATUS" -eq 0 ] || { sed -n '1,240p' "$OUTPUT" >&2; fail "stable setup with discovered phone app"; }
+    assert_contains "$OUTPUT" 'https://herdr.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
+    assert_contains "$OUTPUT" 'Direct browser fallback:'
+    assert_contains "$OUTPUT" 'https://relay-workstation.example.test/#label=workstation&relay=wss%3A%2F%2Frelay-workstation.example.test&setup=fake-token'
+    assert_contains "$HOME/phone-app-origin" 'https://herdr.example.test'
+    pass "stable setup discovers the shared phone app without changing the relay endpoint"
 }
 
 test_creation_confirmation() {
@@ -636,9 +671,11 @@ test_teardown_ownership_and_dns_retention() {
     pass "teardown protects foreign state, removes recorded relays, and retains DNS diagnosis"
 }
 
-echo "1..14"
+echo "1..16"
 test_success_and_alternate_port
 test_existing_phone_app_origin
+test_deployed_phone_app_origin
+test_discovered_phone_app_origin
 test_creation_confirmation
 test_existing_config_reuse
 test_cloudflare_zone_selection_and_route_verification

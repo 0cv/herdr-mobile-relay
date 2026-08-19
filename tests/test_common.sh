@@ -240,6 +240,7 @@ chmod 700 "$DEPLOY_BIN/systemctl"
 run_configure_app_deploy 'app.example.test\nherdr-0cv\n' >/dev/null 2>&1 || true
 test "$(env_file_value "$DEPLOY_ENV" HERDR_APP_DEPLOY_ORIGIN)" = "https://app.example.test"
 test "$(env_file_value "$DEPLOY_ENV" HERDR_CLOUDFLARE_PAGES_PROJECT)" = "herdr-0cv"
+test "$(cat "$(dirname "$DEPLOY_ENV")/phone-app-origin")" = "https://app.example.test"
 
 # With a token, the action attaches the domain itself instead of sending the
 # person to the dashboard, and then records the configuration it just made

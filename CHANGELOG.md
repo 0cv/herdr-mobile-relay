@@ -134,6 +134,11 @@ project follows [Semantic Versioning](https://semver.org/).
   after appending its old zone. Existing failed attempts identify the stray DNS
   record, resume after it is deleted, and reuse the tunnel under the correctly
   authorized domain.
+- Stable Tunnel setup keeps multi-computer pairing on one installed app. A new
+  computer probes `https://herdr.<authorized-zone>` for an existing Herdr app
+  before falling back to its relay hostname, while the relay WebSocket remains
+  inside the setup fragment. App-deployment configuration also records its
+  selected origin, so later QRs reopen the same origin-scoped app and storage.
 
 ## [0.16.4] - 2026-08-18
 

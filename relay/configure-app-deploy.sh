@@ -262,6 +262,7 @@ set_env_value_atomic "$ENV_FILE" HERDR_CLOUDFLARE_PAGES_PROJECT "$PAGES_PROJECT"
 set_env_value_atomic "$ENV_FILE" HERDR_CLOUDFLARE_PAGES_BRANCH "main"
 set_env_value_atomic "$ENV_FILE" HERDR_APP_DEPLOY_NPX "$NPX_BIN"
 set_env_value_atomic "$ENV_FILE" HERDR_APP_DEPLOY_NODE_DIR "$NODE_DIR"
+record_phone_app_origin "$APP_ORIGIN" "$ENV_FILE"
 
 echo ""
 echo "Restarting the relay with app deployment enabled..."

@@ -1047,6 +1047,9 @@ phone_app_base_url() {
             app_url="$(head -1 "$recorded_origin")"
         fi
     fi
+    if [ -z "$app_url" ]; then
+        app_url="${HERDR_APP_DEPLOY_ORIGIN:-}"
+    fi
     if [ -z "$app_url" ] || [ "$app_url" = "relay" ]; then
         app_url="$relay_fallback"
     fi
@@ -1071,6 +1074,22 @@ phone_app_origin_serves_herdr() {
     fi
     printf '%s\n' "$manifest" \
         | grep -Eq '"name"[[:space:]]*:[[:space:]]*"Herdr Mobile Relay"'
+}
+
+# A separately hosted app uses herdr.<authorized-zone> by convention. Probe it
+# before defaulting a new computer to its relay-served copy: browser storage and
+# PWA identity are origin-scoped, so every relay must open the same app origin.
+discover_cloudflare_phone_app_origin() {
+    local origin_cert="${TUNNEL_ORIGIN_CERT:-$HOME/.cloudflared/cert.pem}"
+    local zone
+    local candidate
+
+    [ -r "$origin_cert" ] || return 1
+    zone="$(cloudflare_cert_zone_name "$origin_cert" 2>/dev/null)" || return 1
+    [ -n "$zone" ] || return 1
+    candidate="https://herdr.$zone"
+    phone_app_origin_serves_herdr "$candidate" || return 1
+    printf '%s\n' "$candidate"
 }
 
 # Asks for the origin of an already-installed Herdr app and validates it with
@@ -1155,25 +1174,44 @@ choose_phone_app_base_url() {
     local setup_kind="${3:-stable}"
     local choice
     local current_origin=""
+    local discovered_origin=""
     local recorded_origin
 
     recorded_origin="$(dirname "$env_file")/phone-app-origin"
+    if [ -z "${HERDR_PHONE_APP_URL:-}" ] && [ ! -s "$recorded_origin" ]; then
+        if [ -n "${HERDR_APP_DEPLOY_ORIGIN:-}" ]; then
+            discovered_origin="$(
+                HERDR_PHONE_APP_URL="$HERDR_APP_DEPLOY_ORIGIN" \
+                    phone_app_base_url "$relay_fallback" "$env_file"
+            )"
+        else
+            discovered_origin="$(discover_cloudflare_phone_app_origin || true)"
+        fi
+    fi
     if [ -n "${HERDR_PHONE_APP_URL:-}" ] || [ ! -t 0 ]; then
-        phone_app_base_url "$relay_fallback" "$env_file"
+        if [ -n "$discovered_origin" ]; then
+            printf '%s\n' "$discovered_origin"
+        else
+            phone_app_base_url "$relay_fallback" "$env_file"
+        fi
         return
     fi
 
     echo "Where should the phone setup link open?" >&2
     echo "" >&2
     if [ -s "$recorded_origin" ]; then
-        if current_origin="$(phone_app_base_url "$relay_fallback" "$env_file")"; then
-            echo "  Current phone app: $current_origin" >&2
-            echo "  Press Enter to keep it, or choose another option below." >&2
-            echo "" >&2
-        else
+        if ! current_origin="$(phone_app_base_url "$relay_fallback" "$env_file")"; then
             echo "  The saved phone app address is invalid; choose a replacement." >&2
             echo "" >&2
         fi
+    elif [ -n "$discovered_origin" ]; then
+        current_origin="$discovered_origin"
+        echo "  Found an existing Herdr app in this Cloudflare zone." >&2
+    fi
+    if [ -n "$current_origin" ]; then
+        echo "  Current phone app: $current_origin" >&2
+        echo "  Press Enter to keep it, or choose another option below." >&2
+        echo "" >&2
     fi
     if [ "$setup_kind" = "temporary" ]; then
         menu_item 1 "This temporary relay (recommended for trying one relay)" >&2

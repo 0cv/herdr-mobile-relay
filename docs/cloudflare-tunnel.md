@@ -22,6 +22,14 @@ herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
 The wizard ends by printing the private phone QR. Run it once per computer with
 a distinct hostname, then add every QR to the same phone app.
 
+The URL before `#setup=...` is the phone-app origin; it must stay identical on
+every computer because installed-app identity and relay storage are
+origin-scoped. The relay's own `wss://` hostname remains inside the private
+fragment. On a new computer the wizard checks `https://herdr.<authorized-zone>`
+for an existing Herdr app and uses it when found. If the app has another
+hostname, choose **An existing installed Herdr app** and enter that exact
+origin. `configure-app-deploy` records its selected origin for later QRs.
+
 `cloudflared` login authorizes one zone at a time. The wizard reads and
 preselects that domain from `~/.cloudflared/cert.pem`; choose **Sign in to
 Cloudflare for another domain** to use Cloudflare's account-zone picker and
