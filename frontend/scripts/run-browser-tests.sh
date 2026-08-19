@@ -8,13 +8,20 @@ WEB_ROOT="${1:-dist}"
 
 cd "$FRONTEND_DIR"
 
-if [ ! -r /etc/os-release ] || ! grep -Eq '^ID=("?fedora"?)$' /etc/os-release; then
+CONTAINER_RUNTIME=""
+CONTAINER_ARGS=()
+if [ "${HERDR_WEBKIT_CONTAINER:-}" = 1 ]; then
+    CONTAINER_RUNTIME="docker"
+elif grep -Eq '^ID=("?fedora"?)$' /etc/os-release 2>/dev/null; then
+    CONTAINER_RUNTIME="podman"
+    CONTAINER_ARGS+=(--security-opt label=disable)
+else
     HERDR_WEB_ROOT="$WEB_ROOT" npm exec -- playwright test
     exit
 fi
 
-if ! command -v podman >/dev/null 2>&1; then
-    echo "Fedora WebKit testing requires Podman: sudo dnf install podman" >&2
+if ! command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1; then
+    echo "WebKit testing requires $CONTAINER_RUNTIME." >&2
     exit 1
 fi
 
@@ -29,13 +36,13 @@ if ! [[ "$WEBKIT_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-echo "Fedora detected: installing Chromium browser files without apt dependencies."
+echo "Installing Chromium browser files without apt dependencies."
 npm exec -- playwright install chromium
 HERDR_WEB_ROOT="$WEB_ROOT" npm exec -- playwright test --project=chromium-mobile
 
 echo "Running WebKit in Playwright's version-matched official container."
-podman run --rm \
-    --security-opt label=disable \
+"$CONTAINER_RUNTIME" run --rm \
+    "${CONTAINER_ARGS[@]}" \
     -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     -e HERDR_WEB_ROOT="$WEB_ROOT" \
     -v "$FRONTEND_DIR:/work/frontend:ro" \
