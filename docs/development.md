@@ -27,17 +27,9 @@ make relay-plugin      # link this checkout as a Herdr plugin
 make stable-setup      # install a checkout-managed stable relay
 ```
 
-`make check` is the full gate: it runs the backend, frontend, browser, and
-release checks. `make backend-check` covers the Go side on its own — format,
-vet, tests, the race detector, and shell checks. The frontend build shipped in
-`web/` is produced by `make web-release` and verified against the committed
-bundle by `make web-release-check`, which also browser-tests it.
-
 ## Installing a private canary
 
-`herdr plugin install` clones the named repository, and the plugin then
-installs the verified release of that same repository. A private repository's
-assets need a GitHub token with read access to it:
+A private repository's assets need a GitHub token with read access to it:
 
 ```bash
 GH_TOKEN=<token> herdr plugin install 0cv/herdr-mobile-relay-dev
@@ -50,11 +42,10 @@ canary newer than the public tag reports that it is up to date.
 
 ## Shipping a release candidate
 
-Work lands on `dev` with no tag; the check workflow runs on that branch, so a
-candidate is gated before it is ever tagged. Tag `vX.Y.Z` on `dev` only when
-testers have to install it. The release workflow publishes that tag as a
-prerelease, which ordinary relays never see: their update check resolves the
-latest stable release only.
+Work lands on `dev` with no tag; the check workflow runs on that branch. Tag
+`vX.Y.Z` on `dev` only when testers have to install it. The release workflow
+publishes that tag as a prerelease, which ordinary relays never see: their
+update check resolves the latest stable release only.
 
 ```bash
 herdr plugin install 0cv/herdr-mobile-relay --ref dev
@@ -86,8 +77,7 @@ Backend development uses Go 1.26.5; frontend development uses Node.js 24.
 Packaged users need neither toolchain.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
-failure injection, and process-control traces for black-box tests. It is not
-included in release archives.
+failure injection, and process-control traces for black-box tests.
 
 ## Troubleshooting local runs
 

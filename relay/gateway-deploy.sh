@@ -724,8 +724,10 @@ remote_shell() {
     remote_run "${REMOTE_SUDO:+$REMOTE_SUDO }sh -c '$1'"
 }
 
-# Root or passwordless sudo only: a sudo password prompt has no terminal on the
-# far side of these non-interactive commands, so it would hang instead of fail.
+# Only privilege escalation is constrained, never authentication: the session is
+# opened once and reused, so an SSH password prompt is answered once and costs
+# nothing. A sudo password prompt is different - it would appear on the far side
+# of a non-interactive command and hang instead of failing.
 resolve_remote_privilege() {
     local uid
 
@@ -741,9 +743,10 @@ resolve_remote_privilege() {
         REMOTE_SUDO="sudo -n"
         return 0
     fi
-    echo "✗ $SSH_TARGET is not root and cannot use sudo without a password." >&2
+    echo "✗ $SSH_TARGET is not root and sudo there asks for a password." >&2
+    echo "  Remote commands run non-interactively, so sudo cannot prompt." >&2
     echo "  Use a root address such as root@$GATEWAY_HOST, or give that account" >&2
-    echo "  passwordless sudo, then run this again." >&2
+    echo "  passwordless sudo. A password on the SSH login itself is fine." >&2
     return 1
 }
 

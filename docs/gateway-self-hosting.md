@@ -7,7 +7,7 @@ opaque frames between them. When the phone and the computer manage a direct
 WebRTC DataChannel, the gateway is used only for rendezvous and signaling.
 
 You do not have to trust the gateway operator, and you do not have to use the
-project's gateway. One small VPS with flat egress runs your own.
+project's gateway.
 
 ## Fast path: deploy from the plugin menu
 
@@ -40,13 +40,13 @@ Non-interactive equivalents: `HERDR_GATEWAY_DEPLOY_HOST`,
 `HERDR_GATEWAY_DEPLOY_SERVER`, `HERDR_GATEWAY_DEPLOY_REMOTE_DIR` (default
 `/opt/herdr-gateway`), `HERDR_GATEWAY_DEPLOY_EMAIL`,
 `HERDR_GATEWAY_DEPLOY_DIR`, and `HERDR_GATEWAY_DEPLOY_INSTALL_DOCKER=true`.
-The SSH account must be root or have passwordless sudo.
+Password authentication is fine: the deployment authenticates once and reuses
+that session. Only sudo must not prompt, so use root or an account with
+passwordless sudo.
 
-The project-operated community gateway is the free, shared, best-effort
-choice when it is available. Self-hosting is the choice when you want
-dedicated bandwidth and control of the gateway's transport logs; the gateway
-still cannot read application plaintext because E2EE terminates at the phone
-and relay.
+The project-operated community gateway is shared and best-effort. Self-hosting
+gives you dedicated bandwidth and control of the gateway's transport logs.
+Neither can read application plaintext: E2EE terminates at the phone and relay.
 
 Running your own gateway does not mean giving up the community ones. The
 deployment offers to keep them, and writes `HERDR_GATEWAY_URL` with your own
@@ -59,39 +59,17 @@ traffic off your box.
 
 ## The hostname phones dial
 
-The gateway needs one public name that resolves to the server, and it can live at
-any registrar or DNS provider — the domain does not have to be hosted where the
-server is. In Cloudflare's DNS tab, an `A` record `gw` pointing at the server's
-IPv4 (plus `AAAA` for IPv6) is all it takes. Leave the nameservers alone.
-
-Set that record to **DNS only** (grey cloud), not proxied. A proxied record puts
-Cloudflare's edge back in the path the gateway exists to shorten: it terminates
-TLS itself, so phones would trust Cloudflare's certificate instead of the one
-Caddy owns, TLS-ALPN validation cannot reach the server, and every relayed frame
-would traverse a third network with its own idle timeouts.
-
-Confirm the record resolves to the server, not to a proxy address, before
-deploying:
+The gateway needs one public name pointing at the server: an `A` record, say
+`gw`, at the server's IPv4. On Cloudflare set it to **DNS only** (grey cloud); a
+proxied record terminates TLS at the edge, so phones trust Cloudflare's
+certificate, not Caddy's. Add `AAAA` only if the server answers on IPv6: Let's
+Encrypt prefers IPv6 when a name publishes one, so a dead `AAAA` blocks every
+certificate attempt while IPv4 checks look healthy. Verify the record resolves
+to the server before deploying:
 
 ```sh
 dig +short gw.example.com
 ```
-
-An `AAAA` record is only safe once the server actually answers on that address.
-Let's Encrypt prefers IPv6 whenever a name publishes one, so a record nothing
-listens on fails every certificate attempt while every IPv4 check keeps looking
-healthy — the gateway stays without a certificate and `/healthz` never answers
-over HTTPS. The bundle publishes both families, and the deployment probes the
-address from the server and says so when it does not answer, but the server
-still needs the address configured, its firewall open on TCP 80 and 443 for
-IPv6, and Docker 27 or newer, which is where automatic IPv6 networks and
-`ip6tables` became the default. Otherwise remove the `AAAA` record.
-
-A hostname your provider generated for the server also works, as long as it
-forward-resolves to it — reverse DNS alone does not. Prefer a name in a domain
-you own: Let's Encrypt's limit of 50 certificates per registered domain per week
-is shared by everyone using a provider's zone, and its 5-per-identical-name limit
-is easy to exhaust while testing.
 
 ## What the gateway can and cannot see
 
@@ -115,9 +93,10 @@ It cannot see:
 - WebRTC SDP or ICE candidates: signaling travels inside the encrypted channel,
   so the gateway never learns either side's local addresses, and it is never
   told which candidate pair the two of them chose;
-- terminal output, prompts, uploads, push subscriptions, or the relay key.
+- terminal output, prompts, uploads, or push subscriptions.
 
-It never derives, stores, or verifies a secret:
+Both rendezvous values are derived from the relay key, which the gateway never
+has, and it never derives, stores, or verifies either:
 
 - `relay_id = base64url(HKDF-SHA256(relay_key, "herdr-gateway-v1", "herdr-gw-id", 16))`
 - `rendezvous_key = HKDF-SHA256(relay_key, "herdr-gateway-v1", "herdr-gw-auth", 32)`
@@ -131,71 +110,33 @@ past the relay.
 
 What is logged: transport events only, at `INFO`. Relay ids appear truncated to
 their first six characters. Frame bytes, nonces, proofs, and close payload
-contents are never logged.
-
-The only thing persisted, and only when you ask for it, is a per-relay
-relayed-byte counter (see `HERDR_GATEWAY_STATE`).
+contents are never logged. The only thing persisted, and only when you configure
+it, is a per-relay relayed-byte counter (`HERDR_GATEWAY_STATE`).
 
 ## Deploying
 
-One small flat-egress VPS is the design target. Expect roughly 0.5–1 GB of
-egress per month per *relayed* active user; users on a direct WebRTC path cost
-almost nothing beyond rendezvous. At 1,000 active users with a fifth of them
-relayed that is only 75–150 GB/month, so on any host with a flat or generous
-egress allowance **bandwidth is not the binding constraint** — concurrent
-connections are. Each paired phone costs a goroutine pair and a bounded 4 MiB
-outbound queue, so size for peak simultaneous phones and file descriptors, not
-for transfer.
+One small VPS is the design target: 1 vCPU, 1–2 GB RAM, IPv6, and a provider
+that tolerates outbound UDP. Concurrent connections are the binding constraint,
+not bandwidth — each paired phone costs a goroutine pair and a bounded 4 MiB
+outbound queue — so size for peak simultaneous phones and file descriptors.
 
-What to actually shop for, in priority order: at least 1 TB of included egress
-(150 GB/month leaves generous headroom), 1 vCPU and 1–2 GB RAM, IPv6, and a
-provider that tolerates outbound UDP. That specification is met by the entry
-plan of essentially every reputable VPS host, so pick on network quality and
-region rather than on price.
+Expect 0.5–1 GB of egress per month per *relayed* active user; a direct WebRTC
+path costs almost nothing beyond rendezvous. A thousand active users with a
+fifth relayed is 75–150 GB/month, under 0.5 Mbit/s on average.
 
-Two reference deployments, both fine, priced August 2026 — verify before you
-buy, because both providers moved prices in 2026:
+On a metered host, check whether inbound counts too — a relay pays for every
+byte twice — and set a budget alarm plus a lower `HERDR_GATEWAY_MONTHLY_BYTES`,
+so the gateway's own quota refuses new relayed connections before the bill
+grows.
 
-- **OVHcloud d2-2** (1 vCore / 2 GB / 25 GB NVMe), €5.71/month ex-VAT. Instance
-  traffic is not metered, but public bandwidth is capped at 100 Mbit/s and is
-  explicitly not guaranteed, so it is shared best-effort.
-- **Hetzner CPX12** (1 vCPU AMD / 2 GB / 40 GB), €11.99/month in Falkenstein,
-  Nuremberg, or Helsinki, with 20 TB of included egress billed on outgoing
-  traffic only. US is €17.99 and Singapore €15.99; the older Cost-Optimized
-  CX/CAX line is currently unavailable.
+Latency, not capacity, is the reason to add a second instance, and scaling out
+needs no shared state or session affinity: `gw-eu`, `gw-us`, and `gw-ap` are
+independent deployments, and each relay carries its own ordered gateway list.
 
-Where traffic is unmetered, read the throughput cap instead of the allowance —
-and remember a relay spends it twice, once receiving and once sending. At the
-expected 150 GB/month the average rate is under 0.5 Mbit/s, so a 100 Mbit/s cap
-is ample; it becomes the limit only when many phones upload images at once,
-which is exactly the traffic the direct WebRTC path removes from the gateway.
-
-On a metered host, check two things the headline allowance hides. First, some
-providers count inbound as well as outbound against the allowance — AWS
-Lightsail does — and a gateway is a pure relay, so every byte is counted twice
-and the effective allowance is half the advertised figure. Second, compare the
-*overage* rate, not the included amount: Lightsail bills $0.09/GB beyond the
-bundle (about $92/TB) against roughly €1/TB on a flat-egress host. Both are
-fine at the expected 150 GB/month, but they behave very differently under abuse
-or a traffic bug, and AWS has no hard spend cap. If you deploy somewhere
-metered, set a provider budget alarm and lower
-`HERDR_GATEWAY_MONTHLY_BYTES` so this gateway's own quota refuses new relayed
-connections before the bill grows.
-
-Latency, not capacity, is the reason to add a second instance. The relayed path
-targets a 250–400 ms resume, so a phone and computer both far from the gateway
-notice. Scaling out needs no shared state, anycast, or session affinity: the
-gateway URL is per-relay configuration and the phone learns it from the QR or
-the hybrid descriptor, so `gw-eu`, `gw-us`, and `gw-ap` can be entirely
-independent single-instance deployments.
-
-Two operational notes. `/probe` sends a UDP datagram to the requesting client's
-own address, which some providers' abuse tooling treats as scanning; it is rate
-limited to one request per 10 s per IP, never targets an address the requester
-did not connect from, and returns fewer bytes than it receives, so it cannot be
-used for reflection or amplification. And the gateway needs outbound UDP for
-that endpoint, inbound TCP 443 for everything else, and inbound UDP 3478 for
-address discovery.
+The gateway needs inbound TCP 80 and 443, inbound UDP 3478, and outbound UDP.
+`/probe` replies to the address the client connected from, one request per 10 s
+per IP, returning fewer bytes than it receives: it cannot reflect or amplify,
+but some providers' abuse tooling still flags UDP replies.
 
 ### Docker
 
@@ -215,10 +156,9 @@ no shell. To enforce quotas that survive restarts, drop
 HERDR_GATEWAY_STATE=/state/counters.json`, and make that directory writable by
 uid 65532 (`nonroot`).
 
-`3478/udp` is published on every interface on purpose: address discovery is raw
-UDP and no TLS reverse proxy can carry it, so unlike 8443 it has to be reachable
-from the internet directly. Set `HERDR_GATEWAY_STUN_ADDR=` (empty) to turn the
-listener off and drop the port.
+`3478/udp` is published on every interface because address discovery is raw UDP
+and no TLS reverse proxy can carry it. Set `HERDR_GATEWAY_STUN_ADDR=` (empty) to
+turn the listener off and drop the port.
 
 ### Plain binary
 
@@ -330,40 +270,34 @@ that serves you alone and not enough for one anybody may register with. The two
 whole-gateway ceilings, `HERDR_GATEWAY_MAX_RELAYS` and
 `HERDR_GATEWAY_MAX_CLIENTS`, bound the rest: without them a stranger holding many
 addresses and many self-generated relay ids grows goroutines and memory until the
-process dies, no matter how generous the bandwidth is.
+process dies.
 
-The client ceiling is a memory bound rather than a bandwidth one. Each connection
-may queue up to 4 MiB before it is dropped as too slow, so the default 512 caps
-the worst case near 2 GiB while a real population sits close to empty. Raise it
-with the RAM you actually have, and remember that a session which upgrades to the
-direct path stops consuming a slot within seconds.
+`HERDR_GATEWAY_MAX_CLIENTS` is a memory bound, not a bandwidth one. Each
+connection may queue up to 4 MiB before it is dropped as too slow, so the default
+512 caps the worst case near 2 GiB. Raise it with the RAM you have; a session
+that upgrades to the direct path stops consuming a slot within seconds.
 
-There is deliberately **no per-IP concurrency cap**. Carrier NAT puts thousands
-of unrelated phones behind a single address, so a per-IP concurrency limit refuses
-legitimate users while barely inconveniencing an attacker who has more addresses.
-The per-IP *rate* limit stays, because a connection storm from one address is
-still worth slowing down.
+There is deliberately **no per-IP concurrency cap**: carrier NAT puts thousands
+of unrelated phones behind a single address, so the cap would refuse legitimate
+users while barely inconveniencing an attacker who has more addresses. The
+per-IP *rate* limit stays.
 
 Address discovery has its own ceilings: 20 datagrams per 5 seconds per source
 address over a fixed table, plus a global 2000 per second, and a response can
-never exceed roughly twice its request. A forged source address can therefore
-waste a little of the gateway's CPU and nothing of a victim's bandwidth.
+never exceed roughly twice its request, so a forged source address wastes a
+little of the gateway's CPU and none of a victim's bandwidth.
 
 If `HERDR_GATEWAY_STATE` is set, the file is loaded at startup, rewritten
 atomically every 30 seconds and on shutdown, and created with mode `0600`. It
 contains counters and nothing else. Counters from previous months are dropped on
-load, so a gateway that was offline across a month boundary starts the month
-clean.
+load.
 
 ### Address discovery
 
-The gateway answers address discovery on UDP `HERDR_GATEWAY_STUN_ADDR` so both
-the phone and the relay learn the address the internet sees them at. Neither
-peer can know that address on its own: NAT rewrites the source port on the way
-out, so a candidate list gathered locally names addresses that are useless to
-the other side. With the reflected address in hand both sides offer a reflexive
-ICE candidate, and the direct DataChannel forms across two ordinary NATs without
-anyone touching a router.
+The gateway answers address discovery on UDP `HERDR_GATEWAY_STUN_ADDR` so the
+phone and the relay learn the address the internet sees them at, which each side
+then offers as a reflexive ICE candidate. Neither peer can learn that address on
+its own, because NAT rewrites the source port on the way out.
 
 Three properties keep this from widening the gateway's blast radius:
 
@@ -372,39 +306,29 @@ Three properties keep this from widening the gateway's blast radius:
   dialed — the relay from `HERDR_GATEWAY_URL`, the phone from its stored gateway
   URL — and refuses a host from the gateway. A compromised or hostile gateway
   therefore cannot redirect address discovery at a third party; the worst it can
-  do is point at one of its own ports, which is where the traffic already goes.
+  do is point at one of its own ports.
 - **Reflection reveals nothing new.** The answer is the source address of the
-  packet the gateway just received. It already observes that address on the WSS
-  connection, so a peer that asks tells the gateway nothing it did not have.
-  Requests are unauthenticated, stateless, and answered with fewer bytes than
-  they carry, so the listener cannot be used for amplification.
+  packet the gateway just received, which it already observes on the WSS
+  connection. Requests are unauthenticated, stateless, and answered with fewer
+  bytes than they carry, so the listener cannot be used for amplification.
 - **No third-party service is involved.** Address discovery runs on the gateway
-  you already trust with rendezvous. There is no external STUN provider to add
-  to the trust boundary, and no traffic is ever relayed on the peers' behalf by
-  anything other than this gateway's own WSS path.
+  you already trust with rendezvous, so no external STUN provider joins the trust
+  boundary, and nothing but this gateway's own WSS path ever relays traffic on
+  the peers' behalf.
 
-UPnP/NAT-PMP port mapping on the relay (`HERDR_REACHABILITY_PORT_MAPPING`) still
-helps — a mapped port gives a stable, router-blessed candidate — but it is no
-longer required for a direct path off the LAN, and it never worked for the phone
-at all.
+UPnP/NAT-PMP port mapping on the relay (`HERDR_REACHABILITY_PORT_MAPPING`) gives
+a stable, router-blessed candidate, but it is no longer required for a direct
+path off the LAN, and it never worked for the phone at all.
 
-What still forces a relayed connection, honestly:
-
-- **UDP blocked outright** on either side. A network that drops UDP leaves
-  nothing for ICE to use, and every frame stays on the gateway.
-- **Hard NAT on both ends.** Symmetric NAT picks a fresh external port per
-  destination, so the address the gateway reflects is not the address the peer
-  will see. One hard NAT plus one ordinary NAT usually still connects; two hard
-  NATs do not, and the session runs relayed.
-
-Disabling the listener (`HERDR_GATEWAY_STUN_ADDR=`) is a supported choice: the
-relay then falls back to host candidates plus whatever UPnP/NAT-PMP obtained,
-which is what a LAN-only deployment needs, and everything else relays.
+A session still runs relayed when either side blocks UDP outright, or when both
+ends sit behind symmetric NAT. Disabling the listener
+(`HERDR_GATEWAY_STUN_ADDR=`) leaves the relay with host candidates plus whatever
+UPnP/NAT-PMP obtained, which is what a LAN-only deployment needs; everything
+else relays.
 
 ## Quota tuning
 
-The quota exists to bound a public gateway's bandwidth bill, not to police
-users. It behaves like this:
+The quota bounds a public gateway's bandwidth bill. It behaves like this:
 
 1. At `HERDR_GATEWAY_QUOTA_WARN_PERCENT` of the monthly limit the relay receives
    exactly one advisory notice, which the relay surfaces in its UI.
@@ -416,15 +340,13 @@ users. It behaves like this:
 Guidance:
 
 - Self-hosting for yourself or a household: set `HERDR_GATEWAY_MONTHLY_BYTES=0`.
-  You are paying for your own traffic and the limit only gets in your way.
-- Hosting for a group: divide your VPS's monthly egress allowance by the number
-  of relays you expect and halve it, since every relayed byte is counted once on
-  the way in and once on the way out. On a 1 TB plan with 20 relays, 25 GiB
+- Hosting for a group: divide your monthly egress allowance by the number of
+  relays you expect and halve it, since every relayed byte is counted once on the
+  way in and once on the way out. On a 1 TB plan with 20 relays, 25 GiB
   (`26843545600`) per relay is comfortable.
-- A relay that keeps hitting the quota is a relay whose direct WebRTC path is
-  failing. Fixing reachability on that computer (UPnP/NAT-PMP, IPv6, or a
-  forwarded UDP port) removes the traffic from the gateway entirely; the quota
-  warning says as much.
+- A relay that keeps hitting the quota has a failing direct WebRTC path. Fixing
+  reachability on that computer (UPnP/NAT-PMP, IPv6, or a forwarded UDP port)
+  removes the traffic from the gateway entirely.
 
 ## Pointing a relay at your gateway
 
@@ -434,12 +356,10 @@ On the computer relay:
 HERDR_GATEWAY_URL=wss://gw.example.com
 ```
 
-A base URL with no trailing slash and no path. The relay appends the routes
-itself. The paired phone learns the same base from the QR payload, so a relay
-and its phones must use the same gateway.
-
-The relay key is unchanged by the move, and so is the QR payload: both
-identifiers are derived from the key you already have.
+A base URL with no trailing slash and no path; the relay appends the routes. The
+paired phone learns the same base from the QR payload, so a relay and its phones
+must use the same gateway. Moving gateways changes neither the relay key nor the
+QR payload.
 
 ## Routes and ports
 
@@ -469,8 +389,7 @@ relay re-registers, the older link for that `relay_id` is closed with WebSocket
 status 1008 and the reason `relay_busy`, and its phone connections are detached.
 
 `gateway_hello` carries `stun_port`, the UDP port above, and omits it when the
-listener is disabled. Only the port travels: a peer combines it with the gateway
-host it already dialed, so the hello cannot send address discovery elsewhere.
+listener is disabled.
 
 `POST /probe` takes `{"port":<1024-65535>,"token":"<32 bytes, unpadded
 base64url>"}` and answers `{"sent":true,"observed_ip":"..."}`. The datagram
@@ -500,16 +419,15 @@ curl -sS https://gw.example.com/healthz
 
 ## Running one for other people
 
-A gateway that only you dial needs no operations. One that other people's
-phones depend on needs four habits and no more; the posture is explicitly
-best-effort, and that is what the app tells users.
+A gateway that only you dial needs no operations. One that other people's phones
+depend on needs four habits, and the posture stays best-effort — which is what
+the app tells users.
 
-**Watch one number.** `clients` in `/healthz` is the only signal that matters:
-it is the count of phones currently on the relayed path. It is normal for it to
-sit near zero even with many active users, because every session leaves the
-gateway within ten seconds of the direct path forming. A `clients` count that
-climbs and stays up means hole punching is failing for a cohort, not that the
-gateway is busy.
+**Watch one number.** `clients` in `/healthz` is the count of phones currently on
+the relayed path. It sits near zero even with many active users, because every
+session leaves the gateway within ten seconds of the direct path forming. A
+`clients` count that climbs and stays up means hole punching is failing for a
+cohort, not that the gateway is busy.
 
 ```sh
 watch -n30 'curl -sS https://gw.example.com/healthz'
@@ -517,21 +435,18 @@ watch -n30 'curl -sS https://gw.example.com/healthz'
 
 **Give the state file a disk that persists.** `HERDR_GATEWAY_STATE` holds the
 relayed-byte counters that enforce the monthly quota. Losing it resets the
-month's accounting; it does not break any session. It is rewritten every 30
-seconds and on shutdown, so a snapshot is never far behind.
+month's accounting and breaks no session.
 
-**Certificates renew themselves.** Caddy owns ACME; there is nothing to rotate
-by hand. The one failure worth alerting on is Caddy refusing to renew because
-port 80 stopped being reachable — the same inbound rule the deploy opened.
+**Certificates renew themselves.** Caddy owns ACME. The one failure worth
+alerting on is Caddy refusing to renew because port 80 stopped being reachable —
+the same inbound rule the deploy opened.
 
-**Upgrades are a redeploy.** `bash relay/gateway-deploy.sh` against the same
-host reuses the remembered answers and rebuilds from the bundle it copies. Live
-relays reconnect on their own; phones fall back to the gateway path while a
-restart is in flight, so an upgrade costs a few seconds of relayed latency and
+**Upgrades are a redeploy.** `bash relay/gateway-deploy.sh` against the same host
+reuses the remembered answers and rebuilds from the bundle it copies. Live relays
+reconnect on their own, so an upgrade costs a few seconds of relayed latency and
 no session.
 
-**What you are not promising.** No uptime target, no capacity guarantee, no
-data retention: the gateway holds no keys and stores nothing but byte counters.
-If it goes down, phones with a direct path keep working, phones without one
-reconnect when it returns, and anyone who needs more can self-host with this
-document or point at their own with `HERDR_GATEWAY_URL`.
+**What you are not promising.** No uptime target, no capacity guarantee, no data
+retention: the gateway holds no keys and stores nothing but byte counters. If it
+goes down, phones with a direct path keep working, and the rest reconnect when it
+returns.

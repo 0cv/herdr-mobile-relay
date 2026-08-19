@@ -2,34 +2,25 @@
 
 How to give one computer a permanent hostname and a background relay service
 through a dedicated Cloudflare Tunnel. Read this only if you want the relay to
-stay reachable without an open pane; the temporary TryCloudflare tunnel that
-Quick Start opens needs none of it — no Cloudflare account, no domain, and no
-service installation.
+stay reachable without an open pane.
 
 ## When you need this page
 
-Quick Start opens a temporary TryCloudflare tunnel and prints its QR code. The
-pane has to stay open, and the hostname changes every time. The stable path
-instead creates a dedicated tunnel on a domain you control, installs a user
-service so the relay survives a closed pane, and keeps the same hostname across
-restarts. It needs a Cloudflare account with a domain added to it.
+Quick Start's temporary tunnel needs an open pane and gets a new hostname every
+time. The stable path creates a dedicated tunnel on a domain you control,
+installs a user service, and keeps the same hostname across restarts. It needs
+a Cloudflare account with a domain added to it.
 
 ## Run the wizard
 
-For a permanent hostname and background service, add a domain to Cloudflare and
-run:
+Add a domain to Cloudflare, then run:
 
 ```bash
 herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
 ```
 
-The wizard creates or resumes a dedicated tunnel, checks the DNS route, installs
-a user service, verifies the public relay identity, and then prints the private
-phone QR. Run it once per computer with a distinct hostname, then add every QR
-to the same phone app.
-
-Because the wizard creates *or resumes*, it is safe to rerun: if it stops part
-way, keep its state and rerun the exact command it printed.
+The wizard ends by printing the private phone QR. Run it once per computer with
+a distinct hostname, then add every QR to the same phone app.
 
 ## Useful actions
 

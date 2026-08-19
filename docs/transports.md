@@ -5,16 +5,15 @@ gateway, or a gateway you run yourself. Read this to pick one, and to understand
 the direct WebRTC upgrade that takes all three out of the path when the network
 allows it.
 
-Whichever you pick, traffic stays end-to-end encrypted and the phone upgrades to
-a direct connection whenever the network allows it. The choice only decides who
-carries the fallback when it cannot.
+Whichever you pick, traffic stays end-to-end encrypted; the choice only
+decides who carries the fallback when the direct path cannot form.
 
 ## The three choices
 
 | Choice | What it needs from you | Who carries the traffic | When to pick it |
 | --- | --- | --- | --- |
-| **Cloudflare tunnel** | Nothing for the temporary Quick Start URL. A Cloudflare account with a domain for a permanent hostname and background service. | Cloudflare's edge | The default, and the recommended start. Quick Start opens a temporary URL with no Cloudflare account and no domain; see [docs/cloudflare-tunnel.md](cloudflare-tunnel.md) for the permanent hostname. |
-| **Community gateway** | Nothing — no account and no domain. | A gateway operated by the project | Free, shared, best-effort capacity: fine for normal use, not for heavy transfers. Pick it when you want no Cloudflare setup at all. |
+| **Cloudflare tunnel** | Nothing for the temporary Quick Start URL. A Cloudflare account with a domain for a permanent hostname and background service. | Cloudflare's edge | The default. Quick Start opens a temporary URL with no Cloudflare account and no domain; see [docs/cloudflare-tunnel.md](cloudflare-tunnel.md) for the permanent hostname. |
+| **Community gateway** | Nothing — no account and no domain. | A gateway operated by the project | Free, shared, best-effort capacity; not for heavy transfers. Pick it when you want no Cloudflare setup at all. |
 | **Your own gateway** | One small VPS with Docker and a public hostname that resolves to it. | Your own gateway | Best performance and privacy: you own the box, the bandwidth, and the logs. See [docs/gateway-self-hosting.md](gateway-self-hosting.md). |
 
 Pick from the setup menu under **Choose Connection Method**, which writes or
@@ -24,16 +23,14 @@ own gateway.
 
 ## The gateway path
 
-Cloudflare is no longer the only way to reach a relay. Set `HERDR_GATEWAY_URL`
-in the relay environment and Quick Start skips `cloudflared` entirely — no
-Cloudflare account, domain, or tunnel:
+Set `HERDR_GATEWAY_URL` in the relay environment and Quick Start skips
+`cloudflared` entirely — no Cloudflare account, domain, or tunnel:
 
 ```bash
 HERDR_GATEWAY_URL=wss://gw.example.com make quick-start
 ```
 
-The relay dials that gateway itself, and the QR is printed as soon as the
-gateway confirms the registration.
+The QR is printed as soon as the gateway confirms the registration.
 
 The gateway is blind by construction. It holds no secrets and never learns the
 relay key: the relay registers under an id derived from the key with
@@ -45,35 +42,24 @@ binary you can self-host — see
 
 The plugin can deploy that gateway for you. **Choose Connection Method → Your
 own gateway → Deploy one on my own server over SSH** asks for the public
-hostname and the server's SSH address, copies a compose bundle carrying the
-gateway source, builds and starts it there, waits for the certificate, and
+hostname and the server's SSH address, builds and starts the gateway there, and
 records the verified `wss://` URL only after `/healthz` answers. The server needs
 nothing but Docker, and the relay key never leaves your computer.
 
 ## The direct WebRTC upgrade
 
 Once a phone is connected through the gateway, both sides try to remove it from
-the path. Over the existing encrypted channel they exchange a WebRTC offer,
-answer, and ICE candidates, and on success the reliable ordered DataChannel
-`herdr-dc-v1` carries the same encrypted frames directly between phone and
-computer. If the direct path never forms, or later breaks, traffic stays on (or
-returns to) the gateway without reconnecting the session.
+the path: over the existing encrypted channel they negotiate a direct WebRTC
+DataChannel (`herdr-dc-v1`) that carries the same encrypted frames. If the
+direct path never forms, or later breaks, traffic stays on (or returns to) the
+gateway without reconnecting the session.
 
-The gateway also answers address discovery on UDP 3478, so both the phone and
-the computer learn the address the internet sees them at and can offer it as an
-ICE candidate. That is what lets a phone on a cellular network reach a home
-computer directly, with no port forwarding and no router configuration; no
-third-party service is involved, since the gateway only reflects a source
-address it already observes. On a self-hosted gateway, inbound UDP 3478 must be
-open — it is published on the host directly, because a TLS reverse proxy cannot
-carry raw UDP.
-
-Address discovery is the piece that lets two ordinary NATs meet. Neither side
-can see its own public address from behind a NAT, so neither could name an
-endpoint the other is able to dial; each asks the gateway what address it
-arrives from, offers that as an ICE candidate, and the two agents then probe the
-candidate pairs directly. Nothing is forwarded on either router — the mapping
-each NAT already created for the outbound probe is what the peer uses.
+The gateway also answers address discovery on UDP 3478, which is what lets a
+phone on a cellular network reach a home computer directly, with no port
+forwarding and no router configuration; no third-party service is involved,
+since the gateway only reflects a source address it already observes. On a
+self-hosted gateway, inbound UDP 3478 must be open — it is published on the
+host directly, because a TLS reverse proxy cannot carry raw UDP.
 
 ## Relay environment settings
 
