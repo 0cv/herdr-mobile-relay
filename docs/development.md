@@ -71,9 +71,14 @@ revision to the tag's commit and the published tag has to stay an ancestor of
 gh release edit vX.Y.Z --prerelease=false --latest
 ```
 
-A published tag is never moved. Withdraw a bad candidate with
-`gh release delete vX.Y.Z --cleanup-tag` before anyone installs it, then re-tag
-the same version from the fixed commit.
+A published tag is never moved, and it is never reused. GitHub's immutable
+releases make the second rule permanent: publishing a release for `vX.Y.Z`
+locks that tag name in the repository forever, so deleting the release does
+not free it and a withdrawn candidate is replaced by the next version number,
+never by a retag. Check a repository with
+`gh api repos/<owner>/<repo>/releases/latest --jq .immutable`;
+`0cv/herdr-mobile-relay-dev` has immutable releases enabled and
+`0cv/herdr-mobile-relay` does not.
 
 ## Toolchains
 
