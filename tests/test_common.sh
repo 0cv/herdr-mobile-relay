@@ -85,6 +85,43 @@ for MISSING in absent "$WORK_DIR/absent" "~/.ssh/absent" "" ".ssh"; do
     fi
 done
 
+# Plugin panes never source a shell profile, so node has to be found where the
+# version managers put it, and a run that already recorded a directory keeps it.
+NODE_HOME="$WORK_DIR/nodehome"
+fake_node_dir() {
+    mkdir -p "$1"
+    printf '#!/bin/sh\nexit 0\n' > "$1/node"
+    printf '#!/bin/sh\nexit 0\n' > "$1/npx"
+    chmod 700 "$1/node" "$1/npx"
+}
+fake_node_dir "$NODE_HOME/.nvm/versions/node/v20.0.0/bin"
+fake_node_dir "$NODE_HOME/.nvm/versions/node/v26.1.0/bin"
+test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_dir)" = \
+    "$NODE_HOME/.nvm/versions/node/v26.1.0/bin"
+fake_node_dir "$NODE_HOME/.nvm/current/bin"
+test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_dir)" = \
+    "$NODE_HOME/.nvm/current/bin"
+
+NODE_ENV_FILE="$WORK_DIR/config/node.env"
+mkdir -p "$(dirname "$NODE_ENV_FILE")"
+fake_node_dir "$NODE_HOME/recorded/bin"
+printf "HERDR_APP_DEPLOY_NODE_DIR='%s'\n" "$NODE_HOME/recorded/bin" > "$NODE_ENV_FILE"
+test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_dir "$NODE_ENV_FILE")" = \
+    "$NODE_HOME/recorded/bin"
+
+# A recording that no longer resolves must not win over a working install.
+rm -rf "$NODE_HOME/recorded"
+test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_dir "$NODE_ENV_FILE")" = \
+    "$NODE_HOME/.nvm/current/bin"
+
+EMPTY_NODE_HOME="$WORK_DIR/nodehome-empty"
+mkdir -p "$EMPTY_NODE_HOME"
+if HOME="$EMPTY_NODE_HOME" NVM_DIR="$EMPTY_NODE_HOME/.nvm" PATH="$EMPTY_NODE_HOME" \
+    node_bin_dir >/dev/null 2>&1; then
+    echo "node discovery invented an installation" >&2
+    exit 1
+fi
+
 ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"

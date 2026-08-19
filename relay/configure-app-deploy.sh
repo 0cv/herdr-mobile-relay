@@ -20,15 +20,19 @@ assert_service_env_matches "$ENV_FILE"
 ensure_relay_env "$ENV_FILE"
 load_relay_env "$ENV_FILE"
 
-NPX_BIN="$(command -v npx || true)"
-NODE_BIN="$(command -v node || true)"
-if [ -z "$NPX_BIN" ] || [ -z "$NODE_BIN" ]; then
+if ! NODE_DIR="$(node_bin_dir "$ENV_FILE")"; then
     echo "✗ Node.js and npx are required only on the relay that deploys the separate app." >&2
-    echo "  Install Node.js 24, ensure node and npx are on PATH, then rerun this action." >&2
+    echo "  This pane does not read your shell profile, so a node installed by" >&2
+    echo "  nvm, fnm, volta, or asdf is not on its PATH. Looked in PATH," >&2
+    echo "  \${NVM_DIR:-~/.nvm}/current/bin, the newest ~/.nvm/versions/node/*/bin," >&2
+    echo "  ~/.local/share/fnm/aliases/default/bin, ~/.volta/bin, ~/.asdf/shims," >&2
+    echo "  /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, and /usr/bin." >&2
+    echo "  Set HERDR_APP_DEPLOY_NODE_DIR in $ENV_FILE to the directory holding" >&2
+    echo "  node and npx, or install Node.js 24, then rerun this action." >&2
     exit 1
 fi
-NPX_BIN="$(canonical_file_path "$NPX_BIN")"
-NODE_DIR="$(dirname "$(canonical_file_path "$NODE_BIN")")"
+NODE_BIN="$NODE_DIR/node"
+NPX_BIN="$NODE_DIR/npx"
 echo "Using Node.js $("$NODE_BIN" --version) from $NODE_DIR"
 
 RECORDED_ORIGIN="$(dirname "$ENV_FILE")/phone-app-origin"

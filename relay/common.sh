@@ -277,6 +277,47 @@ pause_before_close() {
     fi
 }
 
+# Plugin panes inherit herdr's environment, not an interactive shell's, so a
+# node installed by nvm, fnm, volta, or asdf is invisible here even though the
+# person's own terminal finds it: the manager's PATH entry comes from a shell rc
+# this process never sources. Look where those managers actually put it, prefer
+# a "current" link over a pinned version so a node upgrade does not strand the
+# recording, and honour what a previous run already recorded.
+node_bin_dir() {
+    local env_file="${1:-}"
+    local candidate
+    local recorded=""
+    local on_path=""
+
+    if [ -n "$env_file" ] && [ -f "$env_file" ]; then
+        recorded="$(env_file_value "$env_file" HERDR_APP_DEPLOY_NODE_DIR)"
+    fi
+    if on_path="$(command -v node 2>/dev/null)"; then
+        on_path="$(dirname "$on_path")"
+    fi
+    for candidate in \
+        "$recorded" \
+        "$on_path" \
+        "${NVM_DIR:-$HOME/.nvm}/current/bin" \
+        "${FNM_DIR:-$HOME/.local/share/fnm}/aliases/default/bin" \
+        "$HOME/.volta/bin" \
+        "$HOME/.asdf/shims" \
+        "$(ls -d "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/bin 2>/dev/null | sort -V | tail -1)" \
+        /opt/homebrew/bin \
+        /usr/local/bin \
+        "$HOME/.local/bin" \
+        /usr/bin; do
+        case "$candidate" in
+            /*) ;;
+            *) continue ;;
+        esac
+        [ -x "$candidate/node" ] && [ -x "$candidate/npx" ] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
 generate_token() {
     if command -v openssl >/dev/null 2>&1; then
         openssl rand -hex 16
