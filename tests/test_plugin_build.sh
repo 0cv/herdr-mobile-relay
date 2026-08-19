@@ -124,7 +124,13 @@ esac
 EOF
 cat > "$FAKE_BIN/curl" <<'EOF'
 #!/bin/sh
-cat "$HEALTH_FILE"
+case "$*" in
+    *"api.github.com/repos/"*)
+        [ "${GH_API_PUBLIC:-}" = 1 ] || exit 22
+        printf '{}\n'
+        ;;
+    *) cat "$HEALTH_FILE" ;;
+esac
 EOF
 cat > "$FAKE_BIN/herdr" <<'EOF'
 #!/bin/sh
@@ -146,6 +152,7 @@ exit 0
 EOF
 cat > "$FAKE_BIN/gh" <<'EOF'
 #!/bin/sh
+[ "${GH_AUTH_FAIL:-}" != 1 ] || exit 1
 if [ "$*" = "auth token --hostname github.com" ]; then
     printf '%s\n' 'private-clone-api-token'
     exit 0
@@ -348,6 +355,21 @@ run_fresh_build() {
         "$@" \
         bash "$REPO_DIR/relay/plugin-build.sh" >"$WORK_DIR/fresh-output" 2>&1
 }
+
+# An SSH-only private checkout has no credential for GitHub's HTTPS release API.
+# Diagnose that before migration instead of surfacing GitHub's deliberate 404.
+if run_fresh_build env GH_AUTH_FAIL=1 \
+    HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay-dev; then
+    echo "an SSH-only private install reached the release installer" >&2
+    exit 1
+fi
+grep -Fq 'SSH access cloned the plugin source' "$WORK_DIR/fresh-output" ||
+    { echo "private release failure did not explain the SSH/API boundary" >&2; exit 1; }
+grep -Fq 'gh auth login --hostname github.com --git-protocol ssh' \
+    "$WORK_DIR/fresh-output" ||
+    { echo "private release failure gave no authentication command" >&2; exit 1; }
+[ ! -e "$FRESH_ROOT/current" ] ||
+    { echo "private release authentication failure changed the release" >&2; exit 1; }
 
 if ! run_fresh_build env HERDR_RELEASE_REPOSITORY=0cv/herdr-mobile-relay-dev; then
     cat "$WORK_DIR/fresh-output" >&2

@@ -423,6 +423,38 @@ gh_release_token() {
     gh auth token --hostname github.com 2>/dev/null
 }
 
+release_api_available_without_token() {
+    command -v curl >/dev/null 2>&1 || return 0
+    curl --fail --silent --show-error --location \
+        --connect-timeout 5 --max-time 10 \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/repos/$RELEASE_REPOSITORY" >/dev/null 2>&1
+}
+
+explain_missing_release_auth() {
+    echo "herdr-mobile-relay: cannot access release repository $RELEASE_REPOSITORY through GitHub's HTTPS API." >&2
+    echo "herdr-mobile-relay: SSH access cloned the plugin source, but SSH keys do not authorize private release downloads." >&2
+    echo "" >&2
+    if ! command -v gh >/dev/null 2>&1; then
+        case "$(uname -s)" in
+            Darwin)
+                if command -v brew >/dev/null 2>&1; then
+                    echo "Install GitHub CLI:" >&2
+                    echo "  brew install gh" >&2
+                else
+                    echo "Install GitHub CLI from https://cli.github.com/" >&2
+                fi
+                ;;
+            *) echo "Install GitHub CLI from https://cli.github.com/" >&2 ;;
+        esac
+    fi
+    echo "Authorize release access while keeping Git over SSH:" >&2
+    echo "  gh auth login --hostname github.com --git-protocol ssh" >&2
+    echo "Then rerun the same 'herdr plugin install' command." >&2
+    echo "Alternatively, set GH_TOKEN to a token with Contents read access." >&2
+}
+
+
 
 INSTALL_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
 if [ -z "$INSTALL_TOKEN" ]; then
@@ -451,6 +483,14 @@ if [ -z "$INSTALL_TOKEN" ] &&
    [ "$RELEASE_REPOSITORY" != "0cv/herdr-mobile-relay" ]; then
     INSTALL_TOKEN="$(gh_release_token || true)"
 fi
+if [ -z "$INSTALL_TOKEN" ] &&
+   [ -n "$RELEASE_REPOSITORY" ] &&
+   [ "$RELEASE_REPOSITORY" != "0cv/herdr-mobile-relay" ] &&
+   ! release_api_available_without_token; then
+    explain_missing_release_auth
+    exit 1
+fi
+
 
 rollback_armed=true
 migrate_source_config "${SOURCE_ENV:-$TARGET_ENV}"
