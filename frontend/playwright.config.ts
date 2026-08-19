@@ -19,6 +19,12 @@ export default defineConfig({
   // GITHUB_ACTIONS) stay at zero retries, so `make check` remains a strict
   // gate before every push.
   retries: process.env.GITHUB_ACTIONS ? 2 : 0,
+  // Playwright's own default collapses to a single worker on CI, which turned
+  // a 66-test project into the slowest step of the whole workflow. GitHub's
+  // standard runners have four vCPUs and these journeys are short and
+  // I/O-bound, so one worker per core is the honest setting; local runs keep
+  // the half-the-cores default.
+  workers: process.env.CI ? 4 : undefined,
   use: {
     baseURL: 'http://127.0.0.1:4173',
     serviceWorkers: 'block',

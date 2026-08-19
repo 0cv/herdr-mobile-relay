@@ -71,7 +71,11 @@ nat-matrix:
 	@echo "  Without it the suite skips with the reason; run 'sudo -E make nat-matrix' to run it."
 	HERDR_NAT_MATRIX=1 go test ./tests/blackbox/ -run TestNATMatrix -count=1 -v -timeout 20m
 
-check: backend-check frontend-check frontend-browser web-release-check cross-build release-bundle-check
+# `web-release-check` proves `frontend/dist` and `web/` are byte-identical and
+# then browser-tests `web/`, so running the same suite against `dist` here only
+# doubles the slowest gate. `make frontend-browser` stays for iterating on a
+# build before `web/` is regenerated.
+check: backend-check frontend-check web-release-check cross-build release-bundle-check
 
 go-check:
 	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './frontend/node_modules/*'))"

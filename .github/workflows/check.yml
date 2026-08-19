@@ -30,6 +30,7 @@ jobs:
     timeout-minutes: 45
     env:
       HERDR_WEBKIT_CONTAINER: 1
+      HERDR_WEBKIT_WORKERS: 4
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,7 +46,6 @@ jobs:
           cache: true
       - run: npm ci --prefix frontend
       - run: make frontend-check
-      - run: make frontend-browser
       - run: make web-release-check
 
   release:
