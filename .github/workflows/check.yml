@@ -27,6 +27,9 @@ jobs:
   frontend:
     name: Frontend and mobile browsers (Node 24)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
     steps:
       - uses: actions/checkout@v7
         with:
@@ -42,9 +45,7 @@ jobs:
           cache: true
       - run: npm ci --prefix frontend
       - run: make frontend-check
-      - name: Install Playwright browsers
-        timeout-minutes: 10
-        run: npm --prefix frontend exec -- playwright install --with-deps chromium webkit
+      - run: test "$PLAYWRIGHT_BROWSERS_PATH" = /ms-playwright
       - run: make frontend-browser
       - run: make web-release-check
 
