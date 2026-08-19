@@ -266,7 +266,11 @@ assert_service_env_matches() {
     return 1
 }
 
+# A pane invoked straight from herdr has to hold the terminal open long enough
+# to be read. Under the setup menu it must not: the menu pauses once on the way
+# back, so a second prompt here would cost two keystrokes to return.
 pause_before_close() {
+    [ "${HERDR_SETUP_MENU:-}" != 1 ] || return 0
     if [ -t 0 ]; then
         echo ""
         read -r -p "Press Enter to close this pane." _answer

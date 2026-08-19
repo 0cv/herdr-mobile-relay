@@ -453,14 +453,23 @@ case "$*" in
 esac
 EOF
 chmod 700 "$MENU_BIN_DIR/curl"
+# Entering an action and finishing it has to come back here, not end the pane:
+# 7 shows the status, then the menu is redrawn and q leaves. Without a terminal
+# the return prompt is skipped, so the input carries no extra newline.
 MENU_OUTPUT="$(
-    printf 'q\n' |
+    printf '7\nq\n' |
         PATH="$MENU_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELEASE_ROOT="$MENU_ROOT" \
         HERDR_RELAY_ENV="$MENU_ENV" \
         bash "$REPO_DIR/relay/plugin-setup-menu.sh"
 )"
+case "$MENU_OUTPUT" in
+    *"Herdr Mobile Relay status"*) ;;
+    *) echo "setup menu did not open the status action" >&2; exit 1 ;;
+esac
+test "$(printf '%s\n' "$MENU_OUTPUT" | grep -c 'Herdr Mobile Relay Setup')" -ge 2 ||
+    { echo "setup menu did not come back after an action" >&2; exit 1; }
 case "$MENU_OUTPUT" in
     *"Relay:      9.9.9 running"*) ;;
     *) echo "setup menu did not report the running release" >&2; exit 1 ;;

@@ -100,69 +100,78 @@ print_status() {
     fi
 }
 
-echo "🐑 Herdr Mobile Relay Setup"
-echo ""
-print_status
-echo ""
-echo "Choose how you want to start:"
-echo ""
-echo "  1. Choose Connection Method"
-echo "     Decide how your phone reaches this computer: the community gateway"
-echo "     (free, shared, run by the project), your own gateway (best"
-echo "     performance, you own the bandwidth and the logs), or a Cloudflare"
-echo "     tunnel."
-echo ""
-echo "  2. Quick Start (recommended)"
-echo "     Installs missing tools, starts the relay, and prints the phone setup"
-echo "     QR code using whichever connection method is configured."
-echo ""
-echo "  3. Stable Tunnel"
-echo "     Guided permanent Cloudflare hostname, dedicated tunnel, and background service."
-echo ""
-echo "  4. Show Phone Setup QR"
-echo "     Reprint the private link and QR for the installed relay, tunnel or gateway."
-echo ""
-echo "  5. Remove Stable Tunnel"
-echo "     Tear down only resources recorded as wizard-owned."
-echo ""
-echo "  6. Configure App Deployment"
-echo "     Let this computer deploy one separately hosted Cloudflare Pages app."
-echo ""
-echo "  7. Show Full Status"
-echo "     Service, health, and a sanitized support snapshot."
-echo ""
-echo "  q. Exit, change nothing"
-echo ""
+render_menu() {
+    echo "🐑 Herdr Mobile Relay Setup"
+    echo ""
+    print_status
+    echo ""
+    echo "Choose how you want to start:"
+    echo ""
+    echo "  1. Choose Connection Method"
+    echo "     Decide how your phone reaches this computer: the community gateway"
+    echo "     (free, shared, run by the project), your own gateway (best"
+    echo "     performance, you own the bandwidth and the logs), or a Cloudflare"
+    echo "     tunnel."
+    echo ""
+    echo "  2. Quick Start (recommended)"
+    echo "     Installs missing tools, starts the relay, and prints the phone setup"
+    echo "     QR code using whichever connection method is configured."
+    echo ""
+    echo "  3. Stable Tunnel"
+    echo "     Guided permanent Cloudflare hostname, dedicated tunnel, and background service."
+    echo ""
+    echo "  4. Show Phone Setup QR"
+    echo "     Reprint the private link and QR for the installed relay, tunnel or gateway."
+    echo ""
+    echo "  5. Remove Stable Tunnel"
+    echo "     Tear down only resources recorded as wizard-owned."
+    echo ""
+    echo "  6. Configure App Deployment"
+    echo "     Let this computer deploy one separately hosted Cloudflare Pages app."
+    echo ""
+    echo "  7. Show Full Status"
+    echo "     Service, health, and a sanitized support snapshot."
+    echo ""
+    echo "  q. Exit, change nothing"
+    echo ""
+}
+
+# Every action runs as a child, so finishing one comes back here with the status
+# recomputed instead of ending the pane. The menu ignores SIGINT while a child
+# holds the terminal: Ctrl-C out of a foreground relay or a wizard step belongs
+# to that step, and must not take the menu with it. Actions pause here rather
+# than inside each script, which is why pause_before_close stands down under
+# HERDR_SETUP_MENU.
+run_action() {
+    local action="$1"
+
+    echo ""
+    trap '' INT
+    HERDR_SETUP_MENU=1 "$action" || true
+    trap - INT
+    if [ -t 0 ]; then
+        echo ""
+        read -r -p "Press Enter to return to the menu." _answer || return 0
+    fi
+}
 
 while true; do
-    read -r -p "Choice [1]: " choice
-    case "${choice:-1}" in
-        1)
-            exec "$SCRIPT_DIR/plugin-choose-transport.sh"
-            ;;
-        2)
-            exec "$SCRIPT_DIR/plugin-quick-start.sh"
-            ;;
-        3)
-            exec "$SCRIPT_DIR/plugin-install-service.sh"
-            ;;
-        4)
-            exec "$SCRIPT_DIR/plugin-setup-link.sh"
-            ;;
-        5)
-            exec "$SCRIPT_DIR/plugin-stable-teardown.sh"
-            ;;
-        6)
-            exec "$SCRIPT_DIR/plugin-configure-app-deploy.sh"
-            ;;
-        7)
-            exec "$SCRIPT_DIR/plugin-status.sh"
-            ;;
-        q|Q)
+    render_menu
+    while true; do
+        if ! read -r -p "Choice [1]: " choice; then
+            echo ""
             exit 0
-            ;;
-        *)
-            echo "Enter 1, 2, 3, 4, 5, 6, 7, or q."
-            ;;
-    esac
+        fi
+        case "${choice:-1}" in
+            1) run_action "$SCRIPT_DIR/plugin-choose-transport.sh"; break ;;
+            2) run_action "$SCRIPT_DIR/plugin-quick-start.sh"; break ;;
+            3) run_action "$SCRIPT_DIR/plugin-install-service.sh"; break ;;
+            4) run_action "$SCRIPT_DIR/plugin-setup-link.sh"; break ;;
+            5) run_action "$SCRIPT_DIR/plugin-stable-teardown.sh"; break ;;
+            6) run_action "$SCRIPT_DIR/plugin-configure-app-deploy.sh"; break ;;
+            7) run_action "$SCRIPT_DIR/plugin-status.sh"; break ;;
+            q | Q) exit 0 ;;
+            *) echo "Enter 1, 2, 3, 4, 5, 6, 7, or q." ;;
+        esac
+    done
 done
