@@ -115,6 +115,9 @@ jobs:
     needs: [verify, build, native-smoke]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v8
         with:
           name: release-bundles
@@ -123,9 +126,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Candidates are tagged on dev, so a tag is only a stable release once
+          # its commit is on main. Until then it ships as a prerelease, which the
+          # relay's update check skips, and promotion flips it with
+          # `gh release edit --prerelease=false --latest`.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            visibility=(--latest)
+          else
+            # 1 means "not on main"; any other status is a real git failure.
+            status=$?
+            test "$status" -eq 1 || exit "$status"
+            visibility=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \
+            "${visibility[@]}" \
             dist/release/checksums.txt \
             dist/release/herdr-mobile-relay_*.tar.gz

@@ -245,44 +245,114 @@ func TestFetchReleaseRequiresExactTagCommit(t *testing.T) {
 	}
 }
 
-func TestFetchReleaseFallsBackToAtomFeedsAfterAPIFailure(t *testing.T) {
-	mux := http.NewServeMux()
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	mux.HandleFunc("/releases/latest", func(writer http.ResponseWriter, _ *http.Request) {
-		http.Error(writer, "rate limited", http.StatusForbidden)
-	})
-	mux.HandleFunc("/releases.atom", func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte(`<?xml version="1.0"?>
+func TestFetchReleaseFallsBackToLatestReleaseRedirectAfterAPIFailure(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		location    string
+		wantVersion string
+		wantError   string
+	}{
+		{
+			name:        "stable tag",
+			status:      http.StatusFound,
+			location:    "/releases/tag/v1.2.4",
+			wantVersion: "1.2.4",
+		},
+		{
+			// The newest release is the prerelease v2.0.0, which the release
+			// feed lists first and cannot flag; only the redirect skips it.
+			name:        "newest release is a prerelease",
+			status:      http.StatusMovedPermanently,
+			location:    "/releases/tag/v1.2.4",
+			wantVersion: "1.2.4",
+		},
+		{
+			name:      "not a redirect",
+			status:    http.StatusOK,
+			wantError: "latest release did not redirect: HTTP 200",
+		},
+		{
+			name:      "redirect without location",
+			status:    http.StatusFound,
+			wantError: "latest release redirect has no Location header",
+		},
+		{
+			name:      "tag is not semantic versioned",
+			status:    http.StatusFound,
+			location:  "/releases/tag/nightly",
+			wantError: `latest release tag "nightly" is not semantic versioned`,
+		},
+		{
+			name:      "tag lacks the v prefix",
+			status:    http.StatusFound,
+			location:  "/releases/tag/1.2.4",
+			wantError: `latest release tag "1.2.4" is not semantic versioned`,
+		},
+	}
+	commitFeed := func(revision string) http.HandlerFunc {
+		return func(writer http.ResponseWriter, _ *http.Request) {
+			_, _ = writer.Write([]byte(`<?xml version="1.0"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><id>tag:github.com,2008:Grit::Commit/` + revision + `</id></entry>
+</feed>`))
+		}
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				http.Error(writer, "rate limited", http.StatusForbidden)
+			}))
+			defer api.Close()
+
+			mux := http.NewServeMux()
+			web := httptest.NewServer(mux)
+			defer web.Close()
+			mux.HandleFunc("/releases/latest", func(writer http.ResponseWriter, _ *http.Request) {
+				if test.location != "" {
+					writer.Header().Set("Location", web.URL+test.location)
+				}
+				writer.WriteHeader(test.status)
+			})
+			mux.HandleFunc("/releases.atom", func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(`<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>v2.0.0</title></entry>
   <entry><title>v1.2.4</title></entry>
 </feed>`))
-	})
-	mux.HandleFunc("/commits/v1.2.4.atom", func(writer http.ResponseWriter, _ *http.Request) {
-		_, _ = writer.Write([]byte(`<?xml version="1.0"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <entry><id>tag:github.com,2008:Grit::Commit/` + nextTestRevision + `</id></entry>
-</feed>`))
-	})
-	manager := NewManager(
-		t.TempDir(),
-		t.TempDir(),
-		testHerdrBinary(t),
-		"1.2.3",
-		currentTestRevision,
-		"http://127.0.0.1:8375/healthz",
-	)
-	manager.apiBase = server.URL
-	manager.webBase = server.URL
-	manager.client = server.Client()
+			})
+			mux.HandleFunc("/commits/v1.2.4.atom", commitFeed(nextTestRevision))
+			mux.HandleFunc("/commits/v2.0.0.atom", commitFeed(currentTestRevision))
 
-	metadata, err := manager.fetchRelease(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if metadata.Version != "1.2.4" || metadata.Revision != nextTestRevision {
-		t.Fatalf("metadata = %#v", metadata)
+			manager := NewManager(
+				t.TempDir(),
+				t.TempDir(),
+				testHerdrBinary(t),
+				"1.2.3",
+				currentTestRevision,
+				"http://127.0.0.1:8375/healthz",
+			)
+			manager.apiBase = api.URL
+			manager.webBase = web.URL
+			manager.client = web.Client()
+
+			metadata, err := manager.fetchRelease(context.Background())
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("error = %v, want %q", err, test.wantError)
+				}
+				if metadata != (releaseMetadata{}) {
+					t.Fatalf("metadata = %#v, want zero value", metadata)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata.Version != test.wantVersion || metadata.Revision != nextTestRevision {
+				t.Fatalf("metadata = %#v", metadata)
+			}
+		})
 	}
 }
 

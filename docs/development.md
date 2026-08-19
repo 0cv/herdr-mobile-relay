@@ -48,6 +48,33 @@ installing user; the relay, `cloudflared`, and agent subprocesses never inherit
 it. Managed self-updates still track this project's public releases, so a
 canary newer than the public tag reports that it is up to date.
 
+## Shipping a release candidate
+
+Work lands on `dev` with no tag; the check workflow runs on that branch, so a
+candidate is gated before it is ever tagged. Tag `vX.Y.Z` on `dev` only when
+testers have to install it. The release workflow publishes that tag as a
+prerelease, which ordinary relays never see: their update check resolves the
+latest stable release only.
+
+```bash
+herdr plugin install 0cv/herdr-mobile-relay --ref dev
+```
+
+Testers move to a newer candidate by re-running that same command.
+
+Promote a candidate by merging `dev` into `main` with a merge commit or a
+fast-forward — never a squash, because `install.sh` pins the installed manifest
+revision to the tag's commit and the published tag has to stay an ancestor of
+`main`. Then flip the release:
+
+```bash
+gh release edit vX.Y.Z --prerelease=false --latest
+```
+
+A published tag is never moved. Withdraw a bad candidate with
+`gh release delete vX.Y.Z --cleanup-tag` before anyone installs it, then re-tag
+the same version from the fixed commit.
+
 ## Toolchains
 
 Backend development uses Go 1.26.5; frontend development uses Node.js 24.

@@ -71,8 +71,7 @@ type githubAtomFeed struct {
 }
 
 type githubAtomEntry struct {
-	ID    string `xml:"id"`
-	Title string `xml:"title"`
+	ID string `xml:"id"`
 }
 
 type gitObject struct {
@@ -274,14 +273,16 @@ func (m *Manager) fetchRelease(ctx context.Context) (releaseMetadata, error) {
 		return releaseMetadata{}, fmt.Errorf("read canonical release: %w", apiErr)
 	}
 
-	// GitHub's unauthenticated API is limited per public IP. The web Atom
-	// feeds are independently rate-limited and still expose the published tag
-	// and exact commit needed to verify a release.
-	metadata, feedErr := m.fetchReleaseFromFeeds(ctx)
-	if feedErr == nil {
+	// GitHub's unauthenticated API is limited per public IP. The web host is
+	// rate-limited independently, and its /releases/latest redirect names the
+	// newest stable tag: unlike releases.atom, which has no prerelease marker
+	// and therefore cannot exclude release candidates, that redirect never
+	// points at a prerelease.
+	metadata, fallbackErr := m.fetchLatestStableRelease(ctx)
+	if fallbackErr == nil {
 		return metadata, nil
 	}
-	return releaseMetadata{}, fmt.Errorf("read canonical release: %v; Atom fallback: %w", apiErr, feedErr)
+	return releaseMetadata{}, fmt.Errorf("read canonical release: %v; web fallback: %w", apiErr, fallbackErr)
 }
 
 func githubAPIRateLimited(err error) bool {
@@ -315,28 +316,60 @@ func (m *Manager) releaseMetadataForTag(
 	}, nil
 }
 
-func (m *Manager) fetchReleaseFromFeeds(ctx context.Context) (releaseMetadata, error) {
-	var releaseFeed githubAtomFeed
-	feedURL := strings.TrimRight(m.webBase, "/") + "/releases.atom"
-	if err := m.getXML(ctx, feedURL, &releaseFeed); err != nil {
-		return releaseMetadata{}, fmt.Errorf("read release feed: %w", err)
+func (m *Manager) fetchLatestStableRelease(ctx context.Context) (releaseMetadata, error) {
+	tag, err := m.fetchLatestStableTag(ctx)
+	if err != nil {
+		return releaseMetadata{}, err
 	}
-	for _, entry := range releaseFeed.Entries {
-		tag := strings.TrimSpace(entry.Title)
-		version := strings.TrimPrefix(tag, "v")
-		if !semverPattern.MatchString(version) {
-			continue
-		}
-		if !strings.HasPrefix(tag, "v") {
-			tag = "v" + version
-		}
-		revision, err := m.fetchFeedTagRevision(ctx, tag)
-		if err != nil {
-			return releaseMetadata{}, fmt.Errorf("resolve release tag %s: %w", tag, err)
-		}
-		return releaseMetadata{Version: version, Revision: revision}, nil
+	revision, err := m.fetchFeedTagRevision(ctx, tag)
+	if err != nil {
+		return releaseMetadata{}, fmt.Errorf("resolve release tag %s: %w", tag, err)
 	}
-	return releaseMetadata{}, errors.New("release feed contains no stable semantic-version release")
+	return releaseMetadata{Version: strings.TrimPrefix(tag, "v"), Revision: revision}, nil
+}
+
+func (m *Manager) fetchLatestStableTag(ctx context.Context) (string, error) {
+	endpoint := strings.TrimRight(m.webBase, "/") + "/releases/latest"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Accept", "text/html")
+	request.Header.Set("User-Agent", "herdr-mobile-relay-update-check")
+	// The redirect target carries the answer, so it must be read instead of
+	// followed; the copy keeps the configured transport and timeout.
+	client := *m.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return "", fmt.Errorf("latest release did not redirect: HTTP %d", response.StatusCode)
+	}
+	location := strings.TrimSpace(response.Header.Get("Location"))
+	if location == "" {
+		return "", errors.New("latest release redirect has no Location header")
+	}
+	target, err := url.Parse(location)
+	if err != nil {
+		return "", fmt.Errorf("latest release redirect target %q is not a URL: %w", location, err)
+	}
+	tagPath := strings.TrimRight(target.Path, "/")
+	tag := tagPath
+	if slash := strings.LastIndexByte(tagPath, '/'); slash >= 0 {
+		tag = tagPath[slash+1:]
+	}
+	if !strings.HasPrefix(tag, "v") || !semverPattern.MatchString(strings.TrimPrefix(tag, "v")) {
+		return "", fmt.Errorf("latest release tag %q is not semantic versioned", tag)
+	}
+	return tag, nil
 }
 
 func (m *Manager) fetchFeedTagRevision(ctx context.Context, tag string) (string, error) {

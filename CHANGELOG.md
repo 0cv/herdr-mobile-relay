@@ -107,6 +107,12 @@ project follows [Semantic Versioning](https://semver.org/).
   including port-preserving NATs, rather than waiting for an attempt to time out
   and retry.
 
+### Fixed
+
+- Relay update checks ignore prereleases even when GitHub's API is rate-limited:
+  the fallback now resolves the latest stable tag through the `releases/latest`
+  redirect instead of the release feed, which cannot mark one.
+
 ## [0.16.4] - 2026-08-18
 
 ### Fixed
