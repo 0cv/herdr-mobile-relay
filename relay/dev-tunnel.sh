@@ -31,7 +31,7 @@ echo "  Production relay port 8375 and its configuration are not used."
 echo ""
 
 if ! command -v npm >/dev/null 2>&1; then
-    echo "✗ npm is required for make dev-tunnel. Install Node.js 24 first." >&2
+    echo "✗ npm is required for make dev-tunnel. Install Node.js 26 first." >&2
     exit 1
 fi
 

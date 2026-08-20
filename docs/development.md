@@ -45,7 +45,7 @@ passes first.
 
 ## Toolchains
 
-Backend development uses Go 1.26.5; frontend development uses Node.js 24.
+Backend development uses Go 1.27.0; frontend development uses Node.js 26.
 Packaged users need neither toolchain.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,

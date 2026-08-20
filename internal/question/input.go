@@ -1,5 +1,7 @@
 package question
 
+import "slices"
+
 // InputIntent is the provider-neutral action requested by the phone.
 type InputIntent struct {
 	Navigation    string
@@ -421,10 +423,5 @@ func openCodeNavigationKeys(interaction *Interaction, target Focus) []string {
 }
 
 func containsInt(values []int, target int) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, target)
 }

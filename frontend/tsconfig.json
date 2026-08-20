@@ -1,7 +1,6 @@
 {
   "compilerOptions": {
     "allowJs": true,
-    "baseUrl": ".",
     "checkJs": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
@@ -11,8 +10,8 @@
     "moduleResolution": "Bundler",
     "noEmit": true,
     "paths": {
-      "$components/*": ["src/components/*"],
-      "$lib/*": ["src/lib/*"]
+      "$components/*": ["./src/components/*"],
+      "$lib/*": ["./src/lib/*"]
     },
     "resolveJsonModule": true,
     "skipLibCheck": true,

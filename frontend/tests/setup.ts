@@ -14,7 +14,7 @@ function createMemoryStorage(): Storage {
   };
 }
 
-// Node 24 may expose experimental storage globals that differ by launch flags.
+// Node may expose experimental storage globals that differ by launch flags.
 // Always use one deterministic in-memory implementation for unit tests.
 Object.defineProperty(globalThis, 'localStorage', { value: createMemoryStorage(), configurable: true, writable: true });
 Object.defineProperty(globalThis, 'sessionStorage', { value: createMemoryStorage(), configurable: true, writable: true });

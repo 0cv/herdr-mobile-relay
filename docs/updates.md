@@ -23,7 +23,7 @@ Pages app, configure exactly one stable relay as deployment owner with the
 before it installs and restarts the relay; a failed download, compatibility
 check, deployment, or public-origin check leaves the current relay running.
 
-The optional deployment-owner role requires Node.js 24 and Cloudflare
+The optional deployment-owner role requires Node.js 26 and Cloudflare
 credentials on that computer only. The action looks for `node` where nvm, fnm,
 volta, and asdf put it, not only on `PATH`.
 
