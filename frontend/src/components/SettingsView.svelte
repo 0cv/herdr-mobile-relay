@@ -31,7 +31,7 @@
     terminalRefreshInterval,
     theme,
   } from '$lib/preferences';
-  import { relayVersionMeta } from '$lib/protocol';
+  import { relayVersionMeta, shortRevision } from '$lib/protocol';
   import {
     finishedNotificationsEnabled,
     notificationsSupported,
@@ -271,7 +271,7 @@
     if (update.state === 'available') {
       return {
         label: `Update v${update.available_version} available`,
-        detail: `Revision ${update.available_revision}`,
+        detail: `Revision ${shortRevision(update.available_revision)}`,
         warning: true,
       };
     }

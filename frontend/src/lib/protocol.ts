@@ -7,6 +7,19 @@ export function relayProtocolError(connection: Pick<RelayConnectionView, 'protoc
   return `Incompatible relay protocol v${connection.protocol}; this app requires v${APP_PROTOCOL_VERSION}.`;
 }
 
+/**
+ * Git revisions are 40 characters and only the leading few carry meaning, so a
+ * phone row shows the short form and the tooltip keeps the full hash. Anything
+ * that is not a hash — a bare version, a placeholder — is left alone, and a
+ * `-dirty` working tree stays marked.
+ */
+export function shortRevision(revision: string): string {
+  const dirty = revision.endsWith('-dirty');
+  const base = dirty ? revision.slice(0, -6) : revision;
+  if (!/^[0-9a-f]{12,40}$/i.test(base)) return revision;
+  return dirty ? `${base.slice(0, 7)}-dirty` : base.slice(0, 7);
+}
+
 export function relayVersionMeta(
   connection: (
     Pick<RelayConnectionView, 'status' | 'protocol' | 'version'>
@@ -32,12 +45,16 @@ export function relayVersionMeta(
   const revision = connection.revision || connection.version;
   if (connection.releaseVersion) {
     return {
-      label: `v${connection.releaseVersion} · ${revision}`,
+      label: `v${connection.releaseVersion} · ${shortRevision(revision)}`,
       tone: 'muted' as const,
-      title: 'Relay product version and Git revision.',
+      title: `Relay product version and Git revision ${revision}.`,
     };
   }
-  return { label: `relay ${revision}`, tone: 'muted' as const, title: 'Relay git revision.' };
+  return {
+    label: `relay ${shortRevision(revision)}`,
+    tone: 'muted' as const,
+    title: `Relay Git revision ${revision}.`,
+  };
 }
 
 export function parseNotificationTarget(value: string): NotificationTarget | null {

@@ -1071,6 +1071,98 @@ gateway_answers_healthz() {
     printf '%s\n' "$body" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'
 }
 
+# Round-trip milliseconds for a gateway's /healthz, or failure when it does not
+# answer. Setup already opens this connection to prove the gateway is alive;
+# reporting what it measured is what lets a person order the list by distance
+# instead of guessing from hostnames. The body goes to a file so stdout carries
+# only the timing: a curl that reports no timing still proves health, and the
+# caller simply omits the number.
+gateway_healthz_ms() {
+    local body_file
+    local seconds
+
+    body_file="$(mktemp "${TMPDIR:-/tmp}/herdr-healthz.XXXXXX")" || return 1
+    if ! seconds="$(
+        curl --fail --silent --show-error \
+            --connect-timeout 3 \
+            --max-time 8 \
+            --output "$body_file" \
+            --write-out '%{time_total}' \
+            "$(gateway_http_base "$1")/healthz" 2>/dev/null
+    )"; then
+        rm -f "$body_file"
+        return 1
+    fi
+    if ! grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' "$body_file"; then
+        rm -f "$body_file"
+        return 1
+    fi
+    rm -f "$body_file"
+    case "$seconds" in
+        '' | *[!0-9.]*) return 0 ;;
+    esac
+    awk -v seconds="$seconds" 'BEGIN { printf "%d\n", (seconds * 1000) + 0.5 }'
+}
+
+# How a saved list reads in one phrase, for the setup menu's status line. The
+# policy decides which gateway carries traffic, so it belongs next to the
+# gateway it chose rather than only in the environment file.
+gateway_selection_label() {
+    case "$1" in
+        latency) printf 'closest wins\n' ;;
+        *) printf 'first listed wins\n' ;;
+    esac
+}
+
+# The policy a prompt answer selects. Split from the prompt so the rule is
+# testable without a terminal: "1" or empty keeps the default the list was
+# built with, "2" takes the other one, and anything else keeps the default
+# rather than silently changing which gateway carries traffic.
+gateway_selection_choice() {
+    local default_selection="$1"
+    local answer="$2"
+
+    if [ "$answer" = 2 ]; then
+        if [ "$default_selection" = latency ]; then
+            printf 'ordered\n'
+        else
+            printf 'latency\n'
+        fi
+        return 0
+    fi
+    printf '%s\n' "$default_selection"
+}
+
+# Asks how the relay should read the list it just saved. The default matches
+# how the list was built — an operator's own gateway is a priority, a pool of
+# interchangeable public ones is ranked by distance — so Enter is always the
+# right answer for someone who does not care. HERDR_GATEWAY_SELECTION and a
+# missing terminal both skip the question, which keeps automation silent.
+prompt_gateway_selection() {
+    local default_selection="$1"
+    local answer
+
+    if [ -n "${HERDR_GATEWAY_SELECTION:-}" ]; then
+        printf '%s\n' "$HERDR_GATEWAY_SELECTION"
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        printf '%s\n' "$default_selection"
+        return 0
+    fi
+    echo "" >&2
+    echo "How should the relay pick from this list?" >&2
+    if [ "$default_selection" = latency ]; then
+        echo "  1. Closest by measured latency [default]" >&2
+        echo "  2. First one that answers, in the order above" >&2
+    else
+        echo "  1. First one that answers, in the order above [default]" >&2
+        echo "  2. Closest by measured latency" >&2
+    fi
+    read -r -p "Choice [1]: " answer || answer=""
+    gateway_selection_choice "$default_selection" "$answer"
+}
+
 # Persists the transport choice. An empty URL removes the key, which returns
 # the relay to the Cloudflare tunnel path — and takes the selection policy with
 # it, so a relay that leaves the gateway path keeps no stale policy to revive

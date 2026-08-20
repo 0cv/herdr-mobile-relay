@@ -21,7 +21,7 @@ import {
 import { APP_PROTOCOL_VERSION } from '$lib/config';
 import { quickSetupConfig } from '$lib/config';
 import { suggestedLaunchName, validAgentName } from '$lib/launch';
-import { parseNotificationTarget, relayProtocolError, relayVersionMeta } from '$lib/protocol';
+import { parseNotificationTarget, relayProtocolError, relayVersionMeta, shortRevision } from '$lib/protocol';
 import { relayPushScope } from '$lib/push';
 import { stateFromLocation } from '$lib/router';
 import {
@@ -67,6 +67,21 @@ describe('protocol and setup parsing', () => {
     expect(relayProtocolError({ protocol: 0 } as RelayConnectionView)).toMatch(/Waiting/);
     expect(relayProtocolError({ protocol: 1 } as RelayConnectionView)).toMatch(/v1/);
     expect(relayVersionMeta({ status: 'connected', protocol: 3, version: 'future' } as RelayConnectionView)?.label).toMatch(/App outdated/);
+  });
+
+  it('shortens git revisions for a phone row without losing the full hash', () => {
+    const revision = 'e3816cb50d9fcc4220558c278be8d31d6d7a12d0';
+    const meta = relayVersionMeta({
+      status: 'connected', protocol: 2, version: revision, releaseVersion: '0.17.0', revision,
+    } as RelayConnectionView);
+    expect(meta?.label).toBe('v0.17.0 · e3816cb');
+    // The full hash stays reachable: the row is for scanning, not for copying.
+    expect(meta?.title).toContain(revision);
+
+    expect(shortRevision(`${revision}-dirty`)).toBe('e3816cb-dirty');
+    // Anything that is not a hash is left intact rather than truncated blindly.
+    expect(shortRevision('0.17.0')).toBe('0.17.0');
+    expect(shortRevision('unknown')).toBe('unknown');
   });
 
   it('sanitizes setup links and notification routes', () => {

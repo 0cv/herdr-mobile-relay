@@ -81,8 +81,12 @@ remains the only authorization for control on every path.
 - `HERDR_GATEWAY_SELECTION` — `ordered`, the default, takes the first healthy
   entry in configured order, which makes a list you write yourself a priority
   list. `latency` keeps the lowest-latency healthy entry, with configured order
-  breaking ties within 20 ms; the setup menu writes it only for the community
-  list, whose gateways are interchangeable.
+  breaking ties within 20 ms. You do not have to set this by hand: the setup
+  menu asks whenever a list has more than one entry, defaulting to `ordered`
+  for a list built around your own gateway and `latency` for the community
+  list, whose gateways are interchangeable. The menu's status line names the
+  rule in force, and setup prints each candidate's measured round trip so the
+  order is an informed choice.
 - `HERDR_WEBRTC_UDP_PORT` — fixed UDP port for the direct path; `0` (default) uses
   an ephemeral port.
 - `HERDR_REACHABILITY_PORT_MAPPING` — ask the router for a PCP, NAT-PMP, or UPnP

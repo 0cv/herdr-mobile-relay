@@ -38,6 +38,7 @@ use_gateways() {
     local url
     local healthy=0
     local count
+    local rtt
 
     if ! urls="$(normalize_gateway_urls "$1")"; then
         echo "✗ $1 is not a usable gateway candidate list."
@@ -51,8 +52,15 @@ use_gateways() {
     count=$#
     for url in "$@"; do
         printf '▸ Checking %s..' "$url"
-        if gateway_answers_healthz "$url"; then
-            echo " ✓"
+        # The measured round trip is the whole reason to prefer one entry over
+        # another, so it is shown rather than discarded: ordering the list is a
+        # decision, and this is the number it turns on.
+        if rtt="$(gateway_healthz_ms "$url")"; then
+            if [ -n "$rtt" ]; then
+                printf ' ✓ %s ms\n' "$rtt"
+            else
+                echo " ✓"
+            fi
             healthy=$((healthy + 1))
         else
             echo " unavailable"
@@ -64,6 +72,9 @@ use_gateways() {
         echo "  Check the addresses, TLS termination, and that at least one"
         echo "  gateway is running. Plain HTTP is accepted only on loopback."
         return 1
+    fi
+    if [ "$count" -gt 1 ]; then
+        selection="$(prompt_gateway_selection "$selection")"
     fi
     set_gateway_url "$ENV_FILE" "$urls"
     set_gateway_selection "$ENV_FILE" "$selection"
@@ -105,7 +116,14 @@ choose_own_gateway() {
                 ;;
             b|B)
                 while true; do
-                    if ! read -r -p "Your gateway address(es), comma-separated, or q to cancel: " entered; then
+                    # An empty answer keeps the saved list, so revisiting this
+                    # action to change the order or the selection rule does not
+                    # mean retyping addresses that are already configured.
+                    if [ -n "$CURRENT" ]; then
+                        read -r -p "Your gateway address(es), comma-separated, q to cancel [keep saved]: " entered ||
+                            { echo ""; return 1; }
+                        entered="${entered:-$CURRENT}"
+                    elif ! read -r -p "Your gateway address(es), comma-separated, or q to cancel: " entered; then
                         echo ""
                         return 1
                     fi

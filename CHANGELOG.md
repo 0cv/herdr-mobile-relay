@@ -127,6 +127,16 @@ project follows [Semantic Versioning](https://semver.org/).
   Newly discovered mappings are also trickled into sessions already negotiating,
   including port-preserving NATs, rather than waiting for an attempt to time out
   and retry.
+- The gateway selection rule is administered from the setup menu instead of
+  only `HERDR_GATEWAY_SELECTION`. Setup prints each candidate's measured round
+  trip, asks how to read a multi-entry list — defaulting to first-listed for a
+  list built around your own gateway and closest for the community pool — and
+  the menu status line names the rule that picked the active gateway. Revisiting
+  the own-gateway action keeps the saved list, so changing only the rule no
+  longer means retyping addresses.
+- Relay Git revisions display as short hashes on the phone, which fit a narrow
+  row instead of being truncated mid-hash; the full revision stays in the
+  row's tooltip.
 
 ### Fixed
 

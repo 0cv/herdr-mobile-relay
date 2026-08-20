@@ -107,7 +107,10 @@ transport_summary() {
         # Commas, not lines: the list has no trailing newline for wc to count.
         count=$(($(printf '%s' "$gateways" | tr -cd ',' | wc -c) + 1))
         if [ "$count" -gt 1 ]; then
-            printf ' (+%s fallback)' "$((count - 1))"
+            # Which rule picked this gateway is the answer to "why that one",
+            # so it belongs beside the gateway rather than only in relay.env.
+            printf ' (+%s fallback, %s)' "$((count - 1))" \
+                "$(gateway_selection_label "$(env_file_value "$ENV_FILE" HERDR_GATEWAY_SELECTION)")"
         fi
         printf '\n'
         return 0

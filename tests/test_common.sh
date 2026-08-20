@@ -622,6 +622,23 @@ test "$(
 )" = "wss://own.example.test,wss://backup.example.test"
 test -z "$(HERDR_COMMUNITY_GATEWAY_URL="" community_gateway_url)"
 
+# The selection rule is a decision about which gateway carries traffic, so an
+# unrecognized or empty answer keeps the default the list was built with rather
+# than switching policies behind the operator's back.
+test "$(gateway_selection_choice ordered '')" = "ordered"
+test "$(gateway_selection_choice ordered 1)" = "ordered"
+test "$(gateway_selection_choice ordered 2)" = "latency"
+test "$(gateway_selection_choice latency '')" = "latency"
+test "$(gateway_selection_choice latency 2)" = "ordered"
+test "$(gateway_selection_choice ordered nonsense)" = "ordered"
+# Automation and a missing terminal both keep the question silent.
+test "$(HERDR_GATEWAY_SELECTION=latency prompt_gateway_selection ordered)" = "latency"
+test "$(prompt_gateway_selection ordered < /dev/null)" = "ordered"
+# The status line phrases the rule instead of printing the variable.
+test "$(gateway_selection_label latency)" = "closest wins"
+test "$(gateway_selection_label ordered)" = "first listed wins"
+test "$(gateway_selection_label '')" = "first listed wins"
+
 # Each flattened transport entry is complete: Community accepts the managed
 # candidate list without asking for addresses, retains an unavailable cold
 # fallback, saves the latency policy, and immediately enters Quick Start.
@@ -634,9 +651,24 @@ cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-choose-transport.sh" \
     "$CHOOSER_SCRIPT_DIR/"
 cat > "$CHOOSER_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
+# Faithful enough for the probe: the health check reads the body from stdout,
+# and the latency probe asks for the body in --output with the timing on
+# stdout. A double that answered only the first shape would report every
+# gateway unavailable.
+OUT=""
+PREV=""
+for ARG in "$@"; do
+    [ "$PREV" != "--output" ] || OUT="$ARG"
+    PREV="$ARG"
+done
 case "$*" in
     *own.example.test/healthz* | *gw-a.example.test/healthz*)
-        printf '%s\n' '{"ok":true}'
+        if [ -n "$OUT" ]; then
+            printf '%s\n' '{"ok":true}' > "$OUT"
+            printf '0.042'
+        else
+            printf '%s\n' '{"ok":true}'
+        fi
         ;;
     *)
         exit 22
@@ -866,9 +898,11 @@ case "$MENU_OUTPUT" in
     *"Relay:      9.9.9 running"*) ;;
     *) echo "setup menu did not report the running release" >&2; exit 1 ;;
 esac
+# The status line names the rule that picked this gateway, so "why that one"
+# is answerable without opening relay.env.
 case "$MENU_OUTPUT" in
-    *"gateway wss://gw-b.example.test runs 9.9.8; latest available 9.9.10 (+1 fallback)"*) ;;
-    *) echo "setup menu did not report the active gateway and available version" >&2; exit 1 ;;
+    *"gateway wss://gw-b.example.test runs 9.9.8; latest available 9.9.10 (+1 fallback, first listed wins)"*) ;;
+    *) echo "setup menu did not report the active gateway, version, and selection rule" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
     *"serves 9.9.8, this relay ships 9.9.9"*) ;;
