@@ -27,6 +27,12 @@ export interface TransportStatusDetail {
    * manager pairs it with the gateway host it dialed itself.
    */
   stunPort?: number;
+  /**
+   * Gateway the live session was opened against. Reported for the relayed path
+   * and kept on the direct one, whose signalling used that same gateway, so the
+   * app can name the candidate actually in use out of a configured list.
+   */
+  gatewayUrl?: string;
 }
 
 /**

@@ -10,7 +10,23 @@ import {
   TERMINAL_REFRESH_KEY,
 } from '$lib/config';
 import { relayStore } from '$lib/store';
+import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
+import type { RelayConfig } from '$lib/types';
 import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+
+type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
+
+/** Lets one test drive a relayed or direct path the mock socket cannot produce. */
+const transportHijack = vi.hoisted(() => ({ current: null as TransportFactory | null }));
+
+vi.mock('$lib/transports', async (importOriginal) => {
+  const actual = await importOriginal() as { createRelayTransport: TransportFactory };
+  return {
+    ...actual,
+    createRelayTransport: (relay: RelayConfig, handlers: TransportHandlers) =>
+      (transportHijack.current ?? actual.createRelayTransport)(relay, handlers),
+  };
+});
 
 class MockWebSocket {
   static OPEN = 1;
@@ -41,6 +57,7 @@ describe('settings relay status', () => {
   const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(navigator, 'serviceWorker');
 
   beforeEach(() => {
+    transportHijack.current = null;
     MockWebSocket.instances = [];
     vi.stubGlobal('WebSocket', MockWebSocket);
     vi.stubGlobal('Notification', { permission: 'granted', requestPermission: vi.fn().mockResolvedValue('granted') });
@@ -63,6 +80,7 @@ describe('settings relay status', () => {
   });
 
   afterEach(() => {
+    transportHijack.current = null;
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
     vi.unstubAllGlobals();
@@ -109,6 +127,50 @@ describe('settings relay status', () => {
       'wss://community-a.example.test',
       'wss://community-b.example.test',
     ]);
+  });
+
+  it('names the gateway carrying each relay, and the direct path that replaces it', async () => {
+    let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
+    let deliver: (message: Record<string, unknown>) => void = () => {};
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'gateway',
+      connect: () => {
+        report = handlers.onStatus;
+        deliver = handlers.onMessage;
+        handlers.onStatus('connecting');
+      },
+      send: () => true,
+      close: () => {},
+    });
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({
+      label: 'Fedora',
+      url: '',
+      token: 'relay-secret',
+      transport: 'hybrid',
+      gatewayUrl: 'wss://own.example.test',
+      gatewayUrls: ['wss://own.example.test', 'wss://community-a.example.test'],
+    });
+    render(SettingsView);
+
+    // The configured head was skipped, so the list order is not the answer to
+    // "which gateway am I on": the live session names itself.
+    report('connected', { path: 'gateway', gatewayUrl: 'wss://community-a.example.test' });
+    deliver({ type: 'push_config', protocol: 2, capabilities: [], agent_profiles: [] });
+
+    expect(await screen.findByText('Connection: gateway community-a.example.test')).toBeInTheDocument();
+
+    report('connected', { path: 'webrtc', gatewayUrl: 'wss://community-a.example.test' });
+    expect(await screen.findByText('Connection: direct, via community-a.example.test')).toBeInTheDocument();
+  });
+
+  it('names the relay URL when no gateway carries the connection', async () => {
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+
+    expect(await screen.findByText('Connection: relay URL fedora.example')).toBeInTheDocument();
   });
 
   it('shows active and latest gateway versions without regressing to an older upstream', async () => {

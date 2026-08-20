@@ -43,6 +43,7 @@ dns_has_record() {
 recover_state_from_config() {
     local config
     local port
+    local resolved
 
     load_relay_env "$ENV_FILE"
     port="${HERDR_RELAY_PORT:-8375}"
@@ -61,6 +62,20 @@ recover_state_from_config() {
     if ! read_cloudflared_relay_config "$config" "$port"; then
         echo "✗ Refusing to recover teardown identity from $config." >&2
         return 1
+    fi
+
+    # The wizard writes the tunnel UUID as the config's `tunnel:` scalar, so the
+    # namespace guard below has nothing to recognize until Cloudflare resolves
+    # that id back to the name the tunnel was created with.
+    if [[ "$TUNNEL_NAME" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+        resolved="$(cloudflared_tunnel_name_by_id "$TUNNEL_UUID" "$(cloudflared_origin_cert "$config")")" || resolved=""
+        if [ -z "$resolved" ]; then
+            echo "✗ Cloudflare could not name tunnel $TUNNEL_UUID recorded in $config." >&2
+            echo "  Authorize cloudflared with cloudflared tunnel login, then rerun this teardown," >&2
+            echo "  or delete tunnel $TUNNEL_UUID in the Cloudflare dashboard." >&2
+            return 1
+        fi
+        TUNNEL_NAME="$resolved"
     fi
     case "$TUNNEL_NAME" in
         herdr-mobile-relay-*) ;;

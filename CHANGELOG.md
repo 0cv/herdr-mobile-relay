@@ -64,6 +64,9 @@ project follows [Semantic Versioning](https://semver.org/).
   gateways, the QR carries the whole list, and both relay and phone move to the
   next one when a gateway is unreachable. Pairing links produced now always
   carry the list, so adding a second gateway later needs no re-scan.
+- Phone Settings names the path each relay is on: the gateway carrying it, the
+  direct peer-to-peer session and the gateway that signalled it, or the relay
+  URL. A configured candidate list no longer hides which entry answered.
 - Documentation restructured: the README is now a short overview that gets a new
   user to a paired phone, with the detail split into `docs/mobile-app.md`,
   `docs/transports.md`, `docs/cloudflare-tunnel.md`, `docs/updates.md`,
@@ -132,6 +135,13 @@ project follows [Semantic Versioning](https://semver.org/).
   closed and narrowed it again on the way back, and the agent re-rendered on both
   resizes. A released width now lapses after ten seconds instead, so a return
   within that window reuses the width the pane already has.
+- Stable tunnel teardown can recover its identity again after older no-op
+  teardowns cleared the state: the wizard records the tunnel UUID in its
+  `cloudflared` config, so recovery now resolves that id to its Cloudflare name
+  before the Herdr namespace guard judges it. It still refuses a foreign tunnel,
+  and an unresolvable id now says how to authorize the lookup.
+- An empty `HERDR_GATEWAY_STUN_ADDR` in a generated gateway bundle really
+  disables address discovery; compose folded the empty value back into `:3478`.
 - Relay update checks ignore prereleases even when GitHub's API is rate-limited:
   the fallback now resolves the latest stable tag through the `releases/latest`
   redirect instead of the release feed, which cannot mark one.

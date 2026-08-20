@@ -977,6 +977,41 @@ describe('relay command store', () => {
     expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 100 });
   });
 
+  it('records the gateway that answered and drops it on the relay URL path', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'gateway',
+      connect: () => {
+        report = handlers.onStatus;
+        handlers.onStatus('connecting');
+      },
+      send: () => true,
+      close: () => {},
+    });
+    relayStore.addRelay({
+      label: 'Gateway',
+      url: 'wss://fedora.example',
+      token: '',
+      transport: 'hybrid',
+      gatewayUrl: 'wss://a.example',
+      gatewayUrls: ['wss://a.example', 'wss://b.example'],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+
+    // The head of the list was skipped, so the answer is the dialed entry.
+    report('connected', { path: 'gateway', gatewayUrl: 'wss://b.example' });
+    expect(get(relayStore.connections).get(relayId)?.activeGatewayUrl).toBe('wss://b.example');
+
+    report('connected', { path: 'webrtc', gatewayUrl: 'wss://b.example' });
+    expect(get(relayStore.connections).get(relayId)?.activeGatewayUrl).toBe('wss://b.example');
+
+    // The legacy relay URL carries no gateway, so nothing may still name one.
+    report('connected', { path: 'websocket' });
+    expect(get(relayStore.connections).get(relayId)?.activeGatewayUrl).toBe('');
+  });
+
   it('adopts an advertised hybrid descriptor without a QR re-scan', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();

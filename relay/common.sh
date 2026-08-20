@@ -222,6 +222,50 @@ read_cloudflared_relay_config() {
     TUNNEL_NAME="$configured_tunnel"
 }
 
+# The origin certificate cloudflared should manage tunnels with: an explicit
+# TUNNEL_ORIGIN_CERT wins, then the config's own origincert, then cloudflared's
+# default location. A path is always printed even when nothing is there to read,
+# because the callers differ on what an unreadable certificate means — setup
+# skips its existence check, teardown refuses.
+cloudflared_origin_cert() {
+    local config="$1"
+    local certificate_value
+
+    if [ -n "${TUNNEL_ORIGIN_CERT:-}" ]; then
+        printf '%s\n' "$TUNNEL_ORIGIN_CERT"
+        return
+    fi
+    certificate_value="$(yaml_scalar origincert "$config")"
+    if [ -n "$certificate_value" ]; then
+        expand_config_path "$certificate_value" "$config"
+        return
+    fi
+    printf '%s\n' "$HOME/.cloudflared/cert.pem"
+}
+
+# The Cloudflare name of a tunnel UUID. A generated config records the UUID as
+# its `tunnel:` scalar, so anything that reasons about the tunnel *name* — the
+# Herdr namespace guard above all — has to ask Cloudflare which name the id was
+# created with. Fails when the certificate cannot authorize the lookup, when
+# Cloudflare refuses it, or when the id names no live tunnel.
+cloudflared_tunnel_name_by_id() {
+    local uuid="$1"
+    local origin_cert="$2"
+    local list_output
+    local name
+
+    [ -r "$origin_cert" ] || return 1
+    list_output="$(mktemp "${TMPDIR:-/tmp}/herdr-tunnel-list.XXXXXX")" || return 1
+    if ! cloudflared tunnel --origincert "$origin_cert" list --id "$uuid" --output json > "$list_output"; then
+        rm -f "$list_output"
+        return 1
+    fi
+    name="$("$(relay_binary)" stable-state tunnel-name-by-id "$list_output" "$uuid")" || name=""
+    rm -f "$list_output"
+    [ -n "$name" ] || return 1
+    printf '%s\n' "$name"
+}
+
 cloudflare_cert_zone_name() {
     local origin_cert="$1"
     local payload

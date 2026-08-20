@@ -344,13 +344,15 @@ services:
     # is raw UDP, and a TLS reverse proxy cannot carry it, so Caddy cannot front
     # it the way it fronts 8443: phones and relays have to reach it directly.
     # Answering it only reflects the source address the gateway already sees on
-    # the connection, so publishing it exposes nothing new.
+    # the connection, so publishing it exposes nothing new. The single "-" below
+    # defaults only when the variable is unset, so an empty .env value really
+    # disables the listener instead of being folded back into ":3478".
     ports:
       - "127.0.0.1:8443:8443"
       - "3478:3478/udp"
     environment:
       HERDR_GATEWAY_ADDR: ":8443"
-      HERDR_GATEWAY_STUN_ADDR: ${HERDR_GATEWAY_STUN_ADDR:-:3478}
+      HERDR_GATEWAY_STUN_ADDR: ${HERDR_GATEWAY_STUN_ADDR-:3478}
       # Caddy is in front, so the leftmost X-Forwarded-For entry is the real
       # client: the per-IP connect limit and /probe need it. Safe only because
       # port 8443 is unreachable from outside the host.
@@ -526,8 +528,9 @@ HERDR_GATEWAY_LOG_FORMAT=json
 # UDP address discovery, published on 3478 by docker-compose.yml. Phones and
 # relays ask the gateway what address it sees them coming from, which is what
 # lets the two of them meet directly instead of paying for a relayed path. An
-# empty value disables the listener: peers behind NAT then fall back to the
-# relayed path through this gateway.
+# empty value here disables the listener: peers behind NAT then fall back to the
+# relayed path through this gateway. With it empty, the "3478:3478/udp" mapping
+# in docker-compose.yml can be deleted too, which closes the port on the host.
 HERDR_GATEWAY_STUN_ADDR=:3478
 
 # Set in docker-compose.yml rather than here, because the deployment shape

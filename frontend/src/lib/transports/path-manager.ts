@@ -156,6 +156,11 @@ export function createHybridTransport(
     },
   };
 
+  /** The gateway carrying, or having signalled, the live session. */
+  function dialedGateway(): string {
+    return String(dialed.gatewayUrl || '');
+  }
+
   function scheduleDirectRetry(): void {
     if (closed || forceRelay || directBlocked || direct || retryTimer !== null) return;
     const delay = Math.min(DIRECT_RETRY_BASE_MS * 2 ** Math.max(0, directFailures - 1), DIRECT_RETRY_CAP_MS);
@@ -222,7 +227,7 @@ export function createHybridTransport(
     directFailures = 0;
     clearTimeout(attemptTimer ?? undefined);
     attemptTimer = null;
-    handlers.onStatus('connected', { path: 'webrtc' });
+    handlers.onStatus('connected', { path: 'webrtc', gatewayUrl: dialedGateway() });
     stabilityTimer = setTimeout(() => {
       stabilityTimer = null;
       gatewayReady = false;
@@ -246,7 +251,7 @@ export function createHybridTransport(
     if (wasActive) {
       active = 'gateway';
       handlers.onStatus('connecting', detail?.reason ? { reason: detail.reason } : undefined);
-      if (gatewayReady) handlers.onStatus('connected', { path: 'gateway' });
+      if (gatewayReady) handlers.onStatus('connected', { path: 'gateway', gatewayUrl: dialedGateway() });
       else if (!gateway) openGateway();
     }
     scheduleDirectRetry();
@@ -299,7 +304,10 @@ export function createHybridTransport(
           stunPort = detail?.stunPort ?? 0;
         }
         if (active !== 'gateway') return;
-        handlers.onStatus(status, detail);
+        handlers.onStatus(
+          status,
+          status === 'connected' ? { ...detail, gatewayUrl: dialedGateway() } : detail,
+        );
         if (status === 'connected') startDirect();
       },
     });

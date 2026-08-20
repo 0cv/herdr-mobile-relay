@@ -150,9 +150,9 @@ make that directory writable by uid 65532 (`nonroot`).
 
 `3478/udp` is published on every interface because address discovery is raw UDP
 and no TLS proxy can carry it. `HERDR_GATEWAY_STUN_ADDR=` (empty) turns the
-listener off so the port can stay closed — for a container or binary you start
-yourself. The generated Compose bundle substitutes `:3478` for an empty value,
-so remove the port mapping there instead.
+listener off — for a container you start yourself, for the plain binary, and for
+the generated Compose bundle alike. Deleting the published `3478:3478/udp`
+mapping is what closes the port on the host.
 
 ### Plain binary
 

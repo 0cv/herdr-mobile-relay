@@ -60,7 +60,7 @@
     reloadApp,
     setUpdateProgressError,
   } from '$lib/updates';
-  import type { AppUpdateStatus, RelayConnectionView } from '$lib/types';
+  import type { AppUpdateStatus, RelayConfig, RelayConnectionView } from '$lib/types';
 
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
@@ -432,6 +432,22 @@
     if (connection.status === 'connected' && $pushPreferences.optedIn) return 'checking…';
     return 'not synced';
   }
+
+  /** Host of a ws(s) origin, without the scheme the row does not need. */
+  function originHost(url: string): string {
+    return url.replace(/^\w+:\/\//, '').split('/')[0];
+  }
+
+  /**
+   * Which physical path is carrying this relay right now. A configured gateway
+   * list says what the phone may use; this says what it is using.
+   */
+  function relayPathLabel(connection: RelayConnectionView | undefined, relay: RelayConfig): string {
+    if (!connection || connection.status !== 'connected') return '';
+    if (connection.path === 'websocket') return `relay URL ${originHost(relay.url)}`;
+    const gateway = originHost(connection.activeGatewayUrl || relay.gatewayUrl || '');
+    return connection.path === 'webrtc' ? `direct, via ${gateway}` : `gateway ${gateway}`;
+  }
 </script>
 
 <main class="page settings-page" aria-labelledby="settings-title">
@@ -460,6 +476,7 @@
         {@const manualUpdate = Boolean(connection && relayNeedsManualBootstrap(connection))}
         {@const currentRelay = connection?.relay || relay}
         {@const gateways = currentRelay.gatewayUrls || []}
+        {@const connectionPath = relayPathLabel(connection, currentRelay)}
         <article class="relay-row">
           <span
             class={`status-dot status-${connectionStatus === 'connected' && connection?.inventory.state === 'ready' ? 'success' : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'warning' : 'danger'}`}
@@ -468,6 +485,7 @@
           ></span>
           <div class="relay-info">
             <strong>{relay.label}</strong>
+            {#if connectionPath}<small>Connection: {connectionPath}</small>{/if}
             {#if gateways.length}
               <small>Gateway: {connection?.gatewayVersion || 'unknown'} · Latest: {connection?.update.available_version || connection?.gatewayAvailableVersion || connection?.releaseVersion || 'unknown'}</small>
               <ol aria-label={`Gateway candidates for ${relay.label}`}>

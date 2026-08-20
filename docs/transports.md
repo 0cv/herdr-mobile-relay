@@ -52,6 +52,10 @@ session is dropped ten seconds later. If the direct path never forms, or later
 breaks, the phone opens a relayed session again — automatically, with no
 re-pairing.
 
+Phone **Settings** names what each relay is using right now: `gateway <host>`
+while relayed, `direct, via <host>` once the upgrade takes over, or
+`relay URL <host>` on a Cloudflare tunnel or LAN address.
+
 The gateway also answers address discovery on UDP 3478. That is what lets a phone
 on a cellular network reach a home computer with no port forwarding and no router
 configuration; the gateway only reflects a source address it already observes, so

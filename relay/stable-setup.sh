@@ -418,8 +418,7 @@ ensure_tunnel_management() {
 validate_tunnel_config() {
     local config="$1"
     local expected_port="$2"
-    local certificate_value
-    local certificate_path=""
+    local certificate_path
     local list_output="$WORK_DIR/config-tunnel-list.json"
     local list_error="$WORK_DIR/config-tunnel-list.err"
 
@@ -427,16 +426,8 @@ validate_tunnel_config() {
         return 1
     fi
 
-    certificate_value="$(yaml_scalar origincert "$config")"
-    if [ -n "${TUNNEL_ORIGIN_CERT:-}" ]; then
-        certificate_path="$TUNNEL_ORIGIN_CERT"
-    elif [ -n "$certificate_value" ]; then
-        certificate_path="$(expand_config_path "$certificate_value" "$config")"
-    elif [ -r "$HOME/.cloudflared/cert.pem" ]; then
-        certificate_path="$HOME/.cloudflared/cert.pem"
-    fi
-
-    if [ -z "$certificate_path" ] || [ ! -r "$certificate_path" ]; then
+    certificate_path="$(cloudflared_origin_cert "$config")"
+    if [ ! -r "$certificate_path" ]; then
         echo "  Tunnel credentials are usable; cert.pem is unavailable, so the management existence check is skipped."
         return
     fi

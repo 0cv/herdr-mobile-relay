@@ -226,6 +226,11 @@ export interface RelayConnectionView {
    * URL. Empty until the first successful connection.
    */
   path: TransportKind | '';
+  /**
+   * Gateway carrying the session, or the one that signalled a direct path.
+   * Empty on the relay-URL path and before the first successful connection.
+   */
+  activeGatewayUrl: string;
   host: string;
   protocol: number;
   version: string;

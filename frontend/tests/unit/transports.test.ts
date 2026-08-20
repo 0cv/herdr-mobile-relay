@@ -743,6 +743,12 @@ describe('hybrid path manager', () => {
 
     directs[0].handlers.onMessage({ type: 'push_config', protocol: 2 });
     expect(statuses.filter((event) => event.status === 'connected')).toHaveLength(2);
+    // The direct path keeps naming the gateway that signalled it: the phone
+    // still depends on that candidate to rebuild the session.
+    expect(statuses.at(-1)).toEqual({
+      status: 'connected',
+      detail: { path: 'webrtc', gatewayUrl: HYBRID_RELAY.gatewayUrl },
+    });
     expect(messages.at(-1)).toMatchObject({ type: 'push_config' });
     expect(transport.send({ type: 'refresh_agents' })).toBe(true);
     expect(directs[0].sent.at(-1)).toMatchObject({ type: 'refresh_agents' });
@@ -954,7 +960,12 @@ describe('hybrid path manager', () => {
     ]);
 
     gateways[1].handlers.onStatus('connected', { path: 'gateway', stunPort: 3478 });
-    expect(statuses.at(-1)?.status).toBe('connected');
+    // The reported gateway is the entry that answered, so the app can name the
+    // one actually in use instead of the configured head.
+    expect(statuses.at(-1)).toEqual({
+      status: 'connected',
+      detail: { path: 'gateway', stunPort: 3478, gatewayUrl: 'wss://b.example' },
+    });
     expect(transport.send({ type: 'refresh_agents' })).toBe(true);
     expect(gateways[1].sent.at(-1)).toMatchObject({ type: 'refresh_agents' });
     expect(directOptions[0]).toEqual({ iceServers: [{ urls: 'stun:b.example:3478' }] });

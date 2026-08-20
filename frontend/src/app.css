@@ -224,10 +224,6 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .inventory-warning strong { color: var(--foreground); }
 .agent-section { margin-bottom: 1.1rem; }
 .section-heading { align-items: center; color: var(--muted); display: flex; font-size: .72rem; gap: .45rem; letter-spacing: .08em; margin: 0 0 .45rem .25rem; text-transform: uppercase; }
-.recent-section > summary { cursor: pointer; list-style: none; user-select: none; }
-.recent-section > summary::-webkit-details-marker { display: none; }
-.recent-section > summary::after { content: '›'; font-size: 1rem; margin-left: .1rem; transform: rotate(90deg); transition: transform .12s; }
-.recent-section:not([open]) > summary::after { transform: rotate(0); }
 .section-count { background: var(--secondary); border-radius: 999px; color: var(--muted); font-size: .62rem; letter-spacing: 0; margin-left: auto; padding: .08rem .38rem; }
 .agent-grid { display: grid; gap: .55rem; }
 .agent-card { background: var(--card); border: 1px solid var(--border); border-radius: .75rem; overflow: hidden; }
@@ -346,7 +342,6 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-entry-actions { align-items: center; display: flex; flex: 0 0 auto; gap: .25rem; }
 .copy-conversation-markdown { color: var(--muted); height: 1.7rem; min-height: 1.7rem; opacity: .72; width: 1.7rem; }
 .copy-conversation-markdown:hover, .copy-conversation-markdown:focus-visible { opacity: 1; }
-.conversation-text { font-size: .8rem; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .conversation-entry > small { display: block; margin-top: .4rem; }
 .conversation-toolbar-actions { align-items: center; display: flex; flex: 1; gap: .55rem; justify-content: flex-end; min-width: 0; }
 .conversation-mode { background: var(--secondary); border-radius: .48rem; display: flex; flex: 0 0 auto; padding: .14rem; }

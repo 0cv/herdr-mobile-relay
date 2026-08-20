@@ -193,6 +193,14 @@ grep -Fq '"3478:3478/udp"' "$BUNDLE_DIR/docker-compose.yml" ||
 grep -Fq 'HERDR_GATEWAY_STUN_ADDR' "$BUNDLE_DIR/.env" ||
     fail ".env lost the address discovery knob"
 
+# ":-" would fold an empty .env value back into ":3478", so the documented way to
+# switch address discovery off has to survive into the compose file as plain "-".
+grep -Fq 'HERDR_GATEWAY_STUN_ADDR: ${HERDR_GATEWAY_STUN_ADDR-:3478}' \
+    "$BUNDLE_DIR/docker-compose.yml" ||
+    fail "compose file does not default the address discovery listener on unset only"
+! grep -Fq '${HERDR_GATEWAY_STUN_ADDR:-' "$BUNDLE_DIR/docker-compose.yml" ||
+    fail "compose file turns an empty address discovery value back into :3478"
+
 # A shared instance needs whole-gateway ceilings; every other limit is per-relay
 # or per-IP and cannot bound total memory.
 for KNOB in HERDR_GATEWAY_MAX_RELAYS HERDR_GATEWAY_MAX_CLIENTS; do

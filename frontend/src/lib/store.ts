@@ -288,6 +288,7 @@ class RelayStore {
       transport: null,
       status: 'connecting',
       path: '',
+      activeGatewayUrl: '',
       reconnectTimer: null,
       healthTimer: null,
       updateRestartTimer: null,
@@ -336,6 +337,9 @@ class RelayStore {
     if (status === 'connected') {
       const previousPath = connection.path;
       connection.path = detail?.path || connection.transport?.kind || 'websocket';
+      // Which candidate answered matters with a list: the app names it rather
+      // than the configured head, which may be a gateway that was skipped.
+      connection.activeGatewayUrl = connection.path === 'websocket' ? '' : detail?.gatewayUrl || '';
       this.markConnectionReady(relay.id, connection);
       // A path switch changes the relayed-fidelity budget, so panes have to be
       // rewatched at the interval the new path can afford.
