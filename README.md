@@ -30,11 +30,10 @@ herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 Scan the QR with your phone. Keep the pane open; Ctrl-C stops the temporary
 relay.
 
-That trial path needs no Cloudflare account, no domain, no Python, Node.js, or Go
-toolchain, no separate web deployment, and no `sudo`. Treat the QR and its setup
-link as secrets: they carry the relay key.
+No Cloudflare account, no domain, no `sudo`, and no Python, Node.js, or Go
+toolchain. Treat the QR and its setup link as secrets: they carry the relay key.
 
-[QUICKSTART.md](QUICKSTART.md) is the same thing with screenshots and
+[QUICKSTART.md](QUICKSTART.md) is the same path with pairing detail and
 troubleshooting.
 
 ## What you get
@@ -45,14 +44,13 @@ troubleshooting.
 
 - Monitor and control agents across several computers, grouped by status and
   workspace, with agents that need input pinned on top.
-- Start, rename, clear, restart, and stop agents from relay-provided launch
-  profiles.
-- Send prompts, terminal keys, slash commands, screenshots, and photos; answer
-  verified approvals and structured plan questions.
-- Read searchable native conversation history for Claude Code, Codex, Qoder, Pi,
-  and Oh My Pi, and inspect workspace files, images, and Git diffs read-only.
+- Start, rename, clear, and stop agents; send prompts, terminal keys, slash
+  commands, screenshots, and photos.
+- Answer verified approvals and structured plan questions from Codex, Claude
+  Code, Qoder, OpenCode, Oh My Pi, and Pi.
+- Read searchable native conversation history, and inspect workspace files,
+  images, and Git diffs read-only.
 - Receive blocked-agent notifications, with completion notifications optional.
-- Detects Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 **[Full feature tour →](docs/mobile-app.md)**
 
@@ -70,12 +68,12 @@ The setup menu exposes each complete connection path directly:
 | Choice | Needs | Best for |
 | --- | --- | --- |
 | Cloudflare tunnel | nothing, or a domain for the stable variant | the default; a permanent hostname with a background service |
-| Community gateway | nothing at all | free, shared, best-effort; no account and no domain |
+| Community gateway | no account, no domain, but an app origin to pair against | free, shared, best-effort |
 | Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
 
-Whichever you pick, traffic is end-to-end encrypted and the phone upgrades to a
-direct peer-to-peer connection whenever the network allows, so the transport only
-carries the fallback.
+All three are end-to-end encrypted. On either gateway the phone and the computer
+then negotiate a direct peer-to-peer connection, leaving the gateway with the
+fallback; Cloudflare tunnel traffic stays on Cloudflare.
 
 - **[Transports explained →](docs/transports.md)**
 - **[Permanent Cloudflare tunnel →](docs/cloudflare-tunnel.md)**
@@ -99,8 +97,9 @@ carries the fallback.
 Prompts, terminal output, uploads, and push details are encrypted end to end
 between the phone and the relay. Whatever carries the traffic — a Cloudflare
 tunnel or a gateway — observes connection metadata only, never plaintext; on the
-direct path it sees nothing at all. The relay never exposes a write action to the
-workspace inspector, and device verification is required before reconnecting.
+direct path no application data reaches it at all, though a gateway still
+answers address discovery. The relay exposes no write action to the workspace
+inspector, and the app can require device verification before it reconnects.
 [Details →](docs/security.md)
 
 ## License

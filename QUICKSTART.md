@@ -1,8 +1,8 @@
 # Herdr Mobile Relay Quick Start
 
-Connect one Linux or macOS computer to your phone, either through a gateway that
-needs no Cloudflare account (see **Skip Cloudflare** below) or through a temporary
-Cloudflare tunnel. You need Herdr 0.7.5 or newer, Git, and `curl`.
+Connect one Linux or macOS computer to your phone through a temporary Cloudflare
+tunnel, or through a gateway that needs no Cloudflare account (see **Skip
+Cloudflare**). You need Herdr 0.7.5 or newer, Git, and `curl`.
 
 ## 1. Install
 
@@ -23,11 +23,17 @@ verified relay bundle; it does not require Python, Node.js, a Go toolchain, or
 
 ## 2. Pair the Phone
 
-On the gateway path the QR appears once the registration is confirmed. On the
-tunnel path, wait for the temporary tunnel, then choose:
+Both paths print the QR once they know which origin serves the phone app.
+
+On the tunnel path, wait for the temporary tunnel, then choose:
 
 - **This temporary relay** for a simple one-computer trial.
-- **An existing installed Herdr app** to add this computer to an existing app.
+- **An existing installed Herdr app** to add this computer to an app you already
+  use.
+
+On the gateway path the QR follows registration, and the app origin has to be an
+installed Herdr app — a gateway carries relay traffic only. It reuses a recorded
+or `HERDR_PHONE_APP_URL` origin, and asks for one when neither exists.
 
 Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
 the relay encryption key in the URL fragment. The fragment is not sent in the
@@ -44,28 +50,22 @@ agent lifecycle.
 
 ## Skip Cloudflare
 
-Choose **Community WebRTC Gateway** in the setup menu. It checks the published
-gateways, saves the healthy candidates, then starts the relay and prints its QR
-without installing, launching, or needing `cloudflared`. The gateway is run by
-the project: free, shared, best-effort, with no account and no domain to set up.
-Point at a different one yourself with:
+Choose **Community WebRTC Gateway** in the setup menu. It checks the project's
+published gateways, saves the ordered list, then starts the relay and prints its
+QR. No account, no domain, no `cloudflared`. The gateways are run by the
+project: free, shared, best-effort.
 
-```bash
-HERDR_GATEWAY_URL=wss://gw.example.com make quick-start
-```
+A gateway carries relay traffic only, so the phone app lives elsewhere: point
+`HERDR_PHONE_APP_URL` at an installed Herdr app, or host one with
+`make web-deploy`.
 
-Either way the QR appears as soon as the registration is confirmed. A gateway
-cannot read your traffic: it only copies frames that are already encrypted between
-the phone and the relay. Right after connecting, the phone and the computer try to
-cut it out of the path entirely, moving the same frames onto a direct WebRTC
-connection and returning to the gateway if that fails.
+A gateway cannot read your traffic — it copies frames that are already encrypted
+between the phone and the relay — and right after connecting both sides try to
+cut it out of the path with a direct WebRTC connection.
 
-[docs/transports.md](docs/transports.md) covers the settings that control the
-direct path; [docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) covers
-running your own gateway.
-
-The phone app itself is not served by the gateway. Point `HERDR_PHONE_APP_URL` at
-an installed Herdr app, or host one yourself with `make web-deploy`.
+[docs/transports.md](docs/transports.md) explains every choice and its settings;
+[docs/gateway-self-hosting.md](docs/gateway-self-hosting.md) covers running your
+own gateway.
 
 ## Make It Permanent
 
@@ -76,20 +76,11 @@ herdr plugin action invoke install-service --plugin herdr-mobile-relay.events
 ```
 
 The wizard creates or resumes a dedicated tunnel, installs a background user
-service, verifies the public endpoint, and prints the stable QR. Repeat this on
+service, verifies the public endpoint, and prints the stable QR. Repeat it on
 each computer with a different hostname and add every QR to the same phone app.
 
-Useful actions:
-
-```bash
-herdr plugin action invoke setup-link --plugin herdr-mobile-relay.events
-herdr plugin action invoke status --plugin herdr-mobile-relay.events
-herdr plugin action invoke stable-teardown --plugin herdr-mobile-relay.events
-herdr plugin action invoke uninstall --plugin herdr-mobile-relay.events
-```
-
-Run `stable-teardown` before uninstall if the configured Cloudflare tunnel and
-DNS route should also be removed.
+[docs/cloudflare-tunnel.md](docs/cloudflare-tunnel.md) has the rest: hostname
+changes, the full action list, teardown, and uninstall.
 
 ## Troubleshooting
 
@@ -101,5 +92,4 @@ DNS route should also be removed.
 - **Need the stable QR again:** invoke `setup-link`.
 - **Stable setup stops:** rerun the exact command it prints; setup is resumable.
 
-See [README.md](README.md) for stable deployment, updates, development, and
-security details.
+[README.md](README.md) indexes the rest of the documentation.

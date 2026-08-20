@@ -28,17 +28,18 @@ credentials on that computer only. The action looks for `node` where nvm, fnm,
 volta, and asdf put it, not only on `PATH`.
 
 A Pages project can only deploy a domain it already serves. When the origin you
-enter is not one of them, the action attaches it for you if `relay.env` carries
-a `CLOUDFLARE_API_TOKEN` with Pages:Edit — the `wrangler login` alone cannot,
-since Wrangler 4 has no custom-domain command. Set
-`HERDR_APP_DEPLOY_ATTACH_DOMAIN=true` to allow that without being asked, or
-`false` to refuse. Without a token it names the credential to set and offers to
-take a different origin.
+enter is not one of them, and the account has exactly one Pages project, the
+action attaches it for you if `relay.env` carries a `CLOUDFLARE_API_TOKEN` with
+Pages:Edit — `wrangler login` alone cannot, since the pinned Wrangler 4.114.0 has
+no custom-domain command. Set `HERDR_APP_DEPLOY_ATTACH_DOMAIN=true` to allow that
+without being asked, or `false` to refuse. Otherwise it names the credential to
+set and offers to take a different origin.
 
 ## Release checks and app reloads
 
-Release checks use the GitHub API and fall back to the public GitHub Atom release
-and commit feeds when an unauthenticated API request is rate-limited. Loading a
+Release checks use the GitHub API. When an unauthenticated request is rate
+limited, they fall back to the public `releases/latest` redirect for the stable
+tag and that tag's Atom commit feed for its revision. Loading a
 newly deployed phone app uses a versioned navigation, so a sleeping browser or
 installed PWA does not reuse a stale document.
 
@@ -49,7 +50,7 @@ The relay continues to support Herdr 0.7.5 or newer.
 Herdr 0.8.0 and newer can resume restored agent sessions without a TUI
 attached ([#2064](https://github.com/herdrdev/herdr/issues/2064)) and keep the
 desktop user's focus when a background workspace closes
-([#1328](https://github.com/herdrdev/herdr/issues/1328),
+([#1328](https://github.com/herdrdev/herdr/discussions/1328),
 [#1621](https://github.com/herdrdev/herdr/issues/1621)). Phone-driven **Stop**
 still cascades a single-tab workspace away; the workspace then reports
 `workspace_not_found`.
@@ -60,6 +61,6 @@ still cascades a single-tab workspace away; the workspace then reports
   relay's unauthenticated GitHub release check was rate-limited. Run
   `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes`
   once on that computer as the signed-in user; current releases retry through
-  GitHub's public release feeds.
+  the public release redirect and commit feed.
 - **Updated app still shows the previous version:** open Settings, choose
   **Check for Updates**, then **Load Update**.

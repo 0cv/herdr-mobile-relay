@@ -20,6 +20,12 @@ const (
 	MinColumns = 40
 	MaxColumns = 240
 	LeaseTTL   = 30 * time.Second
+	// ReleaseGrace keeps a released width in place for a moment. Leaving a
+	// terminal on the phone and stepping back into it is a few seconds apart,
+	// and restoring the pane in between resizes it twice: the agent re-renders
+	// on both SIGWINCHs, so its output looks stalled for as long as it repaints.
+	// The pane keeping the phone's width this much longer is the cheaper trade.
+	ReleaseGrace = 10 * time.Second
 
 	sweepInterval  = time.Second
 	commandTimeout = 3 * time.Second
@@ -71,6 +77,7 @@ type Manager struct {
 	runner   commandRunner
 	goos     string
 	ttl      time.Duration
+	grace    time.Duration
 	now      func() time.Time
 	logger   *slog.Logger
 	panes    map[string]*paneState
@@ -78,7 +85,7 @@ type Manager struct {
 }
 
 func NewManager(provider ProcessInfoProvider, logger *slog.Logger) *Manager {
-	return newManager(provider, execCommandRunner{}, runtime.GOOS, LeaseTTL, time.Now, logger)
+	return newManager(provider, execCommandRunner{}, runtime.GOOS, LeaseTTL, ReleaseGrace, time.Now, logger)
 }
 
 func newManager(
@@ -86,6 +93,7 @@ func newManager(
 	runner commandRunner,
 	goos string,
 	ttl time.Duration,
+	grace time.Duration,
 	now func() time.Time,
 	logger *slog.Logger,
 ) *Manager {
@@ -97,6 +105,7 @@ func newManager(
 		runner:   runner,
 		goos:     goos,
 		ttl:      ttl,
+		grace:    grace,
 		now:      now,
 		logger:   logger,
 		panes:    make(map[string]*paneState),
@@ -232,6 +241,11 @@ func (m *Manager) ActiveRows(paneID string) (int, bool) {
 	return 0, false
 }
 
+// Release lapses the lease instead of restoring the pane immediately. A phone
+// that returns to the terminal within ReleaseGrace re-acquires the width it
+// already has, so nothing is resized and the agent does not re-render; the
+// expiry sweep restores the pane once the grace elapses. A disconnecting
+// client keeps the immediate path through ReleaseClient.
 func (m *Manager) Release(ctx context.Context, clientID, paneID string) error {
 	if clientID == "" || paneID == "" {
 		return ErrInvalidLease
@@ -246,7 +260,16 @@ func (m *Manager) Release(ctx context.Context, clientID, paneID string) error {
 	if state == nil {
 		return nil
 	}
-	if _, exists := state.leases[clientID]; !exists {
+	lease, exists := state.leases[clientID]
+	if !exists {
+		return nil
+	}
+	now := m.now()
+	if lapse := now.Add(m.grace); lease.ExpiresAt.After(lapse) {
+		lease.ExpiresAt = lapse
+		state.leases[clientID] = lease
+	}
+	if lease.ExpiresAt.After(now) {
 		return nil
 	}
 	delete(state.leases, clientID)

@@ -10,7 +10,8 @@ machine you control. It changes nothing about encryption: no gateway can read
 your traffic.
 
 You need a small VPS with Docker and a public hostname that resolves to it.
-1 vCPU and 1–2 GB RAM is plenty.
+1 vCPU and 1–2 GB RAM covers a personal instance; a gateway serving other people
+is sized by concurrent phones, since each one may queue up to 4 MiB.
 
 ## Deploy it from the setup menu
 
@@ -44,12 +45,16 @@ version reporting appears as `version unknown` until it is redeployed.
 Password authentication works; the deployment authenticates once and reuses that
 session. Sudo must not prompt, so use root or an account with passwordless sudo.
 
-Leave the SSH address empty to write the bundle without deploying it, or run the
-wizard directly:
+Run the wizard directly with:
 
 ```sh
 bash relay/gateway-deploy.sh
 ```
+
+It always writes the bundle first. Interactively it then deploys — pressing Enter
+at the SSH prompt accepts `root@<hostname>`. With no terminal and no remembered
+server it stops after writing the bundle and prints the manual `scp` and
+`docker compose` steps.
 
 Answers are remembered, so a later run against the same host offers them as
 defaults. To skip the deployment prompts entirely, set
@@ -58,7 +63,7 @@ defaults. To skip the deployment prompts entirely, set
 `HERDR_GATEWAY_DEPLOY_EMAIL` (ACME contact), `HERDR_GATEWAY_DEPLOY_DIR` (local
 bundle directory), and `HERDR_GATEWAY_DEPLOY_INSTALL_DOCKER=true`.
 
-Every own-gateway path ends by showing the complete ordered list the relay and
+A completed own-gateway path ends by showing the complete ordered list the relay and
 phone may use. The default places your gateway first and appends the community
 gateways as cold fallbacks; edit that list to keep, add, reorder, or remove
 candidates. For unattended deployment, set the same comma-separated choice in
@@ -86,9 +91,9 @@ It holds no secrets — not the relay key, not the pairing token, not the sessio
 keys.
 
 It sees source addresses, connection times, byte counts, frame sizes and timing,
-and two rendezvous values derived one-way from the relay key — the 22-character
-`relay_id` a relay registers under, and the challenge/answer pair of each phone
-connection.
+and two rendezvous values — the 22-character `relay_id` a relay registers under,
+derived one way from the relay key, and the random challenge each phone answers
+with an HMAC it cannot forge without that key.
 
 It cannot see frame contents (AES-256-GCM ciphertext from a session that
 terminates on the phone and the relay), the WebRTC SDP and ICE candidates that
@@ -103,22 +108,26 @@ cannot get past the relay.
 
 Logs hold transport events at `INFO`, with relay ids truncated to six characters;
 frame bytes, nonces, and proofs are never logged. The only thing persisted, and
-only if you set `HERDR_GATEWAY_STATE`, is a per-relay byte counter.
+only if you set `HERDR_GATEWAY_STATE`, is quota bookkeeping: relay ids, the
+current UTC month, relayed byte totals, and whether a warning was sent.
 
 ## Capacity and bandwidth
 
-Concurrent connections, not bandwidth, are the binding constraint: each paired
-phone costs a goroutine pair and a 4 MiB outbound queue, so size for peak
-simultaneous phones and file descriptors.
+Concurrent connections bind memory and file descriptors: each paired phone costs
+a goroutine pair and a 4 MiB outbound queue, so size for peak simultaneous
+phones. The monthly quota binds relayed traffic separately.
 
-Expect 0.5–1 GB of egress per month per *relayed* active user; sessions that
-reach the direct path cost almost nothing. On a metered host, check whether
-inbound traffic is billed too — a relayed byte is paid for twice — and set a
-budget alarm plus a lower `HERDR_GATEWAY_MONTHLY_BYTES` so the quota refuses new
-relayed connections before the bill grows.
+As a planning figure, budget 0.5–1 GB of egress per month per *relayed* active
+user; sessions that reach the direct path cost almost nothing. The gateway
+counts each relayed payload once per direction, so a phone→relay byte and its
+reply are both billed. On a metered host, check whether inbound traffic is
+charged too, and set a budget alarm plus a lower `HERDR_GATEWAY_MONTHLY_BYTES`
+so the quota refuses new relayed connections before the bill grows.
 
-Latency, not capacity, is the reason to add a second instance. Instances need no
-shared state or session affinity, and each relay carries its own ordered list.
+Latency, not capacity, is the reason to add a second instance. Separate gateway
+candidates need no shared state, because each relay carries its own ordered
+list. Do not put independent instances behind one round-robin hostname: a relay
+registration lives in the process that accepted it.
 
 ## Deploying by hand
 
@@ -141,7 +150,9 @@ make that directory writable by uid 65532 (`nonroot`).
 
 `3478/udp` is published on every interface because address discovery is raw UDP
 and no TLS proxy can carry it. `HERDR_GATEWAY_STUN_ADDR=` (empty) turns the
-listener off so the port can stay closed.
+listener off so the port can stay closed — for a container or binary you start
+yourself. The generated Compose bundle substitutes `:3478` for an empty value,
+so remove the port mapping there instead.
 
 ### Plain binary
 
@@ -229,7 +240,7 @@ Everything is read from the environment at startup; there are no flags.
 | `HERDR_GATEWAY_MAX_CLIENTS_PER_RELAY` | `8` | Concurrent phone connections per relay. Negative removes the cap. Refusals return `too_many_clients`. |
 | `HERDR_GATEWAY_MAX_RELAYS` | `1024` | Registered relays this gateway will hold. Negative removes the cap. Refusals return `at_capacity`. |
 | `HERDR_GATEWAY_MAX_CLIENTS` | `512` | Phone connections across every relay. Negative removes the cap. Refusals return `at_capacity`. |
-| `HERDR_GATEWAY_CONNECT_RATE_PER_MINUTE` | `30` | Phone connection attempts per client IP per minute; relay registrations are counted separately against the same number. Negative removes the limit. Refusals return `rate_limited`. |
+| `HERDR_GATEWAY_CONNECT_RATE_PER_MINUTE` | `30` | Phone connection attempts per client IP per minute; relay registrations are counted separately against the same number. Negative removes the limit. Phone refusals return `rate_limited`, relay registrations HTTP 429. |
 | `HERDR_GATEWAY_MONTHLY_BYTES` | `5368709120` (5 GiB) | Bytes copied in both directions, per relay, per UTC calendar month. `0` means unlimited. |
 | `HERDR_GATEWAY_QUOTA_WARN_PERCENT` | `80` | Percentage of the quota at which the relay receives one advisory warning. Negative disables it. |
 | `HERDR_GATEWAY_IDLE_TIMEOUT` | `300` | Seconds a phone connection may carry no traffic before it is closed. Negative disables idle reaping. Relay links use ping/pong instead. |
@@ -241,9 +252,10 @@ Fixed: protocol version 1, a 10-second hello deadline, the wire protocol's
 per-frame ciphertext cap, a 30-second relay ping interval (a relay is dropped
 after two missed pongs), and one `/probe` per 10 seconds per IP.
 
-The state file, when configured, is loaded at startup, rewritten atomically every
-30 seconds and on shutdown, and created with mode `0600`. It holds byte counters
-and nothing else; previous months are dropped on load.
+The state file, when configured, is loaded at startup and rewritten atomically —
+mode `0600` — on the 30-second save cycle and on shutdown whenever the counters
+changed. It holds quota bookkeeping and nothing else; entries from previous
+months are ignored on load and dropped from the next write.
 
 ### Opening the gateway to other people
 
@@ -263,8 +275,8 @@ stays.
 
 The gateway answers address discovery on UDP `HERDR_GATEWAY_STUN_ADDR`, so the
 phone and the relay learn the address the internet sees them at and can offer it
-as an ICE candidate. Neither peer can learn it alone, because NAT rewrites the
-source port on the way out, and no third-party STUN service is involved.
+as an ICE candidate. The listener reports the address it observes, which is the
+one a NAT rewrote the packet to; no third-party STUN service is involved.
 
 The gateway's hello advertises only a port; each peer builds the address from the
 gateway host it already dialed, so a hostile gateway cannot redirect discovery at
@@ -287,13 +299,14 @@ any UPnP/NAT-PMP mapping it obtained, which is what a LAN-only deployment needs.
 3. Counters reset on the UTC month boundary.
 
 For yourself or a household, set `HERDR_GATEWAY_MONTHLY_BYTES=0`. For a group,
-divide your monthly egress allowance by the number of relays you expect and halve
-it, since every relayed byte is counted on the way in and on the way out — on a
-1 TB plan with 20 relays, 25 GiB (`26843545600`) per relay is comfortable.
+divide your monthly egress allowance by the number of relays you expect: the
+quota counts each relayed payload once per direction, so a request and its reply
+both land on the same counter — on a 1 TB plan with 20 relays, 25 GiB
+(`26843545600`) per relay is comfortable.
 
 A relay that keeps hitting the quota has a failing direct path; fixing
-reachability on that computer (UPnP/NAT-PMP, IPv6, or a forwarded UDP port) takes
-its traffic off the gateway entirely.
+reachability on that computer (PCP/NAT-PMP/UPnP, IPv6, or a forwarded UDP port)
+moves its session traffic off the gateway after rendezvous.
 
 ## Point a relay at your gateway
 
@@ -301,9 +314,10 @@ its traffic off the gateway entirely.
 HERDR_GATEWAY_URL=wss://gw.example.com
 ```
 
-A base URL, no trailing slash and no path; the relay appends the routes. The
-paired phone learns the same base from the QR payload, so a relay and its phones
-use the same gateway. Moving gateways changes neither the relay key nor the QR.
+A base URL with no path; a trailing slash is trimmed for you, and the relay
+appends the routes. The paired phone learns the same list from the QR payload.
+Moving gateways keeps the relay key and every paired phone; only newly generated
+setup links carry the new list.
 
 ## Routes
 
@@ -321,8 +335,9 @@ Address discovery listens separately on UDP `HERDR_GATEWAY_STUN_ADDR` and must b
 published directly on the host.
 
 Both WebSocket routes begin with a JSON hello exchange and carry binary frames
-afterwards. A refusal arrives as `{"type":"error","code":...}` followed by a close
-with the same code as its reason.
+afterwards. A refusal after the upgrade arrives as `{"type":"error","code":...}`
+followed by a close with the same code as its reason. Shutdown and relay
+registration rate limiting answer before the upgrade, with HTTP 503 and 429.
 
 `/healthz` needs no authentication and exposes no relay ids, addresses, or byte
 counts, so it is safe to expose publicly:
@@ -341,8 +356,8 @@ connection, means down.
 
 **Watch `clients`.** It counts phones on the relayed path and sits near zero even
 with many active users, because sessions leave the gateway within seconds of the
-direct path forming. A count that climbs and stays up means hole punching is
-failing for a group of users, not that the gateway is busy.
+direct path forming. A count that climbs and stays up means the direct path is
+not forming — or is disabled — for a group of users, not that the gateway is busy.
 
 ```sh
 watch -n30 'curl -sS https://gw.example.com/healthz'

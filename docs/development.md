@@ -24,7 +24,7 @@ make backend-check     # format, vet, tests, race detector, shell checks
 make web-release       # replace committed web/ with a verified frontend build
 make web-release-check # compare and browser-test the shipped web/ bundle
 make relay-plugin      # link this checkout as a Herdr plugin
-make stable-setup      # install a checkout-managed stable relay
+make stable-setup      # run the stable tunnel wizard with the installed relay
 ```
 
 ## Testing a release candidate
@@ -53,7 +53,8 @@ failure injection, and process-control traces for black-box tests.
 
 ## Troubleshooting local runs
 
-- **Port 8375 is busy:** stop the earlier Quick Start or installed service.
+- **Port is busy:** `make dev-tunnel` uses 18375, Quick Start and the installed
+  service use 8375; stop whatever already holds the one you need.
 - **Herdr is not running:** start it with `herdr`, then retry the operation.
 - **Agents are unavailable:** inspect `/healthz`; after a Herdr protocol update,
   run `herdr server live-handoff` and wait for the next relay poll.

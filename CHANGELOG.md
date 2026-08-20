@@ -3,19 +3,6 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Changed
-
-- Gateway setup links now carry only the complete ordered `gateways` list, and
-  phone Settings shows every candidate that can reach each relay.
-- Both self-hosted gateway paths end with an editable subscription list; the
-  default keeps the operator gateway first and community gateways as cold
-  fallbacks.
-- Phone Settings and the setup menu now show the active gateway version, the
-  latest gateway version available from the verified plugin release, and the
-  computer-side install/redeploy path for an outdated self-hosted gateway.
-
 ## [0.17.0] - 2026-08-20
 
 ### Added
@@ -40,8 +27,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - `GET /healthz` reports gateway registration state, and releases declare both
   `herdr-e2ee-v1` and `herdr-hybrid-v1` so existing phones keep working across
   the upgrade in either order. Cloudflare tunnels remain fully supported.
-- Gateway deployment from the setup menu: **Choose Connection Method → Your own
-  gateway → Deploy one on my own server over SSH** asks for the public hostname
+- Gateway deployment from the setup menu: **Deploy or Upgrade Your Own WebRTC
+  Gateway → Deploy one on my own server over SSH** asks for the public hostname
   and the server's SSH address, then writes a compose bundle, copies it over one
   authenticated SSH connection, optionally installs Docker, builds and starts the
   gateway there, and records the `wss://` URL only after the public `/healthz`
@@ -84,6 +71,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Gateway setup links carry only the complete ordered `gateways` list, and phone
+  Settings shows every candidate that can reach each relay.
+- Both self-hosted gateway paths end with an editable subscription list; the
+  default keeps the operator gateway first and community gateways as cold
+  fallbacks.
+- Phone Settings and the setup menu show the active gateway version, the latest
+  version available from the verified plugin release, and the computer-side
+  install or redeploy path for an outdated self-hosted gateway.
 - Faster resume: returning to the app clears stale reconnect backoff and probes
   the existing application path for 2 seconds before replacing it. A healthy
   direct session now resumes without gateway traffic; only a stale session
@@ -132,6 +127,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Leaving a terminal and returning to it no longer stalls the stream for a
+  second or two. The relay restored the pane's own width the moment the terminal
+  closed and narrowed it again on the way back, and the agent re-rendered on both
+  resizes. A released width now lapses after ten seconds instead, so a return
+  within that window reuses the width the pane already has.
 - Relay update checks ignore prereleases even when GitHub's API is rate-limited:
   the fallback now resolves the latest stable tag through the `releases/latest`
   redirect instead of the release feed, which cannot mark one.

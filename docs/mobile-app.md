@@ -9,18 +9,19 @@ setup and want to know what every screen and control is for.
 - Monitor and control agents across several computers, with new, closed, and
   renamed agents, workspaces, and tabs reflected within seconds through a
   live Herdr event stream.
-- Start, rename, clear, restart, and stop agents from relay-provided launch
-  profiles.
-- Send durable prompt drafts, terminal keys, slash commands, screenshots, and
-  photos; search loaded terminal output and open explicit HTTP(S) links.
-- Answer verified Codex, Claude Code, and Qoder approvals, plus structured
-  questions from those agents, OpenCode, OMP, and Pi.
+- Start, rename, clear, and stop agents from relay-provided launch profiles.
+- Send prompts, terminal keys, slash commands, screenshots, and photos; drafts
+  survive locally for 48 hours. Search loaded terminal output and open explicit
+  HTTP(S) links.
+- Answer verified approvals from Codex, Claude Code, Qoder, Oh My Pi, and Pi,
+  plus structured questions from those agents and OpenCode.
 - Inspect the current agent's workspace files, images, Git status, and unified
   diffs without exposing a write action.
 - Read searchable native conversations for Claude Code, Codex, Qoder, Pi, and
-  Oh My Pi in focused conversation or full-history form; review a retained
+  Oh My Pi in focused conversation or full-history form; review a rolling
   24-hour activity summary and receive blocked or completion notifications.
-- Require device verification before reconnecting relays.
+- Optionally require device verification when the app opens or resumes, before
+  it reconnects to any relay.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |
@@ -33,7 +34,7 @@ setup and want to know what every screen and control is for.
 
 | Git Inspection | Native Conversations |
 | --- | --- |
-| <img src="../images/git-history.jpeg" alt="Read-only mobile Git diff with syntax-aware colors and zoom controls" width="392"> | <img src="../images/conversations.jpeg" alt="Mobile native conversation history rendered from the agent transcript" width="392"> |
+| <img src="../images/git-history.jpeg" alt="Read-only mobile Git diff with diff-aware colors and zoom controls" width="392"> | <img src="../images/conversations.jpeg" alt="Mobile native conversation history rendered from the agent transcript" width="392"> |
 
 ## Workspace navigation and inspection
 
@@ -72,14 +73,16 @@ controls to resize it without changing the rest of the app.
 
 The mobile terminal always uses **Resize Session**. While a terminal is open,
 the relay leases the live PTY at the measured phone width so full-screen agents
-redraw for the phone. The relay restores the previous width when the terminal
-closes, the phone disconnects, the lease expires, or the relay shuts down.
+redraw for the phone. Closing the terminal restores the previous width about ten
+seconds later, so stepping back into the same agent resumes instantly instead of
+resizing the pane twice. A disconnecting phone, an expired lease, and relay
+shutdown restore it immediately.
 
-Terminal History keeps 100, 500, or 1,000 lines in the terminal view; 1,000 is
-the default and matches the most Herdr serves per pane read. The "older
-history" notice reports when rows beyond the served window exist. Use **Copy**
-for the latest response or **Conversation History** for clean, searchable
-earlier turns.
+Terminal History keeps 100, 500, or 1,000 lines in the terminal view. 1,000 is
+the default, the largest option, and the ceiling on the gateway-relayed path.
+The "older history" notice reports when rows beyond the served window exist.
+Use **Copy** for the latest response or **Conversation History** for clean,
+searchable earlier turns.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. **Conversation** keeps each user prompt and the
@@ -94,8 +97,8 @@ remain in the harness log on the computer.
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second; 250 ms is the default.
 
-**Find** searches every row loaded into the current terminal view, highlights
-visible matches, and moves between matches.
+**Find** searches the rows loaded into the current terminal view, highlights
+visible matches, and moves between the first 1,000 of them.
 
 Explicit HTTP(S) URLs in terminal output become external links with opener and
 referrer isolation. When the last terminal lines name supported key hints such
@@ -109,8 +112,8 @@ input, and apply to typed characters or any available terminal key. A live
 status confirms the exact chord. Toggle the modifiers off or move focus to the
 composer to disarm them.
 
-**Copy** runs the agent's own copy command (Claude Code, Codex, Kimi, OMP, Pi,
-and Qoder) to capture its latest completed response without ANSI control
-sequences, falling back to the visible terminal output for other agents such as
-OpenCode. Copy is disabled while the agent is still working, so it cannot
-interrupt an in-flight turn.
+**Copy** captures the agent's latest completed response without ANSI control
+sequences. When the relay advertises response copy and the agent is one of
+Claude Code, Codex, Kimi, Oh My Pi, Pi, or Qoder, it runs that agent's own copy
+command; every other case takes the visible terminal output. The agent command
+refuses a busy composer, so it cannot interrupt an in-flight turn.

@@ -99,7 +99,7 @@ func testManager(
 	now func() time.Time,
 ) *Manager {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return newManager(provider, runner, "linux", LeaseTTL, now, logger)
+	return newManager(provider, runner, "linux", LeaseTTL, ReleaseGrace, now, logger)
 }
 
 func TestAcquireUsesForegroundTTYAndChangesColumnsOnly(t *testing.T) {
@@ -200,14 +200,89 @@ func TestMultipleClientsApplyMinimumAndRestoreBaselineOnRelease(t *testing.T) {
 	if err := manager.Release(context.Background(), "client-b", "pane-1"); err != nil {
 		t.Fatalf("Release(client-b) error = %v", err)
 	}
+	now = now.Add(ReleaseGrace)
+	if err := manager.SweepExpired(context.Background()); err != nil {
+		t.Fatalf("SweepExpired() after client-b error = %v", err)
+	}
 	if err := manager.Release(context.Background(), "client-a", "pane-1"); err != nil {
 		t.Fatalf("Release(client-a) error = %v", err)
+	}
+	now = now.Add(ReleaseGrace)
+	if err := manager.SweepExpired(context.Background()); err != nil {
+		t.Fatalf("SweepExpired() after client-a error = %v", err)
 	}
 	if !slices.Equal(runner.setValues, []int{110, 76, 110, 160}) {
 		t.Fatalf("applied columns = %v, want [110 76 110 160]", runner.setValues)
 	}
 	if len(manager.panes) != 0 {
 		t.Fatalf("tracked panes = %d after final release", len(manager.panes))
+	}
+}
+
+// Leaving a terminal on the phone and stepping back into it must not resize
+// the pane: every SIGWINCH makes the agent re-render, and the phone withholds
+// frames until that settles, which is what a stalled stream looks like.
+func TestReleaseKeepsTheWidthForAReturningLeaseOwner(t *testing.T) {
+	now := time.Unix(600, 0)
+	provider := &fakeProcessInfoProvider{infos: map[string]*herdr.PaneProcessInfo{
+		"pane-1": processInfo("pane-1", 821),
+	}}
+	runner := &fakeCommandRunner{
+		ttyByPID: map[int]string{821: "pts/13"},
+		sizes:    map[string]terminalSize{"/dev/pts/13": {rows: 44, columns: 180}},
+	}
+	manager := testManager(provider, runner, func() time.Time { return now })
+
+	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 84); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Release(context.Background(), "client-a", "pane-1"); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	now = now.Add(ReleaseGrace - time.Second)
+	if err := manager.SweepExpired(context.Background()); err != nil {
+		t.Fatalf("SweepExpired() inside the grace error = %v", err)
+	}
+	if columns, ok := manager.ActiveColumns("pane-1"); !ok || columns != 84 {
+		t.Fatalf("ActiveColumns() inside the grace = %d, %v, want 84, true", columns, ok)
+	}
+	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 84); err != nil {
+		t.Fatalf("returning Acquire() error = %v", err)
+	}
+	if !slices.Equal(runner.setValues, []int{84, 84}) {
+		t.Fatalf("applied columns = %v, want the leased width twice and no baseline flip", runner.setValues)
+	}
+	if manager.ResizedWithin("pane-1", time.Second) {
+		t.Fatal("returning to the terminal reopened the resize settle window")
+	}
+}
+
+func TestReleaseRestoresBaselineOnceTheGraceElapses(t *testing.T) {
+	now := time.Unix(700, 0)
+	provider := &fakeProcessInfoProvider{infos: map[string]*herdr.PaneProcessInfo{
+		"pane-1": processInfo("pane-1", 921),
+	}}
+	runner := &fakeCommandRunner{
+		ttyByPID: map[int]string{921: "pts/14"},
+		sizes:    map[string]terminalSize{"/dev/pts/14": {rows: 48, columns: 190}},
+	}
+	manager := testManager(provider, runner, func() time.Time { return now })
+
+	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 90); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Release(context.Background(), "client-a", "pane-1"); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	now = now.Add(ReleaseGrace)
+	if err := manager.SweepExpired(context.Background()); err != nil {
+		t.Fatalf("SweepExpired() error = %v", err)
+	}
+	if got := runner.sizes["/dev/pts/14"]; got.columns != 190 {
+		t.Fatalf("restored size = %+v, want the 190 column baseline", got)
+	}
+	if len(manager.panes) != 0 {
+		t.Fatalf("tracked panes = %d after the grace elapsed", len(manager.panes))
 	}
 }
 
@@ -231,6 +306,10 @@ func TestRefreshPreservesLocalColumnResizeAsNewBaseline(t *testing.T) {
 		t.Fatalf("refresh Acquire() error = %v", err)
 	}
 	if err := manager.Release(context.Background(), "client-a", "pane-1"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(ReleaseGrace)
+	if err := manager.SweepExpired(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := runner.sizes["/dev/pts/9"]; got.rows != 51 || got.columns != 150 {
