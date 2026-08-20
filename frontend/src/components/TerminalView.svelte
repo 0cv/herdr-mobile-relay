@@ -1573,6 +1573,24 @@
     <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"></path>
   </svg>
 {/snippet}
+{#snippet findPreviousIcon()}
+  <svg class="find-action-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="m6 15 6-6 6 6"></path>
+  </svg>
+{/snippet}
+
+{#snippet findNextIcon()}
+  <svg class="find-action-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="m6 9 6 6 6-6"></path>
+  </svg>
+{/snippet}
+
+{#snippet findCloseIcon()}
+  <svg class="find-action-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="m6 6 12 12M18 6 6 18"></path>
+  </svg>
+{/snippet}
+
 
 {#snippet arrowPopup()}
   {#if arrowsOpen}
@@ -1649,18 +1667,24 @@
         oninput={findInputChanged}
         onkeydown={findKeydown}
       />
-      <span class="terminal-find-count" role="status" aria-live="polite">
-        {#if !findQuery.trim()}
-          Type to find
-        {:else if !terminalFind.matches.length}
-          No matches
-        {:else}
-          {activeFindIndex + 1} of {terminalFind.matches.length}{terminalFind.truncated ? '+' : ''}
-        {/if}
-      </span>
-      <Button variant="secondary" size="sm" aria-label="Previous match" disabled={!terminalFind.matches.length} onclick={() => revealFindMatch(activeFindIndex - 1)}>↑</Button>
-      <Button variant="secondary" size="sm" aria-label="Next match" disabled={!terminalFind.matches.length} onclick={() => revealFindMatch(activeFindIndex + 1)}>↓</Button>
-      <Button variant="ghost" size="sm" aria-label="Close find" onclick={closeTerminalFind}>×</Button>
+      {#if findQuery.trim()}
+        <span class="terminal-find-count" role="status" aria-live="polite">
+          {#if !terminalFind.matches.length}
+            No matches
+          {:else}
+            {activeFindIndex + 1} of {terminalFind.matches.length}{terminalFind.truncated ? '+' : ''}
+          {/if}
+        </span>
+      {/if}
+      <Button variant="secondary" size="sm" aria-label="Previous match" disabled={!terminalFind.matches.length} onclick={() => revealFindMatch(activeFindIndex - 1)}>
+        {@render findPreviousIcon()}
+      </Button>
+      <Button variant="secondary" size="sm" aria-label="Next match" disabled={!terminalFind.matches.length} onclick={() => revealFindMatch(activeFindIndex + 1)}>
+        {@render findNextIcon()}
+      </Button>
+      <Button variant="ghost" size="sm" aria-label="Close find" onclick={closeTerminalFind}>
+        {@render findCloseIcon()}
+      </Button>
     </section>
   {/if}
   <div class="term-wrap">

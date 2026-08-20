@@ -423,7 +423,8 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .terminal-find { align-items: center; background: var(--background); border-bottom: 1px solid var(--border); display: flex; flex: 0 0 auto; gap: .35rem; padding: .38rem .5rem; }
 .terminal-find input { flex: 1 1 auto; min-height: 2.15rem; min-width: 5rem; padding: .42rem .58rem; }
 .terminal-find-count { color: var(--muted); flex: 0 0 auto; font-size: .65rem; min-width: 4.6rem; text-align: right; }
-.terminal-find .button { flex: 0 0 auto; min-width: 2.15rem; padding-left: .5rem; padding-right: .5rem; }
+.terminal-find .button { flex: 0 0 auto; min-height: 2.6rem; min-width: 2.6rem; padding: 0; }
+.terminal-find .find-action-symbol { display: block; height: 1.35rem; width: 1.35rem; }
 .agent-response-preview { background: var(--card); border-top: 1px solid var(--border); padding: .5rem; }
 .agent-response-preview-header { align-items: center; display: flex; gap: .5rem; justify-content: space-between; margin-bottom: .35rem; }
 .agent-response-preview-actions { display: flex; gap: .35rem; }

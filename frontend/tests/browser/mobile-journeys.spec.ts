@@ -3091,6 +3091,10 @@ test('finds and highlights matches across virtualized terminal output', async ({
   });
 
   await page.getByRole('button', { name: 'Find in terminal', exact: true }).click();
+  await expect(page.getByText('Type to find', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Previous match' }).locator('svg.find-action-symbol')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Next match' }).locator('svg.find-action-symbol')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Close find' }).locator('svg.find-action-symbol')).toHaveCount(1);
   const search = page.getByRole('searchbox', { name: 'Find in terminal output' });
   await search.fill('needle');
   await expect(page.getByText('1 of 2', { exact: true })).toBeVisible();
