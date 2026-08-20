@@ -1611,11 +1611,16 @@ test('replaces a half-open socket immediately when a sleeping phone resumes', as
   await expect(page.getByRole('log')).toContainText('cached terminal output');
   await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
 
+  // A half-open socket answers nothing — not even the refocus width lease.
+  // Without this the harness acks the lease, which reads as live traffic and
+  // defeats the resume probe this test exists to exercise.
+  await setAutoCommands(page, false);
   await page.evaluate(() => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(() => socketCount(page)).toBe(2);
+  await setAutoCommands(page, true);
   await handshake(page, 1, {
     capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
   });
@@ -2435,6 +2440,49 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'release_pane_size').length).toBe(2);
+});
+
+test('stops renewing the pane width lease while hidden and re-leases on return', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'pane_realtime_delta'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Sleeping app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Sleeping app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'before sleep',
+    content_fingerprint: 'sleep-1',
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  // The renewal interval is 10 s. A hidden app must skip it, so the relay's
+  // lease TTL can hand the desktop its width back while the phone sleeps.
+  await page.waitForTimeout(11_000);
+  expect((await commands(page))
+    .filter((command) => command.type === 'lease_pane_size')).toHaveLength(1);
+  expect((await commands(page))
+    .filter((command) => command.type === 'release_pane_size')).toHaveLength(0);
+
+  // Refocus re-leases at once — the lease may have lapsed and the pane may be
+  // back at the desktop width — and re-reads the pane without waiting for the
+  // resync interval.
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
 });
 
 const resizeCapabilities = [

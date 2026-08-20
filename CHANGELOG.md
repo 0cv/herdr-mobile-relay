@@ -135,6 +135,17 @@ project follows [Semantic Versioning](https://semver.org/).
   closed and narrowed it again on the way back, and the agent re-rendered on both
   resizes. A released width now lapses after ten seconds instead, so a return
   within that window reuses the width the pane already has.
+- A sleeping phone gives the desktop its terminal width back. The app renewed
+  its Resize Session lease every ten seconds even while hidden — an open
+  DataChannel keeps the page running in the background — so the pane stayed at
+  phone width all night. A hidden app now stops renewing, the lease lapses, and
+  the relay restores the desktop width within half a minute; refocusing leases
+  the phone width again at once.
+- Returning to an open terminal after the connection died no longer takes
+  dozens of seconds to stream again. The refocus read and watch were sent while
+  the transport was still down and lost silently, leaving the terminal to the
+  fifteen-second resync interval. A reconnect now re-reads every watched pane
+  itself, so the stream resumes within a round trip of the relay coming back.
 - A phone no longer stays disconnected until a manual reload after its relay
   restarts. The gateway answers `unknown_relay` while a relay's registration
   lapses during an update, and the app treated that as a permanently fatal

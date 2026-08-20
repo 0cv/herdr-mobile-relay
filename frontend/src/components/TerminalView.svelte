@@ -451,12 +451,20 @@
     let lastRefreshAt = Date.now();
     const visibilityChanged = () => {
       if (!visible()) {
+        // A hidden app stops renewing its width lease on purpose: the relay
+        // restores the desktop width once the lease TTL runs out, so a phone
+        // that went to sleep with a terminal open gives the pane back. An open
+        // DataChannel keeps this page unfrozen in the background, so without
+        // this gate the renewals would keep the pane narrow all night.
         relayStore.unwatchPane(agent);
         return;
       }
       lastRefreshAt = Date.now();
       relayStore.readPane(agent);
       relayStore.watchPane(agent);
+      // Re-lease at once: if the lease lapsed while asleep, the pane is back
+      // at the desktop width until this lands.
+      requestPaneSizeLease(true);
     };
     const findShortcut = (event: KeyboardEvent) => {
       if (questionMode
@@ -479,7 +487,7 @@
     }, 3_000);
     if (visible()) relayStore.watchPane(agent);
     const refreshPaneSizeLease = setInterval(
-      () => requestPaneSizeLease(true),
+      () => { if (visible()) requestPaneSizeLease(true); },
       PANE_SIZE_LEASE_REFRESH_MS,
     );
     void tick().then(measurePane);
@@ -1348,6 +1356,10 @@
 
   function requestPaneSizeLease(force: boolean) {
     const target = agent;
+    // A hidden app must not hold or take the pane's width: renewals stop so
+    // the relay's lease TTL can return the desktop width while the phone
+    // sleeps, and the refocus handler re-leases the moment it is visible.
+    if (document.visibilityState !== 'visible') return;
     if (!paneSizeLeaseSupported(target)) return;
     const columns = measuredPaneColumns();
     if (columns === null) {

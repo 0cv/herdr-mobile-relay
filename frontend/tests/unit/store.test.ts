@@ -955,6 +955,40 @@ describe('relay command store', () => {
     expect(attempts).toBe(2);
   });
 
+  it('rereads watched panes as soon as the relay reconnects', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, capabilities: ['pane_realtime_delta'], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId,
+      relay_label: 'Fedora',
+      raw_pane_id: 'w1:p1',
+      pane_id: `${relayId}::w1:p1`,
+    };
+    relayStore.watchPane(agent as never);
+    socket.message({
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      content: 'before the drop\n',
+      format: 'ansi',
+      content_fingerprint: 'content-1',
+    });
+    expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({ type: 'watch_pane', pane_id: 'w1:p1' });
+
+    // The connection dies while the terminal stays open; reads and watches
+    // sent in the gap are lost. The reconnect must revive the stream itself,
+    // not leave it to the fifteen-second resync interval.
+    socket.serverClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const replacement = MockWebSocket.instances.at(-1)!;
+    expect(replacement).not.toBe(socket);
+    replacement.open();
+    const sent = replacement.sent.map((payload) => JSON.parse(payload) as Record<string, unknown>);
+    expect(sent.some((message) => message.type === 'read_pane' && message.pane_id === 'w1:p1')).toBe(true);
+  });
+
   it('honors terminal refresh while traffic is relayed and caps its history', () => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);

@@ -341,6 +341,15 @@ class RelayStore {
       // than the configured head, which may be a gateway that was skipped.
       connection.activeGatewayUrl = connection.path === 'websocket' ? '' : detail?.gatewayUrl || '';
       this.markConnectionReady(relay.id, connection);
+      if (!previousPath) {
+        // First ready of a fresh session: the relay dropped its watches with
+        // the old one, and reads sent while the transport was down were lost
+        // silently. Re-read every watched pane so an open terminal streams
+        // again within one round trip, not at the next resync interval.
+        for (const watched of this.watchedPanes.values()) {
+          if (watched.relay_id === relay.id) this.readPane(watched);
+        }
+      }
       // A path switch changes the relayed-fidelity budget, so panes have to be
       // rewatched at the interval the new path can afford.
       if (previousPath && previousPath !== connection.path) this.restartPaneWatches();
