@@ -87,7 +87,7 @@ describe('device verification lifecycle', () => {
     expect(relayStore.connectAll).toHaveBeenCalledWith(true);
   });
 
-  it('probes after a short foreground and reconnects immediately when the network returns', () => {
+  it('probes after foreground and network return without discarding the current path', () => {
     localStorage.removeItem(DEVICE_LOCK_KEY);
     localStorage.removeItem(DEVICE_CREDENTIAL_KEY);
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
@@ -99,13 +99,13 @@ describe('device verification lifecycle', () => {
     document.dispatchEvent(new Event('visibilitychange'));
     window.dispatchEvent(new Event('online'));
 
-    expect(relayStore.connectAll).toHaveBeenNthCalledWith(1);
-    expect(relayStore.connectAll).toHaveBeenNthCalledWith(2, true);
-    expect(relayStore.revalidateConnections).toHaveBeenCalledOnce();
-    expect(relayStore.revalidateConnections).toHaveBeenCalledWith(2_000);
-    // The backoff must be cleared before the probe, or a relay that failed
-    // while the phone slept keeps waiting out a stale delay.
-    expect(relayStore.resetReconnectBackoff).toHaveBeenCalledOnce();
+    expect(relayStore.connectAll).toHaveBeenCalledOnce();
+    expect(relayStore.revalidateConnections).toHaveBeenCalledTimes(2);
+    expect(relayStore.revalidateConnections).toHaveBeenNthCalledWith(1, 2_000);
+    expect(relayStore.revalidateConnections).toHaveBeenNthCalledWith(2, 2_000);
+    // Backoff must be cleared before every probe, or a relay that failed while
+    // the phone slept can keep waiting out a stale one-minute delay.
+    expect(relayStore.resetReconnectBackoff).toHaveBeenCalledTimes(2);
     expect(vi.mocked(relayStore.resetReconnectBackoff).mock.invocationCallOrder[0])
       .toBeLessThan(vi.mocked(relayStore.revalidateConnections).mock.invocationCallOrder[0]);
     stopSecurity();
@@ -131,7 +131,7 @@ describe('device verification lifecycle', () => {
     stopSecurity();
   });
 
-  it('reconnects immediately after a meaningful background interval', async () => {
+  it('probes the existing direct path after a meaningful background interval', async () => {
     localStorage.removeItem(DEVICE_LOCK_KEY);
     localStorage.removeItem(DEVICE_CREDENTIAL_KEY);
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
@@ -142,21 +142,22 @@ describe('device verification lifecycle', () => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     document.dispatchEvent(new Event('visibilitychange'));
 
-    expect(relayStore.connectAll).toHaveBeenNthCalledWith(1);
-    expect(relayStore.connectAll).toHaveBeenNthCalledWith(2, true);
-    expect(relayStore.revalidateConnections).not.toHaveBeenCalled();
+    expect(relayStore.connectAll).toHaveBeenCalledOnce();
+    expect(relayStore.resetReconnectBackoff).toHaveBeenCalledOnce();
+    expect(relayStore.revalidateConnections).toHaveBeenCalledWith(2_000);
     stopSecurity();
   });
 
-  it('reconnects immediately when an installed app resumes from a frozen page', () => {
+  it('probes the existing direct path when an installed app resumes', () => {
     localStorage.removeItem(DEVICE_LOCK_KEY);
     localStorage.removeItem(DEVICE_CREDENTIAL_KEY);
     const stopSecurity = initializeDeviceSecurity();
 
     document.dispatchEvent(new Event('resume'));
 
-    expect(relayStore.connectAll).toHaveBeenNthCalledWith(1);
-    expect(relayStore.connectAll).toHaveBeenNthCalledWith(2, true);
+    expect(relayStore.connectAll).toHaveBeenCalledOnce();
+    expect(relayStore.resetReconnectBackoff).toHaveBeenCalledOnce();
+    expect(relayStore.revalidateConnections).toHaveBeenCalledWith(2_000);
     stopSecurity();
   });
 });

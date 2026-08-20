@@ -1916,6 +1916,54 @@ test('virtualizes terminal history and copies the latest response', async ({ pag
   await expect(page.getByRole('status').filter({ hasText: 'Final response selected.' })).toBeVisible();
 });
 
+test('keeps rapid streaming frames pinned to the latest terminal row', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Streaming', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Streaming on Fedora' }).click();
+  const initial = Array.from({ length: 200 }, (_, index) => `stream history ${index + 1}`).join('\n');
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: initial,
+  });
+
+  const terminal = page.getByRole('log');
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  let maxBottomDistance = 0;
+  for (let frame = 1; frame <= 24; frame += 1) {
+    const content = Array.from(
+      { length: 200 },
+      (_, index) => `stream history ${frame + index + 1}`,
+    );
+    content.push(`streaming response chunk ${frame}`);
+    await server(page, 0, {
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      format: 'plain',
+      content: content.join('\n'),
+    });
+    await page.waitForTimeout(8);
+    maxBottomDistance = Math.max(
+      maxBottomDistance,
+      await terminal.evaluate((element) =>
+        element.scrollHeight - element.scrollTop - element.clientHeight),
+    );
+  }
+
+  expect(maxBottomDistance).toBeLessThan(48);
+  await expect(terminal).toContainText('streaming response chunk 24');
+  await expect.poll(async () => terminal.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
+});
+
 test('copies visible terminal output when no completed response is available', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', {

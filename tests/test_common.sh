@@ -611,11 +611,13 @@ test "$(HERDR_COMMUNITY_GATEWAY_URL="wss://a.example.test,wss://b.example.test" 
 # default keeps the operator entry first, appends every community fallback, and
 # removes duplicates without reordering.
 test "$(
-    HERDR_COMMUNITY_GATEWAY_URL="wss://gw-a.example.test,wss://gw-b.example.test" \
+    HERDR_RELAY_BIN="$NORMALIZE_BIN" \
+        HERDR_COMMUNITY_GATEWAY_URL="wss://gw-a.example.test,wss://gw-b.example.test" \
         gateway_subscription_defaults "wss://own.example.test,wss://gw-a.example.test"
 )" = "wss://own.example.test,wss://gw-a.example.test,wss://gw-b.example.test"
 test "$(
-    HERDR_GATEWAY_SUBSCRIPTIONS="wss://own.example.test,wss://backup.example.test" \
+    HERDR_RELAY_BIN="$NORMALIZE_BIN" \
+        HERDR_GATEWAY_SUBSCRIPTIONS="wss://own.example.test,wss://backup.example.test" \
         prompt_gateway_subscriptions "wss://unused.example.test"
 )" = "wss://own.example.test,wss://backup.example.test"
 test -z "$(HERDR_COMMUNITY_GATEWAY_URL="" community_gateway_url)"

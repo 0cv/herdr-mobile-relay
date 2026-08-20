@@ -66,10 +66,9 @@ const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
 const PANE_READ_RETRY_MS = 35_000;
 const IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
-// Gateway-relayed traffic is metered project bandwidth. Halving the terminal
-// refresh rate and capping scrollback keeps the fallback affordable; the
-// direct and legacy paths are unmetered and keep full fidelity.
-const RELAYED_REFRESH_INTERVAL_MS = 500;
+// Gateway-relayed traffic is metered project bandwidth. Cap scrollback while
+// honoring the user's refresh rate; acknowledged deltas keep idle frames off
+// the wire and make the selected cadence affordable during normal output.
 const RELAYED_HISTORY_LINES = 1_000;
 const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   answer_question: true,
@@ -1119,18 +1118,15 @@ class RelayStore {
   }
 
   /**
-   * Terminal fidelity the active path can afford. Gateway-relayed traffic is
-   * metered project bandwidth, so it refreshes at half the rate and caps
-   * scrollback; direct and legacy paths keep the user's full settings.
+   * Terminal history the active path can afford. Gateway-relayed traffic is
+   * metered project bandwidth, so it caps scrollback; every path honors the
+   * user's selected refresh interval.
    */
   private paneBudget(relayId: string): { lines: number; intervalMs: number } {
     const lines = get(terminalHistoryLines);
     const intervalMs = get(terminalRefreshInterval);
     if (this.connectionsValue.get(relayId)?.path !== 'gateway') return { lines, intervalMs };
-    return {
-      lines: Math.min(lines, RELAYED_HISTORY_LINES),
-      intervalMs: Math.max(intervalMs, RELAYED_REFRESH_INTERVAL_MS),
-    };
+    return { lines: Math.min(lines, RELAYED_HISTORY_LINES), intervalMs };
   }
 
   readPane(agent: Agent, force = false): void {

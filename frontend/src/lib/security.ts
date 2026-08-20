@@ -21,8 +21,6 @@ export const securityState = writable<SecurityState>({
 
 let unlockInProgress = false;
 let automaticUnlockPending = false;
-const FORCE_RECONNECT_AFTER_BACKGROUND_MS = 3_000;
-const RESUME_RECONNECT_DEDUP_MS = 1_000;
 const RESUME_HEALTH_TIMEOUT_MS = 2_000;
 
 export function deviceVerificationSupported(): boolean {
@@ -42,43 +40,25 @@ export function initializeDeviceSecurity(): () => void {
     void unlockWithDevice('open');
   } else relayStore.connectAll();
 
-  let backgroundedAt: number | null = null;
-  let lastForcedReconnectAt: number | null = null;
   const networkConnection = (navigator as Navigator & { connection?: EventTarget }).connection;
-  const markBackgrounded = () => {
-    if (backgroundedAt === null) backgroundedAt = Date.now();
-  };
-  const reconnectAfterBackground = (force = false) => {
+  const revalidateAfterResume = () => {
     if (document.visibilityState !== 'visible') return;
-    const now = Date.now();
-    const backgroundDuration = backgroundedAt === null ? 0 : Math.max(0, now - backgroundedAt);
-    backgroundedAt = null;
-    if (!force && backgroundDuration < FORCE_RECONNECT_AFTER_BACKGROUND_MS) {
-      // The page just came back. A backoff computed while the device was
-      // asleep must not delay the first attempt made while someone watches,
-      // and revalidation reconnects every dropped relay right away.
-      relayStore.resetReconnectBackoff();
-      relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
-      return;
-    }
-    // connectAll rebuilds every connection and clears the attempt counters,
-    // so the forced path needs no separate backoff reset.
-    if (lastForcedReconnectAt !== null && now - lastForcedReconnectAt < RESUME_RECONNECT_DEDUP_MS) return;
-    lastForcedReconnectAt = now;
-    relayStore.connectAll(true);
+    // Preserve a healthy direct WebRTC session across sleep. A response keeps
+    // it alive without gateway traffic; a stale path gets two seconds before
+    // the normal reconnect creates a fresh gateway-assisted direct session.
+    relayStore.resetReconnectBackoff();
+    relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
   };
   const onVisibility = () => {
     if (document.visibilityState === 'hidden') {
-      markBackgrounded();
       if (deviceVerificationEnabled()) lockForDevice('resume');
       return;
     }
     if (deviceVerificationEnabled()) {
-      backgroundedAt = null;
       unlockAfterResume();
       return;
     }
-    reconnectAfterBackground();
+    revalidateAfterResume();
   };
   const onPageShow = (event: PageTransitionEvent) => {
     if (!event.persisted) return;
@@ -87,7 +67,7 @@ export function initializeDeviceSecurity(): () => void {
       setTimeout(unlockAfterResume, 150);
       return;
     }
-    reconnectAfterBackground(true);
+    revalidateAfterResume();
   };
   const onFocus = () => {
     if (document.visibilityState !== 'visible') return;
@@ -95,7 +75,7 @@ export function initializeDeviceSecurity(): () => void {
       setTimeout(unlockAfterResume, 150);
       return;
     }
-    reconnectAfterBackground();
+    revalidateAfterResume();
   };
   const onOnline = () => {
     if (document.visibilityState !== 'visible') return;
@@ -103,7 +83,7 @@ export function initializeDeviceSecurity(): () => void {
       unlockAfterResume();
       return;
     }
-    reconnectAfterBackground(true);
+    revalidateAfterResume();
   };
   const onNetworkChange = () => {
     if (document.visibilityState !== 'visible') return;
@@ -116,17 +96,15 @@ export function initializeDeviceSecurity(): () => void {
     relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
   };
   const onFreeze = () => {
-    markBackgrounded();
     if (deviceVerificationEnabled()) lockForDevice('resume');
   };
   const onResume = () => {
     if (document.visibilityState !== 'visible') return;
     if (deviceVerificationEnabled()) {
-      backgroundedAt = null;
       if (get(securityState).locked) setTimeout(unlockAfterResume, 150);
       return;
     }
-    reconnectAfterBackground(true);
+    revalidateAfterResume();
   };
   document.addEventListener('visibilitychange', onVisibility);
   document.addEventListener('freeze', onFreeze);

@@ -520,9 +520,8 @@
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
       && next.format === lastFormat && !layoutChanged) return;
-    const frameStick = terminalElement
-      ? terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48
-      : virtualStickToBottom;
+    const frameStick = virtualStickToBottom || Boolean(terminalElement
+      && terminalElement.scrollHeight - terminalElement.scrollTop - terminalElement.clientHeight < 48);
     const stick = resizeSessionActive && pendingResizeStick !== null
       ? pendingResizeStick
       : layoutChanged && pendingLayoutStick !== null

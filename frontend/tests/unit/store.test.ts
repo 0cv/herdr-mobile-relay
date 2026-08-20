@@ -926,7 +926,7 @@ describe('relay command store', () => {
     expect(attempts).toBe(2);
   });
 
-  it('halves terminal refresh while traffic is relayed, and restores it on the direct path', () => {
+  it('honors terminal refresh while traffic is relayed and caps its history', () => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
     setTerminalRefreshInterval(100);
@@ -967,10 +967,11 @@ describe('relay command store', () => {
       format: 'ansi',
       content_fingerprint: 'content-1',
     });
-    // Metered relayed bandwidth floors the 100 ms preference at 500 ms.
-    expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 500, lines: 1_000 });
+    // Acknowledged deltas make the selected cadence affordable on the metered
+    // path; only scrollback remains capped.
+    expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 100, lines: 1_000 });
 
-    // Promotion to the direct path rewatches at the user's full fidelity.
+    // Promotion to the direct path keeps the same user-selected cadence.
     report('connected', { path: 'webrtc' });
     expect(get(relayStore.connections).get(relayId)?.path).toBe('webrtc');
     expect(sent.at(-1)).toMatchObject({ type: 'watch_pane', interval_ms: 100 });

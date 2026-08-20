@@ -84,10 +84,10 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Faster resume: returning to the app resets the reconnect backoff instead of
-  waiting out the previous delay, the base delay drops from 3 s to 1 s, and a
-  foregrounded page now gives a relay 2 s to answer an app-level ping before
-  reconnecting, rather than the previous flat 10 s half-dead detection.
+- Faster resume: returning to the app clears stale reconnect backoff and probes
+  the existing application path for 2 seconds before replacing it. A healthy
+  direct session now resumes without gateway traffic; only a stale session
+  opens a fresh gateway-assisted connection.
 - A visible phone now probes the application connection when Chromium reports a
   Wi-Fi/cellular network change. A healthy path remains open; a half-open path
   gets 2 s to answer before reconnecting.
@@ -114,10 +114,9 @@ project follows [Semantic Versioning](https://semver.org/).
   and the app records it and prefers the hybrid path on the next connection —
   no QR re-scan. The original URL is kept and is used automatically if the
   gateway turns out to be unreachable from that phone.
-- Terminal refresh is floored at 500 ms and scrollback capped at 1,000 lines
-  while traffic is relayed through the gateway, and returns to the configured
-  settings as soon as the direct path takes over. Cloudflare and direct
-  connections are unaffected.
+- Gateway-relayed terminal watches now honor the configured 100, 250, 500, or
+  1,000 ms refresh rate while still capping scrollback at 1,000 lines.
+  Acknowledged deltas keep unchanged frames off the metered path.
 - A gateway no longer displaces a relay registration that is still alive: the
   incumbent link is pinged first and keeps its id if it answers, so anyone who
   learns a relay id cannot evict the real computer in a loop. A crashed or
@@ -179,6 +178,9 @@ project follows [Semantic Versioning](https://semver.org/).
   WebSocket survives but Caddy cannot route new phone connections. A phone also
   abandons a silent gateway handshake after 10 seconds so it can try the next
   advertised candidate.
+- Rapid terminal updates no longer lose the pinned-to-latest scroll state while
+  virtualized rows are being replaced, so an active stream stays at its newest
+  message unless the user deliberately scrolls into history.
 
 ## [0.16.4] - 2026-08-18
 
