@@ -295,7 +295,7 @@
           <h2 id="workspace-dialog-title">Workspace</h2>
           <p>{String(agent?.cwd || 'Workspace unavailable')}</p>
         </div>
-        <Button variant="ghost" size="icon" aria-label="Close workspace inspector" onclick={close}>×</Button>
+        <Button variant="ghost" size="icon" class="workspace-close" aria-label="Close workspace inspector" onclick={close}>×</Button>
       </header>
 
       <div class="workspace-toolbar">

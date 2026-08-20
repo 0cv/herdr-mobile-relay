@@ -594,9 +594,17 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .modifier-menu, .arrow-menu, .fkey-menu { position: relative; }
 .modifier-key-input { border: 0; height: 1px; left: 50%; opacity: 0; padding: 0; pointer-events: none; position: absolute; width: 1px; }
 .modifier-menu .button[aria-pressed='true'] { background: var(--primary); color: var(--primary-foreground); }
-/* The caret's ink sits in the top half of its em box, so it reads high against
-   the other key glyphs; nudge it onto the button's optical centre. */
-.key-caret { display: block; transform: translateY(.16em); }
+/* Inline-level buttons here would align on the text baseline, which drops Alt
+   about a pixel below Shift and Ctrl because their glyph boxes differ. */
+.modifier-menu { align-items: center; display: flex; gap: .35rem; }
+/* Symbol keys read much smaller than the lettered ones at the same font size,
+   and every glyph sits at a different height inside its em box. Size them up
+   to match the letters optically, then nudge each onto the button's centre.
+   1.25rem is the ceiling that keeps these buttons at the row's 2.15rem. */
+.key-glyph { display: block; font-size: 1.25rem; line-height: 1; }
+.key-glyph-tab { transform: translateY(.02em); }
+.key-glyph-shift { transform: translateY(.23em); }
+.key-glyph-caret { transform: translateY(.18em); }
 .arrow-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(3, 2.3rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
 .arrow-popup button { background: var(--secondary); border: 0; border-radius: .4rem; color: var(--foreground); height: 2.3rem; }
 .fkey-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(4, 2.6rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
@@ -694,7 +702,11 @@ textarea { min-height: 6.5rem; resize: vertical; }
 
 .jump-search { display: block; margin-bottom: .65rem; }
 .jump-results { display: flex; flex-direction: column; gap: .8rem; max-height: min(62dvh, 34rem); overflow-y: auto; }
-.jump-results section { border: 1px solid var(--border); border-radius: .7rem; overflow: hidden; }
+/* flex: 0 0 auto — a flex column that hits its max-height shrinks its items by
+   default, and `overflow: hidden` here then clips the agent rows away with no
+   scrollbar to reach them. Keep every group at its natural height and let the
+   list scroll instead. */
+.jump-results section { border: 1px solid var(--border); border-radius: .7rem; flex: 0 0 auto; overflow: hidden; }
 .jump-results section > header { align-items: baseline; background: var(--secondary); display: flex; gap: .55rem; padding: .48rem .65rem; }
 .jump-results section > header strong { flex: 0 1 auto; font-size: .72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .jump-results section > header span { color: var(--muted); flex: 1; font-size: .6rem; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
@@ -712,6 +724,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-inspector > header > div { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .workspace-inspector > header h2 { font-size: 1rem; margin: 0; }
 .workspace-inspector > header p { color: var(--muted); font-size: .65rem; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-inspector > header .workspace-close { font-size: 1.6rem; line-height: 1; }
 .workspace-toolbar { align-items: center; border-bottom: 1px solid var(--border); display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: .5rem; padding: .5rem .6rem; }
 .workspace-section-tabs { background: var(--secondary); border-radius: .55rem; display: flex; padding: .16rem; }
 .workspace-section-tabs button { background: transparent; border: 0; border-radius: .4rem; color: var(--muted); cursor: pointer; font-size: .7rem; min-height: 2rem; padding: .35rem .62rem; }

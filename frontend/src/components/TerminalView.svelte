@@ -1589,7 +1589,7 @@
     {/if}
     <div class="term-keys question-term-keys" aria-label="Terminal fallback keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onclick={sendTab}>⇥</Button>
+      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onclick={sendTab}><span class="key-glyph key-glyph-tab">⇥</span></Button>
       <span class="spacer"></span>
       <div class="fkey-menu">
         <Button variant="secondary" size="sm" aria-label="Function keys" aria-expanded={fkeysOpen} onclick={() => { fkeysOpen = !fkeysOpen; arrowsOpen = false; }}>
@@ -1879,7 +1879,7 @@
     {/if}
     <div class="term-keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>⇥</Button>
+      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}><span class="key-glyph key-glyph-tab">⇥</span></Button>
       <div class="modifier-menu">
         <input
           id="modifier-key-input"
@@ -1903,7 +1903,7 @@
           title="Arm Shift; combine it with Ctrl or Alt"
           onpointerdown={(event) => event.preventDefault()}
           onclick={toggleShift}
-        >⇧</Button>
+        ><span class="key-glyph key-glyph-shift">⇧</span></Button>
         <Button
           variant="secondary"
           size="sm"
@@ -1913,7 +1913,7 @@
           title="Arm Ctrl; combine it with Shift or Alt"
           onpointerdown={(event) => event.preventDefault()}
           onclick={toggleCtrl}
-        ><span class="key-caret">^</span></Button>
+        ><span class="key-glyph key-glyph-caret">^</span></Button>
         <Button
           variant="secondary"
           size="sm"

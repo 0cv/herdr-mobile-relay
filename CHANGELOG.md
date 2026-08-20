@@ -158,6 +158,9 @@ project follows [Semantic Versioning](https://semver.org/).
   reaches rows above the viewport by driving the agent's own scroll interface,
   which visibly scrolls the desktop pane and costs seconds per read, so text
   reads no longer request recent scrollback.
+- Jump to agent shows every agent again. Once the result list reached its
+  height limit each workspace group was squeezed instead of the list scrolling,
+  so agent rows were cut in half and there was no way to scroll to them.
 - Leaving a terminal and returning to it no longer stalls the stream for a
   second or two. The relay restored the pane's own width the moment the terminal
   closed and narrowed it again on the way back, and the agent re-rendered on both
