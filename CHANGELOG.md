@@ -3,6 +3,15 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.17.1] - 2026-08-20
+
+### Fixed
+
+- Terminal Find now opens from the compact header, keeps Copy as a compact
+  two-sheet action, and uses larger SVG controls for previous, next, and close.
+  The empty bar no longer spends space on the unhelpful “Type to find” label;
+  match counts appear once a query is entered.
+
 ## [0.17.0] - 2026-08-20
 
 ### Added
@@ -886,7 +895,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.4...v0.17.0
 [0.16.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.16.2...v0.16.3
