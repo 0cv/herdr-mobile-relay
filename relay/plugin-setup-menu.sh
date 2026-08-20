@@ -19,37 +19,45 @@ installed_release_version() {
     sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" | head -1
 }
 
-running_release_version() {
+running_health() {
     local port="${HERDR_RELAY_PORT:-8375}"
-    local health
 
-    health="$(curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null)" || return 1
-    printf '%s' "$health" |
-        sed -n 's/.*"release_version":"\([^"]*\)".*/\1/p' | head -1
+    curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null
 }
 
 own_gateway_summary() {
     local installed="$1"
+    local available="$2"
     local state_file
     local host
     local health
     local deployed
+    local action="redeploy with 3"
 
     state_file="$(dirname "$ENV_FILE")/gateway-deploy"
     host="$(env_file_value "$state_file" HERDR_GATEWAY_DEPLOY_HOST)"
     [ -n "$host" ] || return 0
-    if ! health="$(curl -fsS --max-time 3 "https://$host/healthz" 2>/dev/null)"; then
-        printf '%s is unreachable - repair or redeploy with 3\n' "$host"
-        return 0
+    if [ -n "$available" ] && [ -n "$installed" ] && [ "$available" != "$installed" ]; then
+        action="run herdr plugin install 0cv/herdr-mobile-relay, then redeploy with 3"
     fi
-    deployed="$(json_string_field "$health" version)"
-    if [ -z "$deployed" ]; then
-        printf '%s is healthy, version unknown - redeploy with 3\n' "$host"
-    elif [ -n "$installed" ] && [ "$deployed" != "$installed" ]; then
-        printf '%s runs %s; this plugin deploys %s - upgrade with 3\n' \
-            "$host" "$deployed" "$installed"
+    if ! health="$(curl -fsS --max-time 3 "https://$host/healthz" 2>/dev/null)"; then
+        printf '%s is unreachable, version unknown' "$host"
     else
-        printf '%s runs %s\n' "$host" "$deployed"
+        deployed="$(json_string_field "$health" version)"
+        if [ -n "$deployed" ]; then
+            if [ -n "$available" ] && [ "$deployed" = "$available" ]; then
+                printf '%s runs %s (latest available)\n' "$host" "$deployed"
+                return 0
+            fi
+            printf '%s runs %s' "$host" "$deployed"
+        else
+            printf '%s is healthy, version unknown' "$host"
+        fi
+    fi
+    if [ -n "$available" ]; then
+        printf '; plugin offers %s - %s\n' "$available" "$action"
+    else
+        printf ' - %s\n' "$action"
     fi
 }
 
@@ -70,18 +78,38 @@ service_state() {
 }
 
 transport_summary() {
+    local health="$1"
+    local available="$2"
     local gateways
+    local active
+    local current
     local count
 
     gateways="$(gateway_urls "$ENV_FILE")"
     if [ -n "$gateways" ]; then
+        active="$(json_string_field "$health" gateway_url)"
+        [ -n "$active" ] || active="$(json_string_field "$health" url)"
+        [ -n "$active" ] || active="${gateways%%,*}"
+        current="$(json_string_field "$health" gateway_version)"
+        printf 'gateway %s' "$active"
+        if [ -n "$current" ]; then
+            printf ' runs %s' "$current"
+            if [ -n "$available" ] && [ "$current" = "$available" ]; then
+                printf ' (latest available)'
+            elif [ -n "$available" ]; then
+                printf '; latest available %s' "$available"
+            fi
+        elif [ -n "$available" ]; then
+            printf ' (version unknown; latest available %s)' "$available"
+        else
+            printf ' (version unknown)'
+        fi
         # Commas, not lines: the list has no trailing newline for wc to count.
         count=$(($(printf '%s' "$gateways" | tr -cd ',' | wc -c) + 1))
         if [ "$count" -gt 1 ]; then
-            printf 'gateway %s (+%s fallback)\n' "${gateways%%,*}" "$((count - 1))"
-        else
-            printf 'gateway %s\n' "$gateways"
+            printf ' (+%s fallback)' "$((count - 1))"
         fi
+        printf '\n'
         return 0
     fi
     if [ -n "${CLOUDFLARED_CONFIG:-}" ] && [ -f "$CLOUDFLARED_CONFIG" ]; then
@@ -94,10 +122,13 @@ transport_summary() {
 }
 
 print_status() {
-    local installed running service app_origin deployed own_gateway
+    local installed running health available service app_origin deployed own_gateway
 
     installed="$(installed_release_version || true)"
-    running="$(running_release_version || true)"
+    health="$(running_health || true)"
+    running="$(json_string_field "$health" release_version)"
+    available="$(json_string_field "$health" gateway_available_version)"
+    [ -n "$available" ] || available="$installed"
     if [ -n "$installed" ]; then
         if [ -z "$running" ]; then
             printf '  Relay:      %s installed, not running\n' "$installed"
@@ -110,9 +141,9 @@ print_status() {
     fi
     service="$(service_state || true)"
     [ -z "$service" ] || printf '  Service:    %s\n' "$service"
-    own_gateway="$(own_gateway_summary "$installed" || true)"
+    own_gateway="$(own_gateway_summary "$installed" "$available" || true)"
     [ -z "$own_gateway" ] || printf '  Own gateway: %s\n' "$own_gateway"
-    printf '  Phone path: %s\n' "$(transport_summary)"
+    printf '  Phone path: %s\n' "$(transport_summary "$health" "$available")"
     app_origin="$(phone_app_base_url "" "$ENV_FILE" 2>/dev/null || true)"
     if [ -n "$app_origin" ]; then
         deployed="$(curl -fsS --max-time 3 "$app_origin/version.json" 2>/dev/null |

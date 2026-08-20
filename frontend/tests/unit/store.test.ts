@@ -987,6 +987,8 @@ describe('relay command store', () => {
       protocol: 2,
       capabilities: [],
       agent_profiles: [],
+      release_version: '0.17.0',
+      update: { state: 'current', upstream_version: '0.17.1' },
       hybrid: {
         transport: 'herdr-hybrid-v1',
         gateway_url: 'wss://gw.example',
@@ -996,6 +998,9 @@ describe('relay command store', () => {
           'https://not-a-websocket.example',
           'wss://backup.example',
         ],
+        gateway_version: '0.17.0',
+        gateway_revision: 'gateway-revision',
+        gateway_available_version: '0.17.1',
         relay_id: 'Ccy3nT9AULlAceTEnhTvoQ',
         direct: true,
       },
@@ -1005,6 +1010,10 @@ describe('relay command store', () => {
     expect(stored.transport).toBe('hybrid');
     expect(stored.gatewayUrl).toBe('wss://gw.example');
     expect(stored.gatewayUrls).toEqual(['wss://gw.example', 'wss://backup.example']);
+    expect(get(relayStore.connections).get(relayId)).toMatchObject({
+      gatewayVersion: '0.17.0',
+      gatewayAvailableVersion: '0.17.1',
+    });
     // The legacy URL survives so the hybrid path can fall back to it.
     expect(stored.url).toBe('wss://fedora.example');
     expect(JSON.parse(localStorage.getItem('herdr_relays')!)).toContainEqual(

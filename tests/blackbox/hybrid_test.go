@@ -496,6 +496,12 @@ func TestGatewayPathControlsRelay(t *testing.T) {
 	if hybrid["transport"] != "herdr-hybrid-v1" {
 		t.Fatalf("hybrid transport id = %v", hybrid["transport"])
 	}
+	if hybrid["gateway_version"] != "dev" || hybrid["gateway_revision"] != "unknown" {
+		t.Fatalf("hybrid gateway build = %v (%v), want dev (unknown)", hybrid["gateway_version"], hybrid["gateway_revision"])
+	}
+	if hybrid["gateway_available_version"] != "dev" {
+		t.Fatalf("hybrid available gateway version = %v, want dev", hybrid["gateway_available_version"])
+	}
 
 	p.sendMessage(ctx, map[string]any{"type": "refresh_agents"})
 	for range 60 {

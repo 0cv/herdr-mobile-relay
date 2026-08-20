@@ -424,8 +424,9 @@ test "$(gateway_registration_state "$GATEWAY_HEALTH")" = "true"
 test "$(gateway_registration_state '{"gateway": {"enabled": true, "registered": false}}')" = "false"
 test -z "$(gateway_registration_state '{"status":"ok"}')"
 
-# The setup fragment carries gateway=<url> for a gateway-configured relay and
-# relay=<wss url> otherwise. Both keep the token inside the fragment.
+# The setup fragment carries only gateways=<ordered list> for a
+# gateway-configured relay and relay=<wss url> otherwise. Both keep the token
+# inside the fragment.
 FRAGMENT_BIN="$WORK_DIR/fragment/herdr-mobile-relay"
 mkdir -p "$(dirname "$FRAGMENT_BIN")"
 cat > "$FRAGMENT_BIN" <<'EOF'
@@ -450,9 +451,9 @@ GATEWAY_FRAGMENT="$(
         build_transport_setup_fragment relay-secret-token workstation "wss://relay.example.test"
 )"
 case "$GATEWAY_FRAGMENT" in
-    *"gateway=wss%3A%2F%2Fgw.example.test"*) ;;
+    *"gateways=wss%3A%2F%2Fgw.example.test"*) ;;
     *)
-        echo "gateway fragment lost the gateway URL: $GATEWAY_FRAGMENT" >&2
+        echo "gateway fragment lost the candidate list: $GATEWAY_FRAGMENT" >&2
         exit 1
         ;;
 esac
@@ -485,22 +486,22 @@ ENV_GATEWAY_FRAGMENT="$(
         HERDR_RELAY_BIN="$FRAGMENT_BIN" HERDR_RELAY_ENV="$GATEWAY_ENV" \
         build_transport_setup_fragment relay-secret-token workstation ""
 )"
-test "$ENV_GATEWAY_FRAGMENT" = "label=workstation&gateway=wss%3A%2F%2Fother.example.test&setup=relay-secret-token&gateways=wss%3A%2F%2Fother.example.test"
+test "$ENV_GATEWAY_FRAGMENT" = "label=workstation&setup=relay-secret-token&gateways=wss%3A%2F%2Fother.example.test"
 
-# An ordered list pairs gateway=<first entry> with the complete gateways= list,
-# in order, so a phone fails over to the second gateway on its own.
+# An ordered candidate list is encoded in full, in order, so a phone fails over
+# to the second gateway on its own.
 LIST_GATEWAY_FRAGMENT="$(
     HERDR_GATEWAY_URL="wss://a.example.test, wss://b.example.test/" \
         HERDR_RELAY_BIN="$FRAGMENT_BIN" HERDR_RELAY_ENV="$GATEWAY_ENV" \
         build_transport_setup_fragment relay-secret-token workstation ""
 )"
-test "$LIST_GATEWAY_FRAGMENT" = "label=workstation&gateway=wss%3A%2F%2Fa.example.test&setup=relay-secret-token&gateways=wss%3A%2F%2Fa.example.test,wss%3A%2F%2Fb.example.test"
+test "$LIST_GATEWAY_FRAGMENT" = "label=workstation&setup=relay-secret-token&gateways=wss%3A%2F%2Fa.example.test,wss%3A%2F%2Fb.example.test"
 
 test "$(HERDR_GATEWAY_URL="wss://gw.example.test/" gateway_url "$WORK_DIR/config/relay.env")" = "wss://gw.example.test"
 test -z "$(unset HERDR_GATEWAY_URL; gateway_url "$WORK_DIR/config/relay.env")"
 
 # A list is parsed in order, with blank entries and trailing slashes dropped, and
-# gateway_url stays the first entry that display and gateway= use.
+# gateway_url stays the first entry used by setup and service scripts.
 test "$(HERDR_GATEWAY_URL=" wss://a.example.test ,, wss://b.example.test/ ," gateway_urls "$GATEWAY_ENV")" = "wss://a.example.test,wss://b.example.test"
 test "$(HERDR_GATEWAY_URL="wss://a.example.test,wss://b.example.test" gateway_url "$GATEWAY_ENV")" = "wss://a.example.test"
 test -z "$(unset HERDR_GATEWAY_URL; gateway_urls "$WORK_DIR/config/relay.env")"
@@ -605,6 +606,18 @@ test "$(unset HERDR_COMMUNITY_GATEWAY_URL; community_gateway_url)" = \
 test "$(HERDR_COMMUNITY_GATEWAY_URL="wss://community.example.test" community_gateway_url)" = "wss://community.example.test"
 test "$(HERDR_COMMUNITY_GATEWAY_URL="wss://a.example.test,wss://b.example.test" community_gateway_url)" = \
     "wss://a.example.test,wss://b.example.test"
+
+# An own gateway always reaches an explicit final candidate-list choice. The
+# default keeps the operator entry first, appends every community fallback, and
+# removes duplicates without reordering.
+test "$(
+    HERDR_COMMUNITY_GATEWAY_URL="wss://gw-a.example.test,wss://gw-b.example.test" \
+        gateway_subscription_defaults "wss://own.example.test,wss://gw-a.example.test"
+)" = "wss://own.example.test,wss://gw-a.example.test,wss://gw-b.example.test"
+test "$(
+    HERDR_GATEWAY_SUBSCRIPTIONS="wss://own.example.test,wss://backup.example.test" \
+        prompt_gateway_subscriptions "wss://unused.example.test"
+)" = "wss://own.example.test,wss://backup.example.test"
 test -z "$(HERDR_COMMUNITY_GATEWAY_URL="" community_gateway_url)"
 
 # Each flattened transport entry is complete: Community accepts the managed
@@ -620,7 +633,7 @@ cp "$REPO_DIR/relay/common.sh" "$REPO_DIR/relay/plugin-choose-transport.sh" \
 cat > "$CHOOSER_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
-    *gw-a.example.test/healthz*)
+    *own.example.test/healthz* | *gw-a.example.test/healthz*)
         printf '%s\n' '{"ok":true}'
         ;;
     *)
@@ -661,6 +674,27 @@ case "$CHOOSER_OUTPUT" in
         echo "community chooser did not report the saved list and unavailable fallback" >&2
         exit 1
         ;;
+esac
+
+# The existing-gateway path ends with the complete subscription list too. An
+# empty final answer accepts own-first plus all published community fallbacks.
+rm -f "$CHOOSER_START_MARKER"
+: > "$CHOOSER_ENV"
+OWN_OUTPUT="$(
+    printf 'b\nown.example.test\n\n' |
+        PATH="$CHOOSER_BIN_DIR:$PATH" \
+        HERDR_RELAY_BIN="$NORMALIZE_BIN" \
+        HERDR_RELAY_ENV="$CHOOSER_ENV" \
+        HERDR_COMMUNITY_GATEWAY_URL="gw-a.example.test,https://gw-b.example.test" \
+        bash "$CHOOSER_SCRIPT_DIR/plugin-choose-transport.sh" own
+)"
+test -f "$CHOOSER_START_MARKER"
+test "$(env_file_value "$CHOOSER_ENV" HERDR_GATEWAY_URL)" = \
+    "wss://own.example.test,wss://gw-a.example.test,wss://gw-b.example.test"
+test "$(env_file_value "$CHOOSER_ENV" HERDR_GATEWAY_SELECTION)" = "ordered"
+case "$OWN_OUTPUT" in
+    *"Saved 3 gateway candidates."*"first healthy one in that order."*) ;;
+    *) echo "own gateway chooser did not save the explicit fallback list" >&2; exit 1 ;;
 esac
 
 # Clearing the gateway file must also clear an inherited gateway variable
@@ -802,7 +836,7 @@ printf 'https://relay.example.test\n' > "$WORK_DIR/config/phone-app-origin"
 cat > "$MENU_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
-    *127.0.0.1*healthz*) printf '{"status":"ok","release_version":"9.9.9"}\n' ;;
+    *127.0.0.1*healthz*) printf '{"status":"ok","release_version":"9.9.9","gateway_url":"wss://gw-b.example.test","gateway_version":"9.9.8","gateway_available_version":"9.9.10"}\n' ;;
     *app.example.test/version.json*) printf '{"version":"9.9.8","assets":1}\n' ;;
     *gw-owned.example.test/healthz*) printf '{"ok":true,"version":"9.9.8","revision":"abc123"}\n' ;;
     *) exit 22 ;;
@@ -831,16 +865,16 @@ case "$MENU_OUTPUT" in
     *) echo "setup menu did not report the running release" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
-    *"gateway wss://gw-a.example.test (+1 fallback)"*) ;;
-    *) echo "setup menu did not report the configured gateway list" >&2; exit 1 ;;
+    *"gateway wss://gw-b.example.test runs 9.9.8; latest available 9.9.10 (+1 fallback)"*) ;;
+    *) echo "setup menu did not report the active gateway and available version" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
     *"serves 9.9.8, this relay ships 9.9.9"*) ;;
     *) echo "setup menu did not report the stale phone app" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
-    *"Own gateway: gw-owned.example.test runs 9.9.8; this plugin deploys 9.9.9 - upgrade with 3"*) ;;
-    *) echo "setup menu did not report the stale self-hosted gateway" >&2; exit 1 ;;
+    *"Own gateway: gw-owned.example.test runs 9.9.8; plugin offers 9.9.10 - run herdr plugin install 0cv/herdr-mobile-relay, then redeploy with 3"*) ;;
+    *) echo "setup menu did not report how to update the stale self-hosted gateway" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
     *"Exit, change nothing"*) ;;

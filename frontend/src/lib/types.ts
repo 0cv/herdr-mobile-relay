@@ -231,6 +231,9 @@ export interface RelayConnectionView {
   version: string;
   releaseVersion: string;
   revision: string;
+  /** Build version reported by the active gateway through the encrypted relay. */
+  gatewayVersion?: string;
+  gatewayAvailableVersion?: string;
   update: RelayUpdateStatus;
   appDeploy: AppDeploymentStatus;
   inventory: AgentInventoryStatus;

@@ -64,6 +64,7 @@
 
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
+
   type SafeUpdateAction =
     | {
       kind: 'deploy_app' | 'install_relay';
@@ -457,6 +458,8 @@
         {@const version = relayVersionMeta(connection)}
         {@const update = relayUpdateMeta(connection)}
         {@const manualUpdate = Boolean(connection && relayNeedsManualBootstrap(connection))}
+        {@const currentRelay = connection?.relay || relay}
+        {@const gateways = currentRelay.gatewayUrls || []}
         <article class="relay-row">
           <span
             class={`status-dot status-${connectionStatus === 'connected' && connection?.inventory.state === 'ready' ? 'success' : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'warning' : 'danger'}`}
@@ -465,7 +468,16 @@
           ></span>
           <div class="relay-info">
             <strong>{relay.label}</strong>
-            <span>{relay.url}</span>
+            {#if gateways.length}
+              <small>Gateway: {connection?.gatewayVersion || 'unknown'} · Latest: {connection?.update.available_version || connection?.gatewayAvailableVersion || connection?.releaseVersion || 'unknown'}</small>
+              <ol aria-label={`Gateway candidates for ${relay.label}`}>
+                {#each gateways as gateway (gateway)}
+                  <li>{gateway}</li>
+                {/each}
+              </ol>
+            {:else}
+              <span>{currentRelay.url}</span>
+            {/if}
             <small>Push: {pushStatusLabel(connection)}</small>
             {#if connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
               <small class="warning" role="status">

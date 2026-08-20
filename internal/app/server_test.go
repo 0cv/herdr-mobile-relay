@@ -596,6 +596,9 @@ func TestHealthz(t *testing.T) {
 	if resp["protocol"] != float64(2) {
 		t.Errorf("protocol = %v, want 2", resp["protocol"])
 	}
+	if resp["gateway_available_version"] != "0.9.0" {
+		t.Errorf("gateway_available_version = %v, want 0.9.0", resp["gateway_available_version"])
+	}
 }
 
 func TestReadyzNotReady(t *testing.T) {

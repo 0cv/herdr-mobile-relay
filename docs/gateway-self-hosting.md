@@ -32,10 +32,14 @@ The image is built on the server from the bundled source, so the server needs
 nothing but Docker — no Go toolchain, registry credentials, or GitHub access. The
 relay key never leaves your computer.
 
-After a plugin update, open the setup menu again. Its **Own gateway** status line
-compares the release reported by the gateway with the release this plugin ships.
-Choose action 3 and accept the remembered hostname, SSH address, and directory
-to copy the new source, rebuild the image, and restart the gateway.
+The setup menu's **Phone path** line and phone Settings show the active
+gateway's reported version and the latest gateway version available from the
+verified plugin release. The setup menu also probes a recorded self-hosted
+gateway for its **Own gateway** line. If a gateway reports an older version, run
+`herdr plugin install 0cv/herdr-mobile-relay` on the computer, then choose action
+3 and accept the remembered hostname, SSH address, and directory to copy the new
+source, rebuild the image, and restart the gateway. A gateway deployed before
+version reporting appears as `version unknown` until it is redeployed.
 
 Password authentication works; the deployment authenticates once and reuses that
 session. Sudo must not prompt, so use root or an account with passwordless sudo.
@@ -48,16 +52,18 @@ bash relay/gateway-deploy.sh
 ```
 
 Answers are remembered, so a later run against the same host offers them as
-defaults. To skip the prompts entirely, set `HERDR_GATEWAY_DEPLOY_HOST`,
-`HERDR_GATEWAY_DEPLOY_SERVER`, `HERDR_GATEWAY_DEPLOY_REMOTE_DIR` (default
-`/opt/herdr-gateway`), `HERDR_GATEWAY_DEPLOY_EMAIL` (ACME contact),
-`HERDR_GATEWAY_DEPLOY_DIR` (local bundle directory), and
-`HERDR_GATEWAY_DEPLOY_INSTALL_DOCKER=true`.
+defaults. To skip the deployment prompts entirely, set
+`HERDR_GATEWAY_DEPLOY_HOST`, `HERDR_GATEWAY_DEPLOY_SERVER`,
+`HERDR_GATEWAY_DEPLOY_REMOTE_DIR` (default `/opt/herdr-gateway`),
+`HERDR_GATEWAY_DEPLOY_EMAIL` (ACME contact), `HERDR_GATEWAY_DEPLOY_DIR` (local
+bundle directory), and `HERDR_GATEWAY_DEPLOY_INSTALL_DOCKER=true`.
 
-The deployment offers to keep the community gateways behind your own, and writes
-your entries first; `HERDR_GATEWAY_DEPLOY_FALLBACK=false` declines them. The relay
-tries a configured list in order, so a community gateway is used only when every
-gateway of yours is unhealthy.
+Every own-gateway path ends by showing the complete ordered list the relay and
+phone may use. The default places your gateway first and appends the community
+gateways as cold fallbacks; edit that list to keep, add, reorder, or remove
+candidates. For unattended deployment, set the same comma-separated choice in
+`HERDR_GATEWAY_SUBSCRIPTIONS`. The relay takes the first healthy entry, so a
+community gateway is used only when every earlier gateway is unhealthy.
 
 ## DNS and firewall
 

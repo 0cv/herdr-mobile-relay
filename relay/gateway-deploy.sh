@@ -877,25 +877,6 @@ report_caddy_acme_errors() {
     echo ""
 }
 
-# Your own gateway first, the community ones behind it. Under the ordered
-# policy they are reached only when yours is unhealthy, so keeping them turns a
-# dead VPS into a slow path instead of no path at all.
-keep_community_fallback() {
-    local answer
-
-    case "${HERDR_GATEWAY_DEPLOY_FALLBACK:-}" in
-        false) return 1 ;;
-        true) return 0 ;;
-    esac
-    have_tty || return 0
-    echo ""
-    read -r -p "Keep the community gateways as fallback after yours? [Y/n]: " answer ||
-        answer=""
-    case "${answer:-y}" in
-        y | Y | yes | YES) return 0 ;;
-        *) return 1 ;;
-    esac
-}
 
 report_public_health_failure() {
     echo ""
@@ -1266,24 +1247,23 @@ case "$DEPLOY_STATUS" in
     *) exit 1 ;;
 esac
 
-GATEWAY_LIST="$GATEWAY_WSS"
-COMMUNITY_FALLBACK="$(community_gateway_url)"
-if [ -n "$COMMUNITY_FALLBACK" ] && keep_community_fallback; then
-    if MERGED_GATEWAYS="$(normalize_gateway_urls "$GATEWAY_WSS,$COMMUNITY_FALLBACK")"; then
-        GATEWAY_LIST="$MERGED_GATEWAYS"
-    fi
+if ! GATEWAY_DEFAULTS="$(gateway_subscription_defaults "$GATEWAY_WSS")"; then
+    echo "✗ Could not build the gateway candidate list." >&2
+    exit 1
+fi
+if ! GATEWAY_LIST="$(prompt_gateway_subscriptions "$GATEWAY_DEFAULTS")"; then
+    echo "✗ Gateway subscriptions were not changed." >&2
+    exit 1
 fi
 set_gateway_url "$ENV_FILE" "$GATEWAY_LIST"
-# Ordered, so the community entries behind yours are a cold fallback rather
-# than a faster alternative that could pull traffic off the box you just paid
-# for.
+# The operator's order is authoritative: their own gateway stays preferred,
+# while any later entries are cold fallbacks.
 set_gateway_selection "$ENV_FILE" ordered
 echo ""
-echo "✓ $GATEWAY_HTTPS/healthz answered and this relay will use $GATEWAY_LIST."
-if [ "$GATEWAY_LIST" != "$GATEWAY_WSS" ]; then
-    echo "  Yours is first; the community gateways behind it are only reached"
-    echo "  when it is unhealthy."
-fi
+echo "✓ $GATEWAY_HTTPS/healthz answered."
+echo "  Saved gateway subscriptions, in priority order:"
+printf '%s\n' "$GATEWAY_LIST" | tr ',' '\n' | sed 's/^/    /'
+echo "  The relay will register with the first healthy candidate."
 echo "  Returning to start or restart the relay and print its phone QR."
 echo ""
 echo "Day-to-day on the server:"

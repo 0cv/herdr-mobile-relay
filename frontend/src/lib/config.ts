@@ -173,15 +173,13 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
   if (!['http:', 'https:'].includes(locationValue.protocol)) return null;
   const label = (params.get('label') || 'This computer').trim().slice(0, 48) || 'This computer';
   const configuredGateways = params.get('gateways');
-  const configuredGateway = params.get('gateway');
-  if (configuredGateways !== null || configuredGateway) {
-    // `gateways=` carries the complete ordered list, so it decides the order
-    // and the primary; a link with only `gateway=` is a one-entry list. The
-    // separator stays literal, each entry is percent-encoded on its own.
-    const entries = configuredGateways === null
-      ? [String(configuredGateway)]
-      : configuredGateways.split(',');
-    const gatewayUrls = gatewayOrigins(entries, locationValue.protocol);
+  // `gateway=` was never part of a public phone-app release. Reject it rather
+  // than silently treating an incomplete gateway link as a direct relay link.
+  if (params.has('gateway')) return null;
+  if (configuredGateways !== null) {
+    // The complete ordered list decides both the primary and every fallback.
+    // The separator stays literal; each entry is percent-encoded on its own.
+    const gatewayUrls = gatewayOrigins(configuredGateways.split(','), locationValue.protocol);
     if (!gatewayUrls.length) return null;
     return { label, url: '', token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls };
   }

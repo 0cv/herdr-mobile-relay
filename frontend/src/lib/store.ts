@@ -399,6 +399,10 @@ class RelayStore {
     const advertised = descriptor as Record<string, unknown>;
     const gatewayUrl = String(advertised.gateway_url || '').trim();
     if (!gatewayUrl.startsWith('wss://') && !gatewayUrl.startsWith('ws://')) return;
+    connection.gatewayVersion = String(advertised.gateway_version || '').slice(0, 32);
+    connection.gatewayAvailableVersion = String(
+      advertised.gateway_available_version || connection.gatewayAvailableVersion || '',
+    ).slice(0, 32);
     const gatewayUrls = Array.isArray(advertised.gateway_urls)
       ? advertised.gateway_urls as string[]
       : [];
@@ -538,6 +542,7 @@ class RelayStore {
         connection.revision,
       );
       observeAppUpstreamVersion(connection.update.upstream_version);
+      connection.gatewayAvailableVersion = connection.update.available_version || connection.releaseVersion;
       this.syncUpdateRestartReconnect(relayId, connection);
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
@@ -581,6 +586,9 @@ class RelayStore {
       );
       observeAppUpstreamVersion(connection.update.upstream_version);
       this.syncUpdateRestartReconnect(relayId, connection);
+      if (connection.update.available_version) {
+        connection.gatewayAvailableVersion = connection.update.available_version;
+      }
       if (['failed', 'rolled_back'].includes(connection.update.state)) {
         clearPendingRelayUpdate(relayId);
       }

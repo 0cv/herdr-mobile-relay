@@ -122,8 +122,8 @@ esac
 EOF
 chmod 700 "$NORMALIZE_BIN"
 export HERDR_RELAY_BIN="$NORMALIZE_BIN"
-# A published community list, so the deployment's fallback offer has something
-# to keep. The compiled default is a real hostname and must never be reached.
+# A published community list, so the final subscription default has cold
+# fallbacks. The compiled default is a real hostname and must never be reached.
 export HERDR_COMMUNITY_GATEWAY_URL="wss://community-a.example.test,wss://community-b.example.test"
 
 HOSTNAME_UNDER_TEST="gw.example.test"
@@ -243,8 +243,8 @@ grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test,wss://community-a.example.tes
     "$HERDR_RELAY_ENV" || fail "verified deployment did not record the ordered gateway list"
 grep -Fq "HERDR_GATEWAY_SELECTION='ordered'" "$HERDR_RELAY_ENV" ||
     fail "verified deployment did not pin the ordered selection policy"
-grep -Fq 'community gateways behind it are only reached' "$OUTPUT" ||
-    fail "deployment did not explain the fallback ordering"
+grep -Fq 'Gateways this relay and phone may use, in priority order:' "$OUTPUT" ||
+    fail "deployment did not present the final gateway subscription list"
 
 # --- Public endpoint never answers: keep the transport unchanged --------------
 : > "$SSH_LOG"
@@ -323,22 +323,22 @@ grep -Fq "email ops@example.test" "$REMEMBERED_BUNDLE/Caddyfile" ||
 grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test,wss://community-a.example.test,wss://community-b.example.test'" \
     "$HERDR_RELAY_ENV" || fail "remembered rerun did not record the verified gateway list"
 
-# --- Declining the community fallback leaves only the deployed gateway -------
+# --- The final subscription choice can keep only the deployed gateway --------
 : > "$SSH_LOG"
 rm -f "$STUB_STATE/started" "$STUB_STATE/uploaded.tar.gz"
-export HERDR_RELAY_ENV="$WORK_DIR/relay-no-fallback.env"
+export HERDR_RELAY_ENV="$WORK_DIR/relay-custom-subscriptions.env"
 : > "$HERDR_RELAY_ENV"
-export HERDR_GATEWAY_DEPLOY_FALLBACK=false
+export HERDR_GATEWAY_SUBSCRIPTIONS="wss://gw.example.test"
 run_deploy
-[ "$STATUS" -eq 0 ] || fail "declined-fallback run exited $STATUS"
+[ "$STATUS" -eq 0 ] || fail "custom-subscription run exited $STATUS"
 grep -Fq "HERDR_GATEWAY_URL='wss://gw.example.test'" "$HERDR_RELAY_ENV" ||
-    fail "declining the fallback did not leave the deployed gateway alone"
+    fail "the explicit subscription list did not leave the deployed gateway alone"
 if grep -Fq 'community-a.example.test' "$HERDR_RELAY_ENV"; then
-    fail "declined fallback still recorded the community gateways"
+    fail "the explicit subscription list still recorded community gateways"
 fi
 grep -Fq "HERDR_GATEWAY_SELECTION='ordered'" "$HERDR_RELAY_ENV" ||
-    fail "declined fallback did not pin the ordered selection policy"
-unset HERDR_GATEWAY_DEPLOY_FALLBACK
+    fail "the explicit subscription list did not pin the ordered selection policy"
+unset HERDR_GATEWAY_SUBSCRIPTIONS
 
 # --- The name has an AAAA the server does not answer -------------------------
 # Let's Encrypt prefers IPv6, so this is the failure that looks like nothing at

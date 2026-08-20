@@ -882,8 +882,8 @@ gateway_urls() {
     printf '%s\n' "$list"
 }
 
-# The configured tie-break leader. Terminal output and the gateway= fragment key
-# each name exactly one gateway; the live relay advertises its selected entry.
+# The configured tie-break leader used by setup and service scripts. The live
+# relay advertises its selected entry separately through status.
 gateway_url() {
     local list
 
@@ -959,6 +959,48 @@ normalize_gateway_urls() {
     printf '%s\n' "$list"
 }
 
+# Builds the editable default shown after an operator supplies or deploys their
+# own gateway. Their entries stay first; the project gateways are cold
+# fallbacks, and normalization removes a community entry that is already theirs.
+gateway_subscription_defaults() {
+    local own="$1"
+    local community
+
+    community="$(community_gateway_url)"
+    normalize_gateway_urls "$own${community:+,$community}"
+}
+
+# Every own-gateway path ends here. Showing the complete candidate list makes
+# the fallback policy an explicit operator choice instead of hiding it behind a
+# yes/no prompt or requiring prior knowledge of the community hostnames.
+prompt_gateway_subscriptions() {
+    local defaults
+    local entered
+    local normalized
+
+    if ! defaults="$(normalize_gateway_urls "$1")"; then
+        return 1
+    fi
+    while true; do
+        if [ "${HERDR_GATEWAY_SUBSCRIPTIONS+set}" = "set" ]; then
+            entered="$HERDR_GATEWAY_SUBSCRIPTIONS"
+        else
+            echo "" >&2
+            echo "Gateways this relay and phone may use, in priority order:" >&2
+            printf '%s\n' "$defaults" | tr ',' '\n' | sed 's/^/  /' >&2
+            read -r -p "Gateways to subscribe to, comma-separated [keep this list]: " entered ||
+                entered=""
+        fi
+        entered="${entered:-$defaults}"
+        if normalized="$(normalize_gateway_urls "$entered")"; then
+            printf '%s\n' "$normalized"
+            return 0
+        fi
+        echo "✗ Enter one or more gateway hostnames or ws:// / wss:// origins." >&2
+        [ "${HERDR_GATEWAY_SUBSCRIPTIONS+set}" != "set" ] || return 1
+    done
+}
+
 # The HTTPS base for the gateway's own endpoints: /healthz, /probe, /whoami.
 gateway_http_base() {
     case "$1" in
@@ -1027,12 +1069,10 @@ encode_fragment_value() {
     build_setup_fragment "" "" "$1" | sed -e 's/.*relay=//' -e 's/&.*//'
 }
 
-# build_setup_fragment for either transport: a gateway-configured relay is
-# reached through the gateway, so the fragment carries gateway=<url> instead of
-# relay=<wss url>, plus gateways=<the whole ordered list>. The compiled helper
-# still does the percent-encoding, and because it escapes '=' inside values, the
-# only "relay=" in its output is the key itself. All secrets stay inside the
-# fragment either way.
+# Builds a setup fragment for either transport. A gateway-configured relay has
+# no direct relay URL; its complete ordered candidate list travels only in
+# `gateways=`. Each entry is encoded separately so the commas remain separators,
+# while the relay token stays inside the URL fragment.
 build_transport_setup_fragment() {
     local token="$1"
     local label="$2"
@@ -1048,8 +1088,7 @@ build_transport_setup_fragment() {
         build_setup_fragment "$token" "$label" "$relay_url"
         return
     fi
-    fragment="$(build_setup_fragment "$token" "$label" "${gateways%%,*}" |
-        sed -e 's/^relay=/gateway=/' -e 's/&relay=/\&gateway=/')"
+    fragment="$(build_setup_fragment "$token" "$label")"
     old_ifs="$IFS"
     IFS=','
     # shellcheck disable=SC2086
@@ -1058,8 +1097,6 @@ build_transport_setup_fragment() {
     for entry in "$@"; do
         encoded="${encoded:+$encoded,}$(encode_fragment_value "$entry")"
     done
-    # The complete list travels even when it holds a single entry, so a relay
-    # that gains a second gateway later costs no paired phone a re-scan.
     printf '%s&gateways=%s\n' "$fragment" "$encoded"
 }
 

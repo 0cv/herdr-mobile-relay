@@ -15,6 +15,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/reachability"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
+	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
 	"github.com/0cv/herdr-mobile-relay/internal/webrtclink"
 )
 
@@ -513,6 +514,22 @@ func intField(msg map[string]any, key string) int {
 	return 0
 }
 
+// gatewayAvailableVersion is the newest gateway source this relay knows how to
+// deploy. Gateway and relay binaries ship in the same verified plugin release,
+// so a newer update-manager upstream version is also the gateway's available
+// version. A stable upstream may be older than a prerelease relay; that must
+// never be presented as an update.
+func (s *Server) gatewayAvailableVersion() string {
+	available := s.version
+	if upstream := s.updateM.State().UpstreamVersion; relayupdate.NewerVersion(upstream, available) {
+		available = upstream
+	}
+	if current, _ := s.hybrid.status()["version"].(string); relayupdate.NewerVersion(current, available) {
+		available = current
+	}
+	return available
+}
+
 // hybridDescriptor is the bridge-window advertisement: an existing app that
 // connected over the legacy WSS URL learns the relay now speaks the hybrid
 // transport and can migrate without a QR re-scan.
@@ -525,10 +542,13 @@ func (s *Server) hybridDescriptor() map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"transport":    protocol.HybridTransportCapability,
-		"gateway_url":  status.URL,
-		"gateway_urls": status.URLs,
-		"relay_id":     status.RelayID,
-		"direct":       s.hybrid.directEnabled(),
+		"transport":                 protocol.HybridTransportCapability,
+		"gateway_url":               status.URL,
+		"gateway_urls":              status.URLs,
+		"gateway_version":           status.Version,
+		"gateway_revision":          status.Revision,
+		"gateway_available_version": s.gatewayAvailableVersion(),
+		"relay_id":                  status.RelayID,
+		"direct":                    s.hybrid.directEnabled(),
 	}
 }

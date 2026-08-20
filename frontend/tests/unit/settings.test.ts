@@ -85,6 +85,75 @@ describe('settings relay status', () => {
     await waitFor(() => expect(screen.getByText('Push: synced')).toBeInTheDocument());
   });
 
+  it('shows every potential gateway in priority order', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    relayStore.addRelay({
+      label: 'Fedora',
+      url: '',
+      token: 'relay-secret',
+      transport: 'hybrid',
+      gatewayUrl: 'wss://own.example.test',
+      gatewayUrls: [
+        'wss://own.example.test',
+        'wss://community-a.example.test',
+        'wss://community-b.example.test',
+      ],
+    });
+
+    render(SettingsView);
+
+    const candidates = screen.getByRole('list', { name: 'Gateway candidates for Fedora' });
+    expect(within(candidates).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'wss://own.example.test',
+      'wss://community-a.example.test',
+      'wss://community-b.example.test',
+    ]);
+  });
+
+  it('shows active and latest gateway versions without regressing to an older upstream', async () => {
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config',
+      protocol: 2,
+      release_version: '0.15.0',
+      capabilities: [],
+      agent_profiles: [],
+      update: { state: 'available', available_version: '0.16.0', upstream_version: '0.16.0' },
+      hybrid: {
+        gateway_url: 'wss://own.example.test',
+        gateway_urls: ['wss://own.example.test'],
+        gateway_version: '0.15.0',
+        gateway_revision: 'gateway-revision',
+        gateway_available_version: '0.16.0',
+      },
+    });
+
+    expect(await screen.findByText('Gateway: 0.15.0 · Latest: 0.16.0')).toBeInTheDocument();
+    socket.server({
+      type: 'update_status',
+      update: { state: 'current', upstream_version: '0.14.0' },
+    });
+    expect(await screen.findByText('Gateway: 0.15.0 · Latest: 0.16.0')).toBeInTheDocument();
+    socket.server({
+      type: 'push_config',
+      protocol: 2,
+      release_version: '0.17.0',
+      capabilities: [],
+      agent_profiles: [],
+      update: { state: 'current', upstream_version: '0.16.0' },
+      hybrid: {
+        gateway_url: 'wss://own.example.test',
+        gateway_urls: ['wss://own.example.test'],
+        gateway_version: '0.17.0',
+        gateway_available_version: '0.17.0',
+      },
+    });
+    expect(await screen.findByText('Gateway: 0.17.0 · Latest: 0.17.0')).toBeInTheDocument();
+  });
+
   it('shows the complete one-time update command for an older relay', async () => {
     const user = userEvent.setup();
     render(SettingsView);

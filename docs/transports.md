@@ -64,6 +64,8 @@ remains the only authorization for control on every path.
   keeps exactly one registration, and after a failure excludes that entry for the
   pass and takes the next healthy one. The pairing QR carries the whole list, so
   either side can fail over without a re-scan.
+  The phone lists every saved candidate, in priority order, under the relay in
+  **Settings**.
 - `HERDR_GATEWAY_SELECTION` — `ordered`, the default, takes the first healthy
   entry in configured order, which makes a list you write yourself a priority
   list. `latency` keeps the lowest-latency healthy entry, with configured order

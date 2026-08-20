@@ -17,7 +17,7 @@ function setupLink(fragment: string): Pick<Location, 'hash' | 'protocol' | 'host
 describe('ordered gateway lists', () => {
   it('reads the whole ordered list out of a setup fragment', () => {
     expect(quickSetupConfig(setupLink(
-      'label=Fedora&gateway=wss%3A%2F%2Fa.example&gateways=wss%3A%2F%2Fa.example,wss%3A%2F%2Fb.example',
+      'label=Fedora&gateways=wss%3A%2F%2Fa.example,wss%3A%2F%2Fb.example',
     ))).toEqual({
       label: 'Fedora',
       url: '',
@@ -38,30 +38,21 @@ describe('ordered gateway lists', () => {
     expect(setup?.gatewayUrl).toBe('wss://b.example');
   });
 
-  it('treats a lone gateway parameter as a one-entry list', () => {
-    expect(quickSetupConfig(setupLink('label=Fedora&gateway=wss%3A%2F%2Fgw.example.com%2F'))).toEqual({
-      label: 'Fedora',
-      url: '',
-      token: TOKEN,
-      transport: 'hybrid',
-      gatewayUrl: 'wss://gw.example.com',
-      gatewayUrls: ['wss://gw.example.com'],
-    });
+  it('rejects the unreleased scalar gateway field', () => {
+    expect(quickSetupConfig(setupLink(
+      'label=Fedora&gateway=wss%3A%2F%2Fgw.example.com',
+    ))).toBeNull();
   });
 
   it.each([
     ['an empty list', 'gateways='],
     ['nothing but junk', 'gateways=javascript%3Aalert(1),http%3A%2F%2Fa.example'],
     ['paths that would leak the key', 'gateways=wss%3A%2F%2Fa.example%2Fconnect%3Fkey%3Dleak'],
-    // A broken list is never quietly narrowed to the primary: the phone would
-    // then be paired against a list the relay never published.
-    ['a valid primary beside a broken list', 'gateway=wss%3A%2F%2Fa.example&gateways=%2C%2C'],
   ])('rejects a setup link carrying %s', (_label, fragment) => {
     expect(quickSetupConfig(setupLink(fragment))).toBeNull();
   });
 
-  it('normalizes a config stored before the list existed', () => {
-    // Nothing re-pairs on upgrade: the single stored gateway becomes the list.
+  it('normalizes a preferred gateway into the complete candidate list', () => {
     const stored = normalizeRelayConfig({ label: 'Fedora', url: '', token: TOKEN, gatewayUrl: 'wss://gw.example.com/' });
     expect(stored).toEqual({
       id: 'fedora-wss-gw-example-com',
@@ -103,8 +94,7 @@ describe('ordered gateway lists', () => {
   });
 
   it('leaves a hybrid entry addressless when no gateway survives', () => {
-    // Exactly what an empty `gateway=` already produced: the entry has no
-    // address, so the store refuses it and the transport reports it fatally.
+    // The entry has no usable address, so the transport reports it fatally.
     expect(normalizeRelayConfig({
       label: 'Fedora',
       token: TOKEN,
@@ -115,14 +105,14 @@ describe('ordered gateway lists', () => {
 
   it('updates a paired computer whose gateway list changed', () => {
     const paired = importQuickSetup([], setupLink(
-      'label=Fedora&gateway=wss%3A%2F%2Fa.example&gateways=wss%3A%2F%2Fa.example,wss%3A%2F%2Fb.example',
+      'label=Fedora&gateways=wss%3A%2F%2Fa.example,wss%3A%2F%2Fb.example',
     ));
     expect(paired).toHaveLength(1);
 
     // The relay promoted its second gateway. The computer is the same one, so
     // the stored entry follows the new order instead of pairing itself twice.
     const repaired = importQuickSetup(paired!, setupLink(
-      'label=Fedora&gateway=wss%3A%2F%2Fb.example&gateways=wss%3A%2F%2Fb.example,wss%3A%2F%2Fa.example',
+      'label=Fedora&gateways=wss%3A%2F%2Fb.example,wss%3A%2F%2Fa.example',
     ));
     expect(repaired).toHaveLength(1);
     expect(repaired?.[0].id).toBe(paired?.[0].id);
@@ -136,8 +126,7 @@ describe('ordered gateway lists', () => {
   // sides encode and split the list independently, so this pins the seam.
   it('parses the fragment the relay actually emits', () => {
     const setup = quickSetupConfig(setupLink(
-      'label=cv&gateway=wss%3A%2F%2Fprimary.example'
-      + '&setup=2435028f051dfa73447b2e2b185c3ca4'
+      'label=cv&setup=2435028f051dfa73447b2e2b185c3ca4'
       + '&gateways=wss%3A%2F%2Fprimary.example,wss%3A%2F%2Fbackup.example',
     ));
     expect(setup?.transport).toBe('hybrid');

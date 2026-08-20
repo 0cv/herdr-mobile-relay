@@ -3,6 +3,19 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Gateway setup links now carry only the complete ordered `gateways` list, and
+  phone Settings shows every candidate that can reach each relay.
+- Both self-hosted gateway paths end with an editable subscription list; the
+  default keeps the operator gateway first and community gateways as cold
+  fallbacks.
+- Phone Settings and the setup menu now show the active gateway version, the
+  latest gateway version available from the verified plugin release, and the
+  computer-side install/redeploy path for an outdated self-hosted gateway.
+
 ## [0.17.0] - 2026-08-20
 
 ### Added

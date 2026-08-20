@@ -1443,7 +1443,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"revision":        s.revision,
 		"protocol":        protocol.Version,
 	}
-	resp["gateway"] = s.hybrid.status()
+	gateway := s.hybrid.status()
+	resp["gateway"] = gateway
+	resp["gateway_url"] = gateway["url"]
+	resp["gateway_version"] = gateway["version"]
+	resp["gateway_revision"] = gateway["revision"]
+	resp["gateway_available_version"] = s.gatewayAvailableVersion()
 
 	if s.webH != nil {
 		resp["bundle_hash"] = s.webH.BundleHash()

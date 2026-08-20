@@ -82,6 +82,9 @@ use_gateways() {
 
 choose_own_gateway() {
     local entered
+    local own
+    local defaults
+    local subscriptions
 
     echo ""
     echo "  a. Deploy one on my own server over SSH"
@@ -92,6 +95,8 @@ choose_own_gateway() {
         read -r -p "Choice [a]: " sub
         case "${sub:-a}" in
             a|A)
+                # The deployment action ends with the same explicit subscription
+                # list prompt used by the manual path below.
                 if "$SCRIPT_DIR/gateway-deploy.sh" &&
                     [ -n "$(gateway_urls "$ENV_FILE")" ]; then
                     return 0
@@ -100,7 +105,7 @@ choose_own_gateway() {
                 ;;
             b|B)
                 while true; do
-                    if ! read -r -p "Gateway address(es), comma-separated, or q to cancel: " entered; then
+                    if ! read -r -p "Your gateway address(es), comma-separated, or q to cancel: " entered; then
                         echo ""
                         return 1
                     fi
@@ -111,9 +116,16 @@ choose_own_gateway() {
                             ;;
                     esac
                     [ -n "$entered" ] || continue
-                    # An operator's own list is a priority order, not a pool of
-                    # equivalents: entry one is theirs and must win.
-                    if use_gateways "$entered" ordered; then
+                    if ! own="$(normalize_gateway_urls "$entered")"; then
+                        echo "✗ Enter one or more gateway hostnames or ws:// / wss:// origins."
+                        continue
+                    fi
+                    if ! defaults="$(gateway_subscription_defaults "$own")"; then
+                        echo "✗ Could not build the gateway candidate list."
+                        continue
+                    fi
+                    if subscriptions="$(prompt_gateway_subscriptions "$defaults")" &&
+                        use_gateways "$subscriptions" ordered; then
                         return 0
                     fi
                 done

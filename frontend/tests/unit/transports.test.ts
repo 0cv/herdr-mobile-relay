@@ -1089,7 +1089,7 @@ describe('hybrid path manager', () => {
 describe('hybrid relay configuration', () => {
   it('imports a gateway setup link and keeps every secret in the fragment', () => {
     const setup = quickSetupConfig({
-      hash: `#setup=${VECTOR_TOKEN}&label=Fedora&gateway=wss%3A%2F%2Fgw.example.com`,
+      hash: `#setup=${VECTOR_TOKEN}&label=Fedora&gateways=wss%3A%2F%2Fgw.example.com`,
       protocol: 'https:',
       host: 'app.example.com',
     } as Location);
@@ -1103,7 +1103,7 @@ describe('hybrid relay configuration', () => {
     });
 
     const imported = importQuickSetup([], {
-      hash: `#setup=${VECTOR_TOKEN}&label=Fedora&gateway=wss%3A%2F%2Fgw.example.com%2F`,
+      hash: `#setup=${VECTOR_TOKEN}&label=Fedora&gateways=wss%3A%2F%2Fgw.example.com%2F`,
       protocol: 'https:',
       host: 'app.example.com',
     } as Location);
@@ -1119,7 +1119,7 @@ describe('hybrid relay configuration', () => {
 
     // Re-scanning the same code updates in place instead of duplicating.
     const again = importQuickSetup(imported!, {
-      hash: `#setup=${VECTOR_TOKEN}&label=Fedora&gateway=wss%3A%2F%2Fgw.example.com`,
+      hash: `#setup=${VECTOR_TOKEN}&label=Fedora&gateways=wss%3A%2F%2Fgw.example.com`,
       protocol: 'https:',
       host: 'app.example.com',
     } as Location);
@@ -1128,14 +1128,14 @@ describe('hybrid relay configuration', () => {
   });
 
   it.each([
-    'gateway=http%3A%2F%2Fgw.example.com',
-    'gateway=ws%3A%2F%2Fgw.example.com',
-    'gateway=wss%3A%2F%2Fuser%3Apass%40gw.example.com',
-    'gateway=wss%3A%2F%2Fgw.example.com%2Fconnect',
-    'gateway=wss%3A%2F%2Fgw.example.com%3Fkey%3Dleak',
-    'gateway=wss%3A%2F%2Fgw.example.com%23leak',
-    'gateway=javascript%3Aalert(1)',
-  ])('rejects the hostile gateway parameter %s', (fragment) => {
+    'gateways=http%3A%2F%2Fgw.example.com',
+    'gateways=ws%3A%2F%2Fgw.example.com',
+    'gateways=wss%3A%2F%2Fuser%3Apass%40gw.example.com',
+    'gateways=wss%3A%2F%2Fgw.example.com%2Fconnect',
+    'gateways=wss%3A%2F%2Fgw.example.com%3Fkey%3Dleak',
+    'gateways=wss%3A%2F%2Fgw.example.com%23leak',
+    'gateways=javascript%3Aalert(1)',
+  ])('rejects the hostile gateways parameter %s', (fragment) => {
     expect(quickSetupConfig({
       hash: `#setup=${VECTOR_TOKEN}&${fragment}`,
       protocol: 'https:',

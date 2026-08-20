@@ -97,7 +97,7 @@ describe('protocol and setup parsing', () => {
       host: 'app.example.com',
     } as Location)).toBeNull();
     expect(quickSetupConfig({
-      hash: '#setup=0123456789abcdef0123456789abcdef&label=Fedora&gateway=wss%3A%2F%2Fgw.example.com',
+      hash: '#setup=0123456789abcdef0123456789abcdef&label=Fedora&gateways=wss%3A%2F%2Fgw.example.com',
       protocol: 'https:',
       host: 'app.example.com',
     } as Location)).toEqual({
@@ -109,7 +109,7 @@ describe('protocol and setup parsing', () => {
       gatewayUrls: ['wss://gw.example.com'],
     });
     expect(quickSetupConfig({
-      hash: '#setup=0123456789abcdef0123456789abcdef&gateway=wss%3A%2F%2Fgw.example.com%2Fconnect%3Fkey%3Dleak',
+      hash: '#setup=0123456789abcdef0123456789abcdef&gateways=wss%3A%2F%2Fgw.example.com%2Fconnect%3Fkey%3Dleak',
       protocol: 'https:',
       host: 'app.example.com',
     } as Location)).toBeNull();
