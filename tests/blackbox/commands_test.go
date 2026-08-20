@@ -299,6 +299,94 @@ func TestReadQoderHistoryRespectsRequestedLines(t *testing.T) {
 	}
 }
 
+func TestHiddenPromptRouteKeepsTheSecretOutOfTextAndScrollback(t *testing.T) {
+	scenario, err := json.Marshal(map[string]any{
+		"panes": []map[string]any{{
+			"pane_id": "pane-1", "agent": "codex", "name": "test",
+			"agent_status": "idle", "tab_id": "tab-1",
+			"workspace_id": "ws-1", "cwd": "/tmp", "revision": 1,
+		}},
+		"tabs": []map[string]any{{
+			"tab_id": "tab-1", "workspace_id": "ws-1", "label": "main", "number": 1, "cwd": "/tmp",
+		}},
+		"content": map[string]string{"pane-1": "make install\n[sudo] password for cv:"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := setupEnvWithScenario(t, string(scenario))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	send := func(command map[string]any) map[string]any {
+		t.Helper()
+		data, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+			t.Fatal(err)
+		}
+		return readJSON(t, conn, ctx, 5*time.Second)
+	}
+
+	response := send(map[string]any{
+		"type": "read_pane", "pane_id": "pane-1", "lines": 100, "format": "ansi",
+	})
+	if response["no_echo"] != true {
+		t.Fatalf("sudo prompt was not recognized: %v", response)
+	}
+	if response["no_echo_prompt"] != "[sudo] password for cv:" {
+		t.Errorf("no_echo_prompt = %v", response["no_echo_prompt"])
+	}
+
+	result := send(map[string]any{
+		"type": "send_secret", "request_id": "secret-1", "protocol": 2,
+		"pane_id": "pane-1", "text": "hunter2",
+	})
+	if result["ok"] != true {
+		t.Fatalf("send_secret result = %v", result)
+	}
+	// One keystroke per rune with its own Enter: `pane send-text` would be
+	// wrapped in bracketed paste and corrupt a value read with echo off.
+	argv := findFakeOperation(
+		t, env.operationsLog,
+		"pane", "send-keys", "pane-1", "h", "u", "n", "t", "e", "r", "2", "Enter",
+	)
+	if argv == nil {
+		t.Fatal("the secret was not typed as individual keystrokes")
+	}
+	if len(argv) != 11 {
+		t.Fatalf("secret keystrokes carried extra arguments: %v", argv)
+	}
+	if operation := findFakeOperation(t, env.operationsLog, "pane", "send-text", "pane-1"); operation != nil {
+		t.Fatalf("the secret was inserted as text: %v", operation)
+	}
+
+	// A text-format read must stay on the visible grid: `recent` reaches the
+	// pages above it by scrolling the operator's own pane.
+	send(map[string]any{
+		"type": "read_pane", "pane_id": "pane-1", "lines": 400, "format": "text",
+	})
+	if operation := findFakeOperation(
+		t, env.operationsLog,
+		"pane", "read", "pane-1", "--lines", "400", "--source", "visible", "--format", "text",
+	); operation == nil {
+		t.Fatal("text-format read did not clamp to the visible grid")
+	}
+	if operation := findFakeOperation(
+		t, env.operationsLog, "pane", "read", "pane-1", "--lines", "400", "--source", "recent",
+	); operation != nil {
+		t.Fatalf("text-format read harvested scrollback: %v", operation)
+	}
+}
+
 func TestReadAndAnswerStructuredQuestion(t *testing.T) {
 	questionView := "Which deployment target?\n❯ 1. Development\n2. Staging\n3. Type something.\n4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel"
 	scenario, err := json.Marshal(map[string]any{

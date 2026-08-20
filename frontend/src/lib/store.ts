@@ -78,6 +78,7 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   submit_prompt: true,
   send_keys: true,
   send_text: true,
+  send_secret: true,
   agent_start: true,
   agent_rename: true,
   tab_reorder: true,
@@ -740,6 +741,7 @@ class RelayStore {
         return;
       }
       this.paneContentFingerprints.set(paneId, message.content_fingerprint);
+      const deltaNoEcho = typeof message.no_echo === 'boolean' ? message.no_echo : frame?.noEcho;
       this.terminalFramesValue.set(paneId, {
         paneId,
         content: nextContent,
@@ -747,6 +749,10 @@ class RelayStore {
         truncated: typeof message.truncated === 'boolean' ? message.truncated : frame?.truncated,
         viewportOnly: typeof message.viewport_only === 'boolean' ? message.viewport_only : frame?.viewportOnly,
         viewportRows: typeof message.viewport_rows === 'number' ? message.viewport_rows : frame?.viewportRows,
+        noEcho: deltaNoEcho,
+        noEchoPrompt: deltaNoEcho
+          ? typeof message.no_echo_prompt === 'string' ? message.no_echo_prompt : frame?.noEchoPrompt
+          : undefined,
         resizeSettling: message.resize_settling === true,
       });
       this.terminalFrames.set(new Map(this.terminalFramesValue));
@@ -768,6 +774,10 @@ class RelayStore {
       if (message.truncated === true) nextFrame.truncated = true;
       if (message.viewport_only === true) nextFrame.viewportOnly = true;
       if (typeof message.viewport_rows === 'number') nextFrame.viewportRows = message.viewport_rows;
+      if (message.no_echo === true) {
+        nextFrame.noEcho = true;
+        if (typeof message.no_echo_prompt === 'string') nextFrame.noEchoPrompt = message.no_echo_prompt;
+      }
       if (message.resize_settling === true) nextFrame.resizeSettling = true;
       this.terminalFramesValue.set(paneId, nextFrame);
       this.terminalFrames.set(new Map(this.terminalFramesValue));
@@ -912,6 +922,20 @@ class RelayStore {
 
   sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number): Promise<CommandResult> {
     return this.sendCommand(agent.relay_id, { ...payload, pane_id: agent.raw_pane_id }, timeoutMs);
+  }
+
+  /**
+   * Answers a recognized no-echo prompt. The relay types the secret as single
+   * runes so no bracketed-paste wrapper reaches a termios noecho read, and it
+   * never journals the text.
+   */
+  sendSecret(agent: Agent, text: string): Promise<CommandResult> {
+    const connection = this.connectionsValue.get(agent.relay_id);
+    if (!connection?.capabilities.includes('secret_input')) {
+      return Promise.reject(new CommandError('This relay does not support password prompts'));
+    }
+    if (!text) return Promise.reject(new CommandError('Enter the password first'));
+    return this.sendToAgent(agent, { type: 'send_secret', text });
   }
 
   reorderTab(agent: Agent, insertIndex: number): Promise<CommandResult> {

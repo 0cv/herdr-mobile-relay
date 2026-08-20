@@ -84,6 +84,62 @@ function renderInline(value: string, highlight: string): string {
   return output;
 }
 
+type TableAlignment = '' | 'left' | 'center' | 'right';
+
+/**
+ * Splits one table row on unescaped pipes. GFM resolves `\|` to a literal pipe
+ * before any inline parsing, so the escape is dropped here and the cell text
+ * still travels through renderInline for escaping.
+ */
+function splitTableRow(row: string): string[] {
+  const text = row.trim();
+  const cells: string[] = [];
+  let cell = '';
+  let separated = false;
+  for (let cursor = 0; cursor < text.length; cursor += 1) {
+    if (text[cursor] === '\\' && text[cursor + 1] === '|') {
+      cell += '|';
+      cursor += 1;
+      separated = false;
+      continue;
+    }
+    if (text[cursor] === '|') {
+      cells.push(cell.trim());
+      cell = '';
+      separated = true;
+      continue;
+    }
+    cell += text[cursor];
+    separated = false;
+  }
+  if (!separated || cell.trim()) cells.push(cell.trim());
+  if (text.startsWith('|')) cells.shift();
+  return cells;
+}
+
+function tableAlignments(row: string): TableAlignment[] | null {
+  if (!row.includes('|')) return null;
+  const cells = splitTableRow(row);
+  if (!cells.length) return null;
+  const alignments: TableAlignment[] = [];
+  for (const cell of cells) {
+    if (!/^:?-+:?$/u.test(cell)) return null;
+    const left = cell.startsWith(':');
+    const right = cell.endsWith(':');
+    alignments.push(left && right ? 'center' : right ? 'right' : left ? 'left' : '');
+  }
+  return alignments;
+}
+
+function renderTableRow(cells: string[], alignments: TableAlignment[], tag: 'th' | 'td', highlight: string): string {
+  let html = '<tr>';
+  for (let column = 0; column < alignments.length; column += 1) {
+    const align = alignments[column] ? ` style="text-align:${alignments[column]}"` : '';
+    html += `<${tag}${align}>${renderInline(cells[column] || '', highlight)}</${tag}>`;
+  }
+  return `${html}</tr>`;
+}
+
 
 export function safeMarkdownHtml(value: string, highlight = ''): string {
   const lines = value.replace(/\r\n?/g, '\n').split('\n');
@@ -113,7 +169,8 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
     list = '';
   };
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const fence = line.match(/^\s*```\s*([A-Za-z0-9_+.-]*)\s*$/u);
     if (fence) {
       if (inCode) flushCode();
@@ -175,6 +232,22 @@ export function safeMarkdownHtml(value: string, highlight = ''): string {
       flushParagraph();
       flushList();
       output.push('<hr>');
+      continue;
+    }
+    const alignments = line.includes('|') ? tableAlignments(lines[index + 1] || '') : null;
+    const header = alignments ? splitTableRow(line) : [];
+    if (alignments && header.length === alignments.length) {
+      flushParagraph();
+      flushList();
+      const body: string[] = [];
+      let row = index + 2;
+      while (row < lines.length && lines[row].trim() && lines[row].includes('|') && !lines[row].trimStart().startsWith('```')) {
+        body.push(renderTableRow(splitTableRow(lines[row]), alignments, 'td', highlight));
+        row += 1;
+      }
+      index = row - 1;
+      const tbody = body.length ? `<tbody>${body.join('')}</tbody>` : '';
+      output.push(`<div class="conversation-table"><table><thead>${renderTableRow(header, alignments, 'th', highlight)}</thead>${tbody}</table></div>`);
       continue;
     }
     flushList();

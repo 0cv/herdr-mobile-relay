@@ -10,7 +10,9 @@ export const TERMINAL_REPEATED_RUN_LIMIT = 24;
 const TERMINAL_REPEATED_RUN_TRIGGER = 32;
 const LIGHT_ROW_FALLBACK_BACKGROUND = 'rgb(61,64,64)';
 const ANSI_HEADING_ACCENT = '#3daee9';
-const TERMINAL_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const TERMINAL_GRAPHEME_SEGMENTER = typeof Intl !== 'undefined' && 'Segmenter' in Intl
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null;
 const TERMINAL_EMOJI_PRESENTATION = /\p{Emoji_Presentation}/u;
 const TERMINAL_HORIZONTAL_CELLS: Record<string, true> = { '─': true, '━': true, '═': true };
 
@@ -165,6 +167,20 @@ function isWideTerminalCodePoint(codePoint: number): boolean {
   );
 }
 
+/**
+ * Older WebViews ship no Intl.Segmenter. Constructing one at module scope
+ * there throws during evaluation and the whole app renders nothing, so the
+ * cluster walk degrades to code points: a combining mark then measures on its
+ * own (width 0) instead of joining its base. Precision loss, not a blank app.
+ */
+function* terminalGraphemes(text: string): Generator<string> {
+  if (TERMINAL_GRAPHEME_SEGMENTER) {
+    for (const { segment } of TERMINAL_GRAPHEME_SEGMENTER.segment(text)) yield segment;
+    return;
+  }
+  yield* text;
+}
+
 function terminalGraphemeWidth(grapheme: string): number {
   if (!grapheme || /^\p{Mark}+$/u.test(grapheme)) return 0;
   if (grapheme.includes('\uFE0F') || TERMINAL_EMOJI_PRESENTATION.test(grapheme)) return 2;
@@ -192,7 +208,7 @@ function terminalCellsHtml(text: string, startingColumn: number): { html: string
     horizontal = '';
     horizontalCells = 0;
   };
-  for (const { segment } of TERMINAL_GRAPHEME_SEGMENTER.segment(text)) {
+  for (const segment of terminalGraphemes(text)) {
     if (segment === '\t') {
       flushHorizontal();
       const spaces = 8 - (column % 8);
@@ -734,7 +750,7 @@ export function renderedRowShift(previous: RenderedTerminalRow[], current: Rende
 
 function terminalTextColumns(text: string): number {
   let column = 0;
-  for (const { segment } of TERMINAL_GRAPHEME_SEGMENTER.segment(text)) {
+  for (const segment of terminalGraphemes(text)) {
     if (segment === '\t') {
       column += 8 - (column % 8);
       continue;

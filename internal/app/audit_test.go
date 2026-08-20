@@ -47,11 +47,36 @@ func TestAuditWriteDetailsKeepAttributionWithoutPayloadContent(t *testing.T) {
 	}
 }
 
+// A secret answering a noecho prompt is short and low entropy: a payload digest
+// would be crackable offline, and the per-rune keys spell it out verbatim.
+func TestAuditWriteDetailsRedactsSecretInput(t *testing.T) {
+	details := auditWriteDetails(map[string]any{
+		"type":       "send_secret",
+		"request_id": "req-secret",
+		"pane_id":    "pane-1",
+		"text":       "hunter2",
+		"keys":       []any{"h", "u", "n", "t", "e", "r", "2", "Enter"},
+	})
+
+	if details["text_bytes"] != len("hunter2") {
+		t.Fatalf("text_bytes = %#v", details["text_bytes"])
+	}
+	for _, key := range []string{"payload_sha256", "payload_bytes", "keys", "text"} {
+		if _, exists := details[key]; exists {
+			t.Fatalf("secret audit details retained %q: %#v", key, details[key])
+		}
+	}
+	if len(details) != 1 {
+		t.Fatalf("secret audit details = %#v, want text_bytes only", details)
+	}
+}
+
 func TestAuditedWriteSetCoversRemoteAgentMutations(t *testing.T) {
 	for _, action := range []string{
 		"submit_prompt", "send_keys", "send_text", "respond", "answer_question",
 		"navigate_question", "clarify_question", "agent_stop", "agent_rename",
 		"tab_reorder", "agent_start", "agent_clear", "agent_restart", "upload_image",
+		"send_secret",
 	} {
 		if !isAuditedWrite(action) {
 			t.Fatalf("%s is not audited", action)

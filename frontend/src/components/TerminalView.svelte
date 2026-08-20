@@ -82,6 +82,15 @@
   let composer = $state(untrack(() => loadPromptDraft(agent)));
   let composerFocused = $state(false);
   let sendingPrompt = $state(false);
+  // Never handed to savePromptDraft: a no-echo prompt answer must not be
+  // written to this phone's storage.
+  let secretValue = $state('');
+  let sendingSecret = $state(false);
+  // Composer text as it stood when a no-echo prompt was first recognized, and
+  // whether the user has changed it since. Recognition is a heuristic, so it
+  // pauses persistence instead of deleting a draft the prompt did not author.
+  let noEchoDraftBaseline: string | null = null;
+  let noEchoDraftTainted = false;
   let draftPersistenceWarning = $state('');
   let historyTruncated = $state(false);
   // Pre-resize frame kept only to suppress display of transient frames while
@@ -115,6 +124,7 @@
   let lastPreserveLineEnds = false;
   let jumpVisible = $state(false);
   let arrowsOpen = $state(false);
+  let fkeysOpen = $state(false);
   let findOpen = $state(false);
   let findQuery = $state('');
   let activeFindIndex = $state(-1);
@@ -138,6 +148,8 @@
   const CELL_MEASURE_TEXT = '0000000000';
   const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
   const PANE_REALTIME_RESYNC_MS = 15_000;
+  // Herdr's key parser covers f1..f24; the pad exposes the range phones need.
+  const FUNCTION_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   const RESPONSE_COPY_AGENT_IDS = new Set([
     'claude', 'claudecode', 'codex', 'openaicodex', 'kimi', 'kimicode',
     'omp', 'ohmypi', 'pi', 'picodingagent', 'qoder', 'qodercli',
@@ -187,6 +199,14 @@
   );
   const terminalTextMode = $derived(inspectionMode && terminalTextInputActive(terminalPlainText));
   const composerLocked = $derived(responsePending || (inspectionMode && !terminalTextMode));
+  // The relay recognizes the prompt; that recognition is what opens the masked
+  // input, even while the generic composer stays locked for inspection.
+  const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
+  const noEchoPrompt = $derived(noEchoActive ? frame?.noEchoPrompt || 'Password:' : '');
+  const secretInputSupported = $derived(
+    Boolean($connections.get(agent.relay_id)?.capabilities.includes('secret_input')),
+  );
+  const secretMode = $derived(noEchoActive && secretInputSupported);
   const terminalMenu = $derived(detectTerminalMenu(terminalPlainText));
   const visibleTerminalMenu = $derived(
     !approvalMode
@@ -228,13 +248,38 @@
     return styles.length ? styles.join(';') : undefined;
   });
 
+  const NOT_PERSISTED_AT_HIDDEN_PROMPT =
+    'Not saved on this phone: typed while the terminal was hiding its input.';
+
   $effect(() => {
+    if (noEchoActive) {
+      // Persistence pauses so nothing typed at a hidden prompt reaches storage.
+      // The stored draft stays: it predates the prompt, and recognition is a
+      // heuristic that must not be able to destroy the user's own text.
+      if (noEchoDraftBaseline === null) noEchoDraftBaseline = composer;
+      if (composer !== noEchoDraftBaseline) noEchoDraftTainted = true;
+      draftPersistenceWarning = noEchoDraftTainted ? NOT_PERSISTED_AT_HIDDEN_PROMPT : '';
+      return;
+    }
+    noEchoDraftBaseline = null;
+    if (!composer) noEchoDraftTainted = false;
+    if (noEchoDraftTainted) {
+      // Authored while the prompt was up: it may be the secret in the wrong
+      // field, so it stays in memory until the composer is cleared or sent.
+      draftPersistenceWarning = NOT_PERSISTED_AT_HIDDEN_PROMPT;
+      return;
+    }
     const result = savePromptDraft(agent, composer);
     draftPersistenceWarning = result === 'too-large'
-      ? 'This draft is too large to persist; keep this page open.'
+      ? 'This draft is too large to persist; it survives pane switches but not closing the app.'
       : result === 'unavailable'
         ? 'Draft persistence is unavailable; keep this page open.'
         : '';
+  });
+
+  $effect(() => {
+    if (secretMode) return;
+    untrack(() => { secretValue = ''; });
   });
 
   $effect(() => {
@@ -987,6 +1032,32 @@
     }
   }
 
+  async function submitSecret() {
+    const secret = secretValue;
+    if (!secret || !secretMode || sendingSecret) return;
+    sendingSecret = true;
+    try {
+      await relayStore.sendSecret(agent, secret);
+      secretValue = '';
+      relayStore.showToast('Password sent to the terminal.');
+    } catch (error) {
+      // The value stays in the field for a retry; it is never stored.
+      const message = error instanceof Error && error.message
+        ? error.message
+        : 'The password could not be sent.';
+      relayStore.showToast(message, true);
+    } finally {
+      sendingSecret = false;
+      setTimeout(() => relayStore.readPane(agent), 500);
+    }
+  }
+
+  function secretKeydown(event: KeyboardEvent) {
+    if (event.isComposing || event.key !== 'Enter') return;
+    event.preventDefault();
+    void submitSecret();
+  }
+
   function composerInput() {
     if (dismissedSlashQuery !== composer) dismissedSlashQuery = null;
     activeSlashIndex = 0;
@@ -1178,6 +1249,7 @@
   }
   function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
     arrowsOpen = false;
+    fkeysOpen = false;
     if (which === 'ctrl') ctrlArmed = !ctrlArmed;
     else if (which === 'alt') altArmed = !altArmed;
     else shiftArmed = !shiftArmed;
@@ -1235,6 +1307,18 @@
 
   function sendTab() {
     sendTerminalKey('Tab');
+  }
+
+  function sendInterrupt() {
+    // A dedicated chord: it must not pick up an armed Ctrl and become ctrl+ctrl+c.
+    fkeysOpen = false;
+    void sendKeys(['ctrl+c'], 'Ctrl+C');
+  }
+
+  function sendFunctionKey(number: number) {
+    fkeysOpen = false;
+    // Herdr parses function keys as f1..f24; the label keeps the pad readable.
+    sendTerminalKey(`f${number}`, `F${number}`);
   }
 
   function modifierKeydown(event: KeyboardEvent) {
@@ -1484,6 +1568,19 @@
   {/if}
 {/snippet}
 
+{#snippet fkeyPopup()}
+  {#if fkeysOpen}
+    <div class="fkey-popup" role="group" aria-label="Function keys">
+      {#each FUNCTION_KEYS as number (number)}
+        <button
+          onpointerdown={(event) => event.preventDefault()}
+          onclick={() => sendFunctionKey(number)}
+        >F{number}</button>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
 <main
   class:has-actions={inputLocked || nextBlocked}
   class:question-only={questionMode}
@@ -1498,10 +1595,17 @@
     {/if}
     <div class="term-keys question-term-keys" aria-label="Terminal fallback keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" aria-label="Ctrl+C" title="Interrupt the running command" onclick={sendInterrupt}>Ctrl+C</Button>
       <Button variant="secondary" size="sm" onclick={sendTab}>Tab</Button>
       <span class="spacer"></span>
+      <div class="fkey-menu">
+        <Button variant="secondary" size="sm" aria-label="Function keys" aria-expanded={fkeysOpen} onclick={() => { fkeysOpen = !fkeysOpen; arrowsOpen = false; }}>
+          F keys
+        </Button>
+        {@render fkeyPopup()}
+      </div>
       <div class="arrow-menu">
-        <Button variant="secondary" size="sm" aria-label="Arrow keys" aria-expanded={arrowsOpen} onclick={() => { arrowsOpen = !arrowsOpen; }}>
+        <Button variant="secondary" size="sm" aria-label="Arrow keys" aria-expanded={arrowsOpen} onclick={() => { arrowsOpen = !arrowsOpen; fkeysOpen = false; }}>
           {@render arrowIcon()}
         </Button>
         {@render arrowPopup()}
@@ -1662,6 +1766,38 @@
         {/if}
       </section>
     {/if}
+    {#if noEchoActive}
+      <section class="secret-prompt" aria-label="Hidden terminal prompt">
+        <p id="secret-prompt-line" role="status">
+          The terminal is asking for a hidden value: <strong>{noEchoPrompt}</strong>
+        </p>
+        {#if secretInputSupported}
+          <div class="secret-prompt-row">
+            <input
+              bind:value={secretValue}
+              type="password"
+              aria-label="Value for the hidden terminal prompt"
+              aria-describedby="secret-prompt-line"
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false"
+              enterkeyhint="send"
+              disabled={sendingSecret}
+              onkeydown={secretKeydown}
+            />
+            <Button
+              size="sm"
+              disabled={!secretValue || sendingSecret}
+              aria-label="Send hidden value"
+              onclick={submitSecret}
+            >{sendingSecret ? '…' : 'Send'}</Button>
+          </div>
+          <p class="hint">Typed straight into the terminal: never saved on this phone and never written to activity.</p>
+        {:else}
+          <p class="hint">This computer’s relay is too old to accept a hidden value from the phone; answer it at the computer.</p>
+        {/if}
+      </section>
+    {/if}
     <div class="term-input">
       <Button variant="ghost" size="icon" disabled={inputLocked} aria-label="Attach image" onclick={() => fileInput.click()}>
         <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -1750,6 +1886,14 @@
     {/if}
     <div class="term-keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
+      <Button
+        variant="secondary"
+        size="sm"
+        aria-label="Ctrl+C"
+        title="Interrupt the running command"
+        onpointerdown={(event) => event.preventDefault()}
+        onclick={sendInterrupt}
+      >Ctrl+C</Button>
       <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>Tab</Button>
       <div class="modifier-menu">
         <input
@@ -1795,6 +1939,17 @@
         >Alt</Button>
       </div>
       <span class="spacer"></span>
+      <div class="fkey-menu">
+        <Button
+          variant="secondary"
+          size="sm"
+          aria-label="Function keys"
+          aria-expanded={fkeysOpen}
+          onpointerdown={(event) => event.preventDefault()}
+          onclick={() => { fkeysOpen = !fkeysOpen; arrowsOpen = false; }}
+        >F keys</Button>
+        {@render fkeyPopup()}
+      </div>
       <div class="arrow-menu">
         <Button
           variant="secondary"
@@ -1802,7 +1957,7 @@
           aria-label="Arrow keys"
           aria-expanded={arrowsOpen}
           onpointerdown={(event) => event.preventDefault()}
-          onclick={() => { arrowsOpen = !arrowsOpen; }}
+          onclick={() => { arrowsOpen = !arrowsOpen; fkeysOpen = false; }}
         >
           {@render arrowIcon()}
         </Button>

@@ -9,7 +9,10 @@ import { constants, gzipSync } from 'node:zlib';
 // the direct-upgrade code cannot be split out of the bootstrap payload.
 // Raised from 112 KiB for connection-path visibility and reconnect-code
 // handling in 0.17.0, after removing the dead CSS that padded the old budget.
-const limitKiB = 113;
+// Raised from 113 KiB for the no-echo prompt route (masked secret input, its
+// relay capability gate), the F1-F12 pad, and GFM tables in conversation
+// history: all three land in the single bootstrap `assets/app.js`.
+const limitKiB = 115;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

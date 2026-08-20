@@ -719,6 +719,50 @@ describe('relay command store', () => {
     });
   });
 
+  it('carries a recognized no-echo prompt on full frames and deltas', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    socket.message({
+      type: 'pane_content', pane_id: 'w1:p1', content: '[sudo] password for cv: ', format: 'ansi',
+      content_fingerprint: 'secret-1', no_echo: true, no_echo_prompt: '[sudo] password for cv:',
+    });
+    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)).toMatchObject({
+      noEcho: true,
+      noEchoPrompt: '[sudo] password for cv:',
+    });
+
+    socket.message({
+      type: 'pane_delta', pane_id: 'w1:p1', format: 'ansi',
+      base_fingerprint: 'secret-1', content_fingerprint: 'secret-2',
+      no_echo: false, segments: [{ text: 'done\n' }],
+    });
+    expect(get(relayStore.terminalFrames).get(`${relayId}::w1:p1`)).toMatchObject({
+      noEcho: false,
+      noEchoPrompt: undefined,
+    });
+  });
+
+  it('sends a secret only to a relay that advertises secret input', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+    };
+    await expect(relayStore.sendSecret(agent, 'hunter2')).rejects.toThrow(/does not support password prompts/);
+
+    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: ['secret_input'], agent_profiles: [] });
+    await expect(relayStore.sendSecret(agent, '')).rejects.toThrow(/Enter the password/);
+
+    const pending = relayStore.sendSecret(agent, 'hunter2');
+    const command = JSON.parse(socket.sent.at(-1)!);
+    expect(command).toMatchObject({ type: 'send_secret', pane_id: 'w1:p1', text: 'hunter2' });
+    expect(typeof command.request_id).toBe('string');
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true });
+    await expect(pending).resolves.toMatchObject({ ok: true });
+  });
+
   it('ignores late events from a socket that has already been replaced', async () => {
     const oldSocket = MockWebSocket.instances.at(-1)!;
     oldSocket.open();

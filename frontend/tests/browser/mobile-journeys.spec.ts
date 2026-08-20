@@ -4397,3 +4397,129 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
   await page.getByRole('button', { name: 'Confirm Stop' }).click();
   await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_stop')).toBe(true);
 });
+
+test('answers a hidden terminal prompt without storing the value anywhere', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['attention_classification', 'secret_input'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Secret app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Secret app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: 'make install\n[sudo] password for cv:',
+    no_echo: true, no_echo_prompt: '[sudo] password for cv:',
+  });
+
+  const prompt = page.getByRole('region', { name: 'Hidden terminal prompt' });
+  await expect(prompt).toContainText('[sudo] password for cv:');
+  const secret = prompt.getByLabel('Value for the hidden terminal prompt');
+  await expect(secret).toHaveAttribute('type', 'password');
+  await secret.fill('hunter2');
+  await prompt.getByRole('button', { name: 'Send hidden value' }).click();
+
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'send_secret'))
+    .toMatchObject({ pane_id: 'w1:p1', text: 'hunter2' });
+  // The secret must never travel as ordinary text, nor be persisted on the phone.
+  const sent = await commands(page);
+  expect(sent.some((command) => command.type === 'send_text' || command.type === 'submit_prompt')).toBe(false);
+  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('hunter2');
+  await expect(secret).toHaveValue('');
+
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'installed', no_echo: false,
+  });
+  await expect(prompt).toBeHidden();
+});
+
+test('keeps a saved draft across a hidden prompt but never persists what it hides', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['attention_classification', 'secret_input'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Draft app', agent: 'codex' }],
+  });
+  const openTerminal = async () => {
+    await page.getByRole('button', { name: 'Open Draft app on Fedora' }).click();
+    return page.getByRole('combobox', { name: 'Prompt' });
+  };
+  const paneContent = async (extra: Record<string, unknown>) => server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', ...extra,
+  });
+
+  let prompt = await openTerminal();
+  await paneContent({ content: 'a shell at rest' });
+  await prompt.fill('half-written instructions');
+
+  // Recognition pauses persistence; it must not delete a draft it did not author.
+  await paneContent({
+    content: 'sudo make install\n[sudo] password for cv:',
+    no_echo: true, no_echo_prompt: '[sudo] password for cv:',
+  });
+  await expect(page.getByRole('region', { name: 'Hidden terminal prompt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+  prompt = await openTerminal();
+  await expect(prompt).toHaveValue('half-written instructions');
+
+  // Text authored while the prompt is up stays out of storage, even after the
+  // prompt clears: it may be the secret typed into the wrong field.
+  await paneContent({
+    content: 'sudo make install\n[sudo] password for cv:',
+    no_echo: true, no_echo_prompt: '[sudo] password for cv:',
+  });
+  await prompt.fill('hunter2');
+  await paneContent({ content: 'installed', no_echo: false });
+  await expect(page.getByText('Not saved on this phone')).toBeVisible();
+  expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('hunter2');
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  prompt = await openTerminal();
+  await expect(prompt).toHaveValue('half-written instructions');
+});
+
+test('names a hidden prompt a relay cannot answer', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Old relay', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Old relay on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'Enter passphrase:',
+    no_echo: true, no_echo_prompt: 'Enter passphrase:',
+  });
+
+  const prompt = page.getByRole('region', { name: 'Hidden terminal prompt' });
+  await expect(prompt).toContainText('Enter passphrase:');
+  await expect(prompt).toContainText('answer it at the computer');
+  await expect(prompt.getByLabel('Value for the hidden terminal prompt')).toHaveCount(0);
+});
+
+test('interrupts and sends function keys from the terminal pad', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0);
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Pad app', agent: 'codex' }],
+  });
+  await page.getByRole('button', { name: 'Open Pad app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'a shell at rest',
+  });
+
+  const keysSent = async (keys: string[]) => (await commands(page)).filter((command) =>
+    command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(keys)).length;
+
+  await page.getByRole('button', { name: 'Ctrl+C' }).first().click();
+  await expect.poll(() => keysSent(['ctrl+c'])).toBe(1);
+
+  await page.getByRole('button', { name: 'Function keys' }).first().click();
+  await page.getByRole('button', { name: 'F5', exact: true }).click();
+  await expect.poll(() => keysSent(['f5'])).toBe(1);
+});

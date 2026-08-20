@@ -13,6 +13,34 @@ interface PromptDraftRecord {
   updatedAt: number;
 }
 
+/**
+ * Newest live value per pane identity. Oversize drafts and drafts written
+ * while storage is unavailable never reach localStorage, so this tier is what
+ * keeps them alive across the remount a pane switch performs. Bounded like the
+ * persisted set; lost on reload, which the composer warning states.
+ */
+const memoryDrafts = new Map<string, { text: string; updatedAt: number }>();
+
+function readMemoryDraft(identity: string, now: number): string {
+  const draft = memoryDrafts.get(identity);
+  if (!draft) return '';
+  if (now - draft.updatedAt > DRAFT_MAX_AGE_MS) {
+    memoryDrafts.delete(identity);
+    return '';
+  }
+  return draft.text;
+}
+
+function writeMemoryDraft(identity: string, text: string, updatedAt: number): void {
+  memoryDrafts.delete(identity);
+  memoryDrafts.set(identity, { text, updatedAt });
+  while (memoryDrafts.size > DRAFT_MAX_ENTRIES) {
+    const oldest = memoryDrafts.keys().next();
+    if (oldest.done) return;
+    memoryDrafts.delete(oldest.value);
+  }
+}
+
 export type PromptDraftSaveResult = 'saved' | 'cleared' | 'too-large' | 'unavailable';
 
 export function promptDraftIdentity(agent: Agent): string {
@@ -48,6 +76,8 @@ function parseDraft(raw: string | null): PromptDraftRecord | null {
 export function loadPromptDraft(agent: Agent, now = Date.now()): string {
   const identity = promptDraftIdentity(agent);
   const key = promptDraftKey(identity);
+  const live = readMemoryDraft(identity, now);
+  if (live) return live;
   try {
     const draft = parseDraft(localStorage.getItem(key));
     if (!draft || draft.identity !== identity || now - draft.updatedAt > DRAFT_MAX_AGE_MS) {
@@ -63,12 +93,19 @@ export function loadPromptDraft(agent: Agent, now = Date.now()): string {
 export function savePromptDraft(agent: Agent, text: string, now = Date.now()): PromptDraftSaveResult {
   const identity = promptDraftIdentity(agent);
   const key = promptDraftKey(identity);
+  if (text) writeMemoryDraft(identity, text, now);
+  else memoryDrafts.delete(identity);
   try {
     if (!text) {
       localStorage.removeItem(key);
       return 'cleared';
     }
-    if (new TextEncoder().encode(text).byteLength > DRAFT_MAX_BYTES) return 'too-large';
+    if (new TextEncoder().encode(text).byteLength > DRAFT_MAX_BYTES) {
+      // An oversize draft never reaches storage, so any shorter earlier record
+      // for this pane would be served back as the current draft on remount.
+      localStorage.removeItem(key);
+      return 'too-large';
+    }
     const draft: PromptDraftRecord = { version: DRAFT_VERSION, identity, text, updatedAt: now };
     localStorage.setItem(key, JSON.stringify(draft));
     prunePromptDrafts(now);
@@ -79,8 +116,10 @@ export function savePromptDraft(agent: Agent, text: string, now = Date.now()): P
 }
 
 export function clearPromptDraft(agent: Agent): void {
+  const identity = promptDraftIdentity(agent);
+  memoryDrafts.delete(identity);
   try {
-    localStorage.removeItem(promptDraftKey(promptDraftIdentity(agent)));
+    localStorage.removeItem(promptDraftKey(identity));
   } catch {
     // Storage can be unavailable in browser private modes; the live composer still clears normally.
   }

@@ -77,7 +77,8 @@ func TestHandleReadPaneUsesRecentRowsForResizedPane(t *testing.T) {
 
 // Display reads serve physical rows so the Resize Session baseline shares row
 // semantics with resized frames; only Claude keeps logical lines for its
-// alternate-screen history merge.
+// alternate-screen history merge. Both apply to ansi reads, the only format
+// the app asks for.
 func TestHandleReadPaneSourceFollowsAgent(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "invocations.log")
@@ -98,7 +99,7 @@ func TestHandleReadPaneSourceFollowsAgent(t *testing.T) {
 
 	for _, paneID := range []string{"pane-omp", "pane-claude"} {
 		response := dispatcher.HandleReadPane(context.Background(), map[string]any{
-			"pane_id": paneID, "lines": float64(100), "format": "text",
+			"pane_id": paneID, "lines": float64(100), "format": "ansi",
 		})
 		if _, failed := response["error"]; failed {
 			t.Fatalf("read %s failed: %#v", paneID, response)
@@ -113,5 +114,50 @@ func TestHandleReadPaneSourceFollowsAgent(t *testing.T) {
 	}
 	if !strings.Contains(string(invocations), "pane-claude --lines 100 --source recent-unwrapped ") {
 		t.Fatalf("claude read did not request logical lines: %s", invocations)
+	}
+}
+
+// A "recent"/"recent-unwrapped" read in text format above the pane's viewport
+// height makes Herdr harvest scrollback through the agent's mouse-scroll
+// interface, which visibly scrolls the operator's real pane. No display read
+// may reach that path.
+func TestTextFormatDisplayReadNeverHarvestsScrollback(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "invocations.log")
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
+		"echo content\n")
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{
+		{PaneID: "pane-omp", Agent: "omp", Status: "idle"},
+		{PaneID: "pane-claude", Agent: "claude", Status: "idle"},
+	}, state.RevisionCounter())
+	dispatcher := NewDispatcher(
+		herdr.NewClient(bin, filepath.Join(dir, "missing.sock")),
+		state,
+		nil,
+		testLogger(),
+	)
+
+	for _, paneID := range []string{"pane-omp", "pane-claude"} {
+		for _, columns := range []float64{0, 59} {
+			response := dispatcher.HandleReadPane(context.Background(), map[string]any{
+				"pane_id": paneID, "lines": float64(400), "format": "text",
+				"terminal_columns": columns,
+			})
+			if _, failed := response["error"]; failed {
+				t.Fatalf("read %s failed: %#v", paneID, response)
+			}
+		}
+	}
+	invocations, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(invocations), "--source recent") {
+		t.Fatalf("a text-format read asked for harvested scrollback: %s", invocations)
+	}
+	if strings.Count(string(invocations), "--source visible --format text") != 4 {
+		t.Fatalf("text-format reads did not all use the visible screen: %s", invocations)
 	}
 }

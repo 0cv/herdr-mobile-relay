@@ -29,8 +29,11 @@ Remote agent writes append private JSONL attempt and result records under
 `<cache>/audit/remote-writes.jsonl`. An attempt and its result share a request
 id and correlate the phone client, WebSocket connection, pane, agent context,
 and outcome; the attempt also records payload size and SHA-256 digest. Neither
-retains prompt, response, or upload content. The file is mode `0600` inside a
-mode `0700` directory and rotates at 5 MiB with three retained rotations.
+retains prompt, response, or upload content. A value answered at a no-echo
+terminal prompt is recorded by length alone — no digest, no keystrokes — so a
+low-entropy secret cannot be recovered from the trail; it is likewise absent
+from the activity journal. The file is mode `0600` inside a mode `0700`
+directory and rotates at 5 MiB with three retained rotations.
 
 ## End-to-end encryption
 

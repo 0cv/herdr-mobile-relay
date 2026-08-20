@@ -17,7 +17,8 @@
     "slash_commands",
     "conversation_history",
     "pane_size_lease",
-    "workspace_inspection"
+    "workspace_inspection",
+    "secret_input"
   ],
   "inventory": {"state": "ready"},
   "agent_profiles": [

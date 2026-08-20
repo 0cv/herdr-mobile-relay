@@ -42,10 +42,19 @@ describe('prompt drafts', () => {
     expect(loadPromptDraft(current, 2_001)).toBe('');
   });
 
-  it('does not truncate drafts that exceed the storage contract', () => {
-    const current = agent();
-    expect(savePromptDraft(current, 'x'.repeat(64 * 1_024 + 1))).toBe('too-large');
-    expect(loadPromptDraft(current)).toBe('');
+  it('keeps an oversize draft in memory and deletes the record it cannot replace', () => {
+    const current = agent({ terminal_id: 'terminal-oversize' });
+    const oversize = 'x'.repeat(64 * 1_024 + 1);
+    expect(savePromptDraft(current, 'short enough to persist', 1_000)).toBe('saved');
+    expect(savePromptDraft(current, oversize, 2_000)).toBe('too-large');
+    expect(localStorage.length).toBe(0);
+
+    // A pane switch remounts the composer, which reloads the draft.
+    expect(loadPromptDraft(current, 3_000)).toBe(oversize);
+
+    clearPromptDraft(current);
+    expect(loadPromptDraft(current, 3_001)).toBe('');
+    expect(localStorage.length).toBe(0);
   });
 
   it('keeps only the newest bounded set of drafts', () => {

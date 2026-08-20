@@ -27,6 +27,7 @@ var mutatingTypes = map[string]bool{
 	"keys":                true,
 	"send_text":           true,
 	"text":                true,
+	"send_secret":         true,
 	"agent_start":         true,
 	"agent_rename":        true,
 	"tab_reorder":         true,
@@ -207,4 +208,5 @@ var Capabilities = []string{
 	"conversation_history",
 	"pane_size_lease",
 	"workspace_inspection",
+	"secret_input",
 }

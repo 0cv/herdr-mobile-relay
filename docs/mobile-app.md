@@ -108,11 +108,20 @@ as arrows, Enter, Esc, Tab, Y/N, or a modifier chord, the app offers matching
 one-tap actions through the same ordered key path. Detected actions can be
 dismissed and never replace verified approval or structured-question controls.
 
-The terminal controls send **Esc**, **Tab**, **Enter**, and arrow keys.
-**Shift**, **Ctrl**, and **Alt** can be combined, remain armed for repeated
-input, and apply to typed characters or any available terminal key. A live
-status confirms the exact chord. Toggle the modifiers off or move focus to the
-composer to disarm them.
+The terminal controls send **Esc**, **Ctrl+C**, **Tab**, **Enter**, arrow keys,
+and **F1**–**F12** behind the **F keys** row. **Shift**, **Ctrl**, and **Alt**
+can be combined, remain armed for repeated input, and apply to typed characters
+or any available terminal key. A live status confirms the exact chord. Toggle
+the modifiers off or move focus to the composer to disarm them.
+
+When the pane's last line is a prompt that echoes nothing — `[sudo] password
+for …`, an SSH passphrase, `gpg`, a PIN — the app names it and offers a masked
+field, even though the ordinary composer stays locked on a screen it cannot
+classify. The value is typed into the pane as individual keystrokes followed by
+Enter. Nothing is sent until you press Send, and the value is never stored on
+the phone, never inserted as pasted text, and never recorded in activity or the
+audit log. Relays older than this feature say so and leave the prompt to the
+computer.
 
 **Copy** captures the agent's latest completed response without ANSI control
 sequences. When the relay advertises response copy and the agent is one of

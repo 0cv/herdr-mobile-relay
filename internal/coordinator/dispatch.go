@@ -23,6 +23,7 @@ const (
 	agentStartDeadline = 40 * time.Second
 	maxTabInsertIndex  = 10_000
 	promptMaxChars     = 100000
+	secretMaxRunes     = 256
 )
 
 type CommandResult struct {
@@ -264,6 +265,8 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleKeys(ctx, receivedAt, requestID, paneID, message)
 	case "send_text", "text":
 		return d.handleText(ctx, receivedAt, requestID, paneID, message)
+	case "send_secret":
+		return d.handleSecret(ctx, receivedAt, requestID, paneID, message)
 	case "respond":
 		return d.handleApproval(ctx, receivedAt, requestID, paneID, message)
 	case "answer_question":
@@ -407,6 +410,51 @@ func (d *Dispatcher) handleText(ctx context.Context, receivedAt time.Time, reque
 	}))
 	if result.OK {
 		d.recordActivityWithExtract("text", "sent", "Text inserted", text, paneID, requestID)
+		d.wake()
+	}
+	return result
+}
+
+// handleSecret answers a terminal prompt that reads with echo disabled — a
+// sudo password, an ssh passphrase, a smartcard PIN. The secret travels as one
+// key per rune plus Enter rather than through send_text: Herdr wraps sent text
+// in a bracketed paste whenever the pane enables it, and a reader using termios
+// noecho takes the paste markers as part of the secret. The single SendKeys
+// call keeps the whole secret plus its submission atomic.
+func (d *Dispatcher) handleSecret(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+	text := stringValue(message, "text")
+	if paneID == "" || text == "" {
+		return d.fail(requestID, "send_secret", paneID, "Secret and agent are required")
+	}
+	runes := []rune(text)
+	if len(runes) > secretMaxRunes {
+		return d.fail(requestID, "send_secret", paneID, "Secret is too long")
+	}
+	keys := make([]string, 0, len(runes)+1)
+	for _, value := range runes {
+		if value < 0x20 || value == 0x7f {
+			return d.fail(requestID, "send_secret", paneID, "Secret must not contain control characters")
+		}
+		keys = append(keys, string(value))
+	}
+	keys = append(keys, "Enter")
+	result := d.schedule(ctx, ScheduleOptions{
+		// The payload stands in for the secret: nothing that reaches the
+		// scheduler, its ledger or its logs may carry the secret itself.
+		Command: d.command(ctx, receivedAt, requestID, CommandSecret, paneID, commandDeadline, len(runes)),
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "send_secret"); stale != nil {
+			return EffectResult{Result: stale}
+		}
+		if err := d.herdr.SendKeys(effectCtx, paneID, keys); err != nil {
+			return EffectResult{Result: d.failErr(requestID, "send_secret", paneID, err)}
+		}
+		return EffectResult{Result: completed(requestID, "send_secret", paneID, nil)}
+	}))
+	if result.OK {
+		// Constant label, no extract: the journal is readable by anyone who can
+		// read the activity feed.
+		d.recordActivity("send_secret", "sent", "Password entered", paneID, requestID)
 		d.wake()
 	}
 	return result
@@ -951,7 +999,7 @@ func isClaudeAgent(agent string) bool {
 	return strings.Contains(strings.ToLower(agent), "claude")
 }
 
-// readPaneForDisplay returns physical rows ("recent") for every display read:
+// readPaneForDisplay returns physical rows ("recent") for every ansi display read:
 // the visible screen alone loses rows that scroll past between watch polls,
 // and the Resize Session baseline must share row semantics with the resized
 // frames so the trailing desktop screen — including agent chrome — can be cut
@@ -964,6 +1012,14 @@ func (d *Dispatcher) readPaneForDisplay(
 	format string,
 	resized bool,
 ) (herdr.PaneRead, error) {
+	// A non-ansi read is the only shape Herdr can serve by harvesting
+	// scrollback through the agent's mouse-scroll interface: asking "recent"
+	// or "recent-unwrapped" in text format for more lines than the pane's
+	// viewport holds makes Herdr scroll the operator's real pane up and snap
+	// it back, once per read. Only "visible" cannot trigger the harvest.
+	if format != "ansi" {
+		return d.herdr.ReadPaneVisible(ctx, paneID, lines, format)
+	}
 	if !resized {
 		if agent, ok := d.state.Agent(paneID); ok && isClaudeAgent(agent.Agent) {
 			return d.herdr.ReadPane(ctx, paneID, lines, format)

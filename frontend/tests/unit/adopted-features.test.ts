@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
 import { safeMarkdownHtml } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
@@ -87,6 +87,85 @@ describe('safe rich output', () => {
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).not.toContain('<script>');
     expect(html).not.toContain('href="javascript:');
+  });
+
+  it('renders a GFM table with per-column alignment inside a scroll container', () => {
+    const html = safeMarkdownHtml([
+      'Comparison:',
+      '',
+      '| Model | Speed | Cost |',
+      '| --- | :---: | ---: |',
+      '| `fast` | high | $1 |',
+      '| slow | low | $2 |',
+      '',
+      'After.',
+    ].join('\n'));
+
+    expect(html).toContain('<div class="conversation-table"><table><thead><tr>');
+    expect(html).toContain('<th>Model</th>');
+    expect(html).toContain('<th style="text-align:center">Speed</th>');
+    expect(html).toContain('<th style="text-align:right">Cost</th>');
+    expect(html).toContain('<tbody><tr><td><code>fast</code></td>');
+    expect(html).toContain('<td style="text-align:right">$2</td></tr></tbody></table></div>');
+    expect(html).toContain('<p>After.</p>');
+  });
+
+  it('accepts bare and left-aligned delimiter rows without outer pipes', () => {
+    const html = safeMarkdownHtml('Name | Value\n:-- | -\nalpha | 1');
+
+    expect(html).toContain('<th style="text-align:left">Name</th><th>Value</th>');
+    expect(html).toContain('<tbody><tr><td style="text-align:left">alpha</td><td>1</td></tr></tbody>');
+  });
+
+  it('keeps escaped pipes literal and still escapes table cell content', () => {
+    const html = safeMarkdownHtml('| a \\| b | c |\n|---|---|\n| <img src=x> | y \\| z |');
+
+    expect(html).toContain('<th>a | b</th>');
+    expect(html).toContain('<td>&lt;img src=x&gt;</td>');
+    expect(html).toContain('<td>y | z</td>');
+    expect(html).not.toContain('<img');
+  });
+
+  it('pads ragged rows and drops cells past the header width', () => {
+    const html = safeMarkdownHtml('| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |');
+
+    expect(html).toContain('<tr><td>1</td><td></td></tr>');
+    expect(html).toContain('<tr><td>1</td><td>2</td></tr>');
+    expect(html).not.toContain('<td>3</td>');
+  });
+
+  it('leaves delimiter-looking lines alone when no header row precedes them', () => {
+    expect(safeMarkdownHtml('|---|')).toBe('<p>|---|</p>');
+    expect(safeMarkdownHtml('| a | b |\n| --- |\n| 1 | 2 |')).not.toContain('<table>');
+    expect(safeMarkdownHtml('---')).toBe('<hr>');
+  });
+});
+
+describe('rendering without Intl.Segmenter', () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it('measures code points when the WebView ships no grapheme segmenter', async () => {
+    const intl = Intl as unknown as { Segmenter?: typeof Intl.Segmenter };
+    const segmenter = intl.Segmenter;
+    const grid = '┌───┬──┐\n│ ab │漢 │';
+    const expected = renderTerminalContent(grid, 'ansi', true).rows;
+    delete intl.Segmenter;
+    try {
+      vi.resetModules();
+      // Static import cannot work: the module must be evaluated again with
+      // Intl.Segmenter absent to exercise the feature-detected fallback.
+      const terminal = await import('$lib/terminal');
+      const rows = terminal.renderTerminalContent(grid, 'ansi', true).rows;
+
+      expect(rows.map((row) => [row.text, row.columns, row.fixedGrid]))
+        .toEqual(expected.map((row) => [row.text, row.columns, row.fixedGrid]));
+      expect(rows.map((row) => row.html)).toEqual(expected.map((row) => row.html));
+      expect(terminal.renderTerminalContent('ab漢字 👍', 'text').rows[0].columns).toBe(9);
+    } finally {
+      intl.Segmenter = segmenter;
+    }
   });
 });
 

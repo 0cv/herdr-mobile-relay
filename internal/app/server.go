@@ -30,6 +30,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
+	"github.com/0cv/herdr-mobile-relay/internal/noecho"
 	"github.com/0cv/herdr-mobile-relay/internal/panesize"
 	"github.com/0cv/herdr-mobile-relay/internal/profiles"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
@@ -1700,7 +1701,25 @@ func (s *Server) publicJobState(filename, defaultState string) map[string]any {
 	return result
 }
 
+// preparePaneResponse annotates a pane frame with everything the phone needs
+// to decide what it may offer the operator. The no-echo flag is computed last,
+// on the content the phone will actually render, so full reads, deltas and the
+// history-merged frames all agree on the tail.
 func (s *Server) preparePaneResponse(message, response map[string]any) map[string]any {
+	response = s.classifyPaneResponse(message, response)
+	content, ok := successfulPaneContent(response)
+	if !ok {
+		return response
+	}
+	prompt, secret := noecho.Match(content)
+	response["no_echo"] = secret
+	if secret {
+		response["no_echo_prompt"] = prompt
+	}
+	return response
+}
+
+func (s *Server) classifyPaneResponse(message, response map[string]any) map[string]any {
 	content, ok := successfulPaneContent(response)
 	if !ok {
 		return response
@@ -1887,7 +1906,7 @@ func isAuditedWrite(action string) bool {
 	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
 		"respond", "answer_question", "navigate_question", "clarify_question",
 		"agent_stop", "agent_rename", "tab_reorder", "agent_start", "agent_clear",
-		"agent_restart", "upload_image":
+		"agent_restart", "upload_image", "send_secret":
 		return true
 	default:
 		return false
@@ -1902,10 +1921,7 @@ func (s *Server) recordWriteAudit(
 	if s.auditLog == nil {
 		return
 	}
-	action, _ := message["type"].(string)
-	if action == "" || action == "command" {
-		action, _ = message["action"].(string)
-	}
+	action := auditAction(message)
 	requestID, _ := message["request_id"].(string)
 	paneID, _ := message["pane_id"].(string)
 	clientID, _ := message["client_id"].(string)
@@ -1949,7 +1965,25 @@ func (s *Server) recordWriteAudit(
 	}
 }
 
+func auditAction(message map[string]any) string {
+	action, _ := message["type"].(string)
+	if action == "" || action == "command" {
+		action, _ = message["action"].(string)
+	}
+	return action
+}
+
 func auditWriteDetails(message map[string]any) map[string]any {
+	// A secret answering a noecho prompt gets no payload digest and no keys: the
+	// digest of a low-entropy secret is crackable offline and the keys spell the
+	// secret out. Only its shape is auditable.
+	if auditAction(message) == "send_secret" {
+		details := make(map[string]any, 1)
+		if text, ok := message["text"].(string); ok {
+			details["text_bytes"] = len(text)
+		}
+		return details
+	}
 	details := make(map[string]any)
 	if encoded, err := json.Marshal(message); err == nil {
 		digest := sha256.Sum256(encoded)
@@ -2062,7 +2096,8 @@ func isCoordinatorMutation(action string) bool {
 	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
 		"respond", "answer_question", "navigate_question", "clarify_question",
 		"agent_stop", "agent_rename", "tab_reorder", "acknowledge_pane", "agent_start",
-		"agent_clear", "agent_restart", "lease_pane_size", "release_pane_size":
+		"agent_clear", "agent_restart", "lease_pane_size", "release_pane_size",
+		"send_secret":
 		return true
 	default:
 		return false

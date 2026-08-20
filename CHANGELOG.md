@@ -71,6 +71,15 @@ project follows [Semantic Versioning](https://semver.org/).
   user to a paired phone, with the detail split into `docs/mobile-app.md`,
   `docs/transports.md`, `docs/cloudflare-tunnel.md`, `docs/updates.md`,
   `docs/security.md`, and `docs/development.md`.
+- A terminal asking for a hidden value — `sudo`, an SSH passphrase, `gpg` — is
+  named on the phone and answered through a masked field that is typed straight
+  into the pane as keystrokes. The value is never written to this phone's draft
+  storage, never inserted as bracketed-paste text, and never kept in the
+  activity journal or the write audit.
+- The terminal key pad gained a one-tap `Ctrl+C` and an `F keys` row covering
+  F1–F12.
+- Conversation history renders Markdown tables as tables, scrolling sideways on
+  a narrow phone instead of collapsing into one paragraph.
 
 ### Changed
 
@@ -140,6 +149,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A prompt draft too large to persist no longer resurrects an older, shorter one
+  after a pane switch: the superseded stored copy is deleted, and the live text
+  is kept in memory so it survives switching panes, though not closing the app.
+- The terminal renders on browsers without `Intl.Segmenter` instead of leaving
+  the whole app blank; grapheme measurement falls back to code points.
+- A pane read asked for as plain text now stays on the visible grid. Herdr
+  reaches rows above the viewport by driving the agent's own scroll interface,
+  which visibly scrolls the desktop pane and costs seconds per read, so text
+  reads no longer request recent scrollback.
 - Leaving a terminal and returning to it no longer stalls the stream for a
   second or two. The relay restored the pane's own width the moment the terminal
   closed and narrowed it again on the way back, and the agent re-rendered on both
