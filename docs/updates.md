@@ -55,6 +55,14 @@ desktop user's focus when a background workspace closes
 still cascades a single-tab workspace away; the workspace then reports
 `workspace_not_found`.
 
+Herdr releases newer than 0.8.2 add screen-based working-state fallbacks for
+Claude Code ([#1630](https://github.com/herdrdev/herdr/issues/1630),
+[#2241](https://github.com/herdrdev/herdr/issues/2241)): a visible turn,
+background shells, or background agents keep a pane reported as working when
+terminal titles are unavailable or disabled. That accuracy flows straight to
+the phone, which keys completion notifications and history capture off those
+status transitions.
+
 ## Troubleshooting
 
 - **Update operation failed with `read canonical release: HTTP 403`:** an older
