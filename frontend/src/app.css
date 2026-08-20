@@ -7,6 +7,11 @@
   unicode-range: U+23FB-23FE, U+2630, U+2665, U+26A1, U+276C-2771, U+2B58, U+E000-F8FF, U+F0000-F1AF0;
 }
 
+/* One source for the sticky header's height: three full-height layouts size
+   themselves against it, and hardcoding the value in each one silently leaves
+   a gap at the bottom of the page the moment the bar changes. */
+:root { --app-header-height: 2.75rem; }
+
 :root,
 :root[data-theme='dark'] {
   color-scheme: dark;
@@ -139,7 +144,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   border-bottom: 1px solid var(--border);
   display: flex;
   gap: .5rem;
-  min-height: calc(3.5rem + env(safe-area-inset-top));
+  min-height: calc(var(--app-header-height) + env(safe-area-inset-top));
   padding: env(safe-area-inset-top) .65rem 0;
   position: sticky;
   top: 0;
@@ -147,6 +152,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   backdrop-filter: blur(14px);
 }
 .app-header nav { display: flex; gap: .15rem; margin-left: auto; }
+/* Terminal view carries five controls beside the title on a 390px line, so the
+   header's own buttons run tighter than the 2.65rem default to leave the agent
+   name readable. Still a 34px target. */
+.app-header nav .button-icon { height: 2.45rem; min-height: 2.45rem; width: 2.45rem; }
 .nav-button-shell { display: inline-flex; position: relative; }
 .nav-update-badge { background: var(--warning); border: 2px solid var(--background); border-radius: 50%; height: .62rem; pointer-events: none; position: absolute; right: .16rem; top: .16rem; width: .62rem; }
 .app-header.home-header > .status-dot { margin-inline-start: 1rem; }
@@ -156,6 +165,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .agent-count { color: var(--muted); font-size: .68rem; white-space: nowrap; }
 .header-symbol { display: block; height: 1rem; width: 1rem; }
 .back-symbol { display: block; height: 1.5rem; width: 1.5rem; }
+.action-symbol { display: block; height: 1.05rem; width: 1.05rem; }
 
 .button {
   align-items: center;
@@ -324,7 +334,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .activity-detail-head { align-items: center; display: flex; gap: .5rem; }
 .activity-detail-head h2 { flex: 1; font-size: 1rem; margin: 0; }
 
-.conversation-page { display: flex; flex-direction: column; gap: .65rem; height: calc(100dvh - 3.5rem - env(safe-area-inset-top)); margin: 0 auto; max-width: 48rem; padding: .75rem .85rem calc(.75rem + env(safe-area-inset-bottom)); }
+.conversation-page { display: flex; flex-direction: column; gap: .65rem; height: calc(100dvh - var(--app-header-height) - env(safe-area-inset-top)); margin: 0 auto; max-width: 48rem; padding: .75rem .85rem calc(.75rem + env(safe-area-inset-bottom)); }
 .conversation-toolbar { align-items: center; display: flex; flex: 0 0 auto; gap: .75rem; justify-content: space-between; }
 .conversation-toolbar h2 { font-size: 1rem; margin: 0; }
 .conversation-toolbar p { color: var(--muted); font-size: .68rem; margin: .15rem 0 0; }
@@ -397,7 +407,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .activity-detail-actions { display: flex; gap: .6rem; }
 .activity-detail-gone { color: var(--muted); font-size: .78rem; margin: 0; }
 
-.terminal-view { display: flex; flex-direction: column; height: calc(100dvh - 3.5rem - env(safe-area-inset-top)); position: relative; }
+.terminal-view { display: flex; flex-direction: column; height: calc(100dvh - var(--app-header-height) - env(safe-area-inset-top)); position: relative; }
 .terminal-view.question-only { overflow: hidden; }
 .terminal-view.question-only .question-form { border-top: 0; flex: 1 1 auto; max-height: none; }
 .term { display: contents; }
@@ -772,7 +782,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-error { color: var(--danger) !important; }
 .workspace-notice { color: var(--warning); padding: .55rem; }
 
-.terminal-layout { height: calc(100dvh - 3.5rem - env(safe-area-inset-top)); }
+.terminal-layout { height: calc(100dvh - var(--app-header-height) - env(safe-area-inset-top)); }
 .agent-rail { display: none; }
 
 @media (max-width: 679px) {

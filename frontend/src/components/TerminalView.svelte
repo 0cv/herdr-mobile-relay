@@ -921,6 +921,12 @@
     });
   }
 
+  // The header owns the Find control, so the terminal exposes opening it rather
+  // than lifting findOpen out: kept here, the bar still closes with the pane.
+  export function openFind() {
+    openTerminalFind();
+  }
+
   function closeTerminalFind() {
     findOpen = false;
   }
@@ -1561,6 +1567,13 @@
   </svg>
 {/snippet}
 
+{#snippet copyIcon()}
+  <svg class="action-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <rect x="9" y="9" width="11" height="12" rx="2"></rect>
+    <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"></path>
+  </svg>
+{/snippet}
+
 {#snippet arrowPopup()}
   {#if arrowsOpen}
     <div class="arrow-popup">
@@ -1714,13 +1727,15 @@
     </section>
   {/if}
   <div class="terminal-copy">
-    <Button variant="secondary" size="sm" aria-label="Find in terminal" onclick={openTerminalFind}>Find</Button>
     <Button
       variant="secondary"
       size="sm"
+      aria-label={copyingAgentResponse ? 'Copying…' : 'Copy'}
+      aria-busy={copyingAgentResponse}
+      title={copyingAgentResponse ? 'Copying…' : 'Copy output'}
       disabled={copyingAgentResponse || responding.has(agent.pane_id)}
       onclick={copyTerminalOutput}
-    >{copyingAgentResponse ? 'Copying…' : 'Copy'}</Button>
+    >{@render copyIcon()}</Button>
   </div>
 
   <div class="terminal-bottom" onfocusin={focusComposer} onfocusout={blurComposer}>

@@ -65,6 +65,8 @@
   const appUpdates = appUpdateStatus;
 
   let manageOpen = $state(false);
+  // Bound so the header's Find control can open the terminal's own find bar.
+  let terminalView = $state<{ openFind: () => void } | null>(null);
   let jumpOpen = $state(false);
   let workspaceOpen = $state(false);
   let workspaceDisclosure = $state<Record<string, boolean>>({});
@@ -472,6 +474,18 @@
         <Button
           variant="ghost"
           size="icon"
+          aria-label="Find in terminal"
+          title="Find in terminal"
+          disabled={!activeAgent}
+          onclick={() => terminalView?.openFind()}
+        >
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false">
+            <circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path>
+          </svg>
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
           aria-label="Conversation history"
           disabled={!conversationHistoryAvailable || !activeAgent}
           title={conversationHistoryAvailable ? 'Conversation history' : 'Conversation history is unavailable for this agent'}
@@ -540,7 +554,7 @@
     {#key activeAgent.pane_id}
       <div class="terminal-layout">
         <AgentRail agents={$agents} active={activeAgent} onopen={openAgent} onjump={() => { jumpOpen = true; }} />
-        <TerminalView agent={activeAgent} allAgents={$agents} frame={$frames.get(activeAgent.pane_id)} responding={$responding} />
+        <TerminalView bind:this={terminalView} agent={activeAgent} allAgents={$agents} frame={$frames.get(activeAgent.pane_id)} responding={$responding} />
       </div>
     {/key}
   {:else if $currentView.view === 'terminal'}

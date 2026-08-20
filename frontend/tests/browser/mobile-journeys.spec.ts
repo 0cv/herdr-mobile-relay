@@ -2071,7 +2071,9 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
     phase: 'failed',
     error: 'Agent did not confirm a copied response',
   });
-  await expect(copyButton).toHaveText('Copy');
+  // The control is an icon, so its idle state shows in the accessible name.
+  await expect(copyButton).toBeEnabled();
+  await expect(copyButton).toHaveAccessibleName('Copy');
   await expect(page.getByRole('status').filter({ hasText: 'Agent did not confirm a copied response' })).toBeVisible();
   expect(await page.evaluate(() => Reflect.get(window, '__copiedTerminal'))).toBeUndefined();
 
