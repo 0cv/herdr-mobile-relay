@@ -3,9 +3,10 @@
 # this repo, runs the [[build]] pre-warm below after confirmation, and
 # registers the entry points), or `herdr plugin link .` from a local checkout.
 #
-# A first install opens the Setup action once the build finishes; an upgrade
-# does not, because its relay is already configured. Invoke it explicitly as a
-# universal fallback, or set HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 to suppress it:
+# Every install and upgrade schedules the Setup action after the build finishes,
+# so transport and self-hosted gateway status are visible immediately. Invoke it
+# explicitly as a universal fallback, or set
+# HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 to suppress it:
 #   herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 # or bind keys in herdr's config.toml and `herdr server reload-config`:
 #   [[keys.command]]
@@ -16,7 +17,7 @@
 
 id = "herdr-mobile-relay.events"
 name = "Herdr Mobile Relay"
-version = "0.17.1"
+version = "0.17.0"
 # Herdr 0.7.5 introduced the live-agent facade used for atomic starts and prompts.
 min_herdr_version = "0.7.5"
 description = "Remote mobile control for Herdr: approve and monitor agents from your smartphone (Android/iOS) with an installable web app, push notifications, QR pairing, and a blind gateway plus direct WebRTC transport (Cloudflare tunnels remain supported)"

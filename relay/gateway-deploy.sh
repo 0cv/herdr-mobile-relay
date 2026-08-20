@@ -60,6 +60,19 @@ REMOTE_SUDO=""
 REMOTE_HEALTH_TIMEOUT="${HERDR_GATEWAY_DEPLOY_HEALTH_TIMEOUT:-120}"
 PUBLIC_HEALTH_TIMEOUT="${HERDR_GATEWAY_DEPLOY_PUBLIC_TIMEOUT:-240}"
 
+
+gateway_source_version() {
+    sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPO_DIR/herdr-plugin.toml" | head -1
+}
+
+gateway_source_revision() {
+    git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown\n'
+}
+
+GATEWAY_BUILD_VERSION="${HERDR_GATEWAY_DEPLOY_VERSION:-$(gateway_source_version)}"
+GATEWAY_BUILD_REVISION="${HERDR_GATEWAY_DEPLOY_REVISION:-$(gateway_source_revision)}"
+GATEWAY_BUILD_VERSION="${GATEWAY_BUILD_VERSION:-dev}"
+GATEWAY_BUILD_REVISION="${GATEWAY_BUILD_REVISION:-unknown}"
 have_tty() {
     [ -t 0 ]
 }
@@ -259,6 +272,8 @@ render_bundle_file() {
     local build_context
     local caddy_image
     local gateway_uid
+    local gateway_version
+    local gateway_revision
     local email_line
     local email_note
 
@@ -270,6 +285,8 @@ render_bundle_file() {
     build_context="$(sed_replacement "$DEFAULT_BUILD_CONTEXT")"
     caddy_image="$(sed_replacement "$DEFAULT_CADDY_IMAGE")"
     gateway_uid="$(sed_replacement "$GATEWAY_UID")"
+    gateway_version="$(sed_replacement "$GATEWAY_BUILD_VERSION")"
+    gateway_revision="$(sed_replacement "$GATEWAY_BUILD_REVISION")"
     email_line="$(sed_replacement "$ACME_EMAIL_LINE")"
     email_note="$(sed_replacement "$ACME_EMAIL_NOTE")"
 
@@ -282,6 +299,8 @@ render_bundle_file() {
         -e "s|@BUILD_CONTEXT@|$build_context|g" \
         -e "s|@CADDY_IMAGE@|$caddy_image|g" \
         -e "s|@GATEWAY_UID@|$gateway_uid|g" \
+        -e "s|@GATEWAY_VERSION@|$gateway_version|g" \
+        -e "s|@GATEWAY_REVISION@|$gateway_revision|g" \
         -e "s|@EMAIL_LINE@|$email_line|g" \
         -e "s|@EMAIL_NOTE@|$email_note|g" \
         >"$1"
@@ -312,6 +331,9 @@ services:
     build:
       context: ${HERDR_GATEWAY_BUILD_CONTEXT:-@BUILD_CONTEXT@}
       dockerfile: Dockerfile.gateway
+      args:
+        HERDR_GATEWAY_VERSION: ${HERDR_GATEWAY_VERSION:-@GATEWAY_VERSION@}
+        HERDR_GATEWAY_REVISION: ${HERDR_GATEWAY_REVISION:-@GATEWAY_REVISION@}
     restart: unless-stopped
     # HERDR_GATEWAY_ADDR stays ":8443" so Caddy can reach the container as
     # "gateway:8443" over the compose network. The published port is bound to
@@ -453,6 +475,11 @@ HERDR_GATEWAY_IMAGE=@GATEWAY_IMAGE@
 HERDR_GATEWAY_BUILD_CONTEXT="@BUILD_CONTEXT@"
 HERDR_CADDY_IMAGE=@CADDY_IMAGE@
 
+# Build identity published by /healthz and the gateway hello. A current relay
+# compares this release with its own and tells the operator when to redeploy.
+HERDR_GATEWAY_VERSION=@GATEWAY_VERSION@
+HERDR_GATEWAY_REVISION=@GATEWAY_REVISION@
+
 # --- Gateway tunables ---
 
 # Bytes copied in both directions, per relay, per UTC calendar month. 0 is
@@ -541,9 +568,9 @@ proxied because raw UDP cannot travel through Caddy's TLS.
 
 ## Bring it up
 
-The plugin menu (**Your Own WebRTC Gateway → Deploy one on my own server**)
-copies this directory to the server over SSH, brings it up, and
-verifies it. These are the same steps by hand:
+Setup-menu action 3 (**Deploy or Upgrade Your Own WebRTC Gateway**) copies this
+directory to the server over SSH, brings it up, and verifies it. These are the
+same steps by hand:
 
 ```sh
 # 1. from this computer
@@ -551,7 +578,7 @@ scp -r @BUNDLE@ root@@HOST@:/opt/herdr-gateway
 
 # 2. on the server
 cd /opt/herdr-gateway
-docker compose up -d --build
+docker compose up -d --build --force-recreate gateway caddy
 ```
 
 The first `up` builds the gateway image from the `gateway-source/` directory in
@@ -766,7 +793,7 @@ upload_bundle() {
 }
 
 remote_compose_up() {
-    remote_shell "cd $REMOTE_DIR && docker compose up -d --build"
+    remote_shell "cd $REMOTE_DIR && docker compose up -d --build --force-recreate gateway caddy"
 }
 
 remote_health_ready() {
@@ -889,8 +916,8 @@ report_public_health_failure() {
     echo "  Watch the certificate attempt with:"
     echo "    $SSH_CMD_HINT \"cd $REMOTE_DIR && docker compose logs -f caddy\""
     echo ""
-    echo "  Once it answers, choose \"Your Own WebRTC Gateway\", then \"Point at"
-    echo "  a gateway I already run\", and enter $GATEWAY_HOST."
+    echo "  Once it answers, run setup-menu action 3 again. It reuses the remembered"
+    echo "  answers, verifies $GATEWAY_HOST, and connects this relay."
 }
 
 # ssh only offers ~/.ssh/id_* and whatever ~/.ssh/config names, so a key kept
@@ -983,7 +1010,7 @@ deploy_bundle() {
     echo "▸ Building the gateway image and starting both containers."
     echo "  The first build compiles the gateway on the server; expect a minute or two."
     if ! remote_compose_up; then
-        echo "✗ \"docker compose up -d --build\" failed on the server." >&2
+        echo "✗ \"docker compose up -d --build --force-recreate gateway caddy\" failed on the server." >&2
         echo "  Inspect it with:" >&2
         echo "    $SSH_CMD_HINT \"cd $REMOTE_DIR && docker compose logs --tail=80\"" >&2
         return 1
@@ -1193,15 +1220,15 @@ if [ -z "$SSH_TARGET" ]; then
     echo "Next:"
     echo "  1. Point DNS for $GATEWAY_HOST at the server."
     echo "  2. scp -r $BUNDLE_NAME root@$GATEWAY_HOST:$DEFAULT_REMOTE_DIR"
-    echo "  3. cd $DEFAULT_REMOTE_DIR && docker compose up -d --build"
+    echo "  3. cd $DEFAULT_REMOTE_DIR && docker compose up -d --build --force-recreate gateway caddy"
     echo "  4. curl $GATEWAY_HTTPS/healthz"
     echo ""
     echo "Open inbound TCP 80 and 443 and inbound UDP 3478, and allow outbound UDP"
     echo "for /probe. UDP 3478 is address discovery: without it phones and"
     echo "computers behind NAT stay on the relayed path."
     echo ""
-    echo "▸ Once it answers, choose Your Own WebRTC Gateway and enter $GATEWAY_HOST,"
-    echo "  or set HERDR_GATEWAY_URL=$GATEWAY_WSS in the relay environment."
+    echo "▸ Once it answers, set HERDR_GATEWAY_URL=$GATEWAY_WSS in the relay"
+    echo "  environment, or rerun setup-menu action 3 to deploy and connect over SSH."
     exit 0
 fi
 

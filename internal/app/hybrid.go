@@ -335,6 +335,8 @@ func (h *hybridTransport) status() map[string]any {
 		"relay_id":          gateway.RelayID,
 		"url":               gateway.URL,
 		"urls":              gateway.URLs,
+		"version":           gateway.Version,
+		"revision":          gateway.Revision,
 		"gateway_selection": h.gateway.Selection(),
 		"clients":           gateway.Clients,
 		"direct":            h.directEnabled(),

@@ -28,6 +28,31 @@ running_release_version() {
         sed -n 's/.*"release_version":"\([^"]*\)".*/\1/p' | head -1
 }
 
+own_gateway_summary() {
+    local installed="$1"
+    local state_file
+    local host
+    local health
+    local deployed
+
+    state_file="$(dirname "$ENV_FILE")/gateway-deploy"
+    host="$(env_file_value "$state_file" HERDR_GATEWAY_DEPLOY_HOST)"
+    [ -n "$host" ] || return 0
+    if ! health="$(curl -fsS --max-time 3 "https://$host/healthz" 2>/dev/null)"; then
+        printf '%s is unreachable - repair or redeploy with 3\n' "$host"
+        return 0
+    fi
+    deployed="$(json_string_field "$health" version)"
+    if [ -z "$deployed" ]; then
+        printf '%s is healthy, version unknown - redeploy with 3\n' "$host"
+    elif [ -n "$installed" ] && [ "$deployed" != "$installed" ]; then
+        printf '%s runs %s; this plugin deploys %s - upgrade with 3\n' \
+            "$host" "$deployed" "$installed"
+    else
+        printf '%s runs %s\n' "$host" "$deployed"
+    fi
+}
+
 service_state() {
     case "$(uname -s)" in
         Darwin)
@@ -69,7 +94,7 @@ transport_summary() {
 }
 
 print_status() {
-    local installed running service app_origin deployed
+    local installed running service app_origin deployed own_gateway
 
     installed="$(installed_release_version || true)"
     running="$(running_release_version || true)"
@@ -85,6 +110,8 @@ print_status() {
     fi
     service="$(service_state || true)"
     [ -z "$service" ] || printf '  Service:    %s\n' "$service"
+    own_gateway="$(own_gateway_summary "$installed" || true)"
+    [ -z "$own_gateway" ] || printf '  Own gateway: %s\n' "$own_gateway"
     printf '  Phone path: %s\n' "$(transport_summary)"
     app_origin="$(phone_app_base_url "" "$ENV_FILE" 2>/dev/null || true)"
     if [ -n "$app_origin" ]; then
@@ -118,9 +145,9 @@ render_menu() {
     echo "     Check the project's shared gateways, save the healthy candidates,"
     echo "     then start or restart the relay and print its QR."
     echo ""
-    menu_item 3 "Your Own WebRTC Gateway"
-    echo "     Deploy a gateway over SSH or enter one you run, then start or restart"
-    echo "     the relay and print its QR."
+    menu_item 3 "Deploy or Upgrade Your Own WebRTC Gateway"
+    echo "     Copy the gateway shipped by this plugin to your server over SSH,"
+    echo "     then start or restart the relay and print its QR."
     echo ""
     echo "Stable Cloudflare tunnel"
     echo ""

@@ -137,6 +137,11 @@ type Options struct {
 	// TrustProxyHeaders makes the gateway believe the leftmost X-Forwarded-For
 	// entry. Enable it only when a trusted reverse proxy terminates TLS.
 	TrustProxyHeaders bool
+	// Version and Revision identify the gateway build in /healthz and hello
+	// messages. They are operational metadata, not protocol negotiation: Proto
+	// remains the compatibility contract.
+	Version  string
+	Revision string
 	// Logger receives structured transport events. Defaults to a discarding
 	// logger.
 	Logger *slog.Logger
@@ -328,10 +333,13 @@ func (s *Server) idleSweepInterval() time.Duration {
 }
 
 type healthResponse struct {
-	OK            bool  `json:"ok"`
-	Relays        int   `json:"relays"`
-	Clients       int   `json:"clients"`
-	UptimeSeconds int64 `json:"uptime_seconds"`
+	OK            bool   `json:"ok"`
+	Relays        int    `json:"relays"`
+	Clients       int    `json:"clients"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
+	Protocol      int    `json:"protocol"`
+	Version       string `json:"version"`
+	Revision      string `json:"revision"`
 	// STUNPort tells an operator whether address discovery is live, and on
 	// which port. It is the same number both hellos advertise; 0 means
 	// disabled. Like every other field here it is a count or a setting, never
@@ -346,6 +354,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 		Relays:        relays,
 		Clients:       clients,
 		UptimeSeconds: int64(s.now().Sub(s.started).Seconds()),
+		Protocol:      gatewaywire.Proto,
+		Version:       s.opts.Version,
+		Revision:      s.opts.Revision,
 		STUNPort:      s.stunPort,
 	})
 }

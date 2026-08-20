@@ -796,12 +796,15 @@ MENU_ROOT="$WORK_DIR/menu-release"
 mkdir -p "$MENU_BIN_DIR" "$MENU_ROOT/current"
 printf '{\n  "version": "9.9.9"\n}\n' > "$MENU_ROOT/current/release-manifest.json"
 printf "HERDR_GATEWAY_URL='wss://gw-a.example.test,wss://gw-b.example.test'\nHERDR_APP_DEPLOY_ORIGIN='https://app.example.test'\n" > "$MENU_ENV"
+printf "HERDR_GATEWAY_DEPLOY_HOST='gw-owned.example.test'\n" \
+    > "$WORK_DIR/config/gateway-deploy"
 printf 'https://relay.example.test\n' > "$WORK_DIR/config/phone-app-origin"
 cat > "$MENU_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 case "$*" in
     *127.0.0.1*healthz*) printf '{"status":"ok","release_version":"9.9.9"}\n' ;;
     *app.example.test/version.json*) printf '{"version":"9.9.8","assets":1}\n' ;;
+    *gw-owned.example.test/healthz*) printf '{"ok":true,"version":"9.9.8","revision":"abc123"}\n' ;;
     *) exit 22 ;;
 esac
 EOF
@@ -834,6 +837,10 @@ esac
 case "$MENU_OUTPUT" in
     *"serves 9.9.8, this relay ships 9.9.9"*) ;;
     *) echo "setup menu did not report the stale phone app" >&2; exit 1 ;;
+esac
+case "$MENU_OUTPUT" in
+    *"Own gateway: gw-owned.example.test runs 9.9.8; this plugin deploys 9.9.9 - upgrade with 3"*) ;;
+    *) echo "setup menu did not report the stale self-hosted gateway" >&2; exit 1 ;;
 esac
 case "$MENU_OUTPUT" in
     *"Exit, change nothing"*) ;;

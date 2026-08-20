@@ -21,7 +21,11 @@ import {
   CHUNK_VERSION,
   MAX_LOGICAL_BYTES,
 } from '$lib/transports/chunking';
-import { createGatewayChannel, GATEWAY_MAX_CHUNK_BYTES } from '$lib/transports/gateway';
+import {
+  createGatewayChannel,
+  GATEWAY_HANDSHAKE_TIMEOUT_MS,
+  GATEWAY_MAX_CHUNK_BYTES,
+} from '$lib/transports/gateway';
 import {
   createWebRTCChannel,
   BUFFERED_AMOUNT_HIGH,
@@ -226,6 +230,22 @@ describe('gateway frame channel', () => {
     MockGatewaySocket.instances[0].text({ type: 'gateway_hello', proto: 9, nonce: VECTOR_NONCE });
     await vi.waitFor(() => expect(second.closes).toHaveLength(1));
     expect(second.closes[0]?.reason).toMatch(/protocol version/);
+  });
+
+  it('closes a silent gateway handshake so the next candidate can run', () => {
+    vi.useFakeTimers();
+    try {
+      const recorder = channelRecorder();
+      createGatewayChannel(HYBRID_RELAY, recorder).open();
+
+      vi.advanceTimersByTime(GATEWAY_HANDSHAKE_TIMEOUT_MS - 1);
+      expect(recorder.closes).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(recorder.closes).toEqual([{ reason: 'The gateway handshake took too long.' }]);
+      expect(MockGatewaySocket.instances[0].closeCode).toBe(1000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

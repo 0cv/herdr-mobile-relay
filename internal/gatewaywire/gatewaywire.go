@@ -177,6 +177,8 @@ type ServerHello struct {
 	Proto    int    `json:"proto"`
 	Nonce    string `json:"nonce"`
 	StunPort int    `json:"stun_port,omitempty"`
+	Version  string `json:"version,omitempty"`
+	Revision string `json:"revision,omitempty"`
 }
 
 // RegisterHello claims a relay id for the multiplexed relay link.

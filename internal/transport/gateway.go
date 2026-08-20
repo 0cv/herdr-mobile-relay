@@ -31,15 +31,18 @@ const (
 
 	gatewayDialTimeout  = 15 * time.Second
 	gatewayHelloTimeout = 10 * time.Second
-	// Selection is a cold-start/failover operation, never a periodic monitor.
-	// Two seconds covers a remote TLS handshake without making a dead candidate
-	// delay startup materially. Entries within the tie window keep list order.
-	gatewayProbeTimeout      = 2 * time.Second
-	gatewayProbeTieWindow    = 20 * time.Millisecond
-	gatewayReadLimit         = int64(gatewaywire.HeaderSize + gatewaywire.MaxFramePayload)
-	gatewayWriteQueue        = 64
-	gatewayConnQueue         = 32
-	gatewayDefaultMaxClients = 8
+	// A registered WebSocket can survive while the gateway's public proxy stops
+	// routing new phone connections. Probe the public path independently and
+	// fail over after two consecutive misses. At 15 seconds this catches the
+	// split failure within 30 seconds without turning health checks into traffic.
+	gatewayHealthInterval     = 15 * time.Second
+	gatewayHealthFailureLimit = 2
+	gatewayProbeTimeout       = 2 * time.Second
+	gatewayProbeTieWindow     = 20 * time.Millisecond
+	gatewayReadLimit          = int64(gatewaywire.HeaderSize + gatewaywire.MaxFramePayload)
+	gatewayWriteQueue         = 64
+	gatewayConnQueue          = 32
+	gatewayDefaultMaxClients  = 8
 
 	// gatewayStallSweep is how often a logical connection whose inbound frame
 	// assembly stopped making progress is looked for.
@@ -76,6 +79,8 @@ type GatewayStatus struct {
 	RelayID        string    `json:"relay_id"`
 	URL            string    `json:"url"`
 	URLs           []string  `json:"urls"`
+	Version        string    `json:"version"`
+	Revision       string    `json:"revision"`
 	Clients        int       `json:"clients"`
 	LastError      string    `json:"last_error"`
 	LastNotice     string    `json:"last_notice"`
@@ -122,17 +127,20 @@ type GatewayClient struct {
 	maxClients    int
 	logger        *slog.Logger
 
-	backoffBase    time.Duration
-	backoffMax     time.Duration
-	probeTimeout   time.Duration
-	probe          func(context.Context, string) (time.Duration, error)
-	mu             sync.Mutex
-	active         int
-	conns          map[uint32]*gatewayConn
-	registered     bool
-	lastError      string
-	lastNotice     string
-	connectedSince time.Time
+	backoffBase     time.Duration
+	backoffMax      time.Duration
+	probeTimeout    time.Duration
+	healthInterval  time.Duration
+	probe           func(context.Context, string) (time.Duration, error)
+	mu              sync.Mutex
+	active          int
+	conns           map[uint32]*gatewayConn
+	registered      bool
+	lastError       string
+	lastNotice      string
+	connectedSince  time.Time
+	gatewayVersion  string
+	gatewayRevision string
 	// stunPort is the address-discovery port the gateway advertised in its
 	// hello. Only the port is kept: the host always comes from the URL this
 	// relay dialed, so a gateway can never point discovery at a third party.
@@ -182,18 +190,19 @@ func NewGatewayClient(hub *Hub, opts GatewayOptions) (*GatewayClient, error) {
 		logger = slog.Default()
 	}
 	return &GatewayClient{
-		hub:           hub,
-		urls:          urls,
-		selection:     opts.Selection,
-		relayID:       relayID,
-		rendezvousKey: rendezvousKey,
-		maxClients:    maxClients,
-		logger:        logger,
-		backoffBase:   gatewayBackoffBase,
-		backoffMax:    gatewayBackoffMax,
-		probeTimeout:  gatewayProbeTimeout,
-		probe:         measureGatewayRTT,
-		conns:         make(map[uint32]*gatewayConn),
+		hub:            hub,
+		urls:           urls,
+		selection:      opts.Selection,
+		relayID:        relayID,
+		rendezvousKey:  rendezvousKey,
+		maxClients:     maxClients,
+		logger:         logger,
+		backoffBase:    gatewayBackoffBase,
+		backoffMax:     gatewayBackoffMax,
+		probeTimeout:   gatewayProbeTimeout,
+		healthInterval: gatewayHealthInterval,
+		probe:          measureGatewayRTT,
+		conns:          make(map[uint32]*gatewayConn),
 	}, nil
 }
 
@@ -478,6 +487,8 @@ func (c *GatewayClient) Status() GatewayStatus {
 		RelayID:        c.relayID,
 		URL:            ordered[0],
 		URLs:           ordered,
+		Version:        c.gatewayVersion,
+		Revision:       c.gatewayRevision,
 		Clients:        len(c.conns),
 		LastError:      c.lastError,
 		LastNotice:     c.lastNotice,
@@ -565,8 +576,9 @@ func (c *GatewayClient) runSession(ctx context.Context) (bool, error) {
 		writerDone: make(chan struct{}),
 	}
 	go session.writeLoop()
-	session.serveWG.Add(1)
+	session.serveWG.Add(2)
 	go session.sweepLoop()
+	go session.healthLoop(base)
 
 	readErr := session.readLoop()
 	session.stop()
@@ -612,6 +624,7 @@ func (c *GatewayClient) registerLink(parent context.Context, conn *websocket.Con
 	if hello.Proto != gatewaywire.Proto {
 		return fmt.Errorf("unsupported gateway protocol %d, want %d", hello.Proto, gatewaywire.Proto)
 	}
+	c.setGatewayBuild(hello.Version, hello.Revision)
 	c.setSTUNPort(hello.StunPort)
 
 	register, err := json.Marshal(gatewaywire.RegisterHello{
@@ -658,6 +671,13 @@ func (c *GatewayClient) registerLink(parent context.Context, conn *websocket.Con
 	default:
 		return fmt.Errorf("unexpected gateway registration reply %q", reply.Type)
 	}
+}
+
+func (c *GatewayClient) setGatewayBuild(version, revision string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.gatewayVersion = version
+	c.gatewayRevision = revision
 }
 
 // setSTUNPort records an advertised address-discovery port. Anything outside
@@ -887,6 +907,42 @@ func (s *gatewaySession) sweepLoop() {
 			return
 		case now := <-ticker.C:
 			s.client.sweepStalled(now)
+		}
+	}
+}
+
+// healthLoop verifies the same public route new phones use. The maintained
+// /relay WebSocket can remain alive through Caddy while Docker DNS for new
+// requests is broken; link ping/pong cannot detect that split failure.
+func (s *gatewaySession) healthLoop(base string) {
+	defer s.serveWG.Done()
+	if s.client.healthInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(s.client.healthInterval)
+	defer ticker.Stop()
+	failures := 0
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(s.ctx, s.client.probeTimeout)
+			_, err := s.client.probe(ctx, base)
+			cancel()
+			if err == nil {
+				failures = 0
+				continue
+			}
+			failures++
+			if failures < gatewayHealthFailureLimit {
+				s.client.logger.Debug("gateway public health probe failed",
+					"url", base, "error", err)
+				continue
+			}
+			s.fail(fmt.Errorf("gateway public path failed %d consecutive health probes: %w",
+				failures, err))
+			return
 		}
 	}
 }

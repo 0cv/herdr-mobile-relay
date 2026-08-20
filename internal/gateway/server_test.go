@@ -41,6 +41,8 @@ type controlMessage struct {
 	Code     string `json:"code"`
 	Message  string `json:"message"`
 	StunPort int    `json:"stun_port"`
+	Version  string `json:"version"`
+	Revision string `json:"revision"`
 }
 
 type muxFrame struct {
@@ -947,7 +949,7 @@ func TestProbeTargetsOnlyTheRequester(t *testing.T) {
 }
 
 func TestWhoamiAndHealthz(t *testing.T) {
-	h := newHarness(t, Options{})
+	h := newHarness(t, Options{Version: "0.17.1", Revision: "abc123"})
 
 	response, err := http.Get(h.url + "/whoami")
 	if err != nil {
@@ -973,6 +975,11 @@ func TestWhoamiAndHealthz(t *testing.T) {
 	}
 	if !report.OK || report.Relays != 0 || report.Clients != 0 {
 		t.Fatalf("healthz reports %+v", report)
+	}
+	if report.Protocol != gatewaywire.Proto ||
+		report.Version != "0.17.1" ||
+		report.Revision != "abc123" {
+		t.Fatalf("healthz build identity = %+v", report)
 	}
 }
 

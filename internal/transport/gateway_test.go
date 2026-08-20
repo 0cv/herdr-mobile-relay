@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,9 +107,12 @@ func (l *fakeGatewayLink) expect(t *testing.T, op byte, connID uint32) gatewayTe
 // then multiplexed binary frames. It never holds a relay secret, exactly like
 // the real gateway.
 type fakeGateway struct {
-	url     string
-	relayID string
-	links   chan *fakeGatewayLink
+	url      string
+	relayID  string
+	version  string
+	revision string
+	links    chan *fakeGatewayLink
+	healthOK atomic.Bool
 }
 
 func newFakeGateway(t *testing.T, relayID string) *fakeGateway {
@@ -122,9 +126,19 @@ func newFakeGatewayWithHealthDelay(
 	healthDelay time.Duration,
 ) *fakeGateway {
 	t.Helper()
-	gateway := &fakeGateway{relayID: relayID, links: make(chan *fakeGatewayLink, 8)}
+	gateway := &fakeGateway{
+		relayID:  relayID,
+		version:  "0.17.1",
+		revision: "abc123",
+		links:    make(chan *fakeGatewayLink, 8),
+	}
+	gateway.healthOK.Store(true)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if !gateway.healthOK.Load() {
+			http.Error(w, "gateway unavailable", http.StatusBadGateway)
+			return
+		}
 		timer := time.NewTimer(healthDelay)
 		defer timer.Stop()
 		select {
@@ -169,9 +183,11 @@ func (g *fakeGateway) handshake(ctx context.Context, conn *websocket.Conn) bool 
 		return false
 	}
 	hello, err := json.Marshal(gatewaywire.ServerHello{
-		Type:  gatewaywire.TypeServerHello,
-		Proto: gatewaywire.Proto,
-		Nonce: base64.RawURLEncoding.EncodeToString(nonce),
+		Type:     gatewaywire.TypeServerHello,
+		Proto:    gatewaywire.Proto,
+		Nonce:    base64.RawURLEncoding.EncodeToString(nonce),
+		Version:  g.version,
+		Revision: g.revision,
 	})
 	if err != nil {
 		return false
@@ -499,6 +515,10 @@ func TestGatewayClientRegistersAndReconnectsWithBackoff(t *testing.T) {
 	if status.URL != harness.gateway.url {
 		t.Errorf("status.URL = %q, want %q", status.URL, harness.gateway.url)
 	}
+	if status.Version != harness.gateway.version || status.Revision != harness.gateway.revision {
+		t.Errorf("status build identity = %q %q, want %q %q",
+			status.Version, status.Revision, harness.gateway.version, harness.gateway.revision)
+	}
 	if status.ConnectedSince.IsZero() {
 		t.Error("status.ConnectedSince is zero while registered")
 	}
@@ -810,6 +830,70 @@ func TestGatewayClientSelectsLowestLatencyAndKeepsOneRegistration(t *testing.T) 
 		status := client.Status()
 		return status.Registered && status.URL == slow.url
 	})
+}
+
+// An established /relay WebSocket can outlive a broken public reverse-proxy
+// route. Health monitoring must rotate the relay so a phone that falls back to
+// the second advertised gateway finds its computer registered there.
+func TestGatewayClientFailsOverWhenPublicHealthBreaksButLinkStaysOpen(t *testing.T) {
+	relayID, err := gatewaywire.DeriveRelayID(gatewayTestRelayKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := newFakeGateway(t, relayID)
+	backup := newFakeGateway(t, relayID)
+	hub := NewHub(&config.Config{Token: gatewayTestRelayKey}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client, err := NewGatewayClient(hub, GatewayOptions{
+		URL:       primary.url,
+		URLs:      []string{primary.url, backup.url},
+		Selection: config.GatewaySelectionOrdered,
+		RelayKey:  gatewayTestRelayKey,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.backoffBase = 10 * time.Millisecond
+	client.backoffMax = 40 * time.Millisecond
+	client.healthInterval = 10 * time.Millisecond
+	client.probeTimeout = 100 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(gatewayTestTimeout):
+			t.Error("gateway client did not stop")
+		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), gatewayTestTimeout)
+		defer shutdownCancel()
+		if err := hub.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("hub shutdown: %v", err)
+		}
+	})
+
+	primaryLink := primary.nextLink(t)
+	waitFor(t, "primary gateway registration", func() bool {
+		status := client.Status()
+		return status.Registered && status.URL == primary.url
+	})
+	primary.healthOK.Store(false)
+	backup.nextLink(t)
+	waitFor(t, "backup registration after public path failure", func() bool {
+		status := client.Status()
+		return status.Registered && status.URL == backup.url
+	})
+	select {
+	case <-primaryLink.closed:
+	case <-time.After(gatewayTestTimeout):
+		t.Fatal("primary link stayed open after its public path failed")
+	}
 }
 
 // TestGatewayLatencySelectionProbesConcurrentlyAndKeepsCloseTiesOrdered guards

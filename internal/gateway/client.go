@@ -75,6 +75,8 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Proto:    gatewaywire.Proto,
 		Nonce:    nonce,
 		StunPort: s.stunPort,
+		Version:  s.opts.Version,
+		Revision: s.opts.Revision,
 	}); err != nil {
 		s.logger.Debug("client hello write failed", "error", err)
 		return

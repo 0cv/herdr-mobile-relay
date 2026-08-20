@@ -11,6 +11,7 @@ test-results/
 relay/.env
 relay/gateway-deploy
 relay/.dev/
+/herdr-gateway-deploy/
 relay/push/
 /internal/app/push/
 relay/cloudflared/

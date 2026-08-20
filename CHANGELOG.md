@@ -3,7 +3,7 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
-## [0.17.0] - 2026-08-18
+## [0.17.0] - 2026-08-20
 
 ### Added
 
@@ -91,6 +91,12 @@ project follows [Semantic Versioning](https://semver.org/).
   interrupting their current session. The setup chooser accepts the managed
   list, validates every entry, and saves it when at least one gateway is
   healthy.
+- Self-hosted gateway builds publish their release, revision, and wire protocol
+  through `/healthz` and the gateway hello. The setup menu compares a remembered
+  deployment with the installed plugin and names action 3 when it needs an
+  upgrade; rerunning that action reuses the host, SSH address, and remote
+  directory, then rebuilds and recreates the gateway and proxy on the current
+  Compose network.
 - A relay reached over its existing Cloudflare URL now advertises its gateway,
   and the app records it and prefers the hybrid path on the next connection —
   no QR re-scan. The original URL is kept and is used automatically if the
@@ -154,6 +160,12 @@ project follows [Semantic Versioning](https://semver.org/).
   gateway to Cloudflare also clears the menu's inherited gateway variables
   before generating the QR, preventing a Cloudflare relay from being paired
   through a gateway where it is no longer registered.
+- A relay now probes the active gateway's public `/healthz` route every 15
+  seconds while its registration is connected. Two consecutive failures rotate
+  to the next candidate, covering the split failure where an established relay
+  WebSocket survives but Caddy cannot route new phone connections. A phone also
+  abandons a silent gateway handshake after 10 seconds so it can try the next
+  advertised candidate.
 
 ## [0.16.4] - 2026-08-18
 

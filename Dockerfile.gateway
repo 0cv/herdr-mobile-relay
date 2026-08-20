@@ -19,7 +19,11 @@ COPY cmd/herdr-gateway ./cmd/herdr-gateway
 COPY internal/gateway ./internal/gateway
 COPY internal/gatewaywire ./internal/gatewaywire
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/herdr-gateway ./cmd/herdr-gateway
+ARG HERDR_GATEWAY_VERSION=dev
+ARG HERDR_GATEWAY_REVISION=unknown
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${HERDR_GATEWAY_VERSION} -X main.revision=${HERDR_GATEWAY_REVISION}" \
+    -o /out/herdr-gateway ./cmd/herdr-gateway
 
 FROM gcr.io/distroless/static:nonroot
 

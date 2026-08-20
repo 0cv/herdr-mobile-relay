@@ -109,6 +109,8 @@ func (s *Server) relayHello(ctx context.Context, conn *websocket.Conn) (string, 
 		Proto:    gatewaywire.Proto,
 		Nonce:    nonce,
 		StunPort: s.stunPort,
+		Version:  s.opts.Version,
+		Revision: s.opts.Revision,
 	}); err != nil {
 		s.logger.Debug("relay hello write failed", "error", err)
 		return "", false

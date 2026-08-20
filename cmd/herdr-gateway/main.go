@@ -24,6 +24,11 @@ import (
 // requests after the relay links have been dropped.
 const drainTimeout = 10 * time.Second
 
+var (
+	version  = "dev"
+	revision = "unknown"
+)
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -152,6 +157,8 @@ func loadOptions() (gateway.Options, error) {
 	if opts.TrustProxyHeaders, err = envBool("HERDR_GATEWAY_TRUSTED_PROXY"); err != nil {
 		return opts, err
 	}
+	opts.Version = version
+	opts.Revision = revision
 	return opts, nil
 }
 

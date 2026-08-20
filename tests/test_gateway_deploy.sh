@@ -171,6 +171,14 @@ grep -Fq 'context: ${HERDR_GATEWAY_BUILD_CONTEXT:-./gateway-source}' \
     "$BUNDLE_DIR/docker-compose.yml" || fail "compose file lost the bundled build context"
 grep -Fq 'HERDR_GATEWAY_BUILD_CONTEXT="./gateway-source"' "$BUNDLE_DIR/.env" ||
     fail ".env lost the bundled build context"
+grep -Fq 'HERDR_GATEWAY_VERSION: ${HERDR_GATEWAY_VERSION:-0.17.0}' \
+    "$BUNDLE_DIR/docker-compose.yml" || fail "compose file does not pass the gateway release to the build"
+grep -Fq 'HERDR_GATEWAY_VERSION=0.17.0' "$BUNDLE_DIR/.env" ||
+    fail ".env does not record the deployed gateway release"
+grep -Eq '^HERDR_GATEWAY_REVISION=[0-9a-f]{40}$' "$BUNDLE_DIR/.env" ||
+    fail ".env does not record the deployed gateway revision"
+grep -Fq 'ARG HERDR_GATEWAY_VERSION=dev' "$BUNDLE_DIR/gateway-source/Dockerfile.gateway" ||
+    fail "gateway image has no build-version input"
 grep -Fq "email ops@example.test" "$BUNDLE_DIR/Caddyfile" || fail "Caddyfile lost the ACME contact"
 
 # A published port answers on IPv6 only from a v6-enabled network, and Let's
@@ -214,8 +222,8 @@ run_deploy
 grep -Fq "deploy@gw.example.test	true" "$SSH_LOG" || fail "deployment never opened an SSH session"
 grep -Fq 'mkdir -p /opt/herdr-gateway && tar -xzf - -C /opt/herdr-gateway' "$SSH_LOG" ||
     fail "deployment never copied the bundle"
-grep -Fq 'cd /opt/herdr-gateway && docker compose up -d --build' "$SSH_LOG" ||
-    fail "deployment never started the stack"
+grep -Fq 'cd /opt/herdr-gateway && docker compose up -d --build --force-recreate gateway caddy' \
+    "$SSH_LOG" || fail "deployment did not recreate the gateway and proxy on one network"
 [ -s "$STUB_STATE/uploaded.tar.gz" ] || fail "no bundle archive reached the server"
 # Listed to a file, not piped into grep: `grep -q` exits at the first match and
 # `tar` then dies of SIGPIPE, which `pipefail` reports as a failed pipeline even

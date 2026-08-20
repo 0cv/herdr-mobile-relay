@@ -19,6 +19,8 @@ export const GATEWAY_PROTO = 1;
  * and a shared gateway never has to buffer a whole upload per client.
  */
 export const GATEWAY_MAX_CHUNK_BYTES = 262_144;
+/** A silent primary must yield to the next configured gateway promptly. */
+export const GATEWAY_HANDSHAKE_TIMEOUT_MS = 10_000;
 
 /**
  * Error codes that will keep failing with the same relay configuration. The
@@ -78,10 +80,16 @@ export function createGatewayChannel(
   const base = String(relay.gatewayUrl || '').replace(/\/+$/, '');
   let socket: WebSocket | null = null;
   let phase: 'idle' | 'hello' | 'ready' | 'open' | 'closed' = 'idle';
+  let handshakeTimer: number | null = null;
 
+  function clearHandshakeTimer(): void {
+    window.clearTimeout(handshakeTimer ?? undefined);
+    handshakeTimer = null;
+  }
   const reassembler = new Reassembler({ onStall: (reason) => fail(reason) });
 
   function fail(reason: string, fatal?: boolean): void {
+    clearHandshakeTimer();
     if (phase === 'closed') return;
     phase = 'closed';
     reassembler.close();
@@ -128,6 +136,7 @@ export function createGatewayChannel(
       fail('The gateway sent an unexpected handshake message.');
       return;
     }
+    clearHandshakeTimer();
     phase = 'open';
     handlers.onOpen();
   }
@@ -180,6 +189,9 @@ export function createGatewayChannel(
       socket.onerror = () => {
         fail('The gateway connection failed.');
       };
+      handshakeTimer = window.setTimeout(() => {
+        fail('The gateway handshake took too long.');
+      }, GATEWAY_HANDSHAKE_TIMEOUT_MS);
     },
     sendFrame(frame: E2EEWireFrame): void {
       if (phase !== 'open' || !socket) return;
@@ -193,6 +205,7 @@ export function createGatewayChannel(
     },
     close(): void {
       if (phase === 'closed') return;
+      clearHandshakeTimer();
       phase = 'closed';
       reassembler.close();
       socket?.close(1000);

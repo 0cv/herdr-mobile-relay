@@ -14,22 +14,28 @@ You need a small VPS with Docker and a public hostname that resolves to it.
 
 ## Deploy it from the setup menu
 
-Open the setup menu and choose **Your Own WebRTC Gateway → Deploy one on my
-own server over SSH**. It asks for the public hostname phones will dial and the
+Open the setup menu and choose **Deploy or Upgrade Your Own WebRTC Gateway**.
+It asks for the public hostname phones will dial and the
 server's SSH address (`root@203.0.113.10`), then:
 
 1. writes a compose bundle — `docker-compose.yml`, Caddy TLS configuration,
    `.env`, and the gateway source;
 2. copies it to the server over one authenticated SSH connection, installing
    Docker there if you allow it;
-3. runs `docker compose up -d --build` and waits for `/healthz` on the server and
-   for the first certificate on the public name;
+3. runs `docker compose up -d --build --force-recreate gateway caddy` so both
+   containers rejoin the current Compose network, then waits for `/healthz` on
+   the server and for the first certificate on the public name;
 4. records the verified `wss://` URL as `HERDR_GATEWAY_URL` in the relay
    environment.
 
 The image is built on the server from the bundled source, so the server needs
 nothing but Docker — no Go toolchain, registry credentials, or GitHub access. The
 relay key never leaves your computer.
+
+After a plugin update, open the setup menu again. Its **Own gateway** status line
+compares the release reported by the gateway with the release this plugin ships.
+Choose action 3 and accept the remembered hostname, SSH address, and directory
+to copy the new source, rebuild the image, and restart the gateway.
 
 Password authentication works; the deployment authenticates once and reuses that
 session. Sudo must not prompt, so use root or an account with passwordless sudo.
@@ -316,12 +322,14 @@ with the same code as its reason.
 counts, so it is safe to expose publicly:
 
 ```json
-{"ok":true,"relays":3,"clients":4,"uptime_seconds":86412,"stun_port":3478}
+{"ok":true,"relays":3,"clients":4,"uptime_seconds":86412,"protocol":1,"version":"0.17.0","revision":"abc123","stun_port":3478}
 ```
 
 `relays` counts live registrations, `clients` counts phone connections paired
 across all of them, and `stun_port` is `0` when address discovery is disabled.
-Anything other than `200` with `ok: true`, or a failed connection, means down.
+`protocol` is the wire compatibility level; `version` and `revision` identify
+the deployed build. Anything other than `200` with `ok: true`, or a failed
+connection, means down.
 
 ## Operating one for other people
 
@@ -340,7 +348,9 @@ month's quota accounting and breaks no session.
 **Keep port 80 reachable.** Caddy renews certificates itself; the failure worth
 alerting on is a renewal blocked because the ACME port was closed.
 
-**Upgrade by redeploying.** `bash relay/gateway-deploy.sh` against the same host
-reuses the remembered answers and rebuilds from the bundle it copies. Relays
-reconnect on their own, so an upgrade costs a few seconds of relayed latency and
-no session.
+**Upgrade by redeploying.** Open the setup menu and choose **Deploy or Upgrade
+Your Own WebRTC Gateway**, or run `bash relay/gateway-deploy.sh`. The remembered
+answers select the same host and directory; the current plugin copies its bundled
+source, rebuilds the image, and recreates both containers on the current Compose
+network. Relays reconnect on their own, so an upgrade costs a few seconds of
+relayed latency; no agent session is lost.
