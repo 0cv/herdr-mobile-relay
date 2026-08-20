@@ -631,9 +631,13 @@ test "$(gateway_selection_choice ordered 2)" = "latency"
 test "$(gateway_selection_choice latency '')" = "latency"
 test "$(gateway_selection_choice latency 2)" = "ordered"
 test "$(gateway_selection_choice ordered nonsense)" = "ordered"
-# Automation and a missing terminal both keep the question silent.
-test "$(HERDR_GATEWAY_SELECTION=latency prompt_gateway_selection ordered)" = "latency"
+# Without a terminal the action's own default stands. A saved policy in the
+# environment must not answer for the operator: the setup menu loads relay.env
+# before running an action, so honouring it here would let an old own-gateway
+# `ordered` silently follow them into a freshly chosen community list.
 test "$(prompt_gateway_selection ordered < /dev/null)" = "ordered"
+test "$(HERDR_GATEWAY_SELECTION=ordered prompt_gateway_selection latency < /dev/null)" = "latency"
+test "$(HERDR_GATEWAY_SELECTION=latency prompt_gateway_selection ordered < /dev/null)" = "ordered"
 # The status line phrases the rule instead of printing the variable.
 test "$(gateway_selection_label latency)" = "closest wins"
 test "$(gateway_selection_label ordered)" = "first listed wins"
@@ -689,10 +693,15 @@ printf 'started\n' > "$CHOOSER_START_MARKER"
 EOF
 chmod 700 "$CHOOSER_SCRIPT_DIR/plugin-quick-start.sh"
 export CHOOSER_START_MARKER
+# The setup menu loads relay.env before running an action, so a policy left by
+# an earlier own-gateway setup is already exported here. Choosing Community has
+# to reset it: these candidates are interchangeable, and inheriting `ordered`
+# would silently pin the pool to whichever entry happens to be listed first.
 CHOOSER_OUTPUT="$(
     PATH="$CHOOSER_BIN_DIR:$PATH" \
         HERDR_RELAY_BIN="$NORMALIZE_BIN" \
         HERDR_RELAY_ENV="$CHOOSER_ENV" \
+        HERDR_GATEWAY_SELECTION="ordered" \
         HERDR_COMMUNITY_GATEWAY_URL="gw-a.example.test,https://gw-b.example.test" \
         bash "$CHOOSER_SCRIPT_DIR/plugin-choose-transport.sh" community
 )"

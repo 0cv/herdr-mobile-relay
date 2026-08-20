@@ -1133,19 +1133,20 @@ gateway_selection_choice() {
     printf '%s\n' "$default_selection"
 }
 
-# Asks how the relay should read the list it just saved. The default matches
-# how the list was built — an operator's own gateway is a priority, a pool of
+# Asks how the relay should read the list it just saved. The default is the one
+# the chosen action implies — an operator's own gateway is a priority, a pool of
 # interchangeable public ones is ranked by distance — so Enter is always the
-# right answer for someone who does not care. HERDR_GATEWAY_SELECTION and a
-# missing terminal both skip the question, which keeps automation silent.
+# right answer for someone who does not care.
+#
+# The terminal is the only guard: HERDR_GATEWAY_SELECTION cannot serve as an
+# "automation is driving" signal, because the setup menu loads relay.env into
+# the environment before running an action. Reading it here would let a saved
+# policy silently answer the question and, worse, carry an old own-gateway
+# `ordered` into a freshly chosen community list.
 prompt_gateway_selection() {
     local default_selection="$1"
     local answer
 
-    if [ -n "${HERDR_GATEWAY_SELECTION:-}" ]; then
-        printf '%s\n' "$HERDR_GATEWAY_SELECTION"
-        return 0
-    fi
     if [ ! -t 0 ]; then
         printf '%s\n' "$default_selection"
         return 0
