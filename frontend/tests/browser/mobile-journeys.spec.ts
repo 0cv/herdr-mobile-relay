@@ -4516,8 +4516,19 @@ test('interrupts and sends function keys from the terminal pad', async ({ page }
   const keysSent = async (keys: string[]) => (await commands(page)).filter((command) =>
     command.type === 'send_keys' && JSON.stringify(command.keys) === JSON.stringify(keys)).length;
 
-  await page.getByRole('button', { name: 'Ctrl+C' }).first().click();
+  // The pad carries no dedicated Ctrl+C button: interrupting is the armed Ctrl
+  // chord, which keeps the whole pad on one row.
+  await expect(page.getByRole('button', { name: 'Ctrl+C' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Ctrl', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Modifier shortcut character' }).press('c');
   await expect.poll(() => keysSent(['ctrl+c'])).toBe(1);
+
+  // Ctrl stays armed for repeated chords, so the pad must be disarmed before an
+  // unmodified key: otherwise F5 would leave as ctrl+f5.
+  const ctrlKey = page.getByRole('button', { name: 'Ctrl', exact: true });
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'true');
+  await ctrlKey.click();
+  await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
 
   await page.getByRole('button', { name: 'Function keys' }).first().click();
   await page.getByRole('button', { name: 'F5', exact: true }).click();

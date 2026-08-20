@@ -76,8 +76,8 @@ project follows [Semantic Versioning](https://semver.org/).
   into the pane as keystrokes. The value is never written to this phone's draft
   storage, never inserted as bracketed-paste text, and never kept in the
   activity journal or the write audit.
-- The terminal key pad gained a one-tap `Ctrl+C` and an `F keys` row covering
-  F1–F12.
+- The terminal key pad gained an `F keys` row covering F1–F12, and labels the
+  modifiers by symbol — `⇧`, `^`, `⇥` — so the whole pad fits one row.
 - Conversation history renders Markdown tables as tables, scrolling sideways on
   a narrow phone instead of collapsing into one paragraph.
 

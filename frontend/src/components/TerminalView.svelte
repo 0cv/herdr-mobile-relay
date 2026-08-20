@@ -1309,12 +1309,6 @@
     sendTerminalKey('Tab');
   }
 
-  function sendInterrupt() {
-    // A dedicated chord: it must not pick up an armed Ctrl and become ctrl+ctrl+c.
-    fkeysOpen = false;
-    void sendKeys(['ctrl+c'], 'Ctrl+C');
-  }
-
   function sendFunctionKey(number: number) {
     fkeysOpen = false;
     // Herdr parses function keys as f1..f24; the label keeps the pad readable.
@@ -1595,8 +1589,7 @@
     {/if}
     <div class="term-keys question-term-keys" aria-label="Terminal fallback keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" aria-label="Ctrl+C" title="Interrupt the running command" onclick={sendInterrupt}>Ctrl+C</Button>
-      <Button variant="secondary" size="sm" onclick={sendTab}>Tab</Button>
+      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onclick={sendTab}>⇥</Button>
       <span class="spacer"></span>
       <div class="fkey-menu">
         <Button variant="secondary" size="sm" aria-label="Function keys" aria-expanded={fkeysOpen} onclick={() => { fkeysOpen = !fkeysOpen; arrowsOpen = false; }}>
@@ -1886,15 +1879,7 @@
     {/if}
     <div class="term-keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button
-        variant="secondary"
-        size="sm"
-        aria-label="Ctrl+C"
-        title="Interrupt the running command"
-        onpointerdown={(event) => event.preventDefault()}
-        onclick={sendInterrupt}
-      >Ctrl+C</Button>
-      <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>Tab</Button>
+      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>⇥</Button>
       <div class="modifier-menu">
         <input
           id="modifier-key-input"
@@ -1924,10 +1909,11 @@
           size="sm"
           aria-controls="modifier-key-input"
           aria-pressed={ctrlArmed}
+          aria-label="Ctrl"
           title="Arm Ctrl; combine it with Shift or Alt"
           onpointerdown={(event) => event.preventDefault()}
           onclick={toggleCtrl}
-        >Ctrl</Button>
+        ><span class="key-caret">^</span></Button>
         <Button
           variant="secondary"
           size="sm"

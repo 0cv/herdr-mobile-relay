@@ -108,11 +108,12 @@ as arrows, Enter, Esc, Tab, Y/N, or a modifier chord, the app offers matching
 one-tap actions through the same ordered key path. Detected actions can be
 dismissed and never replace verified approval or structured-question controls.
 
-The terminal controls send **Esc**, **Ctrl+C**, **Tab**, **Enter**, arrow keys,
-and **F1**–**F12** behind the **F keys** row. **Shift**, **Ctrl**, and **Alt**
-can be combined, remain armed for repeated input, and apply to typed characters
-or any available terminal key. A live status confirms the exact chord. Toggle
-the modifiers off or move focus to the composer to disarm them.
+The terminal controls send **Esc**, **Tab** (`⇥`), **Enter**, arrow keys, and
+**F1**–**F12** behind the **F keys** row. **Shift** (`⇧`), **Ctrl** (`^`), and
+**Alt** can be combined, remain armed for repeated input, and apply to typed
+characters or any available terminal key — arm `^` and type `c` to interrupt.
+A live status confirms the exact chord. Toggle the modifiers off or move focus
+to the composer to disarm them.
 
 When the pane's last line is a prompt that echoes nothing — `[sudo] password
 for …`, an SSH passphrase, `gpg`, a PIN — the app names it and offers a masked
