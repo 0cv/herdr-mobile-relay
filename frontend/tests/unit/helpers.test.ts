@@ -322,6 +322,66 @@ describe('terminal rendering', () => {
     expect(emptyCells.rows.filter((row) => row.separator)).toHaveLength(0);
   });
 
+  it('keeps a bare horizontal rule on one row instead of wrapping a stub under it', () => {
+    // The composer divider most agents print is drawn from ─ alone, with no
+    // corners or junctions. Wider than the phone, it used to fall through to
+    // ordinary text and wrap, leaving a short second line under a full one.
+    for (const stroke of ['─', '━', '═']) {
+      const wide = renderTerminalContent(stroke.repeat(74), 'ansi', true, true, 59);
+      expect(wide.rows.filter((row) => row.separator)).toHaveLength(1);
+      expect(wide.rows.every((row) => !row.text.includes(stroke))).toBe(true);
+    }
+
+    // A rule that fits is drawn as cells, which keeps the stroke continuous.
+    const fits = renderTerminalContent('─'.repeat(40), 'ansi', true, true, 59);
+    expect(fits.rows[0].fixedGrid).toBe(true);
+
+    // Without a width lease there is nothing to fold it into, so the rule stays
+    // a grid row the pane scrolls sideways — still never a wrapped stub.
+    const unleased = renderTerminalContent('─'.repeat(74), 'ansi', true, true, 0);
+    expect(unleased.rows[0].fixedGrid).toBe(true);
+
+    // Prose that merely contains a stroke is still prose, and still re-wraps.
+    const prose = renderTerminalContent(`Connected ─ ${'detail '.repeat(20)}`, 'ansi', true, true, 59);
+    expect(prose.rows[0].separator).toBe(false);
+    expect(prose.rows[0].fixedGrid).toBe(false);
+  });
+
+  it('draws a rule the pty already reflowed as one line, not a line plus a stub', () => {
+    // The pane hard-wraps a divider wider than itself, and a physical-row read
+    // returns both halves. That is one rule: the phone showed a full-width
+    // stroke with a short offcut hanging under it.
+    const reflowed = renderTerminalContent(
+      [`${'─'.repeat(59)}`, `${'─'.repeat(15)}`].join('\n'),
+      'ansi', true, true, 59,
+    );
+    expect(reflowed.rows.filter((row) => row.separator)).toHaveLength(1);
+    expect(reflowed.rows).toHaveLength(1);
+
+    // Several continuation rows collapse into the same single rule.
+    const long = renderTerminalContent(
+      ['─'.repeat(59), '─'.repeat(59), '─'.repeat(12)].join('\n'),
+      'ansi', true, true, 59,
+    );
+    expect(long.rows).toHaveLength(1);
+
+    // Two rules that each fit were never one line, so they stay two.
+    const deliberate = renderTerminalContent(
+      ['─'.repeat(20), '─'.repeat(20)].join('\n'),
+      'ansi', true, true, 59,
+    );
+    expect(deliberate.rows).toHaveLength(2);
+    expect(deliberate.rows.every((row) => row.fixedGrid)).toBe(true);
+
+    // A full-width rule followed by content keeps both.
+    const followed = renderTerminalContent(
+      ['─'.repeat(59), 'next line'].join('\n'),
+      'ansi', true, true, 59,
+    );
+    expect(followed.rows).toHaveLength(2);
+    expect(followed.rows[1].text).toBe('next line');
+  });
+
   it('renders long prose lines so they re-wrap at the phone width', () => {
     // Herdr reflows the pane window to the pty width on every read: no hard
     // wrap is baked in, so the row keeps its full text and the browser wraps it.

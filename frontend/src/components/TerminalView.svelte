@@ -1546,6 +1546,21 @@
   </svg>
 {/snippet}
 
+<!-- Drawn rather than typed: ⇥ and ⇧ resolve to a different fallback font on
+     each platform, and their glyphs sit at different heights inside the em box,
+     so a text label cannot be centred for Android and the desktop at once. -->
+{#snippet tabIcon()}
+  <svg class="key-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M3 12h12M11 8l4 4-4 4M20 6v12"></path>
+  </svg>
+{/snippet}
+
+{#snippet shiftIcon()}
+  <svg class="key-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M12 4.5 4 12.5h4v7h8v-7h4z"></path>
+  </svg>
+{/snippet}
+
 {#snippet arrowPopup()}
   {#if arrowsOpen}
     <div class="arrow-popup">
@@ -1589,7 +1604,7 @@
     {/if}
     <div class="term-keys question-term-keys" aria-label="Terminal fallback keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onclick={sendTab}><span class="key-glyph key-glyph-tab">⇥</span></Button>
+      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onclick={sendTab}>{@render tabIcon()}</Button>
       <span class="spacer"></span>
       <div class="fkey-menu">
         <Button variant="secondary" size="sm" aria-label="Function keys" aria-expanded={fkeysOpen} onclick={() => { fkeysOpen = !fkeysOpen; arrowsOpen = false; }}>
@@ -1879,7 +1894,7 @@
     {/if}
     <div class="term-keys" aria-busy={keySending}>
       <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}><span class="key-glyph key-glyph-tab">⇥</span></Button>
+      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
       <div class="modifier-menu">
         <input
           id="modifier-key-input"
@@ -1903,7 +1918,7 @@
           title="Arm Shift; combine it with Ctrl or Alt"
           onpointerdown={(event) => event.preventDefault()}
           onclick={toggleShift}
-        ><span class="key-glyph key-glyph-shift">⇧</span></Button>
+        >{@render shiftIcon()}</Button>
         <Button
           variant="secondary"
           size="sm"
@@ -1913,7 +1928,7 @@
           title="Arm Ctrl; combine it with Shift or Alt"
           onpointerdown={(event) => event.preventDefault()}
           onclick={toggleCtrl}
-        ><span class="key-glyph key-glyph-caret">^</span></Button>
+        ><span class="key-caret">^</span></Button>
         <Button
           variant="secondary"
           size="sm"

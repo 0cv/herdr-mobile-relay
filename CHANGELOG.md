@@ -161,6 +161,16 @@ project follows [Semantic Versioning](https://semver.org/).
 - Jump to agent shows every agent again. Once the result list reached its
   height limit each workspace group was squeezed instead of the list scrolling,
   so agent rows were cut in half and there was no way to scroll to them.
+- A divider drawn from `─` alone is one continuous line again. Wider than the
+  phone, it used to fall through to ordinary text and wrap, leaving a full-width
+  stroke with a short offcut hanging underneath; the same happened to the two
+  halves a pane produces when it reflows a rule it cannot fit.
+- Clearing or stopping an agent asks on its own: the confirmation replaces the
+  menu with the question, one confirm button, and Cancel, instead of leaving
+  Rename and the other destructive action a tap away. Cancel returns to the menu.
+- The Tab and Shift keys are drawn rather than typed. Their characters resolve
+  to a different font on each platform, which left them sitting visibly off the
+  line the lettered keys share — low on Android, high on the desktop.
 - Leaving a terminal and returning to it no longer stalls the stream for a
   second or two. The relay restored the pane's own width the moment the terminal
   closed and narrowed it again on the way back, and the agent re-rendered on both

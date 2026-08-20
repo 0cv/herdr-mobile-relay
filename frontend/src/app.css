@@ -597,14 +597,16 @@ textarea { min-height: 6.5rem; resize: vertical; }
 /* Inline-level buttons here would align on the text baseline, which drops Alt
    about a pixel below Shift and Ctrl because their glyph boxes differ. */
 .modifier-menu { align-items: center; display: flex; gap: .35rem; }
-/* Symbol keys read much smaller than the lettered ones at the same font size,
-   and every glyph sits at a different height inside its em box. Size them up
-   to match the letters optically, then nudge each onto the button's centre.
-   1.25rem is the ceiling that keeps these buttons at the row's 2.15rem. */
-.key-glyph { display: block; font-size: 1.25rem; line-height: 1; }
-.key-glyph-tab { transform: translateY(.02em); }
-.key-glyph-shift { transform: translateY(.23em); }
-.key-glyph-caret { transform: translateY(.18em); }
+/* 1.15rem keeps these buttons at the row's 2.15rem, unlike the 1.5rem
+   .button-symbol, which makes its button taller than the lettered ones. */
+/* A drawn icon centres on the button box, but the lettered keys' ink sits about
+   half a pixel below it (measured 0.63px desktop, 0.36px Android), so the icons
+   need the same drop to share one optical line with them. */
+.key-icon { display: block; height: 1.15rem; transform: translateY(.5px); width: 1.15rem; }
+/* The caret is ASCII, so it comes from the same family everywhere and one
+   nudge centres it on every platform: its ink sits in the top half of the em
+   box. Measured on Android and desktop, both ~3.1px high before the nudge. */
+.key-caret { display: block; font-size: 1.25rem; line-height: 1; transform: translateY(.18em); }
 .arrow-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(3, 2.3rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }
 .arrow-popup button { background: var(--secondary); border: 0; border-radius: .4rem; color: var(--foreground); height: 2.3rem; }
 .fkey-popup { background: var(--card); border: 1px solid var(--border); border-radius: .7rem; bottom: 2.8rem; display: grid; gap: .2rem; grid-template-columns: repeat(4, 2.6rem); padding: .35rem; position: absolute; right: 0; z-index: 10; }

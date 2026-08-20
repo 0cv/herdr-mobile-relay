@@ -15,6 +15,7 @@
   let initializedPaneId = '';
   let nameInput = $state<HTMLInputElement | null>(null);
   let actionMenu = $state<HTMLDivElement | null>(null);
+  let confirmPanel = $state<HTMLDivElement | null>(null);
 
   const sessionRenameAvailable = $derived(Boolean(
     agent && String(agent.agent || '').trim().toLocaleLowerCase().replace(/[\s_-]+/g, '') !== 'opencode',
@@ -24,6 +25,7 @@
     if (!open) {
       initializedPaneId = '';
       renameMode = '';
+      confirming = '';
       return;
     }
     if (!agent || initializedPaneId === agent.pane_id) return;
@@ -55,6 +57,22 @@
     name = '';
     await tick();
     actionMenu?.querySelector<HTMLButtonElement>(`[data-rename-action="${mode}"]`)?.focus();
+  }
+
+  // The confirmation replaces the menu, so the destructive button cannot be hit
+  // by muscle memory. Focus lands on Cancel: it is the safe answer, and Enter
+  // must never be what clears or stops an agent.
+  async function beginConfirm(mode: 'clear' | 'stop') {
+    confirming = mode;
+    await tick();
+    confirmPanel?.querySelector<HTMLButtonElement>('[data-confirm-cancel]')?.focus();
+  }
+
+  async function cancelConfirm() {
+    const mode = confirming;
+    confirming = '';
+    await tick();
+    actionMenu?.querySelector<HTMLButtonElement>(`[data-confirm-action="${mode}"]`)?.focus();
   }
 
   function nextName(): string | null {
@@ -101,7 +119,7 @@
   async function clearAgent() {
     if (!agent) return;
     if (confirming !== 'clear') {
-      confirming = 'clear';
+      void beginConfirm('clear');
       return;
     }
     busy = true;
@@ -128,7 +146,7 @@
   async function stopAgent() {
     if (!agent) return;
     if (confirming !== 'stop') {
-      confirming = 'stop';
+      void beginConfirm('stop');
       return;
     }
     busy = true;
@@ -159,6 +177,22 @@
         <Button variant="ghost" disabled={busy} onclick={cancelRename}>Cancel</Button>
       </div>
     </form>
+  {:else if confirming}
+    <div bind:this={confirmPanel} class="form-stack">
+      <p class="warning" role="alert">
+        {confirming === 'stop'
+          ? 'Stop this agent? Its pane closes on the computer.'
+          : 'Clear this agent? A fresh agent starts in the same working directory.'}
+      </p>
+      <div class="dialog-actions">
+        <Button
+          variant={confirming === 'stop' ? 'danger' : 'secondary'}
+          disabled={busy}
+          onclick={confirming === 'stop' ? stopAgent : clearAgent}
+        >{confirming === 'stop' ? 'Confirm Stop' : 'Confirm Clear'}</Button>
+        <Button variant="ghost" data-confirm-cancel="true" disabled={busy} onclick={cancelConfirm}>Cancel</Button>
+      </div>
+    </div>
   {:else}
     <div bind:this={actionMenu} class="form-stack">
       <div class="dialog-actions">
@@ -166,11 +200,10 @@
         {#if sessionRenameAvailable}
           <Button data-rename-action="session" variant="secondary" disabled={busy} onclick={() => beginRename('session')}>Rename Session</Button>
         {/if}
-        <Button variant="secondary" disabled={busy} onclick={clearAgent}>{confirming === 'clear' ? 'Confirm Clear' : 'Clear Agent'}</Button>
-        <Button variant="danger" disabled={busy} onclick={stopAgent}>{confirming === 'stop' ? 'Confirm Stop' : 'Stop Agent'}</Button>
+        <Button data-confirm-action="clear" variant="secondary" disabled={busy} onclick={clearAgent}>Clear Agent</Button>
+        <Button data-confirm-action="stop" variant="danger" disabled={busy} onclick={stopAgent}>Stop Agent</Button>
         <Button variant="ghost" disabled={busy} onclick={() => { open = false; }}>Cancel</Button>
       </div>
-      {#if confirming}<p class="warning" role="alert">{confirming === 'stop' ? 'Tap Confirm Stop to close this agent pane.' : 'Tap Confirm Clear to start a fresh agent in the same working directory.'}</p>{/if}
     </div>
   {/if}
 </AppDialog>

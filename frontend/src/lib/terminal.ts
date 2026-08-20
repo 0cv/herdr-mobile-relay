@@ -703,9 +703,14 @@ export function ansiLineBackgrounds(lines: string[]): string[] {
 }
 
 
+// TERMINAL_BOX_RENDERINGS is keyed by the joining cells, which leaves out the
+// bare strokes ─ ━ ═. A rule drawn from those alone — the composer divider most
+// agents print — would otherwise never count as box art: it would miss both the
+// fixed-grid path that keeps it on one row and the responsive path that folds an
+// over-wide rule into a separator, and would wrap into a stub instead.
 function hasTerminalBoxCell(line: string): boolean {
   for (const character of line) {
-    if (TERMINAL_BOX_RENDERINGS[character]) return true;
+    if (TERMINAL_BOX_RENDERINGS[character] || TERMINAL_HORIZONTAL_CELLS[character]) return true;
   }
   return false;
 }
@@ -849,6 +854,33 @@ export function terminalHtml(
     .join('');
 }
 
+// A divider drawn wider than the pane is reflowed by the terminal into a full
+// row plus a short remainder, and a physical-row read faithfully returns both.
+// They are one rule, so collapse the run into a single separator rather than
+// drawing a long stroke with a stub hanging under it. Only the remainder of a
+// row that actually filled the pane is folded in; a deliberately short rule
+// keeps its own line.
+function isStrokeOnlyLine(line: string): boolean {
+  const characters = stripAnsi(line).replace(/\s+/g, '');
+  return characters.length > 0 && [...characters].every((character) => TERMINAL_HORIZONTAL_CELLS[character]);
+}
+
+function mergeReflowedRules(lines: string[], maxColumns: number): string[] {
+  if (maxColumns < 1) return lines;
+  const merged: string[] = [];
+  let openRule = false;
+  for (const line of lines) {
+    if (openRule && isStrokeOnlyLine(line)) {
+      merged[merged.length - 1] = TERMINAL_SEPARATOR_TOKEN;
+      continue;
+    }
+    openRule = isStrokeOnlyLine(line)
+      && terminalTextColumns(stripAnsi(line)) >= maxColumns;
+    merged.push(line);
+  }
+  return merged;
+}
+
 export function renderTerminalContent(
   content: string,
   format: string,
@@ -859,12 +891,13 @@ export function renderTerminalContent(
   const markedDisplay = preserveLayout
     ? preservedTerminalDisplayContent(content)
     : compactSeparatorLines(terminalDisplayContent(content));
-  const display = (preserveLayout && !preserveLineEnds
-    ? markedDisplay.split('\n').map(trimAnsiLineEnd).join('\n')
-    : markedDisplay)
-    .split('\n')
-    .map((line) => responsiveTerminalGridLine(line, maxFixedGridColumns))
-    .join('\n');
+  const display = mergeReflowedRules(
+    (preserveLayout && !preserveLineEnds
+      ? markedDisplay.split('\n').map(trimAnsiLineEnd)
+      : markedDisplay.split('\n'))
+      .map((line) => responsiveTerminalGridLine(line, maxFixedGridColumns)),
+    maxFixedGridColumns,
+  ).join('\n');
   if (format !== 'ansi') {
     const plainDisplay = display
       .replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────');
