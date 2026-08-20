@@ -16,6 +16,13 @@ export interface TransportStatusDetail {
    */
   fatal?: boolean;
   /**
+   * Gateway refusal code behind a close, when one exists. `unknown_relay` is
+   * the one the store treats specially: it is what a gateway answers while a
+   * relay is restarting, so it must keep the normal reconnect cadence even
+   * though it is fatal for the current attempt.
+   */
+  code?: string;
+  /**
    * Which physical path is carrying traffic now. A hybrid transport reports
    * `gateway` while relayed and `webrtc` once the direct upgrade takes over,
    * so the store can lower terminal fidelity on the metered relayed path.

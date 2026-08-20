@@ -895,7 +895,7 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances).toHaveLength(4);
   });
 
-  it('stops retrying a transport that reports a fatal failure', async () => {
+  it('retries a fatal failure at the slow cadence instead of stranding', async () => {
     vi.useFakeTimers();
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
@@ -915,13 +915,42 @@ describe('relay command store', () => {
     const relayId = get(relayStore.relayConfigs)[0].id;
     expect(attempts).toBe(1);
 
+    // A fatal close waits out the full minute: retrying sooner only burns
+    // battery, but never retrying strands the phone until a manual reload.
     report('closed', { reason: 'Relay key rejected', fatal: true });
     expect(get(relayStore.connections).get(relayId)?.status).toBe('disconnected');
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(attempts).toBe(2);
+  });
+
+  it('keeps the normal cadence when the gateway does not know the relay yet', async () => {
+    vi.useFakeTimers();
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    let attempts = 0;
+    let report: (status: TransportStatus, detail?: TransportStatusDetail) => void = () => {};
+    transportHijack.current = (_relay, handlers) => ({
+      kind: 'gateway',
+      connect: () => {
+        attempts += 1;
+        report = handlers.onStatus;
+        handlers.onStatus('connecting');
+      },
+      send: () => false,
+      close: () => {},
+    });
+    relayStore.addRelay({ label: 'Gateway', url: '', token: 'k', transport: 'hybrid', gatewayUrl: 'wss://gw.example' });
     expect(attempts).toBe(1);
 
-    // A plain failure on the same connection still backs off and retries.
-    report('closed', { reason: 'Relay disconnected' });
+    // `unknown_relay` is what a gateway answers while a relay restarts and its
+    // registration lapses; the phone must be back the moment it re-registers.
+    report('closed', {
+      reason: 'That computer is not connected to the gateway.',
+      fatal: true,
+      code: 'unknown_relay',
+    });
     await vi.advanceTimersByTimeAsync(1_000);
     expect(attempts).toBe(2);
   });

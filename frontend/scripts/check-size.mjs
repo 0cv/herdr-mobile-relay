@@ -7,7 +7,9 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 108 KiB for the hybrid transport (gateway pairing, DataChannel
 // framing, path manager): the release contract ships one `assets/app.js`, so
 // the direct-upgrade code cannot be split out of the bootstrap payload.
-const limitKiB = 112;
+// Raised from 112 KiB for connection-path visibility and reconnect-code
+// handling in 0.17.0, after removing the dead CSS that padded the old budget.
+const limitKiB = 113;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

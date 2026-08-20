@@ -356,10 +356,12 @@ class RelayStore {
     connection.status = 'disconnected';
     this.rejectPendingOperations(relay.id, detail?.reason || 'Relay disconnected');
     this.emitConnections();
-    // A fatal transport cannot succeed on retry with this configuration, so
-    // retrying it would only burn battery until the relay entry is fixed.
-    if (detail?.fatal) return;
-    this.scheduleReconnect(relay, connection);
+    // A fatal close would previously never retry, which stranded phones until
+    // a manual reload. `unknown_relay` is a restarting relay nine times out of
+    // ten — its registration lapses during every update — so it keeps the
+    // normal cadence; every other fatal failure retries at the slowest one.
+    const slow = detail?.fatal && detail.code !== 'unknown_relay';
+    this.scheduleReconnect(relay, connection, slow ? RECONNECT_MAX_DELAY_MS : 0);
   }
 
   private markConnectionReady(relayId: string, connection: RelayConnection): void {
@@ -502,15 +504,15 @@ class RelayStore {
     connection.updateRestartTimer = null;
   }
 
-  private scheduleReconnect(relay: RelayConfig, connection: RelayConnection): void {
+  private scheduleReconnect(relay: RelayConfig, connection: RelayConnection, floorMs = 0): void {
     if (connection.closed || !this.reconnectEnabled || connection.reconnectTimer) return;
     if (!this.isCurrentConnection(relay.id, connection)) return;
     const attempt = (this.reconnectAttempts.get(relay.id) || 0) + 1;
     this.reconnectAttempts.set(relay.id, attempt);
-    const baseDelay = Math.min(
+    const baseDelay = Math.max(floorMs, Math.min(
       RECONNECT_MAX_DELAY_MS,
       RECONNECT_BASE_DELAY_MS * 2 ** Math.min(attempt - 1, 5),
-    );
+    ));
     const jitter = attempt === 1 ? 1 : 0.8 + Math.random() * 0.4;
     const delay = Math.round(baseDelay * jitter);
     connection.reconnectTimer = setTimeout(() => {

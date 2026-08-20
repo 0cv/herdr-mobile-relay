@@ -73,6 +73,7 @@
   let terminalUnavailable = $state(false);
   const handlingNotifications = new Set<string>();
   const automaticUpdateChecks = new Set<string>();
+  const awaitedDeployments = new Set<string>();
 
   const activeAgent = $derived.by(() => {
     const view = $currentView;
@@ -265,6 +266,12 @@
         || deployment.origin !== location.origin
         || !deployment.target_version
       ) continue;
+      // A relay announces its last successful deployment forever; without this
+      // guard every store emission would restart the two-minute wait for a
+      // stale target the origin will never serve again.
+      const identity = `${deployment.target_version}:${deployment.target_revision}`;
+      if (awaitedDeployments.has(identity)) continue;
+      awaitedDeployments.add(identity);
       void reloadUpdatedSameOriginApp(deployment.target_version);
     }
   });

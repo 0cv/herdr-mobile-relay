@@ -262,6 +262,10 @@ describe('release updates', () => {
     const [major, minor, patch] = semverTuple(APP_VERSION)!;
     const target = `${major}.${minor + 1}.${patch}`;
     observeAppUpstreamVersion(target);
+    const converged = {
+      ok: true,
+      json: async () => ({ version: target, assets: APP_ASSET_VERSION + 1 }),
+    };
     const fetcher = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
@@ -271,11 +275,12 @@ describe('release updates', () => {
         ok: true,
         json: async () => ({ version: APP_VERSION, assets: APP_ASSET_VERSION }),
       })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ version: target, assets: APP_ASSET_VERSION + 1 }),
-      });
+      // The converging poll, then the one status check that publishes it.
+      .mockResolvedValueOnce(converged)
+      .mockResolvedValueOnce(converged);
     const sleep = vi.fn().mockResolvedValue(undefined);
+    const states: string[] = [];
+    const unsubscribe = appUpdateStatus.subscribe((status) => states.push(status.state));
 
     const status = await waitForDeployedApp(target, {
       fetcher,
@@ -283,10 +288,37 @@ describe('release updates', () => {
       intervalMs: 0,
       sleep,
     });
+    unsubscribe();
 
     expect(status).toMatchObject({ state: 'reload-ready', deployedVersion: target });
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher).toHaveBeenCalledTimes(4);
     expect(sleep).toHaveBeenCalledTimes(2);
+    // Polling stays silent: only the final landing may publish a check, so a
+    // stale deployment target cannot flicker the update status once a second.
+    expect(states.filter((state) => state === 'checking')).toHaveLength(1);
+  });
+
+  it('gives up silently when the origin never serves the target', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const target = `${major}.${minor + 2}.${patch}`;
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: APP_VERSION, assets: APP_ASSET_VERSION }),
+    });
+    const states: string[] = [];
+    const unsubscribe = appUpdateStatus.subscribe((status) => states.push(status.state));
+
+    const status = await waitForDeployedApp(target, {
+      fetcher,
+      attempts: 5,
+      intervalMs: 0,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    });
+    unsubscribe();
+
+    expect(status).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(5);
+    expect(states.filter((state) => state === 'checking')).toHaveLength(0);
   });
 
 });

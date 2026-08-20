@@ -88,14 +88,14 @@ export function createGatewayChannel(
   }
   const reassembler = new Reassembler({ onStall: (reason) => fail(reason) });
 
-  function fail(reason: string, fatal?: boolean): void {
+  function fail(reason: string, fatal?: boolean, code?: string): void {
     clearHandshakeTimer();
     if (phase === 'closed') return;
     phase = 'closed';
     reassembler.close();
     socket?.close();
     socket = null;
-    handlers.onClose(fatal ? { reason, fatal } : { reason });
+    handlers.onClose(fatal ? { reason, fatal, code } : { reason });
   }
 
   async function answerChallenge(hello: Record<string, unknown>): Promise<void> {
@@ -129,7 +129,7 @@ export function createGatewayChannel(
     const message = JSON.parse(raw) as Record<string, unknown>;
     if (message.type === 'error') {
       const code = String(message.code || 'internal');
-      fail(ERROR_MESSAGES[code] || String(message.message || 'The gateway rejected the connection.'), FATAL_ERROR_CODES[code]);
+      fail(ERROR_MESSAGES[code] || String(message.message || 'The gateway rejected the connection.'), FATAL_ERROR_CODES[code], code);
       return;
     }
     if (message.type !== 'ready') {

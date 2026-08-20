@@ -305,6 +305,13 @@ export interface DeployedAppWaitOptions {
   sleep?: (milliseconds: number) => Promise<void>;
 }
 
+/**
+ * Waits for the app origin to serve `version` or newer. Polling is silent —
+ * it reads `/version.json` directly instead of running `checkAppUpdate`, so a
+ * deployment that is still propagating (or a stale success announcement that
+ * will never converge) cannot flip the visible update status to `checking`
+ * once a second. Only the final landing publishes a status.
+ */
 export async function waitForDeployedApp(
   version: string,
   options: DeployedAppWaitOptions = {},
@@ -315,8 +322,12 @@ export async function waitForDeployedApp(
   const sleep = options.sleep || ((milliseconds: number) =>
     new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds)));
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const status = await checkAppUpdate(fetcher);
-    if (semverTuple(status.deployedVersion) && !newerVersion(version, status.deployedVersion)) return status;
+    try {
+      const deployed = await versionMetadata(fetcher, `/version.json?check=${Date.now()}`);
+      if (!newerVersion(version, deployed.version)) return checkAppUpdate(fetcher);
+    } catch {
+      // A propagating deployment can serve errors briefly; keep waiting.
+    }
     if (attempt + 1 < attempts) await sleep(intervalMs);
   }
   return null;

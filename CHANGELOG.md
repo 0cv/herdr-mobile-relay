@@ -135,6 +135,16 @@ project follows [Semantic Versioning](https://semver.org/).
   closed and narrowed it again on the way back, and the agent re-rendered on both
   resizes. A released width now lapses after ten seconds instead, so a return
   within that window reuses the width the pane already has.
+- A phone no longer stays disconnected until a manual reload after its relay
+  restarts. The gateway answers `unknown_relay` while a relay's registration
+  lapses during an update, and the app treated that as a permanently fatal
+  configuration and stopped reconnecting. That code now keeps the normal
+  reconnect cadence, and every other fatal failure retries once a minute
+  instead of never.
+- The update status no longer flickers to "checking" once a second while the
+  app waits for a deployed bundle to reach its origin. The wait polls
+  silently, and a relay's stale record of an already-loaded deployment can
+  start it at most once per app session instead of on every store update.
 - Stable tunnel teardown can recover its identity again after older no-op
   teardowns cleared the state: the wizard records the tunnel UUID in its
   `cloudflared` config, so recovery now resolves that id to its Cloudflare name
