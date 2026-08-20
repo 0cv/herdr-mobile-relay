@@ -31,3 +31,4 @@ relay/phone-app-origin.*
 .codex/
 .ralph
 ralph.yml
+WATCHDOG.yml
