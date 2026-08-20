@@ -132,11 +132,58 @@ jobs:
           # `gh release edit --prerelease=false --latest`.
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            visibility=(--latest)
+            on_main=1
           else
             # 1 means "not on main"; any other status is a real git failure.
             status=$?
             test "$status" -eq 1 || exit "$status"
+            on_main=0
+          fi
+          assets=(
+            dist/release/checksums.txt
+            dist/release/herdr-mobile-relay_*.tar.gz
+          )
+          if prerelease="$(
+            gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isPrerelease \
+              --jq .isPrerelease 2>/dev/null
+          )"; then
+            # A candidate tag moves as dev advances, so its release already
+            # exists. Every bundle embeds the commit it was built from, so the
+            # assets must be replaced: leaving them would advertise this tag
+            # with a revision the relay refuses to install.
+            if [ "$prerelease" = false ] && [ "$on_main" -eq 0 ]; then
+              echo "Release $GITHUB_REF_NAME is already promoted; refusing to republish it from a commit that is not on main." >&2
+              exit 1
+            fi
+            if [ "$on_main" -eq 1 ]; then
+              visibility=(--latest --prerelease=false)
+            else
+              visibility=(--prerelease)
+            fi
+            # `gh release edit` cannot generate notes, so ask for the same body
+            # the create path would have written.
+            notes="$(
+              gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+                -f tag_name="$GITHUB_REF_NAME" \
+                -f target_commitish="$GITHUB_SHA" \
+                --jq .body
+            )"
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --notes "$notes" \
+              "${visibility[@]}"
+            gh release upload "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              "${assets[@]}"
+            exit 0
+          fi
+          if [ "$on_main" -eq 1 ]; then
+            visibility=(--latest)
+          else
             visibility=(--prerelease)
           fi
           gh release create "$GITHUB_REF_NAME" \
@@ -144,5 +191,4 @@ jobs:
             --verify-tag \
             --generate-notes \
             "${visibility[@]}" \
-            dist/release/checksums.txt \
-            dist/release/herdr-mobile-relay_*.tar.gz
+            "${assets[@]}"
