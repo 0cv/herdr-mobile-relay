@@ -195,16 +195,20 @@ function terminalCellsHtml(text: string, startingColumn: number): { html: string
   let plainCells = 0;
   let horizontal = '';
   let horizontalCells = 0;
+  // Run widths multiply the probed cell advance, not ch: Safari can resolve
+  // 1ch against different font metrics than the rendered glyph advance, which
+  // clipped grid runs and cut rules short (issue #11). The 1ch fallback only
+  // covers the frame before the probe has measured.
   const flushPlain = () => {
     if (!plain) return;
-    html += `<span class="terminal-cell-run" style="width:${plainCells}ch">${linkifyTerminalText(plain)}</span>`;
+    html += `<span class="terminal-cell-run" style="width:calc(${plainCells} * var(--terminal-cell-width, 1ch))">${linkifyTerminalText(plain)}</span>`;
     plain = '';
     plainCells = 0;
   };
   const flushHorizontal = () => {
     if (!horizontal) return;
     const kind = horizontal[0] === '━' ? 'heavy' : horizontal[0] === '═' ? 'double' : 'single';
-    html += `<span class="terminal-cell-horizontal terminal-cell-horizontal-${kind}" style="width:${horizontalCells}ch">${escapeHtml(horizontal)}</span>`;
+    html += `<span class="terminal-cell-horizontal terminal-cell-horizontal-${kind}" style="width:calc(${horizontalCells} * var(--terminal-cell-width, 1ch))">${escapeHtml(horizontal)}</span>`;
     horizontal = '';
     horizontalCells = 0;
   };

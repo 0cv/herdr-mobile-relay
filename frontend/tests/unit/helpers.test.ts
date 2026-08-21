@@ -255,7 +255,7 @@ describe('terminal rendering', () => {
     expect(preserved.rows.every((row) => row.fixedGrid)).toBe(true);
     expect(readable.html).not.toContain('terminal-cell');
     expect(preserved.html).toContain('<span class="terminal-cell terminal-cell-box terminal-cell-arc terminal-cell-arc-down-right">╭</span>');
-    expect(preserved.html).toContain(`class="terminal-cell-horizontal terminal-cell-horizontal-single" style="width:40ch">${'─'.repeat(40)}</span>`);
+    expect(preserved.html).toContain(`class="terminal-cell-horizontal terminal-cell-horizontal-single" style="width:calc(40 * var(--terminal-cell-width, 1ch))">${'─'.repeat(40)}</span>`);
     expect(preserved.html).toContain('<span class="terminal-cell terminal-cell-box terminal-cell-arc terminal-cell-arc-down-left">╮</span>');
     const mixedBorders = renderTerminalContent('╘╿├┤┴', 'ansi', true);
     expect(stripAnsi(mixedBorders.display)).toBe('╘╿├┤┴');

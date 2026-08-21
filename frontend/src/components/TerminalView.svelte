@@ -1379,7 +1379,17 @@
     // Only a viewport/controls height change may re-pin: content growth also
     // changes scrollHeight, and a user scrolling up during a stream must win.
     const layoutChanged = Math.abs(clientHeight - virtualClientHeight) >= 1;
-    const movedTowardHistory = !layoutChanged && scrollTop < virtualScrollTop - 1;
+    // A scroll that lands exactly at the bottom is never the user moving
+    // toward history: when corrected row heights shrink the content while
+    // pinned, the browser clamps scrollTop to the new maximum and fires a
+    // scroll event whose position is lower than the remembered one. Reading
+    // that clamp as intent dropped stick-to-bottom, so Safari — whose real
+    // row heights disagree with the estimates more than Chromium's — opened
+    // a growing gap above the transcript's end and fought every scroll with
+    // anchor-preserving corrections (issue #11's missing bottom + flicker).
+    const movedTowardHistory = !layoutChanged
+      && scrollTop < virtualScrollTop - 1
+      && bottomDistance > 1;
     rememberVirtualScrollGeometry(terminalElement);
     if (movedTowardHistory) {
       virtualStickToBottom = false;
@@ -1489,7 +1499,16 @@
       }
       return;
     }
-    const rows = paneSizeRowLeaseSupported(target) ? measuredPaneRows() : 0;
+    let rows = paneSizeRowLeaseSupported(target) ? measuredPaneRows() : 0;
+    // The on-screen keyboard shrinks the terminal while the user types, and
+    // leasing that transient height would SIGWINCH the agent twice per
+    // keyboard toggle. Every full-height redraw can strand a stale copy of a
+    // bottom-anchored status bar in the scrollback, so while a text input
+    // owns focus the lease keeps its resting height and may only grow; the
+    // resize listeners re-measure the moment the keyboard closes.
+    const active = document.activeElement;
+    const typing = active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement;
+    if (typing && rows && lastLeasedRows && rows < lastLeasedRows) rows = lastLeasedRows;
     const sameTarget = leaseTarget?.pane_id === target.pane_id;
     if (!force && sameTarget && columns === lastLeasedColumns && rows === lastLeasedRows) return;
     if (queuedLease && queuedLease.columns === columns && queuedLease.rows === rows) {

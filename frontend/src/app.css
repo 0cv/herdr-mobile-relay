@@ -451,10 +451,12 @@ textarea { min-height: 6.5rem; resize: vertical; }
   width: var(--terminal-width, auto);
 }
 .term-content.preserve-layout > .term-screen > .ansi-line { overflow: visible; }
-.term-content.preserve-layout > .term-screen > .ansi-line {
-  contain-intrinsic-block-size: 1.45em;
-  content-visibility: auto;
-}
+/* No content-visibility on terminal rows: the component virtualizes them
+   itself, mounting only a pixel-bounded window. content-visibility: auto on
+   top of that made Safari size skipped mounted rows at the one-line
+   contain-intrinsic height regardless of wrapping, corrupting scrollHeight
+   and the row measurements — the transcript loaded with its bottom hidden
+   and scrolling flickered until every row had been rendered (issue #11). */
 .term-content.preserve-layout.resize-layout > .term-screen > .ansi-line {
   max-width: var(--terminal-width, 100%);
   overflow-wrap: anywhere;

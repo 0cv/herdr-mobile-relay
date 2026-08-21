@@ -3,6 +3,28 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed-grid terminal content no longer clips or falls short of the leased
+  width on Safari: text runs and horizontal rules inside TUI boxes and status
+  bars were still sized in `ch` units, which Safari resolves to the 0.5em
+  spec fallback when the bundled symbols font — which has no digit glyphs —
+  is the first available font. They now multiply the same probed px cell as
+  every other width. (#11)
+- Opening a session on Safari now shows the transcript's end immediately and
+  scrolling no longer flickers: `content-visibility: auto` made Safari size
+  offscreen mounted rows at one line regardless of wrapping (the rows are
+  already virtualized by the app, so the property only corrupted
+  scrollHeight), and a browser clamp after row-height corrections was
+  misread as the user scrolling toward history, permanently dropping the
+  stick-to-bottom pin. (#11)
+- The row lease no longer shrinks while the on-screen keyboard is open:
+  typing toggled two height resizes per keyboard cycle, and each full-height
+  redraw could strand a stale copy of an agent's status bar in the
+  scrollback.
+
 ## [0.17.2] - 2026-08-21
 
 ### Added
