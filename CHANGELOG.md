@@ -3,49 +3,21 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Changed
-
-- Terminal height leasing is now behind a default-off setting (**Lease
-  Terminal Height** under Settings → Terminal). Resizing the shared pane's
-  height strands stale copies of inline agents' status bars in the
-  scrollback — the terminal reflows the primary buffer before the agent can
-  repaint, and nothing can erase scrollback afterwards — so a phone session
-  left duplicate omp/Claude Code status bars on the computer each time the
-  height changed. Full-screen TUI users opt in; width leasing is unchanged.
-
-### Fixed
-
-- Switching away from the app on desktop Safari no longer resizes the shared
-  pane twice per glance. Safari reports an occluded window as hidden, so the
-  deliberate stop-renewing-while-hidden policy — designed for a sleeping
-  phone — lapsed the pane-size lease on every app switch, and each
-  restore/re-lease SIGWINCH pair could strand a stale copy of an inline
-  agent's status bar in the scrollback. Two changes together stop the flap:
-  a hidden page keeps renewing for five minutes before the lease may lapse,
-  and the relay's lease TTL rises from 30 to 120 seconds — Safari degrades a
-  hidden tab's timers to a measured 60–65 second cadence within two minutes,
-  so renewals kept arriving but the old TTL expired between them. A frozen
-  or vanished client now gives the pane back within about two minutes; a
-  disconnecting one is still released immediately.
-- Streaming resumes seconds after the phone wakes instead of dozens of
-  seconds in gateway mode. A reconnect dial started before the radio was
-  back got blackholed, and the wake/online revalidation skipped anything
-  already "connecting" — so the phone sat out the full handshake timeout
-  plus reconnect backoff. Revalidation now replaces a connect attempt older
-  than five seconds, so the first event after the network returns redials
-  immediately.
-
 ## [0.17.2] - 2026-08-21
 
 ### Added
 
-- **Resize Session** now leases the terminal height as well as the width when
-  the relay advertises `pane_size_lease_rows`. Full-screen agents redraw at the
-  phone's row count instead of stranding their response above dozens of blank
-  desktop-height rows; width-only clients and older relays keep the previous
-  width-only behavior, and lease expiry restores the pane's own height. (#11)
+- **Lease Terminal Height** (Settings → Terminal, off by default). Resize
+  Session can now lease the phone's measured height alongside its width when
+  the relay advertises `pane_size_lease_rows`, so full-screen agents redraw at
+  the phone's row count instead of stranding their response above dozens of
+  blank desktop-height rows. It ships off by default because changing the
+  shared pane's height can strand a stale copy of an inline agent's status bar
+  in the computer's scrollback: the terminal reflows its primary buffer before
+  the agent can repaint, and scrollback cannot be erased afterwards. Turn it on
+  if you mostly drive full-screen TUIs from the phone. While the height is
+  leased, the on-screen keyboard never shrinks it. Width leasing, and relays
+  without row support, are unchanged. (#11)
 
 ### Fixed
 
@@ -64,6 +36,22 @@ project follows [Semantic Versioning](https://semver.org/).
   scrollHeight), and a browser clamp after row-height corrections was misread
   as the user scrolling toward history, permanently dropping the
   stick-to-bottom pin. (#11)
+- Switching away from the app on desktop Safari no longer resizes the shared
+  pane. Safari reports an occluded window as hidden, so the deliberate
+  stop-renewing-while-hidden policy — designed for a sleeping phone — lapsed
+  the pane-size lease on every app switch, and each restore/re-lease SIGWINCH
+  pair could strand a stale status bar. A hidden page now keeps renewing for
+  five minutes, and the lease TTL rises from 30 to 120 seconds because Safari
+  degrades a hidden tab's timers to a measured 60–65 second cadence within two
+  minutes — renewals kept arriving, but the old TTL expired between them. A
+  frozen or vanished client gives the pane back within about two minutes; a
+  disconnecting one is still released immediately.
+- Streaming resumes seconds after the phone wakes instead of dozens of seconds
+  in gateway mode. A reconnect dial started before the radio was back got
+  blackholed, and the wake/online revalidation skipped anything already
+  "connecting" — so the phone sat out the full handshake timeout plus
+  reconnect backoff. Revalidation now replaces a connect attempt older than
+  five seconds, so the first event after the network returns redials at once.
 - The row lease no longer shrinks while the on-screen keyboard is open:
   typing toggled two height resizes per keyboard cycle, and each full-height
   redraw could strand a stale copy of an agent's status bar in the scrollback.
@@ -72,9 +60,11 @@ project follows [Semantic Versioning](https://semver.org/).
 
 - Frontend development and CI run on Bun 1.4 instead of Node.js and npm:
   Playwright, Vitest, ESLint, svelte-check, and the build scripts all run
-  under Bun, with `bun.lock` replacing `package-lock.json`. Publishing the
-  hosted web app still uses `npx wrangler` and Node. This changes no shipped
-  bytes — the built bundle is byte-identical, brotli included.
+  under Bun, with `bun.lock` replacing `package-lock.json`. CI installs the
+  browsers natively instead of pulling Playwright's container image; the
+  container path remains for Fedora. Publishing the hosted web app still uses
+  `npx wrangler` and Node. This changes no shipped bytes — the built bundle is
+  byte-identical, brotli included.
 
 ## [0.17.1] - 2026-08-20
 
