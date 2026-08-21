@@ -67,6 +67,13 @@ const UPDATE_RESTART_RECONNECT_DELAY_MS = 1_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
 const PANE_READ_RETRY_MS = 35_000;
+// A connect attempt older than this is replaced when a revalidation event
+// (wake, focus, online, network change) arrives. A healthy dial finishes its
+// two handshakes in a couple of seconds; one that predates the event usually
+// started before the radio was up, was blackholed, and would otherwise sit
+// out the full handshake timeout plus backoff — the "dozens of seconds before
+// streaming resumes after sleep" a phone sees in gateway mode.
+const STALE_CONNECTING_MS = 5_000;
 const IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 // Gateway-relayed traffic is metered project bandwidth. Cap scrollback while
 // honoring the user's refresh rate; acknowledged deltas keep idle frames off
@@ -128,6 +135,7 @@ interface RelayConnection extends RelayConnectionView {
   healthTimer: ReturnType<typeof setTimeout> | null;
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
+  connectingSince: number;
   directoryGeneration: number;
 }
 
@@ -296,6 +304,7 @@ class RelayStore {
       healthTimer: null,
       updateRestartTimer: null,
       closed: false,
+      connectingSince: Date.now(),
       agentProfiles: [],
       capabilities: [],
       directoryBrowser: null,
@@ -468,7 +477,16 @@ class RelayStore {
     const relays = get(this.relayConfigs);
     for (const relay of relays) {
       const connection = this.connectionsValue.get(relay.id);
-      if (connection?.status === 'connecting') continue;
+      if (connection?.status === 'connecting') {
+        // Replace a dial that predates the event this revalidation reacts to:
+        // it likely started before the network came back and is blackholed.
+        // A young attempt keeps going — focus events fire on every app
+        // switch and must not churn healthy connects.
+        if (Date.now() - connection.connectingSince >= STALE_CONNECTING_MS) {
+          this.connectRelay(relay);
+        }
+        continue;
+      }
       if (connection?.status !== 'connected') {
         this.connectRelay(relay);
         continue;

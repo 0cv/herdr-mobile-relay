@@ -3,6 +3,18 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Streaming resumes seconds after the phone wakes instead of dozens of
+  seconds in gateway mode. A reconnect dial started before the radio was
+  back got blackholed, and the wake/online revalidation skipped anything
+  already "connecting" — so the phone sat out the full handshake timeout
+  plus reconnect backoff. Revalidation now replaces a connect attempt older
+  than five seconds, so the first event after the network returns redials
+  immediately.
+
 ## [0.17.2] - 2026-08-21
 
 ### Added

@@ -199,6 +199,24 @@ describe('relay command store', () => {
     await expect(relayStore.leasePaneSize(agent, 80, 9)).rejects.toThrow(/between 10 and 120/);
   });
 
+  it('replaces a stale connecting attempt on revalidation but keeps a young one', () => {
+    // The socket never opens: the connection sits in 'connecting', like a
+    // dial started before the phone's radio came back after sleep.
+    expect(MockWebSocket.instances).toHaveLength(1);
+    vi.useFakeTimers();
+
+    // Focus events fire on every app switch; a young dial must not be churned.
+    relayStore.revalidateConnections();
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    // Once the revalidation event postdates the dial by the stale threshold,
+    // the blackholed attempt is replaced instead of waiting out its own
+    // handshake timeout plus reconnect backoff.
+    vi.advanceTimersByTime(5_000);
+    relayStore.revalidateConnections();
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
   it('binds approvals to their blocked event and coalesces pane polling', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
