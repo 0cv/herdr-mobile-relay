@@ -7,6 +7,7 @@
     MAX_PANE_SIZE_ROWS,
     MIN_PANE_SIZE_COLUMNS,
     MIN_PANE_SIZE_ROWS,
+    paneLeaseRenewalAllowed,
   } from '$lib/config';
   import {
     agentNeedsInspection,
@@ -169,6 +170,10 @@
   let renderedResizeColumns = $state(0);
   let measuredCellWidth = $state(0);
   let queuedLease: { columns: number; rows: number; force: boolean } | null = null;
+  // Set when the page goes hidden; renewals continue within the grace so a
+  // desktop browser that reports occluded windows as hidden does not lapse
+  // the lease on every app switch.
+  let hiddenAt = 0;
   const keyQueue: QueuedKeyCommand[] = [];
   let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   let keyReadTimer: ReturnType<typeof setTimeout> | undefined;
@@ -508,14 +513,18 @@
     let lastRefreshAt = Date.now();
     const visibilityChanged = () => {
       if (!visible()) {
-        // A hidden app stops renewing its width lease on purpose: the relay
-        // restores the desktop width once the lease TTL runs out, so a phone
-        // that went to sleep with a terminal open gives the pane back. An open
-        // DataChannel keeps this page unfrozen in the background, so without
-        // this gate the renewals would keep the pane narrow all night.
+        // Traffic stops while hidden, but lease renewals keep going for a
+        // bounded grace: desktop Safari reports an occluded window as hidden,
+        // so treating every app switch as departure lapsed the lease and
+        // resized the shared pane twice per glance, stranding stale copies of
+        // inline agents' status bars in the scrollback. Once the grace runs
+        // out the renewals stop and the relay's TTL hands the size back — a
+        // page hidden overnight cannot keep the pane narrow.
+        hiddenAt = Date.now();
         relayStore.unwatchPane(agent);
         return;
       }
+      hiddenAt = 0;
       lastRefreshAt = Date.now();
       relayStore.readPane(agent);
       relayStore.watchPane(agent);
@@ -544,7 +553,9 @@
     }, 3_000);
     if (visible()) relayStore.watchPane(agent);
     const refreshPaneSizeLease = setInterval(
-      () => { if (visible()) requestPaneSizeLease(true); },
+      () => {
+        if (paneLeaseRenewalAllowed(visible(), hiddenAt, Date.now())) requestPaneSizeLease(true);
+      },
       PANE_SIZE_LEASE_REFRESH_MS,
     );
     void tick().then(measurePane);
@@ -1495,10 +1506,10 @@
 
   function requestPaneSizeLease(force: boolean) {
     const target = agent;
-    // A hidden app must not hold or take the pane's width: renewals stop so
-    // the relay's lease TTL can return the desktop width while the phone
-    // sleeps, and the refocus handler re-leases the moment it is visible.
-    if (document.visibilityState !== 'visible') return;
+    // A hidden page renews only within the grace window: after it, the
+    // relay's lease TTL returns the desktop size, and the refocus handler
+    // re-leases the moment the page is visible again.
+    if (!paneLeaseRenewalAllowed(document.visibilityState === 'visible', hiddenAt, Date.now())) return;
     if (!paneSizeLeaseSupported(target)) return;
     const columns = measuredPaneColumns();
     if (columns === null) {

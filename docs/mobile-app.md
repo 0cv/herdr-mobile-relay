@@ -75,10 +75,12 @@ The mobile terminal always uses **Resize Session**. While a terminal is open
 and the app is visible, the relay leases the live PTY at the measured phone
 width. Closing the terminal restores the previous width about ten seconds
 later, so stepping back into the same agent resumes instantly instead of
-resizing the pane twice. A hidden or sleeping app stops renewing its lease, so
-the desktop width returns within half a minute; a disconnecting phone and
-relay shutdown restore it immediately. Returning to the terminal takes the
-phone width again.
+resizing the pane twice. A hidden page keeps renewing its lease for five
+minutes — desktop Safari reports an occluded window as hidden, so brief
+switches to another app must not resize the shared pane — after which the
+desktop size returns within half a minute. A sleeping phone freezes sooner
+than that, a disconnecting phone and relay shutdown restore the size
+immediately, and returning to the terminal takes the phone size again.
 
 **Lease Terminal Height** (Settings → Terminal, off by default) additionally
 leases the phone's measured height, so full-screen agents redraw to fit the

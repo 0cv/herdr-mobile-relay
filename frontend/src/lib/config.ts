@@ -46,6 +46,21 @@ export const MIN_PANE_SIZE_COLUMNS = 40;
 export const MAX_PANE_SIZE_COLUMNS = 240;
 export const MIN_PANE_SIZE_ROWS = 10;
 export const MAX_PANE_SIZE_ROWS = 120;
+// A hidden page keeps renewing its pane-size lease for this long. Desktop
+// Safari reports an occluded window as hidden, so every switch to another app
+// would otherwise lapse the lease after its 30s TTL and resize the shared
+// pane twice per glance — each cycle can strand a stale copy of an inline
+// agent's status bar in the scrollback. The grace is bounded so a page that
+// stays hidden — a phone in a pocket whose open DataChannel keeps it
+// unfrozen — still gives the desktop its size back within minutes, not
+// overnight.
+export const PANE_LEASE_HIDDEN_GRACE_MS = 5 * 60_000;
+
+export function paneLeaseRenewalAllowed(visible: boolean, hiddenAt: number, now: number): boolean {
+  if (visible) return true;
+  return hiddenAt > 0 && now - hiddenAt < PANE_LEASE_HIDDEN_GRACE_MS;
+}
+
 export const THEME_COLORS: Record<Theme, string> = {
   dark: '#0a0a0a',
   light: '#f5f5f5',

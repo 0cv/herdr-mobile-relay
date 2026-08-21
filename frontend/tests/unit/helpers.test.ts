@@ -19,7 +19,7 @@ import {
   tabName,
 } from '$lib/agents';
 import { APP_PROTOCOL_VERSION } from '$lib/config';
-import { quickSetupConfig } from '$lib/config';
+import { PANE_LEASE_HIDDEN_GRACE_MS, paneLeaseRenewalAllowed, quickSetupConfig } from '$lib/config';
 import { suggestedLaunchName, validAgentName } from '$lib/launch';
 import { parseNotificationTarget, relayProtocolError, relayVersionMeta, shortRevision } from '$lib/protocol';
 import { relayPushScope } from '$lib/push';
@@ -140,6 +140,21 @@ describe('protocol and setup parsing', () => {
     });
     expect(relayPushScope('UPPER-id-')).toBe('./push/upper-id/');
     expect(relayPushScope('---')).toBe('./push/relay/');
+  });
+});
+
+describe('pane lease hidden grace', () => {
+  it('renews while visible, within the hidden grace, and never past it', () => {
+    // Desktop Safari reports occluded windows as hidden; renewals must keep
+    // the lease alive across app switches but still lapse for a page that
+    // stays hidden, so the desktop gets its pane size back.
+    expect(paneLeaseRenewalAllowed(true, 0, 1_000_000)).toBe(true);
+    const hiddenAt = 1_000_000;
+    expect(paneLeaseRenewalAllowed(false, hiddenAt, hiddenAt + 1)).toBe(true);
+    expect(paneLeaseRenewalAllowed(false, hiddenAt, hiddenAt + PANE_LEASE_HIDDEN_GRACE_MS - 1)).toBe(true);
+    expect(paneLeaseRenewalAllowed(false, hiddenAt, hiddenAt + PANE_LEASE_HIDDEN_GRACE_MS)).toBe(false);
+    // A page that mounts hidden never held the pane and must not take it.
+    expect(paneLeaseRenewalAllowed(false, 0, 1_000_000)).toBe(false);
   });
 });
 

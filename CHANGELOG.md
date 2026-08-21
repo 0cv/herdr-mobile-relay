@@ -17,6 +17,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Switching away from the app on desktop Safari no longer resizes the shared
+  pane twice per glance. Safari reports an occluded window as hidden, so the
+  deliberate stop-renewing-while-hidden policy — designed for a sleeping
+  phone — lapsed the pane-size lease on every app switch, and each
+  restore/re-lease SIGWINCH pair could strand a stale copy of an inline
+  agent's status bar in the scrollback. A hidden page now keeps renewing for
+  five minutes before the lease is allowed to lapse, so brief switches hold
+  the size steady while a page hidden overnight still gives it back.
 - Streaming resumes seconds after the phone wakes instead of dozens of
   seconds in gateway mode. A reconnect dial started before the radio was
   back got blackholed, and the wake/online revalidation skipped anything

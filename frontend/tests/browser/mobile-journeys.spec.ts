@@ -2500,7 +2500,7 @@ test('does not lease rows unless the height setting is on', async ({ page }) => 
   expect(acquire).not.toHaveProperty('rows');
 });
 
-test('stops renewing the pane width lease while hidden and re-leases on return', async ({ page }) => {
+test('keeps renewing the pane lease briefly while hidden and re-leases on return', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -2522,11 +2522,14 @@ test('stops renewing the pane width lease while hidden and re-leases on return',
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  // The renewal interval is 10 s. A hidden app must skip it, so the relay's
-  // lease TTL can hand the desktop its width back while the phone sleeps.
+  // Desktop Safari reports an occluded window as hidden, so a hidden page
+  // keeps renewing within the grace window instead of lapsing the lease —
+  // and resizing the shared pane — on every app switch. The 10s renewal
+  // must therefore still fire. Grace expiry is unit-tested on the pure
+  // policy helper; five minutes cannot elapse here.
   await page.waitForTimeout(11_000);
-  expect((await commands(page))
-    .filter((command) => command.type === 'lease_pane_size')).toHaveLength(1);
+  expect(((await commands(page))
+    .filter((command) => command.type === 'lease_pane_size')).length).toBeGreaterThanOrEqual(2);
   expect((await commands(page))
     .filter((command) => command.type === 'release_pane_size')).toHaveLength(0);
 
@@ -2538,7 +2541,7 @@ test('stops renewing the pane width lease while hidden and re-leases on return',
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
+    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThanOrEqual(3);
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThanOrEqual(2);
 });
