@@ -5,6 +5,16 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Terminal height leasing is now behind a default-off setting (**Lease
+  Terminal Height** under Settings → Terminal). Resizing the shared pane's
+  height strands stale copies of inline agents' status bars in the
+  scrollback — the terminal reflows the primary buffer before the agent can
+  repaint, and nothing can erase scrollback afterwards — so a phone session
+  left duplicate omp/Claude Code status bars on the computer each time the
+  height changed. Full-screen TUI users opt in; width leasing is unchanged.
+
 ### Fixed
 
 - Streaming resumes seconds after the phone wakes instead of dozens of

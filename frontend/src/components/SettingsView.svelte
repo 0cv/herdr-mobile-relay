@@ -24,9 +24,11 @@
     interfaceSize,
     setHomeLayout,
     setInterfaceSize,
+    setTerminalHeightLease,
     setTerminalHistoryLines,
     setTerminalRefreshInterval,
     setTheme,
+    terminalHeightLease,
     terminalHistoryLines,
     terminalRefreshInterval,
     theme,
@@ -584,6 +586,13 @@
     </fieldset>
     <p class="hint">How often the relay checks the visible pane. 250 ms is balanced; faster refresh uses more computer and phone CPU during active output.</p>
     <p class="hint">Resize Session automatically leases the shared terminal at the phone width while it is open, so the laptop view changes too. The previous width is restored when the terminal closes or disconnects.</p>
+    <AppSwitch
+      checked={$terminalHeightLease}
+      label="Lease Terminal Height"
+      descriptionId="height-lease-hint"
+      onchange={(value) => setTerminalHeightLease(value)}
+    />
+    <p class="hint" id="height-lease-hint">Off by default. Also leases the terminal at the phone's height so full-screen agents redraw to fit the phone instead of serving a mostly empty desktop-sized grid. The shared pane physically shrinks on the computer, and inline agents such as omp or Claude Code can strand duplicate status bars in the scrollback each time the height changes.</p>
   </Card>
 
   <Card>

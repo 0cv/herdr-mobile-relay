@@ -2249,6 +2249,9 @@ test('restores a non-bottom anchor after a Resize Session width change', async (
 });
 
 test('leases measured terminal columns and releases on teardown', async ({ page }) => {
+  // Height leasing is opt-in: resizing the shared pane's height strands
+  // stale status-bar copies of inline agents in the scrollback.
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_height_lease', 'true'));
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -2474,6 +2477,27 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'release_pane_size').length).toBe(2);
+});
+
+test('does not lease rows unless the height setting is on', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+  const acquire = (await commands(page))
+    .find((command) => command.type === 'lease_pane_size')!;
+  // The relay advertises row support, but the default-off setting keeps the
+  // lease width-only so the shared pane's height is never touched.
+  expect(acquire.columns).toEqual(expect.any(Number));
+  expect(acquire).not.toHaveProperty('rows');
 });
 
 test('stops renewing the pane width lease while hidden and re-leases on return', async ({ page }) => {

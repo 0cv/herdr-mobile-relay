@@ -25,7 +25,7 @@
     terminalRowOffsets,
     terminalSearchText,
   } from '$lib/terminal-find';
-  import { interfaceSize } from '$lib/preferences';
+  import { interfaceSize, terminalHeightLease } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
   import {
@@ -1419,10 +1419,18 @@
   }
 
   function paneSizeRowLeaseSupported(target: Agent): boolean {
-    return Boolean(
+    return $terminalHeightLease && Boolean(
       $connections.get(target.relay_id)?.capabilities.includes('pane_size_lease_rows'),
     );
   }
+
+  // A toggle flips the next lease immediately: on adds the measured rows, off
+  // renews width-only, which lifts this client's row constraint on the relay.
+  $effect(() => {
+    const enabled = $terminalHeightLease;
+    void enabled;
+    void tick().then(() => requestPaneSizeLease(false));
+  });
 
   function measuredPaneColumns(): number | null {
     if (!terminalElement || !cellMeasureElement) return null;

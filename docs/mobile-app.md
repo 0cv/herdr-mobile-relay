@@ -73,15 +73,23 @@ controls to resize it without changing the rest of the app.
 
 The mobile terminal always uses **Resize Session**. While a terminal is open
 and the app is visible, the relay leases the live PTY at the measured phone
-width — and, when the relay advertises row support, the measured phone height —
-so full-screen agents redraw for the phone instead of serving a mostly empty
-desktop-sized grid. Closing the terminal restores the previous size about ten
-seconds later, so stepping back into the same agent resumes instantly instead
-of resizing the pane twice. A hidden or sleeping app stops renewing its lease,
-so the desktop size returns within half a minute; a disconnecting phone and
+width. Closing the terminal restores the previous width about ten seconds
+later, so stepping back into the same agent resumes instantly instead of
+resizing the pane twice. A hidden or sleeping app stops renewing its lease, so
+the desktop width returns within half a minute; a disconnecting phone and
 relay shutdown restore it immediately. Returning to the terminal takes the
-phone size again. While leased, the pane on the computer physically shrinks to
-the phone's dimensions — the same trade already made for width.
+phone width again.
+
+**Lease Terminal Height** (Settings → Terminal, off by default) additionally
+leases the phone's measured height, so full-screen agents redraw to fit the
+phone instead of serving a mostly empty desktop-sized grid. The shared pane
+physically shrinks to phone size on the computer, and each height change can
+strand a stale copy of an inline agent's status bar (omp, Claude Code) in the
+scrollback: the terminal reflows its primary buffer before the agent can
+repaint, and scrollback cannot be erased afterwards. Leave it off unless you
+mostly drive full-screen TUIs from the phone. While the height is leased, the
+on-screen keyboard never shrinks it — the lease keeps the resting height and
+re-measures when the keyboard closes.
 
 Terminal History keeps 100, 500, or 1,000 lines in the terminal view. 1,000 is
 the default, the largest option, and the ceiling on the gateway-relayed path.

@@ -7,6 +7,7 @@ import {
   INTERFACE_SIZES,
   TERMINAL_HISTORY_KEY,
   TERMINAL_HISTORY_OPTIONS,
+  TERMINAL_HEIGHT_LEASE_KEY,
   TERMINAL_REFRESH_KEY,
   TERMINAL_REFRESH_OPTIONS,
   THEME_COLORS,
@@ -55,6 +56,13 @@ export const interfaceSize = writable<InterfaceSize>(savedInterfaceSize());
 export const terminalHistoryLines = writable<TerminalHistoryLines>(savedTerminalHistoryLines());
 export const terminalRefreshInterval = writable<TerminalRefreshInterval>(savedTerminalRefreshInterval());
 export const homeLayout = writable<HomeLayout>(savedHomeLayout());
+// Off by default: resizing the shared pane's height strands stale copies of
+// inline agents' status bars in the scrollback (the terminal reflows the
+// primary buffer before the agent can repaint), so only people who need
+// full-screen TUIs to fit the phone opt in.
+export const terminalHeightLease = writable<boolean>(
+  localStorage.getItem(TERMINAL_HEIGHT_LEASE_KEY) === 'true',
+);
 
 export function setTheme(value: Theme): void {
   localStorage.setItem(THEME_KEY, value);
@@ -78,6 +86,11 @@ export function setTerminalHistoryLines(value: TerminalHistoryLines): void {
 export function setTerminalRefreshInterval(value: TerminalRefreshInterval): void {
   localStorage.setItem(TERMINAL_REFRESH_KEY, String(value));
   terminalRefreshInterval.set(value);
+}
+
+export function setTerminalHeightLease(value: boolean): void {
+  localStorage.setItem(TERMINAL_HEIGHT_LEASE_KEY, String(value));
+  terminalHeightLease.set(value);
 }
 
 export function setHomeLayout(value: HomeLayout): void {
