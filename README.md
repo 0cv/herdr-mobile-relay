@@ -19,22 +19,35 @@ Requirements: Herdr 0.7.5 or newer, Git, and `curl`.
 herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-Choose **Temporary Cloudflare Tunnel** from the setup menu. It installs any
-missing user-level tools with confirmation, starts the relay and bundled app,
-and prints a QR code. If the menu does not open:
+The setup menu opens automatically after installation.
+
+To reopen the main setup menu later:
 
 ```bash
-herdr plugin action invoke setup --plugin herdr-mobile-relay.events
+herdr plugin pane open \
+  --plugin herdr-mobile-relay.events \
+  --entrypoint setup \
+  --placement zoomed \
+  --focus
 ```
 
-Scan the QR with your phone. Keep the pane open; Ctrl-C stops the temporary
-relay.
+Start with **Community WebRTC Gateway**. It is the recommended path: as fast
+to set up as the temporary tunnel, with stable relay connectivity and no
+Cloudflare account, domain, `cloudflared`, or tunnel configuration. If prompted,
+choose the installed Herdr app that should host the phone UI. The relay starts
+and prints a QR code.
 
-No Cloudflare account, no domain, no `sudo`, and no Python, Node.js, or Go
-toolchain. Treat the QR and its setup link as secrets: they carry the relay key.
+**Temporary Cloudflare Tunnel** is the fastest getting-started option for a
+one-computer trial. It installs any missing user-level tools with confirmation,
+starts the relay and bundled app, and prints a QR code.
 
-[QUICKSTART.md](QUICKSTART.md) is the same path with pairing detail and
-troubleshooting.
+Scan the QR with your phone. Keep the pane open; Ctrl-C stops the relay.
+
+Neither quick-start path needs `sudo` or a Python, Node.js, or Go toolchain.
+Treat the QR and its setup link as secrets: they carry the relay key.
+
+[QUICKSTART.md](QUICKSTART.md) has pairing detail and troubleshooting for both
+paths.
 
 ## What you get
 
@@ -67,8 +80,8 @@ The setup menu exposes each complete connection path directly:
 
 | Choice | Needs | Best for |
 | --- | --- | --- |
-| Cloudflare tunnel | nothing, or a domain for the stable variant | the default; a permanent hostname with a background service |
-| Community gateway | no account, no domain, but an app origin to pair against | free, shared, best-effort |
+| Community gateway | no account, domain, or tunnel configuration; an installed app origin | the recommended stable, no-configuration relay path |
+| Cloudflare tunnel | nothing for a temporary URL; a Cloudflare account and domain for a permanent hostname | the fastest one-computer trial or a permanent background service |
 | Your own gateway | a small VPS | dedicated bandwidth and control of the transport logs |
 
 All three are end-to-end encrypted. On either gateway the phone and the computer
