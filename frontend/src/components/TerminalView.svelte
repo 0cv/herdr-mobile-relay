@@ -242,20 +242,22 @@
   });
   const terminalCopyText = $derived(latestCompletedResponse(frame?.content || ''));
   const terminalContentStyle = $derived.by(() => {
-    const styles: string[] = [];
-    // Width caps are emitted in px of the measured probe cell, never in ch:
+    // Every width is emitted in px of the measured probe cell, never in ch:
     // Safari's Core Text port resolves 1ch against different font metrics
     // than the rendered glyph advance, so an Nch cap wraps short of N cells.
-    if (measuredCellWidth > 0) {
-      styles.push(`--terminal-cell-width: ${measuredCellWidth.toFixed(4)}px`);
-    }
-    if (resizeSessionActive && (lastLeasedColumns || renderedResizeColumns)) {
-      styles.push(`--terminal-width: calc(${lastLeasedColumns || renderedResizeColumns} * var(--terminal-cell-width, 1ch))`);
+    // Before the probe is measured no cap is emitted at all, so the declared
+    // fallbacks (100% for the wrap cap, auto for the row background) apply
+    // instead of a ch-derived width that would be wrong on those engines.
+    if (measuredCellWidth <= 0) return undefined;
+    const capColumns = lastLeasedColumns || renderedResizeColumns;
+    const styles = [`--terminal-cell-width: ${measuredCellWidth.toFixed(4)}px`];
+    if (resizeSessionActive && capColumns) {
+      styles.push(`--terminal-width: ${(capColumns * measuredCellWidth).toFixed(4)}px`);
     }
     if (virtualContentColumns > 0) {
-      styles.push(`--terminal-content-width: calc(${virtualContentColumns} * var(--terminal-cell-width, 1ch))`);
+      styles.push(`--terminal-content-width: ${(virtualContentColumns * measuredCellWidth).toFixed(4)}px`);
     }
-    return styles.length ? styles.join(';') : undefined;
+    return styles.join(';');
   });
 
   const NOT_PERSISTED_AT_HIDDEN_PROMPT =

@@ -473,7 +473,11 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .term-content.preserve-layout .terminal-cell {
   display: inline-block;
   text-align: center;
-  /* Probed cell advance in px; ch is wrong in Safari's Core Text port. */
+  /* Probed cell advance in px. The 1ch fallback covers the pre-measurement
+     frame only: it is the right intent (one character advance) on every
+     engine, and beats `auto`, which would size cells to their content and
+     break fixed-grid alignment. Caps never fall back to ch — a wrong cap
+     wraps text, a wrong cell only misaligns it for one frame. */
   width: var(--terminal-cell-width, 1ch);
 }
 .term-content.preserve-layout .terminal-cell-wide { width: calc(2 * var(--terminal-cell-width, 1ch)); }
