@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -257,6 +258,41 @@ func TestCommandEnvironmentLoadsOnlyCloudflareCredentials(t *testing.T) {
 	}
 	if _, present := environmentValue(environment, "HERDR_RELAY_TOKEN"); present {
 		t.Fatal("relay token was imported into Wrangler environment")
+	}
+}
+
+func TestCompactRemovesTerminalFormattingAndKeepsDeploymentCause(t *testing.T) {
+	value := "\x1b[31mwrangler\x1b[0m pages deploy /web " +
+		"\x1b[31mERROR\x1b[0m A request to Cloudflare failed: API token lacks Pages:Edit"
+	got := compact(value, 64)
+	if strings.ContainsAny(got, "\x1b") || strings.Contains(got, "[31m") {
+		t.Fatalf("compact() retained terminal formatting: %q", got)
+	}
+	if !strings.Contains(got, "Pages:Edit") {
+		t.Fatalf("compact() lost the deployment cause: %q", got)
+	}
+}
+
+func TestWranglerDeployArgsUseFreshNoCacheUpload(t *testing.T) {
+	got := wranglerDeployArgs(Job{
+		WebRoot: "/tmp/release/web",
+		Project: "herdr-0cv",
+		Branch:  "main",
+	})
+	want := []string{
+		"--yes",
+		"wrangler@4.125.0",
+		"pages",
+		"deploy",
+		"/tmp/release/web",
+		"--project-name",
+		"herdr-0cv",
+		"--branch",
+		"main",
+		"--skip-caching",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("wranglerDeployArgs() = %#v, want %#v", got, want)
 	}
 }
 func TestCommandEnvironmentRejectsUnsupportedExpansion(t *testing.T) {

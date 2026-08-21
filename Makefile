@@ -5,7 +5,7 @@ endif
 
 WEB_PROJECT ?= herdr-mobile-relay
 WEB_BRANCH ?= main
-WRANGLER_VERSION ?= 4.114.0
+WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
@@ -181,7 +181,7 @@ web-release-check: web-bundle-check
 	$(MAKE) frontend-browser-attention-release
 
 web-deploy: web-bundle-check
-	npx --yes wrangler@$(WRANGLER_VERSION) pages deploy web --project-name "$(WEB_PROJECT)" --branch "$(WEB_BRANCH)"
+	npx --yes wrangler@$(WRANGLER_VERSION) pages deploy web --project-name "$(WEB_PROJECT)" --branch "$(WEB_BRANCH)" --skip-caching
 
 web-preview:
 	npx --yes wrangler@$(WRANGLER_VERSION) pages dev web

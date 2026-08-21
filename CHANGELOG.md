@@ -3,6 +3,17 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Phone-app deployment now uses Wrangler 4.125.0 and skips its differential
+  Pages asset cache. Wrangler 4.114.0 could fail with only `exit status 1`
+  when an older deployment's cache was stale, leaving the relay updated but
+  the separately hosted phone app on the old bundle. Deployment errors now
+  strip terminal color codes and preserve the tail containing the actual
+  Cloudflare cause instead of truncating it behind the command prefix.
+
 ## [0.17.3] - 2026-08-21
 
 ### Changed

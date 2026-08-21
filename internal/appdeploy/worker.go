@@ -22,7 +22,11 @@ import (
 )
 
 const (
-	WranglerVersion           = "4.114.0"
+	// Keep this pinned for reproducible deployments, but refresh it when
+	// Wrangler's Pages uploader regresses. 4.114.0's differential asset
+	// upload path can fail with a generic exit status; 4.125.0 is the
+	// current tested release and the deployment below skips that cache path.
+	WranglerVersion           = "4.125.0"
 	deploymentStartupGrace    = 30 * time.Second
 	publicVerificationTimeout = 2 * time.Minute
 	publicRequestTimeout      = 20 * time.Second
@@ -30,6 +34,8 @@ const (
 	processTermGrace          = 2 * time.Second
 	processWaitDelay          = 4 * time.Second
 )
+
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
 
 var (
 	projectPattern          = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$`)
@@ -122,19 +128,9 @@ func Run(ctx context.Context, jobPath string) error {
 		write("failed", err)
 		return err
 	}
-	command := exec.Command(
-		job.NPXPath,
-		"--yes",
-		"wrangler@"+WranglerVersion,
-		"pages",
-		"deploy",
-		job.WebRoot,
-		"--project-name",
-		job.Project,
-		"--branch",
-		job.Branch,
-	)
+	command := exec.Command(job.NPXPath, wranglerDeployArgs(job)...)
 	environment, credentialErr := commandEnvironmentWithCloudflareCredentials(job.NodeDir, os.Environ())
+	environment = replaceEnvironmentValue(environment, "NO_COLOR", "1")
 	if credentialErr != nil {
 		deployErr := fmt.Errorf("read Cloudflare credentials: %w", credentialErr)
 		write("failed", deployErr)
@@ -157,6 +153,25 @@ func Run(ctx context.Context, jobPath string) error {
 	write("succeeded", nil)
 	_ = os.Remove(jobPath)
 	return nil
+}
+
+func wranglerDeployArgs(job Job) []string {
+	return []string{
+		"--yes",
+		"wrangler@" + WranglerVersion,
+		"pages",
+		"deploy",
+		job.WebRoot,
+		"--project-name",
+		job.Project,
+		"--branch",
+		job.Branch,
+		// Avoid Wrangler's differential asset upload path. It can fail with
+		// a generic exit status when an older deployment's cache is stale;
+		// this bundle is tiny and verified, so a complete asset upload is the
+		// safer deployment path.
+		"--skip-caching",
+	}
 }
 
 func runCommandContext(ctx context.Context, command *exec.Cmd) ([]byte, error) {
@@ -769,11 +784,18 @@ func writeState(filename string, state State) error {
 }
 
 func compact(value string, limit int) string {
+	value = ansiEscapePattern.ReplaceAllString(value, "")
 	value = strings.Join(strings.Fields(value), " ")
-	if len(value) > limit {
+	if len(value) <= limit {
+		return value
+	}
+	const separator = " … "
+	if limit <= len(separator) {
 		return value[:limit]
 	}
-	return value
+	head := (limit - len(separator)) / 2
+	tail := limit - len(separator) - head
+	return value[:head] + separator + value[len(value)-tail:]
 }
 
 func safeError(err error) string {

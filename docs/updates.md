@@ -30,8 +30,9 @@ volta, and asdf put it, not only on `PATH`.
 A Pages project can only deploy a domain it already serves. When the origin you
 enter is not one of them, and the account has exactly one Pages project, the
 action attaches it for you if `relay.env` carries a `CLOUDFLARE_API_TOKEN` with
-Pages:Edit — `wrangler login` alone cannot, since the pinned Wrangler 4.114.0 has
-no custom-domain command. Set `HERDR_APP_DEPLOY_ATTACH_DOMAIN=true` to allow that
+Pages:Edit — the updater pins Wrangler 4.125.0 and skips Wrangler's differential
+asset cache during deployment because that upload path can fail against stale
+Pages cache state. Set `HERDR_APP_DEPLOY_ATTACH_DOMAIN=true` to allow that
 without being asked, or `false` to refuse. Otherwise it names the credential to
 set and offers to take a different origin.
 
