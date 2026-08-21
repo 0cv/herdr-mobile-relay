@@ -45,8 +45,12 @@ passes first.
 
 ## Toolchains
 
-Backend development uses Go 1.27.0; frontend development uses Node.js 26.
-Packaged users need neither toolchain.
+Backend development uses Go 1.27.0; frontend development uses Bun 1.4 (`bun
+install --cwd frontend`, then the `make` targets above). Playwright runs on Bun;
+the WebKit leg still runs inside Playwright's official container, which uses the
+image's own Node. Publishing the hosted web app (`make web-deploy`,
+`make web-preview`) shells out to `npx wrangler` and still needs Node.js 26 on
+that computer only. Packaged users need no toolchain at all.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
 failure injection, and process-control traces for black-box tests.

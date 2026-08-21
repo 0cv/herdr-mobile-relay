@@ -30,11 +30,11 @@ echo "  Binary:      $HERDR_RELAY_BIN"
 echo "  Production relay port 8375 and its configuration are not used."
 echo ""
 
-if ! command -v npm >/dev/null 2>&1; then
-    echo "✗ npm is required for make dev-tunnel. Install Node.js 26 first." >&2
+if ! command -v bun >/dev/null 2>&1; then
+    echo "✗ bun is required for make dev-tunnel. Install Bun 1.4 first." >&2
     exit 1
 fi
 
-npm --prefix "$REPO_DIR/frontend" run build
+bun run --cwd "$REPO_DIR/frontend" build
 "$SCRIPT_DIR/setup.sh" --install-missing
 exec "$SCRIPT_DIR/start.sh"

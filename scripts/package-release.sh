@@ -27,8 +27,8 @@ command -v go >/dev/null 2>&1 || {
     echo "go is required on the release builder" >&2
     exit 1
 }
-command -v node >/dev/null 2>&1 || {
-    echo "Node.js is required on the release builder to stamp the web bundle" >&2
+command -v bun >/dev/null 2>&1 || {
+    echo "Bun is required on the release builder to stamp the web bundle" >&2
     exit 1
 }
 command -v tar >/dev/null 2>&1 || {
@@ -59,7 +59,7 @@ for TARGET in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         -o "$STAGE/herdr-mobile-relay" \
         "$REPO_DIR/cmd/herdr-mobile-relay"
     cp -R "$REPO_DIR/web" "$STAGE/web"
-    node "$SCRIPT_DIR/stamp-web-version.mjs" "$STAGE/web/version.json" "$VERSION" "$REVISION"
+    bun "$SCRIPT_DIR/stamp-web-version.mjs" "$STAGE/web/version.json" "$VERSION" "$REVISION"
     cp "$REPO_DIR/LICENSE" "$STAGE/LICENSE"
     cp "$REPO_DIR/README.md" "$STAGE/README.md"
     for WRAPPER in \

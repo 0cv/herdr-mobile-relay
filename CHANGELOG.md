@@ -3,28 +3,6 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Fixed
-
-- Fixed-grid terminal content no longer clips or falls short of the leased
-  width on Safari: text runs and horizontal rules inside TUI boxes and status
-  bars were still sized in `ch` units, which Safari resolves to the 0.5em
-  spec fallback when the bundled symbols font — which has no digit glyphs —
-  is the first available font. They now multiply the same probed px cell as
-  every other width. (#11)
-- Opening a session on Safari now shows the transcript's end immediately and
-  scrolling no longer flickers: `content-visibility: auto` made Safari size
-  offscreen mounted rows at one line regardless of wrapping (the rows are
-  already virtualized by the app, so the property only corrupted
-  scrollHeight), and a browser clamp after row-height corrections was
-  misread as the user scrolling toward history, permanently dropping the
-  stick-to-bottom pin. (#11)
-- The row lease no longer shrinks while the on-screen keyboard is open:
-  typing toggled two height resizes per keyboard cycle, and each full-height
-  redraw could strand a stale copy of an agent's status bar in the
-  scrollback.
-
 ## [0.17.2] - 2026-08-21
 
 ### Added
@@ -37,12 +15,32 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Terminal lines no longer wrap short of the leased width on iOS Safari. The
-  wrap cap was emitted in `ch` units while columns were measured from a pixel
-  probe; engines whose `1ch` disagrees with the rendered glyph advance wrapped
-  early, left a growing right gap in Compact, and mis-estimated virtual row
-  heights, which caused intense flicker while scrolling. Every width cap is now
-  derived in px from the same probe that produced the column count. (#11)
+- Terminal lines no longer wrap short of the leased width on Safari. Width
+  caps were emitted in `ch` units while columns were measured from a pixel
+  probe, and Safari resolves `ch` to the 0.5em spec fallback when the bundled
+  symbols font — which has no digit glyphs — is the first available font, so
+  every cap came out ~19% narrow: text wrapped early, Compact grew a right
+  gap, and virtual row heights were mis-estimated. Every cap, including the
+  text runs and horizontal rules inside TUI boxes and status bars, now
+  multiplies the same probed px cell. (#11)
+- Opening a session on Safari now shows the transcript's end immediately and
+  scrolling no longer flickers: `content-visibility: auto` made Safari size
+  offscreen mounted rows at one line regardless of wrapping (the rows are
+  already virtualized by the app, so the property only corrupted
+  scrollHeight), and a browser clamp after row-height corrections was misread
+  as the user scrolling toward history, permanently dropping the
+  stick-to-bottom pin. (#11)
+- The row lease no longer shrinks while the on-screen keyboard is open:
+  typing toggled two height resizes per keyboard cycle, and each full-height
+  redraw could strand a stale copy of an agent's status bar in the scrollback.
+
+### Changed
+
+- Frontend development and CI run on Bun 1.4 instead of Node.js and npm:
+  Playwright, Vitest, ESLint, svelte-check, and the build scripts all run
+  under Bun, with `bun.lock` replacing `package-lock.json`. Publishing the
+  hosted web app still uses `npx wrangler` and Node. This changes no shipped
+  bytes — the built bundle is byte-identical, brotli included.
 
 ## [0.17.1] - 2026-08-20
 

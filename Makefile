@@ -130,13 +130,13 @@ release-bundle-check:
 		"$$tmp/checksums.txt" "$$version" "$$revision" "$${host_os}/$${host_arch}"
 
 frontend-check:
-	npm --prefix frontend run lint
-	npm --prefix frontend run check
-	npm --prefix frontend run test
-	npm --prefix frontend run build
-	npm --prefix frontend run size
-	node --check frontend/public/sw.js
-	node --check frontend/public/notification-icons.js
+	bun run --cwd frontend lint
+	bun run --cwd frontend check
+	bun run --cwd frontend test
+	bun run --cwd frontend build
+	bun run --cwd frontend size
+	bun build frontend/public/sw.js --outfile=/dev/null
+	bun build frontend/public/notification-icons.js --outfile=/dev/null
 	bash -n frontend/scripts/run-browser-tests.sh
 
 frontend-browser:
@@ -146,7 +146,7 @@ frontend-browser-release:
 	frontend/scripts/run-browser-tests.sh ../web
 
 frontend-browser-attention-release:
-	HERDR_WEB_ROOT=../web npm --prefix frontend run test:browser:attention
+	HERDR_WEB_ROOT=../web bun run --cwd frontend test:browser:attention
 
 relay-plugin:
 	herdr plugin link .
@@ -164,15 +164,15 @@ service-logs:
 	relay/service.sh logs
 
 web-bundle-check:
-	node frontend/scripts/validate-build.mjs web
-	node frontend/scripts/check-size.mjs web
-	node --check web/sw.js
-	node --check web/notification-icons.js
+	bun frontend/scripts/validate-build.mjs web
+	bun frontend/scripts/check-size.mjs web
+	bun build web/sw.js --outfile=/dev/null
+	bun build web/notification-icons.js --outfile=/dev/null
 
 web-release:
-	node frontend/scripts/bump-assets.mjs
+	bun frontend/scripts/bump-assets.mjs
 	$(MAKE) frontend-check
-	node frontend/scripts/release.mjs
+	bun frontend/scripts/release.mjs
 	$(MAKE) web-bundle-check
 
 web-release-check: web-bundle-check

@@ -14,6 +14,9 @@ import { constants, gzipSync } from 'node:zlib';
 // history: all three land in the single bootstrap `assets/app.js`.
 // Raised from 115 KiB for Resize Session row leasing and the px-derived
 // terminal width caps (issue #11), which also land in the bootstrap payload.
+// The gzip figure is the measuring runtime's zlib, not a property of the
+// bundle: the same bytes measure ~300 B larger under Bun than under Node, so
+// compare numbers only across runs on the same runtime (the repo uses Bun).
 const limitKiB = 116;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');

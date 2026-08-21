@@ -169,7 +169,7 @@ fi
 ensure_relay_env "$ENV_FILE"
 
 if ! command -v npx >/dev/null 2>&1; then
-    echo "Optional: install Node.js/npm only if you want to self-host the web app or run frontend checks."
+    echo "Optional: install Node.js/npm only if you want to self-host the web app."
 fi
 
 echo ""
