@@ -2321,19 +2321,30 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   expect(resizeGeometry.firstLineHeight).toBeGreaterThan(resizeGeometry.lineHeight * 2);
   expect(Math.max(...resizeGeometry.lineLengths)).toBeGreaterThan(Number(acquire.columns));
   // Issue #11: the wrap cap must be the probed cell advance times the leased
-  // column count, in px. A ch-derived cap wraps short of the leased width on
-  // engines whose 1ch disagrees with the rendered glyph advance (iOS Safari).
+  // column count, emitted in px — never derived from ch. Measured: with the
+  // symbols face loaded, Playwright WebKit 26.5 and Chromium both resolve
+  // 1ch to the glyph advance (ratio 0.9997) while shipped Safari 26.1
+  // resolves it to the 0.5em spec fallback (ratio 0.8087), so the defect is
+  // NOT reproducible under any CI engine and the arithmetic check alone
+  // would pass a ch-derived cap here. The serialization checks are the part
+  // that fails on a revert; do not replace them with a font-load probe.
   const capGeometry = await terminal.evaluate((element) => {
     const probe = element.querySelector<HTMLElement>(':scope > span[aria-hidden]');
     const line = element.querySelector<HTMLElement>('.ansi-line');
     return {
       cellWidth: probe ? probe.getBoundingClientRect().width / 10 : 0,
       capWidth: line ? Number.parseFloat(getComputedStyle(line).maxWidth) : 0,
+      style: element.getAttribute('style') || '',
     };
   });
   expect(capGeometry.cellWidth).toBeGreaterThan(0);
   expect(Math.abs(capGeometry.capWidth - capGeometry.cellWidth * Number(acquire.columns)))
     .toBeLessThan(0.5);
+  const cellVar = capGeometry.style.match(/--terminal-cell-width: (\d+(?:\.\d+)?)px/);
+  expect(cellVar).not.toBeNull();
+  expect(Number(cellVar![1])).toBeCloseTo(capGeometry.cellWidth, 1);
+  expect(capGeometry.style).toMatch(/--terminal-width: \d+(?:\.\d+)?px/);
+  expect(capGeometry.style).not.toMatch(/\dch\b/);
 
   const storedHistory = Array.from(
     { length: 120 },

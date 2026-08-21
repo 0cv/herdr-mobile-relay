@@ -58,9 +58,6 @@ jobs:
     name: Frontend and mobile browsers (Bun 1.4)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      HERDR_WEBKIT_CONTAINER: 1
-      HERDR_WEBKIT_WORKERS: 4
     steps:
       - uses: actions/checkout@v7
         with:
@@ -73,6 +70,16 @@ jobs:
           go-version: 1.27.0
           cache: true
       - run: bun install --frozen-lockfile --cwd frontend
+      # Native browsers instead of the multi-GB Playwright container image:
+      # the binaries are the same Playwright-pinned builds either way, and no
+      # assertion in the suite depends on the image's font set. Ubuntu is a
+      # supported install-deps target; Fedora is not, which is why the
+      # container path in run-browser-tests.sh stays for local Fedora runs.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+      - run: cd frontend && bun x playwright install --with-deps chromium webkit
       - run: make frontend-check
       - run: make web-release-check
 

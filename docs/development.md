@@ -46,9 +46,15 @@ passes first.
 ## Toolchains
 
 Backend development uses Go 1.27.0; frontend development uses Bun 1.4 (`bun
-install --cwd frontend`, then the `make` targets above). Playwright runs on Bun;
-the WebKit leg still runs inside Playwright's official container, which uses the
-image's own Node. Publishing the hosted web app (`make web-deploy`,
+install --cwd frontend`, then the `make` targets above). Playwright runs on
+Bun. CI installs both browsers natively (`bun x playwright install
+--with-deps chromium webkit`); on Fedora, `install-deps` is unsupported and
+native WebKit crashes, so `make frontend-browser` runs WebKit through
+Playwright's official container via podman (Chromium runs natively — its dnf
+dependencies are nspr nss dbus-libs atk at-spi2-atk cups-libs at-spi2-core
+libXcomposite libXdamage libXext libXfixes libXrandr mesa-libgbm cairo pango
+alsa-lib, per passportxyz/passport's fedora-install-playwright-deps.sh).
+Publishing the hosted web app (`make web-deploy`,
 `make web-preview`) shells out to `npx wrangler` and still needs Node.js 26 on
 that computer only. Packaged users need no toolchain at all.
 

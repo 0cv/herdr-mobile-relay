@@ -8,6 +8,11 @@ WEB_ROOT="${1:-dist}"
 
 cd "$FRONTEND_DIR"
 
+# CI runs both engines natively: Ubuntu is a supported `playwright install
+# --with-deps` target, and the pinned browser builds are identical to the
+# container's. The container paths below remain for hosts where native WebKit
+# cannot work: Fedora (install-deps has no dnf mapping and WebKit crashes on
+# ABI mismatch) and any host that opts in with HERDR_WEBKIT_CONTAINER=1.
 CONTAINER_RUNTIME=""
 CONTAINER_ARGS=()
 if [ "${HERDR_WEBKIT_CONTAINER:-}" = 1 ]; then
