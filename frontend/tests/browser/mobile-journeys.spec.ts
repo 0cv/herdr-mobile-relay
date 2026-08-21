@@ -208,7 +208,11 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         let data: Record<string, unknown> = {};
         if ((message.type === 'answer_question' || message.type === 'navigate_question') && nextInteraction) data = { interaction: nextInteraction };
         else if (message.type === 'agent_start') data = { pane_id: 'w1:pre-placement' };
-        else if (message.type === 'lease_pane_size') data = { columns: message.columns };
+        else if (message.type === 'lease_pane_size') {
+          data = typeof message.rows === 'number'
+            ? { columns: message.columns, rows: message.rows }
+            : { columns: message.columns };
+        }
         else if (message.type === 'agent_clear') data = {
           pane_id: 'w1:pre-clear', name: 'clear-codex-123', cwd: '/home/test/Development/relay',
         };
@@ -2248,7 +2252,7 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
   });
   await server(page, 0, {
     type: 'agents',
@@ -2272,6 +2276,9 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   expect(acquire.columns).toEqual(expect.any(Number));
   expect(Number(acquire.columns)).toBeGreaterThanOrEqual(40);
   expect(Number(acquire.columns)).toBeLessThanOrEqual(240);
+  expect(acquire.rows).toEqual(expect.any(Number));
+  expect(Number(acquire.rows)).toBeGreaterThanOrEqual(10);
+  expect(Number(acquire.rows)).toBeLessThanOrEqual(120);
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(0);
   await page.waitForTimeout(300);
@@ -2313,6 +2320,20 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   expect(resizeGeometry.backgroundWidth).toBeLessThan(resizeGeometry.clientWidth);
   expect(resizeGeometry.firstLineHeight).toBeGreaterThan(resizeGeometry.lineHeight * 2);
   expect(Math.max(...resizeGeometry.lineLengths)).toBeGreaterThan(Number(acquire.columns));
+  // Issue #11: the wrap cap must be the probed cell advance times the leased
+  // column count, in px. A ch-derived cap wraps short of the leased width on
+  // engines whose 1ch disagrees with the rendered glyph advance (iOS Safari).
+  const capGeometry = await terminal.evaluate((element) => {
+    const probe = element.querySelector<HTMLElement>(':scope > span[aria-hidden]');
+    const line = element.querySelector<HTMLElement>('.ansi-line');
+    return {
+      cellWidth: probe ? probe.getBoundingClientRect().width / 10 : 0,
+      capWidth: line ? Number.parseFloat(getComputedStyle(line).maxWidth) : 0,
+    };
+  });
+  expect(capGeometry.cellWidth).toBeGreaterThan(0);
+  expect(Math.abs(capGeometry.capWidth - capGeometry.cellWidth * Number(acquire.columns)))
+    .toBeLessThan(0.5);
 
   const storedHistory = Array.from(
     { length: 120 },
@@ -2390,7 +2411,7 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     action: 'lease_pane_size',
     request_id: reentryLease.request_id,
     ok: true,
-    data: { columns: reentryLease.columns },
+    data: { columns: reentryLease.columns, rows: reentryLease.rows },
   });
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'read_pane').length).toBeGreaterThan(readCountBeforeReentry);

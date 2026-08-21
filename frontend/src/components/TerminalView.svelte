@@ -4,7 +4,9 @@
   import QuestionForm from '$components/QuestionForm.svelte';
   import {
     MAX_PANE_SIZE_COLUMNS,
+    MAX_PANE_SIZE_ROWS,
     MIN_PANE_SIZE_COLUMNS,
+    MIN_PANE_SIZE_ROWS,
   } from '$lib/config';
   import {
     agentNeedsInspection,
@@ -163,8 +165,10 @@
   let leaseInFlight = false;
   let leaseTarget: Agent | null = null;
   let lastLeasedColumns = $state(0);
+  let lastLeasedRows = 0;
   let renderedResizeColumns = $state(0);
-  let queuedLease: { columns: number; force: boolean } | null = null;
+  let measuredCellWidth = $state(0);
+  let queuedLease: { columns: number; rows: number; force: boolean } | null = null;
   const keyQueue: QueuedKeyCommand[] = [];
   let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   let keyReadTimer: ReturnType<typeof setTimeout> | undefined;
@@ -239,11 +243,17 @@
   const terminalCopyText = $derived(latestCompletedResponse(frame?.content || ''));
   const terminalContentStyle = $derived.by(() => {
     const styles: string[] = [];
+    // Width caps are emitted in px of the measured probe cell, never in ch:
+    // Safari's Core Text port resolves 1ch against different font metrics
+    // than the rendered glyph advance, so an Nch cap wraps short of N cells.
+    if (measuredCellWidth > 0) {
+      styles.push(`--terminal-cell-width: ${measuredCellWidth.toFixed(4)}px`);
+    }
     if (resizeSessionActive && (lastLeasedColumns || renderedResizeColumns)) {
-      styles.push(`--terminal-width: ${lastLeasedColumns || renderedResizeColumns}ch`);
+      styles.push(`--terminal-width: calc(${lastLeasedColumns || renderedResizeColumns} * var(--terminal-cell-width, 1ch))`);
     }
     if (virtualContentColumns > 0) {
-      styles.push(`--terminal-content-width: ${virtualContentColumns}ch`);
+      styles.push(`--terminal-content-width: calc(${virtualContentColumns} * var(--terminal-cell-width, 1ch))`);
     }
     return styles.length ? styles.join(';') : undefined;
   });
@@ -1396,6 +1406,12 @@
       && connection.capabilities.includes('pane_size_lease');
   }
 
+  function paneSizeRowLeaseSupported(target: Agent): boolean {
+    return Boolean(
+      $connections.get(target.relay_id)?.capabilities.includes('pane_size_lease_rows'),
+    );
+  }
+
   function measuredPaneColumns(): number | null {
     if (!terminalElement || !cellMeasureElement) return null;
     const cellWidth = cellMeasureElement.getBoundingClientRect().width / CELL_MEASURE_TEXT.length;
@@ -1404,9 +1420,27 @@
       + (Number.parseFloat(style.paddingRight) || 0);
     const usableWidth = terminalElement.clientWidth - horizontalPadding;
     if (!Number.isFinite(cellWidth) || cellWidth <= 0 || usableWidth <= 0) return null;
+    // The probed advance also drives every CSS width cap, so the caps stay
+    // correct the moment the font or interface size changes.
+    if (cellWidth !== measuredCellWidth) measuredCellWidth = cellWidth;
     return Math.min(
       MAX_PANE_SIZE_COLUMNS,
       Math.max(MIN_PANE_SIZE_COLUMNS, Math.floor(usableWidth / cellWidth)),
+    );
+  }
+
+  // 0 means "do not lease rows": the relay keeps the pane's own height.
+  function measuredPaneRows(): number {
+    if (!terminalElement) return 0;
+    const style = getComputedStyle(terminalElement);
+    const lineHeight = Number.parseFloat(style.lineHeight);
+    const verticalPadding = (Number.parseFloat(style.paddingTop) || 0)
+      + (Number.parseFloat(style.paddingBottom) || 0);
+    const usableHeight = terminalElement.clientHeight - verticalPadding;
+    if (!Number.isFinite(lineHeight) || lineHeight <= 0 || usableHeight <= 0) return 0;
+    return Math.min(
+      MAX_PANE_SIZE_ROWS,
+      Math.max(MIN_PANE_SIZE_ROWS, Math.floor(usableHeight / lineHeight)),
     );
   }
 
@@ -1422,6 +1456,7 @@
     leaseGeneration += 1;
     leaseTarget = null;
     lastLeasedColumns = 0;
+    lastLeasedRows = 0;
     clearResizeSettling();
     queuedLease = null;
   }
@@ -1452,11 +1487,12 @@
       }
       return;
     }
+    const rows = paneSizeRowLeaseSupported(target) ? measuredPaneRows() : 0;
     const sameTarget = leaseTarget?.pane_id === target.pane_id;
-    if (!force && sameTarget && columns === lastLeasedColumns) return;
-    if (queuedLease && queuedLease.columns === columns) {
-      queuedLease = { columns, force: queuedLease.force || force };
-    } else queuedLease = { columns, force };
+    if (!force && sameTarget && columns === lastLeasedColumns && rows === lastLeasedRows) return;
+    if (queuedLease && queuedLease.columns === columns && queuedLease.rows === rows) {
+      queuedLease = { columns, rows, force: queuedLease.force || force };
+    } else queuedLease = { columns, rows, force };
     if (!leaseInFlight) void flushPaneSizeLease();
   }
 
@@ -1471,24 +1507,27 @@
         if (!paneSizeLeaseSupported(target)) continue;
         if (!request.force
           && leaseTarget?.pane_id === target.pane_id
-          && request.columns === lastLeasedColumns) continue;
+          && request.columns === lastLeasedColumns
+          && request.rows === lastLeasedRows) continue;
         if (leaseTarget && leaseTarget.pane_id !== target.pane_id) {
           releasePaneSizeLease(componentMounted);
         }
         const generation = leaseGeneration;
         leaseTarget = target;
         try {
-          if (request.columns !== lastLeasedColumns) beginResizeSettling();
-          const appliedColumns = await relayStore.leasePaneSize(target, request.columns);
+          if (request.columns !== lastLeasedColumns
+            || request.rows !== lastLeasedRows) beginResizeSettling();
+          const applied = await relayStore.leasePaneSize(target, request.columns, request.rows);
           if (generation !== leaseGeneration
             || leaseTarget?.pane_id !== target.pane_id
             || !paneSizeLeaseSupported(target)) continue;
-          const previousColumns = lastLeasedColumns;
-          const changed = appliedColumns !== previousColumns;
-          lastLeasedColumns = appliedColumns;
+          const changed = applied.columns !== lastLeasedColumns
+            || applied.rows !== lastLeasedRows;
+          lastLeasedColumns = applied.columns;
+          lastLeasedRows = applied.rows;
           paneSizeLeaseError = '';
           if (changed) {
-            // The pane repaints at the new width: read again so the live
+            // The pane repaints at the new size: read again so the live
             // screen is the resized one. History stays with the relay journal.
             relayStore.readPane(target, true);
           }
@@ -1498,6 +1537,7 @@
             && paneSizeLeaseSupported(target)) {
             queuedLease = null;
             lastLeasedColumns = 0;
+            lastLeasedRows = 0;
             clearResizeSettling();
             paneSizeLeaseError = `Resize Session failed: ${(error as Error).message}`;
           }

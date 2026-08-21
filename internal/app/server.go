@@ -372,7 +372,7 @@ func (s *Server) Run(ctx context.Context) error {
 			s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
 			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
 		case "lease_pane_size":
-			columns, leaseErr := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns)
+			columns, rows, leaseErr := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
 			if leaseErr != nil {
 				s.sendCommandResult(client, inbound.RequestID, "lease_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
 				break
@@ -385,7 +385,7 @@ func (s *Server) Run(ctx context.Context) error {
 				"completed",
 				"",
 				inbound.PaneID,
-				map[string]any{"columns": columns},
+				map[string]any{"columns": columns, "rows": rows},
 			)
 		case "release_pane_size":
 			leaseErr := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID)

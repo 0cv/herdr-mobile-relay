@@ -32,10 +32,11 @@ type runnerCall struct {
 }
 
 type fakeCommandRunner struct {
-	ttyByPID  map[int]string
-	sizes     map[string]terminalSize
-	calls     []runnerCall
-	setValues []int
+	ttyByPID     map[int]string
+	sizes        map[string]terminalSize
+	calls        []runnerCall
+	setValues    []int
+	setRowValues []int
 }
 
 func (f *fakeCommandRunner) Output(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -59,27 +60,33 @@ func (f *fakeCommandRunner) Output(_ context.Context, name string, args ...strin
 		if !ok {
 			return nil, errors.New("unknown tty")
 		}
-		switch args[2] {
-		case "size":
+		if args[2] == "size" {
 			if len(args) != 3 {
 				return nil, fmt.Errorf("unexpected stty size arguments: %v", args)
 			}
 			return []byte(fmt.Sprintf("%d %d\n", size.rows, size.columns)), nil
-		case "cols":
-			if len(args) != 4 {
-				return nil, fmt.Errorf("unexpected stty cols arguments: %v", args)
+		}
+		for i := 2; i < len(args); i += 2 {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("unexpected stty arguments: %v", args)
 			}
-			columns, err := strconv.Atoi(args[3])
+			value, err := strconv.Atoi(args[i+1])
 			if err != nil {
 				return nil, err
 			}
-			size.columns = columns
-			f.sizes[tty] = size
-			f.setValues = append(f.setValues, columns)
-			return nil, nil
-		default:
-			return nil, fmt.Errorf("unexpected stty operation: %v", args)
+			switch args[i] {
+			case "cols":
+				size.columns = value
+				f.setValues = append(f.setValues, value)
+			case "rows":
+				size.rows = value
+				f.setRowValues = append(f.setRowValues, value)
+			default:
+				return nil, fmt.Errorf("unexpected stty operation: %v", args)
+			}
 		}
+		f.sizes[tty] = size
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("unexpected command: %s", name)
 	}
@@ -113,12 +120,12 @@ func TestAcquireUsesForegroundTTYAndChangesColumnsOnly(t *testing.T) {
 	}
 	manager := testManager(provider, runner, func() time.Time { return now })
 
-	applied, err := manager.Acquire(context.Background(), "transport-client-1", "pane-1", 84)
+	applied, appliedRows, err := manager.Acquire(context.Background(), "transport-client-1", "pane-1", 84, 0)
 	if err != nil {
 		t.Fatalf("Acquire() error = %v", err)
 	}
-	if applied != 84 {
-		t.Fatalf("Acquire() columns = %d, want 84", applied)
+	if applied != 84 || appliedRows != 37 {
+		t.Fatalf("Acquire() = %dx%d, want 84x37", applied, appliedRows)
 	}
 	if columns, ok := manager.ActiveColumns("pane-1"); !ok || columns != 84 {
 		t.Fatalf("ActiveColumns() = %d, %v, want 84, true", columns, ok)
@@ -152,7 +159,7 @@ func TestResizedWithinTracksActualColumnChanges(t *testing.T) {
 	if manager.ResizedWithin("pane-1", 3*time.Second) {
 		t.Fatal("untracked pane reported as resized")
 	}
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 46); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 46, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !manager.ResizedWithin("pane-1", 3*time.Second) {
@@ -164,7 +171,7 @@ func TestResizedWithinTracksActualColumnChanges(t *testing.T) {
 		t.Fatal("settle window did not close after the timeout")
 	}
 	// Renewal at the same columns: no SIGWINCH, no re-render, no window.
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 46); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 46, 0); err != nil {
 		t.Fatal(err)
 	}
 	if manager.ResizedWithin("pane-1", 3*time.Second) {
@@ -172,7 +179,7 @@ func TestResizedWithinTracksActualColumnChanges(t *testing.T) {
 	}
 
 	// A genuine width change re-opens it.
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 44); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 44, 0); err != nil {
 		t.Fatal(err)
 	}
 	if !manager.ResizedWithin("pane-1", 3*time.Second) {
@@ -191,10 +198,10 @@ func TestMultipleClientsApplyMinimumAndRestoreBaselineOnRelease(t *testing.T) {
 	}
 	manager := testManager(provider, runner, func() time.Time { return now })
 
-	if columns, err := manager.Acquire(context.Background(), "client-a", "pane-1", 110); err != nil || columns != 110 {
+	if columns, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 110, 0); err != nil || columns != 110 {
 		t.Fatalf("first Acquire() = %d, %v", columns, err)
 	}
-	if columns, err := manager.Acquire(context.Background(), "client-b", "pane-1", 76); err != nil || columns != 76 {
+	if columns, _, err := manager.Acquire(context.Background(), "client-b", "pane-1", 76, 0); err != nil || columns != 76 {
 		t.Fatalf("second Acquire() = %d, %v", columns, err)
 	}
 	if err := manager.Release(context.Background(), "client-b", "pane-1"); err != nil {
@@ -233,7 +240,7 @@ func TestReleaseKeepsTheWidthForAReturningLeaseOwner(t *testing.T) {
 	}
 	manager := testManager(provider, runner, func() time.Time { return now })
 
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 84); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 84, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.Release(context.Background(), "client-a", "pane-1"); err != nil {
@@ -246,7 +253,7 @@ func TestReleaseKeepsTheWidthForAReturningLeaseOwner(t *testing.T) {
 	if columns, ok := manager.ActiveColumns("pane-1"); !ok || columns != 84 {
 		t.Fatalf("ActiveColumns() inside the grace = %d, %v, want 84, true", columns, ok)
 	}
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 84); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 84, 0); err != nil {
 		t.Fatalf("returning Acquire() error = %v", err)
 	}
 	if !slices.Equal(runner.setValues, []int{84, 84}) {
@@ -268,7 +275,7 @@ func TestReleaseRestoresBaselineOnceTheGraceElapses(t *testing.T) {
 	}
 	manager := testManager(provider, runner, func() time.Time { return now })
 
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 90); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 90, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.Release(context.Background(), "client-a", "pane-1"); err != nil {
@@ -297,12 +304,12 @@ func TestRefreshPreservesLocalColumnResizeAsNewBaseline(t *testing.T) {
 	}
 	manager := testManager(provider, runner, func() time.Time { return now })
 
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80, 0); err != nil {
 		t.Fatal(err)
 	}
 	runner.sizes["/dev/pts/9"] = terminalSize{rows: 51, columns: 150}
 	now = now.Add(10 * time.Second)
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80, 0); err != nil {
 		t.Fatalf("refresh Acquire() error = %v", err)
 	}
 	if err := manager.Release(context.Background(), "client-a", "pane-1"); err != nil {
@@ -328,7 +335,7 @@ func TestExpirySweepRestoresBaseline(t *testing.T) {
 	}
 	manager := testManager(provider, runner, func() time.Time { return now })
 
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 72); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 72, 0); err != nil {
 		t.Fatal(err)
 	}
 	if columns, ok := manager.ActiveColumns("pane-1"); !ok || columns != 72 {
@@ -364,10 +371,10 @@ func TestReleaseClientAndShutdownCannotLeaveLeases(t *testing.T) {
 	}
 	manager := testManager(provider, runner, func() time.Time { return now })
 
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 75); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 75, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-2", 85); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-2", 85, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.ReleaseClient(context.Background(), "client-a"); err != nil {
@@ -377,7 +384,7 @@ func TestReleaseClientAndShutdownCannotLeaveLeases(t *testing.T) {
 		t.Fatalf("tracked panes = %d after client disconnect", len(manager.panes))
 	}
 
-	if _, err := manager.Acquire(context.Background(), "client-b", "pane-1", 90); err != nil {
+	if _, _, err := manager.Acquire(context.Background(), "client-b", "pane-1", 90, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.Shutdown(context.Background()); err != nil {
@@ -386,7 +393,7 @@ func TestReleaseClientAndShutdownCannotLeaveLeases(t *testing.T) {
 	if len(manager.panes) != 0 {
 		t.Fatalf("tracked panes = %d after shutdown", len(manager.panes))
 	}
-	if _, err := manager.Acquire(context.Background(), "client-c", "pane-1", 90); !errors.Is(err, ErrClosed) {
+	if _, _, err := manager.Acquire(context.Background(), "client-c", "pane-1", 90, 0); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Acquire() after shutdown error = %v, want ErrClosed", err)
 	}
 }
@@ -402,14 +409,17 @@ func TestAcquireRejectsInvalidColumnsAndNonTTYMetadata(t *testing.T) {
 	}
 	manager := testManager(provider, runner, func() time.Time { return now })
 
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", MinColumns-1); !errors.Is(err, ErrInvalidColumns) {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", MinColumns-1, 0); !errors.Is(err, ErrInvalidColumns) {
 		t.Fatalf("invalid columns error = %v", err)
 	}
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80); !errors.Is(err, ErrTTYUnavailable) {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80, MinRows-1); !errors.Is(err, ErrInvalidRows) {
+		t.Fatalf("invalid rows error = %v", err)
+	}
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80, 0); !errors.Is(err, ErrTTYUnavailable) {
 		t.Fatalf("non-TTY error = %v", err)
 	}
 	provider.infos["pane-1"] = &herdr.PaneProcessInfo{PaneID: "pane-1"}
-	if _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80); !errors.Is(err, ErrProcessUnavailable) {
+	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 80, 0); !errors.Is(err, ErrProcessUnavailable) {
 		t.Fatalf("missing process metadata error = %v", err)
 	}
 }
@@ -427,11 +437,100 @@ func TestAcquireRejectsDisconnectedOwnerBeforeCreatingLease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := manager.Acquire(ctx, "client-a", "pane-1", 80); !errors.Is(err, ErrLeaseOwnerGone) {
+	if _, _, err := manager.Acquire(ctx, "client-a", "pane-1", 80, 0); !errors.Is(err, ErrLeaseOwnerGone) {
 		t.Fatalf("disconnected owner error = %v", err)
 	}
 	if len(runner.calls) != 0 || len(manager.panes) != 0 {
 		t.Fatalf("disconnected owner created state: calls=%v panes=%d", runner.calls, len(manager.panes))
+	}
+}
+
+// Rows ride the same lease: the smallest row constraint wins, width-only
+// clients never lower it, and lapsed row leases give the pane its own
+// height back while surviving width leases stay applied.
+func TestRowLeasesApplyMinimumAndRestoreBaselineHeight(t *testing.T) {
+	now := time.Unix(800, 0)
+	provider := &fakeProcessInfoProvider{infos: map[string]*herdr.PaneProcessInfo{
+		"pane-1": processInfo("pane-1", 951),
+	}}
+	runner := &fakeCommandRunner{
+		ttyByPID: map[int]string{951: "pts/15"},
+		sizes:    map[string]terminalSize{"/dev/pts/15": {rows: 64, columns: 180}},
+	}
+	manager := testManager(provider, runner, func() time.Time { return now })
+
+	columns, rows, err := manager.Acquire(context.Background(), "phone-a", "pane-1", 84, 30)
+	if err != nil || columns != 84 || rows != 30 {
+		t.Fatalf("Acquire() = %dx%d, %v, want 84x30", columns, rows, err)
+	}
+	if got := runner.sizes["/dev/pts/15"]; got.rows != 30 || got.columns != 84 {
+		t.Fatalf("terminal size = %+v, want 84x30", got)
+	}
+	if !manager.ResizedWithin("pane-1", time.Second) {
+		t.Fatal("row lease did not open the settle window")
+	}
+
+	// A second, taller phone must not raise the applied height.
+	if _, rows, err := manager.Acquire(context.Background(), "phone-b", "pane-1", 100, 44); err != nil || rows != 30 {
+		t.Fatalf("second Acquire() rows = %d, %v, want 30", rows, err)
+	}
+	if got, ok := manager.ActiveRows("pane-1"); !ok || got != 30 {
+		t.Fatalf("ActiveRows() = %d, %v, want 30, true", got, ok)
+	}
+
+	// A width-only client never constrains the height.
+	if _, rows, err := manager.Acquire(context.Background(), "desk-c", "pane-1", 90, 0); err != nil || rows != 30 {
+		t.Fatalf("width-only Acquire() rows = %d, %v, want 30", rows, err)
+	}
+
+	// A rows-only change re-opens the settle window like a width change.
+	now = now.Add(5 * time.Second)
+	if manager.ResizedWithin("pane-1", time.Second) {
+		t.Fatal("settle window did not close")
+	}
+	if _, rows, err := manager.Acquire(context.Background(), "phone-a", "pane-1", 84, 26); err != nil || rows != 26 {
+		t.Fatalf("row change Acquire() rows = %d, %v, want 26", rows, err)
+	}
+	if !manager.ResizedWithin("pane-1", time.Second) {
+		t.Fatal("row change did not open the settle window")
+	}
+
+	// Both row-leasing phones leave: the surviving width lease keeps its
+	// narrower width while the pane gets its own height back.
+	if err := manager.Release(context.Background(), "phone-a", "pane-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Release(context.Background(), "phone-b", "pane-1"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(ReleaseGrace)
+	if err := manager.SweepExpired(context.Background()); err != nil {
+		t.Fatalf("SweepExpired() error = %v", err)
+	}
+	if got := runner.sizes["/dev/pts/15"]; got.rows != 64 || got.columns != 90 {
+		t.Fatalf("size after row leases lapsed = %+v, want 90x64", got)
+	}
+	if got, ok := manager.ActiveRows("pane-1"); !ok || got != 64 {
+		t.Fatalf("ActiveRows() with width-only lease = %d, %v, want 64, true", got, ok)
+	}
+
+	// Last client gone: full restore, with the height asserted exactly once
+	// for the restore and never again.
+	if err := manager.Release(context.Background(), "desk-c", "pane-1"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(ReleaseGrace)
+	if err := manager.SweepExpired(context.Background()); err != nil {
+		t.Fatalf("SweepExpired() error = %v", err)
+	}
+	if got := runner.sizes["/dev/pts/15"]; got.rows != 64 || got.columns != 180 {
+		t.Fatalf("restored size = %+v, want 180x64", got)
+	}
+	if !slices.Equal(runner.setRowValues, []int{30, 30, 30, 26, 64}) {
+		t.Fatalf("applied rows = %v, want [30 30 30 26 64]", runner.setRowValues)
+	}
+	if len(manager.panes) != 0 {
+		t.Fatalf("tracked panes = %d after final release", len(manager.panes))
 	}
 }
 

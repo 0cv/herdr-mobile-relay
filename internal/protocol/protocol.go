@@ -67,6 +67,7 @@ type Inbound struct {
 	Before           string          `json:"before,omitempty"`
 	Limit            int             `json:"limit,omitempty"`
 	Columns          int             `json:"columns,omitempty"`
+	Rows             int             `json:"rows,omitempty"`
 	Format           string          `json:"format,omitempty"`
 	Path             string          `json:"path,omitempty"`
 	Filename         string          `json:"filename,omitempty"`
@@ -207,6 +208,7 @@ var Capabilities = []string{
 	"slash_commands",
 	"conversation_history",
 	"pane_size_lease",
+	"pane_size_lease_rows",
 	"workspace_inspection",
 	"secret_input",
 }

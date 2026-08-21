@@ -43,6 +43,8 @@ export const TERMINAL_REFRESH_LABELS: Record<TerminalRefreshInterval, string> = 
 };
 export const MIN_PANE_SIZE_COLUMNS = 40;
 export const MAX_PANE_SIZE_COLUMNS = 240;
+export const MIN_PANE_SIZE_ROWS = 10;
+export const MAX_PANE_SIZE_ROWS = 120;
 export const THEME_COLORS: Record<Theme, string> = {
   dark: '#0a0a0a',
   light: '#f5f5f5',

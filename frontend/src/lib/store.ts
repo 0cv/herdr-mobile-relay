@@ -4,7 +4,9 @@ import {
   importQuickSetup,
   loadRelayConfigs,
   MAX_PANE_SIZE_COLUMNS,
+  MAX_PANE_SIZE_ROWS,
   MIN_PANE_SIZE_COLUMNS,
+  MIN_PANE_SIZE_ROWS,
   normalizeRelayConfig,
   saveRelayConfigs,
 } from './config';
@@ -1078,7 +1080,11 @@ class RelayStore {
     this.rejectPending(this.pendingUploads, relayId, message);
   }
 
-  async leasePaneSize(agent: Agent, columns: number): Promise<number> {
+  async leasePaneSize(
+    agent: Agent,
+    columns: number,
+    rows = 0,
+  ): Promise<{ columns: number; rows: number }> {
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('pane_size_lease')) {
       throw new CommandError('Relay lacks pane-size lease support');
@@ -1088,7 +1094,19 @@ class RelayStore {
         `Terminal columns must be between ${MIN_PANE_SIZE_COLUMNS} and ${MAX_PANE_SIZE_COLUMNS}`,
       );
     }
-    const result = await this.sendToAgent(agent, { type: 'lease_pane_size', columns });
+    // Rows ride the same lease only when the relay understands them; an old
+    // relay would silently ignore the field and the client must not believe
+    // a height was applied.
+    const leaseRows = connection.capabilities.includes('pane_size_lease_rows') ? rows : 0;
+    if (leaseRows !== 0
+      && (!Number.isInteger(leaseRows) || leaseRows < MIN_PANE_SIZE_ROWS || leaseRows > MAX_PANE_SIZE_ROWS)) {
+      throw new CommandError(
+        `Terminal rows must be between ${MIN_PANE_SIZE_ROWS} and ${MAX_PANE_SIZE_ROWS}`,
+      );
+    }
+    const payload: Record<string, any> = { type: 'lease_pane_size', columns };
+    if (leaseRows) payload.rows = leaseRows;
+    const result = await this.sendToAgent(agent, payload);
     if (result.action && result.action !== 'lease_pane_size') {
       throw new CommandError('Wrong pane-size lease confirmation');
     }
@@ -1098,7 +1116,14 @@ class RelayStore {
       || appliedColumns > MAX_PANE_SIZE_COLUMNS) {
       throw new CommandError('Relay did not confirm the applied terminal columns');
     }
-    return appliedColumns;
+    let appliedRows = 0;
+    if (leaseRows) {
+      appliedRows = Number(result.data?.rows);
+      if (!Number.isInteger(appliedRows) || appliedRows < 1) {
+        throw new CommandError('Relay did not confirm the applied terminal rows');
+      }
+    }
+    return { columns: appliedColumns, rows: appliedRows };
   }
 
   async releasePaneSize(agent: Agent): Promise<void> {

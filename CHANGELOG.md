@@ -3,6 +3,25 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Resize Session** now leases the terminal height as well as the width when
+  the relay advertises `pane_size_lease_rows`. Full-screen agents redraw at the
+  phone's row count instead of stranding their response above dozens of blank
+  desktop-height rows; width-only clients and older relays keep the previous
+  width-only behavior, and lease expiry restores the pane's own height. (#11)
+
+### Fixed
+
+- Terminal lines no longer wrap short of the leased width on iOS Safari. The
+  wrap cap was emitted in `ch` units while columns were measured from a pixel
+  probe; engines whose `1ch` disagrees with the rendered glyph advance wrapped
+  early, left a growing right gap in Compact, and mis-estimated virtual row
+  heights, which caused intense flicker while scrolling. Every width cap is now
+  derived in px from the same probe that produced the column count. (#11)
+
 ## [0.17.1] - 2026-08-20
 
 ### Fixed

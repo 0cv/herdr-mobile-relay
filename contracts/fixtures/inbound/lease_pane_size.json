@@ -3,5 +3,6 @@
   "protocol": 2,
   "request_id": "req-lease-size",
   "pane_id": "pane-1",
-  "columns": 84
+  "columns": 84,
+  "rows": 48
 }

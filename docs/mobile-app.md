@@ -73,12 +73,15 @@ controls to resize it without changing the rest of the app.
 
 The mobile terminal always uses **Resize Session**. While a terminal is open
 and the app is visible, the relay leases the live PTY at the measured phone
-width so full-screen agents redraw for the phone. Closing the terminal restores
-the previous width about ten seconds later, so stepping back into the same
-agent resumes instantly instead of resizing the pane twice. A hidden or
-sleeping app stops renewing its lease, so the desktop width returns within half
-a minute; a disconnecting phone and relay shutdown restore it immediately.
-Returning to the terminal takes the phone width again.
+width — and, when the relay advertises row support, the measured phone height —
+so full-screen agents redraw for the phone instead of serving a mostly empty
+desktop-sized grid. Closing the terminal restores the previous size about ten
+seconds later, so stepping back into the same agent resumes instantly instead
+of resizing the pane twice. A hidden or sleeping app stops renewing its lease,
+so the desktop size returns within half a minute; a disconnecting phone and
+relay shutdown restore it immediately. Returning to the terminal takes the
+phone size again. While leased, the pane on the computer physically shrinks to
+the phone's dimensions — the same trade already made for width.
 
 Terminal History keeps 100, 500, or 1,000 lines in the terminal view. 1,000 is
 the default, the largest option, and the ceiling on the gateway-relayed path.

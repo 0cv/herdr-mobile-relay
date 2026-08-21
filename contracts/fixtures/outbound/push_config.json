@@ -17,6 +17,7 @@
     "slash_commands",
     "conversation_history",
     "pane_size_lease",
+    "pane_size_lease_rows",
     "workspace_inspection",
     "secret_input"
   ],

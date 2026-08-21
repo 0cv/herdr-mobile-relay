@@ -19,6 +19,8 @@ import (
 const (
 	MinColumns = 40
 	MaxColumns = 240
+	MinRows    = 10
+	MaxRows    = 120
 	LeaseTTL   = 30 * time.Second
 	// ReleaseGrace keeps a released width in place for a moment. Leaving a
 	// terminal on the phone and stepping back into it is a few seconds apart,
@@ -34,12 +36,13 @@ const (
 var (
 	ErrClosed             = errors.New("Pane size leasing is shut down")
 	ErrInvalidColumns     = errors.New("Columns must be between 40 and 240")
+	ErrInvalidRows        = errors.New("Rows must be between 10 and 120")
 	ErrInvalidLease       = errors.New("Pane and lease owner are required")
 	ErrLeaseOwnerGone     = errors.New("Pane size lease owner is disconnected")
 	ErrProcessUnavailable = errors.New("Pane foreground process information is unavailable")
 	ErrTTYUnavailable     = errors.New("Pane foreground process does not have a TTY")
 	ErrSizeUnavailable    = errors.New("Pane terminal size is unavailable")
-	ErrResizeFailed       = errors.New("Pane terminal columns could not be changed")
+	ErrResizeFailed       = errors.New("Pane terminal size could not be changed")
 	ErrUnsupportedOS      = errors.New("Pane size leasing is unsupported on this platform")
 )
 
@@ -58,7 +61,10 @@ func (execCommandRunner) Output(ctx context.Context, name string, args ...string
 }
 
 type Lease struct {
-	Columns   int
+	Columns int
+	// Rows is zero when the client leases only the width: the pane keeps
+	// its own height and old clients stay valid without sending rows.
+	Rows      int
 	ExpiresAt time.Time
 }
 
@@ -66,6 +72,7 @@ type paneState struct {
 	tty             string
 	baselineRows    int
 	baselineColumns int
+	appliedRows     int
 	appliedColumns  int
 	resizedAt       time.Time
 	leases          map[string]Lease
@@ -115,22 +122,25 @@ func newManager(
 func (m *Manager) Acquire(
 	ctx context.Context,
 	clientID, paneID string,
-	columns int,
-) (int, error) {
+	columns, rows int,
+) (int, int, error) {
 	if clientID == "" || paneID == "" {
-		return 0, ErrInvalidLease
+		return 0, 0, ErrInvalidLease
 	}
 	if columns < MinColumns || columns > MaxColumns {
-		return 0, ErrInvalidColumns
+		return 0, 0, ErrInvalidColumns
+	}
+	if rows != 0 && (rows < MinRows || rows > MaxRows) {
+		return 0, 0, ErrInvalidRows
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		return 0, ErrClosed
+		return 0, 0, ErrClosed
 	}
 	if ctx.Err() != nil {
-		return 0, ErrLeaseOwnerGone
+		return 0, 0, ErrLeaseOwnerGone
 	}
 
 	now := m.now()
@@ -140,27 +150,42 @@ func (m *Manager) Acquire(
 		var err error
 		state, err = m.resolvePane(ctx, paneID)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	} else {
 		m.removeExpired(state, now)
-		if size, err := m.readSize(ctx, state.tty); err != nil {
-			return 0, err
-		} else if size.columns != state.appliedColumns {
-			// A local terminal resize while the lease is active becomes the new
-			// restore point. Rows are observed but are never changed by a lease.
-			state.baselineRows = size.rows
+		size, err := m.readSize(ctx, state.tty)
+		if err != nil {
+			return 0, 0, err
+		}
+		// A local terminal resize while the lease is active becomes the new
+		// restore point, per dimension.
+		if size.columns != state.appliedColumns {
 			state.baselineColumns = size.columns
+		}
+		if size.rows != state.appliedRows {
+			state.baselineRows = size.rows
 		}
 	}
 	if ctx.Err() != nil {
-		return 0, ErrLeaseOwnerGone
+		return 0, 0, ErrLeaseOwnerGone
 	}
 
 	previous, hadPrevious := state.leases[clientID]
-	state.leases[clientID] = Lease{Columns: columns, ExpiresAt: now.Add(m.ttl)}
-	target, _ := minimumColumns(state.leases)
-	if err := m.setColumns(ctx, state.tty, target); err != nil {
+	state.leases[clientID] = Lease{Columns: columns, Rows: rows, ExpiresAt: now.Add(m.ttl)}
+	targetColumns, _ := minimumColumns(state.leases)
+	targetRows := minimumRows(state.leases)
+	constrainedRows := targetRows > 0
+	if !constrainedRows {
+		targetRows = state.baselineRows
+	}
+	// A width-only pane never gets its height touched: rows reach stty only
+	// while a row lease constrains them or a lapsed one must be undone.
+	sttyRows := targetRows
+	if !constrainedRows && targetRows == state.appliedRows {
+		sttyRows = 0
+	}
+	if err := m.setSize(ctx, state.tty, targetColumns, sttyRows); err != nil {
 		if hadPrevious {
 			state.leases[clientID] = previous
 		} else {
@@ -169,16 +194,17 @@ func (m *Manager) Acquire(
 		if newState {
 			m.panes[paneID] = state
 		}
-		return 0, err
+		return 0, 0, err
 	}
-	if target != state.appliedColumns {
+	if targetColumns != state.appliedColumns || targetRows != state.appliedRows {
 		state.resizedAt = now
 	}
-	state.appliedColumns = target
+	state.appliedColumns = targetColumns
+	state.appliedRows = targetRows
 	if newState {
 		m.panes[paneID] = state
 	}
-	return target, nil
+	return targetColumns, targetRows, nil
 }
 
 // ActiveColumns reports the narrowest unexpired lease for a pane.
@@ -221,7 +247,9 @@ func (m *Manager) ResizedWithin(paneID string, window time.Duration) bool {
 	return m.now().Sub(state.resizedAt) < window
 }
 
-// ActiveRows reports the unchanged terminal height for an actively leased pane.
+// ActiveRows reports the effective terminal height for an actively leased
+// pane: the smallest unexpired row lease, or the pane's baseline height when
+// no client leases rows.
 func (m *Manager) ActiveRows(paneID string) (int, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -233,12 +261,24 @@ func (m *Manager) ActiveRows(paneID string) (int, bool) {
 		return 0, false
 	}
 	now := m.now()
+	active := false
+	minimum := 0
 	for _, lease := range state.leases {
-		if lease.ExpiresAt.After(now) {
-			return state.baselineRows, true
+		if !lease.ExpiresAt.After(now) {
+			continue
+		}
+		active = true
+		if lease.Rows > 0 && (minimum == 0 || lease.Rows < minimum) {
+			minimum = lease.Rows
 		}
 	}
-	return 0, false
+	if !active {
+		return 0, false
+	}
+	if minimum == 0 {
+		return state.baselineRows, true
+	}
+	return minimum, true
 }
 
 // Release lapses the lease instead of restoring the pane immediately. A phone
@@ -316,7 +356,11 @@ func (m *Manager) SweepExpired(ctx context.Context) error {
 	for paneID, state := range m.panes {
 		removed := m.removeExpired(state, now)
 		target, active := minimumColumns(state.leases)
-		if !removed && active && state.appliedColumns == target {
+		targetRows := minimumRows(state.leases)
+		if targetRows == 0 {
+			targetRows = state.baselineRows
+		}
+		if !removed && active && state.appliedColumns == target && state.appliedRows == targetRows {
 			continue
 		}
 		if err := m.reconcile(ctx, paneID, state); err != nil {
@@ -387,6 +431,7 @@ func (m *Manager) resolvePane(ctx context.Context, paneID string) (*paneState, e
 		tty:             tty,
 		baselineRows:    size.rows,
 		baselineColumns: size.columns,
+		appliedRows:     size.rows,
 		appliedColumns:  size.columns,
 		leases:          make(map[string]Lease),
 	}, nil
@@ -436,19 +481,16 @@ func (m *Manager) readSize(ctx context.Context, tty string) (terminalSize, error
 	return terminalSize{rows: rows, columns: columns}, nil
 }
 
-func (m *Manager) setColumns(ctx context.Context, tty string, columns int) error {
+func (m *Manager) setSize(ctx context.Context, tty string, columns, rows int) error {
 	flag, err := sttyDeviceFlag(m.goos)
 	if err != nil {
 		return err
 	}
-	if _, err := m.runner.Output(
-		ctx,
-		"stty",
-		flag,
-		tty,
-		"cols",
-		strconv.Itoa(columns),
-	); err != nil {
+	args := []string{flag, tty, "cols", strconv.Itoa(columns)}
+	if rows > 0 {
+		args = append(args, "rows", strconv.Itoa(rows))
+	}
+	if _, err := m.runner.Output(ctx, "stty", args...); err != nil {
 		return ErrResizeFailed
 	}
 	return nil
@@ -491,6 +533,21 @@ func minimumColumns(leases map[string]Lease) (int, bool) {
 	return minimum, minimum != 0
 }
 
+// minimumRows reports the smallest row constraint across leases; zero when
+// every lease is width-only.
+func minimumRows(leases map[string]Lease) int {
+	minimum := 0
+	for _, lease := range leases {
+		if lease.Rows <= 0 {
+			continue
+		}
+		if minimum == 0 || lease.Rows < minimum {
+			minimum = lease.Rows
+		}
+	}
+	return minimum
+}
+
 func (m *Manager) removeExpired(state *paneState, now time.Time) bool {
 	removed := false
 	for clientID, lease := range state.leases {
@@ -508,22 +565,38 @@ func (m *Manager) reconcile(ctx context.Context, paneID string, state *paneState
 	if !active {
 		return m.restore(ctx, paneID, state)
 	}
-	if target == state.appliedColumns {
+	targetRows := minimumRows(state.leases)
+	constrainedRows := targetRows > 0
+	if !constrainedRows {
+		targetRows = state.baselineRows
+	}
+	if target == state.appliedColumns && targetRows == state.appliedRows {
 		return nil
 	}
-	if err := m.setColumns(ctx, state.tty, target); err != nil {
+	sttyRows := targetRows
+	if !constrainedRows && targetRows == state.appliedRows {
+		sttyRows = 0
+	}
+	if err := m.setSize(ctx, state.tty, target, sttyRows); err != nil {
 		return err
 	}
 	state.resizedAt = m.now()
 	state.appliedColumns = target
+	state.appliedRows = targetRows
 	return nil
 }
 
 func (m *Manager) restore(ctx context.Context, paneID string, state *paneState) error {
-	if err := m.setColumns(ctx, state.tty, state.baselineColumns); err != nil {
+	sttyRows := state.baselineRows
+	if state.appliedRows == state.baselineRows {
+		// The height was never leased away; leave the tty's rows alone.
+		sttyRows = 0
+	}
+	if err := m.setSize(ctx, state.tty, state.baselineColumns, sttyRows); err != nil {
 		return err
 	}
 	state.appliedColumns = state.baselineColumns
+	state.appliedRows = state.baselineRows
 	delete(m.panes, paneID)
 	return nil
 }

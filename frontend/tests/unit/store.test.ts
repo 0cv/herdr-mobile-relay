@@ -117,7 +117,7 @@ describe('relay command store', () => {
     });
     const agent = get(relayStore.agents)[0];
 
-    const lease = relayStore.leasePaneSize(agent, 83);
+    const lease = relayStore.leasePaneSize(agent, 83, 32);
     const acquire = socket.sent.map((payload) => JSON.parse(payload))
       .findLast((message) => message.type === 'lease_pane_size');
     expect(acquire).toMatchObject({
@@ -128,6 +128,9 @@ describe('relay command store', () => {
     });
     expect(acquire.request_id).toBeTruthy();
     expect(acquire).not.toHaveProperty('client_id');
+    // The relay does not advertise row support: rows must not be sent, and
+    // no applied height may be believed.
+    expect(acquire).not.toHaveProperty('rows');
     socket.message({
       type: 'command_result',
       action: 'lease_pane_size',
@@ -135,7 +138,7 @@ describe('relay command store', () => {
       ok: true,
       data: { columns: 83 },
     });
-    await expect(lease).resolves.toBe(83);
+    await expect(lease).resolves.toEqual({ columns: 83, rows: 0 });
 
     const release = relayStore.releasePaneSize(agent);
     const releaseCommand = socket.sent.map((payload) => JSON.parse(payload))
@@ -155,6 +158,45 @@ describe('relay command store', () => {
     });
     await expect(release).resolves.toBeUndefined();
     await expect(relayStore.leasePaneSize(agent, 39)).rejects.toThrow(/between 40 and 240/);
+  });
+
+  it('leases rows only when the relay advertises row support', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      version: 'abc123',
+      host: 'fedora',
+      capabilities: ['pane_size_lease', 'pane_size_lease_rows'],
+      agent_profiles: [],
+    });
+    socket.message({
+      type: 'agents',
+      agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp' }],
+    });
+    const agent = get(relayStore.agents)[0];
+
+    const lease = relayStore.leasePaneSize(agent, 83, 32);
+    const acquire = socket.sent.map((payload) => JSON.parse(payload))
+      .findLast((message) => message.type === 'lease_pane_size');
+    expect(acquire).toMatchObject({
+      type: 'lease_pane_size',
+      pane_id: 'w1:p1',
+      columns: 83,
+      rows: 32,
+      protocol: 2,
+    });
+    socket.message({
+      type: 'command_result',
+      action: 'lease_pane_size',
+      request_id: acquire.request_id,
+      ok: true,
+      // Another client holds a shorter lease: the applied height wins.
+      data: { columns: 83, rows: 30 },
+    });
+    await expect(lease).resolves.toEqual({ columns: 83, rows: 30 });
+    await expect(relayStore.leasePaneSize(agent, 80, 9)).rejects.toThrow(/between 10 and 120/);
   });
 
   it('binds approvals to their blocked event and coalesces pane polling', async () => {

@@ -473,9 +473,10 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .term-content.preserve-layout .terminal-cell {
   display: inline-block;
   text-align: center;
-  width: 1ch;
+  /* Probed cell advance in px; ch is wrong in Safari's Core Text port. */
+  width: var(--terminal-cell-width, 1ch);
 }
-.term-content.preserve-layout .terminal-cell-wide { width: 2ch; }
+.term-content.preserve-layout .terminal-cell-wide { width: calc(2 * var(--terminal-cell-width, 1ch)); }
 .term-content.preserve-layout .terminal-cell-horizontal,
 .term-content.preserve-layout .terminal-cell-box {
   display: inline-block;

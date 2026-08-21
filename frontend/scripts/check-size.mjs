@@ -12,7 +12,9 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 113 KiB for the no-echo prompt route (masked secret input, its
 // relay capability gate), the F1-F12 pad, and GFM tables in conversation
 // history: all three land in the single bootstrap `assets/app.js`.
-const limitKiB = 115;
+// Raised from 115 KiB for Resize Session row leasing and the px-derived
+// terminal width caps (issue #11), which also land in the bootstrap payload.
+const limitKiB = 116;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];
