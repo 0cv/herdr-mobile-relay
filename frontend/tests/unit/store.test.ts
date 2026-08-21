@@ -913,6 +913,157 @@ describe('relay command store', () => {
     }
   });
 
+  it('keeps every connected relay warm with a proof-of-life ping', async () => {
+    vi.useFakeTimers();
+    relayStore.addRelay({ label: 'Debian', url: 'wss://debian.example', token: '' });
+    // Adding a relay redials both; keep only the two live sockets so a later
+    // count means "nothing was redialed".
+    const [connected, dialing] = MockWebSocket.instances.slice(-2);
+    MockWebSocket.instances = [connected, dialing];
+    expect(dialing.url).toBe('wss://debian.example');
+    connected.open();
+    connected.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    const sentOnConnect = connected.sent.length;
+
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(connected.sent).toHaveLength(sentOnConnect);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(JSON.parse(connected.sent.at(-1)!).type).toBe('refresh_agents');
+    expect(connected.sent).toHaveLength(sentOnConnect + 1);
+    // The keepalive proves a live path; it never dials one, so the relay still
+    // completing its handshake hears nothing.
+    expect(dialing.sent).toEqual([]);
+
+    // The reply doubles as the health signal: an answered ping keeps the socket
+    // past the gateway's five-minute idle reaper.
+    connected.message({ type: 'inventory_status', state: 'ready' });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(connected.sent).toHaveLength(sentOnConnect + 2);
+    expect(MockWebSocket.instances).toHaveLength(2);
+  });
+
+  it('drops a connection that misses its keepalive while hidden and leaves the dial to resume', async () => {
+    vi.useFakeTimers();
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    try {
+      const socket = MockWebSocket.instances.at(-1)!;
+      socket.open();
+      socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+      const relayId = get(relayStore.relayConfigs)[0].id;
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      relayStore.setHidden(true);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
+
+      // Ten seconds of silence after the ping: the path is gone.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(socket.readyState).toBe(MockWebSocket.CLOSED);
+      expect(get(relayStore.connections).get(relayId)?.status).toBe('disconnected');
+      // No socket churn and no radio churn for a page nobody is looking at.
+      expect(MockWebSocket.instances).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(MockWebSocket.instances).toHaveLength(1);
+
+      // Resume dials at once: the relay is not connected, so there is nothing
+      // to probe.
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      relayStore.setHidden(false);
+      relayStore.revalidateConnections(2_000);
+      expect(MockWebSocket.instances).toHaveLength(2);
+    } finally {
+      if (visibility) Object.defineProperty(document, 'visibilityState', visibility);
+      else Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
+  it('stops pinging after an hour hidden and starts again when the app comes back', async () => {
+    vi.useFakeTimers();
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    try {
+      const socket = MockWebSocket.instances.at(-1)!;
+      socket.open();
+      socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+      const pings = () => socket.sent.filter((payload) => JSON.parse(payload).type === 'refresh_agents').length;
+      const onConnect = pings();
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      relayStore.setHidden(true);
+      // Answer every ping: a healthy hidden page holds its socket for the hour.
+      for (let tick = 0; tick < 29; tick += 1) {
+        await vi.advanceTimersByTimeAsync(120_000);
+        socket.message({ type: 'inventory_status', state: 'ready' });
+      }
+      expect(pings()).toBe(onConnect + 29);
+
+      // An hour hidden: the radio wakeups stop being worth it and the socket
+      // is left to lapse on its own.
+      await vi.advanceTimersByTimeAsync(120_000);
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(pings()).toBe(onConnect + 29);
+
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+      relayStore.setHidden(false);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(pings()).toBe(onConnect + 30);
+    } finally {
+      if (visibility) Object.defineProperty(document, 'visibilityState', visibility);
+      else Reflect.deleteProperty(document, 'visibilityState');
+    }
+  });
+
+  it('dials a stale resumed connection at once and only probes a fresh one', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+
+    // Fresh proof of life: keep the session and spend one probe on it, so an
+    // app switch never churns a healthy direct path.
+    relayStore.revalidateConnections(2_000);
+    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
+    expect(MockWebSocket.instances).toHaveLength(1);
+    socket.message({ type: 'inventory_status', state: 'ready' });
+    expect(relayStore.connection(relayId)?.healthTimer).toBeNull();
+
+    // A silence a throttled hidden tab could still produce stays inside the
+    // bound: a healthy connection must never be redialed for being slow.
+    vi.setSystemTime(Date.now() + 240_000);
+    relayStore.revalidateConnections(2_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
+    socket.message({ type: 'inventory_status', state: 'ready' });
+    const beforeResume = socket.sent.length;
+
+    // A frozen page runs no timers while the clock keeps moving, which is the
+    // gap `setSystemTime` reproduces here. The keepalive cannot have run, so
+    // the silence is proof the path died with the freeze.
+    vi.setSystemTime(Date.now() + 240_001);
+    relayStore.revalidateConnections(2_000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    // Dialed on the spot, with no probe spent on the corpse.
+    expect(socket.sent).toHaveLength(beforeResume);
+  });
+
+  it('stamps the last-heard time on inbound traffic and clears the pending probe', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    socket.open();
+    // A completed handshake is itself proof of life.
+    expect(relayStore.connection(relayId)?.lastMessageAt).toBe(Date.now());
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    relayStore.revalidateConnections(2_000);
+    expect(relayStore.connection(relayId)?.healthTimer).not.toBeNull();
+    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    expect(relayStore.connection(relayId)?.lastMessageAt).toBe(Date.now());
+    expect(relayStore.connection(relayId)?.healthTimer).toBeNull();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
   it('replaces a half-open socket after the relay announces its update restart', async () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;

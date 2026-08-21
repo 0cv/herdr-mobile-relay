@@ -507,6 +507,15 @@ test('keeps device verification modal until native authentication succeeds', asy
   await expect(unlockDialog).toBeVisible();
   expect(await socketCount(page)).toBe(0);
 
+  // The session behind this dialog stays connected while locked, so the gate
+  // has to hide the page rather than dim it: a translucent scrim would leave
+  // live agent names and status changes legible before verification.
+  const backdrop = await unlockDialog.evaluate(
+    (element) => getComputedStyle(element, '::backdrop').backgroundColor,
+  );
+  const alpha = /^rgba?\((?:[^,]+,){3}\s*([\d.]+)\s*\)$/.exec(backdrop)?.[1];
+  expect({ backdrop, alpha: alpha === undefined ? 1 : Number(alpha) }).toEqual({ backdrop, alpha: 1 });
+
   await page.evaluate(() => (window as any).__resolveDeviceVerification());
   await expect(unlockDialog).toBeHidden();
   await expect.poll(() => socketCount(page)).toBe(1);

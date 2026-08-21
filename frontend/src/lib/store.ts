@@ -74,6 +74,29 @@ const PANE_READ_RETRY_MS = 35_000;
 // out the full handshake timeout plus backoff — the "dozens of seconds before
 // streaming resumes after sleep" a phone sees in gateway mode.
 const STALE_CONNECTING_MS = 5_000;
+// Proof-of-life cadence for every connected relay. The gateway reaps a quiet
+// phone connection after five minutes and never pings one, so a hidden but
+// still-running page loses its socket silently and pays a full re-dial (TLS +
+// WS + hello + E2EE) on focus. Two minutes sits well under that reaper and is
+// coarser than the once-a-minute floor an intensively throttled background
+// timer gets, so it still fires wherever the platform keeps the page running.
+const KEEPALIVE_INTERVAL_MS = 120_000;
+// After this long hidden, holding the connection open stops being worth the
+// radio wakeups: the keepalive stops and the connection is left to lapse.
+// Becoming visible resets the bound and resumes the keepalive.
+const HIDDEN_KEEPALIVE_MAX_MS = 60 * 60_000;
+// With the keepalive running, a healthy connection is never silent for longer
+// than its cadence plus slack. A longer gap means the page was frozen, and a
+// frozen page cannot have kept its path: the remote side's ICE consent lapses
+// in about thirty seconds and the gateway reaper fires at five minutes. So a
+// stale connection is a corpse, and probing it only delays the dial.
+//
+// The slack has to cover an intensively throttled hidden tab, where a
+// two-minute interval can drift onto the next once-a-minute wakeup and the
+// reply still has to arrive: three minutes is boundary-tight and would
+// occasionally redial a healthy connection. Four still sits a full minute
+// under the reaper, so nothing a live connection does can reach it.
+const FRESH_PROOF_MS = 240_000;
 const IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 // Gateway-relayed traffic is metered project bandwidth. Cap scrollback while
 // honoring the user's refresh rate; acknowledged deltas keep idle frames off
@@ -136,6 +159,12 @@ interface RelayConnection extends RelayConnectionView {
   updateRestartTimer: ReturnType<typeof setTimeout> | null;
   closed: boolean;
   connectingSince: number;
+  /**
+   * When the app last heard anything from this relay, including the handshake
+   * that made it ready. The keepalive bounds it, and a resume compares it
+   * against FRESH_PROOF_MS to tell a resumable path from a dead one.
+   */
+  lastMessageAt: number;
   directoryGeneration: number;
 }
 
@@ -196,6 +225,9 @@ class RelayStore {
   private respondingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconnectAttempts = new Map<string, number>();
   private reconnectEnabled = true;
+  private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  private hidden = false;
+  private hiddenSince = 0;
   private toastId = 0;
   private pushConfigHandler: ((relayId: string) => void) | null = null;
 
@@ -233,6 +265,7 @@ class RelayStore {
 
   destroy(): void {
     this.reconnectEnabled = false;
+    this.stopKeepalive();
     for (const id of [...this.connectionsValue.keys()]) this.disconnectRelay(id);
     this.reconnectAttempts.clear();
     for (const timer of this.respondingTimers.values()) clearTimeout(timer);
@@ -305,6 +338,7 @@ class RelayStore {
       updateRestartTimer: null,
       closed: false,
       connectingSince: Date.now(),
+      lastMessageAt: 0,
       agentProfiles: [],
       capabilities: [],
       directoryBrowser: null,
@@ -328,6 +362,7 @@ class RelayStore {
       onMessage: (message) => {
         if (!this.isCurrentConnection(relay.id, connection)) return;
         // Inbound traffic proves the path is alive, whatever the message says.
+        connection.lastMessageAt = Date.now();
         this.clearHealthTimer(connection);
         this.reconnectAttempts.delete(relay.id);
         this.handleMessage(relay.id, message);
@@ -387,6 +422,8 @@ class RelayStore {
 
   private markConnectionReady(relayId: string, connection: RelayConnection): void {
     if (!this.isCurrentConnection(relayId, connection) || connection.closed) return;
+    // A completed handshake is the freshest proof of life there is.
+    connection.lastMessageAt = Date.now();
     connection.status = 'connected';
     this.emitConnections();
     if (runningAsInstalledApp()) {
@@ -472,6 +509,17 @@ class RelayStore {
     this.emitConnections();
   }
 
+  /**
+   * Records whether the page is hidden. The visibility lifecycle lives in
+   * `security.ts`; the store owns the keepalive timer so no component has to.
+   */
+  setHidden(hidden: boolean): void {
+    if (this.hidden === hidden) return;
+    this.hidden = hidden;
+    this.hiddenSince = hidden ? Date.now() : 0;
+    this.syncKeepalive();
+  }
+
   revalidateConnections(timeoutMs = healthTimeoutMs()): void {
     if (!this.reconnectEnabled) return;
     const relays = get(this.relayConfigs);
@@ -488,6 +536,13 @@ class RelayStore {
         continue;
       }
       if (connection?.status !== 'connected') {
+        this.connectRelay(relay);
+        continue;
+      }
+      // The keepalive gives every healthy connection a freshness bound, so a
+      // silence longer than FRESH_PROOF_MS is a corpse: dial now instead of
+      // spending the probe timeout proving what the silence already said.
+      if (Date.now() - connection.lastMessageAt > FRESH_PROOF_MS) {
         this.connectRelay(relay);
         continue;
       }
@@ -512,6 +567,96 @@ class RelayStore {
     if (!connection.healthTimer) return;
     clearTimeout(connection.healthTimer);
     connection.healthTimer = null;
+  }
+
+  /**
+   * Keeps the keepalive interval running exactly while there is a connection
+   * worth holding open. Driven from `emitConnections`, so every status change
+   * is covered without each call site having to remember this.
+   */
+  private syncKeepalive(): void {
+    const wanted = this.reconnectEnabled && !this.keepaliveExhausted() && this.hasConnectedRelay();
+    if (wanted === (this.keepaliveTimer !== null)) return;
+    if (!wanted) {
+      this.stopKeepalive();
+      return;
+    }
+    this.keepaliveTimer = setInterval(() => this.sendKeepalive(), KEEPALIVE_INTERVAL_MS);
+  }
+
+  private stopKeepalive(): void {
+    if (!this.keepaliveTimer) return;
+    clearInterval(this.keepaliveTimer);
+    this.keepaliveTimer = null;
+  }
+
+  /** True once a hidden page has held its connections open long enough. */
+  private keepaliveExhausted(): boolean {
+    return this.hidden && Date.now() - this.hiddenSince >= HIDDEN_KEEPALIVE_MAX_MS;
+  }
+
+  private hasConnectedRelay(): boolean {
+    for (const connection of this.connectionsValue.values()) {
+      if (connection.status === 'connected') return true;
+    }
+    return false;
+  }
+
+  /**
+   * Sends one proof-of-life frame per connected relay and arms the health
+   * timer for the reply. `refresh_agents` is the ping: every deployed relay
+   * answers it with a small inventory snapshot, the reply doubles as the
+   * health signal, and traffic in either direction resets the gateway's idle
+   * clock. A dedicated ping type would need protocol versioning and
+   * capability gating to save a handful of bytes every two minutes.
+   */
+  private sendKeepalive(): void {
+    if (this.keepaliveExhausted()) {
+      this.stopKeepalive();
+      return;
+    }
+    for (const [relayId, connection] of this.connectionsValue) {
+      // The keepalive proves a path is alive; it never dials one. Relays that
+      // are disconnected or still dialing belong to the reconnect paths.
+      if (connection.status !== 'connected' || connection.healthTimer) continue;
+      connection.healthTimer = setTimeout(() => {
+        if (!this.isCurrentConnection(relayId, connection)) return;
+        connection.healthTimer = null;
+        this.failKeepalive(relayId, connection);
+      }, BACKGROUND_HEALTH_TIMEOUT_MS);
+      if (this.sendRaw(relayId, { type: 'refresh_agents' })) continue;
+      this.clearHealthTimer(connection);
+      this.failKeepalive(relayId, connection);
+    }
+  }
+
+  /**
+   * An unanswered keepalive means the socket is gone. A visible page replaces
+   * it at once: someone is watching. A hidden page must not — redialing in the
+   * background churns the socket and the radio for nobody, and the resume
+   * revalidation dials anything not connected the moment the app comes back.
+   */
+  private failKeepalive(relayId: string, connection: RelayConnection): void {
+    if (!this.hidden) {
+      this.connectRelay(connection.relay);
+      return;
+    }
+    this.retireConnection(relayId, connection, 'Relay disconnected');
+  }
+
+  /**
+   * Drops a dead transport without scheduling a dial, leaving the relay
+   * `disconnected` for the next revalidation to pick up. Marking the
+   * connection closed also suppresses the transport's own disconnect status,
+   * which would otherwise put the relay straight back on the reconnect ladder.
+   */
+  private retireConnection(relayId: string, connection: RelayConnection, reason: string): void {
+    this.clearHealthTimer(connection);
+    connection.closed = true;
+    connection.transport?.close();
+    connection.status = 'disconnected';
+    this.rejectPendingOperations(relayId, reason);
+    this.emitConnections();
   }
 
   private syncUpdateRestartReconnect(relayId: string, connection: RelayConnection): void {
@@ -1654,6 +1799,9 @@ class RelayStore {
     this.connections.set(new Map(
       [...this.connectionsValue].map(([relayId, connection]) => [relayId, { ...connection }]),
     ));
+    // Every status change funnels through here, so this is the one place the
+    // keepalive has to be told that a relay came up or went away.
+    this.syncKeepalive();
   }
 }
 

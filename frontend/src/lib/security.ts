@@ -34,6 +34,14 @@ export function deviceVerificationEnabled(): boolean {
 
 export function initializeDeviceSecurity(): () => void {
   automaticUnlockPending = false;
+  // The store keeps connections warm while hidden and skips the resume probe
+  // once one has gone stale, so it needs the visibility truth from every path
+  // that can flip it — not just `visibilitychange`, which some engines skip on
+  // a bfcache restore or an unfreeze.
+  const syncVisibility = () => {
+    relayStore.setHidden(document.visibilityState === 'hidden');
+  };
+  syncVisibility();
   relayStore.initialize(false);
   if (deviceVerificationEnabled()) {
     securityState.update((state) => ({ ...state, locked: true, reason: 'open' }));
@@ -50,6 +58,7 @@ export function initializeDeviceSecurity(): () => void {
     relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
   };
   const onVisibility = () => {
+    syncVisibility();
     if (document.visibilityState === 'hidden') {
       if (deviceVerificationEnabled()) lockForDevice('resume');
       return;
@@ -61,6 +70,7 @@ export function initializeDeviceSecurity(): () => void {
     revalidateAfterResume();
   };
   const onPageShow = (event: PageTransitionEvent) => {
+    syncVisibility();
     if (!event.persisted) return;
     if (deviceVerificationEnabled()) {
       lockForDevice('resume');
@@ -70,6 +80,7 @@ export function initializeDeviceSecurity(): () => void {
     revalidateAfterResume();
   };
   const onFocus = () => {
+    syncVisibility();
     if (document.visibilityState !== 'visible') return;
     if (deviceVerificationEnabled()) {
       setTimeout(unlockAfterResume, 150);
@@ -99,6 +110,7 @@ export function initializeDeviceSecurity(): () => void {
     if (deviceVerificationEnabled()) lockForDevice('resume');
   };
   const onResume = () => {
+    syncVisibility();
     if (document.visibilityState !== 'visible') return;
     if (deviceVerificationEnabled()) {
       if (get(securityState).locked) setTimeout(unlockAfterResume, 150);
@@ -126,9 +138,30 @@ export function initializeDeviceSecurity(): () => void {
 
 export function lockForDevice(reason: 'open' | 'resume' = 'resume'): void {
   if (!deviceVerificationEnabled() || get(securityState).locked) return;
-  relayStore.destroy();
+  // Locking gates the interface, not the transport. Dropping the connection
+  // here used to be free — the app was going idle anyway — but it now costs
+  // every verification user the warm-resume path, and it buys no secrecy: the
+  // relay key sits in localStorage and the unlock redials with it unchanged,
+  // so a live socket grants an attacker nothing a dial would not. Pane traffic
+  // stops separately (TerminalView treats a locked app as not visible), so
+  // nothing streams behind the unlock dialog.
   automaticUnlockPending = true;
   securityState.update((state) => ({ ...state, locked: true, reason, status: '' }));
+}
+
+/**
+ * Restores traffic once verification succeeds. A resume unlock finds the
+ * connections the lock left in place, so it revalidates: a warm socket is kept
+ * and only a dead one is replaced. An unlock at app open has nothing to keep
+ * and dials.
+ */
+function resumeAfterUnlock(reason: 'open' | 'resume'): void {
+  if (reason !== 'resume') {
+    relayStore.connectAll(false);
+    return;
+  }
+  relayStore.resetReconnectBackoff();
+  relayStore.revalidateConnections(RESUME_HEALTH_TIMEOUT_MS);
 }
 
 function unlockAfterResume(): void {
@@ -193,7 +226,7 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
   if (!deviceVerificationEnabled()) {
     automaticUnlockPending = false;
     securityState.update((state) => ({ ...state, locked: false, busy: false, status: '' }));
-    relayStore.connectAll(reason === 'resume');
+    resumeAfterUnlock(reason);
     return true;
   }
   if (!get(securityState).locked) {
@@ -229,7 +262,7 @@ export async function unlockWithDevice(reason: 'open' | 'resume' = 'open'): Prom
     });
     if (!assertion) throw new Error('No assertion returned');
     securityState.update((state) => ({ ...state, locked: false, busy: false, status: '' }));
-    relayStore.connectAll(reason === 'resume');
+    resumeAfterUnlock(reason);
     return true;
   } catch {
     securityState.update((state) => ({

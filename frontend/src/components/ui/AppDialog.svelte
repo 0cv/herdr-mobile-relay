@@ -45,6 +45,7 @@
 {#if open}
   <dialog
     bind:this={dialog}
+    {id}
     class="app-dialog"
     aria-labelledby={`${id}-title`}
     aria-describedby={description ? `${id}-description` : undefined}

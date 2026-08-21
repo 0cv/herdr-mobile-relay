@@ -31,6 +31,7 @@ describe('device verification lifecycle', () => {
     vi.spyOn(relayStore, 'destroy').mockImplementation(() => {});
     vi.spyOn(relayStore, 'revalidateConnections').mockImplementation(() => {});
     vi.spyOn(relayStore, 'resetReconnectBackoff').mockImplementation(() => {});
+    vi.spyOn(relayStore, 'setHidden').mockImplementation(() => {});
     localStorage.setItem(DEVICE_LOCK_KEY, 'true');
     localStorage.setItem(DEVICE_CREDENTIAL_KEY, 'AQID');
     securityState.set({
@@ -78,13 +79,44 @@ describe('device verification lifecycle', () => {
     stopSecurity();
   });
 
-  it('preserves the current agent snapshot after successful resume verification', async () => {
+  it('keeps the existing session across a lock and revalidates it after resume verification', async () => {
     getCredential.mockResolvedValue({});
-    securityState.update((state) => ({ ...state, locked: true, reason: 'resume' }));
+    const stopSecurity = initializeDeviceSecurity();
+    // Settle the open-time verification so the app is unlocked and connected,
+    // which is the state a resume lock actually starts from.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(get(securityState)).toMatchObject({ locked: false });
+    vi.mocked(relayStore.connectAll).mockClear();
 
+    // Hiding the app locks the interface. It must not drop the transport: the
+    // relay key is in localStorage and the unlock redials with it either way,
+    // so tearing the socket down only costs the warm resume.
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(get(securityState)).toMatchObject({ locked: true, reason: 'resume' });
+    expect(relayStore.destroy).not.toHaveBeenCalled();
+    expect(relayStore.setHidden).toHaveBeenLastCalledWith(true);
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     await expect(unlockWithDevice('resume')).resolves.toBe(true);
 
-    expect(relayStore.connectAll).toHaveBeenCalledWith(true);
+    // Revalidation, not a redial: a warm socket is kept and only a dead one is
+    // replaced, so the agent snapshot survives untouched.
+    expect(relayStore.connectAll).not.toHaveBeenCalled();
+    expect(relayStore.resetReconnectBackoff).toHaveBeenCalled();
+    expect(relayStore.revalidateConnections).toHaveBeenCalledWith(2_000);
+    stopSecurity();
+  });
+
+  it('dials from scratch when verification succeeds at app open', async () => {
+    getCredential.mockResolvedValue({});
+    securityState.update((state) => ({ ...state, locked: true, reason: 'open' }));
+
+    await expect(unlockWithDevice('open')).resolves.toBe(true);
+
+    // Nothing was ever connected, so there is nothing to revalidate.
+    expect(relayStore.connectAll).toHaveBeenCalledWith(false);
+    expect(relayStore.revalidateConnections).not.toHaveBeenCalled();
   });
 
   it('probes after foreground and network return without discarding the current path', () => {

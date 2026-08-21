@@ -20,8 +20,11 @@ setup and want to know what every screen and control is for.
 - Read searchable native conversations for Claude Code, Codex, Qoder, Pi, and
   Oh My Pi in focused conversation or full-history form; review a rolling
   24-hour activity summary and receive blocked or completion notifications.
-- Optionally require device verification when the app opens or resumes, before
-  it reconnects to any relay.
+- Optionally require device verification before the app connects at open, and
+  again before the interface unlocks on resume. A resume keeps the existing
+  encrypted session, so verifying is instant rather than a fresh connection;
+  the unlock screen covers the page and the terminal stops streaming until it
+  succeeds.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |

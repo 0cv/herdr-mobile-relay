@@ -10,7 +10,7 @@
   dismissible={false}
   title="Unlock Herdr"
   description={$securityState.reason === 'resume'
-    ? 'Verify to reconnect relays after the pause.'
+    ? 'Verify to pick up where you left off.'
     : 'Verify with your device fingerprint, face unlock, or passcode.'}
 >
   <Button disabled={$securityState.busy} onclick={() => unlockWithDevice($securityState.reason)}>Unlock</Button>

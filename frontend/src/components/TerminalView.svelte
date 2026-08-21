@@ -28,6 +28,7 @@
   } from '$lib/terminal-find';
   import { interfaceSize, terminalHeightLease } from '$lib/preferences';
   import { replaceView } from '$lib/router';
+  import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
   import {
     latestCompletedResponse,
@@ -174,6 +175,21 @@
   // desktop browser that reports occluded windows as hidden does not lapse
   // the lease on every app switch.
   let hiddenAt = 0;
+  // A locked app is showing this pane to nobody who has verified, so it counts
+  // as hidden for reads and watches. The connection now survives the lock, so
+  // without this the terminal would keep streaming behind the unlock screen.
+  const paneVisible = () => document.visibilityState === 'visible' && !$securityState.locked;
+  // The lease needs its own gate: being locked is not the same as being
+  // briefly hidden. The grace window below exists so an app switch does not
+  // resize the computer's pane, but an unverified holder must not keep it
+  // narrowed at all, so a lock skips the grace instead of entering it. The
+  // relay's TTL hands the size back if the lock outlasts it.
+  const paneLeaseAllowed = () => !$securityState.locked
+    && paneLeaseRenewalAllowed(document.visibilityState === 'visible', hiddenAt, Date.now());
+  // A lock flip changes what "visible" means for this pane, and no visibility
+  // event comes with it, so the pane handler is called directly.
+  let paneVisibilityChanged: (() => void) | null = null;
+  let paneLocked = false;
   const keyQueue: QueuedKeyCommand[] = [];
   let keyFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   let keyReadTimer: ReturnType<typeof setTimeout> | undefined;
@@ -393,6 +409,13 @@
   });
 
   $effect(() => {
+    const locked = $securityState.locked;
+    if (locked === paneLocked) return;
+    paneLocked = locked;
+    paneVisibilityChanged?.();
+  });
+
+  $effect(() => {
     const connection = $connections.get(agent.relay_id);
     const interfaceSizeValue = $interfaceSize;
     const paneId = agent.pane_id;
@@ -506,13 +529,12 @@
       if (mounted) slashCatalogLoading = false;
     });
     const measurePane = () => requestPaneSizeLease(false);
-    const visible = () => document.visibilityState === 'visible';
     const realtimeDeltaEnabled = () => Boolean(
       $connections.get(agent.relay_id)?.capabilities.includes('pane_realtime_delta'),
     );
     let lastRefreshAt = Date.now();
     const visibilityChanged = () => {
-      if (!visible()) {
+      if (!paneVisible()) {
         // Traffic stops while hidden, but lease renewals keep going for a
         // bounded grace: desktop Safari reports an occluded window as hidden,
         // so treating every app switch as departure lapsed the lease and
@@ -532,6 +554,7 @@
       // at the desktop width until this lands.
       requestPaneSizeLease(true);
     };
+    paneVisibilityChanged = visibilityChanged;
     const findShortcut = (event: KeyboardEvent) => {
       if (questionMode
         || event.altKey
@@ -545,16 +568,16 @@
     window.visualViewport?.addEventListener('resize', measurePane);
     document.addEventListener('visibilitychange', visibilityChanged);
     const refresh = setInterval(() => {
-      if (!visible()) return;
+      if (!paneVisible()) return;
       const refreshInterval = realtimeDeltaEnabled() ? PANE_REALTIME_RESYNC_MS : 3_000;
       if (Date.now() - lastRefreshAt < refreshInterval) return;
       lastRefreshAt = Date.now();
       relayStore.readPane(agent);
     }, 3_000);
-    if (visible()) relayStore.watchPane(agent);
+    if (paneVisible()) relayStore.watchPane(agent);
     const refreshPaneSizeLease = setInterval(
       () => {
-        if (paneLeaseRenewalAllowed(visible(), hiddenAt, Date.now())) requestPaneSizeLease(true);
+        if (paneLeaseAllowed()) requestPaneSizeLease(true);
       },
       PANE_SIZE_LEASE_REFRESH_MS,
     );
@@ -565,6 +588,7 @@
       window.removeEventListener('resize', measurePane);
       window.visualViewport?.removeEventListener('resize', measurePane);
       document.removeEventListener('visibilitychange', visibilityChanged);
+      paneVisibilityChanged = null;
       window.removeEventListener('keydown', findShortcut);
       clearInterval(refresh);
       clearInterval(refreshPaneSizeLease);
@@ -1509,7 +1533,7 @@
     // A hidden page renews only within the grace window: after it, the
     // relay's lease TTL returns the desktop size, and the refocus handler
     // re-leases the moment the page is visible again.
-    if (!paneLeaseRenewalAllowed(document.visibilityState === 'visible', hiddenAt, Date.now())) return;
+    if (!paneLeaseAllowed()) return;
     if (!paneSizeLeaseSupported(target)) return;
     const columns = measuredPaneColumns();
     if (columns === null) {

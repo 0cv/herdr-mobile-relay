@@ -3,6 +3,38 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Streaming resumes immediately when you come back to the app. The app now
+  sends a small proof-of-life ping to every connected relay every two minutes,
+  including while it is in the background, so the gateway's five-minute idle
+  reaper no longer takes a live connection from a phone that is merely hidden:
+  coming back finds the connection already up instead of paying a full re-dial
+  (TLS, WebSocket, relay hello, encrypted handshake). Where the platform
+  suspends the page instead — iOS backgrounds a tab within seconds — the
+  connection cannot survive, and the app now recognises that from the silence
+  and reconnects on the spot rather than spending two seconds probing a dead
+  path first. A connection that answered recently is still kept and probed
+  exactly as before, so switching apps never churns a healthy session. A ping
+  that goes unanswered while the app is hidden closes the connection without
+  redialing in the background, and after an hour hidden the pings stop
+  altogether so a phone in a pocket is not kept awake; both cases reconnect
+  the moment the app is opened. Terminal size leases are unaffected.
+- Device verification no longer costs a reconnect. Hiding the app used to drop
+  every relay connection, so verification users paid a full re-dial after each
+  glance away and could never benefit from the warm connection above. Locking
+  now gates the interface only: the encrypted session stays open, and a
+  successful verification picks it up instead of dialing again. This gives up
+  nothing — the relay key lives in the browser's local storage and the unlock
+  reconnected with it either way, so dropping the connection denied an attacker
+  nothing it does not already have. The unlock screen now covers the page
+  instead of dimming it: the session behind it is live, so a see-through scrim
+  would have left agent names and status changes readable — and stale ones
+  readable already. The open terminal also stops streaming and stops holding
+  the computer's pane at the phone's width until verification succeeds.
+
 ## [0.17.2] - 2026-08-21
 
 ### Added

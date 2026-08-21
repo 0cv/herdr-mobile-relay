@@ -654,6 +654,14 @@ textarea { min-height: 6.5rem; resize: vertical; }
 
 .app-dialog { background: transparent; border: 0; color: var(--foreground); height: 100dvh; inset: 0; margin: auto; max-height: 100dvh; max-width: 100%; padding: 0; width: 100%; }
 .app-dialog::backdrop { background: rgb(0 0 0 / .72); }
+/* The unlock gate is the one dialog that must hide the page rather than dim it:
+   the session behind it stays connected, so a 72% scrim would leave live agent
+   names, prompt previews, and status changes legible to whoever is holding the
+   phone before they verify. The literal fallback is load-bearing: ::backdrop
+   only inherits custom properties since Safari 17.4, and a failed var() would
+   compute to transparent — no cover at all — on exactly the platform that
+   backgrounds this app the most. */
+#unlock-dialog::backdrop { background: var(--background, #0a0a0a); }
 .dialog-content { background: var(--card); border: 1px solid var(--border); border-radius: .9rem; box-shadow: 0 1.5rem 4rem rgb(0 0 0 / .4); left: 50%; max-height: calc(100dvh - 2rem); max-width: 30rem; overflow-y: auto; padding: 1.1rem; position: absolute; top: 50%; transform: translate(-50%, -50%); width: calc(100% - 1.5rem); }
 .dialog-title { font-size: 1.1rem; font-weight: 700; margin: 0; }
 .dialog-description { color: var(--muted); font-size: .78rem; margin: .35rem 0 1rem; }
