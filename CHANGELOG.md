@@ -22,9 +22,13 @@ project follows [Semantic Versioning](https://semver.org/).
   deliberate stop-renewing-while-hidden policy — designed for a sleeping
   phone — lapsed the pane-size lease on every app switch, and each
   restore/re-lease SIGWINCH pair could strand a stale copy of an inline
-  agent's status bar in the scrollback. A hidden page now keeps renewing for
-  five minutes before the lease is allowed to lapse, so brief switches hold
-  the size steady while a page hidden overnight still gives it back.
+  agent's status bar in the scrollback. Two changes together stop the flap:
+  a hidden page keeps renewing for five minutes before the lease may lapse,
+  and the relay's lease TTL rises from 30 to 120 seconds — Safari degrades a
+  hidden tab's timers to a measured 60–65 second cadence within two minutes,
+  so renewals kept arriving but the old TTL expired between them. A frozen
+  or vanished client now gives the pane back within about two minutes; a
+  disconnecting one is still released immediately.
 - Streaming resumes seconds after the phone wakes instead of dozens of
   seconds in gateway mode. A reconnect dial started before the radio was
   back got blackholed, and the wake/online revalidation skipped anything

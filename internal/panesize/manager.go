@@ -21,7 +21,15 @@ const (
 	MaxColumns = 240
 	MinRows    = 10
 	MaxRows    = 120
-	LeaseTTL   = 30 * time.Second
+	// LeaseTTL must ride out hidden-tab timer clamping: desktop Safari
+	// reports an occluded window as hidden and degrades its timers to a
+	// measured ~60-65s cadence within two minutes, so a 30s TTL lapsed the
+	// lease — and resized the shared pane — during every longer glance away,
+	// even though renewals were still arriving. Twice the measured clamp
+	// keeps a renewing-but-hidden page leased; a frozen or vanished client
+	// gives the pane back within two minutes instead of half a minute, and a
+	// closing client is still released immediately through ReleaseClient.
+	LeaseTTL = 120 * time.Second
 	// ReleaseGrace keeps a released width in place for a moment. Leaving a
 	// terminal on the phone and stepping back into it is a few seconds apart,
 	// and restoring the pane in between resizes it twice: the agent re-renders

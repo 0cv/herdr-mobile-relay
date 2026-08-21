@@ -78,8 +78,8 @@ later, so stepping back into the same agent resumes instantly instead of
 resizing the pane twice. A hidden page keeps renewing its lease for five
 minutes — desktop Safari reports an occluded window as hidden, so brief
 switches to another app must not resize the shared pane — after which the
-desktop size returns within half a minute. A sleeping phone freezes sooner
-than that, a disconnecting phone and relay shutdown restore the size
+desktop size returns within about two minutes. A sleeping phone freezes
+sooner than that, a disconnecting phone and relay shutdown restore the size
 immediately, and returning to the terminal takes the phone size again.
 
 **Lease Terminal Height** (Settings → Terminal, off by default) additionally
