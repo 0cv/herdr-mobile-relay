@@ -3,6 +3,24 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Conversation History opens on the newest turn again instead of the first turn
+  of the session. The view did try to pin to the end on load, but the scroll ran
+  while the list was still behind the loading placeholder — there was no
+  scroller to move yet — and a single flush could not see the final height of
+  rendered markdown anyway: wrapped prose, tables and code blocks settle a
+  layout pass later, which is why transcripts heavy on them were the worst
+  (measured 12,343 px short of the end on a 60-turn transcript in Safari, 12,210
+  px in Chromium). A resize observer now owns the pin: it watches the turns and
+  the viewport around them, so mount, late layout, new turns, rotation and the
+  on-screen keyboard all re-apply it. Scrolling up to read releases the pin and
+  later turns no longer yank the view; returning to the end restores it.
+  Unrelated to the terminal transcript's `content-visibility` defect fixed in
+  0.17.2 — this component never used that property. (#12)
+
 ## [0.17.4] - 2026-08-21
 
 ### Fixed

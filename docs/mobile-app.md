@@ -103,14 +103,16 @@ Use **Copy** for the latest response or **Conversation History** for clean,
 searchable earlier turns.
 
 For supported agents, the terminal header opens **Conversation History** after
-the agent reports a session. **Conversation** keeps each user prompt and the
-latest agent answer from that exchange. **Full history** shows every recorded
-message with collapsible tool activity. Both use an escaped Markdown subset,
-search filters the currently displayed view, and each message can copy its
-original Markdown. Hidden reasoning, injected system records, and sidechain
-turns remain excluded. Reads are confined to known session directories and the
-newest 16 MiB of very large logs. When that bound omits older turns, they
-remain in the harness log on the computer.
+the agent reports a session. It opens on the newest turn and stays there as
+turns arrive; scrolling up to read holds your position until you return to the
+end. **Conversation** keeps each user prompt and the latest agent answer from
+that exchange. **Full history** shows every recorded message with collapsible
+tool activity. Both use an escaped Markdown subset, search filters the
+currently displayed view, and each message can copy its original Markdown.
+Hidden reasoning, injected system records, and sidechain turns remain excluded.
+Reads are confined to known session directories and the newest 16 MiB of very
+large logs. When that bound omits older turns, they remain in the harness log
+on the computer.
 
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second; 250 ms is the default.

@@ -43,6 +43,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     const commands: Record<string, unknown>[] = [];
     const socketCommands: Record<string, unknown>[][] = [];
     let nextInteraction: Record<string, unknown> | null = null;
+    let conversationFixture: { entries: unknown[]; total: number } | null = null;
     let autoCommands = true;
 
     class MockSocket {
@@ -152,6 +153,24 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         }
         if (message.type === 'get_conversation_history') {
           const older = Boolean(message.before);
+          if (conversationFixture) {
+            const fixture = conversationFixture;
+            queueMicrotask(() => this.server({
+              type: 'command_result',
+              action: message.type,
+              request_id: message.request_id,
+              ok: true,
+              phase: 'completed',
+              data: {
+                available: true,
+                entries: older ? [] : fixture.entries,
+                has_more: false,
+                total: fixture.total,
+                file_truncated: false,
+              },
+            }));
+            return;
+          }
           queueMicrotask(() => this.server({
             type: 'command_result',
             action: message.type,
@@ -234,6 +253,9 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
       __relayServer(index: number, message: unknown) { sockets[index]?.server(message); },
       __relayClose(index: number) { sockets[index]?.serverClose(); },
       __relayNextInteraction(interaction: Record<string, unknown>) { nextInteraction = interaction; },
+      __relayConversationFixture(fixture: { entries: unknown[]; total: number } | null) {
+        conversationFixture = fixture;
+      },
       __relayAutoCommands(enabled: boolean) { autoCommands = enabled; },
     });
   }, {
@@ -269,6 +291,20 @@ async function setAutoCommands(page: Page, enabled: boolean) {
     const harnessWindow = window as unknown as { __relayAutoCommands(next: boolean): void };
     harnessWindow.__relayAutoCommands(value);
   }, enabled);
+}
+
+interface ConversationFixture {
+  entries: Record<string, unknown>[];
+  total: number;
+}
+
+async function setConversationFixture(page: Page, fixture: ConversationFixture | null) {
+  await page.evaluate((value) => {
+    const harnessWindow = window as unknown as {
+      __relayConversationFixture(next: ConversationFixture | null): void;
+    };
+    harnessWindow.__relayConversationFixture(value);
+  }, fixture);
 }
 
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
@@ -2908,6 +2944,107 @@ test('opens native conversation history and pages older turns', async ({ page })
   await expect(page.getByText('latest retained question')).toBeHidden();
   await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeVisible();
+});
+
+test('opens a long conversation at its newest turn and holds the pin', async ({ page }) => {
+  // The view polls for new turns every five seconds. Shortening that interval
+  // keeps the streaming assertions below deterministic instead of sleeping
+  // through real intervals, exactly as boot() does for reconnect timers.
+  await page.addInitScript(() => {
+    const nativeSetInterval = window.setInterval.bind(window);
+    window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+      nativeSetInterval(handler, timeout === 5000 ? 60 : timeout, ...args)) as typeof window.setInterval;
+  });
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: [
+      'attention_classification',
+      'structured_questions',
+      'slash_commands',
+      'conversation_history',
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Long conversation',
+      agent: 'claude',
+      session: 'Current session',
+      conversation_history_available: true,
+    }],
+  });
+
+  // Tables and fenced code are the reported trigger: they lay out taller than
+  // the frame that first measures the list, so a scroll written once against
+  // an early scrollHeight lands short of the end (issue #12).
+  const heavyTurn = (index: number) => [
+    `### Turn ${index} heading`,
+    '',
+    `Prose that wraps several times on a phone: ${'detail '.repeat(24).trim()}.`,
+    '',
+    '| Field | Value |',
+    '| --- | --- |',
+    `| index | ${index} |`,
+    `| note | ${'wide cell content '.repeat(6).trim()} |`,
+    '',
+    '```ts',
+    ...Array.from({ length: 6 }, (_, line) => `const value${line} = compute(${index}, ${line});`),
+    '```',
+  ].join('\n');
+  const entries = Array.from({ length: 60 }, (_, index) => ({
+    id: `turn-${index + 1}`,
+    timestamp: `2026-08-12T09:${String(index).padStart(2, '0')}:00Z`,
+    role: index % 2 ? 'assistant' : 'user',
+    text: index % 2 ? heavyTurn(index + 1) : `question ${index + 1}`,
+  }));
+  await setConversationFixture(page, { entries, total: entries.length });
+
+  await page.getByRole('button', { name: 'Open Long conversation on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  const list = page.locator('.conversation-list');
+  const bottomGap = () => list.evaluate((element) =>
+    element.scrollHeight - element.scrollTop - element.clientHeight);
+
+  await expect(page.getByText('Turn 60 heading')).toBeVisible();
+  // A pin assertion is only meaningful while the transcript really overflows.
+  expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight * 3)).toBe(true);
+  await expect.poll(bottomGap).toBeLessThan(2);
+
+  // Turns arriving while the reader sits at the end keep the end in view.
+  const streamed = [...entries, {
+    id: 'turn-61', timestamp: '2026-08-12T10:00:00Z', role: 'user', text: 'newest streamed question',
+  }];
+  await setConversationFixture(page, { entries: streamed, total: streamed.length });
+  await expect(page.getByText('newest streamed question')).toBeVisible();
+  await expect.poll(bottomGap).toBeLessThan(2);
+
+  // Reading history wins over the pin: later turns must not yank the view.
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  const later = [...streamed, {
+    id: 'turn-62', timestamp: '2026-08-12T10:01:00Z', role: 'user', text: 'later streamed question',
+  }];
+  await setConversationFixture(page, { entries: later, total: later.length });
+  await expect(page.getByText('later streamed question')).toBeVisible();
+  expect(await list.evaluate((element) => element.scrollTop)).toBeLessThan(48);
+  expect(await bottomGap()).toBeGreaterThan(200);
+
+  // Scrolling back to the end restores the pin.
+  await list.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  const final = [...later, {
+    id: 'turn-63', timestamp: '2026-08-12T10:02:00Z', role: 'user', text: 'final streamed question',
+  }];
+  await setConversationFixture(page, { entries: final, total: final.length });
+  await expect(page.getByText('final streamed question')).toBeVisible();
+  await expect.poll(bottomGap).toBeLessThan(2);
 });
 
 test('inspects workspace files and Git changes without write controls', async ({ page }) => {

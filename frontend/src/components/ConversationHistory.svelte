@@ -20,6 +20,13 @@
   let query = $state('');
   let mode = $state<'conversation' | 'activity'>('conversation');
   let listElement = $state<HTMLElement>(null!);
+  let streamElement = $state<HTMLElement>(null!);
+  /**
+   * Whether the view follows the end of the transcript. It starts pinned so
+   * opening a session lands on the newest turn, and only the reader scrolling
+   * away from the bottom releases it.
+   */
+  let pinnedToBottom = $state(true);
   let mounted = false;
 
   const modeEntries = $derived(mode === 'conversation' ? conversationEntries(entries) : entries);
@@ -35,16 +42,49 @@
   onMount(() => {
     mode = localStorage.getItem('herdr-conversation-view') === 'activity' ? 'activity' : 'conversation';
     mounted = true;
-    void loadLatest(true);
-    const refresh = setInterval(() => { void loadLatest(false); }, 5_000);
+    void loadLatest();
+    const refresh = setInterval(() => { void loadLatest(); }, 5_000);
     return () => {
       mounted = false;
       clearInterval(refresh);
     };
   });
 
-  async function loadLatest(initial: boolean) {
-    const stickToBottom = !listElement || listElement.scrollHeight - listElement.scrollTop - listElement.clientHeight < 48;
+  /**
+   * Holds the view at the end of the transcript while it is pinned. Writing the
+   * scroll once after a state flush is not enough: the list mounts only when
+   * the loading placeholder is replaced, and the rendered markdown — wrapped
+   * prose, tables, code blocks — settles its height a layout pass later still,
+   * so the first readable scrollHeight is short of the final one (issue #12).
+   * Every one of those moments is a size change of the stream or of the
+   * viewport around it, so the observer owns the pin and re-applies it until
+   * the geometry stops moving.
+   */
+  $effect(() => {
+    const element = listElement;
+    const stream = streamElement;
+    if (!element || !stream || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (pinnedToBottom) element.scrollTop = element.scrollHeight;
+    });
+    // The stream grows with the turns; the scroller's own box changes with the
+    // on-screen keyboard and rotation, which moves the end away as well.
+    observer.observe(stream);
+    observer.observe(element);
+    return () => observer.disconnect();
+  });
+
+  function trackScroll() {
+    if (!listElement) return;
+    // Re-measured on every scroll, so a content shrink — which makes the
+    // browser clamp scrollTop and fire a scroll event from a lower position —
+    // lands exactly at the bottom and keeps the pin instead of dropping it.
+    pinnedToBottom = listElement.scrollHeight
+      - listElement.scrollTop
+      - listElement.clientHeight < 48;
+  }
+
+  async function loadLatest() {
     try {
       const page = await relayStore.getConversationHistory(agent);
       if (!mounted) return;
@@ -55,10 +95,6 @@
       fileTruncated = page.fileTruncated;
       error = '';
       if (page.available) entries = mergeEntries(entries, page.entries);
-      if (initial || stickToBottom) {
-        await tick();
-        if (listElement) listElement.scrollTop = listElement.scrollHeight;
-      }
     } catch (failure) {
       if (mounted) error = failure instanceof Error ? failure.message : 'Conversation history could not be loaded.';
     } finally {
@@ -192,34 +228,42 @@
     {#if query.trim() && !visibleEntries.length}
       <div class="empty-state" role="status">No loaded turns match “{query.trim()}”.</div>
     {/if}
-    <section class="conversation-list" bind:this={listElement} aria-label={`Conversation with ${displayName(agent)}`} aria-live="polite">
-      {#each visibleEntries as entry (entry.id)}
-        <article class:conversation-user={entry.role === 'user'} class="conversation-entry">
-          <header>
-            <strong>{entry.role === 'user' ? 'You' : displayName(agent)}</strong>
-            <span class="conversation-entry-actions">
-              {#if formatTimestamp(entry.timestamp)}<time datetime={entry.timestamp}>{formatTimestamp(entry.timestamp)}</time>{/if}
-              {#if entry.text}
-                <Button
-                  class="copy-conversation-markdown"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={`Copy ${entry.role === 'user' ? 'your' : displayName(agent)} message as Markdown`}
-                  title="Copy Markdown"
-                  onclick={() => copyMarkdown(entry)}
-                >
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                  </svg>
-                </Button>
-              {/if}
-            </span>
-          </header>
-          <ConversationMessage text={entry.text} tools={mode === 'activity' ? entry.tools : []} highlight={query.trim()} />
-          {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
-        </article>
-      {/each}
+    <section
+      class="conversation-list"
+      bind:this={listElement}
+      onscroll={trackScroll}
+      aria-label={`Conversation with ${displayName(agent)}`}
+      aria-live="polite"
+    >
+      <div class="conversation-stream" bind:this={streamElement}>
+        {#each visibleEntries as entry (entry.id)}
+          <article class:conversation-user={entry.role === 'user'} class="conversation-entry">
+            <header>
+              <strong>{entry.role === 'user' ? 'You' : displayName(agent)}</strong>
+              <span class="conversation-entry-actions">
+                {#if formatTimestamp(entry.timestamp)}<time datetime={entry.timestamp}>{formatTimestamp(entry.timestamp)}</time>{/if}
+                {#if entry.text}
+                  <Button
+                    class="copy-conversation-markdown"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Copy ${entry.role === 'user' ? 'your' : displayName(agent)} message as Markdown`}
+                    title="Copy Markdown"
+                    onclick={() => copyMarkdown(entry)}
+                  >
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <rect x="9" y="9" width="13" height="13" rx="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                  </Button>
+                {/if}
+              </span>
+            </header>
+            <ConversationMessage text={entry.text} tools={mode === 'activity' ? entry.tools : []} highlight={query.trim()} />
+            {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
+          </article>
+        {/each}
+      </div>
     </section>
   {/if}
 </main>

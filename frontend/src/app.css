@@ -343,7 +343,11 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-older { display: flex; flex: 0 0 auto; justify-content: center; }
 .conversation-warning { color: var(--warning); flex: 0 0 auto; font-size: .7rem; margin: 0; text-align: center; }
 .conversation-warning.error { color: var(--danger); }
-.conversation-list { display: flex; flex: 1 1 auto; flex-direction: column; gap: .55rem; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .1rem .05rem .6rem; }
+.conversation-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .1rem .05rem .6rem; }
+/* The turns live in their own box so a ResizeObserver can watch the height of
+   the content itself: the scroller's box never changes when a turn is added or
+   when wrapped markdown settles, which is what the bottom pin has to follow. */
+.conversation-stream { display: flex; flex-direction: column; gap: .55rem; }
 .conversation-entry { align-self: flex-start; background: var(--card); border: 1px solid var(--border); border-radius: .75rem; max-width: min(94%, 42rem); padding: .72rem .78rem; }
 .conversation-entry.conversation-user { align-self: flex-end; background: color-mix(in srgb, var(--primary) 12%, var(--card)); border-color: color-mix(in srgb, var(--primary) 38%, var(--border)); }
 .conversation-entry > header { align-items: center; display: flex; gap: .5rem; justify-content: space-between; margin-bottom: .35rem; }
