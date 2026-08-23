@@ -11,6 +11,31 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
+// TestMain clears every environment variable agentroots consults before any
+// test in this package runs. Without this, a developer's exported
+// CLAUDE_CONFIG_DIR / CODEX_HOME / PI_CODING_AGENT_DIR / HERDR_*_CONFIG_DIRS
+// leaks into every test's Resolver and can override the fixture data it just
+// wrote (see clearAgentRootEnv below for the per-test escape hatch used by
+// tests that need to reassert a var mid-run). A single TestMain protects every
+// test in the package, including ones added later that forget to call
+// clearAgentRootEnv themselves - the property the per-test helper alone
+// cannot guarantee.
+func TestMain(m *testing.M) {
+	for _, key := range []string{
+		agentroots.ClaudeListEnv,
+		agentroots.QoderListEnv,
+		agentroots.CodexListEnv,
+		agentroots.PiListEnv,
+		agentroots.OMPListEnv,
+		"CLAUDE_CONFIG_DIR",
+		"CODEX_HOME",
+		"PI_CODING_AGENT_DIR",
+	} {
+		os.Setenv(key, "")
+	}
+	os.Exit(m.Run())
+}
+
 func TestQoderSessionName(t *testing.T) {
 	home := t.TempDir()
 	projDir := filepath.Join(home, ".qoder", "projects", "home-user-myapp")
