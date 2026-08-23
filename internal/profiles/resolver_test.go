@@ -198,17 +198,6 @@ func TestCommandConfig(t *testing.T) {
 	}
 }
 
-func TestDefaultCommandConfigExpandsHome(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	resolver := NewResolver(t.TempDir(), nil)
-	dirs, format, ok := resolver.CommandConfig("pi")
-	want := filepath.Join(home, ".pi", "agent", "skills")
-	if !ok || format != "skill:{name}" || len(dirs) != 1 || dirs[0] != want {
-		t.Fatalf("default command config = %q, %q, %v; want %q", dirs, format, ok, want)
-	}
-}
-
 func profileLabel(profiles []Profile, id string) string {
 	for _, profile := range profiles {
 		if profile.ID == id {

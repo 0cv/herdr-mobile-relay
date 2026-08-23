@@ -37,13 +37,14 @@ var defaultAliases = map[string]string{
 	"pi-coding-agent": "pi",
 }
 
-var defaultSkillDirs = map[string][]string{
-	"pi": {"~/.pi/agent/skills"},
-}
+// defaultSkillDirs and defaultCommandFormats hold no defaults: every provider
+// discovers its own skill directories the way its agent does, and a default
+// format would make CommandConfig report every such profile as explicitly
+// configured, permanently routing it down the INI escape hatch. Both maps stay
+// because the INI [skills] and [commands] sections populate them at runtime.
+var defaultSkillDirs = map[string][]string{}
 
-var defaultCommandFormats = map[string]string{
-	"pi": "skill:{name}",
-}
+var defaultCommandFormats = map[string]string{}
 
 type IntegrationStatuser interface {
 	IntegrationStatus(ctx context.Context) ([]byte, error)
