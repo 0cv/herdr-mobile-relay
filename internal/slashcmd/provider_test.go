@@ -69,6 +69,49 @@ func TestCatalogForExactDispatch(t *testing.T) {
 	}
 }
 
+// The relay passes an empty profileID whenever the agent's own binary is missing
+// from the service PATH, which is the norm under launchd's minimal environment. The
+// reportedAgent fallback is then the only thing that selects a provider, so it must
+// cover every name the exact-dispatch table above covers. Asserting through
+// CatalogFor alone cannot catch a gap here: that path supplies the profileID itself.
+// No environment isolation is needed - every assertion is on a builtin, and no
+// discovered directory can remove a builtin, only add alongside it.
+func TestCatalogForProfileFallbackCoversEveryAgentName(t *testing.T) {
+	tests := []struct {
+		agent       string
+		wantBuiltin string
+	}{
+		{"claude", "/clear"},
+		{"claude-code", "/clear"},
+		{"claude code", "/clear"},
+		{"codex", "/clear"},
+		{"qoder", "/clear"},
+		{"qodercli", "/clear"},
+		{"pi", "/model"},
+		{"pi-coding-agent", "/model"},
+		{"omp", "/model"},
+		{"oh my pi", "/model"},
+		{"oh-my-pi", "/model"},
+		{"kimi", "/model"},
+		{"kimi code", "/model"},
+		{"kimi-code", "/model"},
+		{"kimi-cli", "/model"},
+		{"opencode", "/models"},
+		{"open code", "/models"},
+		{"open-code", "/models"},
+	}
+	for _, tt := range tests {
+		catalog := CatalogForProfile("", tt.agent, "/tmp", "/nonexistent", nil, "", "")
+		if len(catalog.Commands) == 0 {
+			t.Errorf("CatalogForProfile(\"\", %q) returned an empty catalog", tt.agent)
+			continue
+		}
+		if !hasCommand(catalog, tt.wantBuiltin) {
+			t.Errorf("CatalogForProfile(\"\", %q) missing %q", tt.agent, tt.wantBuiltin)
+		}
+	}
+}
+
 func TestCatalogForNoSubstringMatch(t *testing.T) {
 	catalog := CatalogFor("not-claude-at-all", "/tmp", "/nonexistent")
 	if len(catalog.Commands) != 0 {
