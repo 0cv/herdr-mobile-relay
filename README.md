@@ -102,7 +102,11 @@ the relay looks for the conversation transcript in the wrong directory, and
 the conversation view shows "No conversation log is available for this
 session."
 
-Tell the relay about every profile you use with one of these:
+Pi and Oh My Pi need no configuration for their named profiles: both keep a
+profile's sessions at `<config root>/profiles/<name>/agent`, so the relay
+discovers `~/.omp/profiles/*/agent` and `~/.pi/profiles/*/agent` on startup.
+Restart the relay after adding a profile. Every other case — and a Pi or Oh My
+Pi config root moved somewhere else — needs to be named explicitly:
 
 | Variable | Home default it adds to | Agent's own directory variable |
 | --- | --- | --- |
@@ -112,13 +116,15 @@ Tell the relay about every profile you use with one of these:
 | `HERDR_PI_CONFIG_DIRS` | `~/.pi/agent` | `PI_CODING_AGENT_DIR` |
 | `HERDR_OMP_CONFIG_DIRS` | `~/.omp/agent` | `PI_CODING_AGENT_DIR` (Oh My Pi is a Pi fork and shares Pi's default) |
 
-Two things to get right:
+Three things to get right:
 
 - The home default is always searched. Setting a list *adds* profiles; it
   never replaces the default.
 - Entries are config directories — the same value you'd put in
   `CLAUDE_CONFIG_DIR` — not pre-joined `projects`/`sessions` paths. The relay
   appends the right leaf itself.
+- What you configure is searched before what the relay discovered, and the home
+  default is searched last.
 
 Separate multiple entries with your platform's path-list separator (`:` on
 Unix, `;` on Windows), same as `PATH`.
