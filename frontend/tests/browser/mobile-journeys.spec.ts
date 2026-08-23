@@ -2769,6 +2769,52 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     .filter((command) => command.type === 'release_pane_size').length).toBe(2);
 });
 
+test('paints again when the relay keeps a pane settling after a resize', async ({ page }) => {
+  // Frames read while the agent repaints are suppressed so a transient screen
+  // never replaces the stable one. That wait must be bounded: a shared session
+  // whose desktop client keeps fighting the leased size re-arms the relay's
+  // settling window on every read, and an unbounded wait freezes the phone on
+  // its last painted frame for as long as that lasts.
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_height_lease', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'stable row before resize',
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('stable row before resize');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+
+  // A width change captures the painted frame as the settling baseline.
+  const viewport = page.viewportSize()!;
+  await page.setViewportSize({ width: viewport.width + 120, height: viewport.height });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
+
+  // The relay now reports every frame as settling for longer than the pane
+  // takes to repaint. The newest screen must still reach the phone.
+  for (let index = 1; index <= 12; index += 1) {
+    await server(page, 0, {
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      format: 'ansi',
+      content: `live row ${index}`,
+      resize_settling: true,
+    });
+    await page.waitForTimeout(500);
+  }
+  await expect(terminal).toContainText('live row 12');
+});
+
 test('does not lease rows unless the height setting is on', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);

@@ -103,6 +103,12 @@
   // the agent repaints at the new width.
   // Raw state: the effect compares frame identity, which a deep proxy breaks.
   let resizeFrameBaseline = $state.raw<TerminalFrame | undefined>(undefined);
+  // The relay flags frames while a pane repaints at a new size. Suppressing
+  // them keeps a half-drawn screen off the phone, but a shared session whose
+  // desktop client keeps fighting the leased size can flag every frame, so the
+  // wait is bounded: a stale screen is worse than a transient one.
+  let resizeWaitExpired = $state(false);
+  let resizeWaitTimer: ReturnType<typeof setTimeout> | null = null;
   let displayed = $state('');
   let renderedHtml = $state('');
   let renderedRows = $state<RenderedTerminalRow[]>([]);
@@ -154,6 +160,8 @@
   const CELL_MEASURE_TEXT = '0000000000';
   const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
   const PANE_REALTIME_RESYNC_MS = 15_000;
+  // One relay poll of slack over its own three-second settling window.
+  const PANE_RESIZE_WAIT_MAX_MS = 4_000;
   // Herdr's key parser covers f1..f24; the pad exposes the range phones need.
   const FUNCTION_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   const RESPONSE_COPY_AGENT_IDS = new Set([
@@ -374,9 +382,12 @@
     // yet. Only a relay that cannot lease keeps its line ends.
     const preserveLineEnds = !resizeSessionActive;
     // A frame read while the agent repaints at a new width is transient. Keep
-    // the phone's last stable frame painted until the new stable frame lands.
+    // the phone's last stable frame painted until the new stable frame lands,
+    // but never past the deadline: a relay that keeps flagging frames would
+    // otherwise freeze this pane on a screen that is minutes old.
     const waitingForResizedFrame = resizeSessionActive
       && !paneSizeLeaseError
+      && !resizeWaitExpired
       && (lastLeasedColumns === 0
         || (Boolean(resizeFrameBaseline)
           && (next === resizeFrameBaseline || next?.resizeSettling === true)));
@@ -1530,10 +1541,20 @@
 
   function beginResizeSettling() {
     resizeFrameBaseline = frame;
+    resizeWaitExpired = false;
+    if (resizeWaitTimer !== null) clearTimeout(resizeWaitTimer);
+    resizeWaitTimer = setTimeout(() => {
+      resizeWaitTimer = null;
+      resizeWaitExpired = true;
+    }, PANE_RESIZE_WAIT_MAX_MS);
   }
 
   function clearResizeSettling() {
     resizeFrameBaseline = undefined;
+    resizeWaitExpired = false;
+    if (resizeWaitTimer === null) return;
+    clearTimeout(resizeWaitTimer);
+    resizeWaitTimer = null;
   }
 
   function discardPaneSizeLease() {
