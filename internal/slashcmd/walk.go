@@ -188,6 +188,78 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 	return commands, suppressed, truncated
 }
 
+// scanSkillDirFormat scans dir for <entry>/SKILL.md and renders each skill
+// through format, which must contain exactly one "{name}". The skill name comes
+// from frontmatter "name", falling back to the directory name, matching how omp,
+// Pi and Kimi resolve it. Skills without a description are dropped, as those
+// agents require one. Reports whether budget ran out.
+//
+// Unlike scanSkillDirBudget this follows symlinked skill directories and
+// de-duplicates by real path, matching omp, and returns no suppression list:
+// none of omp, Pi or Kimi has a frontmatter field that hides a skill from the
+// command palette.
+func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, bool) {
+	if strings.Count(format, "{name}") != 1 {
+		return nil, false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, false
+	}
+	var commands []Command
+	seen := make(map[string]bool, len(entries))
+	truncated := false
+	for _, e := range entries {
+		if *budget <= 0 {
+			truncated = true
+			break
+		}
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		skillDir := filepath.Join(dir, e.Name())
+		if info, err := os.Stat(skillDir); err != nil || !info.IsDir() {
+			continue
+		}
+		skillFile := filepath.Join(skillDir, "SKILL.md")
+		info, err := os.Stat(skillFile)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		real, err := filepath.EvalSymlinks(skillFile)
+		if err != nil {
+			real = skillFile
+		}
+		if seen[real] {
+			continue
+		}
+		seen[real] = true
+		*budget--
+		metadata, ok := readSkillMetadata(skillFile)
+		if !ok {
+			continue
+		}
+		name := metadata["name"]
+		if name == "" {
+			name = e.Name()
+		}
+		if !commandNamePattern.MatchString(name) {
+			continue
+		}
+		description := metadata["description"]
+		if description == "" {
+			continue
+		}
+		commands = append(commands, Command{
+			Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
+			Description:  compact(description, 240),
+			Source:       source,
+			ArgumentHint: compact(metadata["argument-hint"], 120),
+		})
+	}
+	return commands, truncated
+}
+
 func fileFrontmatter(path string) map[string]string {
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) > maxMetadataSize {
