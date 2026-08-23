@@ -140,6 +140,16 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			if dir == "" {
 				continue
 			}
+			if !filepath.IsAbs(dir) {
+				// ctx.Home is the *service's* os.UserHomeDir(), not the
+				// pane's, and is empty whenever that lookup failed - the
+				// relay runs headless under launchd/systemd with an
+				// arbitrary working directory unrelated to any project, so a
+				// relative dir here would silently scan whatever skills
+				// happen to sit under the service's own cwd and label them
+				// "personal" or "project" as if they were the user's.
+				continue
+			}
 			cmds, trunc := scanSkillDirFormat(dir, scope, ompCommandFormat, &budget)
 			allowed := cmds[:0]
 			for _, command := range cmds {
@@ -218,9 +228,22 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	// 7. customDirectories - subject to the ban lists but not to source
 	// toggles. Scanned after every toggled source, so an authored skill of the
-	// same name wins the collision.
+	// same name wins the collision. A relative entry is far more likely to
+	// mean "relative to my project" than to be a mistake - config.yml is
+	// often itself project-scoped - so it resolves against ctx.Cwd (the
+	// pane's directory), matching how kimi.go resolves a relative
+	// extra_skill_dirs entry against the project root. Skip it when the
+	// pane's cwd is unknown rather than falling through to scan's own guard,
+	// which would otherwise resolve against the service's unrelated cwd.
 	for _, dir := range settings.customDirectories {
-		scan("personal", expandTilde(dir, ctx.Home))
+		dir = expandTilde(dir, ctx.Home)
+		if !filepath.IsAbs(dir) {
+			if ctx.Cwd == "" {
+				continue
+			}
+			dir = filepath.Join(ctx.Cwd, dir)
+		}
+		scan("personal", dir)
 	}
 
 	// 8. managed (priority 5) - always enabled, scanned last so it loses every

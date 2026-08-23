@@ -498,3 +498,45 @@ func TestKimiBudgetFavorsHighestPriorityBrandDir(t *testing.T) {
 		t.Fatal("~/.kimi/skills outranks ~/.codex/skills and must be scanned before the budget is spent")
 	}
 }
+
+// TestKimiEmptyHomeDoesNotScanServiceWorkingDirectory guards the
+// os.UserHomeDir() failure path in server.go: when ctx.Home is "" every
+// user-scope join (.kimi/skills, .claude/skills, ...) becomes relative, and
+// a relative dir must never resolve against the relay service's own working
+// directory - which is arbitrary and unrelated to any project - instead of
+// simply contributing nothing.
+func TestKimiEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
+	isolateAgentEnv(t)
+	repo := t.TempDir()
+	scratch := t.TempDir()
+	writeSkill(t, filepath.Join(scratch, ".kimi", "skills"), "leak-kimi", "Should never be discovered")
+	t.Chdir(scratch)
+
+	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.29.2")
+	if _, ok := commandByName(catalog, "/skill:leak-kimi"); ok {
+		t.Fatal("empty ctx.Home must not make Kimi scan the service's own working directory")
+	}
+}
+
+// TestKimiEmptyHomeDoesNotReadServiceWorkingDirectoryConfig guards
+// kimi.go's own config.toml read against the same failure: with ctx.Home
+// empty, filepath.Join(ctx.Home, ".kimi") is relative, and must not resolve
+// to a stray config.toml sitting in the service's own working directory. An
+// extra_skill_dirs entry in that stray config would otherwise be honoured
+// even though it names an otherwise-legitimate absolute path, because the
+// leak is in reading the file at all, not in resolving the paths inside it.
+func TestKimiEmptyHomeDoesNotReadServiceWorkingDirectoryConfig(t *testing.T) {
+	isolateAgentEnv(t)
+	repo := t.TempDir()
+	scratch := t.TempDir()
+	extra := filepath.Join(scratch, "extra-skills")
+	writeSkill(t, extra, "leak-kimi-config", "Should never be discovered")
+	writeFile(t, filepath.Join(scratch, ".kimi", "config.toml"),
+		fmt.Sprintf("extra_skill_dirs = [%q]\n", extra))
+	t.Chdir(scratch)
+
+	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.29.2")
+	if _, ok := commandByName(catalog, "/skill:leak-kimi-config"); ok {
+		t.Fatal("empty ctx.Home must not make Kimi read a config.toml from the service's own working directory")
+	}
+}

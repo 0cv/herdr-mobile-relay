@@ -3,7 +3,9 @@ package slashcmd
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestWalkFlat(t *testing.T) {
@@ -196,5 +198,81 @@ func TestFindGitRootWorktree(t *testing.T) {
 	got := findGitRoot(sub)
 	if got != root {
 		t.Errorf("findGitRoot = %q, want %q", got, root)
+	}
+}
+
+// A skill directory symlinked in from a dotfiles repo is the layout the
+// agent-configs style setup produces, and it used to vanish from the palette
+// with no diagnostic - not even a suppression entry.
+func TestScanSkillDirFollowsSymlinkedSkillDir(t *testing.T) {
+	root := t.TempDir()
+	dotfiles := filepath.Join(root, "dotfiles", "linked-skill")
+	skills := filepath.Join(root, "skills")
+	plain := filepath.Join(skills, "plain-skill")
+	os.MkdirAll(dotfiles, 0o755)
+	os.MkdirAll(plain, 0o755)
+	os.WriteFile(filepath.Join(dotfiles, "SKILL.md"), []byte("---\nname: linked-skill\ndescription: Linked\n---\n"), 0o644)
+	os.WriteFile(filepath.Join(plain, "SKILL.md"), []byte("---\nname: plain-skill\ndescription: Plain\n---\n"), 0o644)
+	if err := os.Symlink(dotfiles, filepath.Join(skills, "linked-skill")); err != nil {
+		t.Fatal(err)
+	}
+
+	budget := 100
+	commands, suppressed, _ := scanSkillDirBudget(skills, "personal", &budget)
+	names := map[string]bool{}
+	for _, cmd := range commands {
+		names[cmd.Command] = true
+	}
+	if !names["/plain-skill"] {
+		t.Fatalf("baseline broken, plain skill missing: %+v commands, suppressed %v", commands, suppressed)
+	}
+	if !names["/linked-skill"] {
+		t.Errorf("symlinked skill directory was dropped: %+v commands, suppressed %v", commands, suppressed)
+	}
+}
+
+// Following symlinks makes it possible for two entries to name one real skill.
+// scanSkillDirFormat already keys on the resolved path; this scanner must agree,
+// or the palette shows the same skill twice.
+func TestScanSkillDirDeduplicatesSymlinkToSameSkill(t *testing.T) {
+	root := t.TempDir()
+	skills := filepath.Join(root, "skills")
+	real := filepath.Join(root, "real", "dup")
+	os.MkdirAll(skills, 0o755)
+	os.MkdirAll(real, 0o755)
+	os.WriteFile(filepath.Join(real, "SKILL.md"), []byte("---\nname: dup\ndescription: Dup\n---\n"), 0o644)
+	if err := os.Symlink(real, filepath.Join(skills, "one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(skills, "two")); err != nil {
+		t.Fatal(err)
+	}
+
+	budget := 100
+	commands, _, _ := scanSkillDirBudget(skills, "personal", &budget)
+	if len(commands) != 1 {
+		t.Errorf("expected one command for one real skill, got %+v", commands)
+	}
+}
+
+// fileFrontmatter reads a command file with os.ReadFile, which blocks forever on
+// a pipe that has no writer. The relay polls this path, so a stray FIFO named
+// *.md would hang a service goroutine permanently.
+func TestWalkNonRegularCommandFileSkipped(t *testing.T) {
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe.md"), 0o644); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+	os.WriteFile(filepath.Join(dir, "real.md"), []byte("Real command"), 0o644)
+
+	done := make(chan []Command, 1)
+	go func() { done <- walkCommandDir(dir, "personal") }()
+	select {
+	case commands := <-done:
+		if len(commands) != 1 || commands[0].Command != "/real" {
+			t.Errorf("expected only /real, got %+v", commands)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walk blocked on a FIFO named *.md")
 	}
 }

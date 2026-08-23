@@ -78,8 +78,10 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 
 	settings := defaultKimiSkillSettings()
-	if data, ok := readSettingsFile(filepath.Join(ctx.Home, ".kimi"), "config.toml"); ok {
-		parseKimiSkillSettings(data, &settings)
+	if filepath.IsAbs(ctx.Home) {
+		if data, ok := readSettingsFile(filepath.Join(ctx.Home, ".kimi"), "config.toml"); ok {
+			parseKimiSkillSettings(data, &settings)
+		}
 	}
 
 	truncated := false
@@ -100,6 +102,12 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	scan := func(scope string, dirs ...string) {
 		for _, dir := range dirs {
 			if dir == "" {
+				continue
+			}
+			if !filepath.IsAbs(dir) {
+				// Same guard, and the same reason, as omp.go's scan: an empty
+				// ctx.Home makes filepath.Join yield a relative path, which
+				// would scan the headless service's own working directory.
 				continue
 			}
 			cmds, trunc := scanSkillDirFormat(dir, scope, ompCommandFormat, &budget)

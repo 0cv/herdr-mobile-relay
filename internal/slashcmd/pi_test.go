@@ -271,3 +271,22 @@ func TestPiUnusableSettingsStopsAtFirstConfigDir(t *testing.T) {
 		t.Fatal("first-found wins: an unusable settings.json in the first agent directory must stop the search and fail open, not fall through to another profile's settings")
 	}
 }
+
+// TestPiEmptyHomeDoesNotScanServiceWorkingDirectory guards the
+// os.UserHomeDir() failure path in server.go: when ctx.Home is "" the
+// ~/.agents/skills join becomes relative, and a relative dir must never
+// resolve against the relay service's own working directory - which is
+// arbitrary and unrelated to any project - instead of simply contributing
+// nothing.
+func TestPiEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
+	isolateAgentEnv(t)
+	repo := t.TempDir()
+	scratch := t.TempDir()
+	writeSkill(t, filepath.Join(scratch, ".agents", "skills"), "leak-pi", "Should never be discovered")
+	t.Chdir(scratch)
+
+	catalog := CatalogForProfile("pi", "pi", repo, "", nil, "", "0.82.1")
+	if _, ok := commandByName(catalog, "/skill:leak-pi"); ok {
+		t.Fatal("empty ctx.Home must not make Pi scan the service's own working directory")
+	}
+}

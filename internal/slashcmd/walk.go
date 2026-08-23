@@ -47,6 +47,14 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
+		// Symlinks stay skipped here, unlike in the skill scanners. A command
+		// tree is namespaced by directory, so following a link that resolves
+		// inside the same tree would publish one command file twice under two
+		// namespaces, and which name wins would fall out of os.ReadDir
+		// ordering. TestWalkSymlinkDirSkipped and TestWalkSymlinkFileSkipped
+		// pin that. Skill directories carry no namespace and are
+		// de-duplicated by resolved path, so scanSkillDirBudget can and does
+		// follow them.
 		if e.Type()&fs.ModeSymlink != 0 {
 			continue
 		}
@@ -67,6 +75,12 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 				childNS = namespace + ":" + name
 			}
 			walkDirBudget(fullPath, childNS, source, out, suppressed, budget, truncated)
+			continue
+		}
+		// A FIFO or socket named *.md would reach fileFrontmatter, whose
+		// os.ReadFile blocks on a pipe with no writer - a permanent hang in a
+		// service that polls. Only regular files can be commands.
+		if !e.Type().IsRegular() {
 			continue
 		}
 		if !strings.HasSuffix(name, ".md") {
@@ -151,6 +165,23 @@ func scanSkillDir(dir, source string) []Command {
 	return cmds
 }
 
+// entryIsDir classifies a directory entry by what it points at, not by its own
+// type bits. os.ReadDir reports ModeSymlink for a symlink, so DirEntry.IsDir()
+// is false for a symlink to a directory and a skill directory symlinked in
+// from a dotfiles repo would be silently skipped - the same hazard
+// agentroots.profileAgentDirs documents at length. Only a symlink needs the
+// stat: the type bits already settle every other entry.
+func entryIsDir(e os.DirEntry, path string) bool {
+	if e.IsDir() {
+		return true
+	}
+	if e.Type()&fs.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -158,26 +189,36 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 	}
 	var commands []Command
 	var suppressed []string
+	seen := make(map[string]bool, len(entries))
 	truncated := false
 	for _, e := range entries {
 		if *budget <= 0 {
 			truncated = true
 			break
 		}
-		if !e.IsDir() {
-			continue
-		}
-		if e.Type()&fs.ModeSymlink != 0 {
-			continue
-		}
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		skillFile := filepath.Join(dir, e.Name(), "SKILL.md")
+		skillDir := filepath.Join(dir, e.Name())
+		if !entryIsDir(e, skillDir) {
+			continue
+		}
+		skillFile := filepath.Join(skillDir, "SKILL.md")
 		info, err := os.Stat(skillFile)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
+		// Once symlinks are followed two entries can name one real skill.
+		// scanSkillDirFormat de-duplicates by resolved path for the same
+		// reason; keep the two scanners consistent.
+		resolved, err := filepath.EvalSymlinks(skillFile)
+		if err != nil {
+			resolved = skillFile
+		}
+		if seen[resolved] {
+			continue
+		}
+		seen[resolved] = true
 		*budget--
 		if cmd, suppressedName := parseSkillEntry(skillFile, e.Name(), "", source); cmd != nil {
 			commands = append(commands, *cmd)

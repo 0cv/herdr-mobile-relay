@@ -103,6 +103,19 @@ func parseOMPSkillSettings(data []byte, s *ompSkillSettings) {
 		indent := len(leading)
 
 		if indent == 0 {
+			// A block-sequence item for disabledExtensions sits at the SAME
+			// column as the "disabledExtensions:" key that introduced it (YAML
+			// permits a sequence at its parent's indentation), so it must be
+			// consumed before the mode reset below discards it. modeSkills
+			// never needs the same treatment: "skills:" introduces a mapping,
+			// whose children YAML requires to be indented past it, so a
+			// pending skills item is never seen at indent 0.
+			if mode == modeDisabled {
+				if item, ok := ompListItem(trimmed); ok {
+					addDisabledSkill(s, item)
+					continue
+				}
+			}
 			mode = modeNone
 			childIndent = -1
 			listTarget = nil
@@ -256,7 +269,16 @@ func splitOMPKey(trimmed string) (key, value string, ok bool) {
 	if matches == nil {
 		return "", "", false
 	}
-	return matches[1], strings.TrimSpace(matches[2]), true
+	value = strings.TrimSpace(matches[2])
+	if strings.HasPrefix(value, "#") {
+		// A value that is nothing but a trailing comment (e.g. "skills: #
+		// discovery") must read the same as no value at all, so the block-form
+		// detections below ("skills:", "disabledExtensions:") still fire. A
+		// quoted scalar is never affected: it starts with a quote character,
+		// never '#', so a literal "#" inside quotes is preserved untouched.
+		value = ""
+	}
+	return matches[1], value, true
 }
 
 // setScalarBool applies a boolean scalar, accepting true/false case
