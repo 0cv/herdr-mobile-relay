@@ -2815,6 +2815,48 @@ test('paints again when the relay keeps a pane settling after a resize', async (
   await expect(terminal).toContainText('live row 12');
 });
 
+test('paints again when a re-entry lease never lands', async ({ page }) => {
+  // The same wait also covers a pane with no lease yet. Reopening a pane asks
+  // for a fresh lease while the cached frame is painted, so a relay that never
+  // answers must not strand the phone on that cached frame.
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'cached row before re-entry',
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('cached row before re-entry');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'release_pane_size').length).toBe(1);
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
+
+  for (let index = 1; index <= 12; index += 1) {
+    await server(page, 0, {
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      format: 'ansi',
+      content: `unleased row ${index}`,
+    });
+    await page.waitForTimeout(500);
+  }
+  await expect(terminal).toContainText('unleased row 12');
+});
+
 test('does not lease rows unless the height setting is on', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
