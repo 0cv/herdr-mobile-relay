@@ -540,7 +540,21 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 		return role, humanClaudeText(raw)
 	}
 	if role == "user" {
-		return "", ""
+		// Filter per block, not on the joined string: humanClaudeText anchors its
+		// envelope checks on the start of what it is given, so joining first
+		// would let a <system-reminder> in any block after the first survive
+		// into the phone's conversation view.
+		blocks := textBlockList(content)
+		kept := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if text := humanClaudeText(block); strings.TrimSpace(text) != "" {
+				kept = append(kept, text)
+			}
+		}
+		if len(kept) == 0 {
+			return "", ""
+		}
+		return role, strings.Join(kept, "\n")
 	}
 	return role, textBlocks(content)
 }
@@ -612,9 +626,16 @@ func textBlocks(value any) string {
 	if text, ok := value.(string); ok {
 		return text
 	}
+	return strings.Join(textBlockList(value), "\n")
+}
+
+// textBlockList reports the text carried by each text-like block separately.
+// Callers that filter per block need the boundaries: joining first would let an
+// envelope in a later block escape a prefix test anchored on the whole string.
+func textBlockList(value any) []string {
 	blocks, ok := value.([]any)
 	if !ok {
-		return ""
+		return nil
 	}
 	texts := make([]string, 0, len(blocks))
 	for _, rawBlock := range blocks {
@@ -630,7 +651,7 @@ func textBlocks(value any) string {
 			texts = append(texts, text)
 		}
 	}
-	return strings.Join(texts, "\n")
+	return texts
 }
 
 func sanitizeText(text string) string {
