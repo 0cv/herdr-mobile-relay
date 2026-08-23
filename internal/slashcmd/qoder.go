@@ -1,7 +1,6 @@
 package slashcmd
 
 import (
-	"os"
 	"path/filepath"
 )
 
@@ -36,7 +35,7 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	var projectScopes []qoderProjectScope
 
 	if ctx.Cwd != "" {
-		projectDirs := findQoderProjectDirs(ctx.Cwd)
+		projectDirs := findProjectDirs(ctx.Cwd, []string{".qoder"})
 		for _, dir := range projectDirs {
 			cmdDir := filepath.Join(dir, "commands")
 			projectCmds, commandSuppressions, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
@@ -188,50 +187,6 @@ func filterQoderCommands(commands []Command, suppressed map[string]bool) []Comma
 		}
 	}
 	return filtered
-}
-
-// findQoderProjectDirs returns all .qoder directories from git root through cwd.
-// Without a git root, only cwd/.qoder is checked.
-func findQoderProjectDirs(cwd string) []string {
-	var dirs []string
-	seen := make(map[string]bool)
-
-	gitRoot := findGitRoot(cwd)
-	if gitRoot == "" {
-		candidate := filepath.Join(cwd, ".qoder")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			dirs = append(dirs, candidate)
-		}
-		return dirs
-	}
-
-	candidate := filepath.Join(gitRoot, ".qoder")
-	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-		dirs = append(dirs, candidate)
-		seen[candidate] = true
-	}
-
-	var chain []string
-	dir := cwd
-	for depth := 0; depth < maxGitWalkDepth; depth++ {
-		candidate := filepath.Join(dir, ".qoder")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() && !seen[candidate] {
-			chain = append(chain, candidate)
-			seen[candidate] = true
-		}
-		if dir == gitRoot {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	for i := len(chain) - 1; i >= 0; i-- {
-		dirs = append(dirs, chain[i])
-	}
-	return dirs
 }
 
 func init() {

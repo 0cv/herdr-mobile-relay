@@ -87,7 +87,7 @@ func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	apply(claudeBuiltins, nil)
 
 	if ctx.Cwd != "" {
-		projectDirs := findClaudeProjectDirs(ctx.Cwd)
+		projectDirs := findProjectDirs(ctx.Cwd, []string{".claude"})
 		for _, dir := range projectDirs {
 			cmdDir := filepath.Join(dir, "commands")
 			cmds, supp, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
@@ -142,7 +142,7 @@ func claudeSkillOverrides(ctx DiscoverContext) []string {
 		filepath.Join(ctx.Home, ".claude", "settings.json"),
 	}
 	if ctx.Cwd != "" {
-		for _, dir := range findClaudeProjectDirs(ctx.Cwd) {
+		for _, dir := range findProjectDirs(ctx.Cwd, []string{".claude"}) {
 			paths = append(paths,
 				filepath.Join(dir, "settings.json"),
 				filepath.Join(dir, "settings.local.json"),
@@ -241,52 +241,6 @@ func dedupClaudePrecedence(commands []Command, builtinCount, personalCount int, 
 		}
 	}
 	return result
-}
-
-// findClaudeProjectDirs returns all .claude directories from git root through cwd.
-// Without a git root, only cwd/.claude is checked.
-func findClaudeProjectDirs(cwd string) []string {
-	var dirs []string
-	seen := make(map[string]bool)
-
-	gitRoot := findGitRoot(cwd)
-	if gitRoot == "" {
-		candidate := filepath.Join(cwd, ".claude")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			dirs = append(dirs, candidate)
-		}
-		return dirs
-	}
-
-	candidate := filepath.Join(gitRoot, ".claude")
-	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-		dirs = append(dirs, candidate)
-		seen[candidate] = true
-	}
-
-	// Walk from cwd upward to git root, collecting .claude dirs.
-	var chain []string
-	dir := cwd
-	for depth := 0; depth < maxGitWalkDepth; depth++ {
-		candidate := filepath.Join(dir, ".claude")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() && !seen[candidate] {
-			chain = append(chain, candidate)
-			seen[candidate] = true
-		}
-		if dir == gitRoot {
-			break
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	// Reverse chain so outermost scope comes first (git root direction).
-	for i := len(chain) - 1; i >= 0; i-- {
-		dirs = append(dirs, chain[i])
-	}
-	return dirs
 }
 
 func init() {
