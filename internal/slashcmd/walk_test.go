@@ -276,3 +276,31 @@ func TestWalkNonRegularCommandFileSkipped(t *testing.T) {
 		t.Fatal("walk blocked on a FIFO named *.md")
 	}
 }
+
+// walkDirBudget recurses, so a symlink pointing at an ancestor would be an
+// unbounded loop if the walk ever followed one. It does not - symlinks are
+// skipped outright, which is what makes the recursion safe without a
+// cross-level visited set. Anyone who later makes this walk follow symlinks
+// has to thread real-path de-duplication through the recursion to keep this
+// test passing; the budget alone will not save them, because recursing into a
+// directory does not spend it.
+func TestWalkSymlinkToAncestorTerminates(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	os.MkdirAll(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, "real.md"), []byte("Real command"), 0o644)
+	if err := os.Symlink(dir, filepath.Join(sub, "loop")); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan []Command, 1)
+	go func() { done <- walkCommandDir(dir, "personal") }()
+	select {
+	case commands := <-done:
+		if len(commands) != 1 || commands[0].Command != "/sub:real" {
+			t.Errorf("expected only /sub:real, got %+v", commands)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("walk did not terminate on a symlink to an ancestor")
+	}
+}
