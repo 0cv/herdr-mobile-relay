@@ -582,8 +582,11 @@ func TestConfiguredTildeUserFormIsSkipped(t *testing.T) {
 
 // Tilde expansion has to happen before de-duplication, not after: "~/x" and
 // "<home>/x" name the same directory, and resolve's seen-set keys on the
-// final joined root, so if expansion ran after de-duplication (or not at
-// all) these would compare unequal and both would survive.
+// final joined root, so if expansion ran after de-duplication these would
+// compare unequal and both would survive. (Whether expansion happens at all
+// is TestConfiguredEntryExpandsTilde's job: with expansion removed entirely,
+// "~/x" is just dropped by the absolute-path guard, so this dedup assertion
+// would still hold.)
 func TestTildeExpansionDedupesAgainstEquivalentAbsoluteEntry(t *testing.T) {
 	clearAllEnv(t)
 	home := t.TempDir()

@@ -255,3 +255,185 @@ func TestTitleAndTranscriptComeFromTheSameRootForADuplicateSessionID(t *testing.
 		t.Fatalf("title = %q, want the first root's own title - it has no summary record, so it is empty", title)
 	}
 }
+
+// writeCodexIndexEntry appends one session_index.jsonl record to codexHome -
+// the file both session.codexSessionName and conversation's Codex Locate
+// path key off id, keyed by the config directory (not the "sessions" leaf)
+// per agentroots.CodexHomes.
+func writeCodexIndexEntry(t *testing.T, codexHome, sessionID, threadName string) {
+	t.Helper()
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := json.Marshal(map[string]any{"id": sessionID, "thread_name": threadName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(codexHome, "session_index.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(append(entry, '\n')); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeCodexRollout writes a minimal rollout file under codexHome/sessions -
+// one user turn and one assistant turn carrying answer, so a test that puts
+// the same session id in two roots can tell which root the reader actually
+// read. Serves the same purpose writeClaudeTranscriptAnswering does for
+// Claude. day is the two-digit day-of-month component; the fixture is
+// otherwise fixed at 2026-08 so callers only vary what distinguishes roots.
+func writeCodexRollout(t *testing.T, codexHome, day, sessionID, answer string) {
+	t.Helper()
+	dir := filepath.Join(codexHome, "sessions", "2026", "08", day)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rows := []map[string]any{
+		{"timestamp": "2026-08-" + day + "T10:00:00Z", "type": "response_item",
+			"payload": map[string]any{"type": "message", "role": "user",
+				"content": []any{map[string]any{"type": "input_text", "text": "the prompt"}}}},
+		{"timestamp": "2026-08-" + day + "T10:00:01Z", "type": "response_item",
+			"payload": map[string]any{"type": "message", "role": "assistant",
+				"content": []any{map[string]any{"type": "output_text", "text": answer}}}},
+	}
+	var buf []byte
+	for _, row := range rows {
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf = append(buf, encoded...)
+		buf = append(buf, '\n')
+	}
+	path := filepath.Join(dir, "rollout-2026-08-"+day+"T10-00-00-"+sessionID+".jsonl")
+	if err := os.WriteFile(path, buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const codexInvariantSession = "223e4567-e89b-12d3-a456-426614174321"
+
+// The baseline agreement must hold for Codex too, mirroring
+// TestTitleAndTranscriptAgreeForANonDefaultProfile: a session reachable only
+// through a non-default config directory must title and transcript together.
+func TestCodexTitleAndTranscriptAgreeForANonDefaultConfigDir(t *testing.T) {
+	clearAgentEnv(t)
+	home := t.TempDir()
+	work := t.TempDir()
+	t.Setenv(agentroots.CodexListEnv, work)
+
+	writeCodexIndexEntry(t, work, codexInvariantSession, "Work Session")
+	writeCodexRollout(t, work, "22", codexInvariantSession, "the answer")
+
+	title := session.NewResolver(home).SessionName("codex", "/work/app", codexInvariantSession)
+	page, err := conversation.NewReader(home).Read("codex", codexInvariantSession, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title == "" {
+		t.Errorf("title did not resolve from the configured codex home")
+	}
+	if !page.Available {
+		t.Errorf("transcript did not resolve from the configured codex home: reason=%q", page.Reason)
+	}
+}
+
+// The round-3 blocker, reproduced verbatim from two independent gate
+// reviewers: session.codexSessionName answered with the first NON-EMPTY
+// thread_name across codexHomes while conversation.findCodexSession answered
+// with the first home whose rollout tree HOLDS the session - different
+// search key and a different stopping rule. Codex writes the index record
+// before it names the thread, so an empty thread_name in the transcript's
+// own root is the ordinary fresh-session state, not a corner case; falling
+// through to a later root's title pairs it with a transcript that root never
+// actually served.
+func TestCodexTitleComesFromTheSameRootAsTheTranscriptForADuplicateSessionID(t *testing.T) {
+	clearAgentEnv(t)
+	home := t.TempDir()
+	work := t.TempDir()
+	t.Setenv(agentroots.CodexListEnv, work)
+
+	writeCodexIndexEntry(t, work, codexInvariantSession, "")
+	writeCodexRollout(t, work, "22", codexInvariantSession, "work conversation")
+
+	homeCodex := filepath.Join(home, ".codex")
+	writeCodexIndexEntry(t, homeCodex, codexInvariantSession, "Deploy hotfix")
+	writeCodexRollout(t, homeCodex, "21", codexInvariantSession, "home conversation")
+
+	title := session.NewResolver(home).SessionName("codex", "/work/app", codexInvariantSession)
+	page, err := conversation.NewReader(home).Read("codex", codexInvariantSession, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Available {
+		t.Fatalf("transcript did not resolve at all: reason=%q", page.Reason)
+	}
+
+	var answers []string
+	for _, entry := range page.Entries {
+		if entry.Role == "assistant" {
+			answers = append(answers, entry.Text)
+		}
+	}
+	if len(answers) != 1 || answers[0] != "work conversation" {
+		t.Fatalf("transcript answers = %q, want the work root's %q (earliest configured root wins)",
+			answers, "work conversation")
+	}
+	if title == "Deploy hotfix" {
+		t.Fatalf("INVARIANT BROKEN: title came from the home root while the transcript came from the work root")
+	}
+	if title != "" {
+		t.Fatalf("title = %q, want empty - the work root's own index entry has no thread name yet", title)
+	}
+}
+
+// Codex titles with no transcript at all: before the fix the title was read
+// straight from session_index.jsonl with no check that the rollout the
+// reader will serve exists, so a pruned or unsynced rollout put a confident
+// name over "No conversation log is available for this session."
+func TestCodexTitleRequiresAReachableTranscript(t *testing.T) {
+	clearAgentEnv(t)
+	home := t.TempDir()
+	writeCodexIndexEntry(t, filepath.Join(home, ".codex"), codexInvariantSession, "Ghost Title")
+	// Deliberately no rollout file anywhere - a pruned or unsynced transcript.
+
+	title := session.NewResolver(home).SessionName("codex", "/work/app", codexInvariantSession)
+	page, err := conversation.NewReader(home).Read("codex", codexInvariantSession, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Available {
+		t.Fatalf("transcript resolved from nowhere: %#v", page.Entries)
+	}
+	if title != "" {
+		t.Fatalf("INVARIANT BROKEN: title %q resolved over a session with no reachable transcript", title)
+	}
+}
+
+// Id validation asymmetry: the resolver used to title any validSessionID
+// while the reader requires a canonical UUID for Codex. A non-canonical id
+// must be refused identically on both sides even when an index entry and a
+// same-shaped rollout both exist for it.
+func TestCodexNonCanonicalSessionIDIsRefusedOnBothSides(t *testing.T) {
+	clearAgentEnv(t)
+	home := t.TempDir()
+	const nonCanonical = "sess-456"
+	codexHome := filepath.Join(home, ".codex")
+	writeCodexIndexEntry(t, codexHome, nonCanonical, "Should Never Title")
+	writeCodexRollout(t, codexHome, "22", nonCanonical, "should never be readable")
+
+	title := session.NewResolver(home).SessionName("codex", "/work/app", nonCanonical)
+	page, err := conversation.NewReader(home).Read("codex", nonCanonical, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Available {
+		t.Fatalf("INVARIANT BROKEN: reader served a transcript for a non-canonical id: %#v", page.Entries)
+	}
+	if title != "" {
+		t.Fatalf("INVARIANT BROKEN: resolver titled a non-canonical id: %q", title)
+	}
+}

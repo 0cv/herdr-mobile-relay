@@ -100,13 +100,19 @@ inherits the shell environment a Herdr pane runs in. If a pane sets
 profile — one per herdr setup — the pane keeps whatever title herdr itself
 reports, but the relay-resolved session name and the transcript both come up
 empty, and the conversation view shows "No conversation log is available for
-this session."
+this session." The same lists below also decide where that profile's slash
+commands and skills are discovered, so a profile whose commands are missing
+from the palette has the same root cause.
 
 Pi and Oh My Pi need no configuration for their named profiles as long as the
 config root stays at its default, `~/.pi` or `~/.omp`: both keep a profile's
 sessions at `<config root>/profiles/<name>/agent`, so the relay discovers
-`~/.omp/profiles/*/agent` and `~/.pi/profiles/*/agent` on startup. Restart the
-relay after adding a profile. Auto-discovery only ever expands the home config
+`~/.omp/profiles/*/agent` and `~/.pi/profiles/*/agent` on every lookup, not
+just at startup — a profile created while the relay is already running is
+picked up with no restart. The one lag: a pane's already-resolved session
+title can stay cached for up to 60 seconds, so it can take that long to
+reflect a brand-new profile; the transcript itself is never cached and is
+always current. Auto-discovery only ever expands the home config
 root, never a configured one — so a relocated Pi or Oh My Pi config root does
 not get its profiles discovered, even after its `<root>/agent` is added to the
 matching `HERDR_*_CONFIG_DIRS` list. Each profile under a relocated root must

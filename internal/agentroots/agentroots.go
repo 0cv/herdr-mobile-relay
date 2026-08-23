@@ -35,11 +35,15 @@ import (
 	"strings"
 )
 
-// Relay-side overrides. Each holds a platform-separated list (":" on Unix, ";"
-// on Windows, as in PATH) of *config directories* - the same values that would
-// go in CLAUDE_CONFIG_DIR and friends - not pre-joined transcript roots. The
-// service wrapper exports every key of relay.env into the relay process, so
-// these belong in that file.
+// Relay-side overrides. Each holds a colon-separated list (the platform
+// path-list separator, as in PATH) of directories - not pre-joined transcript
+// roots. For ClaudeListEnv, QoderListEnv and CodexListEnv each entry is a
+// *config directory* - the same values that would go in CLAUDE_CONFIG_DIR and
+// friends. For PiListEnv and OMPListEnv each entry is instead an *agent*
+// directory - the same value PI_CODING_AGENT_DIR takes - because resolve()
+// joins the leaf straight onto it, so a config-root directory there would
+// scan one level too high. The service wrapper exports every key of
+// relay.env into the relay process, so these belong in that file.
 const (
 	ClaudeListEnv = "HERDR_CLAUDE_CONFIG_DIRS"
 	QoderListEnv  = "HERDR_QODER_CONFIG_DIRS"

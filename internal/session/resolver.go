@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 )
 
 const cacheTTL = 60 * time.Second
@@ -23,76 +23,91 @@ type cacheEntry struct {
 }
 
 type Resolver struct {
-	mu    sync.Mutex
-	cache map[string]cacheEntry
-	home  string
+	mu     sync.Mutex
+	cache  map[string]cacheEntry
+	home   string
+	reader *conversation.Reader
 }
 
-// NewResolver keeps the home directory and nothing else. Every root is
-// resolved per call, through the same agentroots seam conversation.Reader
-// uses, so a pane's title and its transcript can never be looked up in
-// different trees.
+// NewResolver keeps the home directory and a conversation.Reader built on the
+// same home (NewReader stores home and nothing else), so construction reads
+// nothing. With a session id the transcript is located by the reader's own
+// Locate - the very function the conversation view resolves through - so the
+// file a pane's title is read from and the transcript the reader serves come
+// out of one lookup instead of two that must agree: a split between them is
+// not expressible, for any agent kind, and an id the reader refuses is never
+// titled. The one lookup with no reader counterpart is the empty-session-id
+// heuristic; see soleTranscriptInRoot for why it is a deliberate exception.
 //
-// The roots are deliberately not resolved once here. agentroots discovers Pi
-// and Oh My Pi named profiles by reading <config root>/profiles, and the relay
-// is a long-lived user service: a profile directory appears the first time
-// someone runs the agent under that profile, which is almost always after the
-// relay started. A snapshot taken at construction would leave every pane in
-// that profile unresolvable until the service was restarted.
+// No root list is resolved here. agentroots discovers Pi and Oh My Pi named
+// profiles by reading <config root>/profiles, and the relay is a long-lived
+// user service: a profile directory appears the first time someone runs the
+// agent under that profile, which is almost always after the relay started. A
+// snapshot taken at construction would leave every pane in that profile
+// unresolvable until the service was restarted. Locate resolves its lists per
+// call for the same reason.
 func NewResolver(home string) *Resolver {
-	return &Resolver{cache: make(map[string]cacheEntry), home: home}
+	return &Resolver{cache: make(map[string]cacheEntry), home: home, reader: conversation.NewReader(home)}
 }
 
 func (r *Resolver) claudeRoots() []string { return agentroots.Claude(r.home) }
 func (r *Resolver) qoderRoots() []string  { return agentroots.Qoder(r.home) }
-func (r *Resolver) codexHomes() []string  { return agentroots.CodexHomes(r.home) }
-func (r *Resolver) piRoots() []string     { return agentroots.Pi(r.home) }
-func (r *Resolver) ompRoots() []string    { return agentroots.OMP(r.home) }
 
-// agentRoots reports the directories to search for one agent, or nil when the
-// agent has no title source at all. The precedence matches the switch in
-// SessionName: Pi and Oh My Pi are matched by exact name, everything else by
-// substring.
-func (r *Resolver) agentRoots(agentLower string) []string {
-	switch {
-	case isOMPSessionAgent(agentLower):
-		return r.ompRoots()
-	case isPiSessionAgent(agentLower):
-		return r.piRoots()
-	case strings.Contains(agentLower, "qoder"):
+// heuristicRoots reports the cwd-encoded project-directory roots the
+// empty-session-id heuristic scans. Only Claude and Qoder keep such trees;
+// every other agent's pane is never titled without an id.
+func (r *Resolver) heuristicRoots(kind agentKind) []string {
+	if kind == agentQoder {
 		return r.qoderRoots()
-	case strings.Contains(agentLower, "claude"):
-		return r.claudeRoots()
-	case strings.Contains(agentLower, "codex"):
-		return r.codexHomes()
 	}
-	return nil
+	return r.claudeRoots()
 }
 
 func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
-	agentLower := strings.ToLower(agent)
-
-	// Resolved once and threaded through every helper below. Each accessor
-	// reads the filesystem, so calling one twice in a single request both pays
-	// for the scan twice and risks deciding the title, its cache signature and
-	// the containment check against three different lists.
-	roots := r.agentRoots(agentLower)
-
-	sessionPath := ""
-	if isOMPSessionAgent(agentLower) || isPiSessionAgent(agentLower) {
-		// Pi and Oh My Pi panes report the transcript path itself, not an id.
-		sessionPath = containedSessionFile(roots, sessionID)
-		if sessionPath == "" {
-			return ""
-		}
-	} else if sessionID != "" && !validSessionID(sessionID) {
+	kind := classifyAgent(agent)
+	if kind == agentUnknown {
 		return ""
 	}
 
-	key := agent + "|" + cwd + "|" + sessionID
-	sig := sourceSignature(agentLower, cwd, sessionID, sessionPath, roots)
+	// ONE lookup per call produces both the file the title will be read from
+	// and the cache signature over it, so the signature always signs the
+	// title's actual source; deriving the two through separate scans is how
+	// they once came to disagree. No root list is resolved or scanned twice:
+	// with a session id the only scan is Locate's own, and the Codex index
+	// home falls out of the root Locate already answered with.
+	var titleSource, sig string
+	codexIndex := ""
+	if sessionID == "" {
+		// The reader rejects empty ids outright, so there is no lookup to
+		// share; see soleTranscriptInRoot for the one resolver-only guess.
+		if kind != agentQoder && kind != agentClaude {
+			return ""
+		}
+		titleSource, sig = resolveSoleTranscript(r.heuristicRoots(kind), cwd)
+	} else if path, root, ok := r.reader.Locate(agent, sessionID); ok {
+		titleSource = path
+		sig = pathSignature(path)
+		if kind == agentCodex {
+			// The title must be read from the SAME home whose rollout the
+			// reader serves. Codex writes the index record before it names
+			// the thread, so an empty thread_name here is the ordinary
+			// fresh-session state - answering with another home's non-empty
+			// name instead would put that home's title over this home's
+			// transcript. Locate's root is agentroots.Codex's element,
+			// <home>/sessions in the configured spelling, so its parent is
+			// the home whose index belongs to this rollout.
+			codexIndex = filepath.Join(filepath.Dir(root), "session_index.jsonl")
+			sig += "|" + pathSignature(codexIndex)
+		}
+	} else {
+		// No transcript for this pane means no title: a confident name over
+		// a conversation view that says "not available" is worse than none.
+		// A miss has no file to sign, so a cached miss lives out its TTL.
+		sig = "locate-miss"
+	}
 
+	key := agent + "|" + cwd + "|" + sessionID
 	r.mu.Lock()
 	if entry, ok := r.cache[key]; ok && entry.sig == sig && time.Now().Before(entry.expires) {
 		r.mu.Unlock()
@@ -101,15 +116,17 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	r.mu.Unlock()
 
 	var name string
-	switch {
-	case isOMPSessionAgent(agentLower):
-		name = extractOMPSessionTitle(sessionPath)
-	case isPiSessionAgent(agentLower):
-		name = extractPiSessionTitle(sessionPath)
-	case strings.Contains(agentLower, "qoder"), strings.Contains(agentLower, "claude"):
-		name = projectSessionTitle(roots, cwd, sessionID)
-	case strings.Contains(agentLower, "codex"):
-		name = codexSessionName(roots, sessionID)
+	if titleSource != "" {
+		switch kind {
+		case agentOMP:
+			name = extractOMPSessionTitle(titleSource)
+		case agentPi:
+			name = extractPiSessionTitle(titleSource)
+		case agentQoder, agentClaude:
+			name = extractTitle(titleSource)
+		case agentCodex:
+			name = codexIndexThreadName(codexIndex, sessionID)
+		}
 	}
 
 	r.mu.Lock()
@@ -119,63 +136,53 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	return name
 }
 
-func isOMPSessionAgent(agent string) bool {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
+// agentKind is the single classification every resolver-side dispatch
+// switches on: the title-extraction strategy, the empty-session-id
+// heuristic's gate and its root choice all branch on the same value, so
+// their notions of "which agent is this" cannot drift from each other.
+// Whether a session id has a transcript is not dispatched on it at all -
+// that is conversation.Reader.Locate's classification; see classifyAgent.
+type agentKind int
+
+const (
+	agentUnknown agentKind = iota
+	agentOMP
+	agentPi
+	agentQoder
+	agentClaude
+	agentCodex
+)
+
+// classifyAgent picks the title-extraction strategy: Pi and Oh My Pi by exact
+// name, everything else by substring. It deliberately does NOT decide whether
+// a session id has a transcript - conversation.Reader.Locate does, with the
+// reader's own exact normalized-name classification - so a name this matches
+// but the reader does not ("claude-work") is refused a title by Locate rather
+// than titled with no transcript source, exactly as the reader refuses it a
+// conversation. The residual asymmetry runs the safe way only: a name the
+// reader supports but this misses (say "pi_coding_agent", which normalizes to
+// a supported name yet matches no case below) goes untitled, never mistitled
+// - and herdr reports fixed kinds ("claude", "codex", "qodercli", "pi",
+// "omp"; profiles.isHerdrKind), which both sides classify identically. The
+// substring cases still gate the empty-session-id heuristic, where the reader
+// offers no classification to share because it rejects the id outright.
+func classifyAgent(agent string) agentKind {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	switch agent {
 	case "omp", "oh-my-pi", "oh my pi", "ohmypi":
-		return true
-	default:
-		return false
-	}
-}
-
-func isPiSessionAgent(agent string) bool {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
+		return agentOMP
 	case "pi", "pi-coding-agent":
-		return true
-	default:
-		return false
+		return agentPi
 	}
-}
-
-// containedSessionFile reports the resolved path of sessionID when it names a
-// regular .jsonl file inside at least one root. The predicates are the original
-// single-root check - IsAbs, .jsonl, Abs, EvalSymlinks, Rel, Mode().IsRegular()
-// - unchanged; the path-side ones are hoisted out of the loop because they do
-// not depend on the root, and every root-side bail-out becomes "try the next
-// root" so a root that fails to resolve is skipped rather than treated as a
-// match. Multi-root means contained in at least one root, never containment
-// skipped.
-func containedSessionFile(roots []string, sessionID string) string {
-	if !filepath.IsAbs(sessionID) || filepath.Ext(sessionID) != ".jsonl" {
-		return ""
+	switch {
+	case strings.Contains(agent, "qoder"):
+		return agentQoder
+	case strings.Contains(agent, "claude"):
+		return agentClaude
+	case strings.Contains(agent, "codex"):
+		return agentCodex
 	}
-	path, err := filepath.Abs(filepath.Clean(sessionID))
-	if err != nil {
-		return ""
-	}
-	path, err = filepath.EvalSymlinks(path)
-	if err != nil {
-		return ""
-	}
-	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
-		return ""
-	}
-	for _, candidate := range roots {
-		root, err := filepath.Abs(candidate)
-		if err != nil {
-			continue
-		}
-		root, err = filepath.EvalSymlinks(root)
-		if err != nil {
-			continue
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			continue
-		}
-		return path
-	}
-	return ""
+	return agentUnknown
 }
 
 func extractOMPSessionTitle(path string) string {
@@ -249,68 +256,85 @@ func extractPiSessionTitle(path string) string {
 	return name
 }
 
-// projectSessionTitle returns the title held by the FIRST root that holds this
-// session - not the first root that yields a non-empty title.
-// conversation.Reader picks the transcript by exactly the same
-// first-root-that-holds-the-file rule, and the two have to agree. A freshly
-// started session has no title record yet, so stopping on the first non-empty
-// title would let a titleless copy in an earlier root hand the pane a later
-// root's title while the reader shows the earlier root's transcript: a
-// correct-looking header over someone else's conversation, which is the split
-// this seam exists to prevent.
-func projectSessionTitle(roots []string, cwd, sessionID string) string {
+// resolveSoleTranscript is the empty-session-id path: it reports the
+// heuristic's transcript guess - "" when no root answers - together with the
+// cache signature over every path that decision depended on. Both come out of
+// one soleTranscriptInRoot call per root, so the signature always signs the
+// file the title came from.
+//
+// The FIRST root that owns the cwd's project directory ends the search,
+// titled or not; roots after it are never scanned, so nothing in them needs
+// signing either. See soleTranscriptInRoot for why falling through to a later
+// tree would be wrong.
+func resolveSoleTranscript(roots []string, cwd string) (path, sig string) {
+	signatures := make([]string, 0, len(roots))
 	for _, projectsDir := range roots {
-		// First root that answers for the session wins, titled or not.
-		if title, stop := projectTitleInRoot(projectsDir, cwd, sessionID); stop {
-			return title
+		candidate, rootSig, stop := soleTranscriptInRoot(projectsDir, cwd)
+		signatures = append(signatures, rootSig)
+		if stop {
+			return candidate, strings.Join(signatures, "|")
 		}
 	}
-	return ""
+	return "", strings.Join(signatures, "|")
 }
 
-// projectTitleInRoot reports the session's title within one root, and whether
-// this root ends the search. The two are distinct: a session that lives here
-// but has not been titled yet is ("", true) and must end the search, while a
-// session that lives in another profile is ("", false) and must not.
-func projectTitleInRoot(projectsDir, cwd, sessionID string) (title string, stop bool) {
+// soleTranscriptInRoot is the empty-session-id heuristic: a pane that
+// reported no session id can still be identified when the cwd's project
+// directory holds exactly one transcript. It is the one lookup in this file
+// that does NOT route through conversation.Reader.Locate, deliberately: the
+// reader rejects empty ids outright, so there is no transcript it could
+// serve and therefore none this guess could ever contradict - the shared
+// seam has nothing to share here. The guess is only sound within the root
+// that owns the cwd's project directory, so owning it ends the search
+// whatever it holds: when the directory is ambiguous the search ends empty
+// rather than falling through to a different tree, whose sole transcript is
+// some unrelated session - a confidently wrong title over a conversation
+// view that says "not available".
+//
+// Candidates get the same acceptance the id path's transcripts get:
+// classified through entryIsDir (a symlink to a directory is not a
+// transcript, however it is named) and read only when Stat reports a regular
+// file.
+func soleTranscriptInRoot(projectsDir, cwd string) (path, sig string, stop bool) {
 	projectDir := findProjectDir(projectsDir, cwd)
 	if projectDir == "" {
-		return "", false
+		return "", pathSignature(projectsDir), false
 	}
-
-	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
-	if _, err := os.Stat(sessionFile); err != nil {
-		if sessionID != "" {
-			return "", false
-		}
-		// A pane that reported no session id can still be identified when the
-		// project directory holds exactly one transcript. That heuristic is
-		// only sound as a same-root guess: there is no reader to agree with
-		// (it rejects empty session ids outright), so this root owning the
-		// cwd's project directory is the only anchor tying the guess to the
-		// pane. When the directory is ambiguous the search must end empty
-		// rather than fall through to a different tree, whose sole transcript
-		// is some unrelated session - a confidently wrong title over a
-		// conversation view that says "not available".
-		entries, err := os.ReadDir(projectDir)
-		if err != nil {
-			return "", true
-		}
-		var jsonlFiles []string
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
-				jsonlFiles = append(jsonlFiles, e.Name())
-			}
-		}
-		if len(jsonlFiles) != 1 {
-			return "", true
-		}
-		sessionFile = filepath.Join(projectDir, jsonlFiles[0])
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		return "", pathSignature(projectDir), true
 	}
-
-	return extractTitle(sessionFile), true
+	// The guess depends on the whole listing: a second transcript appearing
+	// must invalidate the cache, not just an edit to the chosen one.
+	signatures := []string{pathSignature(projectDir)}
+	var transcripts []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		p := filepath.Join(projectDir, e.Name())
+		if entryIsDir(e, p) {
+			continue
+		}
+		info, statErr := os.Stat(p)
+		signatures = append(signatures, statSignature(p, info, statErr))
+		if statErr != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		transcripts = append(transcripts, p)
+	}
+	sig = strings.Join(signatures, "|")
+	if len(transcripts) != 1 {
+		return "", sig, true
+	}
+	return transcripts[0], sig, true
 }
 
+// findProjectDir locates the cwd-encoded project directory (or one whose cwd
+// file names the cwd) within one root. Only the empty-session-id heuristic
+// still needs it: with a session id the search key is the id itself, shared
+// with conversation.Reader, and neither the cwd nor the per-entry cwd-file
+// read below plays any part.
 func findProjectDir(projectsDir, cwd string) string {
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
@@ -354,15 +378,10 @@ func entryIsDir(e os.DirEntry, path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func codexSessionName(codexHomes []string, sessionID string) string {
-	for _, codexHome := range codexHomes {
-		if name := codexIndexThreadName(filepath.Join(codexHome, "session_index.jsonl"), sessionID); name != "" {
-			return name
-		}
-	}
-	return ""
-}
-
+// codexIndexThreadName reads one home's session_index.jsonl. The caller is
+// responsible for handing it the index of the home whose rollout
+// conversation.Reader.Locate answered with - never another home's, whose
+// record for the same id names a different conversation.
 func codexIndexThreadName(indexFile, sessionID string) string {
 	f, err := os.Open(indexFile)
 	if err != nil {
@@ -432,88 +451,14 @@ func matchesCwd(dir, cwd string) bool {
 	return false
 }
 
-func validSessionID(id string) bool {
-	if len(id) == 0 || len(id) > 128 {
-		return false
-	}
-	for _, c := range id {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '-', c == '_', c == '.':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// sourceSignature fingerprints every file the name could have been read from,
-// so an edit to any of them invalidates the cached entry. roots is the list
-// SessionName already resolved for this agent, and sessionPath the transcript
-// an OMP or Pi pane reported: re-resolving either here would scan the profiles
-// directory a second time and could sign a different tree than the one the
-// title came from.
-func sourceSignature(agentLower, cwd, sessionID, sessionPath string, roots []string) string {
-	if isOMPSessionAgent(agentLower) || isPiSessionAgent(agentLower) {
-		return pathSignature(sessionPath)
-	}
-	if strings.Contains(agentLower, "codex") {
-		return rootsSignature(roots, "session_index.jsonl")
-	}
-	if !strings.Contains(agentLower, "qoder") && !strings.Contains(agentLower, "claude") {
-		return ""
-	}
-	// Sign the candidate in EVERY root, never just the first root that happens
-	// to have a project directory for this cwd. The title comes from the first
-	// root that HOLDS the session, which can be any of them and changes the
-	// moment a copy appears in an earlier one, so stopping here at an earlier
-	// root would sign a file the title did not come from and pin a stale title
-	// for the whole cache TTL. With exactly one root - every default,
-	// unconfigured install - this reduces to the original signature.
-	signatures := make([]string, 0, len(roots))
-	for _, projectsDir := range roots {
-		projectDir := findProjectDir(projectsDir, cwd)
-		if projectDir == "" {
-			signatures = append(signatures, pathSignature(projectsDir))
-			continue
-		}
-		if sessionID != "" {
-			signatures = append(signatures, pathSignature(filepath.Join(projectDir, sessionID+".jsonl")))
-			continue
-		}
-		// With no session id the title falls back to the sole .jsonl in the
-		// directory, so the choice depends on the whole listing: a second file
-		// appearing must invalidate the cache.
-		entries, _ := os.ReadDir(projectDir)
-		listing := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
-				listing = append(listing, pathSignature(filepath.Join(projectDir, entry.Name())))
-			}
-		}
-		sort.Strings(listing)
-		signatures = append(signatures, strings.Join(listing, "|"))
-	}
-	return strings.Join(signatures, "|")
-}
-
-// rootsSignature signs one file per root (or the root itself when leaf is
-// empty), joined in root order. agentroots reports the roots in a fixed order,
-// so the result is deterministic.
-func rootsSignature(roots []string, leaf string) string {
-	signatures := make([]string, 0, len(roots))
-	for _, root := range roots {
-		path := root
-		if leaf != "" {
-			path = filepath.Join(root, leaf)
-		}
-		signatures = append(signatures, pathSignature(path))
-	}
-	return strings.Join(signatures, "|")
-}
-
 func pathSignature(path string) string {
 	info, err := os.Stat(path)
+	return statSignature(path, info, err)
+}
+
+// statSignature is pathSignature for a caller that already holds the Stat
+// result, so a probe that decided a candidate is not paid twice.
+func statSignature(path string, info os.FileInfo, err error) string {
 	if err != nil {
 		return path + "|missing"
 	}
