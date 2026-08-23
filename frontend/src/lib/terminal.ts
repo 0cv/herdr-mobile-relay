@@ -788,6 +788,38 @@ export interface RenderedTerminalContent {
 }
 
 /**
+ * Whether the wrapping layout can be trusted. It caps rows at the pane's own
+ * width, so a row breaks exactly where the pane broke it. Until both the cell
+ * advance and the pane's column count are known that cap falls back to the
+ * container, which breaks rows mid-word at a width the pane never used, so the
+ * caller must keep the fixed layout and scroll horizontally instead.
+ */
+export function terminalResizeLayoutEngaged(
+  sessionActive: boolean,
+  measuredCellWidth: number,
+  capColumns: number,
+): boolean {
+  return sessionActive && measuredCellWidth > 0 && capColumns > 0;
+}
+
+/**
+ * Columns the screen must be able to show. Under the wrapping layout rows wrap
+ * at the cap and only fixed-grid rows may exceed it; otherwise every row keeps
+ * its full width, which is what makes the screen scroll rather than wrap.
+ */
+export function terminalScreenColumns(
+  rows: readonly Pick<RenderedTerminalRow, 'columns' | 'fixedGrid'>[],
+  engaged: boolean,
+  capColumns: number,
+): number {
+  let columns = engaged ? capColumns : 0;
+  for (const row of rows) {
+    if (!engaged || row.fixedGrid) columns = Math.max(columns, row.columns);
+  }
+  return columns;
+}
+
+/**
  * Rows cropped from the front between two renders of a growing log. The new
  * head must reappear verbatim as a block of the previous rows; wholesale
  * redraws find no block and return 0.

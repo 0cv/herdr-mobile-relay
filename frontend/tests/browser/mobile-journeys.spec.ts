@@ -1965,6 +1965,52 @@ test('uses Resize Session as the only terminal layout', async ({ page }) => {
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBeNull();
 });
 
+test('keeps a wide pane readable while its size lease is still pending', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'claude' }],
+  });
+  // The relay advertises the lease capability unconditionally, so the pane is
+  // shown before any width is granted. Leaving the lease unanswered pins that
+  // state: wrapping then had no cap and broke every row mid-word.
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
+  const wideRow = `${'the pane is far wider than the phone viewport '.repeat(3)}and keeps going`;
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: ['first row', wideRow, 'last row'].join('\n'),
+  });
+
+  const terminal = page.getByRole('log');
+  const lines = terminal.locator('.ansi-line');
+  await expect(lines).toHaveCount(3);
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThan(0);
+
+  // Every row occupies exactly one line: the wide row scrolls instead of
+  // wrapping, so no row is broken mid-word at the container width.
+  const geometry = await terminal.evaluate((element) => {
+    const rows = Array.from(element.querySelectorAll<HTMLElement>('.ansi-line'));
+    const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+    return {
+      lineHeight,
+      heights: rows.map((row) => row.getBoundingClientRect().height),
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    };
+  });
+  expect(geometry.lineHeight).toBeGreaterThan(0);
+  for (const height of geometry.heights) {
+    expect(height).toBeLessThan(geometry.lineHeight * 1.5);
+  }
+  expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
+});
+
 test('reports unavailable Resize Session without exposing legacy width modes', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);

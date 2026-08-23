@@ -36,6 +36,8 @@
     stripAnsi,
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
+    terminalResizeLayoutEngaged,
+    terminalScreenColumns,
   } from '$lib/terminal';
   import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
   import type {
@@ -203,6 +205,15 @@
   const resizeSessionActive = $derived(
     Boolean($connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
   );
+  // The capability only says the relay can lease; it does not mean this pane
+  // has a width yet. The wrapping layout is engaged solely when it does, so a
+  // pane read before the lease lands keeps the fixed layout rather than
+  // wrapping its rows at the phone's container width.
+  const resizeLayoutActive = $derived(terminalResizeLayoutEngaged(
+    resizeSessionActive,
+    measuredCellWidth,
+    lastLeasedColumns || renderedResizeColumns,
+  ));
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -266,13 +277,14 @@
     // Every width is emitted in px of the measured probe cell, never in ch:
     // Safari's Core Text port resolves 1ch against different font metrics
     // than the rendered glyph advance, so an Nch cap wraps short of N cells.
-    // Before the probe is measured no cap is emitted at all, so the declared
-    // fallbacks (100% for the wrap cap, auto for the row background) apply
-    // instead of a ch-derived width that would be wrong on those engines.
+    // Before the probe is measured no cap is emitted at all. The wrapping
+    // layout is gated on the same predicate, so the missing cap can no longer
+    // fall back to the container width and shred rows mid-word: the fixed
+    // layout applies instead until a real cap exists.
     if (measuredCellWidth <= 0) return undefined;
     const capColumns = lastLeasedColumns || renderedResizeColumns;
     const styles = [`--terminal-cell-width: ${measuredCellWidth.toFixed(4)}px`];
-    if (resizeSessionActive && capColumns) {
+    if (resizeLayoutActive) {
       styles.push(`--terminal-width: ${(capColumns * measuredCellWidth).toFixed(4)}px`);
     }
     if (virtualContentColumns > 0) {
@@ -356,6 +368,10 @@
     const next = frame;
     const matchingFrame = next?.paneId === agent.pane_id ? next : undefined;
     const preserve = true;
+    // Keyed to the session, not to resizeLayoutActive, on purpose: a relay that
+    // can lease will repaint this pane at the phone's width, so trailing padding
+    // measured at the desktop width is stale whether or not the width has landed
+    // yet. Only a relay that cannot lease keeps its line ends.
     const preserveLineEnds = !resizeSessionActive;
     // A frame read while the agent repaints at a new width is transient. Keep
     // the phone's last stable frame painted until the new stable frame lands.
@@ -628,7 +644,7 @@
       next.format,
       preserve,
       preserveLineEnds,
-      resizeSessionActive ? lastLeasedColumns : 0,
+      resizeLayoutActive ? lastLeasedColumns : 0,
     );
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
@@ -763,7 +779,7 @@
       || Math.round(window.visualViewport?.width || window.innerWidth);
     const layoutSignature = [
       lastPreserveLayout ? 'preserve' : 'readable',
-      resizeSessionActive ? 'resize' : 'fixed',
+      resizeLayoutActive ? 'resize' : 'fixed',
       lastPreserveLineEnds ? 'line-ends' : 'wrapped',
       lastLeasedColumns || renderedResizeColumns,
       $interfaceSize,
@@ -787,7 +803,7 @@
       const measured = virtualHeightCache.get(row.html);
       if (measured) return measured;
       if (row.separator) return lineHeight * 1.2;
-      const wraps = (!lastPreserveLayout || (resizeSessionActive && !row.fixedGrid))
+      const wraps = (!lastPreserveLayout || (resizeLayoutActive && !row.fixedGrid))
         ? Math.max(1, Math.ceil(row.columns / wrappingColumns))
         : 1;
       return lineHeight * wraps;
@@ -805,11 +821,11 @@
 
     if (!lastPreserveLayout) virtualContentColumns = 0;
     else {
-      let columns = resizeSessionActive ? (lastLeasedColumns || renderedResizeColumns) : 0;
-      for (const row of renderedRows) {
-        if (!resizeSessionActive || row.fixedGrid) columns = Math.max(columns, row.columns);
-      }
-      virtualContentColumns = columns;
+      virtualContentColumns = terminalScreenColumns(
+        renderedRows,
+        resizeLayoutActive,
+        lastLeasedColumns || renderedResizeColumns,
+      );
     }
     renderVirtualWindow(nextTop, true);
     return nextTop;
@@ -1806,7 +1822,7 @@
   {/if}
   <div class="term-wrap">
   <div
-    class:resize-layout={resizeSessionActive}
+    class:resize-layout={resizeLayoutActive}
     class="term-content preserve-layout"
     style={terminalContentStyle}
     bind:this={terminalElement}
