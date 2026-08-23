@@ -174,12 +174,21 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 
 func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	agent.SessionName = ""
-	agent.SessionID = agent.Session
-	agent.ConversationHistoryAvailable = agent.SessionID != "" && conversation.Supported(agent.Agent)
-	if agent.Session == "" {
+	// Every other consumer of a pane's reported session (Reader.Read,
+	// latestConversationResponse, the activity backfill path) TrimSpaces it
+	// before deciding anything. Trimming once here, before it reaches
+	// SessionID or the resolver, is what keeps a whitespace-only value from
+	// looking like a real session id: untrimmed, it survives the `== ""`
+	// checks below and can still reach the resolver's empty-id
+	// sole-transcript heuristic, inventing a title over a conversation view
+	// that Reader.Read reports as unavailable.
+	sessionID := strings.TrimSpace(agent.Session)
+	agent.SessionID = sessionID
+	agent.ConversationHistoryAvailable = sessionID != "" && conversation.Supported(agent.Agent)
+	if sessionID == "" {
 		return
 	}
-	title := s.sessions.SessionName(agent.Agent, agent.Cwd, agent.Session)
+	title := s.sessions.SessionName(agent.Agent, agent.Cwd, sessionID)
 	if title == "" {
 		return
 	}

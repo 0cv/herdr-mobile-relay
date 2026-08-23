@@ -45,10 +45,23 @@ func testServerWithCacheDir(cacheDir string) *Server {
 func TestResolveAgentSessionName(t *testing.T) {
 	home := t.TempDir()
 	codexDir := filepath.Join(home, ".codex")
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+	const codexSessionID = "123e4567-e89b-12d3-a456-426614174001"
+	rolloutPath := filepath.Join(codexDir, "sessions", "2026", "08", "12", "rollout-2026-08-12T10-00-00-"+codexSessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	index := []byte("{\"id\":\"session-1\",\"thread_name\":\"current-session\"}\n")
+	row, err := json.Marshal(map[string]any{
+		"timestamp": "2026-08-12T10:00:00Z", "type": "response_item",
+		"payload": map[string]any{"type": "message", "role": "user",
+			"content": []any{map[string]any{"type": "input_text", "text": "build it"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, append(row, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	index := []byte("{\"id\":\"" + codexSessionID + "\",\"thread_name\":\"current-session\"}\n")
 	if err := os.WriteFile(filepath.Join(codexDir, "session_index.jsonl"), index, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -56,10 +69,12 @@ func TestResolveAgentSessionName(t *testing.T) {
 	s := testServer()
 	s.sessions = session.NewResolver(home)
 
-	named := &coordinator.AgentState{Agent: "codex", Session: "session-1"}
+	// named carries a canonical session id with both an index record and the
+	// rollout the reader would serve, the shape Locate requires post round-3.
+	named := &coordinator.AgentState{Agent: "codex", Session: codexSessionID}
 	s.resolveAgentSessionName(named)
 	if named.SessionName != "current-session" || named.Session != "current-session" ||
-		named.SessionID != "session-1" || !named.ConversationHistoryAvailable {
+		named.SessionID != codexSessionID || !named.ConversationHistoryAvailable {
 		t.Fatalf("named session = %#v, want resolved display name and retained history identity", named)
 	}
 
@@ -68,6 +83,38 @@ func TestResolveAgentSessionName(t *testing.T) {
 	if unnamed.SessionName != "" || unnamed.Session != "missing-session" ||
 		unnamed.SessionID != "missing-session" || !unnamed.ConversationHistoryAvailable {
 		t.Fatalf("unnamed session = %#v, want preserved history identity", unnamed)
+	}
+}
+
+// A whitespace-only session value is what herdr reports for a pane with no
+// real session yet - not the same as an empty string, but every other
+// consumer (Reader.Read, latestConversationResponse, the activity backfill
+// path) treats it as one via TrimSpace. Before the fix,
+// resolveAgentSessionName did not, so the untrimmed value survived the
+// `== ""` guard and reached the resolver's empty-id sole-transcript
+// heuristic, which - given a cwd whose project directory holds exactly one
+// transcript - invents a title for a session that was never reported. The
+// conversation view for the same (agent, cwd) reads its session id through
+// Reader.Read, which trims it back to empty and answers "not available", so
+// the pane would show a confident title next to an unavailable transcript.
+func TestResolveAgentSessionNameTrimsWhitespaceOnlySession(t *testing.T) {
+	home := t.TempDir()
+	const cwd = "/work/app"
+	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Sole Transcript Title")
+
+	s := testServer()
+	s.sessions = session.NewResolver(home)
+
+	agent := &coordinator.AgentState{Agent: "claude", Cwd: cwd, Session: "   "}
+	s.resolveAgentSessionName(agent)
+	if agent.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for a whitespace-only session", agent.SessionName)
+	}
+	if agent.SessionID != "" {
+		t.Fatalf("SessionID = %q, want empty for a whitespace-only session", agent.SessionID)
+	}
+	if agent.ConversationHistoryAvailable {
+		t.Fatal("ConversationHistoryAvailable = true, want false for a whitespace-only session")
 	}
 }
 

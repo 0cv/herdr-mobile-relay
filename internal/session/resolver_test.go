@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 )
 
 // TestMain clears every environment variable agentroots consults before any
@@ -125,18 +126,19 @@ func TestClaudeSessionName(t *testing.T) {
 	}
 }
 
+// A Codex session is titled from session_index.jsonl, but only once the
+// rollout the conversation reader would serve exists beside it: the reader's
+// Locate decides whether this pane has a transcript at all, and a title is
+// only ever read from the home whose rollout answered.
 func TestCodexSessionName(t *testing.T) {
 	home := t.TempDir()
-	codexDir := filepath.Join(home, ".codex")
-	os.MkdirAll(codexDir, 0o755)
-
-	entry := map[string]any{"id": "sess-456", "thread_name": "Build API endpoint"}
-	data, _ := json.Marshal(entry)
-	os.WriteFile(filepath.Join(codexDir, "session_index.jsonl"), append(data, '\n'), 0o644)
+	const id = "3f9a1c2e-4b5d-4a6f-8c7d-9e0f1a2b3c4d"
+	codexHome := filepath.Join(home, ".codex")
+	writeCodexIndex(t, codexHome, id, "Build API endpoint")
+	writeCodexRollout(t, codexHome, id, "2026/08/22")
 
 	r := NewResolver(home)
-	name := r.SessionName("codex", "/tmp", "sess-456")
-	if name != "Build API endpoint" {
+	if name := r.SessionName("codex", "/tmp", id); name != "Build API endpoint" {
 		t.Errorf("session name = %q, want 'Build API endpoint'", name)
 	}
 }
@@ -285,41 +287,6 @@ func writeTitleFile(t *testing.T, path, title string) {
 	}
 }
 
-// Pins the architectural constraint whose absence produced the original bug:
-// NewResolver must take every root from the agentroots seam instead of
-// hand-rolling paths of its own. Reverting any field below to a
-// filepath.Join(r.home, ...) fails this, because the seam also carries the
-// configured list entry set up here.
-//
-// It deliberately does NOT claim to cover the title/transcript invariant.
-// Comparing this package's fields against the seam can only restate this
-// package's own construction, and conversation.Reader's roots are unexported
-// and live in another package. The behavioural half - title and transcript
-// resolving, or failing, together - is covered where both types are visible, in
-// internal/app/conversation_invariant_test.go. Keep the two in step.
-func TestResolverSourcesEveryRootFromTheSeam(t *testing.T) {
-	clearAgentRootEnv(t)
-	home := t.TempDir()
-	t.Setenv(agentroots.ClaudeListEnv, t.TempDir())
-
-	r := NewResolver(home)
-	for _, c := range []struct {
-		name string
-		got  []string
-		want []string
-	}{
-		{"claudeRoots", r.claudeRoots, agentroots.Claude(home)},
-		{"qoderRoots", r.qoderRoots, agentroots.Qoder(home)},
-		{"codexHomes", r.codexHomes, agentroots.CodexHomes(home)},
-		{"piRoots", r.piRoots, agentroots.Pi(home)},
-		{"ompRoots", r.ompRoots, agentroots.OMP(home)},
-	} {
-		if !slices.Equal(c.got, c.want) {
-			t.Errorf("%s = %v, want the seam's %v", c.name, c.got, c.want)
-		}
-	}
-}
-
 // A root whose project directory exists but does not hold this session must not
 // end the search: the session may live in another configured profile. Returning
 // "" from the first root fails this test.
@@ -333,11 +300,60 @@ func TestClaudeTitleFromSecondRootWhenFirstRootLacksTheSession(t *testing.T) {
 	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "home-user-app", "wanted.jsonl"), "Second root title")
 
 	r := NewResolver(home)
-	if len(r.claudeRoots) != 2 || r.claudeRoots[0] != filepath.Join(profile, "projects") {
-		t.Fatalf("claudeRoots = %v, want the configured profile first and the home default kept", r.claudeRoots)
+	if roots := r.claudeRoots(); len(roots) != 2 || roots[0] != filepath.Join(profile, "projects") {
+		t.Fatalf("claudeRoots = %v, want the configured profile first and the home default kept", roots)
 	}
 	if got := r.SessionName("claude", "/home/user/app", "wanted"); got != "Second root title" {
 		t.Fatalf("session name = %q, want %q", got, "Second root title")
+	}
+}
+
+// Reader parity (Bug 1): the transcript reader stops at the first root that
+// HOLDS the session file, regardless of its contents. The resolver must stop
+// at that same root even when its copy has no title record yet - the normal
+// state of a session Claude has not summarised - instead of answering with a
+// later root's title. Otherwise the phone pairs root 2's title with root 1's
+// transcript.
+func TestClaudeUntitledSessionInFirstRootIsNotOverriddenBySecondRoot(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, profile)
+
+	untitled := filepath.Join(profile, "projects", "home-user-app", "wanted.jsonl")
+	if err := os.MkdirAll(filepath.Dir(untitled), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Transcript lines only, no title record - extractTitle returns "" here.
+	if err := os.WriteFile(untitled, []byte("{\"type\":\"user\",\"text\":\"hi\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "home-user-app", "wanted.jsonl"), "Second root title")
+
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", "wanted"); got != "" {
+		t.Fatalf("session name = %q, want empty - the first root holds the session, so it must answer even untitled", got)
+	}
+}
+
+// Bug 2: with no reported session id the sole-.jsonl fallback may only guess
+// within the root that owns the cwd's project directory. Two candidates there
+// is ambiguous - it must not fall through to a later root, whose sole
+// transcript answers for a pane whose sessions live in the earlier root. The
+// phone would then show a confidently wrong title while the conversation view
+// shows nothing at all, because the reader rejects empty session ids outright.
+// Pre-multi-root this was impossible: only ~/.claude was consulted.
+func TestEmptySessionIDAmbiguousFirstRootDoesNotFallThroughToSecondRoot(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, profile)
+
+	writeTitleFile(t, filepath.Join(profile, "projects", "home-user-app", "a.jsonl"), "Title A")
+	writeTitleFile(t, filepath.Join(profile, "projects", "home-user-app", "b.jsonl"), "Title B")
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "home-user-app", "only.jsonl"), "Stale home title")
+
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", ""); got != "" {
+		t.Fatalf("session name = %q, want empty - an ambiguous owning root is not a licence to guess from another tree", got)
 	}
 }
 
@@ -416,28 +432,32 @@ func TestCodexTitleFromSecondConfiguredHome(t *testing.T) {
 	second := t.TempDir()
 	t.Setenv(agentroots.CodexListEnv, strings.Join([]string{first, second}, string(filepath.ListSeparator)))
 
-	data, err := json.Marshal(map[string]any{"id": "sess-second", "thread_name": "Second home thread"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(second, "session_index.jsonl"), append(data, '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	const id = "7c1d2e3f-0a1b-4c2d-8e3f-4a5b6c7d8e9f"
+	writeCodexIndex(t, second, id, "Second home thread")
+	writeCodexRollout(t, second, id, "2026/08/22")
 
-	if got := NewResolver(home).SessionName("codex", "/tmp", "sess-second"); got != "Second home thread" {
-		t.Fatalf("session name = %q, want %q; the first home has no index file and must not end the search", got, "Second home thread")
+	if got := NewResolver(home).SessionName("codex", "/tmp", id); got != "Second home thread" {
+		t.Fatalf("session name = %q, want %q; the first home holds nothing for this session and must not end the search", got, "Second home thread")
 	}
 }
 
 // Mirrors TestCacheTTL, but for a session reachable only through a non-default
-// root: sourceSignature has to sign the file the title actually came from.
+// root: the cache signature has to sign the file the title actually came
+// from. The fixture sits in the SECOND root on purpose - with it in the first
+// root a signature that only ever signed roots[0] would pass, and the bug
+// this test names would go unnoticed.
 func TestCacheInvalidationWithNonDefaultClaudeRoot(t *testing.T) {
 	clearAgentRootEnv(t)
 	home := t.TempDir()
-	profile := t.TempDir()
-	t.Setenv(agentroots.ClaudeListEnv, profile)
+	first := t.TempDir()
+	second := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, first+string(os.PathListSeparator)+second)
 
-	sessionFile := filepath.Join(profile, "projects", "home-user-proj", "s1.jsonl")
+	// The first root holds no project directory for this cwd at all.
+	if err := os.MkdirAll(filepath.Join(first, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := filepath.Join(second, "projects", "home-user-proj", "s1.jsonl")
 	writeTitleFile(t, sessionFile, "First Title")
 
 	r := NewResolver(home)
@@ -451,12 +471,12 @@ func TestCacheInvalidationWithNonDefaultClaudeRoot(t *testing.T) {
 	}
 }
 
-// Regression guard for the title cache. projectSessionTitle keeps searching
-// roots until one yields a non-empty title, so sourceSignature must sign the
-// candidate in EVERY root. Signing only the first root that happens to have a
-// project directory for this cwd - which it did - signs a file the title never
-// came from, and the cached title then survives an edit to the file it really
-// came from for the whole 60s TTL.
+// Regression guard for the title cache. The signature must sign the file the
+// title was actually read from - the transcript Locate answered with,
+// whichever root it sits in. Signing only the first root that happens to have
+// a project directory for this cwd - which it once did - signs a file the
+// title never came from, and the cached title then survives an edit to the
+// file it really came from for the whole 60s TTL.
 func TestTitleCacheTracksTheRootTheTitleActuallyCameFrom(t *testing.T) {
 	clearAgentRootEnv(t)
 	home := t.TempDir()
@@ -501,7 +521,7 @@ func TestLegacyClaudeConfigDirWidensWithoutDroppingTheHomeDefault(t *testing.T) 
 	writeTitleFile(t, filepath.Join(profile, "projects", "home-user-app", "sess-profile.jsonl"), "Profile Title")
 
 	r := NewResolver(home)
-	if got, want := r.claudeRoots, []string{
+	if got, want := r.claudeRoots(), []string{
 		filepath.Join(profile, "projects"),
 		filepath.Join(home, ".claude", "projects"),
 	}; !slices.Equal(got, want) {
@@ -518,9 +538,13 @@ func TestLegacyClaudeConfigDirWidensWithoutDroppingTheHomeDefault(t *testing.T) 
 	}
 }
 
-// Same widening guarantee for the agents whose roots used to be hardcoded with
-// no override at all, and for Pi/OMP sharing PI_CODING_AGENT_DIR: setting the
-// legacy variable must not cost either agent its own home default.
+// Same widening guarantee for the agents whose roots used to be hardcoded
+// with no override at all, and for Pi/OMP sharing PI_CODING_AGENT_DIR. The
+// root lists themselves are pinned in agentroots_test.go ("shared single var,
+// distinct base"); this asserts the behaviour those lists buy at the
+// resolver: a transcript under the configured directory and one under each
+// agent's own home default both resolve, so setting the legacy variable never
+// costs an agent its home default.
 func TestLegacyPiCodingAgentDirKeepsBothHomeDefaults(t *testing.T) {
 	clearAgentRootEnv(t)
 	home := t.TempDir()
@@ -529,21 +553,349 @@ func TestLegacyPiCodingAgentDirKeepsBothHomeDefaults(t *testing.T) {
 
 	r := NewResolver(home)
 	for _, c := range []struct {
-		name string
-		got  []string
-		want []string
+		agent, record, want string
+		paths               []string
 	}{
-		{"piRoots", r.piRoots, []string{
-			filepath.Join(profile, "sessions"),
-			filepath.Join(home, ".pi", "agent", "sessions"),
+		{"pi", "{\"type\":\"session_info\",\"name\":\"pi_title\"}\n", "pi_title", []string{
+			filepath.Join(profile, "sessions", "-home-user-app", "pi-configured.jsonl"),
+			filepath.Join(home, ".pi", "agent", "sessions", "-home-user-app", "pi-default.jsonl"),
 		}},
-		{"ompRoots", r.ompRoots, []string{
-			filepath.Join(profile, "sessions"),
-			filepath.Join(home, ".omp", "agent", "sessions"),
+		{"omp", "{\"type\":\"title\",\"title\":\"omp_title\"}\n", "omp_title", []string{
+			filepath.Join(profile, "sessions", "-home-user-app", "omp-configured.jsonl"),
+			filepath.Join(home, ".omp", "agent", "sessions", "-home-user-app", "omp-default.jsonl"),
 		}},
 	} {
-		if !slices.Equal(c.got, c.want) {
-			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		for _, sessionPath := range c.paths {
+			if err := os.MkdirAll(filepath.Dir(sessionPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(sessionPath, []byte(c.record), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.SessionName(c.agent, "/home/user/app", sessionPath); got != c.want {
+				t.Errorf("%s title for %s = %q, want %q", c.agent, sessionPath, got, c.want)
+			}
 		}
+	}
+}
+
+// Roots are resolved per call, never snapshotted in the constructor. The relay
+// is a long-lived user service and `omp --profile work` creates its profile
+// directory the first time it runs, which is normally long after the resolver
+// was built. A resolver holding a snapshot never sees the profile, and every
+// pane in it stays unresolvable until someone restarts the service.
+func TestProfileCreatedAfterTheResolverWasBuiltIsStillResolved(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+
+	r := NewResolver(home)
+
+	for _, c := range []struct{ agent, configRoot, record string }{
+		{"omp", ".omp", "{\"type\":\"title\",\"title\":\"late_profile\"}\n"},
+		{"pi", ".pi", "{\"type\":\"session_info\",\"name\":\"late_profile\"}\n"},
+	} {
+		sessionPath := filepath.Join(home, c.configRoot, "profiles", "work", "agent", "sessions", "-home-user-app", "s.jsonl")
+		if err := os.MkdirAll(filepath.Dir(sessionPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sessionPath, []byte(c.record), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.SessionName(c.agent, "/home/user/app", sessionPath); got != "late_profile" {
+			t.Errorf("%s session name = %q, want %q from a profile created after NewResolver returned", c.agent, got, "late_profile")
+		}
+	}
+}
+
+// os.ReadDir reports the directory entry's own type bits, so DirEntry.IsDir()
+// is false for a symlink to a directory. Classifying with it would drop a
+// project directory symlinked in from a dotfiles repo, which is a mainstream
+// way to keep agent configuration - so the shared session predicate has to
+// stat through the link. The symlink target sits OUTSIDE the root on purpose:
+// the reader accepts that (its containment is against the project directory,
+// not the root), and the resolver has to accept it too or the two split.
+func TestSymlinkedProjectDirectoryIsSearchedForTheSession(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+
+	target := filepath.Join(elsewhere, "dotfiles-app")
+	writeTitleFile(t, filepath.Join(target, "sess-link.jsonl"), "Symlinked project title")
+	projects := filepath.Join(home, ".claude", "projects")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(projects, "home-user-app")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", "sess-link"); got != "Symlinked project title" {
+		t.Fatalf("session name = %q, want %q from a symlinked project directory", got, "Symlinked project title")
+	}
+}
+
+// The same hazard on the empty-session-id path, which still anchors on the
+// cwd: findProjectDir identifies the project directory by the cwd file inside
+// it when the encoded name does not match, and has to stat through the link
+// to see a directory at all.
+func TestSymlinkedProjectDirectoryIsFoundByItsCwdFile(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	elsewhere := t.TempDir()
+
+	target := filepath.Join(elsewhere, "dotfiles-app")
+	writeTitleFile(t, filepath.Join(target, "sess-link.jsonl"), "Cwd-matched symlink title")
+	if err := os.WriteFile(filepath.Join(target, "cwd"), []byte("/home/user/app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projects := filepath.Join(home, ".claude", "projects")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(projects, "not-the-encoded-name")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", ""); got != "Cwd-matched symlink title" {
+		t.Fatalf("session name = %q, want %q from a symlinked project directory matched by its cwd file", got, "Cwd-matched symlink title")
+	}
+}
+
+// GAP 1 regression guard: the reader's predicate has no cwd in it.
+// conversation.Reader.Read locates the transcript by scanning EVERY project
+// directory in each root for <sessionID>.jsonl and stops at the first root
+// that holds it. The resolver once located the session through the
+// cwd-encoded project directory instead, so a first root holding the session
+// under an UNRELATED directory name answered for the reader but not for the
+// resolver: title from the home default, transcript from the profile - the
+// correct-looking-header-over-someone-else's-conversation split this seam
+// exists to prevent. The title must come from the root the reader serves,
+// whatever its project directory is called.
+func TestTitleComesFromTheRootTheReaderServesEvenUnderAnotherProjectDirectory(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, profile)
+
+	// First root: the session sits under a project directory that has nothing
+	// to do with the pane's cwd (a checkout that moved, a copied tree).
+	// Second root: the same id under the cwd-encoded directory name.
+	writeTitleFile(t, filepath.Join(profile, "projects", "-some-other-checkout", "wanted.jsonl"), "Profile title")
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "-work-app", "wanted.jsonl"), "Home title")
+
+	if got := NewResolver(home).SessionName("claude", "/work/app", "wanted"); got != "Profile title" {
+		t.Fatalf("session name = %q, want %q - the first root holds the session, so it must answer no matter which project directory the transcript sits under", got, "Profile title")
+	}
+}
+
+// The positive half of the empty-session-id heuristic; its ambiguity half is
+// pinned above. A pane that reported no session id is still identified when
+// the cwd's project directory holds exactly one transcript. Deleting the
+// heuristic leaves every id-less pane titleless, which this catches.
+func TestEmptySessionIDResolvesTheSoleTranscriptInTheOwningRoot(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "home-user-app", "only.jsonl"), "Sole transcript title")
+
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", ""); got != "Sole transcript title" {
+		t.Fatalf("session name = %q, want %q from the sole transcript in the cwd's project directory", got, "Sole transcript title")
+	}
+}
+
+// The other half of the reader's acceptance: conversation.Reader runs every
+// candidate through containedRegularFile against its project directory, so a
+// session FILE symlinked out of its own project directory is skipped and the
+// scan moves on. The resolver has to skip it too - answering with the escaped
+// copy's title would pair it with the transcript the reader takes from the
+// next root that genuinely holds the file.
+func TestSessionFileSymlinkedOutOfItsProjectDirectoryIsSkipped(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, profile)
+
+	escaped := filepath.Join(outside, "real.jsonl")
+	writeTitleFile(t, escaped, "Escaped title")
+	projectDir := filepath.Join(profile, "projects", "-home-user-app")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(escaped, filepath.Join(projectDir, "wanted.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "-home-user-app", "wanted.jsonl"), "Genuine title")
+
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", "wanted"); got != "Genuine title" {
+		t.Fatalf("session name = %q, want %q - the reader skips the escaped symlink and serves the next root's transcript", got, "Genuine title")
+	}
+}
+
+// The resolver must refuse exactly the ids the reader refuses. "." passes a
+// naive character check - the filename probed would be "..jsonl" - but
+// conversation.SafeSessionID rejects the id outright, and the lookup now
+// routes through the reader's Locate, so a title here would otherwise sit
+// over a conversation view that says "not available".
+func TestDotSessionIDIsRejectedLikeTheReaderRejectsIt(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "home-user-app", "..jsonl"), "Dot title")
+
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", "."); got != "" {
+		t.Fatalf("session name = %q, want empty for id %q, which the reader rejects", got, ".")
+	}
+}
+
+// writeCodexIndex appends one session_index.jsonl record to a Codex home.
+// threadName may be empty: Codex writes the index record before it names the
+// thread, so an empty thread_name is the ordinary fresh-session state.
+func writeCodexIndex(t *testing.T, codexHome, id, threadName string) {
+	t.Helper()
+	if err := os.MkdirAll(codexHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record, err := json.Marshal(map[string]any{"id": id, "thread_name": threadName})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(codexHome, "session_index.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(append(record, '\n')); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeCodexRollout writes the rollout transcript conversation.Reader serves
+// for a Codex session, under the dated tree its lookup scans. day is
+// slash-separated ("2026/08/22").
+func writeCodexRollout(t *testing.T, codexHome, id, day string) string {
+	t.Helper()
+	dir := filepath.Join(codexHome, "sessions", filepath.FromSlash(day))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-"+strings.ReplaceAll(day, "/", "-")+"T10-00-00-"+id+".jsonl")
+	if err := os.WriteFile(path, []byte("{\"type\":\"message\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The round-3 blocker. The work home holds this session's rollout - the
+// transcript the reader serves - with a fresh, still-unnamed index record;
+// the home default holds an index record with a confident name and its own,
+// earlier rollout for the same id. The title must be the work home's (empty)
+// thread_name, never "Deploy hotfix": pairing the home default's title with
+// the work home's transcript is a correct-looking header over someone else's
+// conversation.
+func TestCodexTitleComesFromTheHomeWhoseRolloutTheReaderServes(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	work := t.TempDir()
+	t.Setenv(agentroots.CodexListEnv, work)
+
+	const id = "0199a213-81a0-7800-8000-1a2b3c4d5e6f"
+	writeCodexIndex(t, work, id, "")
+	writeCodexRollout(t, work, id, "2026/08/22")
+	homeCodex := filepath.Join(home, ".codex")
+	writeCodexIndex(t, homeCodex, id, "Deploy hotfix")
+	writeCodexRollout(t, homeCodex, id, "2026/08/21")
+
+	if got := NewResolver(home).SessionName("codex", "/tmp", id); got != "" {
+		t.Fatalf("session name = %q, want empty - the work home's rollout answers and its thread is not named yet", got)
+	}
+}
+
+// A pruned or unsynced rollout: the index still remembers the session, but
+// the reader has no transcript to serve, so the pane must not be titled.
+func TestCodexIndexEntryWithoutRolloutIsNotTitled(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	const id = "5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e"
+	writeCodexIndex(t, filepath.Join(home, ".codex"), id, "Ghost session")
+
+	if got := NewResolver(home).SessionName("codex", "/tmp", id); got != "" {
+		t.Fatalf("session name = %q, want empty - no rollout exists anywhere, so the reader serves no transcript", got)
+	}
+}
+
+// The reader accepts either an absolute .jsonl path or a bare canonical UUID
+// for Pi and Oh My Pi (scanning <projectdir>/*_<id>.jsonl); the resolver used
+// to accept only the path form, so a bare-UUID pane got a transcript with no
+// title. Both halves must resolve, to the same file.
+func TestPiAndOMPBareSessionUUIDResolvesTitleAndTranscript(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+
+	for _, c := range []struct{ agent, id, base, record, want string }{
+		{"omp", "9e8d7c6b-5a49-4837-a6b5-c4d3e2f1a0b9",
+			filepath.Join(home, ".omp", "agent", "sessions"),
+			"{\"type\":\"title\",\"title\":\"omp_bare_uuid\"}\n", "omp_bare_uuid"},
+		{"pi", "8d7c6b5a-4938-4726-b5a4-d3c2e1f0a9b8",
+			filepath.Join(home, ".pi", "agent", "sessions"),
+			"{\"type\":\"session_info\",\"name\":\"pi_bare_uuid\"}\n", "pi_bare_uuid"},
+	} {
+		sessionPath := filepath.Join(c.base, "-home-user-app", "2026-08-22T10-00-00-000Z_"+c.id+".jsonl")
+		if err := os.MkdirAll(filepath.Dir(sessionPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sessionPath, []byte(c.record), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := NewResolver(home).SessionName(c.agent, "/home/user/app", c.id); got != c.want {
+			t.Errorf("%s title for bare id %s = %q, want %q", c.agent, c.id, got, c.want)
+		}
+		wantPath, err := filepath.EvalSymlinks(sessionPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotPath, _, ok := conversation.NewReader(home).Locate(c.agent, c.id); !ok || gotPath != wantPath {
+			t.Errorf("%s transcript for bare id %s = %q (ok=%v), want %q", c.agent, c.id, gotPath, ok, wantPath)
+		}
+	}
+}
+
+// A ".." in a reported path after a symlinked directory: filepath.Clean
+// resolves it lexically against the link's NAME while EvalSymlinks resolves
+// it against what the link points at, so the two name different files. The
+// reader evaluates the path as given (containedRegularFile), and the title
+// must be read from the file the reader serves - a decoy sits at the
+// lexically-cleaned spelling to catch a resolver that Cleans first.
+func TestReportedPathWithDotDotAfterSymlinkResolvesLikeTheReader(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	base := filepath.Join(home, ".omp", "agent", "sessions")
+	if err := os.MkdirAll(filepath.Join(base, "deep", "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	served := filepath.Join(base, "deep", "x.jsonl")
+	if err := os.WriteFile(served, []byte("{\"type\":\"title\",\"title\":\"Right title\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The decoy sits where Clean would land: Clean("link/../x.jsonl")
+	// collapses to "x.jsonl" beside the link, ignoring what "link" points at.
+	if err := os.WriteFile(filepath.Join(base, "x.jsonl"), []byte("{\"type\":\"title\",\"title\":\"Wrong title\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "deep", "dir"), filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
+	// Built by concatenation: filepath.Join would Clean the ".." away.
+	sep := string(filepath.Separator)
+	reported := filepath.Join(base, "link") + sep + ".." + sep + "x.jsonl"
+
+	wantPath, err := filepath.EvalSymlinks(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath, _, ok := conversation.NewReader(home).Locate("omp", reported); !ok || gotPath != wantPath {
+		t.Fatalf("reader locates %q (ok=%v), want %q", gotPath, ok, wantPath)
+	}
+	if got := NewResolver(home).SessionName("omp", "/home/user/app", reported); got != "Right title" {
+		t.Fatalf("session name = %q, want %q - the title must come from the file the reader serves, not the lexically-cleaned spelling", got, "Right title")
 	}
 }
