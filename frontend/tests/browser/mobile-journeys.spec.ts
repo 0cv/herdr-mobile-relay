@@ -3229,6 +3229,81 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Open History app on Fedora' })).toBeVisible();
 });
 
+test('keeps tool-only agent turns and decodes their arguments', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: [
+      'attention_classification',
+      'clear_activities',
+      'directory_browser',
+      'self_update',
+      'structured_questions',
+      'slash_commands',
+      'conversation_history',
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Tool history',
+      agent: 'claude',
+      session: 'Current session',
+      conversation_history_available: true,
+    }],
+  });
+  // Claude Code records one text-less assistant turn per tool call and
+  // serialises the arguments as JSON, which is the shape the compact view used
+  // to discard entirely.
+  const output = Array.from({ length: 200 }, (_, index) => `line-${index}`).join('\n');
+  await setConversationFixture(page, {
+    entries: [
+      { id: 'turn-1', timestamp: '2026-08-12T09:00:00Z', role: 'user', text: 'run the probe' },
+      {
+        id: 'turn-2',
+        timestamp: '2026-08-12T09:00:01Z',
+        role: 'assistant',
+        text: '',
+        tools: [{
+          id: 'tool-1',
+          name: 'Bash',
+          input: JSON.stringify({
+            command: 'python3 /tmp/band-sample.py',
+            description: 'List the band',
+            timeout: 300000,
+          }),
+          output,
+        }],
+      },
+      { id: 'turn-3', timestamp: '2026-08-12T09:00:02Z', role: 'assistant', text: 'Probe finished.' },
+    ],
+    total: 3,
+  });
+
+  await page.getByRole('button', { name: 'Open Tool history on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('Probe finished.')).toBeVisible();
+
+  // The compact view must keep the tool turn: it is the only record of the work.
+  const card = page.getByLabel(/^Conversation with/).locator('details').filter({ hasText: 'Bash' });
+  await expect(card).toBeVisible();
+  await card.locator('summary').click();
+
+  const panels = card.locator('pre');
+  await expect(panels.first()).toContainText('command: python3 /tmp/band-sample.py');
+  await expect(panels.first()).toContainText('timeout: 300000');
+  await expect(panels.first()).not.toContainText('{"command"');
+
+  await expect(panels.nth(1)).not.toContainText('line-199');
+  await card.getByRole('button', { name: 'Show all 200 lines' }).click();
+  await expect(panels.nth(1)).toContainText('line-199');
+  await card.getByRole('button', { name: 'Show less' }).click();
+  await expect(panels.nth(1)).not.toContainText('line-199');
+});
+
 test('opens a long conversation at its newest turn and holds the pin', async ({ page }) => {
   // The view polls for new turns every five seconds. Shortening that interval
   // keeps the streaming assertions below deterministic instead of sleeping
