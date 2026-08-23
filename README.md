@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.17.5`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.17.5) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.17.6`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.17.6) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -56,7 +56,9 @@ paths.
 | <img src="images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="images/agent_plan.jpeg" alt="Structured plan question navigation" width="392"> |
 
 - Monitor and control agents across several computers, grouped by status and
-  workspace, with agents that need input pinned on top.
+  authoritative Herdr workspace, with agents that need input pinned on top.
+- Create, rename, reorder, and close workspaces; create, open, and safely remove
+  Git worktrees without stealing desktop focus.
 - Start, rename, clear, and stop agents; send prompts, terminal keys, slash
   commands, screenshots, and photos.
 - Answer verified approvals and structured plan questions from Codex, Claude

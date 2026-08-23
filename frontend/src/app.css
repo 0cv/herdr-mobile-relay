@@ -726,6 +726,29 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .done-workspace-card { border-color: color-mix(in srgb, var(--success) 42%, var(--border)); }
 .workspace-state-dot { margin-inline-start: -.1rem; }
 .workspace-tabs { border-top: 1px solid var(--border); display: grid; gap: .75rem; padding: .7rem; }
+.workspace-provenance, .workspace-empty { color: var(--muted); font-size: .68rem; margin: 0; padding: .55rem .8rem; }
+.workspace-provenance { border-top: 1px solid var(--border); padding-bottom: 0; }
+.workspace-empty { border-top: 1px solid var(--border); }
+
+.workspace-manager-page { display: grid; gap: .8rem; }
+.workspace-manager-heading h2 { margin: 0; }
+.workspace-manager-heading p { color: var(--muted); font-size: .75rem; margin: .25rem 0 0; }
+.workspace-create > summary { cursor: pointer; font-size: .84rem; font-weight: 700; }
+.workspace-create[open] > summary { margin-bottom: .8rem; }
+.workspace-management-list { display: grid; gap: .65rem; }
+.workspace-management-card > header, .worktree-manager > header, .worktree-list article { align-items: flex-start; display: flex; gap: .7rem; justify-content: space-between; }
+.workspace-management-card > header > span:first-child, .worktree-list article > span:first-child { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.workspace-management-card strong, .worktree-list strong { font-size: .85rem; }
+.workspace-management-card small, .worktree-list small, .worktree-manager > header p { color: var(--muted); font-size: .65rem; overflow-wrap: anywhere; }
+.workspace-position, .worktree-state { color: var(--muted); flex: 0 0 auto; font-size: .68rem; }
+.workspace-management-meta { color: var(--muted); font-size: .68rem; margin: .45rem 0 0; }
+.workspace-management-actions, .button-row { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .7rem; }
+.worktree-manager > header h3, .worktree-create-form h4 { margin: 0; }
+.worktree-manager > header p { margin: .2rem 0 0; }
+.worktree-list { border: 1px solid var(--border); border-radius: .65rem; margin-top: .75rem; overflow: hidden; }
+.worktree-list article { align-items: center; padding: .65rem; }
+.worktree-list article + article { border-top: 1px solid var(--border); }
+.worktree-create-form { border-top: 1px solid var(--border); margin-top: .9rem; padding-top: .9rem; }
 /* Long-press starts a tab drag; selectable text would trigger the platform
    text-selection and search sheets instead. */
 .agent-list, .agent-rail { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }

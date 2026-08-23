@@ -1,0 +1,9 @@
+{
+  "type": "worktree_create",
+  "request_id": "req-worktree-create",
+  "protocol": 2,
+  "workspace_id": "w1",
+  "branch": "fix/issue-14",
+  "base": "main",
+  "label": "Issue 14"
+}

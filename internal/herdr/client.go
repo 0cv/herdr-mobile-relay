@@ -179,8 +179,62 @@ type Pane struct {
 }
 
 type Workspace struct {
-	ID    string `json:"workspace_id"`
-	Label string `json:"label"`
+	ID          string             `json:"workspace_id"`
+	Number      int                `json:"number"`
+	Label       string             `json:"label"`
+	Focused     bool               `json:"focused"`
+	PaneCount   int                `json:"pane_count"`
+	TabCount    int                `json:"tab_count"`
+	ActiveTabID string             `json:"active_tab_id"`
+	AgentStatus string             `json:"agent_status"`
+	Cwd         string             `json:"cwd,omitempty"`
+	Worktree    *WorkspaceWorktree `json:"worktree,omitempty"`
+}
+
+type WorkspaceWorktree struct {
+	RepoKey          string `json:"repo_key"`
+	RepoName         string `json:"repo_name"`
+	RepoRoot         string `json:"repo_root"`
+	CheckoutPath     string `json:"checkout_path"`
+	IsLinkedWorktree bool   `json:"is_linked_worktree"`
+}
+
+type Worktree struct {
+	Path            string  `json:"path"`
+	Branch          *string `json:"branch"`
+	IsBare          bool    `json:"is_bare"`
+	IsDetached      bool    `json:"is_detached"`
+	IsPrunable      bool    `json:"is_prunable"`
+	IsLinked        bool    `json:"is_linked_worktree"`
+	Label           string  `json:"label"`
+	OpenWorkspaceID *string `json:"open_workspace_id"`
+}
+
+type WorktreeSource struct {
+	RepoKey            string  `json:"repo_key"`
+	RepoName           string  `json:"repo_name"`
+	RepoRoot           string  `json:"repo_root"`
+	SourceCheckoutPath string  `json:"source_checkout_path"`
+	SourceWorkspaceID  *string `json:"source_workspace_id"`
+}
+
+type WorktreeListResult struct {
+	Source    WorktreeSource `json:"source"`
+	Worktrees []Worktree     `json:"worktrees"`
+}
+
+type WorktreeMutationResult struct {
+	Workspace   Workspace `json:"workspace"`
+	Tab         Tab       `json:"tab"`
+	RootPane    Pane      `json:"root_pane"`
+	Worktree    Worktree  `json:"worktree"`
+	AlreadyOpen bool      `json:"already_open,omitempty"`
+}
+
+type WorktreeRemoveResult struct {
+	WorkspaceID string `json:"workspace_id"`
+	Path        string `json:"path"`
+	Forced      bool   `json:"forced"`
 }
 
 type Tab struct {
@@ -274,16 +328,24 @@ func (c *Client) GetInventory(ctx context.Context) (*Inventory, error) {
 	// Herdr versions predating agent-list inventory do not expose a
 	// state_change_seq. Keep pane-list compatibility; those relays simply use
 	// epoch activity timestamps and the deterministic UI fallback.
-	var legacy struct {
-		Panes []Pane `json:"panes"`
-	}
-	if err := c.runResult(ctx, &legacy, "pane", "list"); err != nil {
+	panes, err := c.PaneList(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("herdr inventory: %w", err)
 	}
-	for i := range legacy.Panes {
-		legacy.Panes[i].Session = legacy.Panes[i].SessionRaw.Value
+	return &Inventory{Panes: panes}, nil
+}
+
+func (c *Client) PaneList(ctx context.Context) ([]Pane, error) {
+	var result struct {
+		Panes []Pane `json:"panes"`
 	}
-	return &Inventory{Panes: legacy.Panes}, nil
+	if err := c.runResult(ctx, &result, "pane", "list"); err != nil {
+		return nil, fmt.Errorf("herdr pane list: %w", err)
+	}
+	for index := range result.Panes {
+		result.Panes[index].Session = result.Panes[index].SessionRaw.Value
+	}
+	return result.Panes, nil
 }
 
 func (c *Client) WorkspaceList(ctx context.Context) ([]Workspace, error) {
@@ -316,6 +378,87 @@ func (c *Client) WorkspaceCreate(ctx context.Context, cwd, label string) (*Creat
 		)
 	}
 	return &result, nil
+}
+
+func (c *Client) WorkspaceRename(ctx context.Context, workspaceID, label string) error {
+	if _, err := c.runCommand(ctx, "workspace", "rename", workspaceID, label); err != nil {
+		return fmt.Errorf("herdr workspace rename: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) WorkspaceMove(ctx context.Context, workspaceID string, insertIndex int) error {
+	if err := c.api.workspaceMove(ctx, workspaceID, insertIndex); err != nil {
+		return fmt.Errorf("herdr workspace move: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) WorkspaceClose(ctx context.Context, workspaceID string) error {
+	if _, err := c.runCommand(ctx, "workspace", "close", workspaceID); err != nil {
+		return fmt.Errorf("herdr workspace close: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) WorktreeList(ctx context.Context, workspaceID string) (*WorktreeListResult, error) {
+	var result WorktreeListResult
+	if err := c.runResult(ctx, &result, "worktree", "list", "--workspace", workspaceID); err != nil {
+		return nil, fmt.Errorf("herdr worktree list: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) WorktreeCreate(
+	ctx context.Context,
+	workspaceID, branch, base, label string,
+) (*WorktreeMutationResult, error) {
+	args := []string{"worktree", "create", "--workspace", workspaceID, "--branch", branch, "--no-focus"}
+	args = appendOptionalFlag(args, "--base", base)
+	args = appendOptionalFlag(args, "--label", label)
+	var result WorktreeMutationResult
+	if err := c.runResult(ctx, &result, args...); err != nil {
+		return nil, fmt.Errorf("herdr worktree create: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) WorktreeOpen(
+	ctx context.Context,
+	workspaceID, path, branch, label string,
+) (*WorktreeMutationResult, error) {
+	args := []string{"worktree", "open", "--workspace", workspaceID, "--no-focus"}
+	args = appendOptionalFlag(args, "--path", path)
+	args = appendOptionalFlag(args, "--branch", branch)
+	args = appendOptionalFlag(args, "--label", label)
+	var result WorktreeMutationResult
+	if err := c.runResult(ctx, &result, args...); err != nil {
+		return nil, fmt.Errorf("herdr worktree open: %w", err)
+	}
+	return &result, nil
+}
+
+func (c *Client) WorktreeRemove(
+	ctx context.Context,
+	workspaceID string,
+	force bool,
+) (*WorktreeRemoveResult, error) {
+	args := []string{"worktree", "remove", "--workspace", workspaceID}
+	if force {
+		args = append(args, "--force")
+	}
+	var result WorktreeRemoveResult
+	if err := c.runResult(ctx, &result, args...); err != nil {
+		return nil, fmt.Errorf("herdr worktree remove: %w", err)
+	}
+	return &result, nil
+}
+
+func appendOptionalFlag(args []string, flag, value string) []string {
+	if value == "" {
+		return args
+	}
+	return append(args, flag, value)
 }
 
 func (c *Client) TabCreate(ctx context.Context, workspaceID, cwd, label string) (*CreateResult, error) {

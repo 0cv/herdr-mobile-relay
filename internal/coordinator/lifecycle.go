@@ -37,16 +37,18 @@ const (
 var agentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
 type StartRequest struct {
-	ProfileID string
-	Name      string
-	Cwd       string
-	Prompt    string
+	ProfileID   string
+	WorkspaceID string
+	Name        string
+	Cwd         string
+	Prompt      string
 }
 
 type StartResult struct {
-	PaneID string `json:"pane_id"`
-	Name   string `json:"name"`
-	Cwd    string `json:"cwd"`
+	PaneID      string `json:"pane_id"`
+	Name        string `json:"name"`
+	Cwd         string `json:"cwd"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 type Lifecycle struct {
@@ -71,7 +73,7 @@ func (l *Lifecycle) ValidateStart(request StartRequest) (profiles.Profile, Start
 	if len([]rune(request.Prompt)) > promptMaxChars {
 		return profiles.Profile{}, request, errors.New("prompt exceeds maximum length")
 	}
-	cwd, err := l.resolveCwd(request.Cwd)
+	cwd, err := l.ResolveCwd(request.Cwd)
 	if err != nil {
 		return profiles.Profile{}, request, err
 	}
@@ -82,7 +84,7 @@ func (l *Lifecycle) ValidateStart(request StartRequest) (profiles.Profile, Start
 func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request StartRequest) (StartResult, error) {
 	if existing := l.reconcileExisting(ctx, profile.ID, request); existing != "" {
 		l.profiles.Remember(existing, profile.ID)
-		return StartResult{PaneID: existing, Name: request.Name, Cwd: request.Cwd}, nil
+		return StartResult{PaneID: existing, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}, nil
 	}
 
 	deadline, ok := ctx.Deadline()
@@ -104,7 +106,13 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 	if err != nil {
 		return StartResult{}, err
 	}
-	workspaceID := SelectWorkspaceForCwd(request.Cwd, inventory.Panes, workspaces, l.home)
+	workspaceID := request.WorkspaceID
+	if workspaceID != "" && !workspaceExists(workspaces, workspaceID) {
+		return StartResult{}, errors.New("workspace is unavailable")
+	}
+	if workspaceID == "" {
+		workspaceID = SelectWorkspaceForCwd(request.Cwd, inventory.Panes, workspaces, l.home)
+	}
 
 	target, err := l.createTarget(startupCtx, workspaceID, request.Name, request.Cwd)
 	if err != nil {
@@ -117,11 +125,11 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 		// the workspace the user asked for and leave nothing to retry into. An
 		// uncertain dispatch may also have left an agent running in it, and
 		// the phone is told to review that agent before retrying.
-		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd}, startErr
+		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, startErr
 	}
 
 	l.profiles.Remember(target.PaneID, profile.ID)
-	return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd}, nil
+	return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, nil
 }
 
 func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd string) (*herdr.CreateResult, error) {
@@ -226,6 +234,9 @@ func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, req
 		if err != nil || cwd != request.Cwd {
 			continue
 		}
+		if request.WorkspaceID != "" && pane.WorkspaceID != request.WorkspaceID {
+			continue
+		}
 		if l.profiles.ResolvePane(pane.ID, pane.Agent) == profileID {
 			return pane.ID
 		}
@@ -233,7 +244,16 @@ func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, req
 	return ""
 }
 
-func (l *Lifecycle) resolveCwd(raw string) (string, error) {
+func workspaceExists(workspaces []herdr.Workspace, workspaceID string) bool {
+	for _, workspace := range workspaces {
+		if workspace.ID == workspaceID {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *Lifecycle) ResolveCwd(raw string) (string, error) {
 	if raw == "" {
 		return "", errors.New("cwd is required")
 	}

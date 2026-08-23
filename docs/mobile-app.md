@@ -59,6 +59,26 @@ change is applied to the desktop immediately.
 Opened workspace cards remain expanded after visiting an agent and returning to
 the home screen.
 
+The workspace cards come from Herdr's complete workspace inventory rather than
+being inferred from active agents. A workspace therefore remains visible when
+it contains only a shell or no running agent; the phone does not expose that
+shell as a generic terminal.
+
+Open **Workspaces** from the folder button in the header to:
+
+- create a non-focusing workspace in a directory below the relay user's home;
+- rename, reorder, or close a workspace;
+- start an agent as a new tab in a selected workspace;
+- list a repository's Git worktrees, create a branch-backed worktree, or open an
+  existing checkout as a non-focusing Herdr workspace;
+- close a linked-worktree workspace without deleting its checkout, or remove
+  the checkout while retaining its Git branch.
+
+Normal worktree removal refuses a dirty checkout. **Force Remove** is offered
+only after that refusal and requires a second confirmation because it discards
+uncommitted checkout changes. Creating a worktree uses Herdr's configured
+worktree directory; the phone cannot provide an arbitrary checkout path.
+
 **Inspect Workspace** is read-only and is available only when the connected
 relay advertises workspace inspection and the agent reports a working
 directory. The relay confines reads to that directory, skips symlinks and

@@ -14,9 +14,12 @@ gateway replaces the tunnel, and the direct WebRTC path adds one UDP socket,
 guarded by ICE credentials and a pinned DTLS fingerprint exchanged only inside
 the encrypted channel; see [transports.md](transports.md). Tokens use
 constant-time comparison, uploads are limited, and launch requests cannot provide
-arbitrary executables or shell commands. A keyed connection is authorized by the
-end-to-end handshake rather than by its browser origin; the `HERDR_ALLOWED_ORIGINS`
-check applies to tokenless loopback development connections.
+arbitrary executables or shell commands. Workspace and worktree mutations use
+Herdr's typed API; the phone creates checkouts under Herdr's configured
+worktree directory and can open only paths returned by Herdr's worktree list.
+A keyed connection is authorized by the end-to-end handshake rather than by its
+browser origin; the `HERDR_ALLOWED_ORIGINS` check applies to tokenless loopback
+development connections.
 
 Runtime data stays in the relay's private config and cache roots. The phone
 stores its relay list locally. Relays never connect to one another, and no
@@ -25,11 +28,13 @@ mode uses the gateways you selected.
 
 ## Audit log
 
-Remote agent writes append private JSONL attempt and result records under
-`<cache>/audit/remote-writes.jsonl`. An attempt and its result share a request
-id and correlate the phone client, WebSocket connection, pane, agent context,
-and outcome; the attempt also records payload size and SHA-256 digest. Neither
-retains prompt, response, or upload content. A value answered at a no-echo
+Remote writes append private JSONL attempt and result records under
+`<cache>/audit/remote-writes.jsonl`. This includes agent input and lifecycle
+commands plus workspace and worktree creation, rename, reorder, close, open, and
+removal. An attempt and its result share a request id and correlate the phone
+client, WebSocket connection, target identifiers, and outcome; the attempt also
+records payload size and SHA-256 digest. Neither retains prompt, response, or
+upload content. A value answered at a no-echo
 terminal prompt is recorded by length alone — no digest, no keystrokes — so a
 low-entropy secret cannot be recovered from the trail; it is likewise absent
 from the activity journal. The file is mode `0600` inside a mode `0700`

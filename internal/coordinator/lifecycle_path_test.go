@@ -16,7 +16,7 @@ func TestResolveCwdReturnsCanonicalSymlinkTarget(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := (&Lifecycle{home: home}).resolveCwd(link)
+	resolved, err := (&Lifecycle{home: home}).ResolveCwd(link)
 	if err != nil {
 		t.Fatal(err)
 	}

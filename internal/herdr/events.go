@@ -21,28 +21,32 @@ type Event struct {
 }
 
 var eventNameAliases = map[string]string{
-	"workspace_created":         "workspace.created",
-	"workspace_updated":         "workspace.updated",
-	"workspace_closed":          "workspace.closed",
-	"workspace_renamed":         "workspace.renamed",
-	"workspace_moved":           "workspace.moved",
-	"workspace_reordered":       "workspace.reordered",
-	"workspace_focused":         "workspace.focused",
-	"tab_created":               "tab.created",
-	"tab_closed":                "tab.closed",
-	"tab_renamed":               "tab.renamed",
-	"tab_moved":                 "tab.moved",
-	"tab_focused":               "tab.focused",
-	"pane_created":              "pane.created",
-	"pane_closed":               "pane.closed",
-	"pane_updated":              "pane.updated",
-	"pane_focused":              "pane.focused",
-	"pane_moved":                "pane.moved",
-	"pane_output_changed":       "pane.output_changed",
-	"pane_exited":               "pane.exited",
-	"pane_agent_detected":       "pane.agent_detected",
-	"pane_agent_status_changed": "pane.agent_status_changed",
-	"layout_updated":            "layout.updated",
+	"workspace_created":          "workspace.created",
+	"workspace_updated":          "workspace.updated",
+	"workspace_metadata_updated": "workspace.metadata_updated",
+	"workspace_closed":           "workspace.closed",
+	"workspace_renamed":          "workspace.renamed",
+	"workspace_moved":            "workspace.moved",
+	"workspace_reordered":        "workspace.reordered",
+	"workspace_focused":          "workspace.focused",
+	"worktree_created":           "worktree.created",
+	"worktree_opened":            "worktree.opened",
+	"worktree_removed":           "worktree.removed",
+	"tab_created":                "tab.created",
+	"tab_closed":                 "tab.closed",
+	"tab_renamed":                "tab.renamed",
+	"tab_moved":                  "tab.moved",
+	"tab_focused":                "tab.focused",
+	"pane_created":               "pane.created",
+	"pane_closed":                "pane.closed",
+	"pane_updated":               "pane.updated",
+	"pane_focused":               "pane.focused",
+	"pane_moved":                 "pane.moved",
+	"pane_output_changed":        "pane.output_changed",
+	"pane_exited":                "pane.exited",
+	"pane_agent_detected":        "pane.agent_detected",
+	"pane_agent_status_changed":  "pane.agent_status_changed",
+	"layout_updated":             "layout.updated",
 }
 
 func (e *Event) UnmarshalJSON(data []byte) error {
@@ -110,8 +114,9 @@ type SnapshotAgent struct {
 }
 
 type TopologySnapshot struct {
-	Panes []Pane
-	Tabs  []Tab
+	Workspaces []Workspace
+	Panes      []Pane
+	Tabs       []Tab
 }
 
 type EventClient struct {
@@ -267,8 +272,16 @@ func topologySubscriptions() []map[string]string {
 		"tab.renamed",
 		"tab.moved",
 		"workspace.created",
+		"workspace.updated",
+		"workspace.metadata_updated",
 		"workspace.closed",
 		"workspace.renamed",
+		"workspace.moved",
+		"workspace.reordered",
+		"workspace.focused",
+		"worktree.created",
+		"worktree.opened",
+		"worktree.removed",
 	}
 	subscriptions := make([]map[string]string, len(names))
 	for index, name := range names {
@@ -430,8 +443,10 @@ func (q *eventQueue) drain() []Event {
 }
 
 type SessionCache struct {
-	panes map[string]Pane
-	tabs  map[string]Tab
+	workspaces     map[string]Workspace
+	workspaceOrder []string
+	panes          map[string]Pane
+	tabs           map[string]Tab
 	// tabOrder holds tab IDs in Herdr's visual order. Numbers are stable
 	// identities that never change when a tab moves, so array order is the
 	// only truth for on-screen position.
@@ -440,8 +455,12 @@ type SessionCache struct {
 
 func NewSessionCache(snapshot SessionSnapshot) *SessionCache {
 	cache := &SessionCache{
-		panes: make(map[string]Pane, len(snapshot.Panes)),
-		tabs:  make(map[string]Tab, len(snapshot.Tabs)),
+		workspaces: make(map[string]Workspace, len(snapshot.Workspaces)),
+		panes:      make(map[string]Pane, len(snapshot.Panes)),
+		tabs:       make(map[string]Tab, len(snapshot.Tabs)),
+	}
+	for _, workspace := range snapshot.Workspaces {
+		cache.setWorkspace(workspace)
 	}
 	for _, tab := range snapshot.Tabs {
 		cache.setTab(tab)
@@ -458,6 +477,15 @@ func NewSessionCache(snapshot SessionSnapshot) *SessionCache {
 }
 
 func (c *SessionCache) Snapshot() TopologySnapshot {
+	workspaces := make([]Workspace, 0, len(c.workspaces))
+	for _, id := range c.workspaceOrder {
+		if workspace, ok := c.workspaces[id]; ok {
+			if workspace.Cwd == "" {
+				workspace.Cwd = c.workspaceCwd(id, workspace)
+			}
+			workspaces = append(workspaces, workspace)
+		}
+	}
 	panes := make([]Pane, 0, len(c.panes))
 	for _, pane := range c.panes {
 		panes = append(panes, pane)
@@ -469,7 +497,7 @@ func (c *SessionCache) Snapshot() TopologySnapshot {
 			tabs = append(tabs, tab)
 		}
 	}
-	return TopologySnapshot{Panes: panes, Tabs: tabs}
+	return TopologySnapshot{Workspaces: workspaces, Panes: panes, Tabs: tabs}
 }
 
 func (c *SessionCache) Apply(event Event) (bool, error) {
@@ -630,16 +658,70 @@ func (c *SessionCache) Apply(event Event) (bool, error) {
 		}
 		c.removeTab(data.TabID)
 		return data.TabID != "", nil
-	case "workspace.closed":
+	case "workspace.closed", "worktree.removed":
 		var data struct {
 			WorkspaceID string `json:"workspace_id"`
 		}
 		if err := json.Unmarshal(event.Data, &data); err != nil {
 			return false, err
 		}
-		c.removeWorkspace(data.WorkspaceID)
-		return data.WorkspaceID != "", nil
-	case "workspace.created", "workspace.renamed":
+		return c.removeWorkspace(data.WorkspaceID), nil
+	case "workspace.created", "workspace.updated", "workspace.metadata_updated",
+		"worktree.created", "worktree.opened":
+		var data struct {
+			Workspace Workspace `json:"workspace"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return false, err
+		}
+		return c.setWorkspace(data.Workspace), nil
+	case "workspace.renamed":
+		var data struct {
+			Workspace   Workspace `json:"workspace"`
+			WorkspaceID string    `json:"workspace_id"`
+			Label       string    `json:"label"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return false, err
+		}
+		if data.Workspace.ID != "" {
+			return c.setWorkspace(data.Workspace), nil
+		}
+		workspace := c.workspaces[data.WorkspaceID]
+		workspace.ID = data.WorkspaceID
+		workspace.Label = data.Label
+		return c.setWorkspace(workspace), nil
+	case "workspace.focused":
+		var data struct {
+			WorkspaceID string `json:"workspace_id"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return false, err
+		}
+		changed := false
+		for id, workspace := range c.workspaces {
+			focused := id == data.WorkspaceID
+			if workspace.Focused != focused {
+				workspace.Focused = focused
+				c.workspaces[id] = workspace
+				changed = true
+			}
+		}
+		return changed, nil
+	case "workspace.moved", "workspace.reordered":
+		var data struct {
+			Workspaces []Workspace `json:"workspaces"`
+		}
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			return false, err
+		}
+		for _, workspace := range data.Workspaces {
+			c.setWorkspace(workspace)
+		}
+		if len(data.Workspaces) > 0 {
+			c.reorderWorkspaces(data.Workspaces)
+			return true, nil
+		}
 		return false, nil
 	default:
 		return false, nil
@@ -733,21 +815,123 @@ func (c *SessionCache) removeTab(tabID string) {
 	}
 }
 
-func (c *SessionCache) removeWorkspace(workspaceID string) {
+func (c *SessionCache) removeWorkspace(workspaceID string) bool {
 	if workspaceID == "" {
-		return
+		return false
 	}
+	_, changed := c.workspaces[workspaceID]
+	delete(c.workspaces, workspaceID)
+	c.pruneWorkspaceOrder()
 	for tabID, tab := range c.tabs {
 		if tab.WorkspaceID == workspaceID {
 			delete(c.tabs, tabID)
+			changed = true
 		}
 	}
 	c.pruneTabOrder()
 	for paneID, pane := range c.panes {
 		if pane.WorkspaceID == workspaceID {
 			delete(c.panes, paneID)
+			changed = true
 		}
 	}
+	return changed
+}
+
+func (c *SessionCache) setWorkspace(workspace Workspace) bool {
+	if workspace.ID == "" {
+		return false
+	}
+	previous, exists := c.workspaces[workspace.ID]
+	if exists {
+		if workspace.Number == 0 {
+			workspace.Number = previous.Number
+		}
+		if workspace.Label == "" {
+			workspace.Label = previous.Label
+		}
+		if workspace.ActiveTabID == "" {
+			workspace.ActiveTabID = previous.ActiveTabID
+		}
+		if workspace.AgentStatus == "" {
+			workspace.AgentStatus = previous.AgentStatus
+		}
+		if workspace.Cwd == "" {
+			workspace.Cwd = previous.Cwd
+		}
+		if workspace.Worktree == nil {
+			workspace.Worktree = previous.Worktree
+		}
+	}
+	c.workspaces[workspace.ID] = workspace
+	if !exists {
+		c.workspaceOrder = append(c.workspaceOrder, workspace.ID)
+	}
+	return !exists || !workspaceEqual(previous, workspace)
+}
+
+func workspaceEqual(left, right Workspace) bool {
+	if left.ID != right.ID || left.Number != right.Number || left.Label != right.Label ||
+		left.Focused != right.Focused || left.PaneCount != right.PaneCount ||
+		left.TabCount != right.TabCount || left.ActiveTabID != right.ActiveTabID ||
+		left.AgentStatus != right.AgentStatus || left.Cwd != right.Cwd {
+		return false
+	}
+	if left.Worktree == nil || right.Worktree == nil {
+		return left.Worktree == nil && right.Worktree == nil
+	}
+	return *left.Worktree == *right.Worktree
+}
+
+func (c *SessionCache) workspaceCwd(workspaceID string, workspace Workspace) string {
+	if workspace.Worktree != nil && workspace.Worktree.CheckoutPath != "" {
+		return workspace.Worktree.CheckoutPath
+	}
+	cwd := ""
+	for _, tab := range c.tabs {
+		if tab.WorkspaceID != workspaceID || tab.Cwd == "" {
+			continue
+		}
+		if cwd == "" || len(tab.Cwd) < len(cwd) {
+			cwd = tab.Cwd
+		}
+	}
+	for _, pane := range c.panes {
+		if pane.WorkspaceID != workspaceID || pane.Cwd == "" {
+			continue
+		}
+		if cwd == "" || len(pane.Cwd) < len(cwd) {
+			cwd = pane.Cwd
+		}
+	}
+	return cwd
+}
+
+func (c *SessionCache) reorderWorkspaces(ordered []Workspace) {
+	seen := make(map[string]bool, len(ordered))
+	next := make([]string, 0, len(c.workspaceOrder))
+	for _, workspace := range ordered {
+		if workspace.ID != "" {
+			seen[workspace.ID] = true
+			next = append(next, workspace.ID)
+		}
+	}
+	for _, id := range c.workspaceOrder {
+		if !seen[id] {
+			next = append(next, id)
+		}
+	}
+	c.workspaceOrder = next
+}
+
+func (c *SessionCache) pruneWorkspaceOrder() {
+	kept := c.workspaceOrder[:0]
+	for _, id := range c.workspaceOrder {
+		if _, ok := c.workspaces[id]; ok {
+			kept = append(kept, id)
+		}
+	}
+	c.workspaceOrder = kept
 }
 
 // setTab upserts tab metadata, keeping previously known fields that the

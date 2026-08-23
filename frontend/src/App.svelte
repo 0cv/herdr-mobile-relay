@@ -14,6 +14,7 @@
   import TerminalView from '$components/TerminalView.svelte';
   import UpdateProgressDialog from '$components/UpdateProgressDialog.svelte';
   import WorkspaceInspector from '$components/WorkspaceInspector.svelte';
+  import WorkspaceManager from '$components/WorkspaceManager.svelte';
   import Button from '$components/ui/Button.svelte';
   import Toast from '$components/ui/Toast.svelte';
   import { activityForNotification } from '$lib/activity';
@@ -59,6 +60,7 @@
   const relays = relayStore.relayConfigs;
   const connections = relayStore.connections;
   const agents = relayStore.agents;
+  const workspaces = relayStore.workspaces;
   const activities = relayStore.activities;
   const frames = relayStore.terminalFrames;
   const responding = relayStore.responding;
@@ -121,6 +123,7 @@
         : 'Settings');
   const headerTitle = $derived.by(() => {
     if ($currentView.view === 'settings') return 'Settings';
+    if ($currentView.view === 'workspaces') return 'Workspaces';
     if ($currentView.view === 'launch') return 'Start Agent';
     if ($currentView.view === 'activity') return 'Activity';
     if ($currentView.view === 'activity_detail') return 'Activity';
@@ -524,6 +527,12 @@
           </svg>
         </Button>
       {:else}
+        <Button variant="ghost" size="icon" aria-label="Manage workspaces" title="Manage workspaces" onclick={() => navigate({ view: 'workspaces' })}>
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M3 6.5h7l2 2h9v10H3z"></path>
+            <path d="M8 12h8M12 10v4"></path>
+          </svg>
+        </Button>
         <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => toggle('launch')}>＋</Button>
         <Button variant="ghost" size="icon" aria-label="Activity history" onclick={() => toggle('activity')}>
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -546,8 +555,14 @@
 
   {#if $currentView.view === 'settings'}
     <SettingsView />
+  {:else if $currentView.view === 'workspaces'}
+    <WorkspaceManager />
   {:else if $currentView.view === 'launch'}
-    <LaunchView />
+    <LaunchView
+      relayId={$currentView.relayId}
+      workspaceId={$currentView.workspaceId}
+      cwd={$currentView.cwd}
+    />
   {:else if $currentView.view === 'activity'}
     <ActivityView />
   {:else if $currentView.view === 'activity_detail'}
@@ -581,7 +596,7 @@
       {/if}
     </main>
   {:else}
-    <AgentList bind:workspaceDisclosure agents={$agents} relays={$relays} connections={$connections} responding={$responding} onopen={openAgent} />
+    <AgentList bind:workspaceDisclosure agents={$agents} workspaces={$workspaces} relays={$relays} connections={$connections} responding={$responding} onopen={openAgent} />
   {/if}
 </div>
 

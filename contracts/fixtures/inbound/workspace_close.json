@@ -1,0 +1,6 @@
+{
+  "type": "workspace_close",
+  "request_id": "req-workspace-close",
+  "protocol": 2,
+  "workspace_id": "w1"
+}

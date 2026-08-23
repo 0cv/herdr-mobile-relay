@@ -1,0 +1,7 @@
+{
+  "type": "workspace_rename",
+  "request_id": "req-workspace-rename",
+  "protocol": 2,
+  "workspace_id": "w1",
+  "label": "Renamed Project"
+}

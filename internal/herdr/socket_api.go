@@ -186,6 +186,34 @@ func (c *socketAPIClient) tabMove(ctx context.Context, tabID string, insertIndex
 	return lastErr
 }
 
+// workspaceMove retries once on transport errors for the same reason as
+// tabMove. Repeating a satisfied insert_index is a Herdr no-op.
+func (c *socketAPIClient) workspaceMove(ctx context.Context, workspaceID string, insertIndex int) error {
+	if c == nil || c.path == "" {
+		return errors.New("Herdr socket path is unavailable")
+	}
+	params := map[string]any{"workspace_id": workspaceID, "insert_index": insertIndex}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var lastErr error
+	for range 2 {
+		if err := c.connect(ctx); err != nil {
+			lastErr = err
+			break
+		}
+		response, err := c.requestConnected(ctx, "workspace.move", params)
+		if err == nil {
+			if response.Result.Type != "workspace_list" {
+				return fmt.Errorf("Herdr socket API returned %q for workspace.move", response.Result.Type)
+			}
+			return nil
+		}
+		lastErr = err
+		_ = c.closeLocked()
+	}
+	return lastErr
+}
+
 func readSocketAPILine(reader *bufio.Reader) ([]byte, error) {
 	line := make([]byte, 0, socketAPIBufferBytes)
 	for {

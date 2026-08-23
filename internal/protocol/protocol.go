@@ -34,6 +34,13 @@ var mutatingTypes = map[string]bool{
 	"agent_stop":          true,
 	"agent_clear":         true,
 	"agent_restart":       true,
+	"workspace_create":    true,
+	"workspace_rename":    true,
+	"workspace_reorder":   true,
+	"workspace_close":     true,
+	"worktree_create":     true,
+	"worktree_open":       true,
+	"worktree_remove":     true,
 	"acknowledge_pane":    true,
 	"upload_image":        true,
 	"register_app_origin": true,
@@ -51,6 +58,11 @@ type Inbound struct {
 	Text             string          `json:"text,omitempty"`
 	Name             string          `json:"name,omitempty"`
 	ProfileID        string          `json:"profile_id,omitempty"`
+	Label            string          `json:"label,omitempty"`
+	WorkspaceID      string          `json:"workspace_id,omitempty"`
+	Branch           string          `json:"branch,omitempty"`
+	Base             string          `json:"base,omitempty"`
+	Force            bool            `json:"force,omitempty"`
 	Cwd              string          `json:"cwd,omitempty"`
 	Prompt           string          `json:"prompt,omitempty"`
 	EventID          string          `json:"event_id,omitempty"`
@@ -203,6 +215,8 @@ var Capabilities = []string{
 	"attention_classification",
 	"clear_activities",
 	"directory_browser",
+	"workspace_management",
+	"worktree_management",
 	"self_update",
 	"structured_questions",
 	"slash_commands",

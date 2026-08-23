@@ -3,7 +3,7 @@ import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity
 import { safeMarkdownHtml } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
-import type { Activity, Agent } from '$lib/types';
+import type { Activity, Agent, RelayWorkspace } from '$lib/types';
 import { workspaceGroups, workspaceStateTone } from '$lib/workspaces';
 
 function agent(overrides: Partial<Agent>): Agent {
@@ -13,6 +13,24 @@ function agent(overrides: Partial<Agent>): Agent {
     raw_pane_id: 'pane-1',
     pane_id: 'relay-a::pane-1',
     status: 'idle',
+    ...overrides,
+  };
+}
+
+function workspace(overrides: Partial<RelayWorkspace>): RelayWorkspace {
+  return {
+    relay_id: 'relay-a',
+    relay_label: 'Laptop',
+    workspace_id: 'work-1',
+    number: 1,
+    label: 'Mobile Relay',
+    focused: false,
+    pane_count: 1,
+    tab_count: 1,
+    active_tab_id: 'tab-1',
+    agent_status: 'idle',
+    cwd: '/home/user/mobile',
+    worktree: null,
     ...overrides,
   };
 }
@@ -41,6 +59,34 @@ describe('workspace navigation', () => {
       label: 'mobile',
       workingCount: 1,
       tabs: [{ label: 'Code' }, { label: 'Tests' }],
+    });
+  });
+
+  it('keeps authoritative labels and empty shell-only workspaces', () => {
+    const groups = workspaceGroups([
+      agent({ workspace_id: 'work-1', tab_id: 'tab-1', project: 'fallback' }),
+    ], [
+      workspace({}),
+      workspace({
+        workspace_id: 'work-2',
+        number: 2,
+        label: 'Shell Only',
+        cwd: '/home/user/shell',
+        pane_count: 1,
+        tab_count: 1,
+      }),
+    ]);
+
+    expect(groups).toHaveLength(2);
+    expect(groups.find((group) => group.workspaceId === 'work-1')).toMatchObject({
+      label: 'Mobile Relay',
+      cwd: '/home/user/mobile',
+    });
+    expect(groups.find((group) => group.workspaceId === 'work-2')).toMatchObject({
+      label: 'Shell Only',
+      agents: [],
+      tabCount: 1,
+      paneCount: 1,
     });
   });
 

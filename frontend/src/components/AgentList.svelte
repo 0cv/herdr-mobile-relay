@@ -17,19 +17,21 @@
   } from '$lib/agents';
   import { homeLayout } from '$lib/preferences';
   import { relayStore } from '$lib/store';
-  import type { Agent, RelayConfig, RelayConnectionView } from '$lib/types';
-  import { workspaceGroups, workspaceStateTone, type WorkspaceGroup, type WorkspaceTab } from '$lib/workspaces';
+  import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
+  import { workspaceGroups, workspaceIdentity, workspaceStateTone, type WorkspaceGroup, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents,
     relays,
     connections = new Map(),
+    workspaces = [],
     workspaceDisclosure = $bindable<Record<string, boolean>>({}),
     responding,
     onopen,
   }: {
     agents: Agent[];
     relays: RelayConfig[];
+    workspaces?: RelayWorkspace[];
     connections?: Map<string, RelayConnectionView>;
     workspaceDisclosure?: Record<string, boolean>;
     responding: Set<string>;
@@ -80,13 +82,34 @@
   const workingAgents = $derived(backgroundAgents.filter((agent) => agentStatusGroup(agent) === 'working'));
   const doneAgents = $derived(backgroundAgents.filter((agent) => agentStatusGroup(agent) === 'done'));
   const mixedLayout = $derived($homeLayout === 'mixed');
-  const doneWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(doneAgents));
-  const workingWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(workingAgents));
-  const idleWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(backgroundAgents.filter((agent) => {
+  const doneWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(
+    doneAgents,
+    workspaceRecordsFor(doneAgents, false),
+  ));
+  const workingWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(
+    workingAgents,
+    workspaceRecordsFor(workingAgents, false),
+  ));
+  const idleAgents = $derived(backgroundAgents.filter((agent) => {
     const group = agentStatusGroup(agent);
     return group !== 'working' && group !== 'done';
-  })));
-  const mixedWorkspaces = $derived(mixedLayout ? workspaceGroups(backgroundAgents) : []);
+  }));
+  const idleWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(
+    idleAgents,
+    workspaceRecordsFor(idleAgents, true),
+  ));
+  const mixedWorkspaces = $derived(mixedLayout
+    ? workspaceGroups(backgroundAgents, workspaceRecordsFor(backgroundAgents, true))
+    : []);
+
+  function workspaceRecordsFor(visible: Agent[], includeEmpty: boolean): RelayWorkspace[] {
+    const visibleKeys = new Set(visible.map((agent) => workspaceIdentity(agent)));
+    const occupiedKeys = new Set(agents.map((agent) => workspaceIdentity(agent)));
+    return workspaces.filter((workspace) => {
+      const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
+      return visibleKeys.has(key) || includeEmpty && !occupiedKeys.has(key);
+    });
+  }
 
   $effect(() => {
     if (!pendingTabOrder) return;
@@ -470,12 +493,12 @@
           <span
             class="workspace-counts"
             aria-label={working || done
-              ? `${workspace.agents.length} ${kind} agents in ${workspace.tabs.length} tabs`
-              : `${workspace.tabs.length} tabs and ${workspace.agents.length} agents`}
+              ? `${workspace.agents.length} ${kind} agents in ${workspace.tabCount} tabs`
+              : `${workspace.tabCount} tabs, ${workspace.paneCount} panes, and ${workspace.agents.length} agents`}
           >
             {#if working}<em class="workspace-working-count">{workspace.agents.length} working</em>{/if}
             {#if done}<em class="workspace-done-count">{workspace.agents.length} done</em>{/if}
-            <span>{workspace.tabs.length} {workspace.tabs.length === 1 ? 'tab' : 'tabs'}</span>
+            <span>{workspace.tabCount} {workspace.tabCount === 1 ? 'tab' : 'tabs'}</span>
             {#if !working && !done}<span>{workspace.agents.length} {workspace.agents.length === 1 ? 'agent' : 'agents'}</span>{/if}
             {#if workspace.lastActiveAt}
               <time
@@ -486,6 +509,11 @@
             {/if}
           </span>
         </summary>
+        {#if workspace.worktree}
+          <p class="workspace-provenance">
+            {workspace.worktree.is_linked_worktree ? 'Worktree' : 'Repository'} · {workspace.worktree.repo_name}
+          </p>
+        {/if}
         <div class="workspace-tabs">
           {#each displayTabs(workspace) as tab (tab.id)}
             <section
@@ -507,6 +535,9 @@
             </section>
           {/each}
         </div>
+          {#if !workspace.tabs.length}
+            <p class="workspace-empty">No agents are running in this workspace.</p>
+          {/if}
       </details>
     {/each}
   </div>

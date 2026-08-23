@@ -6,8 +6,18 @@
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
 
+  let {
+    relayId: requestedRelayId = '',
+    workspaceId = '',
+    cwd: requestedCwd = '',
+  }: {
+    relayId?: string;
+    workspaceId?: string;
+    cwd?: string;
+  } = $props();
   const relays = relayStore.relayConfigs;
   const connections = relayStore.connections;
+  const workspaces = relayStore.workspaces;
 
   let relayId = $state('');
   let profileId = $state('');
@@ -33,15 +43,29 @@
   }));
   const connection = $derived($connections.get(relayId));
   const profiles = $derived(connection?.agentProfiles || []);
+  const targetWorkspace = $derived(
+    $workspaces.find((workspace) => (
+      workspace.relay_id === relayId && workspace.workspace_id === workspaceId
+    )) || null,
+  );
 
   $effect(() => {
-    if (!connectedRelays.some((relay) => relay.id === relayId)) relayId = connectedRelays[0]?.id || '';
+    if (!connectedRelays.some((relay) => relay.id === relayId)) {
+      relayId = connectedRelays.some((relay) => relay.id === requestedRelayId)
+        ? requestedRelayId
+        : connectedRelays[0]?.id || '';
+    }
     if (!profiles.some((profile) => profile.id === profileId)) profileId = profiles[0]?.id || '';
     if (relayId && relayId !== loadedRelay) {
       loadedRelay = relayId;
-      cwd = '';
       directoryRelayId = '';
-      void loadDirectory('');
+      const initialPath = relayId === requestedRelayId ? requestedCwd : '';
+      cwd = initialPath;
+      if (initialPath) {
+        directoryRelayId = relayId;
+        name = suggestedLaunchName(initialPath, profileId);
+      }
+      void loadDirectory(initialPath);
     }
   });
 
@@ -79,7 +103,12 @@
       const launchName = name.trim();
       const launchCwd = cwd.trim();
       const result = await relayStore.sendCommand(relayId, {
-        type: 'agent_start', profile_id: profileId, name: launchName, cwd: launchCwd, prompt,
+        type: 'agent_start',
+        profile_id: profileId,
+        name: launchName,
+        cwd: launchCwd,
+        prompt,
+        workspace_id: targetWorkspace?.workspace_id || '',
       }, 45_000);
       const warning = String(result.data?.warning || '');
       status = warning || 'Agent started.';
@@ -118,6 +147,9 @@
       </select>
       {#if unavailableRelays.length}
         <p class="warning" role="status">Agent inventory is unavailable on {unavailableRelays.map((relay) => relay.label).join(', ')}.</p>
+      {/if}
+      {#if targetWorkspace}
+        <p class="hint">New tab in workspace <strong>{targetWorkspace.label}</strong>. The desktop keeps its current focus.</p>
       {/if}
 
       <label for="launch-profile">Agent</label>

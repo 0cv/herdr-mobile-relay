@@ -1,0 +1,7 @@
+{
+  "type": "workspace_create",
+  "request_id": "req-workspace-create",
+  "protocol": 2,
+  "cwd": "/home/user/project",
+  "label": "Project"
+}

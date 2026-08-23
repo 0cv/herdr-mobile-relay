@@ -57,6 +57,7 @@ type TransitionCallback func(paneID, agent, project, status string, revision int
 type State struct {
 	mu                 sync.RWMutex
 	agents             map[string]*AgentState
+	workspaces         []herdr.Workspace
 	revision           map[string]int64
 	contentRev         map[string]int64
 	attentionRev       map[string]int64
@@ -336,14 +337,26 @@ func (s *State) CommitInventory(agents []*AgentState, baseRev int64) {
 	s.commitInventoryLocked(agents, baseRev)
 }
 
-// CommitTopology applies a topology snapshot without allowing its sampled
-// agent status to overwrite the current status stream for an existing pane.
-// Topology events carry pane metadata; UDP status events and the reconcile poll
-// remain authoritative for status and attention details.
-func (s *State) CommitTopology(agents []*AgentState, baseRev int64) {
+// CommitTopology applies an event topology snapshot without allowing its
+// sampled agent status to overwrite the current status stream for an existing
+// pane. Workspace and agent topology commit under the same lock, and a
+// workspace change advances topologyGen so an older reconcile poll is rejected.
+func (s *State) CommitTopology(
+	agents []*AgentState,
+	workspaces []herdr.Workspace,
+	baseRev int64,
+) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	workspaceChanged := s.commitWorkspacesLocked(workspaces)
+	if workspaceChanged {
+		s.topologyGen++
+	}
+	s.commitTopologyLocked(agents, baseRev)
+	return workspaceChanged
+}
 
+func (s *State) commitTopologyLocked(agents []*AgentState, baseRev int64) {
 	topology := make([]*AgentState, len(agents))
 	for index, incoming := range agents {
 		if incoming == nil {
@@ -364,15 +377,23 @@ func (s *State) CommitTopology(agents []*AgentState, baseRev int64) {
 	s.commitInventoryLocked(topology, baseRev)
 }
 
-func (s *State) CommitPoll(agents []*AgentState, token PollToken) bool {
+// CommitPoll validates its token and commits both inventories while holding one
+// lock. No workspace event can land between the topology-generation check and
+// the workspace replacement.
+func (s *State) CommitPoll(
+	agents []*AgentState,
+	workspaces []herdr.Workspace,
+	token PollToken,
+) (workspaceChanged, committed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.topologyGen != token.TopologyGeneration {
 		s.topologyRetries++
-		return false
+		return false, false
 	}
+	workspaceChanged = s.commitWorkspacesLocked(workspaces)
 	s.commitInventoryLocked(agents, token.BaseRevision)
-	return true
+	return workspaceChanged, true
 }
 
 func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
@@ -948,6 +969,88 @@ func (s *State) Snapshot() []*AgentState {
 		result = append(result, &cp)
 	}
 	return result
+}
+
+func (s *State) CommitWorkspaces(workspaces []herdr.Workspace) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commitWorkspacesLocked(workspaces)
+}
+
+func (s *State) commitWorkspacesLocked(workspaces []herdr.Workspace) bool {
+	merged := cloneWorkspaces(workspaces)
+	previousByID := make(map[string]herdr.Workspace, len(s.workspaces))
+	for _, workspace := range s.workspaces {
+		previousByID[workspace.ID] = workspace
+	}
+	for index := range merged {
+		if merged[index].Cwd == "" {
+			merged[index].Cwd = previousByID[merged[index].ID].Cwd
+		}
+	}
+	if workspacesEqual(s.workspaces, merged) {
+		return false
+	}
+	s.workspaces = merged
+	return true
+}
+
+func (s *State) Workspaces() []herdr.Workspace {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneWorkspaces(s.workspaces)
+}
+
+func (s *State) Workspace(workspaceID string) (herdr.Workspace, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, workspace := range s.workspaces {
+		if workspace.ID == workspaceID {
+			copy := workspace
+			if workspace.Worktree != nil {
+				worktree := *workspace.Worktree
+				copy.Worktree = &worktree
+			}
+			return copy, true
+		}
+	}
+	return herdr.Workspace{}, false
+}
+
+func cloneWorkspaces(workspaces []herdr.Workspace) []herdr.Workspace {
+	result := append([]herdr.Workspace(nil), workspaces...)
+	for index := range result {
+		if result[index].Worktree != nil {
+			worktree := *result[index].Worktree
+			result[index].Worktree = &worktree
+		}
+	}
+	return result
+}
+
+func workspacesEqual(left, right []herdr.Workspace) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].ID != right[index].ID || left[index].Number != right[index].Number ||
+			left[index].Label != right[index].Label || left[index].Focused != right[index].Focused ||
+			left[index].PaneCount != right[index].PaneCount || left[index].TabCount != right[index].TabCount ||
+			left[index].ActiveTabID != right[index].ActiveTabID ||
+			left[index].AgentStatus != right[index].AgentStatus || left[index].Cwd != right[index].Cwd {
+			return false
+		}
+		if left[index].Worktree == nil || right[index].Worktree == nil {
+			if left[index].Worktree != nil || right[index].Worktree != nil {
+				return false
+			}
+			continue
+		}
+		if *left[index].Worktree != *right[index].Worktree {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *State) Agent(paneID string) (*AgentState, bool) {

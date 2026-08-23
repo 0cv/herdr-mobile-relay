@@ -267,6 +267,74 @@ func TestSessionCacheAppliesDesktopTabOrder(t *testing.T) {
 	}
 }
 
+func TestSessionCacheKeepsEmptyWorkspacesAndWorktreeChanges(t *testing.T) {
+	cache := NewSessionCache(SessionSnapshot{
+		Workspaces: []Workspace{
+			{ID: "w1", Number: 1, Label: "Project"},
+			{ID: "w2", Number: 2, Label: "Empty"},
+		},
+		Tabs: []Tab{{ID: "t2", WorkspaceID: "w2", Cwd: "/home/user/empty"}},
+	})
+	snapshot := cache.Snapshot()
+	if len(snapshot.Workspaces) != 2 || snapshot.Workspaces[1].Cwd != "/home/user/empty" {
+		t.Fatalf("initial workspaces = %+v", snapshot.Workspaces)
+	}
+
+	changed, err := cache.Apply(Event{
+		Event: "worktree.opened",
+		Data: json.RawMessage(`{
+			"workspace":{
+				"workspace_id":"w3",
+				"number":3,
+				"label":"fix/one",
+				"worktree":{
+					"repo_key":"repo",
+					"repo_name":"project",
+					"repo_root":"/home/user/project",
+					"checkout_path":"/home/user/worktrees/fix",
+					"is_linked_worktree":true
+				}
+			}
+		}`),
+	})
+	if err != nil || !changed {
+		t.Fatalf("Apply(worktree.opened) changed=%v err=%v", changed, err)
+	}
+	workspaces := cache.Snapshot().Workspaces
+	if len(workspaces) != 3 || workspaces[2].Worktree == nil ||
+		workspaces[2].Cwd != "/home/user/worktrees/fix" {
+		t.Fatalf("workspaces after open = %+v", workspaces)
+	}
+
+	changed, err = cache.Apply(Event{
+		Event: "workspace.renamed",
+		Data:  json.RawMessage(`{"workspace_id":"w2","label":"Renamed"}`),
+	})
+	if err != nil || !changed || cache.Snapshot().Workspaces[1].Label != "Renamed" {
+		t.Fatalf("rename changed=%v err=%v workspaces=%+v", changed, err, cache.Snapshot().Workspaces)
+	}
+}
+
+func TestTopologySubscriptionsCoverWorkspaceAndWorktreeMutations(t *testing.T) {
+	seen := make(map[string]bool)
+	for _, subscription := range topologySubscriptions() {
+		seen[subscription["type"]] = true
+	}
+	for _, event := range []string{
+		"workspace.updated",
+		"workspace.metadata_updated",
+		"workspace.moved",
+		"workspace.reordered",
+		"worktree.created",
+		"worktree.opened",
+		"worktree.removed",
+	} {
+		if !seen[event] {
+			t.Fatalf("topology subscription omits %s", event)
+		}
+	}
+}
+
 func writeTestJSON(conn net.Conn, value any) error {
 	payload, err := json.Marshal(value)
 	if err != nil {

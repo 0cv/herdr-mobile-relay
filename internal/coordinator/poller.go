@@ -24,6 +24,7 @@ type Poller struct {
 	interval            time.Duration
 	wakeup              chan struct{}
 	onChange            func(agents []*AgentState)
+	onWorkspaceChange   func(workspaces []herdr.Workspace)
 	onStatus            func(status map[string]any)
 	enrich              func(context.Context, []*AgentState)
 	hostname            string
@@ -49,6 +50,10 @@ func NewPoller(client *herdr.Client, state *State, interval time.Duration, logge
 
 func (p *Poller) SetOnChange(fn func(agents []*AgentState)) {
 	p.onChange = fn
+}
+
+func (p *Poller) SetOnWorkspaceChange(fn func(workspaces []herdr.Workspace)) {
+	p.onWorkspaceChange = fn
 }
 
 func (p *Poller) SetOnInventoryStatus(fn func(status map[string]any)) {
@@ -110,17 +115,32 @@ func (p *Poller) poll(ctx context.Context) {
 	}
 	p.consecutiveFailures.Store(0)
 
+	workspaces, err := p.client.WorkspaceList(ctx)
+	if err != nil {
+		p.consecutiveFailures.Add(1)
+		p.state.MarkInventoryFailure(err)
+		p.notifyStatusChange(previousStatus)
+		p.logger.Warn("workspace inventory poll failed", "error", err)
+		return
+	}
+
 	tabs, tabErr := p.client.TabList(ctx)
 	if tabErr != nil {
 		tabs = nil
 	}
+	topologyPanes, paneErr := p.client.PaneList(ctx)
+	if paneErr != nil {
+		topologyPanes = inv.Panes
+	}
+	hydrateWorkspaceCwds(workspaces, tabs, topologyPanes)
 	agents := p.agentsFromTopology(inv.Panes, tabs)
 
 	if p.enrich != nil {
 		p.enrich(ctx, agents)
 	}
 
-	if !p.state.CommitPoll(agents, token) {
+	workspaceChanged, committed := p.state.CommitPoll(agents, workspaces, token)
+	if !committed {
 		p.logger.Debug("discarded topology-stale inventory sample")
 		p.handleTopologyStale(previousStatus)
 		return
@@ -131,6 +151,9 @@ func (p *Poller) poll(ctx context.Context) {
 
 	if p.onChange != nil {
 		p.onChange(p.state.Snapshot())
+	}
+	if workspaceChanged && p.onWorkspaceChange != nil {
+		p.onWorkspaceChange(p.state.Workspaces())
 	}
 }
 
@@ -186,6 +209,34 @@ func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*Age
 		})
 	}
 	return agents
+}
+
+func hydrateWorkspaceCwds(workspaces []herdr.Workspace, tabs []herdr.Tab, panes []herdr.Pane) {
+	cwds := make(map[string]string, len(workspaces))
+	for _, tab := range tabs {
+		if tab.WorkspaceID != "" {
+			cwds[tab.WorkspaceID] = shorterPath(cwds[tab.WorkspaceID], tab.Cwd)
+		}
+	}
+	for _, pane := range panes {
+		if pane.WorkspaceID != "" {
+			cwds[pane.WorkspaceID] = shorterPath(cwds[pane.WorkspaceID], pane.Cwd)
+		}
+	}
+	for index := range workspaces {
+		if workspaces[index].Worktree != nil && workspaces[index].Worktree.CheckoutPath != "" {
+			workspaces[index].Cwd = workspaces[index].Worktree.CheckoutPath
+			continue
+		}
+		workspaces[index].Cwd = cwds[workspaces[index].ID]
+	}
+}
+
+func shorterPath(current, candidate string) string {
+	if candidate == "" || current != "" && len(current) <= len(candidate) {
+		return current
+	}
+	return candidate
 }
 
 func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
@@ -266,11 +317,14 @@ func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.Topolog
 		p.enrich(ctx, agents)
 	}
 	p.consecutiveFailures.Store(0)
-	p.state.CommitTopology(agents, baseRevision)
+	workspaceChanged := p.state.CommitTopology(agents, topology.Workspaces, baseRevision)
 	p.notifyStatusChange(previousStatus)
-	p.logger.Debug("event inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
+	p.logger.Debug("event inventory committed", "agents", len(agents), "workspaces", len(topology.Workspaces), "topology", p.state.TopologyGeneration())
 	if p.onChange != nil {
 		p.onChange(p.state.Snapshot())
+	}
+	if workspaceChanged && p.onWorkspaceChange != nil {
+		p.onWorkspaceChange(p.state.Workspaces())
 	}
 }
 

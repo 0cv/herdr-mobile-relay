@@ -3,6 +3,28 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.17.6] - 2026-08-23
+
+### Added
+
+- Reply from searchable Conversation History with an ordinary multiline prompt
+  or image attachment, and switch back to the same agent's terminal from the
+  history header. The composer locks for approvals, structured questions, and
+  other terminal-only interactions; uncertain dispatches stay cleared so a
+  retry cannot duplicate a prompt that may already have arrived. Attachment
+  status is cleared with the sent draft instead of leaking into the next reply.
+  (#13)
+- Manage Herdr workspaces and Git worktrees from the phone without exposing
+  ordinary shell panes as agent terminals or stealing desktop focus. The home
+  screen now keeps authoritative workspace labels, ordering, worktree
+  provenance, and shell-only or empty workspaces instead of reconstructing
+  workspace cards solely from active agents. The new Workspaces view can create,
+  rename, reorder, and close workspaces; start an agent in a selected workspace;
+  and list, create, open, close, or remove Herdr-managed worktrees. Worktree
+  removal keeps the branch, refuses dirty checkouts by default, and offers force
+  removal only through a second destructive confirmation. Every mutation is
+  protocol-gated and recorded in the private remote-write audit log. (#14)
+
 ## [0.17.5] - 2026-08-22
 
 ### Fixed
@@ -1019,7 +1041,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.5...HEAD
+[0.17.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.5...v0.17.6
 [0.17.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.4...v0.17.5
 [0.17.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.3...v0.17.4
 [0.17.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.2...v0.17.3

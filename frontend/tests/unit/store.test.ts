@@ -78,6 +78,89 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
   });
 
+  it('stores empty workspaces and sends workspace and worktree commands', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      version: 'abc123',
+      host: 'fedora',
+      capabilities: ['workspace_management', 'worktree_management'],
+      agent_profiles: [],
+      inventory: { state: 'ready' },
+    });
+    socket.message({
+      type: 'workspaces',
+      workspaces: [{
+        workspace_id: 'w1',
+        number: 1,
+        label: 'Project',
+        pane_count: 1,
+        tab_count: 1,
+        cwd: '/home/user/project',
+        worktree: {
+          repo_key: 'repo',
+          repo_name: 'project',
+          repo_root: '/home/user/project',
+          checkout_path: '/home/user/project',
+          is_linked_worktree: false,
+        },
+      }, {
+        workspace_id: 'w2',
+        number: 2,
+        label: 'Empty',
+        pane_count: 1,
+        tab_count: 1,
+        cwd: '/home/user/empty',
+      }],
+    });
+    expect(get(relayStore.workspaces)).toEqual([
+      expect.objectContaining({ workspace_id: 'w1', label: 'Project', cwd: '/home/user/project' }),
+      expect.objectContaining({ workspace_id: 'w2', label: 'Empty', cwd: '/home/user/empty' }),
+    ]);
+
+    const workspace = get(relayStore.workspaces)[0];
+    const rename = relayStore.renameWorkspace(workspace, 'Renamed');
+    const renameCommand = JSON.parse(socket.sent.at(-1)!);
+    expect(renameCommand).toMatchObject({
+      type: 'workspace_rename',
+      workspace_id: 'w1',
+      label: 'Renamed',
+      protocol: 2,
+    });
+    socket.message({
+      type: 'command_result',
+      request_id: renameCommand.request_id,
+      action: 'workspace_rename',
+      ok: true,
+      phase: 'completed',
+    });
+    await expect(rename).resolves.toMatchObject({ ok: true });
+
+    const listing = relayStore.listWorktrees(workspace);
+    const listCommand = JSON.parse(socket.sent.at(-1)!);
+    expect(listCommand).toMatchObject({ type: 'worktree_list', workspace_id: 'w1', protocol: 2 });
+    socket.message({
+      type: 'command_result',
+      request_id: listCommand.request_id,
+      action: 'worktree_list',
+      ok: true,
+      phase: 'completed',
+      data: {
+        source: {
+          repo_key: 'repo',
+          repo_name: 'project',
+          repo_root: '/home/user/project',
+          source_checkout_path: '/home/user/project',
+          source_workspace_id: 'w1',
+        },
+        worktrees: [],
+      },
+    });
+    await expect(listing).resolves.toMatchObject({ source: { repo_name: 'project' }, worktrees: [] });
+  });
+
   it('keeps relay keys out of the WebSocket URL and waits for encrypted authentication', async () => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);

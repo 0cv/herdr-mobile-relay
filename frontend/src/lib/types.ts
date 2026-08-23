@@ -41,6 +41,53 @@ export interface AgentProfile {
   label?: string;
 }
 
+export interface WorkspaceWorktree {
+  repo_key: string;
+  repo_name: string;
+  repo_root: string;
+  checkout_path: string;
+  is_linked_worktree: boolean;
+}
+
+export interface RelayWorkspace {
+  relay_id: string;
+  relay_label: string;
+  workspace_id: string;
+  number: number;
+  label: string;
+  focused: boolean;
+  pane_count: number;
+  tab_count: number;
+  active_tab_id: string;
+  agent_status: string;
+  cwd: string;
+  worktree?: WorkspaceWorktree | null;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  is_bare: boolean;
+  is_detached: boolean;
+  is_prunable: boolean;
+  is_linked_worktree: boolean;
+  label: string;
+  open_workspace_id: string | null;
+}
+
+export interface WorktreeSource {
+  repo_key: string;
+  repo_name: string;
+  repo_root: string;
+  source_checkout_path: string;
+  source_workspace_id: string | null;
+}
+
+export interface WorktreeListing {
+  source: WorktreeSource;
+  worktrees: WorktreeInfo[];
+}
+
 export interface DirectoryEntry {
   name: string;
   path: string;

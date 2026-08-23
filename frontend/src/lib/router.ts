@@ -5,7 +5,8 @@ import type { NotificationTarget } from './types';
 export type ViewState =
   | { view: 'agents' }
   | { view: 'settings' }
-  | { view: 'launch' }
+  | { view: 'workspaces' }
+  | { view: 'launch'; relayId?: string; workspaceId?: string; cwd?: string }
   | { view: 'activity' }
   | { view: 'activity_detail'; key: string }
   | { view: 'terminal'; paneId: string }
@@ -27,7 +28,22 @@ function showView(state: ViewState): void {
 
 export function stateFromLocation(locationValue: Pick<Location, 'hash'> = location): ViewState {
   if (locationValue.hash === '#settings') return { view: 'settings' };
+  if (locationValue.hash === '#workspaces') return { view: 'workspaces' };
   if (locationValue.hash === '#launch') return { view: 'launch' };
+  const launchTarget = locationValue.hash.match(/^#launch=(.+)$/);
+  if (launchTarget) {
+    try {
+      const target = JSON.parse(decodeURIComponent(launchTarget[1])) as Record<string, unknown>;
+      return {
+        view: 'launch',
+        relayId: String(target.relayId || ''),
+        workspaceId: String(target.workspaceId || ''),
+        cwd: String(target.cwd || ''),
+      };
+    } catch {
+      return { view: 'launch' };
+    }
+  }
   if (locationValue.hash === '#activity') return { view: 'activity' };
   const activityDetail = locationValue.hash.match(/^#activity=(.+)$/);
   if (activityDetail) {
@@ -63,7 +79,15 @@ export function stateFromLocation(locationValue: Pick<Location, 'hash'> = locati
 
 export function viewUrl(state: ViewState): string {
   if (state.view === 'settings') return '#settings';
-  if (state.view === 'launch') return '#launch';
+  if (state.view === 'workspaces') return '#workspaces';
+  if (state.view === 'launch') {
+    if (!state.workspaceId) return '#launch';
+    return `#launch=${encodeURIComponent(JSON.stringify({
+      relayId: state.relayId || '',
+      workspaceId: state.workspaceId,
+      cwd: state.cwd || '',
+    }))}`;
+  }
   if (state.view === 'activity') return '#activity';
   if (state.view === 'activity_detail') return `#activity=${encodeURIComponent(state.key)}`;
   if (state.view === 'terminal') return `#pane=${encodeURIComponent(state.paneId)}`;

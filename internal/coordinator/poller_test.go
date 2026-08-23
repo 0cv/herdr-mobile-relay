@@ -3,6 +3,8 @@ package coordinator
 import (
 	"testing"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
 
 func TestTopologyStaleRepollsAreBounded(t *testing.T) {
@@ -57,5 +59,15 @@ func TestPollerIntervalClampsToReconcileCeiling(t *testing.T) {
 	poller := NewPoller(nil, testState(), time.Hour, testLogger())
 	if got := poller.currentInterval(); got != idlePollInterval {
 		t.Fatalf("interval = %v, want it clamped to %v", got, idlePollInterval)
+	}
+}
+
+func TestHydrateWorkspaceCwdsKeepsShellOnlyWorkspaceLaunchable(t *testing.T) {
+	workspaces := []herdr.Workspace{{ID: "w1", Label: "Shell only"}}
+	hydrateWorkspaceCwds(workspaces, nil, []herdr.Pane{{
+		ID: "p1", WorkspaceID: "w1", Cwd: "/home/user/project",
+	}})
+	if workspaces[0].Cwd != "/home/user/project" {
+		t.Fatalf("workspace cwd = %q", workspaces[0].Cwd)
 	}
 }

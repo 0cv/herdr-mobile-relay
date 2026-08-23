@@ -466,9 +466,9 @@ func TestInflightPollPreservesNewerBlockedClassification(t *testing.T) {
 		t.Fatal("classification setup failed")
 	}
 
-	if !s.CommitPoll([]*AgentState{{
+	if _, committed := s.CommitPoll([]*AgentState{{
 		PaneID: "p1", Agent: "codex", Status: "working",
-	}}, token) {
+	}}, nil, token); !committed {
 		t.Fatal("stable in-flight poll was rejected")
 	}
 	current, _ := s.Agent("p1")
@@ -502,13 +502,37 @@ func TestTopologyCommitPreservesCurrentStatusAndAttention(t *testing.T) {
 		Agent:  "codex",
 		Name:   "renamed",
 		Status: "idle",
-	}}, s.RevisionCounter())
+	}}, nil, s.RevisionCounter())
 	current, _ := s.Agent("p1")
 	if current.Status != "blocked" ||
 		current.AttentionKind != question.AttentionApproval ||
 		len(current.Options) != 2 ||
 		current.Name != "renamed" {
 		t.Fatalf("topology commit overwrote current state: %+v", current)
+	}
+}
+
+func TestInflightPollCannotOverwriteNewerWorkspaceEvent(t *testing.T) {
+	s := NewState(testLogger())
+	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, 0)
+	s.CommitWorkspaces([]herdr.Workspace{{ID: "w1", Label: "Before"}})
+	token := s.BeginPoll()
+
+	s.CommitTopology(
+		[]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}},
+		[]herdr.Workspace{{ID: "w1", Label: "Desktop rename"}},
+		s.RevisionCounter(),
+	)
+	if _, committed := s.CommitPoll(
+		[]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}},
+		[]herdr.Workspace{{ID: "w1", Label: "Before"}},
+		token,
+	); committed {
+		t.Fatal("poll sampled before the workspace event was committed")
+	}
+	workspace, ok := s.Workspace("w1")
+	if !ok || workspace.Label != "Desktop rename" {
+		t.Fatalf("workspace = %+v, ok=%v", workspace, ok)
 	}
 }
 

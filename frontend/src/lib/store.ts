@@ -49,6 +49,7 @@ import type {
   QuestionInteraction,
   RelayConfig,
   RelayConnectionView,
+  RelayWorkspace,
   SlashCommand,
   SlashCommandCatalog,
   TerminalFrame,
@@ -57,6 +58,7 @@ import type {
   WorkspaceGitDiff,
   WorkspaceGitStatus,
   WorkspaceTree,
+  WorktreeListing,
 } from './types';
 const COMMAND_TIMEOUT_MS = 15_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
@@ -117,6 +119,14 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   agent_stop: true,
   agent_clear: true,
   agent_restart: true,
+  workspace_create: true,
+  workspace_rename: true,
+  workspace_reorder: true,
+  workspace_close: true,
+  worktree_list: true,
+  worktree_create: true,
+  worktree_open: true,
+  worktree_remove: true,
   acknowledge_pane: true,
   upload_image: true,
   copy_agent_response: true,
@@ -149,6 +159,38 @@ function normalizeAgentInventory(
     lastAttemptAt: Number(inventory.last_attempt_at) || 0,
     lastSuccessAt: Number(inventory.last_success_at) || 0,
     stale: inventory.stale === true,
+  };
+}
+
+function normalizeWorkspace(
+  relayId: string,
+  relayLabel: string,
+  value: Record<string, unknown>,
+): RelayWorkspace | null {
+  const workspaceId = String(value.workspace_id || '');
+  if (!workspaceId) return null;
+  const worktreeValue = value.worktree && typeof value.worktree === 'object'
+    ? value.worktree as Record<string, unknown>
+    : null;
+  return {
+    relay_id: relayId,
+    relay_label: relayLabel,
+    workspace_id: workspaceId,
+    number: Number(value.number) || 0,
+    label: String(value.label || 'Workspace').slice(0, 256),
+    focused: value.focused === true,
+    pane_count: Number(value.pane_count) || 0,
+    tab_count: Number(value.tab_count) || 0,
+    active_tab_id: String(value.active_tab_id || ''),
+    agent_status: String(value.agent_status || ''),
+    cwd: String(value.cwd || ''),
+    worktree: worktreeValue ? {
+      repo_key: String(worktreeValue.repo_key || ''),
+      repo_name: String(worktreeValue.repo_name || ''),
+      repo_root: String(worktreeValue.repo_root || ''),
+      checkout_path: String(worktreeValue.checkout_path || ''),
+      is_linked_worktree: worktreeValue.is_linked_worktree === true,
+    } : null,
   };
 }
 
@@ -202,6 +244,7 @@ class RelayStore {
   readonly relayConfigs = writable<RelayConfig[]>([]);
   readonly connections = writable<Map<string, RelayConnection>>(new Map());
   readonly agents = writable<Agent[]>([]);
+  readonly workspaces = writable<RelayWorkspace[]>([]);
   readonly activities = writable<Activity[]>([]);
   readonly terminalFrames = writable<Map<string, TerminalFrame>>(new Map());
   readonly responding = writable<Set<string>>(new Set());
@@ -210,6 +253,7 @@ class RelayStore {
 
   private connectionsValue = new Map<string, RelayConnection>();
   private agentsValue: Agent[] = [];
+  private workspacesValue: RelayWorkspace[] = [];
   private activitiesValue: Activity[] = [];
   private terminalFramesValue = new Map<string, TerminalFrame>();
   private respondingValue = new Set<string>();
@@ -307,6 +351,7 @@ class RelayStore {
     this.relayConfigs.set(relays);
     saveRelayConfigs(relays);
     this.removeAgentsForRelay(id);
+    this.removeWorkspacesForRelay(id);
     this.activitiesValue = this.activitiesValue.filter((activity) => activity.relay_id !== id);
     this.activities.set(this.activitiesValue);
   }
@@ -320,6 +365,8 @@ class RelayStore {
     if (!preserveAgents) {
       this.agentsValue = [];
       this.agents.set([]);
+      this.workspacesValue = [];
+      this.workspaces.set([]);
     }
     this.blockedSnapshotMisses.clear();
     for (const relay of get(this.relayConfigs)) this.connectRelay(relay);
@@ -806,6 +853,25 @@ class RelayStore {
       this.upsertActivity(relayId, message.activity);
       return;
     }
+    if (message.type === 'workspaces') {
+      if (
+        connection
+        && connection.inventory.state !== 'ready'
+        && !connection.inventory.stale
+      ) return;
+      const relayLabel = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
+      const incoming = (Array.isArray(message.workspaces) ? message.workspaces : [])
+        .map((workspace: unknown) => workspace && typeof workspace === 'object'
+          ? normalizeWorkspace(relayId, relayLabel, workspace as Record<string, unknown>)
+          : null)
+        .filter((workspace: RelayWorkspace | null): workspace is RelayWorkspace => workspace !== null);
+      this.workspacesValue = [
+        ...this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId),
+        ...incoming,
+      ];
+      this.workspaces.set(this.workspacesValue);
+      return;
+    }
     if (message.type === 'agents') {
       // Starting/error snapshots are not authoritative. In particular, a relay
       // restart has no in-memory pane cache yet; accepting its placeholder []
@@ -992,6 +1058,11 @@ class RelayStore {
     this.agents.set(this.agentsValue);
   }
 
+  private removeWorkspacesForRelay(relayId: string): void {
+    this.workspacesValue = this.workspacesValue.filter((workspace) => workspace.relay_id !== relayId);
+    this.workspaces.set(this.workspacesValue);
+  }
+
   private clearSlashCommandCacheForRelay(relayId: string): void {
     const prefix = `${relayId}::`;
     for (const paneId of this.slashCommandCache.keys()) {
@@ -1112,6 +1183,104 @@ class RelayStore {
       return Promise.reject(new CommandError('Tab position is invalid'));
     }
     return this.sendToAgent(agent, { type: 'tab_reorder', insert_index: insertIndex });
+  }
+
+  private workspaceManagementAvailable(relayId: string, capability = 'workspace_management'): RelayConnection {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection?.capabilities.includes(capability)) {
+      throw new CommandError('This relay does not support workspace management');
+    }
+    return connection;
+  }
+
+  async createWorkspace(relayId: string, cwd: string, label: string): Promise<CommandResult> {
+    this.workspaceManagementAvailable(relayId);
+    const result = await this.sendCommand(relayId, { type: 'workspace_create', cwd, label }, 45_000);
+    this.requestAgents();
+    return result;
+  }
+
+  async renameWorkspace(workspace: RelayWorkspace, label: string): Promise<CommandResult> {
+    this.workspaceManagementAvailable(workspace.relay_id);
+    const result = await this.sendCommand(workspace.relay_id, {
+      type: 'workspace_rename', workspace_id: workspace.workspace_id, label,
+    });
+    this.requestAgents();
+    return result;
+  }
+
+  async reorderWorkspace(workspace: RelayWorkspace, insertIndex: number): Promise<CommandResult> {
+    this.workspaceManagementAvailable(workspace.relay_id);
+    if (!Number.isInteger(insertIndex) || insertIndex < 0) {
+      throw new CommandError('Workspace position is invalid');
+    }
+    const result = await this.sendCommand(workspace.relay_id, {
+      type: 'workspace_reorder', workspace_id: workspace.workspace_id, insert_index: insertIndex,
+    });
+    this.requestAgents();
+    return result;
+  }
+
+  async closeWorkspace(workspace: RelayWorkspace): Promise<CommandResult> {
+    this.workspaceManagementAvailable(workspace.relay_id);
+    const result = await this.sendCommand(workspace.relay_id, {
+      type: 'workspace_close', workspace_id: workspace.workspace_id,
+    }, 30_000);
+    this.requestAgents();
+    return result;
+  }
+
+  async listWorktrees(workspace: RelayWorkspace): Promise<WorktreeListing> {
+    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
+    const result = await this.sendCommand(workspace.relay_id, {
+      type: 'worktree_list', workspace_id: workspace.workspace_id,
+    }, 30_000);
+    const listing = result.data as unknown as WorktreeListing;
+    if (!listing?.source || !Array.isArray(listing.worktrees)) {
+      throw new CommandError('Relay returned an invalid worktree listing');
+    }
+    return listing;
+  }
+
+  async createWorktree(
+    workspace: RelayWorkspace,
+    options: { branch: string; base?: string; label?: string },
+  ): Promise<CommandResult> {
+    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
+    const result = await this.sendCommand(workspace.relay_id, {
+      type: 'worktree_create',
+      workspace_id: workspace.workspace_id,
+      branch: options.branch,
+      base: options.base || '',
+      label: options.label || '',
+    }, 75_000);
+    this.requestAgents();
+    return result;
+  }
+
+  async openWorktree(
+    workspace: RelayWorkspace,
+    options: { path?: string; branch?: string; label?: string },
+  ): Promise<CommandResult> {
+    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
+    const result = await this.sendCommand(workspace.relay_id, {
+      type: 'worktree_open',
+      workspace_id: workspace.workspace_id,
+      path: options.path || '',
+      branch: options.branch || '',
+      label: options.label || '',
+    }, 75_000);
+    this.requestAgents();
+    return result;
+  }
+
+  async removeWorktree(workspace: RelayWorkspace, force = false): Promise<CommandResult> {
+    this.workspaceManagementAvailable(workspace.relay_id, 'worktree_management');
+    const result = await this.sendCommand(workspace.relay_id, {
+      type: 'worktree_remove', workspace_id: workspace.workspace_id, force,
+    }, 75_000);
+    this.requestAgents();
+    return result;
   }
 
   async checkRelayUpdate(relayId: string): Promise<void> {

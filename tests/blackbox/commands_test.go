@@ -563,7 +563,7 @@ func readJSON(t *testing.T, conn *websocket.Conn, ctx context.Context, timeout t
 		// socket between a command being sent and its reply, and reading it as
 		// the reply fails the test for a reason the command never caused.
 		switch msg["type"] {
-		case "agents", "agent_update", "activity", "push_config", "activity_history",
+		case "agents", "workspaces", "agent_update", "activity", "push_config", "activity_history",
 			"inventory_status", "blocked":
 			continue
 		}

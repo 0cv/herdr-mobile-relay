@@ -21,10 +21,14 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 117 KiB for the Conversation History prompt composer (issue #13):
 // prompt dispatch safety, interaction locks and image attachment add 1,525 B
 // gzip to the released 0.17.5 baseline, which had 1,208 B of headroom.
+// Raised from 118 KiB for authoritative workspace topology and the complete
+// workspace/worktree manager (issue #14): empty workspace cards, safe
+// destructive confirmations, directory selection, and worktree create/open
+// flows add one project-level control surface to the single application bundle.
 // The gzip figure is the measuring runtime's zlib, not a property of the
 // bundle: the same bytes measure ~300 B larger under Bun than under Node, so
 // compare numbers only across runs on the same runtime (the repo uses Bun).
-const limitKiB = 118;
+const limitKiB = 123;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

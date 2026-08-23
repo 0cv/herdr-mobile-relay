@@ -7,7 +7,7 @@ import {
   sortedAgents,
   tabName,
 } from './agents';
-import type { Agent } from './types';
+import type { Agent, RelayWorkspace, WorkspaceWorktree } from './types';
 
 export interface WorkspaceTab {
   id: string;
@@ -23,10 +23,14 @@ export interface WorkspaceGroup {
   relayLabel: string;
   workspaceId: string;
   label: string;
+  number: number;
   cwd: string;
   host: string;
   agents: Agent[];
   tabs: WorkspaceTab[];
+  tabCount: number;
+  paneCount: number;
+  worktree: WorkspaceWorktree | null;
   attentionCount: number;
   workingCount: number;
   doneCount: number;
@@ -60,16 +64,23 @@ function groupCwd(agents: Agent[]): string {
   return paths.sort((left, right) => left.length - right.length || left.localeCompare(right))[0];
 }
 
-export function workspaceGroups(agents: Agent[]): WorkspaceGroup[] {
-  const grouped = new Map<string, Agent[]>();
+export function workspaceGroups(agents: Agent[], workspaces: RelayWorkspace[] = []): WorkspaceGroup[] {
+  const grouped = new Map<string, { agents: Agent[]; workspace: RelayWorkspace | null }>();
+  for (const workspace of workspaces) {
+    const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
+    grouped.set(key, { agents: [], workspace });
+  }
   for (const agent of agents) {
     const key = workspaceIdentity(agent);
-    grouped.set(key, [...(grouped.get(key) || []), agent]);
+    const group = grouped.get(key) || { agents: [], workspace: null };
+    group.agents.push(agent);
+    grouped.set(key, group);
   }
 
-  const groups = [...grouped].map(([key, members]) => {
-    const ordered = sortedAgents(members);
+  const groups = [...grouped].map(([key, value]) => {
+    const ordered = sortedAgents(value.agents);
     const first = ordered[0];
+    const workspace = value.workspace;
     const tabs = new Map<string, Agent[]>();
     for (const agent of ordered) {
       const id = String(agent.tab_id || agent.pane_id);
@@ -90,14 +101,18 @@ export function workspaceGroups(agents: Agent[]): WorkspaceGroup[] {
     const statuses = ordered.map(agentStatusGroup);
     return {
       key,
-      relayId: first.relay_id,
-      relayLabel: first.relay_label,
-      workspaceId: String(first.workspace_id || ''),
-      label: groupLabel(ordered),
-      cwd: groupCwd(ordered),
-      host: hostLabel(first),
+      relayId: workspace?.relay_id || first?.relay_id || '',
+      relayLabel: workspace?.relay_label || first?.relay_label || '',
+      workspaceId: workspace?.workspace_id || String(first?.workspace_id || ''),
+      number: workspace?.number || Number.MAX_SAFE_INTEGER,
+      label: workspace?.label || groupLabel(ordered),
+      cwd: workspace?.cwd || groupCwd(ordered),
+      host: first ? hostLabel(first) : workspace?.relay_label || '',
       agents: ordered,
       tabs: tabGroups,
+      tabCount: Math.max(workspace?.tab_count || 0, tabGroups.length),
+      paneCount: Math.max(workspace?.pane_count || 0, ordered.length),
+      worktree: workspace?.worktree || null,
       attentionCount: statuses.filter((status) => status === 'blocked' || status === 'attention').length,
       workingCount: statuses.filter((status) => status === 'working').length,
       doneCount: statuses.filter((status) => status === 'done').length,

@@ -277,6 +277,10 @@ func (s *Server) Run(ctx context.Context) error {
 			"type":   "agents",
 			"agents": s.committedAgents(),
 		})
+		s.hub.Send(client, map[string]any{
+			"type":       "workspaces",
+			"workspaces": s.state.Workspaces(),
+		})
 		activities := s.recentActivities(500)
 		s.hub.Send(client, map[string]any{
 			"type":       "activity_history",
@@ -479,6 +483,51 @@ func (s *Server) Run(ctx context.Context) error {
 					PaneID:    paneID,
 				})
 			}
+		case "workspace_create", "workspace_rename", "workspace_reorder", "workspace_close",
+			"worktree_list", "worktree_create", "worktree_open", "worktree_remove":
+			var result *coordinator.CommandResult
+			switch action {
+			case "workspace_create":
+				result = s.dispatcher.HandleWorkspaceCreate(commandCtx, inbound.RequestID, inbound.Cwd, inbound.Label)
+			case "workspace_rename":
+				result = s.dispatcher.HandleWorkspaceRename(commandCtx, inbound.RequestID, inbound.WorkspaceID, inbound.Label)
+			case "workspace_reorder":
+				result = s.dispatcher.HandleWorkspaceReorder(commandCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
+			case "workspace_close":
+				result = s.dispatcher.HandleWorkspaceClose(commandCtx, inbound.RequestID, inbound.WorkspaceID)
+			case "worktree_list":
+				result = s.dispatcher.HandleWorktreeList(commandCtx, inbound.RequestID, inbound.WorkspaceID)
+			case "worktree_create":
+				result = s.dispatcher.HandleWorktreeCreate(
+					commandCtx,
+					inbound.RequestID,
+					inbound.WorkspaceID,
+					inbound.Branch,
+					inbound.Base,
+					inbound.Path,
+					inbound.Label,
+				)
+			case "worktree_open":
+				result = s.dispatcher.HandleWorktreeOpen(
+					commandCtx,
+					inbound.RequestID,
+					inbound.WorkspaceID,
+					inbound.Path,
+					inbound.Branch,
+					inbound.Label,
+				)
+			case "worktree_remove":
+				result = s.dispatcher.HandleWorktreeRemove(
+					commandCtx,
+					inbound.RequestID,
+					inbound.WorkspaceID,
+					inbound.Force,
+				)
+			}
+			if auditedWrite {
+				s.recordWriteAudit(client, msg, result)
+			}
+			s.hub.Send(client, commandResultMessage(result))
 		case "list_directories":
 			requestID, _ := msg["request_id"].(string)
 			path, _ := msg["path"].(string)
@@ -598,6 +647,7 @@ func (s *Server) Run(ctx context.Context) error {
 				"stale":           inventory["stale"],
 			})
 			s.hub.Send(client, map[string]any{"type": "agents", "agents": s.committedAgents()})
+			s.hub.Send(client, map[string]any{"type": "workspaces", "workspaces": s.state.Workspaces()})
 			s.refreshMu.Lock()
 			s.refreshClients[client.ID()] = true
 			s.refreshMu.Unlock()
@@ -676,6 +726,12 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 		}
 		s.dispatcher.PruneSlots(active)
+	})
+	s.poller.SetOnWorkspaceChange(func(workspaces []herdr.Workspace) {
+		s.broadcastCommitted(map[string]any{
+			"type":       "workspaces",
+			"workspaces": workspaces,
+		})
 	})
 	s.poller.SetOnInventoryStatus(func(status map[string]any) {
 		s.broadcastCommitted(inventoryStatusMessage(status))
@@ -1642,6 +1698,10 @@ func (s *Server) sendRequestedAgentRefreshes(agents []*coordinator.AgentState) {
 	for _, clientID := range clientIDs {
 		s.hub.SendByID(clientID, status)
 		s.hub.SendByID(clientID, snapshot)
+		s.hub.SendByID(clientID, map[string]any{
+			"type":       "workspaces",
+			"workspaces": s.state.Workspaces(),
+		})
 	}
 }
 
@@ -1906,7 +1966,9 @@ func isAuditedWrite(action string) bool {
 	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
 		"respond", "answer_question", "navigate_question", "clarify_question",
 		"agent_stop", "agent_rename", "tab_reorder", "agent_start", "agent_clear",
-		"agent_restart", "upload_image", "send_secret":
+		"agent_restart", "workspace_create", "workspace_rename", "workspace_reorder",
+		"workspace_close", "worktree_create", "worktree_open", "worktree_remove",
+		"upload_image", "send_secret":
 		return true
 	default:
 		return false
@@ -1991,7 +2053,8 @@ func auditWriteDetails(message map[string]any) map[string]any {
 		details["payload_bytes"] = len(encoded)
 	}
 	stringLimits := map[string]int{
-		"name": 256, "profile_id": 160, "cwd": 1024,
+		"name": 256, "label": 256, "profile_id": 160, "workspace_id": 160,
+		"cwd": 1024, "path": 1024, "branch": 512, "base": 512,
 		"filename": 512, "mime": 128, "activity_label": 256,
 	}
 	for key, limit := range stringLimits {
@@ -2008,6 +2071,9 @@ func auditWriteDetails(message map[string]any) map[string]any {
 		if value, ok := auditInteger(message[key]); ok {
 			details[key] = value
 		}
+	}
+	if force, ok := message["force"].(bool); ok {
+		details["force"] = force
 	}
 	keys := make([]string, 0, 16)
 	switch values := message["keys"].(type) {
@@ -2096,8 +2162,9 @@ func isCoordinatorMutation(action string) bool {
 	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
 		"respond", "answer_question", "navigate_question", "clarify_question",
 		"agent_stop", "agent_rename", "tab_reorder", "acknowledge_pane", "agent_start",
-		"agent_clear", "agent_restart", "lease_pane_size", "release_pane_size",
-		"send_secret":
+		"agent_clear", "agent_restart", "workspace_create", "workspace_rename",
+		"workspace_reorder", "workspace_close", "worktree_create", "worktree_open",
+		"worktree_remove", "lease_pane_size", "release_pane_size", "send_secret":
 		return true
 	default:
 		return false

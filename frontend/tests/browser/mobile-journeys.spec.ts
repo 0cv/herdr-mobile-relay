@@ -99,6 +99,37 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           }));
           return;
         }
+        if (message.type === 'worktree_list') {
+          queueMicrotask(() => this.server({
+            type: 'command_result',
+            action: message.type,
+            request_id: message.request_id,
+            ok: true,
+            phase: 'completed',
+            data: {
+              source: {
+                repo_key: 'repo',
+                repo_name: 'project',
+                repo_root: '/work/project',
+                source_checkout_path: '/work/project',
+                source_workspace_id: 'w1',
+              },
+              worktrees: [
+                {
+                  path: '/work/worktrees/project/fix-one',
+                  branch: 'fix/one',
+                  is_bare: false,
+                  is_detached: false,
+                  is_prunable: false,
+                  is_linked_worktree: true,
+                  label: 'fix/one',
+                  open_workspace_id: null,
+                },
+              ],
+            },
+          }));
+          return;
+        }
         if (String(message.type).startsWith('workspace_')) {
           let data: Record<string, unknown>;
           switch (message.type) {
@@ -317,6 +348,81 @@ async function handshake(page: Page, index: number, overrides: Record<string, un
 }
 
 const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' };
+
+test('manages authoritative workspaces and worktrees without exposing shell terminals', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'directory_browser', 'workspace_management', 'worktree_management'],
+  });
+  await server(page, 0, {
+    type: 'workspaces',
+    workspaces: [
+      {
+        workspace_id: 'w1', number: 1, label: 'Project', pane_count: 1, tab_count: 1,
+        cwd: '/work/project',
+        worktree: {
+          repo_key: 'repo', repo_name: 'project', repo_root: '/work/project',
+          checkout_path: '/work/project', is_linked_worktree: false,
+        },
+      },
+      {
+        workspace_id: 'w2', number: 2, label: 'Shell Only', pane_count: 1, tab_count: 1,
+        cwd: '/work/shell-only',
+      },
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', tab_number: 1,
+      tab_label: 'Agent', status: 'working', project: 'fallback-project', agent: 'codex',
+    }],
+  });
+
+  await expect(page.getByText('Project', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Shell Only', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('No agents are running in this workspace.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  await expect(page.locator('#workspace-manager-title')).toBeVisible();
+  const projectCard = page.locator('.workspace-management-card').first();
+  await expect(projectCard).toContainText('/work/project');
+  await projectCard.getByRole('button', { name: 'Rename' }).click();
+  await projectCard.getByLabel('Workspace label').fill('Renamed Project');
+  await projectCard.getByRole('button', { name: 'Save' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'workspace_rename')).toMatchObject({
+    workspace_id: 'w1',
+    label: 'Renamed Project',
+  });
+
+  await projectCard.getByRole('button', { name: 'Worktrees' }).click();
+  await expect(page.getByRole('heading', { name: 'Project worktrees' })).toBeVisible();
+  await expect(page.getByText('fix/one', { exact: true })).toBeVisible();
+  await page.locator('.worktree-list').getByRole('button', { name: 'Open' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'worktree_open')).toMatchObject({
+    workspace_id: 'w1',
+    path: '/work/worktrees/project/fix-one',
+  });
+
+  await page.getByLabel('Branch').fill('fix/issue-14');
+  await page.getByLabel('Base ref').fill('main');
+  await page.getByRole('button', { name: 'Create Worktree' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'worktree_create')).toMatchObject({
+    workspace_id: 'w1',
+    branch: 'fix/issue-14',
+    base: 'main',
+  });
+
+  await projectCard.getByRole('button', { name: 'Start Agent' }).click();
+  await expect(page.getByText('New tab in workspace Project.')).toBeVisible();
+  await page.getByLabel('Name').fill('issue-14-codex');
+  await page.getByRole('button', { name: 'Start Agent' }).last().click();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'agent_start')).toMatchObject({
+    workspace_id: 'w1',
+    cwd: '/work/project',
+  });
+});
 
 test('groups working agents and synchronizes tab order in both directions', async ({ page }) => {
   await boot(page, [fedora]);

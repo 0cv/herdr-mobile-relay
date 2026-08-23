@@ -1,0 +1,8 @@
+{
+  "type": "worktree_open",
+  "request_id": "req-worktree-open",
+  "protocol": 2,
+  "workspace_id": "w1",
+  "path": "/home/user/worktrees/project/issue-14",
+  "label": "Issue 14"
+}

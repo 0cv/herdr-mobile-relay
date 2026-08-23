@@ -12,6 +12,8 @@
     "attention_classification",
     "clear_activities",
     "directory_browser",
+    "workspace_management",
+    "worktree_management",
     "self_update",
     "structured_questions",
     "slash_commands",
