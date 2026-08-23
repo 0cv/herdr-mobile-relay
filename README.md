@@ -92,6 +92,53 @@ fallback; Cloudflare tunnel traffic stays on Cloudflare.
 - **[Permanent Cloudflare tunnel →](docs/cloudflare-tunnel.md)**
 - **[Run your own gateway →](docs/gateway-self-hosting.md)**
 
+## Agents with a non-default config directory
+
+The relay runs as a background launchd/systemd user service, so it never
+inherits the shell environment a Herdr pane runs in. If a pane sets
+`CLAUDE_CONFIG_DIR`, `PI_CODING_AGENT_DIR`, or similar to use a non-default
+profile — one per herdr setup — the pane title still resolves correctly, but
+the relay looks for the conversation transcript in the wrong directory, and
+the conversation view shows "No conversation log is available for this
+session."
+
+Tell the relay about every profile you use with one of these:
+
+| Variable | Home default it adds to | Agent's own directory variable |
+| --- | --- | --- |
+| `HERDR_CLAUDE_CONFIG_DIRS` | `~/.claude` | `CLAUDE_CONFIG_DIR` |
+| `HERDR_QODER_CONFIG_DIRS` | `~/.qoder` | none |
+| `HERDR_CODEX_CONFIG_DIRS` | `~/.codex` | `CODEX_HOME` |
+| `HERDR_PI_CONFIG_DIRS` | `~/.pi/agent` | `PI_CODING_AGENT_DIR` |
+| `HERDR_OMP_CONFIG_DIRS` | `~/.omp/agent` | `PI_CODING_AGENT_DIR` (Oh My Pi is a Pi fork and shares Pi's default) |
+
+Two things to get right:
+
+- The home default is always searched. Setting a list *adds* profiles; it
+  never replaces the default.
+- Entries are config directories — the same value you'd put in
+  `CLAUDE_CONFIG_DIR` — not pre-joined `projects`/`sessions` paths. The relay
+  appends the right leaf itself.
+
+Separate multiple entries with your platform's path-list separator (`:` on
+Unix, `;` on Windows), same as `PATH`.
+
+Set these in the file named by `HERDR_RELAY_ENV`: `$HERDR_PLUGIN_CONFIG_DIR/relay.env`
+for an installation, `relay/.env` for a checkout. For example, with two herdr
+setups using `~/agents/claude-work` and `~/agents/claude-personal` as their
+Claude profiles, add:
+
+```bash
+HERDR_CLAUDE_CONFIG_DIRS=~/agents/claude-work:~/agents/claude-personal
+```
+
+The service wrapper sources that file with `set -a`, so every key in it
+becomes part of the relay's environment — quote a path that contains spaces,
+since the file is parsed by bash. After editing, restart the relay: reopen
+the setup menu with the `herdr plugin pane open` command under **Get started
+in two minutes** above, then choose your connection option again. An
+already-installed background service is restarted rather than started twice.
+
 ## Documentation
 
 | Page | What is in it |
