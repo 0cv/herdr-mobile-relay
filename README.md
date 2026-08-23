@@ -61,8 +61,8 @@ paths.
   commands, screenshots, and photos.
 - Answer verified approvals and structured plan questions from Codex, Claude
   Code, Qoder, OpenCode, Oh My Pi, and Pi.
-- Read searchable native conversation history, and inspect workspace files,
-  images, and Git diffs read-only.
+- Read and reply from searchable native conversation history, and inspect
+  workspace files, images, and Git diffs read-only.
 - Receive blocked-agent notifications, with completion notifications optional.
 
 **[Full feature tour →](docs/mobile-app.md)**

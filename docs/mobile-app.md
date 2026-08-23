@@ -109,6 +109,15 @@ end. **Conversation** keeps each user prompt and the latest agent answer from
 that exchange. **Full history** shows every recorded message with collapsible
 tool activity. Both use an escaped Markdown subset, search filters the
 currently displayed view, and each message can copy its original Markdown.
+The composer below the history sends ordinary multiline prompts and accepts
+one or more images from the file picker or clipboard. Images are uploaded to
+the computer and added to the prompt by path; the history does not render them
+inline. Draft persistence, slash-command suggestions, hidden-value entry,
+approvals, structured questions, and terminal menus remain in the terminal
+view. The composer locks when one of those interactions needs attention, and
+the **Terminal** header button switches to the same agent without adding
+repeated view toggles to browser history.
+
 Hidden reasoning, injected system records, and sidechain turns remain excluded.
 Reads are confined to known session directories and the newest 16 MiB of very
 large logs. When that bound omits older turns, they remain in the harness log

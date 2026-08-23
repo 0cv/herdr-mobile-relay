@@ -120,8 +120,8 @@ html { background: var(--background); font-family: Inter, ui-sans-serif, system-
 :root[data-interface-size='regular'] { --composer-max-height: 10rem; --composer-min-height: 2.85rem; --composer-padding-block: .66rem; font-size: 16px; }
 :root[data-interface-size='large'] { --composer-max-height: 12rem; --composer-min-height: 3.05rem; --composer-padding-block: .76rem; font-size: 18px; }
 body { background: var(--background); color: var(--foreground); font-size: 1rem; overflow-x: hidden; }
-body[data-view='terminal'] { overflow: hidden; }
-body[data-view='terminal'] .app-shell {
+body[data-view='terminal'], body[data-view='history'] { overflow: hidden; }
+body[data-view='terminal'] .app-shell, body[data-view='history'] .app-shell {
   height: 100dvh;
   inset: 0;
   min-height: 0;
@@ -344,6 +344,10 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-warning { color: var(--warning); flex: 0 0 auto; font-size: .7rem; margin: 0; text-align: center; }
 .conversation-warning.error { color: var(--danger); }
 .conversation-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .1rem .05rem .6rem; }
+.conversation-input-area { flex: 0 0 auto; margin-top: auto; min-width: 0; }
+.conversation-composer { align-items: flex-end; display: flex; gap: .45rem; }
+.conversation-composer-status { color: var(--muted); font-size: .68rem; margin: .35rem .2rem 0; }
+.conversation-composer-status.error { color: var(--danger); }
 /* The turns live in their own box so a ResizeObserver can watch the height of
    the content itself: the scroller's box never changes when a turn is added or
    when wrapped markdown settles, which is what the bottom pin has to follow. */

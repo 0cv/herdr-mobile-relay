@@ -2878,7 +2878,7 @@ test('preserves unsafe prompt state for older relays without error data', async 
   await expect(prompt).toHaveValue('');
 });
 
-test('opens native conversation history and pages older turns', async ({ page }) => {
+test('reads and replies from native conversation history', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -2932,6 +2932,68 @@ test('opens native conversation history and pages older turns', async ({ page })
   await page.getByRole('button', { name: 'Conversation', exact: true }).click();
   await expect(page.getByText('intermediate progress update')).toBeHidden();
 
+  const composer = page.getByRole('textbox', { name: 'Prompt' });
+  await composer.fill('Review the attached screen');
+  await page.locator('.conversation-composer input[type=file]').setInputFiles({
+    name: 'history-shot.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from('png'),
+  });
+  const attachedPrompt = [
+    'Review the attached screen',
+    'Image: /home/test/.cache/herdr-mobile-relay/uploads/shot.png',
+    '',
+  ].join('\n');
+  await expect(composer).toHaveValue(attachedPrompt);
+  const historyReadsBeforeSend = (await commands(page))
+    .filter((command) => command.type === 'get_conversation_history').length;
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => (
+    command.type === 'submit_prompt' && command.text === attachedPrompt.replace(/\n$/, '')
+  ))).toMatchObject({ pane_id: 'w1:p1' });
+  await expect(composer).toHaveValue('');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'get_conversation_history').length).toBeGreaterThan(historyReadsBeforeSend);
+
+  await setAutoCommands(page, false);
+  await composer.fill('restore this known failure');
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => (
+    command.type === 'submit_prompt' && command.text === 'restore this known failure'
+  ))).toBe(true);
+  const failedCommand = (await commands(page)).find((command) => (
+    command.type === 'submit_prompt' && command.text === 'restore this known failure'
+  ))!;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'submit_prompt',
+    request_id: failedCommand.request_id,
+    ok: false,
+    phase: 'failed',
+    error: 'Relay rejected prompt',
+  });
+  await expect(composer).toHaveValue('restore this known failure');
+
+  await composer.fill('do not send this twice');
+  await page.getByRole('button', { name: 'Send prompt' }).click();
+  await expect.poll(async () => (await commands(page)).some((command) => (
+    command.type === 'submit_prompt' && command.text === 'do not send this twice'
+  ))).toBe(true);
+  const ambiguousCommand = (await commands(page)).find((command) => (
+    command.type === 'submit_prompt' && command.text === 'do not send this twice'
+  ))!;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'submit_prompt',
+    request_id: ambiguousCommand.request_id,
+    ok: false,
+    phase: 'dispatched_unknown',
+    error: 'Command may have executed',
+  });
+  await expect(composer).toHaveValue('');
+  await expect(page.getByText('Command may have executed Check the terminal before sending again.')).toBeVisible();
+  await setAutoCommands(page, true);
+
   await page.getByRole('button', { name: 'Load older turns' }).click();
   await expect(page.getByText('first retained question')).toBeVisible();
   await expect.poll(async () => (await commands(page)).find((command) => (
@@ -2942,8 +3004,23 @@ test('opens native conversation history and pages older turns', async ({ page })
   await search.fill('first retained');
   await expect(page.getByText('first retained question')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeHidden();
-  await page.getByRole('button', { name: 'Back' }).click();
+  await server(page, 0, {
+    type: 'agent_update',
+    pane_id: 'w1:p1',
+    status: 'blocked',
+    attention_kind: 'approval',
+    options: ['Approve once', 'Reject'],
+    updated_at: 2,
+  });
+  await expect(composer).toBeDisabled();
+  await expect(page.getByText('Switch to Terminal to handle the pending agent interaction.')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Terminal view' }).click();
   await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('button', { name: 'Open History app on Fedora' })).toBeVisible();
 });
 
 test('opens a long conversation at its newest turn and holds the pin', async ({ page }) => {

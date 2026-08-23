@@ -489,7 +489,7 @@
           aria-label="Conversation history"
           disabled={!conversationHistoryAvailable || !activeAgent}
           title={conversationHistoryAvailable ? 'Conversation history' : 'Conversation history is unavailable for this agent'}
-          onclick={() => { if (activeAgent) navigate({ view: 'history', paneId: activeAgent.pane_id }); }}
+          onclick={() => { if (activeAgent) replaceView({ view: 'history', paneId: activeAgent.pane_id }); }}
         >
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
             <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path>
@@ -509,7 +509,21 @@
           </svg>
         </Button>
         <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
-      {:else if $currentView.view !== 'history'}
+      {:else if $currentView.view === 'history'}
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Terminal view"
+          title="Terminal view"
+          disabled={!activeAgent}
+          onclick={() => { if (activeAgent) replaceView({ view: 'terminal', paneId: activeAgent.pane_id }); }}
+        >
+          <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="m7 9 3 3-3 3M12 15h5"></path>
+          </svg>
+        </Button>
+      {:else}
         <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => toggle('launch')}>＋</Button>
         <Button variant="ghost" size="icon" aria-label="Activity history" onclick={() => toggle('activity')}>
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">

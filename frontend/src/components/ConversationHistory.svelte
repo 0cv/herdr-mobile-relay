@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import ConversationMessage from '$components/ConversationMessage.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { displayName } from '$lib/agents';
+  import { agentNeedsInspection, agentNeedsResponse, displayName } from '$lib/agents';
   import { relayStore } from '$lib/store';
   import type { Agent, ConversationEntry } from '$lib/types';
 
@@ -21,6 +21,13 @@
   let mode = $state<'conversation' | 'activity'>('conversation');
   let listElement = $state<HTMLElement>(null!);
   let streamElement = $state<HTMLElement>(null!);
+  let composerElement = $state<HTMLTextAreaElement>(null!);
+  let fileInput = $state<HTMLInputElement>(null!);
+  let composer = $state('');
+  let sendingPrompt = $state(false);
+  let uploadingImage = $state(false);
+  let uploadStatus = $state('');
+  let uploadError = $state(false);
   /**
    * Whether the view follows the end of the transcript. It starts pinned so
    * opening a session lands on the newest turn, and only the reader scrolling
@@ -30,6 +37,12 @@
   let mounted = false;
 
   const modeEntries = $derived(mode === 'conversation' ? conversationEntries(entries) : entries);
+  const inputLocked = $derived(agentNeedsResponse(agent) || agentNeedsInspection(agent));
+  const inputPlaceholder = $derived(agentNeedsResponse(agent)
+    ? 'Needs response — switch to Terminal'
+    : agentNeedsInspection(agent)
+      ? 'Needs inspection — switch to Terminal'
+      : 'Type a reply…');
   const visibleEntries = $derived.by(() => {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return modeEntries;
@@ -72,6 +85,13 @@
     observer.observe(stream);
     observer.observe(element);
     return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    const value = composer;
+    void tick().then(() => {
+      if (value === composer) resizeComposer();
+    });
   });
 
   function trackScroll() {
@@ -179,6 +199,90 @@
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
+
+  function resizeComposer() {
+    if (!composerElement) return;
+    composerElement.style.height = 'auto';
+    const maxHeight = Number.parseFloat(getComputedStyle(composerElement).maxHeight);
+    const contentHeight = composerElement.scrollHeight;
+    const capped = Number.isFinite(maxHeight) && contentHeight > maxHeight;
+    composerElement.style.height = `${capped ? maxHeight : contentHeight}px`;
+    composerElement.style.overflowY = capped ? 'auto' : 'hidden';
+  }
+
+  function clearComposer() {
+    composer = '';
+  }
+
+  function composerKeydown(event: KeyboardEvent) {
+    if (event.isComposing) return;
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void sendPrompt();
+    }
+  }
+
+  async function sendPrompt() {
+    const submittedDraft = composer;
+    const text = submittedDraft.replace(/[\r\n]+$/g, '');
+    if (!text || inputLocked || sendingPrompt || uploadingImage) return;
+    sendingPrompt = true;
+    composer = '';
+    try {
+      await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
+      relayStore.showToast('Prompt sent.');
+      setTimeout(() => { void loadLatest(); }, 500);
+    } catch (failure) {
+      const dispatchedUnknown = typeof failure === 'object'
+        && failure !== null
+        && 'data' in failure
+        && typeof failure.data === 'object'
+        && failure.data !== null
+        && 'dispatched_unknown' in failure.data
+        && failure.data.dispatched_unknown === true;
+      if (!composer && !dispatchedUnknown) composer = submittedDraft;
+      const detail = failure instanceof Error ? failure.message : 'Prompt could not be sent.';
+      relayStore.showToast(
+        dispatchedUnknown ? `${detail} Check the terminal before sending again.` : detail,
+        true,
+      );
+    } finally {
+      sendingPrompt = false;
+    }
+  }
+
+  async function filesSelected(files: FileList | File[]) {
+    const images = [...files].filter((item) => item.type.startsWith('image/'));
+    if (!images.length || inputLocked || uploadingImage) return;
+    uploadingImage = true;
+    try {
+      for (const file of images) {
+        uploadStatus = `Uploading ${file.name || 'image'}…`;
+        uploadError = false;
+        try {
+          const path = await relayStore.uploadImage(agent, file);
+          const prefix = composer && !composer.endsWith('\n') ? '\n' : '';
+          composer += `${prefix}Image: ${path}\n`;
+          uploadStatus = `Image attached: ${path.split(/[\\/]/).pop() || 'image'}`;
+        } catch (failure) {
+          uploadStatus = failure instanceof Error ? failure.message : 'Image could not be uploaded.';
+          uploadError = true;
+        }
+      }
+    } finally {
+      uploadingImage = false;
+    }
+  }
+
+  function paste(event: ClipboardEvent) {
+    const files = [...(event.clipboardData?.items || [])]
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (!files.length) return;
+    event.preventDefault();
+    void filesSelected(files);
+  }
 </script>
 
 <main class="conversation-page" aria-labelledby="conversation-title">
@@ -266,4 +370,64 @@
       </div>
     </section>
   {/if}
+
+  <div class="conversation-input-area">
+    <form
+      class="conversation-composer"
+      aria-label="Send a prompt"
+      aria-busy={sendingPrompt || uploadingImage}
+      onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}
+    >
+      <Button
+        variant="ghost"
+        size="icon"
+        disabled={inputLocked || uploadingImage || sendingPrompt}
+        aria-label="Attach image"
+        onclick={() => fileInput.click()}
+      >
+        <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+          <circle cx="8.5" cy="9" r="1.5"></circle>
+          <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
+        </svg>
+      </Button>
+      <div class:has-text={Boolean(composer)} class="composer-field">
+        <textarea
+          bind:this={composerElement}
+          bind:value={composer}
+          rows="1"
+          disabled={inputLocked}
+          placeholder={inputPlaceholder}
+          aria-label="Prompt"
+          autocomplete="off"
+          autocorrect="on"
+          autocapitalize="sentences"
+          spellcheck="true"
+          enterkeyhint="enter"
+          onkeydown={composerKeydown}
+          onpaste={paste}
+        ></textarea>
+        {#if composer}<button type="button" class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
+      </div>
+      <Button
+        type="submit"
+        size="icon"
+        disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked || sendingPrompt || uploadingImage}
+        aria-label={sendingPrompt ? 'Submitting input' : 'Send prompt'}
+      >{sendingPrompt ? '…' : '➤'}</Button>
+      <input
+        bind:this={fileInput}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }}
+      />
+    </form>
+    {#if inputLocked}
+      <p class="conversation-composer-status" role="status">Switch to Terminal to handle the pending agent interaction.</p>
+    {:else if uploadStatus}
+      <p class:error={uploadError} class="conversation-composer-status" role="status">{uploadStatus}</p>
+    {/if}
+  </div>
 </main>
