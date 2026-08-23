@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 func TestQoderSessionName(t *testing.T) {
@@ -221,5 +225,233 @@ func TestExactSessionIDDoesNotFallBackToOnlyOtherFile(t *testing.T) {
 	}
 	if got := NewResolver(home).SessionName("claude", "/home/user/app", "wanted"); got != "" {
 		t.Fatalf("session name = %q, want empty exact-ID miss", got)
+	}
+}
+
+// clearAgentRootEnv unsets every variable agentroots consults, so a developer's
+// exported shell environment cannot add roots to a test and make it flaky.
+func clearAgentRootEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		agentroots.ClaudeListEnv,
+		agentroots.QoderListEnv,
+		agentroots.CodexListEnv,
+		agentroots.PiListEnv,
+		agentroots.OMPListEnv,
+		"CLAUDE_CONFIG_DIR",
+		"CODEX_HOME",
+		"PI_CODING_AGENT_DIR",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
+func writeTitleFile(t *testing.T, path, title string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(map[string]any{"type": "custom-title", "customTitle": title})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Pins the architectural constraint whose absence produced the original bug:
+// NewResolver must take every root from the agentroots seam instead of
+// hand-rolling paths of its own. Reverting any field below to a
+// filepath.Join(r.home, ...) fails this, because the seam also carries the
+// configured list entry set up here.
+//
+// It deliberately does NOT claim to cover the title/transcript invariant.
+// Comparing this package's fields against the seam can only restate this
+// package's own construction, and conversation.Reader's roots are unexported
+// and live in another package. The behavioural half - title and transcript
+// resolving, or failing, together - is covered where both types are visible, in
+// internal/app/conversation_invariant_test.go. Keep the two in step.
+func TestResolverSourcesEveryRootFromTheSeam(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, t.TempDir())
+
+	r := NewResolver(home)
+	for _, c := range []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{"claudeRoots", r.claudeRoots, agentroots.Claude(home)},
+		{"qoderRoots", r.qoderRoots, agentroots.Qoder(home)},
+		{"codexHomes", r.codexHomes, agentroots.CodexHomes(home)},
+		{"piRoots", r.piRoots, agentroots.Pi(home)},
+		{"ompRoots", r.ompRoots, agentroots.OMP(home)},
+	} {
+		if !slices.Equal(c.got, c.want) {
+			t.Errorf("%s = %v, want the seam's %v", c.name, c.got, c.want)
+		}
+	}
+}
+
+// A root whose project directory exists but does not hold this session must not
+// end the search: the session may live in another configured profile. Returning
+// "" from the first root fails this test.
+func TestClaudeTitleFromSecondRootWhenFirstRootLacksTheSession(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, profile)
+
+	writeTitleFile(t, filepath.Join(profile, "projects", "home-user-app", "unrelated.jsonl"), "First root title")
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "home-user-app", "wanted.jsonl"), "Second root title")
+
+	r := NewResolver(home)
+	if len(r.claudeRoots) != 2 || r.claudeRoots[0] != filepath.Join(profile, "projects") {
+		t.Fatalf("claudeRoots = %v, want the configured profile first and the home default kept", r.claudeRoots)
+	}
+	if got := r.SessionName("claude", "/home/user/app", "wanted"); got != "Second root title" {
+		t.Fatalf("session name = %q, want %q", got, "Second root title")
+	}
+}
+
+func TestOMPSessionPathAcceptedFromNonDefaultRoot(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.OMPListEnv, profile)
+
+	sessionPath := filepath.Join(profile, "sessions", "-home-user-app", "s.jsonl")
+	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionPath, []byte("{\"type\":\"title\",\"title\":\"profile_omp\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("omp", "/home/user/app", sessionPath); got != "profile_omp" {
+		t.Fatalf("session name = %q, want %q", got, "profile_omp")
+	}
+}
+
+// Containment regression guard: a path outside every configured root is
+// rejected even though one configured root resolves fine.
+func TestOMPSessionPathRejectedOutsideEveryRoot(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv(agentroots.OMPListEnv, profile)
+
+	if err := os.MkdirAll(filepath.Join(profile, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(outside, "escaped.jsonl")
+	if err := os.WriteFile(outsidePath, []byte("{\"type\":\"title\",\"title\":\"escaped_title\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("omp", "/home/user/app", outsidePath); got != "" {
+		t.Fatalf("session name = %q, want empty for a path outside every root", got)
+	}
+}
+
+// Containment regression guard: a symlink sitting inside a configured root but
+// resolving outside every root is rejected, because the check evaluates
+// symlinks before comparing.
+func TestOMPSessionPathRejectedSymlinkEscapingEveryRoot(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv(agentroots.OMPListEnv, profile)
+
+	target := filepath.Join(outside, "escaped.jsonl")
+	if err := os.WriteFile(target, []byte("{\"type\":\"title\",\"title\":\"escaped_title\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(profile, "sessions", "-home-user-app", "link.jsonl")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("omp", "/home/user/app", link); got != "" {
+		t.Fatalf("session name = %q, want empty for a symlink escaping every root", got)
+	}
+}
+
+func TestCodexTitleFromSecondConfiguredHome(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	first := t.TempDir()
+	second := t.TempDir()
+	t.Setenv(agentroots.CodexListEnv, strings.Join([]string{first, second}, string(filepath.ListSeparator)))
+
+	data, err := json.Marshal(map[string]any{"id": "sess-second", "thread_name": "Second home thread"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(second, "session_index.jsonl"), append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := NewResolver(home).SessionName("codex", "/tmp", "sess-second"); got != "Second home thread" {
+		t.Fatalf("session name = %q, want %q; the first home has no index file and must not end the search", got, "Second home thread")
+	}
+}
+
+// Mirrors TestCacheTTL, but for a session reachable only through a non-default
+// root: sourceSignature has to sign the file the title actually came from.
+func TestCacheInvalidationWithNonDefaultClaudeRoot(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, profile)
+
+	sessionFile := filepath.Join(profile, "projects", "home-user-proj", "s1.jsonl")
+	writeTitleFile(t, sessionFile, "First Title")
+
+	r := NewResolver(home)
+	if got := r.SessionName("claude", "/home/user/proj", "s1"); got != "First Title" {
+		t.Fatalf("first call = %q, want %q", got, "First Title")
+	}
+
+	writeTitleFile(t, sessionFile, "Second Title After Rename")
+	if got := r.SessionName("claude", "/home/user/proj", "s1"); got != "Second Title After Rename" {
+		t.Fatalf("refreshed call = %q, want %q", got, "Second Title After Rename")
+	}
+}
+
+// Regression guard for the title cache. projectSessionTitle keeps searching
+// roots until one yields a non-empty title, so sourceSignature must sign the
+// candidate in EVERY root. Signing only the first root that happens to have a
+// project directory for this cwd - which it did - signs a file the title never
+// came from, and the cached title then survives an edit to the file it really
+// came from for the whole 60s TTL.
+func TestTitleCacheTracksTheRootTheTitleActuallyCameFrom(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	first := t.TempDir()
+	second := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, first+string(os.PathListSeparator)+second)
+
+	// The first root has a project directory for this cwd but NOT this session,
+	// so the title has to come from the second root.
+	writeTitleFile(t, filepath.Join(first, "projects", "home-user-app", "other.jsonl"), "Unrelated")
+	target := filepath.Join(second, "projects", "home-user-app", "wanted.jsonl")
+	writeTitleFile(t, target, "First Title")
+
+	r := NewResolver(home)
+	if got := r.SessionName("claude", "/home/user/app", "wanted"); got != "First Title" {
+		t.Fatalf("first call = %q, want %q from the second root", got, "First Title")
+	}
+
+	writeTitleFile(t, target, "Renamed Title")
+	if got := r.SessionName("claude", "/home/user/app", "wanted"); got != "Renamed Title" {
+		t.Fatalf("second call = %q, want %q - the cache signed the wrong root", got, "Renamed Title")
 	}
 }
