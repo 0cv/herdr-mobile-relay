@@ -23,40 +23,66 @@ type cacheEntry struct {
 }
 
 type Resolver struct {
-	mu          sync.Mutex
-	cache       map[string]cacheEntry
-	claudeRoots []string
-	qoderRoots  []string
-	codexHomes  []string
-	piRoots     []string
-	ompRoots    []string
+	mu    sync.Mutex
+	cache map[string]cacheEntry
+	home  string
 }
 
-// NewResolver resolves every agent's roots once, through the same seam
-// conversation.NewReader uses, so a pane's title and its transcript can never
-// be looked up in different trees.
+// NewResolver keeps the home directory and nothing else. Every root is
+// resolved per call, through the same agentroots seam conversation.Reader
+// uses, so a pane's title and its transcript can never be looked up in
+// different trees.
+//
+// The roots are deliberately not resolved once here. agentroots discovers Pi
+// and Oh My Pi named profiles by reading <config root>/profiles, and the relay
+// is a long-lived user service: a profile directory appears the first time
+// someone runs the agent under that profile, which is almost always after the
+// relay started. A snapshot taken at construction would leave every pane in
+// that profile unresolvable until the service was restarted.
 func NewResolver(home string) *Resolver {
-	return &Resolver{
-		cache:       make(map[string]cacheEntry),
-		claudeRoots: agentroots.Claude(home),
-		qoderRoots:  agentroots.Qoder(home),
-		codexHomes:  agentroots.CodexHomes(home),
-		piRoots:     agentroots.Pi(home),
-		ompRoots:    agentroots.OMP(home),
+	return &Resolver{cache: make(map[string]cacheEntry), home: home}
+}
+
+func (r *Resolver) claudeRoots() []string { return agentroots.Claude(r.home) }
+func (r *Resolver) qoderRoots() []string  { return agentroots.Qoder(r.home) }
+func (r *Resolver) codexHomes() []string  { return agentroots.CodexHomes(r.home) }
+func (r *Resolver) piRoots() []string     { return agentroots.Pi(r.home) }
+func (r *Resolver) ompRoots() []string    { return agentroots.OMP(r.home) }
+
+// agentRoots reports the directories to search for one agent, or nil when the
+// agent has no title source at all. The precedence matches the switch in
+// SessionName: Pi and Oh My Pi are matched by exact name, everything else by
+// substring.
+func (r *Resolver) agentRoots(agentLower string) []string {
+	switch {
+	case isOMPSessionAgent(agentLower):
+		return r.ompRoots()
+	case isPiSessionAgent(agentLower):
+		return r.piRoots()
+	case strings.Contains(agentLower, "qoder"):
+		return r.qoderRoots()
+	case strings.Contains(agentLower, "claude"):
+		return r.claudeRoots()
+	case strings.Contains(agentLower, "codex"):
+		return r.codexHomes()
 	}
+	return nil
 }
 
 func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
 	agentLower := strings.ToLower(agent)
+
+	// Resolved once and threaded through every helper below. Each accessor
+	// reads the filesystem, so calling one twice in a single request both pays
+	// for the scan twice and risks deciding the title, its cache signature and
+	// the containment check against three different lists.
+	roots := r.agentRoots(agentLower)
+
 	sessionPath := ""
-	if isOMPSessionAgent(agentLower) {
-		sessionPath = r.ompSessionPath(sessionID)
-		if sessionPath == "" {
-			return ""
-		}
-	} else if isPiSessionAgent(agentLower) {
-		sessionPath = r.piSessionPath(sessionID)
+	if isOMPSessionAgent(agentLower) || isPiSessionAgent(agentLower) {
+		// Pi and Oh My Pi panes report the transcript path itself, not an id.
+		sessionPath = containedSessionFile(roots, sessionID)
 		if sessionPath == "" {
 			return ""
 		}
@@ -65,7 +91,7 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	}
 
 	key := agent + "|" + cwd + "|" + sessionID
-	sig := r.sourceSignature(agent, cwd, sessionID)
+	sig := sourceSignature(agentLower, cwd, sessionID, sessionPath, roots)
 
 	r.mu.Lock()
 	if entry, ok := r.cache[key]; ok && entry.sig == sig && time.Now().Before(entry.expires) {
@@ -80,12 +106,10 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 		name = extractOMPSessionTitle(sessionPath)
 	case isPiSessionAgent(agentLower):
 		name = extractPiSessionTitle(sessionPath)
-	case strings.Contains(agentLower, "qoder"):
-		name = r.projectSessionTitle(r.qoderRoots, cwd, sessionID)
-	case strings.Contains(agentLower, "claude"):
-		name = r.projectSessionTitle(r.claudeRoots, cwd, sessionID)
+	case strings.Contains(agentLower, "qoder"), strings.Contains(agentLower, "claude"):
+		name = projectSessionTitle(roots, cwd, sessionID)
 	case strings.Contains(agentLower, "codex"):
-		name = r.codexSessionName(cwd, sessionID)
+		name = codexSessionName(roots, sessionID)
 	}
 
 	r.mu.Lock()
@@ -111,10 +135,6 @@ func isPiSessionAgent(agent string) bool {
 	default:
 		return false
 	}
-}
-
-func (r *Resolver) ompSessionPath(sessionID string) string {
-	return containedSessionFile(r.ompRoots, sessionID)
 }
 
 // containedSessionFile reports the resolved path of sessionID when it names a
@@ -204,10 +224,6 @@ func extractOMPSessionTitle(path string) string {
 	return sessionTitle
 }
 
-func (r *Resolver) piSessionPath(sessionID string) string {
-	return containedSessionFile(r.piRoots, sessionID)
-}
-
 func extractPiSessionTitle(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -233,32 +249,52 @@ func extractPiSessionTitle(path string) string {
 	return name
 }
 
-// projectSessionTitle returns the first non-empty title across the agent's
-// roots. A root whose project directory exists but does not hold this session
-// must not end the search - the session may live in another profile.
-func (r *Resolver) projectSessionTitle(roots []string, cwd, sessionID string) string {
+// projectSessionTitle returns the title held by the FIRST root that holds this
+// session - not the first root that yields a non-empty title.
+// conversation.Reader picks the transcript by exactly the same
+// first-root-that-holds-the-file rule, and the two have to agree. A freshly
+// started session has no title record yet, so stopping on the first non-empty
+// title would let a titleless copy in an earlier root hand the pane a later
+// root's title while the reader shows the earlier root's transcript: a
+// correct-looking header over someone else's conversation, which is the split
+// this seam exists to prevent.
+func projectSessionTitle(roots []string, cwd, sessionID string) string {
 	for _, projectsDir := range roots {
-		if title := r.projectTitleInRoot(projectsDir, cwd, sessionID); title != "" {
+		// First root that answers for the session wins, titled or not.
+		if title, stop := projectTitleInRoot(projectsDir, cwd, sessionID); stop {
 			return title
 		}
 	}
 	return ""
 }
 
-func (r *Resolver) projectTitleInRoot(projectsDir, cwd, sessionID string) string {
-	projectDir := r.findProjectDir(projectsDir, cwd)
+// projectTitleInRoot reports the session's title within one root, and whether
+// this root ends the search. The two are distinct: a session that lives here
+// but has not been titled yet is ("", true) and must end the search, while a
+// session that lives in another profile is ("", false) and must not.
+func projectTitleInRoot(projectsDir, cwd, sessionID string) (title string, stop bool) {
+	projectDir := findProjectDir(projectsDir, cwd)
 	if projectDir == "" {
-		return ""
+		return "", false
 	}
 
 	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
 	if _, err := os.Stat(sessionFile); err != nil {
 		if sessionID != "" {
-			return ""
+			return "", false
 		}
+		// A pane that reported no session id can still be identified when the
+		// project directory holds exactly one transcript. That heuristic is
+		// only sound as a same-root guess: there is no reader to agree with
+		// (it rejects empty session ids outright), so this root owning the
+		// cwd's project directory is the only anchor tying the guess to the
+		// pane. When the directory is ambiguous the search must end empty
+		// rather than fall through to a different tree, whose sole transcript
+		// is some unrelated session - a confidently wrong title over a
+		// conversation view that says "not available".
 		entries, err := os.ReadDir(projectDir)
 		if err != nil {
-			return ""
+			return "", true
 		}
 		var jsonlFiles []string
 		for _, e := range entries {
@@ -266,17 +302,16 @@ func (r *Resolver) projectTitleInRoot(projectsDir, cwd, sessionID string) string
 				jsonlFiles = append(jsonlFiles, e.Name())
 			}
 		}
-		if len(jsonlFiles) == 1 {
-			sessionFile = filepath.Join(projectDir, jsonlFiles[0])
-		} else {
-			return ""
+		if len(jsonlFiles) != 1 {
+			return "", true
 		}
+		sessionFile = filepath.Join(projectDir, jsonlFiles[0])
 	}
 
-	return extractTitle(sessionFile)
+	return extractTitle(sessionFile), true
 }
 
-func (r *Resolver) findProjectDir(projectsDir, cwd string) string {
+func findProjectDir(projectsDir, cwd string) string {
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		return ""
@@ -285,25 +320,42 @@ func (r *Resolver) findProjectDir(projectsDir, cwd string) string {
 	encoded := encodePath(cwd)
 	leadingDashEncoded := "-" + encoded
 	for _, e := range entries {
-		if e.IsDir() && (e.Name() == encoded || e.Name() == leadingDashEncoded) {
-			return filepath.Join(projectsDir, e.Name())
+		if e.Name() != encoded && e.Name() != leadingDashEncoded {
+			continue
+		}
+		if dir := filepath.Join(projectsDir, e.Name()); entryIsDir(e, dir) {
+			return dir
 		}
 	}
 
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
 		dir := filepath.Join(projectsDir, e.Name())
-		if matchesCwd(dir, cwd) {
+		if entryIsDir(e, dir) && matchesCwd(dir, cwd) {
 			return dir
 		}
 	}
 	return ""
 }
 
-func (r *Resolver) codexSessionName(cwd, sessionID string) string {
-	for _, codexHome := range r.codexHomes {
+// entryIsDir classifies a directory entry by what it points at, not by its own
+// type bits. os.ReadDir reports ModeSymlink for a symlink, so DirEntry.IsDir()
+// is false for a symlink to a directory and a project directory symlinked in
+// from a dotfiles repo would be silently skipped; agentroots.profileAgentDirs
+// documents the same hazard at length. Only a symlink needs the stat: the type
+// bits already settle every other entry.
+func entryIsDir(e os.DirEntry, path string) bool {
+	if e.IsDir() {
+		return true
+	}
+	if e.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func codexSessionName(codexHomes []string, sessionID string) string {
+	for _, codexHome := range codexHomes {
 		if name := codexIndexThreadName(filepath.Join(codexHome, "session_index.jsonl"), sessionID); name != "" {
 			return name
 		}
@@ -395,42 +447,32 @@ func validSessionID(id string) bool {
 	return true
 }
 
-func (r *Resolver) sourceSignature(agent, cwd, sessionID string) string {
-	agentLower := strings.ToLower(agent)
-	if isOMPSessionAgent(agentLower) {
-		if path := r.ompSessionPath(sessionID); path != "" {
-			return pathSignature(path)
-		}
-		return ""
+// sourceSignature fingerprints every file the name could have been read from,
+// so an edit to any of them invalidates the cached entry. roots is the list
+// SessionName already resolved for this agent, and sessionPath the transcript
+// an OMP or Pi pane reported: re-resolving either here would scan the profiles
+// directory a second time and could sign a different tree than the one the
+// title came from.
+func sourceSignature(agentLower, cwd, sessionID, sessionPath string, roots []string) string {
+	if isOMPSessionAgent(agentLower) || isPiSessionAgent(agentLower) {
+		return pathSignature(sessionPath)
 	}
-	if isPiSessionAgent(agentLower) {
-		if path := r.piSessionPath(sessionID); path != "" {
-			return pathSignature(path)
-		}
-		return ""
-	}
-
 	if strings.Contains(agentLower, "codex") {
-		return rootsSignature(r.codexHomes, "session_index.jsonl")
+		return rootsSignature(roots, "session_index.jsonl")
 	}
-	var projectsRoots []string
-	switch {
-	case strings.Contains(agentLower, "qoder"):
-		projectsRoots = r.qoderRoots
-	case strings.Contains(agentLower, "claude"):
-		projectsRoots = r.claudeRoots
-	default:
+	if !strings.Contains(agentLower, "qoder") && !strings.Contains(agentLower, "claude") {
 		return ""
 	}
 	// Sign the candidate in EVERY root, never just the first root that happens
-	// to have a project directory for this cwd. projectSessionTitle keeps
-	// searching until a root yields a non-empty title, so stopping here at an
-	// earlier root would sign a file the title did not come from and pin a
-	// stale title for the whole cache TTL. With exactly one root - every
-	// default, unconfigured install - this reduces to the original signature.
-	signatures := make([]string, 0, len(projectsRoots))
-	for _, projectsDir := range projectsRoots {
-		projectDir := r.findProjectDir(projectsDir, cwd)
+	// to have a project directory for this cwd. The title comes from the first
+	// root that HOLDS the session, which can be any of them and changes the
+	// moment a copy appears in an earlier one, so stopping here at an earlier
+	// root would sign a file the title did not come from and pin a stale title
+	// for the whole cache TTL. With exactly one root - every default,
+	// unconfigured install - this reduces to the original signature.
+	signatures := make([]string, 0, len(roots))
+	for _, projectsDir := range roots {
+		projectDir := findProjectDir(projectsDir, cwd)
 		if projectDir == "" {
 			signatures = append(signatures, pathSignature(projectsDir))
 			continue
@@ -456,8 +498,8 @@ func (r *Resolver) sourceSignature(agent, cwd, sessionID string) string {
 }
 
 // rootsSignature signs one file per root (or the root itself when leaf is
-// empty), joined in root order. The root list is fixed when the Resolver is
-// built, so the result is deterministic.
+// empty), joined in root order. agentroots reports the roots in a fixed order,
+// so the result is deterministic.
 func rootsSignature(roots []string, leaf string) string {
 	signatures := make([]string, 0, len(roots))
 	for _, root := range roots {

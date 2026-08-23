@@ -13,6 +13,17 @@
 // always appended, so configuring the list adds profiles instead of replacing
 // the default profile, and configuration always outranks discovery.
 //
+// Every configured entry is normalised before use: a leading "~" or "~/" is
+// expanded against the caller's home directory, and whatever remains must then
+// be absolute or the entry is dropped. This matters specifically because the
+// relay runs under launchd/systemd, never a shell: a silently relative entry
+// resolves against the service's working directory instead of erroring, which
+// produces the exact missing-history symptom this package exists to cure and
+// is indistinguishable from a plain wrong path once it happens. It also
+// matters because bash does not expand "~" inside the quotes the README
+// advises for a value containing spaces, so the tilde form has to be honoured
+// here or the README's own worked example never actually works.
+//
 // Both the conversation reader and the session-title resolver resolve through
 // this package, which is what keeps a pane's title and its transcript from
 // being looked up in different trees.
@@ -40,31 +51,31 @@ const (
 // Claude reports the transcript roots for Claude Code, honouring
 // CLAUDE_CONFIG_DIR exactly as it did when a single root was resolved.
 func Claude(home string) []string {
-	return resolve(ClaudeListEnv, "CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"), "projects")
+	return resolve(home, ClaudeListEnv, "CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"), "projects")
 }
 
 // Qoder reports the transcript roots for Qoder CLI, which has no config
 // directory variable of its own.
 func Qoder(home string) []string {
-	return resolve(QoderListEnv, "", filepath.Join(home, ".qoder"), "projects")
+	return resolve(home, QoderListEnv, "", filepath.Join(home, ".qoder"), "projects")
 }
 
 // Codex reports the rollout roots for OpenAI Codex.
 func Codex(home string) []string {
-	return resolve(CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "sessions")
+	return resolve(home, CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "sessions")
 }
 
 // CodexHomes reports the Codex config directories themselves, for consumers
 // that read a file stored beside the sessions tree (session_index.jsonl).
 func CodexHomes(home string) []string {
-	return resolve(CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "")
+	return resolve(home, CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "")
 }
 
 // Pi reports the session roots for the Pi coding agent, including the agent
 // directory of every named profile found under its config root.
 func Pi(home string) []string {
 	configRoot := filepath.Join(home, ".pi")
-	return resolve(PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "sessions",
+	return resolve(home, PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "sessions",
 		profileAgentDirs(configRoot)...)
 }
 
@@ -86,7 +97,7 @@ func Pi(home string) []string {
 // exists - but it is why discovery, not the variable, is what finds profiles.
 func OMP(home string) []string {
 	configRoot := filepath.Join(home, ".omp")
-	return resolve(OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "sessions",
+	return resolve(home, OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "sessions",
 		profileAgentDirs(configRoot)...)
 }
 
@@ -94,7 +105,7 @@ func OMP(home string) []string {
 // one per agent directory resolved for OMP.
 func OMPSkillDirs(home string) []string {
 	configRoot := filepath.Join(home, ".omp")
-	return resolve(OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "skills",
+	return resolve(home, OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "skills",
 		profileAgentDirs(configRoot)...)
 }
 
@@ -102,7 +113,7 @@ func OMPSkillDirs(home string) []string {
 // the ones the agent mints for itself.
 func OMPManagedSkillDirs(home string) []string {
 	configRoot := filepath.Join(home, ".omp")
-	return resolve(OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "managed-skills",
+	return resolve(home, OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "managed-skills",
 		profileAgentDirs(configRoot)...)
 }
 
@@ -111,14 +122,14 @@ func OMPManagedSkillDirs(home string) []string {
 // only way to reach the settings that actually apply to a profile's pane.
 func OMPConfigDirs(home string) []string {
 	configRoot := filepath.Join(home, ".omp")
-	return resolve(OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "",
+	return resolve(home, OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "",
 		profileAgentDirs(configRoot)...)
 }
 
 // PiSkillDirs reports the directories holding Pi's own skills.
 func PiSkillDirs(home string) []string {
 	configRoot := filepath.Join(home, ".pi")
-	return resolve(PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "skills",
+	return resolve(home, PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "skills",
 		profileAgentDirs(configRoot)...)
 }
 
@@ -126,7 +137,7 @@ func PiSkillDirs(home string) []string {
 // lives.
 func PiConfigDirs(home string) []string {
 	configRoot := filepath.Join(home, ".pi")
-	return resolve(PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "",
+	return resolve(home, PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "",
 		profileAgentDirs(configRoot)...)
 }
 
@@ -177,17 +188,45 @@ func profileAgentDirs(configRoot string) []string {
 	return dirs
 }
 
-// resolve builds the ordered, de-duplicated root list for one agent. singleEnv
-// may be empty for agents without a config directory variable. leaf may be
-// empty to report the config directories themselves. discovered bases are
-// appended after the environment ones and before the home default, so
-// configuration always wins over discovery and the home default stays last.
-func resolve(listEnv, singleEnv, homeBase, leaf string, discovered ...string) []string {
+// resolve builds the ordered, de-duplicated root list for one agent. home is
+// threaded through only so add() can expand a leading "~" in a *configured*
+// entry - homeBase is already an absolute path the caller built from home
+// directly, so home is not otherwise used here. singleEnv may be empty for
+// agents without a config directory variable. leaf may be empty to report the
+// config directories themselves. discovered bases are appended after the
+// environment ones and before the home default, so configuration always wins
+// over discovery and the home default stays last.
+//
+// Any base still not absolute after that expansion is dropped instead of
+// joined - including homeBase, which is relative whenever the caller's
+// os.UserHomeDir() failed - because relay.env is read by a service and never
+// expanded by a shell, so a "~" or "." entry would otherwise silently become a
+// scan root under the service's working directory.
+func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...string) []string {
 	seen := make(map[string]bool, 4+len(discovered))
 	roots := make([]string, 0, 4+len(discovered))
 	add := func(base string) {
 		base = strings.TrimSpace(base)
 		if base == "" {
+			return
+		}
+		// The README's only worked example configures a path as
+		// "~/agents/claude-work", and the same paragraph advises quoting
+		// values that contain spaces - but bash does not expand "~" inside
+		// quotes, so the documented syntax would otherwise silently degrade
+		// to a relative path. Expand it ourselves, before the absolute-path
+		// check below, so a home-relative entry is not rejected as relative.
+		base = expandTilde(base, home)
+		// Anything still relative here would join against the relay's
+		// working directory instead of the caller's intended root, which
+		// produces the exact missing-history symptom this package exists to
+		// cure and looks indistinguishable from a plain wrong path once it
+		// happens - the process has no shell to have expanded or validated
+		// the value first. profileAgentDirs already refuses a relative
+		// config root for the same reason; this closes the matching half of
+		// that hazard so the package does not carry two contracts for one
+		// thing.
+		if !filepath.IsAbs(base) {
 			return
 		}
 		root := filepath.Join(base, leaf)
@@ -208,4 +247,25 @@ func resolve(listEnv, singleEnv, homeBase, leaf string, discovered ...string) []
 	}
 	add(homeBase)
 	return roots
+}
+
+// expandTilde expands a leading "~" or "~/" against home, the same shorthand a
+// shell would expand before a program ever saw the value. It exists only
+// because this package reads its input straight from the environment of a
+// launchd/systemd service, which is never a shell, so nothing upstream has
+// already done this expansion; without it, a value copied verbatim from the
+// README's "~/agents/claude-work" example would resolve as a relative path
+// and be dropped by the absolute-path guard in add(). A bare "~" alone means
+// home itself. "~user" forms, which name another account's home directory,
+// are deliberately left untouched rather than guessed at - they fall through
+// unchanged and are then rejected as relative by the same guard, like any
+// other relative entry.
+func expandTilde(path, home string) string {
+	if path == "~" {
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }

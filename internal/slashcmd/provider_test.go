@@ -41,7 +41,18 @@ func TestResolveProviderUnknown(t *testing.T) {
 	}
 }
 
+// cwd is t.TempDir() rather than a shared path like /tmp: claudeProvider and
+// qoderProvider walk up from ctx.Cwd via findProjectDirs looking for a project
+// .claude/.qoder directory, and piProvider/ompProvider do the same for
+// .agents/.pi/.omp. A stray project file reachable from cwd - e.g. a
+// .claude/settings.json with a skillOverrides entry set to "off" - can delete a
+// builtin via claudeSkillOverrides, not just add alongside it. /tmp is
+// world-writable on macOS, so it is not a safe stand-in for an isolated cwd.
+// isolateAgentEnv additionally strips the agent env vars those providers also
+// consult, so only the dispatch table below decides the outcome.
 func TestCatalogForExactDispatch(t *testing.T) {
+	isolateAgentEnv(t)
+	cwd := t.TempDir()
 	tests := []struct {
 		agent       string
 		wantBuiltin string
@@ -62,7 +73,7 @@ func TestCatalogForExactDispatch(t *testing.T) {
 		{"open code", "/models"},
 	}
 	for _, tt := range tests {
-		catalog := CatalogFor(tt.agent, "/tmp", "/nonexistent")
+		catalog := CatalogFor(tt.agent, cwd, "/nonexistent")
 		if !hasCommand(catalog, tt.wantBuiltin) {
 			t.Errorf("CatalogFor(%q) missing %q", tt.agent, tt.wantBuiltin)
 		}
@@ -74,34 +85,48 @@ func TestCatalogForExactDispatch(t *testing.T) {
 // reportedAgent fallback is then the only thing that selects a provider, so it must
 // cover every name the exact-dispatch table above covers. Asserting through
 // CatalogFor alone cannot catch a gap here: that path supplies the profileID itself.
-// No environment isolation is needed - every assertion is on a builtin, and no
-// discovered directory can remove a builtin, only add alongside it.
+//
+// Each wantBuiltin is a command unique to its provider (not shared with any other
+// provider's builtin list), so a case that resolves to the wrong provider fails here
+// even though most agents' catalogs still come back non-empty. /clear and /model, the
+// commands this test used before, are not provider-unique - /clear is also a claude,
+// codex, and qoder builtin, and /model is also a pi, omp, and kimi builtin - so 15 of
+// 18 cases kept passing with profileIDForAgentName mapping an agent to the wrong
+// provider entirely.
+//
+// cwd and home are each t.TempDir() rather than a shared path like /tmp: claudeProvider
+// reads skillOverrides from <home>/.claude/settings.json and from
+// findProjectDirs(cwd, ".claude")/settings*.json, and a stray file there would suppress
+// a builtin and fail this test on an otherwise-correct mapping. /tmp is world-writable
+// on macOS, so it is not a safe stand-in for an isolated cwd/home.
 func TestCatalogForProfileFallbackCoversEveryAgentName(t *testing.T) {
+	cwd := t.TempDir()
+	home := t.TempDir()
 	tests := []struct {
 		agent       string
 		wantBuiltin string
 	}{
-		{"claude", "/clear"},
-		{"claude-code", "/clear"},
-		{"claude code", "/clear"},
-		{"codex", "/clear"},
-		{"qoder", "/clear"},
-		{"qodercli", "/clear"},
-		{"pi", "/model"},
-		{"pi-coding-agent", "/model"},
-		{"omp", "/model"},
-		{"oh my pi", "/model"},
-		{"oh-my-pi", "/model"},
-		{"kimi", "/model"},
-		{"kimi code", "/model"},
-		{"kimi-code", "/model"},
-		{"kimi-cli", "/model"},
+		{"claude", "/doctor"},
+		{"claude-code", "/doctor"},
+		{"claude code", "/doctor"},
+		{"codex", "/apps"},
+		{"qoder", "/cost"},
+		{"qodercli", "/cost"},
+		{"pi", "/scoped-models"},
+		{"pi-coding-agent", "/scoped-models"},
+		{"omp", "/vibe"},
+		{"oh my pi", "/vibe"},
+		{"oh-my-pi", "/vibe"},
+		{"kimi", "/yolo"},
+		{"kimi code", "/yolo"},
+		{"kimi-code", "/yolo"},
+		{"kimi-cli", "/yolo"},
 		{"opencode", "/models"},
 		{"open code", "/models"},
 		{"open-code", "/models"},
 	}
 	for _, tt := range tests {
-		catalog := CatalogForProfile("", tt.agent, "/tmp", "/nonexistent", nil, "", "")
+		catalog := CatalogForProfile("", tt.agent, cwd, home, nil, "", "")
 		if len(catalog.Commands) == 0 {
 			t.Errorf("CatalogForProfile(\"\", %q) returned an empty catalog", tt.agent)
 			continue

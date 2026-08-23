@@ -55,22 +55,29 @@ type Page struct {
 }
 
 type Reader struct {
-	claudeRoots []string
-	qoderRoots  []string
-	codexRoots  []string
-	piRoots     []string
-	ompRoots    []string
+	home string
 }
 
+// NewReader keeps only home: the root lists below are resolved per call via
+// the accessor methods rather than snapshotted here. agentroots.Pi/OMP scan
+// <configRoot>/profiles on every call, so a profile created after the relay
+// started is still found instead of requiring a restart. The added cost is
+// one ReadDir of <configRoot>/profiles plus one Stat per discovered profile,
+// against a walk of every project directory that already happens on each
+// read.
 func NewReader(home string) *Reader {
-	return &Reader{
-		claudeRoots: agentroots.Claude(home),
-		qoderRoots:  agentroots.Qoder(home),
-		codexRoots:  agentroots.Codex(home),
-		piRoots:     agentroots.Pi(home),
-		ompRoots:    agentroots.OMP(home),
-	}
+	return &Reader{home: home}
 }
+
+func (r *Reader) claudeRoots() []string { return agentroots.Claude(r.home) }
+
+func (r *Reader) qoderRoots() []string { return agentroots.Qoder(r.home) }
+
+func (r *Reader) codexRoots() []string { return agentroots.Codex(r.home) }
+
+func (r *Reader) piRoots() []string { return agentroots.Pi(r.home) }
+
+func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 
 func Supported(agent string) bool {
 	switch normalizedAgent(agent) {
@@ -144,21 +151,21 @@ func (r *Reader) resolve(agent, sessionID string) string {
 		if !safeSessionID(sessionID) {
 			return ""
 		}
-		return findProjectSession(r.claudeRoots, sessionID+".jsonl")
+		return findProjectSession(r.claudeRoots(), sessionID+".jsonl")
 	case "qoder", "qodercli":
 		if !safeSessionID(sessionID) {
 			return ""
 		}
-		return findProjectSession(r.qoderRoots, sessionID+".jsonl")
+		return findProjectSession(r.qoderRoots(), sessionID+".jsonl")
 	case "codex", "openaicodex":
 		if !canonicalSessionID.MatchString(sessionID) {
 			return ""
 		}
-		return findCodexSession(r.codexRoots, sessionID)
+		return findCodexSession(r.codexRoots(), sessionID)
 	case "pi", "picodingagent":
-		return resolvePathOrSession(r.piRoots, sessionID, "_")
+		return resolvePathOrSession(r.piRoots(), sessionID, "_")
 	case "omp", "ohmypi":
-		return resolvePathOrSession(r.ompRoots, sessionID, "_")
+		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	default:
 		return ""
 	}
@@ -179,6 +186,16 @@ func safeSessionID(value string) bool {
 	return true
 }
 
+// isDir reports whether path is a directory, following symlinks. DirEntry's
+// IsDir reports the entry's own type bits, which are ModeSymlink for a
+// symlink, so it is false for a symlink to a directory - the same hazard
+// agentroots.profileAgentDirs documents. Stat follows the link so a
+// symlinked project or profile directory is still searched.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func findProjectSession(roots []string, filename string) string {
 	for _, root := range roots {
 		directories, err := os.ReadDir(root)
@@ -186,11 +203,15 @@ func findProjectSession(roots []string, filename string) string {
 			continue
 		}
 		for _, directory := range directories {
-			if !directory.IsDir() {
+			projectDir := filepath.Join(root, directory.Name())
+			if !isDir(projectDir) {
 				continue
 			}
-			candidate := filepath.Join(root, directory.Name(), filename)
+			candidate := filepath.Join(projectDir, filename)
 			if path := containedRegularFile(candidate, root); path != "" {
+				// Earliest root wins: preserves CLAUDE_CONFIG_DIR/CODEX_HOME
+				// (searched first) as genuine overrides over discovery and
+				// the home default.
 				return path
 			}
 		}
@@ -213,10 +234,14 @@ func findCodexSession(roots []string, sessionID string) string {
 					}
 					for _, file := range files {
 						name := strings.ToLower(file.Name())
-						if file.IsDir() || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
+						filePath := filepath.Join(dayPath, file.Name())
+						if isDir(filePath) || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
 							continue
 						}
-						if path := containedRegularFile(filepath.Join(dayPath, file.Name()), root); path != "" {
+						if path := containedRegularFile(filePath, root); path != "" {
+							// Earliest root wins: preserves CLAUDE_CONFIG_DIR/
+							// CODEX_HOME (searched first) as genuine
+							// overrides over discovery and the home default.
 							return path
 						}
 					}
@@ -234,7 +259,7 @@ func descendingDirectories(path string) []string {
 	}
 	directories := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if isDir(filepath.Join(path, entry.Name())) {
 			directories = append(directories, entry.Name())
 		}
 	}
@@ -246,6 +271,9 @@ func resolvePathOrSession(roots []string, sessionID, separator string) string {
 	if filepath.IsAbs(sessionID) && strings.HasSuffix(strings.ToLower(sessionID), ".jsonl") {
 		for _, root := range roots {
 			if path := containedRegularFile(sessionID, root); path != "" {
+				// Earliest root wins: preserves CLAUDE_CONFIG_DIR/CODEX_HOME
+				// (searched first) as genuine overrides over discovery and
+				// the home default.
 				return path
 			}
 		}
@@ -261,18 +289,23 @@ func resolvePathOrSession(roots []string, sessionID, separator string) string {
 			continue
 		}
 		for _, directory := range directories {
-			if !directory.IsDir() {
+			projectDir := filepath.Join(root, directory.Name())
+			if !isDir(projectDir) {
 				continue
 			}
-			files, err := os.ReadDir(filepath.Join(root, directory.Name()))
+			files, err := os.ReadDir(projectDir)
 			if err != nil {
 				continue
 			}
 			for _, file := range files {
-				if file.IsDir() || !strings.HasSuffix(strings.ToLower(file.Name()), suffix) {
+				filePath := filepath.Join(projectDir, file.Name())
+				if isDir(filePath) || !strings.HasSuffix(strings.ToLower(file.Name()), suffix) {
 					continue
 				}
-				if path := containedRegularFile(filepath.Join(root, directory.Name(), file.Name()), root); path != "" {
+				if path := containedRegularFile(filePath, root); path != "" {
+					// Earliest root wins: preserves CLAUDE_CONFIG_DIR/
+					// CODEX_HOME (searched first) as genuine overrides over
+					// discovery and the home default.
 					return path
 				}
 			}

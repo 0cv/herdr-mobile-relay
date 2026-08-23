@@ -143,15 +143,34 @@ func TestCodexRootsAndHomes(t *testing.T) {
 	scenarios := []struct {
 		name  string
 		setup func(t *testing.T)
+		want  func(home string) []string
 	}{
-		{name: "default only", setup: func(t *testing.T) {}},
-		{name: "CODEX_HOME override", setup: func(t *testing.T) {
-			t.Setenv("CODEX_HOME", "/c")
-		}},
-		{name: "list env adds and comes first", setup: func(t *testing.T) {
-			t.Setenv(CodexListEnv, "/c1")
-			t.Setenv("CODEX_HOME", "/c2")
-		}},
+		{
+			name:  "default only",
+			setup: func(t *testing.T) {},
+			want: func(home string) []string {
+				return []string{filepath.Join(home, ".codex")}
+			},
+		},
+		{
+			name: "CODEX_HOME override",
+			setup: func(t *testing.T) {
+				t.Setenv("CODEX_HOME", "/c")
+			},
+			want: func(home string) []string {
+				return []string{"/c", filepath.Join(home, ".codex")}
+			},
+		},
+		{
+			name: "list env adds and comes first",
+			setup: func(t *testing.T) {
+				t.Setenv(CodexListEnv, "/c1")
+				t.Setenv("CODEX_HOME", "/c2")
+			},
+			want: func(home string) []string {
+				return []string{"/c1", "/c2", filepath.Join(home, ".codex")}
+			},
+		},
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -159,8 +178,21 @@ func TestCodexRootsAndHomes(t *testing.T) {
 			home := t.TempDir()
 			scenario.setup(t)
 
-			sessions := Codex(home)
 			homes := CodexHomes(home)
+			wantHomes := scenario.want(home)
+			// The ordering itself is the thing under test - CodexHomes must
+			// reproduce the configured precedence (list env, then the single
+			// var, then the home default) exactly, not merely contain the
+			// same elements. A prior version of this assertion only checked
+			// len(sessions) == len(homes) and the zip relationship below,
+			// both of which stay true under a reordering bug (e.g. adding
+			// the single-env entry before the list-env loop), so it never
+			// caught one.
+			if !slices.Equal(homes, wantHomes) {
+				t.Fatalf("CodexHomes(%q) = %v, want %v", home, homes, wantHomes)
+			}
+
+			sessions := Codex(home)
 			if len(sessions) != len(homes) {
 				t.Fatalf("len(Codex(home)) = %d, len(CodexHomes(home)) = %d, want equal (%v vs %v)", len(sessions), len(homes), sessions, homes)
 			}
@@ -396,11 +428,13 @@ func TestDiscoverySkipsBrokenSymlinksAndFiles(t *testing.T) {
 	}
 }
 
-// profileAgentDirs returns nil for a non-absolute config root, which happens
-// only when os.UserHomeDir() failed and home is "". Without that guard, a
-// relative root would scan under the relay's working directory instead. The
-// working directory here deliberately contains a profiles/ layout that a
-// relative scan would find, so the assertion is non-vacuous.
+// A relative config root reaches this package only when os.UserHomeDir()
+// failed and home is "". profileAgentDirs refuses to scan it and add() refuses
+// to keep it, so with home == "" nothing is returned at all - not the
+// discovered profiles, and not the relative home default ".omp/agent/sessions"
+// either. The working directory here deliberately contains a profiles/ layout
+// that a relative scan would find, so the assertion is non-vacuous: drop
+// either guard and one of those trees shows up in the result.
 func TestDiscoveryIgnoresRelativeConfigRoot(t *testing.T) {
 	clearAllEnv(t)
 	dir := t.TempDir()
@@ -419,10 +453,8 @@ func TestDiscoveryIgnoresRelativeConfigRoot(t *testing.T) {
 		{"OMP", OMP("")},
 		{"Pi", Pi("")},
 	} {
-		for _, root := range c.got {
-			if strings.Contains(root, "profiles") {
-				t.Fatalf("%s(\"\") = %v, want no profiles/ path from a relative config root", c.name, c.got)
-			}
+		if len(c.got) != 0 {
+			t.Fatalf("%s(\"\") = %v, want no roots at all: every base derived from an empty home is relative", c.name, c.got)
 		}
 	}
 }
@@ -485,5 +517,114 @@ func TestDiscoveryUnreadableProfilesDirIsANoOp(t *testing.T) {
 	want := []string{filepath.Join(home, ".omp", "agent", "sessions")}
 	if !slices.Equal(got, want) {
 		t.Fatalf("OMP(home) = %v, want exactly the home default when profiles/ is unreadable: %v", got, want)
+	}
+}
+
+// The README's only worked example configures a value as "~/agents/claude-
+// work"; a leading "~/" has to expand against home or that documented syntax
+// never actually finds anything.
+func TestConfiguredEntryExpandsTilde(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", "~/work/claude")
+	want := []string{
+		filepath.Join(home, "work", "claude", "projects"),
+		filepath.Join(home, ".claude", "projects"),
+	}
+	if got := Claude(home); !slices.Equal(got, want) {
+		t.Fatalf("Claude(%q) = %v, want %v (a leading ~/ must expand against home)", home, got, want)
+	}
+}
+
+// A bare "~" (no trailing slash) means home itself, not "home joined with the
+// empty string" by accident of string handling.
+func TestConfiguredEntryExpandsBareTilde(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", "~")
+	want := []string{
+		filepath.Join(home, "projects"),
+		filepath.Join(home, ".claude", "projects"),
+	}
+	if got := Claude(home); !slices.Equal(got, want) {
+		t.Fatalf("Claude(%q) = %v, want %v (a bare ~ must expand to home itself)", home, got, want)
+	}
+}
+
+// A relative entry - one that never started with "~" at all - must be
+// dropped rather than silently resolved against the relay's working
+// directory. This is the same hazard profileAgentDirs already guards against
+// for a relative config root; add() now closes the matching half of it for a
+// configured entry.
+func TestConfiguredRelativeEntryIsSkipped(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", "relative/path")
+	want := []string{filepath.Join(home, ".claude", "projects")}
+	if got := Claude(home); !slices.Equal(got, want) {
+		t.Fatalf("Claude(%q) = %v, want %v (a relative entry must be dropped, not resolved against the working directory)", home, got, want)
+	}
+}
+
+// "~otheruser/..." names another account's home directory. This package has
+// no way to resolve that and must not guess: it is left untouched by
+// expandTilde and then rejected by the same absolute-path guard as any other
+// relative string, rather than being joined onto the caller's own home.
+func TestConfiguredTildeUserFormIsSkipped(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", "~otheruser/claude")
+	want := []string{filepath.Join(home, ".claude", "projects")}
+	if got := Claude(home); !slices.Equal(got, want) {
+		t.Fatalf("Claude(%q) = %v, want %v (a ~user form must be dropped, not guessed at)", home, got, want)
+	}
+}
+
+// Tilde expansion has to happen before de-duplication, not after: "~/x" and
+// "<home>/x" name the same directory, and resolve's seen-set keys on the
+// final joined root, so if expansion ran after de-duplication (or not at
+// all) these would compare unequal and both would survive.
+func TestTildeExpansionDedupesAgainstEquivalentAbsoluteEntry(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	t.Setenv(ClaudeListEnv, strings.Join([]string{"~/x", filepath.Join(home, "x")}, string(os.PathListSeparator)))
+	want := []string{
+		filepath.Join(home, "x", "projects"),
+		filepath.Join(home, ".claude", "projects"),
+	}
+	if got := Claude(home); !slices.Equal(got, want) {
+		t.Fatalf("Claude(%q) = %v, want %v (tilde expansion must happen before de-duplication so ~/x and <home>/x collapse to one root)", home, got, want)
+	}
+}
+
+// De-duplication keys on the *joined* root, and filepath.Join cleans the path
+// it builds, so several spellings of one directory collapse into a single
+// entry. The list is edited by hand in relay.env, where a trailing separator
+// or a "/./" is a spelling and not a second root; a surviving duplicate would
+// make every consumer walk the same tree twice. This pins the normalisation
+// form rather than just the behaviour: de-duplicating the raw base before the
+// leaf is joined, or building the root by string concatenation instead of
+// filepath.Join, leaves these spellings distinct and fails here.
+func TestDeduplicationNormalizesEquivalentSpellings(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	shared := filepath.Join(home, "shared")
+	sep := string(os.PathSeparator)
+	// Built by concatenation on purpose: filepath.Join would clean these
+	// spellings away before resolve ever saw them.
+	t.Setenv(ClaudeListEnv, strings.Join([]string{
+		shared,
+		shared + sep,
+		shared + sep + "." + sep,
+		shared + sep + sep,
+		shared + sep + "sub" + sep + "..",
+	}, string(os.PathListSeparator)))
+
+	want := []string{
+		filepath.Join(shared, "projects"),
+		filepath.Join(home, ".claude", "projects"),
+	}
+	if got := Claude(home); !slices.Equal(got, want) {
+		t.Fatalf("Claude(%q) = %v, want %v (equivalent spellings of one directory must collapse to a single root)", home, got, want)
 	}
 }
