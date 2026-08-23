@@ -169,6 +169,70 @@ func TestParseOMPSkillSettingsTrailingCommentsAndSpaces(t *testing.T) {
 	}
 }
 
+func TestParseOMPSkillSettingsDisabledExtensionsAtParentIndent(t *testing.T) {
+	s := defaultOMPSkillSettings()
+	// YAML permits a block sequence at the same column as the key that
+	// introduces it - this is not the two-space-indented form covered by
+	// TestParseOMPSkillSettingsDisabledExtensions above.
+	parseOMPSkillSettings([]byte(`disabledExtensions:
+- skill:deploy
+- skill:review
+skills:
+  enabled: true
+`), &s)
+	if len(s.disabledSkills) != 2 || !s.disabledSkills["deploy"] || !s.disabledSkills["review"] {
+		t.Fatalf("a block sequence at the parent's own indentation must still be read, got %#v", s.disabledSkills)
+	}
+	if s.allows("deploy") {
+		t.Error("deploy is banned and must not be allowed")
+	}
+	if !s.enabled {
+		t.Error("the key following the sequence must still be parsed")
+	}
+}
+
+func TestParseOMPSkillSettingsSkillsHeaderTrailingComment(t *testing.T) {
+	s := defaultOMPSkillSettings()
+	parseOMPSkillSettings([]byte(`skills: # skill discovery
+  enabled: false
+  ignoredSkills:
+    - noisy
+`), &s)
+	if s.enabled {
+		t.Error(`a trailing comment on "skills:" must not hide the section's own enabled: false`)
+	}
+	if len(s.ignoredSkills) != 1 || s.ignoredSkills[0] != "noisy" {
+		t.Fatalf(`a trailing comment on "skills:" must not hide ignoredSkills, got %#v`, s.ignoredSkills)
+	}
+}
+
+func TestParseOMPSkillSettingsDisabledExtensionsHeaderTrailingComment(t *testing.T) {
+	s := defaultOMPSkillSettings()
+	parseOMPSkillSettings([]byte(`disabledExtensions: # bans
+  - skill:deploy
+`), &s)
+	if !s.disabledSkills["deploy"] {
+		t.Fatalf(`a trailing comment on "disabledExtensions:" must not hide the ban list, got %#v`, s.disabledSkills)
+	}
+	if s.allows("deploy") {
+		t.Error("deploy is banned and must not be allowed")
+	}
+}
+
+func TestSplitOMPKeyCommentOnlyValueIsEmpty(t *testing.T) {
+	key, value, ok := splitOMPKey("skills: # skill discovery")
+	if !ok || key != "skills" || value != "" {
+		t.Fatalf("a comment-only value must split to an empty value, got key=%q value=%q ok=%v", key, value, ok)
+	}
+}
+
+func TestSplitOMPKeyPreservesHashInsideQuotedValue(t *testing.T) {
+	key, value, ok := splitOMPKey(`ignoredSkills: "#deploy"`)
+	if !ok || key != "ignoredSkills" || value != `"#deploy"` {
+		t.Fatalf("a '#' inside a quoted value must not be treated as a comment, got key=%q value=%q ok=%v", key, value, ok)
+	}
+}
+
 func TestSourceFallbackEnabled(t *testing.T) {
 	s := defaultOMPSkillSettings()
 	if !s.sourceFallbackEnabled() {

@@ -467,3 +467,59 @@ func TestFindProjectDirsWalksIntermediateAncestors(t *testing.T) {
 		}
 	}
 }
+
+// TestOMPEmptyHomeDoesNotScanServiceWorkingDirectory guards the
+// os.UserHomeDir() failure path in server.go: when ctx.Home is "" every
+// user-scope join (.claude/skills, .codex/skills, ...) becomes relative, and
+// a relative dir must never resolve against the relay service's own working
+// directory - which is arbitrary and unrelated to any project - instead of
+// simply contributing nothing.
+func TestOMPEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
+	isolateAgentEnv(t)
+	repo := t.TempDir()
+	scratch := t.TempDir()
+	writeSkill(t, filepath.Join(scratch, ".claude", "skills"), "leak-omp", "Should never be discovered")
+	t.Chdir(scratch)
+
+	catalog := CatalogForProfile("omp", "omp", repo, "", nil, "", "18.0.3")
+	if _, ok := commandByName(catalog, "/skill:leak-omp"); ok {
+		t.Fatal("empty ctx.Home must not make omp scan the service's own working directory")
+	}
+}
+
+// TestOMPCustomDirectoryResolvesAgainstCwd covers the other way a relative
+// scan root reaches os.ReadDir: a relative customDirectories entry is legal
+// in a project .omp/config.yml, and is far more likely to mean "relative to
+// my project" than to be a mistake - it must resolve against the pane's cwd.
+func TestOMPCustomDirectoryResolvesAgainstCwd(t *testing.T) {
+	f := newOMPFixture(t)
+	writeFile(t, filepath.Join(f.home, ".omp", "agent", "config.yml"),
+		"skills:\n  customDirectories:\n    - relskills\n")
+	writeSkill(t, filepath.Join(f.repo, "relskills"), "intended", "From the project")
+
+	command, ok := commandByName(f.catalog(f.repo), "/skill:intended")
+	if !ok {
+		t.Fatal("a relative customDirectories entry must resolve against ctx.Cwd")
+	}
+	if command.Source != "personal" {
+		t.Errorf("source = %q, want personal", command.Source)
+	}
+}
+
+// TestOMPCustomDirectorySkippedWhenCwdUnknown covers the same relative
+// customDirectories entry when the pane's cwd is unknown: it must be
+// dropped, not fall through to scan's own guard and silently resolve against
+// the service's unrelated working directory.
+func TestOMPCustomDirectorySkippedWhenCwdUnknown(t *testing.T) {
+	f := newOMPFixture(t)
+	writeFile(t, filepath.Join(f.home, ".omp", "agent", "config.yml"),
+		"skills:\n  customDirectories:\n    - relskills\n")
+	scratch := t.TempDir()
+	writeSkill(t, filepath.Join(scratch, "relskills"), "stray", "Should never be discovered")
+	t.Chdir(scratch)
+
+	catalog := CatalogForProfile("omp", "omp", "", f.home, nil, "", "18.0.3")
+	if _, ok := commandByName(catalog, "/skill:stray"); ok {
+		t.Fatal("a relative customDirectories entry must not resolve against the service's cwd when ctx.Cwd is empty")
+	}
+}
