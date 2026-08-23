@@ -2934,7 +2934,8 @@ test('reads and replies from native conversation history', async ({ page }) => {
 
   const composer = page.getByRole('textbox', { name: 'Prompt' });
   await composer.fill('Review the attached screen');
-  await page.locator('.conversation-composer input[type=file]').setInputFiles({
+  const imageInput = page.locator('.conversation-composer input[type=file]');
+  await imageInput.setInputFiles({
     name: 'history-shot.png',
     mimeType: 'image/png',
     buffer: Buffer.from('png'),
@@ -2945,6 +2946,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
     '',
   ].join('\n');
   await expect(composer).toHaveValue(attachedPrompt);
+  await expect(page.getByText('Image attached: shot.png')).toBeVisible();
   const historyReadsBeforeSend = (await commands(page))
     .filter((command) => command.type === 'get_conversation_history').length;
   await page.getByRole('button', { name: 'Send prompt' }).click();
@@ -2952,8 +2954,19 @@ test('reads and replies from native conversation history', async ({ page }) => {
     command.type === 'submit_prompt' && command.text === attachedPrompt.replace(/\n$/, '')
   ))).toMatchObject({ pane_id: 'w1:p1' });
   await expect(composer).toHaveValue('');
+  await expect(page.getByText('Image attached: shot.png')).toBeHidden();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'get_conversation_history').length).toBeGreaterThan(historyReadsBeforeSend);
+
+  await imageInput.setInputFiles({
+    name: 'history-shot.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from('png'),
+  });
+  await expect(page.getByText('Image attached: shot.png')).toBeVisible();
+  await page.getByRole('button', { name: 'Clear prompt text' }).click();
+  await expect(composer).toHaveValue('');
+  await expect(page.getByText('Image attached: shot.png')).toBeHidden();
 
   await setAutoCommands(page, false);
   await composer.fill('restore this known failure');

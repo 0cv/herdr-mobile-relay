@@ -210,8 +210,14 @@
     composerElement.style.overflowY = capped ? 'auto' : 'hidden';
   }
 
+  function clearUploadStatus() {
+    uploadStatus = '';
+    uploadError = false;
+  }
+
   function clearComposer() {
     composer = '';
+    clearUploadStatus();
   }
 
   function composerKeydown(event: KeyboardEvent) {
@@ -231,6 +237,7 @@
     try {
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
       relayStore.showToast('Prompt sent.');
+      clearUploadStatus();
       setTimeout(() => { void loadLatest(); }, 500);
     } catch (failure) {
       const dispatchedUnknown = typeof failure === 'object'
@@ -241,6 +248,7 @@
         && 'dispatched_unknown' in failure.data
         && failure.data.dispatched_unknown === true;
       if (!composer && !dispatchedUnknown) composer = submittedDraft;
+      else clearUploadStatus();
       const detail = failure instanceof Error ? failure.message : 'Prompt could not be sent.';
       relayStore.showToast(
         dispatchedUnknown ? `${detail} Check the terminal before sending again.` : detail,
@@ -253,7 +261,7 @@
 
   async function filesSelected(files: FileList | File[]) {
     const images = [...files].filter((item) => item.type.startsWith('image/'));
-    if (!images.length || inputLocked || uploadingImage) return;
+    if (!images.length || inputLocked || sendingPrompt || uploadingImage) return;
     uploadingImage = true;
     try {
       for (const file of images) {
