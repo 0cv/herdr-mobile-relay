@@ -455,3 +455,70 @@ func TestTitleCacheTracksTheRootTheTitleActuallyCameFrom(t *testing.T) {
 		t.Fatalf("second call = %q, want %q - the cache signed the wrong root", got, "Renamed Title")
 	}
 }
+
+// The two paths this change unified did not agree before it: the conversation
+// reader honoured CLAUDE_CONFIG_DIR and searched only that directory, while the
+// resolver ignored the variable and searched only ~/.claude. Neither old
+// behaviour can be reproduced byte-for-byte on both paths at once, because that
+// disagreement was the bug. What must hold instead is that the change only ever
+// WIDENS: every lookup that resolved at v0.17.5 still resolves, to the same
+// value. This test pins that for the legacy variable - the home default stays
+// searched (the old resolver behaviour) and the configured directory is now
+// searched too (the old reader behaviour), with the configured one taking
+// precedence in the order.
+func TestLegacyClaudeConfigDirWidensWithoutDroppingTheHomeDefault(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", profile)
+
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "home-user-app", "sess-home.jsonl"), "Home Title")
+	writeTitleFile(t, filepath.Join(profile, "projects", "home-user-app", "sess-profile.jsonl"), "Profile Title")
+
+	r := NewResolver(home)
+	if got, want := r.claudeRoots, []string{
+		filepath.Join(profile, "projects"),
+		filepath.Join(home, ".claude", "projects"),
+	}; !slices.Equal(got, want) {
+		t.Fatalf("claudeRoots = %v, want the configured directory first then the home default %v", got, want)
+	}
+
+	// Old resolver behaviour: ~/.claude was always searched. Still true.
+	if got := r.SessionName("claude", "/home/user/app", "sess-home"); got != "Home Title" {
+		t.Errorf("home-default session title = %q, want %q - the home default must stay searched", got, "Home Title")
+	}
+	// Old reader behaviour: CLAUDE_CONFIG_DIR was honoured. Now titles honour it too.
+	if got := r.SessionName("claude", "/home/user/app", "sess-profile"); got != "Profile Title" {
+		t.Errorf("configured-directory session title = %q, want %q", got, "Profile Title")
+	}
+}
+
+// Same widening guarantee for the agents whose roots used to be hardcoded with
+// no override at all, and for Pi/OMP sharing PI_CODING_AGENT_DIR: setting the
+// legacy variable must not cost either agent its own home default.
+func TestLegacyPiCodingAgentDirKeepsBothHomeDefaults(t *testing.T) {
+	clearAgentRootEnv(t)
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", profile)
+
+	r := NewResolver(home)
+	for _, c := range []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{"piRoots", r.piRoots, []string{
+			filepath.Join(profile, "sessions"),
+			filepath.Join(home, ".pi", "agent", "sessions"),
+		}},
+		{"ompRoots", r.ompRoots, []string{
+			filepath.Join(profile, "sessions"),
+			filepath.Join(home, ".omp", "agent", "sessions"),
+		}},
+	} {
+		if !slices.Equal(c.got, c.want) {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
