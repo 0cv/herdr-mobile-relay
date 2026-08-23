@@ -25,7 +25,7 @@ const (
 	maxPageSize          = 200
 )
 
-var canonicalSessionIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var canonicalSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type ToolActivity struct {
 	ID        string `json:"id,omitempty"`
@@ -103,8 +103,8 @@ func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) 
 	if sessionID == "" {
 		return unavailable("This agent has not reported a conversation session yet."), nil
 	}
-	path, _, ok := r.Locate(agent, sessionID)
-	if !ok {
+	path := r.resolve(agent, sessionID)
+	if path == "" {
 		return unavailable("No conversation log is available for this session."), nil
 	}
 	text, clipped, err := loadTail(path, maxConversationBytes)
@@ -145,63 +145,33 @@ func unavailable(reason string) Page {
 	return Page{Available: false, Reason: reason, Entries: []Entry{}}
 }
 
-// Locate reports the transcript file the reader would serve for this agent and
-// session id, and the root it was found in. ok is false when no root holds it,
-// when the id fails the agent's own validation, or when the agent has no
-// transcript source.
-//
-// Read routes through this, so "where is this session's transcript" has exactly
-// one implementation. A caller whose whole contract is to agree with the served
-// transcript - internal/session, deciding whether a pane may be titled -
-// depends on this rather than mirroring the lookup per agent kind, which is how
-// the two halves drifted apart for Codex and for the bare-UUID Pi/OMP form.
-//
-// root is the element of the agent's root list that answered, in the form the
-// list holds it and not its symlink-resolved form: Codex reads
-// session_index.jsonl from the same home, which has to be the home as
-// configured. path, in contrast, is always fully resolved - see
-// containedRegularFile.
-//
-// The id is trimmed here as well as in Read so the two can never disagree
-// about a whitespace-padded value.
-func (r *Reader) Locate(agent, sessionID string) (path string, root string, ok bool) {
-	sessionID = strings.TrimSpace(sessionID)
+func (r *Reader) resolve(agent, sessionID string) string {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode":
-		if !SafeSessionID(sessionID) {
-			return "", "", false
+		if !safeSessionID(sessionID) {
+			return ""
 		}
-		path, root = findProjectSession(r.claudeRoots(), sessionID+".jsonl")
+		return findProjectSession(r.claudeRoots(), sessionID+".jsonl")
 	case "qoder", "qodercli":
-		if !SafeSessionID(sessionID) {
-			return "", "", false
+		if !safeSessionID(sessionID) {
+			return ""
 		}
-		path, root = findProjectSession(r.qoderRoots(), sessionID+".jsonl")
+		return findProjectSession(r.qoderRoots(), sessionID+".jsonl")
 	case "codex", "openaicodex":
-		if !CanonicalSessionID(sessionID) {
-			return "", "", false
+		if !canonicalSessionID.MatchString(sessionID) {
+			return ""
 		}
-		path, root = findCodexSession(r.codexRoots(), sessionID)
+		return findCodexSession(r.codexRoots(), sessionID)
 	case "pi", "picodingagent":
-		path, root = resolvePathOrSession(r.piRoots(), sessionID, "_")
+		return resolvePathOrSession(r.piRoots(), sessionID, "_")
 	case "omp", "ohmypi":
-		path, root = resolvePathOrSession(r.ompRoots(), sessionID, "_")
+		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	default:
-		return "", "", false
+		return ""
 	}
-	if path == "" {
-		return "", "", false
-	}
-	return path, root, true
 }
 
-// SafeSessionID reports whether value is usable as a session-file name
-// component: non-empty, bounded, built only from characters that cannot escape
-// a directory, and neither "." nor "..". Claude and Qoder ids reach the
-// filesystem as <id>.jsonl, so this is the validation those agents get.
-// Exported for internal/session, which must refuse to title exactly the ids
-// the reader refuses to serve.
-func SafeSessionID(value string) bool {
+func safeSessionID(value string) bool {
 	if value == "" || len(value) > 128 || value == "." || value == ".." {
 		return false
 	}
@@ -216,32 +186,17 @@ func SafeSessionID(value string) bool {
 	return true
 }
 
-// CanonicalSessionID reports whether value is a canonical session UUID. Codex
-// and the bare-id Pi/OMP form are looked up by suffix match against enumerated
-// filenames, so they require this stricter shape rather than SafeSessionID.
-func CanonicalSessionID(value string) bool {
-	return canonicalSessionIDPattern.MatchString(value)
-}
-
-// entryIsDir classifies a directory entry by what it points at, not by its own
-// type bits. os.ReadDir reports ModeSymlink for a symlink, so DirEntry.IsDir()
-// is false for a symlink to a directory and a project directory symlinked in
-// from a dotfiles repo would be silently skipped; agentroots.profileAgentDirs
-// documents the same hazard at length. Only a symlink needs the stat: the type
-// bits already settle every other entry. Same signature as session.entryIsDir
-// on purpose - one convention for one hazard.
-func entryIsDir(e os.DirEntry, path string) bool {
-	if e.IsDir() {
-		return true
-	}
-	if e.Type()&os.ModeSymlink == 0 {
-		return false
-	}
+// isDir reports whether path is a directory, following symlinks. DirEntry's
+// IsDir reports the entry's own type bits, which are ModeSymlink for a
+// symlink, so it is false for a symlink to a directory - the same hazard
+// agentroots.profileAgentDirs documents. Stat follows the link so a
+// symlinked project or profile directory is still searched.
+func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
 
-func findProjectSession(roots []string, filename string) (string, string) {
+func findProjectSession(roots []string, filename string) string {
 	for _, root := range roots {
 		directories, err := os.ReadDir(root)
 		if err != nil {
@@ -249,29 +204,22 @@ func findProjectSession(roots []string, filename string) (string, string) {
 		}
 		for _, directory := range directories {
 			projectDir := filepath.Join(root, directory.Name())
-			if !entryIsDir(directory, projectDir) {
+			if !isDir(projectDir) {
 				continue
 			}
 			candidate := filepath.Join(projectDir, filename)
-			// Contained against the project directory rather than the root:
-			// the directory component came from ReadDir of the root and
-			// filename is <sessionID>.jsonl with the id already
-			// character-validated, so nothing here can name a path outside
-			// projectDir. Checking the root instead would reject exactly what
-			// entryIsDir makes reachable - a project directory symlinked to a
-			// dotfiles repo or another volume.
-			if path := containedRegularFile(candidate, projectDir); path != "" {
+			if path := containedRegularFile(candidate, root); path != "" {
 				// Earliest root wins: preserves CLAUDE_CONFIG_DIR/CODEX_HOME
 				// (searched first) as genuine overrides over discovery and
 				// the home default.
-				return path, root
+				return path
 			}
 		}
 	}
-	return "", ""
+	return ""
 }
 
-func findCodexSession(roots []string, sessionID string) (string, string) {
+func findCodexSession(roots []string, sessionID string) string {
 	suffix := "-" + strings.ToLower(sessionID) + ".jsonl"
 	for _, root := range roots {
 		for _, year := range descendingDirectories(root) {
@@ -286,25 +234,22 @@ func findCodexSession(roots []string, sessionID string) (string, string) {
 					}
 					for _, file := range files {
 						name := strings.ToLower(file.Name())
-						if !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
+						filePath := filepath.Join(dayPath, file.Name())
+						if isDir(filePath) || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
 							continue
 						}
-						// Joined only for the candidates the two free name
-						// tests above did not reject, which is nearly all of
-						// a day directory.
-						filePath := filepath.Join(dayPath, file.Name())
-						if path := containedRegularFile(filePath, dayPath); path != "" {
+						if path := containedRegularFile(filePath, root); path != "" {
 							// Earliest root wins: preserves CLAUDE_CONFIG_DIR/
 							// CODEX_HOME (searched first) as genuine
 							// overrides over discovery and the home default.
-							return path, root
+							return path
 						}
 					}
 				}
 			}
 		}
 	}
-	return "", ""
+	return ""
 }
 
 func descendingDirectories(path string) []string {
@@ -314,7 +259,7 @@ func descendingDirectories(path string) []string {
 	}
 	directories := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entryIsDir(entry, filepath.Join(path, entry.Name())) {
+		if isDir(filepath.Join(path, entry.Name())) {
 			directories = append(directories, entry.Name())
 		}
 	}
@@ -322,20 +267,20 @@ func descendingDirectories(path string) []string {
 	return directories
 }
 
-func resolvePathOrSession(roots []string, sessionID, separator string) (string, string) {
+func resolvePathOrSession(roots []string, sessionID, separator string) string {
 	if filepath.IsAbs(sessionID) && strings.HasSuffix(strings.ToLower(sessionID), ".jsonl") {
 		for _, root := range roots {
 			if path := containedRegularFile(sessionID, root); path != "" {
 				// Earliest root wins: preserves CLAUDE_CONFIG_DIR/CODEX_HOME
 				// (searched first) as genuine overrides over discovery and
 				// the home default.
-				return path, root
+				return path
 			}
 		}
-		return "", ""
+		return ""
 	}
-	if !CanonicalSessionID(sessionID) {
-		return "", ""
+	if !canonicalSessionID.MatchString(sessionID) {
+		return ""
 	}
 	suffix := separator + strings.ToLower(sessionID) + ".jsonl"
 	for _, root := range roots {
@@ -345,7 +290,7 @@ func resolvePathOrSession(roots []string, sessionID, separator string) (string, 
 		}
 		for _, directory := range directories {
 			projectDir := filepath.Join(root, directory.Name())
-			if !entryIsDir(directory, projectDir) {
+			if !isDir(projectDir) {
 				continue
 			}
 			files, err := os.ReadDir(projectDir)
@@ -353,33 +298,24 @@ func resolvePathOrSession(roots []string, sessionID, separator string) (string, 
 				continue
 			}
 			for _, file := range files {
-				if !strings.HasSuffix(strings.ToLower(file.Name()), suffix) {
+				filePath := filepath.Join(projectDir, file.Name())
+				if isDir(filePath) || !strings.HasSuffix(strings.ToLower(file.Name()), suffix) {
 					continue
 				}
-				// Joined only for the candidates the free suffix test above
-				// did not reject, which is nearly all of a project directory.
-				filePath := filepath.Join(projectDir, file.Name())
-				if path := containedRegularFile(filePath, projectDir); path != "" {
+				if path := containedRegularFile(filePath, root); path != "" {
 					// Earliest root wins: preserves CLAUDE_CONFIG_DIR/
 					// CODEX_HOME (searched first) as genuine overrides over
 					// discovery and the home default.
-					return path, root
+					return path
 				}
 			}
 		}
 	}
-	return "", ""
+	return ""
 }
 
-// containedRegularFile resolves path with symlinks evaluated on both sides and
-// returns it only when it is a regular file inside dir. Callers pass the
-// directory the candidate was derived from: the ReadDir-derived project or day
-// directory for entries this package enumerated itself, where the containment
-// only has to rule out a symlinked *file* escaping its own directory, and the
-// root itself for a caller-supplied path, where the root is the trust boundary
-// being enforced.
-func containedRegularFile(path, dir string) string {
-	realDir, err := filepath.EvalSymlinks(dir)
+func containedRegularFile(path, root string) string {
+	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return ""
 	}
@@ -387,7 +323,7 @@ func containedRegularFile(path, dir string) string {
 	if err != nil {
 		return ""
 	}
-	relative, err := filepath.Rel(realDir, realPath)
+	relative, err := filepath.Rel(realRoot, realPath)
 	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return ""
 	}

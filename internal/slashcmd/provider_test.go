@@ -41,7 +41,18 @@ func TestResolveProviderUnknown(t *testing.T) {
 	}
 }
 
+// cwd is t.TempDir() rather than a shared path like /tmp: claudeProvider and
+// qoderProvider walk up from ctx.Cwd via findProjectDirs looking for a project
+// .claude/.qoder directory, and piProvider/ompProvider do the same for
+// .agents/.pi/.omp. A stray project file reachable from cwd - e.g. a
+// .claude/settings.json with a skillOverrides entry set to "off" - can delete a
+// builtin via claudeSkillOverrides, not just add alongside it. /tmp is
+// world-writable on macOS, so it is not a safe stand-in for an isolated cwd.
+// isolateAgentEnv additionally strips the agent env vars those providers also
+// consult, so only the dispatch table below decides the outcome.
 func TestCatalogForExactDispatch(t *testing.T) {
+	isolateAgentEnv(t)
+	cwd := t.TempDir()
 	tests := []struct {
 		agent       string
 		wantBuiltin string
@@ -62,12 +73,13 @@ func TestCatalogForExactDispatch(t *testing.T) {
 		{"open code", "/models"},
 	}
 	for _, tt := range tests {
-		catalog := CatalogFor(tt.agent, "/tmp", "/nonexistent")
+		catalog := CatalogFor(tt.agent, cwd, "/nonexistent")
 		if !hasCommand(catalog, tt.wantBuiltin) {
 			t.Errorf("CatalogFor(%q) missing %q", tt.agent, tt.wantBuiltin)
 		}
 	}
 }
+
 
 func TestCatalogForNoSubstringMatch(t *testing.T) {
 	catalog := CatalogFor("not-claude-at-all", "/tmp", "/nonexistent")
