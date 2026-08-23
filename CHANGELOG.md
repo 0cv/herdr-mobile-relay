@@ -3,6 +3,19 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.17.7] - 2026-08-23
+
+### Changed
+
+- Match native Herdr workspace management more closely: **Create Workspace**
+  and **Worktrees** now open focused dialogs instead of expanding the page;
+  workspace ordering uses the same hold-and-drag interaction as home-page tab
+  ordering, with Alt+arrow keys on the reorder handle; and linked worktrees are
+  nested below their repository workspace instead of appearing as unrelated
+  top-level cards. Reordering a repository moves its linked-worktree block
+  atomically. A new workspace keeps Herdr's initial tab, and **Start Agent**
+  adds the agent as the following tab. (#14)
+
 ## [0.17.6] - 2026-08-23
 
 ### Added
@@ -1041,6 +1054,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.17.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.6...v0.17.7
 [0.17.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.5...v0.17.6
 [0.17.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.4...v0.17.5
 [0.17.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.3...v0.17.4

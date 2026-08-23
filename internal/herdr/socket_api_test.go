@@ -194,3 +194,53 @@ func TestWorkspaceMoveUsesSocketAPI(t *testing.T) {
 		t.Fatal(serverErr)
 	}
 }
+
+func TestWorkspaceMoveBlockKeepsLinkedWorktreesTogether(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	serverResult := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverResult <- acceptErr
+			return
+		}
+		defer conn.Close()
+		var request struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				WorkspaceIDs      []string `json:"workspace_ids"`
+				BeforeWorkspaceID string   `json:"before_workspace_id"`
+			} `json:"params"`
+		}
+		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+			serverResult <- decodeErr
+			return
+		}
+		if request.Method != "workspace.move_block" ||
+			fmt.Sprint(request.Params.WorkspaceIDs) != "[w1 w2]" ||
+			request.Params.BeforeWorkspaceID != "w5" {
+			serverResult <- fmt.Errorf("unexpected request: %+v", request)
+			return
+		}
+		serverResult <- json.NewEncoder(conn).Encode(map[string]any{
+			"id":     request.ID,
+			"result": map[string]any{"type": "workspace_list"},
+		})
+	}()
+
+	client := NewClient("/binary/must-not-run", socketPath)
+	defer client.Close()
+	if err := client.WorkspaceMoveBlock(context.Background(), []string{"w1", "w2"}, "w5"); err != nil {
+		t.Fatalf("WorkspaceMoveBlock() error = %v", err)
+	}
+	if serverErr := <-serverResult; serverErr != nil {
+		t.Fatal(serverErr)
+	}
+}

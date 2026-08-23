@@ -1209,14 +1209,33 @@ class RelayStore {
     return result;
   }
 
-  async reorderWorkspace(workspace: RelayWorkspace, insertIndex: number): Promise<CommandResult> {
-    this.workspaceManagementAvailable(workspace.relay_id);
-    if (!Number.isInteger(insertIndex) || insertIndex < 0) {
-      throw new CommandError('Workspace position is invalid');
+  async reorderWorkspaceBlock(
+    relayId: string,
+    workspaceIds: string[],
+    beforeWorkspaceId: string,
+    legacyInsertIndex: number,
+  ): Promise<CommandResult> {
+    const connection = this.workspaceManagementAvailable(relayId);
+    if (!workspaceIds.length || new Set(workspaceIds).size !== workspaceIds.length) {
+      throw new CommandError('Workspace selection is invalid');
     }
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'workspace_reorder', workspace_id: workspace.workspace_id, insert_index: insertIndex,
-    });
+    const payload = connection.capabilities.includes('workspace_reorder_block')
+      ? {
+          type: 'workspace_reorder',
+          workspace_ids: workspaceIds,
+          before_workspace_id: beforeWorkspaceId,
+        }
+      : workspaceIds.length === 1 && Number.isInteger(legacyInsertIndex) && legacyInsertIndex >= 0
+        ? {
+            type: 'workspace_reorder',
+            workspace_id: workspaceIds[0],
+            insert_index: legacyInsertIndex,
+          }
+        : null;
+    if (!payload) {
+      throw new CommandError('Update Herdr to reorder a workspace with linked worktrees');
+    }
+    const result = await this.sendCommand(relayId, payload);
     this.requestAgents();
     return result;
   }

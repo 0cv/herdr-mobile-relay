@@ -39,6 +39,18 @@ export interface WorkspaceGroup {
   lastActivitySeq: number;
 }
 
+export interface RelayWorkspaceTree {
+  workspace: RelayWorkspace;
+  children: RelayWorkspace[];
+  workspaceIds: string[];
+}
+
+export interface WorkspaceGroupTree {
+  workspace: WorkspaceGroup;
+  children: WorkspaceGroup[];
+  aggregate: WorkspaceGroup;
+}
+
 function pathBase(path: string): string {
   const normalized = path.replace(/[\\/]+$/, '');
   return normalized.split(/[\\/]/).filter(Boolean).at(-1) || '';
@@ -103,7 +115,7 @@ export function workspaceGroups(agents: Agent[], workspaces: RelayWorkspace[] = 
       key,
       relayId: workspace?.relay_id || first?.relay_id || '',
       relayLabel: workspace?.relay_label || first?.relay_label || '',
-      workspaceId: workspace?.workspace_id || String(first?.workspace_id || ''),
+      workspaceId: workspace?.workspace_id || key.slice(key.indexOf('\u0000') + 1),
       number: workspace?.number || Number.MAX_SAFE_INTEGER,
       label: workspace?.label || groupLabel(ordered),
       cwd: workspace?.cwd || groupCwd(ordered),
@@ -128,6 +140,83 @@ export function workspaceGroups(agents: Agent[], workspaces: RelayWorkspace[] = 
     || (left.relayId === right.relayId ? right.lastActivitySeq - left.lastActivitySeq : 0)
     || left.label.localeCompare(right.label, undefined, { sensitivity: 'base' })
     || left.host.localeCompare(right.host, undefined, { sensitivity: 'base' }));
+}
+
+export function relayWorkspaceTrees(workspaces: RelayWorkspace[]): RelayWorkspaceTree[] {
+  const parentByRepo = new Map<string, RelayWorkspace>();
+  for (const workspace of workspaces) {
+    const worktree = workspace.worktree;
+    if (worktree && !worktree.is_linked_worktree && worktree.repo_key) {
+      parentByRepo.set(`${workspace.relay_id}\u0000${worktree.repo_key}`, workspace);
+    }
+  }
+  const children = new Map<string, RelayWorkspace[]>();
+  const childIDs = new Set<string>();
+  for (const workspace of workspaces) {
+    const worktree = workspace.worktree;
+    if (!worktree?.is_linked_worktree || !worktree.repo_key) continue;
+    const parent = parentByRepo.get(`${workspace.relay_id}\u0000${worktree.repo_key}`);
+    if (!parent || parent.workspace_id === workspace.workspace_id) continue;
+    const key = `${parent.relay_id}\u0000${parent.workspace_id}`;
+    children.set(key, [...(children.get(key) || []), workspace]);
+    childIDs.add(`${workspace.relay_id}\u0000${workspace.workspace_id}`);
+  }
+  return workspaces
+    .filter((workspace) => !childIDs.has(`${workspace.relay_id}\u0000${workspace.workspace_id}`))
+    .map((workspace) => {
+      const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
+      const nested = (children.get(key) || []).sort((left, right) =>
+        left.number - right.number || left.label.localeCompare(right.label));
+      return {
+        workspace,
+        children: nested,
+        workspaceIds: [workspace.workspace_id, ...nested.map((child) => child.workspace_id)],
+      };
+    });
+}
+
+export function workspaceGroupTrees(groups: WorkspaceGroup[]): WorkspaceGroupTree[] {
+  const workspaces = groups.map((group): RelayWorkspace => ({
+    relay_id: group.relayId,
+    relay_label: group.relayLabel,
+    workspace_id: group.workspaceId,
+    number: group.number,
+    label: group.label,
+    focused: false,
+    pane_count: group.paneCount,
+    tab_count: group.tabCount,
+    active_tab_id: '',
+    agent_status: '',
+    cwd: group.cwd,
+    worktree: group.worktree,
+  }));
+  const groupByID = new Map(groups.map((group) => [
+    `${group.relayId}\u0000${group.workspaceId}`,
+    group,
+  ]));
+  return relayWorkspaceTrees(workspaces).map((tree) => {
+    const workspace = groupByID.get(`${tree.workspace.relay_id}\u0000${tree.workspace.workspace_id}`)!;
+    const children = tree.children
+      .map((child) => groupByID.get(`${child.relay_id}\u0000${child.workspace_id}`))
+      .filter((child): child is WorkspaceGroup => Boolean(child));
+    const all = [workspace, ...children];
+    return {
+      workspace,
+      children,
+      aggregate: {
+        ...workspace,
+        agents: all.flatMap((group) => group.agents),
+        tabCount: all.reduce((total, group) => total + group.tabCount, 0),
+        paneCount: all.reduce((total, group) => total + group.paneCount, 0),
+        attentionCount: all.reduce((total, group) => total + group.attentionCount, 0),
+        workingCount: all.reduce((total, group) => total + group.workingCount, 0),
+        doneCount: all.reduce((total, group) => total + group.doneCount, 0),
+        readyCount: all.reduce((total, group) => total + group.readyCount, 0),
+        lastActiveAt: Math.max(...all.map((group) => group.lastActiveAt)),
+        lastActivitySeq: Math.max(...all.map((group) => group.lastActivitySeq)),
+      },
+    };
+  });
 }
 
 /**

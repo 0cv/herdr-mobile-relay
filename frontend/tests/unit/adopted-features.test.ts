@@ -4,7 +4,7 @@ import { safeMarkdownHtml } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
-import { workspaceGroups, workspaceStateTone } from '$lib/workspaces';
+import { relayWorkspaceTrees, workspaceGroups, workspaceStateTone } from '$lib/workspaces';
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -88,6 +88,43 @@ describe('workspace navigation', () => {
       tabCount: 1,
       paneCount: 1,
     });
+  });
+
+  it('nests linked worktrees under their repository workspace', () => {
+    const repo = {
+      repo_key: 'repo-key',
+      repo_name: 'mobile',
+      repo_root: '/home/user/mobile',
+    };
+    const trees = relayWorkspaceTrees([
+      workspace({
+        worktree: {
+          ...repo,
+          checkout_path: '/home/user/mobile',
+          is_linked_worktree: false,
+        },
+      }),
+      workspace({
+        workspace_id: 'work-2',
+        number: 2,
+        label: 'fix/one',
+        cwd: '/home/user/worktrees/fix-one',
+        worktree: {
+          ...repo,
+          checkout_path: '/home/user/worktrees/fix-one',
+          is_linked_worktree: true,
+        },
+      }),
+      workspace({ workspace_id: 'work-3', number: 3, label: 'Other' }),
+    ]);
+
+    expect(trees).toHaveLength(2);
+    expect(trees[0]).toMatchObject({
+      workspace: { workspace_id: 'work-1' },
+      children: [{ workspace_id: 'work-2', label: 'fix/one' }],
+      workspaceIds: ['work-1', 'work-2'],
+    });
+    expect(trees[1].workspace.workspace_id).toBe('work-3');
   });
 
   it('uses relay activity order when workspace timestamps tie', () => {

@@ -214,6 +214,39 @@ func (c *socketAPIClient) workspaceMove(ctx context.Context, workspaceID string,
 	return lastErr
 }
 
+func (c *socketAPIClient) workspaceMoveBlock(
+	ctx context.Context,
+	workspaceIDs []string,
+	beforeWorkspaceID string,
+) error {
+	if c == nil || c.path == "" {
+		return errors.New("Herdr socket path is unavailable")
+	}
+	params := map[string]any{"workspace_ids": workspaceIDs}
+	if beforeWorkspaceID != "" {
+		params["before_workspace_id"] = beforeWorkspaceID
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var lastErr error
+	for range 2 {
+		if err := c.connect(ctx); err != nil {
+			lastErr = err
+			break
+		}
+		response, err := c.requestConnected(ctx, "workspace.move_block", params)
+		if err == nil {
+			if response.Result.Type != "workspace_list" {
+				return fmt.Errorf("Herdr socket API returned %q for workspace.move_block", response.Result.Type)
+			}
+			return nil
+		}
+		lastErr = err
+		_ = c.closeLocked()
+	}
+	return lastErr
+}
+
 func readSocketAPILine(reader *bufio.Reader) ([]byte, error) {
 	line := make([]byte, 0, socketAPIBufferBytes)
 	for {

@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -49,5 +50,17 @@ func TestWorktreeCreateParsesWorkspaceAndRootPane(t *testing.T) {
 	}
 	if result.Workspace.ID != "w2" || result.RootPane.ID != "p2" || result.Worktree.Path != "/home/user/worktrees/fix" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestSupportsWorkspaceMoveBlockReadsBundledSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "herdr")
+	schema := `{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}},{"properties":{"method":{"const":"workspace.move_block"}}}]}}}`
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+schema+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(path, filepath.Join(t.TempDir(), "herdr.sock"))
+	if !client.SupportsWorkspaceMoveBlock() {
+		t.Fatal("workspace.move_block was not detected")
 	}
 }

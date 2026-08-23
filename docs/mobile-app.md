@@ -66,13 +66,22 @@ shell as a generic terminal.
 
 Open **Workspaces** from the folder button in the header to:
 
-- create a non-focusing workspace in a directory below the relay user's home;
-- rename, reorder, or close a workspace;
-- start an agent as a new tab in a selected workspace;
-- list a repository's Git worktrees, create a branch-backed worktree, or open an
+- open **Create Workspace**, choose a directory and label in its dialog, then
+  confirm a non-focusing workspace with the native initial tab;
+- press and hold a workspace card until it lifts, then drag it into place;
+  Alt+arrow keys on its reorder handle provide the same accessible control;
+- rename or close a workspace, or start an agent as a second tab in a selected
+  workspace;
+- open **Worktrees** in a dialog, create a branch-backed worktree, or open an
   existing checkout as a non-focusing Herdr workspace;
 - close a linked-worktree workspace without deleting its checkout, or remove
   the checkout while retaining its Git branch.
+
+Linked worktrees are nested below their repository workspace on both the home
+screen and the Workspaces page, matching Herdr's parent/child presentation.
+Dragging a repository moves that complete group atomically when Herdr exposes
+`workspace.move_block`; older compatible Herdr versions can still move a
+standalone workspace and ask for an update before moving a linked group.
 
 Normal worktree removal refuses a dirty checkout. **Force Remove** is offered
 only after that refusal and requires a second confirmation because it discards

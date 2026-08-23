@@ -102,6 +102,49 @@ func (d *Dispatcher) HandleWorkspaceReorder(
 	return completed(requestID, action, "", map[string]any{"workspace_id": workspace.ID, "insert_index": *insertIndex})
 }
 
+func (d *Dispatcher) HandleWorkspaceReorderBlock(
+	ctx context.Context,
+	requestID string,
+	workspaceIDs []string,
+	beforeWorkspaceID string,
+) *CommandResult {
+	const action = "workspace_reorder"
+	if len(workspaceIDs) == 0 || len(workspaceIDs) > maxTabInsertIndex {
+		return d.fail(requestID, action, "", "Workspace selection is invalid")
+	}
+	seen := make(map[string]bool, len(workspaceIDs))
+	for _, workspaceID := range workspaceIDs {
+		if workspaceID == "" || seen[workspaceID] {
+			return d.fail(requestID, action, "", "Workspace selection is invalid")
+		}
+		if _, ok := d.state.Workspace(workspaceID); !ok {
+			return d.fail(requestID, action, "", "Workspace is unavailable")
+		}
+		seen[workspaceID] = true
+	}
+	if beforeWorkspaceID != "" {
+		if seen[beforeWorkspaceID] {
+			return d.fail(requestID, action, "", "Workspace destination is invalid")
+		}
+		if _, ok := d.state.Workspace(beforeWorkspaceID); !ok {
+			return d.fail(requestID, action, "", "Workspace destination is unavailable")
+		}
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
+	defer cancel()
+	d.topologyMu.Lock()
+	defer d.topologyMu.Unlock()
+	if err := d.herdr.WorkspaceMoveBlock(commandCtx, workspaceIDs, beforeWorkspaceID); err != nil {
+		return d.failTopologyErr(requestID, action, "", err)
+	}
+	d.topologyChanged()
+	d.recordActivity(action, "reordered", "Reordered workspace group", "", requestID)
+	return completed(requestID, action, "", map[string]any{
+		"workspace_ids":       workspaceIDs,
+		"before_workspace_id": beforeWorkspaceID,
+	})
+}
+
 func (d *Dispatcher) HandleWorkspaceClose(
 	ctx context.Context,
 	requestID, workspaceID string,

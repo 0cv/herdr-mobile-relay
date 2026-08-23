@@ -86,7 +86,7 @@ describe('relay command store', () => {
       protocol: 2,
       version: 'abc123',
       host: 'fedora',
-      capabilities: ['workspace_management', 'worktree_management'],
+      capabilities: ['workspace_management', 'workspace_reorder_block', 'worktree_management'],
       agent_profiles: [],
       inventory: { state: 'ready' },
     });
@@ -137,6 +137,50 @@ describe('relay command store', () => {
       phase: 'completed',
     });
     await expect(rename).resolves.toMatchObject({ ok: true });
+
+    const reorder = relayStore.reorderWorkspaceBlock(workspace.relay_id, ['w1', 'w2'], 'w5', 2);
+    const reorderCommand = JSON.parse(socket.sent.at(-1)!);
+    expect(reorderCommand).toMatchObject({
+      type: 'workspace_reorder',
+      workspace_ids: ['w1', 'w2'],
+      before_workspace_id: 'w5',
+      protocol: 2,
+    });
+    socket.message({
+      type: 'command_result',
+      request_id: reorderCommand.request_id,
+      action: 'workspace_reorder',
+      ok: true,
+      phase: 'completed',
+    });
+    await expect(reorder).resolves.toMatchObject({ ok: true });
+
+    socket.message({
+      type: 'push_config',
+      protocol: 2,
+      version: 'abc123',
+      host: 'fedora',
+      capabilities: ['workspace_management', 'worktree_management'],
+      agent_profiles: [],
+      inventory: { state: 'ready' },
+    });
+    const legacyReorder = relayStore.reorderWorkspaceBlock(workspace.relay_id, ['w1'], '', 2);
+    const legacyCommand = JSON.parse(socket.sent.at(-1)!);
+    expect(legacyCommand).toMatchObject({
+      type: 'workspace_reorder',
+      workspace_id: 'w1',
+      insert_index: 2,
+      protocol: 2,
+    });
+    expect(legacyCommand).not.toHaveProperty('workspace_ids');
+    socket.message({
+      type: 'command_result',
+      request_id: legacyCommand.request_id,
+      action: 'workspace_reorder',
+      ok: true,
+      phase: 'completed',
+    });
+    await expect(legacyReorder).resolves.toMatchObject({ ok: true });
 
     const listing = relayStore.listWorktrees(workspace);
     const listCommand = JSON.parse(socket.sent.at(-1)!);

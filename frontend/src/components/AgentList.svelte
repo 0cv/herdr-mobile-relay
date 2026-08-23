@@ -18,7 +18,7 @@
   import { homeLayout } from '$lib/preferences';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
-  import { workspaceGroups, workspaceIdentity, workspaceStateTone, type WorkspaceGroup, type WorkspaceTab } from '$lib/workspaces';
+  import { workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents,
@@ -82,39 +82,67 @@
   const workingAgents = $derived(backgroundAgents.filter((agent) => agentStatusGroup(agent) === 'working'));
   const doneAgents = $derived(backgroundAgents.filter((agent) => agentStatusGroup(agent) === 'done'));
   const mixedLayout = $derived($homeLayout === 'mixed');
-  const doneWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(
+  const doneWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     doneAgents,
     workspaceRecordsFor(doneAgents, false),
-  ));
-  const workingWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(
+  )));
+  const workingWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     workingAgents,
     workspaceRecordsFor(workingAgents, false),
-  ));
+  )));
   const idleAgents = $derived(backgroundAgents.filter((agent) => {
     const group = agentStatusGroup(agent);
     return group !== 'working' && group !== 'done';
   }));
-  const idleWorkspaces = $derived(mixedLayout ? [] : workspaceGroups(
+  const idleWorkspaces = $derived(mixedLayout ? [] : workspaceGroupTrees(workspaceGroups(
     idleAgents,
     workspaceRecordsFor(idleAgents, true),
-  ));
+  )));
   const mixedWorkspaces = $derived(mixedLayout
-    ? workspaceGroups(backgroundAgents, workspaceRecordsFor(backgroundAgents, true))
+    ? workspaceGroupTrees(workspaceGroups(backgroundAgents, workspaceRecordsFor(backgroundAgents, true)))
     : []);
 
   function workspaceRecordsFor(visible: Agent[], includeEmpty: boolean): RelayWorkspace[] {
     const visibleKeys = new Set(visible.map((agent) => workspaceIdentity(agent)));
     const occupiedKeys = new Set(agents.map((agent) => workspaceIdentity(agent)));
-    return workspaces.filter((workspace) => {
+    const selected = new Set(workspaces.filter((workspace) => {
       const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
-      return visibleKeys.has(key) || includeEmpty && !occupiedKeys.has(key);
-    });
+      const unoccupiedParent = includeEmpty
+        && !occupiedKeys.has(key)
+        && workspace.worktree?.is_linked_worktree !== true;
+      return visibleKeys.has(key) || unoccupiedParent;
+    }).map((workspace) => `${workspace.relay_id}\u0000${workspace.workspace_id}`));
+    for (const workspace of workspaces) {
+      const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
+      const worktree = workspace.worktree;
+      if (!worktree?.repo_key) continue;
+      if (worktree.is_linked_worktree && selected.has(key)) {
+        const parent = workspaces.find((candidate) => (
+          candidate.relay_id === workspace.relay_id
+          && candidate.worktree?.repo_key === worktree.repo_key
+          && candidate.worktree.is_linked_worktree === false
+        ));
+        if (parent) selected.add(`${parent.relay_id}\u0000${parent.workspace_id}`);
+      } else if (!worktree.is_linked_worktree && selected.has(key)) {
+        for (const child of workspaces) {
+          const childKey = `${child.relay_id}\u0000${child.workspace_id}`;
+          if (child.relay_id === workspace.relay_id
+            && child.worktree?.repo_key === worktree.repo_key
+            && child.worktree.is_linked_worktree
+            && !occupiedKeys.has(childKey)) {
+            selected.add(childKey);
+          }
+        }
+      }
+    }
+    return workspaces.filter((workspace) => selected.has(`${workspace.relay_id}\u0000${workspace.workspace_id}`));
   }
 
   $effect(() => {
     if (!pendingTabOrder) return;
     const pending = pendingTabOrder;
     const workspace = [...doneWorkspaces, ...workingWorkspaces, ...idleWorkspaces, ...mixedWorkspaces]
+      .flatMap((tree) => [tree.workspace, ...tree.children])
       .find((group) => group.key === pending.key);
     if (!workspace || workspace.tabs.map((tab) => tab.id).join('\u0000') === pending.order.join('\u0000')) {
       pendingTabOrder = null;
@@ -461,12 +489,41 @@
   </div>
 {/snippet}
 
-{#snippet workspaceGrid(groups: WorkspaceGroup[], defaultOpen: boolean, kind: 'working' | 'done' | 'idle' | 'mixed')}
+{#snippet workspaceTabs(workspace: WorkspaceGroup)}
+  <div class="workspace-tabs">
+    {#each displayTabs(workspace) as tab (tab.id)}
+      <section
+        class:tab-dragging={tabDrag?.workspaceKey === workspace.key && tabDrag.sourceTabId === tab.id}
+        class="workspace-tab"
+        data-tab-id={tab.id}
+        aria-label={`${tab.label} tab`}
+        style:transform={tabShift(workspace, tab.id) || undefined}
+      >
+        <header class="workspace-tab-header">
+          <h3>{tab.label}</h3>
+        </header>
+        {@render agentGrid(
+          tab.agents,
+          true,
+          workspace.tabs.length > 1 && tabOrderingAvailable(workspace) ? workspace : undefined,
+          tab.id,
+        )}
+      </section>
+    {/each}
+  </div>
+  {#if !workspace.tabs.length}
+    <p class="workspace-empty">No agents are running in this workspace.</p>
+  {/if}
+{/snippet}
+
+{#snippet workspaceGrid(trees: WorkspaceGroupTree[], defaultOpen: boolean, kind: 'working' | 'done' | 'idle' | 'mixed')}
   <div class="workspace-grid">
-    {#each groups as workspace (workspace.key)}
+    {#each trees as tree (tree.workspace.key)}
+      {@const workspace = tree.workspace}
+      {@const summary = tree.aggregate}
       {@const working = kind === 'working'}
       {@const done = kind === 'done'}
-      {@const stateTone = kind === 'mixed' ? workspaceStateTone(workspace) : ''}
+      {@const stateTone = kind === 'mixed' ? workspaceStateTone(summary) : ''}
       {@const disclosureKey = `${working ? 'working' : done ? 'done' : 'workspace'}:${workspace.key}`}
       <details
         class:working-workspace-card={working}
@@ -492,52 +549,39 @@
           </span>
           <span
             class="workspace-counts"
-            aria-label={working || done
-              ? `${workspace.agents.length} ${kind} agents in ${workspace.tabCount} tabs`
-              : `${workspace.tabCount} tabs, ${workspace.paneCount} panes, and ${workspace.agents.length} agents`}
+            aria-label={`${summary.tabCount} tabs, ${summary.paneCount} panes, and ${summary.agents.length} agents`}
           >
-            {#if working}<em class="workspace-working-count">{workspace.agents.length} working</em>{/if}
-            {#if done}<em class="workspace-done-count">{workspace.agents.length} done</em>{/if}
-            <span>{workspace.tabCount} {workspace.tabCount === 1 ? 'tab' : 'tabs'}</span>
-            {#if !working && !done}<span>{workspace.agents.length} {workspace.agents.length === 1 ? 'agent' : 'agents'}</span>{/if}
-            {#if workspace.lastActiveAt}
+            {#if working}<em class="workspace-working-count">{summary.workingCount} working</em>{/if}
+            {#if done}<em class="workspace-done-count">{summary.doneCount} done</em>{/if}
+            <span>{summary.tabCount} {summary.tabCount === 1 ? 'tab' : 'tabs'}</span>
+            {#if tree.children.length}<span>{tree.children.length} {tree.children.length === 1 ? 'worktree' : 'worktrees'}</span>{/if}
+            {#if !working && !done}<span>{summary.agents.length} {summary.agents.length === 1 ? 'agent' : 'agents'}</span>{/if}
+            {#if summary.lastActiveAt}
               <time
-                datetime={new Date(workspace.lastActiveAt).toISOString()}
-                title={`Last agent activity: ${new Date(workspace.lastActiveAt).toLocaleString()}`}
-                aria-label={`Last agent activity ${new Date(workspace.lastActiveAt).toLocaleString()}`}
-              >{relativeTimestamp(workspace.lastActiveAt)}</time>
+                datetime={new Date(summary.lastActiveAt).toISOString()}
+                title={`Last agent activity: ${new Date(summary.lastActiveAt).toLocaleString()}`}
+                aria-label={`Last agent activity ${new Date(summary.lastActiveAt).toLocaleString()}`}
+              >{relativeTimestamp(summary.lastActiveAt)}</time>
             {/if}
           </span>
         </summary>
         {#if workspace.worktree}
-          <p class="workspace-provenance">
-            {workspace.worktree.is_linked_worktree ? 'Worktree' : 'Repository'} · {workspace.worktree.repo_name}
-          </p>
+          <p class="workspace-provenance">Repository · {workspace.worktree.repo_name}</p>
         {/if}
-        <div class="workspace-tabs">
-          {#each displayTabs(workspace) as tab (tab.id)}
-            <section
-              class:tab-dragging={tabDrag?.workspaceKey === workspace.key && tabDrag.sourceTabId === tab.id}
-              class="workspace-tab"
-              data-tab-id={tab.id}
-              aria-label={`${tab.label} tab`}
-              style:transform={tabShift(workspace, tab.id) || undefined}
-            >
-              <header class="workspace-tab-header">
-                <h3>{tab.label}</h3>
-              </header>
-              {@render agentGrid(
-                tab.agents,
-                true,
-                workspace.tabs.length > 1 && tabOrderingAvailable(workspace) ? workspace : undefined,
-                tab.id,
-              )}
-            </section>
-          {/each}
-        </div>
-          {#if !workspace.tabs.length}
-            <p class="workspace-empty">No agents are running in this workspace.</p>
-          {/if}
+        {@render workspaceTabs(workspace)}
+        {#each tree.children as child (child.key)}
+          <section class="workspace-worktree-card" aria-label={`${child.label} worktree`}>
+            <header>
+              <span aria-hidden="true">↳</span>
+              <span>
+                <strong>{child.label}</strong>
+                <small>{child.cwd}</small>
+              </span>
+              <span>{child.tabCount} {child.tabCount === 1 ? 'tab' : 'tabs'}</span>
+            </header>
+            {@render workspaceTabs(child)}
+          </section>
+        {/each}
       </details>
     {/each}
   </div>

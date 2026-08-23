@@ -252,6 +252,9 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.herdrC.SupportsRealtimePane(client.Context()) {
 			capabilities = append(capabilities, "pane_realtime_delta", "tab_reorder")
 		}
+		if s.herdrC.SupportsWorkspaceMoveBlock() {
+			capabilities = append(capabilities, "workspace_reorder_block")
+		}
 		if s.appDeployM.State().Configured {
 			capabilities = append(capabilities, "app_deploy")
 		}
@@ -492,7 +495,16 @@ func (s *Server) Run(ctx context.Context) error {
 			case "workspace_rename":
 				result = s.dispatcher.HandleWorkspaceRename(commandCtx, inbound.RequestID, inbound.WorkspaceID, inbound.Label)
 			case "workspace_reorder":
-				result = s.dispatcher.HandleWorkspaceReorder(commandCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
+				if len(inbound.WorkspaceIDs) > 0 {
+					result = s.dispatcher.HandleWorkspaceReorderBlock(
+						commandCtx,
+						inbound.RequestID,
+						inbound.WorkspaceIDs,
+						inbound.BeforeWorkspaceID,
+					)
+				} else {
+					result = s.dispatcher.HandleWorkspaceReorder(commandCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
+				}
 			case "workspace_close":
 				result = s.dispatcher.HandleWorkspaceClose(commandCtx, inbound.RequestID, inbound.WorkspaceID)
 			case "worktree_list":
@@ -2054,8 +2066,8 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	}
 	stringLimits := map[string]int{
 		"name": 256, "label": 256, "profile_id": 160, "workspace_id": 160,
-		"cwd": 1024, "path": 1024, "branch": 512, "base": 512,
-		"filename": 512, "mime": 128, "activity_label": 256,
+		"before_workspace_id": 160, "cwd": 1024, "path": 1024, "branch": 512,
+		"base": 512, "filename": 512, "mime": 128, "activity_label": 256,
 	}
 	for key, limit := range stringLimits {
 		if value, ok := message[key].(string); ok && value != "" {
@@ -2074,6 +2086,31 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	}
 	if force, ok := message["force"].(bool); ok {
 		details["force"] = force
+	}
+	workspaceIDs := make([]string, 0, 8)
+	switch values := message["workspace_ids"].(type) {
+	case []any:
+		for _, value := range values {
+			workspaceID, valid := value.(string)
+			if valid && workspaceID != "" {
+				workspaceIDs = append(workspaceIDs, boundedAuditString(workspaceID, 160))
+			}
+			if len(workspaceIDs) == 32 {
+				break
+			}
+		}
+	case []string:
+		for _, workspaceID := range values {
+			if workspaceID != "" {
+				workspaceIDs = append(workspaceIDs, boundedAuditString(workspaceID, 160))
+			}
+			if len(workspaceIDs) == 32 {
+				break
+			}
+		}
+	}
+	if len(workspaceIDs) > 0 {
+		details["workspace_ids"] = workspaceIDs
 	}
 	keys := make([]string, 0, 16)
 	switch values := message["keys"].(type) {

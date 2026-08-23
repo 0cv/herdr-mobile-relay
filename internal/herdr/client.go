@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -138,10 +139,12 @@ func (b *limitedBuffer) Bytes() []byte  { return b.buf.Bytes() }
 func (b *limitedBuffer) String() string { return b.buf.String() }
 
 type Client struct {
-	bin        string
-	socketPath string
-	sem        chan struct{}
-	api        *socketAPIClient
+	bin                    string
+	socketPath             string
+	sem                    chan struct{}
+	api                    *socketAPIClient
+	workspaceMoveBlockOnce sync.Once
+	workspaceMoveBlock     bool
 }
 
 func NewClient(bin, socketPath string) *Client {
@@ -394,6 +397,17 @@ func (c *Client) WorkspaceMove(ctx context.Context, workspaceID string, insertIn
 	return nil
 }
 
+func (c *Client) WorkspaceMoveBlock(
+	ctx context.Context,
+	workspaceIDs []string,
+	beforeWorkspaceID string,
+) error {
+	if err := c.api.workspaceMoveBlock(ctx, workspaceIDs, beforeWorkspaceID); err != nil {
+		return fmt.Errorf("herdr workspace move block: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) WorkspaceClose(ctx context.Context, workspaceID string) error {
 	if _, err := c.runCommand(ctx, "workspace", "close", workspaceID); err != nil {
 		return fmt.Errorf("herdr workspace close: %w", err)
@@ -592,6 +606,40 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 
 func (c *Client) SupportsRealtimePane(ctx context.Context) bool {
 	return c.api.available(ctx)
+}
+
+func (c *Client) SupportsWorkspaceMoveBlock() bool {
+	c.workspaceMoveBlockOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out, err := c.runCommand(ctx, "api", "schema", "--json")
+		if err != nil {
+			return
+		}
+		var document struct {
+			Schemas struct {
+				Request struct {
+					OneOf []struct {
+						Properties struct {
+							Method struct {
+								Const string `json:"const"`
+							} `json:"method"`
+						} `json:"properties"`
+					} `json:"oneOf"`
+				} `json:"request"`
+			} `json:"schemas"`
+		}
+		if json.Unmarshal(out, &document) != nil {
+			return
+		}
+		for _, request := range document.Schemas.Request.OneOf {
+			if request.Properties.Method.Const == "workspace.move_block" {
+				c.workspaceMoveBlock = true
+				return
+			}
+		}
+	})
+	return c.workspaceMoveBlock
 }
 
 func (c *Client) Close() error {

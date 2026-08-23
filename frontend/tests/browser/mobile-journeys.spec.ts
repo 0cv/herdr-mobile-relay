@@ -349,29 +349,25 @@ async function handshake(page: Page, index: number, overrides: Record<string, un
 
 const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' };
 
-test('manages authoritative workspaces and worktrees without exposing shell terminals', async ({ page }) => {
+test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
-    capabilities: ['attention_classification', 'directory_browser', 'workspace_management', 'worktree_management'],
+    capabilities: ['attention_classification', 'directory_browser', 'workspace_management', 'workspace_reorder_block', 'worktree_management'],
   });
-  await server(page, 0, {
-    type: 'workspaces',
-    workspaces: [
-      {
-        workspace_id: 'w1', number: 1, label: 'Project', pane_count: 1, tab_count: 1,
-        cwd: '/work/project',
-        worktree: {
-          repo_key: 'repo', repo_name: 'project', repo_root: '/work/project',
-          checkout_path: '/work/project', is_linked_worktree: false,
-        },
-      },
-      {
-        workspace_id: 'w2', number: 2, label: 'Shell Only', pane_count: 1, tab_count: 1,
-        cwd: '/work/shell-only',
-      },
-    ],
-  });
+  const parent = {
+    workspace_id: 'w1', number: 1, label: 'Project', pane_count: 1, tab_count: 1,
+    cwd: '/work/project',
+    worktree: {
+      repo_key: 'repo', repo_name: 'project', repo_root: '/work/project',
+      checkout_path: '/work/project', is_linked_worktree: false,
+    },
+  };
+  const shellOnly = {
+    workspace_id: 'w2', number: 2, label: 'Shell Only', pane_count: 1, tab_count: 1,
+    cwd: '/work/shell-only',
+  };
+  await server(page, 0, { type: 'workspaces', workspaces: [parent, shellOnly] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
@@ -386,8 +382,42 @@ test('manages authoritative workspaces and worktrees without exposing shell term
 
   await page.getByRole('button', { name: 'Manage workspaces' }).click();
   await expect(page.locator('#workspace-manager-title')).toBeVisible();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'list_directories')).toBe(true);
+  const workspaceDirectory = (await commands(page)).find((command) => command.type === 'list_directories')!;
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: workspaceDirectory.request_id,
+    action: 'list_directories',
+    ok: true,
+    phase: 'completed',
+    data: {
+      current: { path: '/work/mobile', label: 'mobile' },
+      parent: '/work',
+      directories: [],
+    },
+  });
+
+  await page.getByRole('button', { name: 'Create Workspace' }).click();
+  const createDialog = page.locator('#workspace-create-dialog');
+  await expect(createDialog.getByRole('heading', { name: 'Create Workspace' })).toBeVisible();
+  await createDialog.getByLabel('Label').fill('Phone Workspace');
+  await createDialog.getByRole('button', { name: 'Confirm' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'workspace_create')).toMatchObject({
+    cwd: '/work/mobile',
+    label: 'Phone Workspace',
+  });
+  await expect(createDialog).toBeHidden();
+
+  const phoneWorkspace = {
+    workspace_id: 'w3', number: 3, label: 'Phone Workspace', pane_count: 1, tab_count: 1,
+    cwd: '/work/mobile',
+  };
+  await server(page, 0, { type: 'workspaces', workspaces: [parent, shellOnly, phoneWorkspace] });
+  const phoneCard = page.locator('.workspace-management-card').filter({ hasText: 'Phone Workspace' });
+  await expect(phoneCard).toContainText('1 tab');
+  await expect(phoneCard).toContainText('0 agents');
+
   const projectCard = page.locator('.workspace-management-card').first();
-  await expect(projectCard).toContainText('/work/project');
   await projectCard.getByRole('button', { name: 'Rename' }).click();
   await projectCard.getByLabel('Workspace label').fill('Renamed Project');
   await projectCard.getByRole('button', { name: 'Save' }).click();
@@ -397,30 +427,79 @@ test('manages authoritative workspaces and worktrees without exposing shell term
   });
 
   await projectCard.getByRole('button', { name: 'Worktrees' }).click();
-  await expect(page.getByRole('heading', { name: 'Project worktrees' })).toBeVisible();
-  await expect(page.getByText('fix/one', { exact: true })).toBeVisible();
-  await page.locator('.worktree-list').getByRole('button', { name: 'Open' }).click();
+  const worktreeDialog = page.locator('#worktree-manager-dialog');
+  await expect(worktreeDialog.getByRole('heading', { name: 'Project Worktrees' })).toBeVisible();
+  await expect(worktreeDialog.getByText('fix/one', { exact: true })).toBeVisible();
+  await worktreeDialog.locator('.worktree-list').getByRole('button', { name: 'Open' }).click();
   await expect.poll(async () => (await commands(page)).find((command) => command.type === 'worktree_open')).toMatchObject({
     workspace_id: 'w1',
     path: '/work/worktrees/project/fix-one',
   });
 
-  await page.getByLabel('Branch').fill('fix/issue-14');
-  await page.getByLabel('Base ref').fill('main');
-  await page.getByRole('button', { name: 'Create Worktree' }).click();
+  const linked = {
+    workspace_id: 'w4', number: 4, label: 'fix/one', pane_count: 1, tab_count: 1,
+    cwd: '/work/worktrees/project/fix-one',
+    worktree: {
+      repo_key: 'repo', repo_name: 'project', repo_root: '/work/project',
+      checkout_path: '/work/worktrees/project/fix-one', is_linked_worktree: true,
+    },
+  };
+  await server(page, 0, { type: 'workspaces', workspaces: [parent, linked, shellOnly, phoneWorkspace] });
+  await worktreeDialog.getByLabel('Branch').fill('fix/issue-14');
+  await worktreeDialog.getByLabel('Base ref').fill('main');
+  await worktreeDialog.getByRole('button', { name: 'Confirm' }).click();
   await expect.poll(async () => (await commands(page)).find((command) => command.type === 'worktree_create')).toMatchObject({
     workspace_id: 'w1',
     branch: 'fix/issue-14',
     base: 'main',
   });
+  await worktreeDialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(worktreeDialog).toBeHidden();
 
-  await projectCard.getByRole('button', { name: 'Start Agent' }).click();
-  await expect(page.getByText('New tab in workspace Project.')).toBeVisible();
-  await page.getByLabel('Name').fill('issue-14-codex');
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.locator('.workspace-worktree-card')).toContainText('fix/one');
+  await page.getByRole('button', { name: 'Manage workspaces' }).click();
+  await expect(page.locator('#workspace-manager-title')).toBeVisible();
+
+  const projectSlot = page.locator('.workspace-management-slot').first();
+  await expect(projectSlot.locator('.workspace-management-card')).toHaveCount(2);
+  await expect(projectSlot.locator('.nested-workspace')).toContainText('fix/one');
+  const targetSlot = page.locator('.workspace-management-slot').nth(1);
+  const sourceHeader = projectSlot.locator('.workspace-management-card').first().locator('header');
+  const sourceBox = await sourceHeader.boundingBox();
+  const targetBox = await targetSlot.boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(targetBox).not.toBeNull();
+  await page.mouse.move(sourceBox!.x + sourceBox!.width / 2, sourceBox!.y + sourceBox!.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(750);
+  await expect(projectSlot).toHaveClass(/workspace-dragging/);
+  await page.mouse.move(targetBox!.x + targetBox!.width / 2, targetBox!.y + targetBox!.height * .8, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'workspace_reorder')).toMatchObject({
+    workspace_ids: ['w1', 'w4'],
+    before_workspace_id: 'w3',
+  });
+
+  await phoneCard.getByRole('button', { name: 'Start Agent' }).click();
+  await expect(page.getByText('New tab in workspace Phone Workspace.')).toBeVisible();
+  await page.getByLabel('Name').fill('phone-workspace-codex');
   await page.getByRole('button', { name: 'Start Agent' }).last().click();
   await expect.poll(async () => (await commands(page)).find((command) => command.type === 'agent_start')).toMatchObject({
-    workspace_id: 'w1',
-    cwd: '/work/project',
+    workspace_id: 'w3',
+    cwd: '/work/mobile',
+  });
+  await server(page, 0, {
+    type: 'workspaces',
+    workspaces: [parent, linked, shellOnly, { ...phoneWorkspace, pane_count: 2, tab_count: 2 }],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w3:p2', workspace_id: 'w3', tab_id: 'w3:t2', tab_number: 2,
+      tab_label: 'phone-workspace-codex', status: 'working', project: 'mobile', agent: 'codex',
+      cwd: '/work/mobile',
+    }],
   });
 });
 

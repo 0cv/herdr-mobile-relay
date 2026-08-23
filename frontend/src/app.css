@@ -729,26 +729,39 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-provenance, .workspace-empty { color: var(--muted); font-size: .68rem; margin: 0; padding: .55rem .8rem; }
 .workspace-provenance { border-top: 1px solid var(--border); padding-bottom: 0; }
 .workspace-empty { border-top: 1px solid var(--border); }
+.workspace-worktree-card { background: color-mix(in srgb, var(--secondary) 35%, transparent); border-top: 1px solid var(--border); margin-left: .8rem; }
+.workspace-worktree-card > header { align-items: center; display: grid; gap: .55rem; grid-template-columns: auto minmax(0, 1fr) auto; padding: .65rem .75rem; }
+.workspace-worktree-card > header > span:nth-child(2) { display: flex; flex-direction: column; min-width: 0; }
+.workspace-worktree-card > header strong { font-size: .78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-worktree-card > header small, .workspace-worktree-card > header > span:last-child { color: var(--muted); font-size: .62rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-worktree-card .workspace-tabs { padding-left: 1rem; }
 
 .workspace-manager-page { display: grid; gap: .8rem; }
 .workspace-manager-heading h2 { margin: 0; }
 .workspace-manager-heading p { color: var(--muted); font-size: .75rem; margin: .25rem 0 0; }
-.workspace-create > summary { cursor: pointer; font-size: .84rem; font-weight: 700; }
-.workspace-create[open] > summary { margin-bottom: .8rem; }
+.workspace-create-button { width: 100%; }
 .workspace-management-list { display: grid; gap: .65rem; }
-.workspace-management-card > header, .worktree-manager > header, .worktree-list article { align-items: flex-start; display: flex; gap: .7rem; justify-content: space-between; }
-.workspace-management-card > header > span:first-child, .worktree-list article > span:first-child { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.workspace-management-card > header, .worktree-list article { align-items: flex-start; display: flex; gap: .7rem; justify-content: space-between; }
+.workspace-management-card > header > span:not(.workspace-tree-branch), .worktree-list article > span:first-child { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .workspace-management-card strong, .worktree-list strong { font-size: .85rem; }
-.workspace-management-card small, .worktree-list small, .worktree-manager > header p { color: var(--muted); font-size: .65rem; overflow-wrap: anywhere; }
-.workspace-position, .worktree-state { color: var(--muted); flex: 0 0 auto; font-size: .68rem; }
+.workspace-management-card small, .worktree-list small { color: var(--muted); font-size: .65rem; overflow-wrap: anywhere; }
+.worktree-state { color: var(--muted); flex: 0 0 auto; font-size: .68rem; }
 .workspace-management-meta { color: var(--muted); font-size: .68rem; margin: .45rem 0 0; }
 .workspace-management-actions, .button-row { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .7rem; }
-.worktree-manager > header h3, .worktree-create-form h4 { margin: 0; }
-.worktree-manager > header p { margin: .2rem 0 0; }
+.worktree-create-form h4 { margin: 0; }
 .worktree-list { border: 1px solid var(--border); border-radius: .65rem; margin-top: .75rem; overflow: hidden; }
 .worktree-list article { align-items: center; padding: .65rem; }
 .worktree-list article + article { border-top: 1px solid var(--border); }
 .worktree-create-form { border-top: 1px solid var(--border); margin-top: .9rem; padding-top: .9rem; }
+.workspace-management-slot { -webkit-touch-callout: none; -webkit-user-select: none; position: relative; touch-action: pan-y; transition: transform .12s ease; user-select: none; }
+.workspace-management-slot.workspace-dragging { box-shadow: 0 .75rem 2rem rgb(0 0 0 / .4); border-radius: .8rem; opacity: .96; touch-action: none; transition: none; z-index: 3; }
+.workspace-drag-handle { background: transparent; border: 0; color: var(--muted); cursor: grab; flex: 0 0 auto; font-size: 1.25rem; line-height: 1; min-height: 2rem; min-width: 2rem; padding: .2rem; touch-action: none; }
+.workspace-drag-handle:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.workspace-drag-handle:active { cursor: grabbing; }
+.workspace-management-worktrees { border-top: 1px solid var(--border); margin-top: .8rem; padding-left: .8rem; }
+.workspace-management-card.nested-workspace { border-left: 2px solid color-mix(in srgb, var(--primary) 45%, var(--border)); padding-left: .75rem; }
+.workspace-management-card.nested-workspace + .workspace-management-card.nested-workspace { border-top: 1px solid var(--border); padding-top: .8rem; }
+.workspace-tree-branch { color: var(--muted); flex: 0 0 auto; }
 /* Long-press starts a tab drag; selectable text would trigger the platform
    text-selection and search sheets instead. */
 .agent-list, .agent-rail { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
