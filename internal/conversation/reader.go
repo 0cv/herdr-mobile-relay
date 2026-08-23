@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	panehistory "github.com/0cv/herdr-mobile-relay/internal/history"
 )
 
@@ -62,23 +63,13 @@ type Reader struct {
 }
 
 func NewReader(home string) *Reader {
-	claudeHome := firstConfiguredRoot("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
-	codexHome := firstConfiguredRoot("CODEX_HOME", filepath.Join(home, ".codex"))
-	piHome := firstConfiguredRoot("PI_CODING_AGENT_DIR", filepath.Join(home, ".pi", "agent"))
 	return &Reader{
-		claudeRoots: []string{filepath.Join(claudeHome, "projects")},
-		qoderRoots:  []string{filepath.Join(home, ".qoder", "projects")},
-		codexRoots:  []string{filepath.Join(codexHome, "sessions")},
-		piRoots:     []string{filepath.Join(piHome, "sessions")},
-		ompRoots:    []string{filepath.Join(home, ".omp", "agent", "sessions")},
+		claudeRoots: agentroots.Claude(home),
+		qoderRoots:  agentroots.Qoder(home),
+		codexRoots:  agentroots.Codex(home),
+		piRoots:     agentroots.Pi(home),
+		ompRoots:    agentroots.OMP(home),
 	}
-}
-
-func firstConfiguredRoot(environment, fallback string) string {
-	if configured := strings.TrimSpace(os.Getenv(environment)); configured != "" {
-		return configured
-	}
-	return fallback
 }
 
 func Supported(agent string) bool {
