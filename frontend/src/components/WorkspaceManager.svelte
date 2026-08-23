@@ -48,7 +48,8 @@
     items: WorkspaceSlot[];
     gap: number;
   } | null>(null);
-  let pendingWorkspaceOrder = $state<string[] | null>(null);
+  let pendingWorkspaceOrder = $state<{ relayId: string; order: string[] } | null>(null);
+  let directoryLoadGeneration = 0;
 
   const readyRelays = $derived($relays.filter((relay) => {
     const connection = $connections.get(relay.id);
@@ -57,13 +58,14 @@
       && connection.capabilities.includes('workspace_management');
   }));
   const connection = $derived($connections.get(relayId));
+  const worktreeManagementAvailable = $derived(connection?.capabilities.includes('worktree_management') ?? false);
   const relayWorkspaces = $derived(
     $workspaces.filter((workspace) => workspace.relay_id === relayId),
   );
   const workspaceTrees = $derived(relayWorkspaceTrees(relayWorkspaces));
   const displayWorkspaceTrees = $derived.by(() => {
-    if (!pendingWorkspaceOrder) return workspaceTrees;
-    const rank = new Map(pendingWorkspaceOrder.map((id, index) => [id, index]));
+    if (pendingWorkspaceOrder?.relayId !== relayId) return workspaceTrees;
+    const rank = new Map(pendingWorkspaceOrder.order.map((id, index) => [id, index]));
     return [...workspaceTrees].sort((left, right) =>
       (rank.get(left.workspace.workspace_id) ?? Number.MAX_SAFE_INTEGER)
       - (rank.get(right.workspace.workspace_id) ?? Number.MAX_SAFE_INTEGER));
@@ -86,6 +88,8 @@
     loadedRelay = relayId;
     cwd = '';
     label = '';
+    renamingId = '';
+    renameLabel = '';
     createOpen = false;
     worktreeWorkspaceId = '';
     worktreeOpen = false;
@@ -102,9 +106,18 @@
   });
 
   $effect(() => {
-    if (!pendingWorkspaceOrder) return;
+    const pending = pendingWorkspaceOrder;
+    if (!pending || pending.relayId !== relayId) return;
     const current = workspaceTrees.map((tree) => tree.workspace.workspace_id);
-    if (current.join('\u0000') === pendingWorkspaceOrder.join('\u0000')) {
+    if (current.join('\u0000') === pending.order.join('\u0000')) {
+      pendingWorkspaceOrder = null;
+      return;
+    }
+    // An authoritative snapshot whose membership differs from the optimistic
+    // array invalidates the optimism outright; only a pure reorder of the
+    // same set keeps waiting for the relay's confirmation.
+    const optimistic = new Set(pending.order);
+    if (current.length !== pending.order.length || current.some((id) => !optimistic.has(id))) {
       pendingWorkspaceOrder = null;
     }
   });
@@ -114,14 +127,18 @@
   }
 
   async function loadDirectory(path: string) {
-    if (!relayId || !connection?.capabilities.includes('directory_browser')) return;
+    const loadRelayId = relayId;
+    const generation = ++directoryLoadGeneration;
+    if (!loadRelayId || !connection?.capabilities.includes('directory_browser')) return;
     try {
-      const listing = await relayStore.listDirectories(relayId, path);
+      const listing = await relayStore.listDirectories(loadRelayId, path);
+      if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
       if (listing.current.path) {
         cwd = listing.current.path;
         if (!label) label = pathBase(cwd);
       }
     } catch (caught) {
+      if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
       setStatus((caught as Error).message, true);
     }
   }
@@ -350,7 +367,7 @@
       sourceID,
       ...others.slice(insertIdx).map((item) => item.workspace.workspace_id),
     ];
-    pendingWorkspaceOrder = order;
+    pendingWorkspaceOrder = { relayId: tree.workspace.relay_id, order };
     movingWorkspace = sourceID;
     try {
       const legacyInsertIndex = beforeWorkspaceID
@@ -431,6 +448,20 @@
     }
   }
 
+  /**
+   * Refreshes the worktree dialog after a mutation, but only when the user
+   * still has it open: Escape-dismissing the dialog while the request was
+   * busy must not reopen it. When dismissed, the stale listing is dropped so
+   * the next explicit open fetches a fresh one.
+   */
+  async function refreshWorktrees(workspace: RelayWorkspace) {
+    if (worktreeOpen && worktreeWorkspaceId === workspace.workspace_id) {
+      await showWorktrees(workspace);
+      return;
+    }
+    if (worktreeWorkspaceId === workspace.workspace_id) worktreeListing = null;
+  }
+
   function closeWorktrees() {
     worktreeOpen = false;
     worktreeWorkspaceId = '';
@@ -439,10 +470,11 @@
 
   async function createWorktree(event: SubmitEvent) {
     event.preventDefault();
-    if (!worktreeWorkspace || !branch.trim()) return;
+    const workspace = worktreeWorkspace;
+    if (!workspace || !branch.trim()) return;
     busy = true;
     try {
-      await relayStore.createWorktree(worktreeWorkspace, {
+      await relayStore.createWorktree(workspace, {
         branch: branch.trim(),
         base: base.trim(),
         label: worktreeLabel.trim(),
@@ -451,7 +483,7 @@
       branch = '';
       base = '';
       worktreeLabel = '';
-      await showWorktrees(worktreeWorkspace);
+      await refreshWorktrees(workspace);
     } catch (caught) {
       setStatus((caught as Error).message, true);
     } finally {
@@ -460,12 +492,13 @@
   }
 
   async function openWorktree(path: string, labelValue: string) {
-    if (!worktreeWorkspace) return;
+    const workspace = worktreeWorkspace;
+    if (!workspace) return;
     busy = true;
     try {
-      await relayStore.openWorktree(worktreeWorkspace, { path });
+      await relayStore.openWorktree(workspace, { path });
       setStatus(`Opened worktree ${labelValue}.`);
-      await showWorktrees(worktreeWorkspace);
+      await refreshWorktrees(workspace);
     } catch (caught) {
       setStatus((caught as Error).message, true);
     } finally {
@@ -520,10 +553,22 @@
       <div class="workspace-management-actions">
         <Button size="sm" disabled={busy || !(workspace.cwd || workspace.worktree?.checkout_path)} onclick={() => startAgent(workspace)}>Start Agent</Button>
         <Button size="sm" variant="secondary" disabled={busy} onclick={() => beginRename(workspace)}>Rename</Button>
-        <Button size="sm" variant="secondary" disabled={busy || !connection?.capabilities.includes('worktree_management')} onclick={() => showWorktrees(workspace)}>Worktrees</Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={busy || !worktreeManagementAvailable}
+          title={worktreeManagementAvailable ? undefined : 'This relay does not support worktree management'}
+          onclick={() => showWorktrees(workspace)}
+        >Worktrees</Button>
         <Button size="sm" variant="danger" disabled={busy} onclick={() => beginConfirm('close', workspace)}>Close</Button>
         {#if workspace.worktree?.is_linked_worktree}
-          <Button size="sm" variant="danger" disabled={busy} onclick={() => beginConfirm('remove', workspace)}>Remove Worktree</Button>
+          <Button
+            size="sm"
+            variant="danger"
+            disabled={busy || !worktreeManagementAvailable}
+            title={worktreeManagementAvailable ? undefined : 'This relay does not support worktree management'}
+            onclick={() => beginConfirm('remove', workspace)}
+          >Remove Worktree</Button>
         {/if}
       </div>
     {/if}

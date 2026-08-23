@@ -432,7 +432,7 @@ func (c *Client) WorktreeCreate(
 	args = appendOptionalFlag(args, "--label", label)
 	var result WorktreeMutationResult
 	if err := c.runResult(ctx, &result, args...); err != nil {
-		return nil, fmt.Errorf("herdr worktree create: %w", err)
+		return nil, fmt.Errorf("herdr worktree create: %w", dispatchedAfterSuccess(err))
 	}
 	return &result, nil
 }
@@ -447,7 +447,7 @@ func (c *Client) WorktreeOpen(
 	args = appendOptionalFlag(args, "--label", label)
 	var result WorktreeMutationResult
 	if err := c.runResult(ctx, &result, args...); err != nil {
-		return nil, fmt.Errorf("herdr worktree open: %w", err)
+		return nil, fmt.Errorf("herdr worktree open: %w", dispatchedAfterSuccess(err))
 	}
 	return &result, nil
 }
@@ -463,9 +463,21 @@ func (c *Client) WorktreeRemove(
 	}
 	var result WorktreeRemoveResult
 	if err := c.runResult(ctx, &result, args...); err != nil {
-		return nil, fmt.Errorf("herdr worktree remove: %w", err)
+		return nil, fmt.Errorf("herdr worktree remove: %w", dispatchedAfterSuccess(err))
 	}
 	return &result, nil
+}
+
+// dispatchedAfterSuccess classifies runResult failures for mutations. An
+// error that carries no dispatch boundary comes from decoding the result
+// envelope after the subprocess reported success: the mutation may have
+// applied even though its outcome could not be read, so retrying is unsafe.
+// Errors already classified at the subprocess boundary keep their marker.
+func dispatchedAfterSuccess(err error) error {
+	if errors.Is(err, ErrNotStarted) || errors.Is(err, ErrDispatchedUnknown) {
+		return err
+	}
+	return errors.Join(ErrDispatchedUnknown, err)
 }
 
 func appendOptionalFlag(args []string, flag, value string) []string {

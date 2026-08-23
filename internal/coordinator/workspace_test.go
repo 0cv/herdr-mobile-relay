@@ -2,6 +2,8 @@ package coordinator
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -41,5 +43,83 @@ func TestWorkspaceStatePreservesCwdAcrossMetadataEvents(t *testing.T) {
 	workspace, ok := state.Workspace("w1")
 	if !ok || workspace.Label != "Renamed" || workspace.Cwd != "/home/user/project" {
 		t.Fatalf("workspace = %+v, ok=%v", workspace, ok)
+	}
+}
+
+// A workspace mutation must release the hub's global ordered ingress as soon
+// as its ordering position (topologyMu) is secured — not after the Herdr
+// command completes, which can take the full command deadline.
+func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "rename-started")
+	release := filepath.Join(dir, "release-rename")
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"if [ \"$1 $2\" = \"workspace rename\" ]; then\n"+
+		"  touch \""+started+"\"\n"+
+		"  while [ ! -f \""+release+"\" ]; do sleep 0.01; done\n"+
+		"fi\n"+
+		"printf '{\"ok\":true}\\n'\n")
+
+	dispatcher := NewDispatcher(
+		herdr.NewClient(bin, filepath.Join(dir, "sock")),
+		NewState(testLogger()),
+		nil,
+		testLogger(),
+	)
+	t.Cleanup(func() {
+		_ = os.WriteFile(release, nil, 0o600)
+		_ = dispatcher.Close(context.Background())
+	})
+	dispatcher.state.CommitWorkspaces([]herdr.Workspace{{ID: "w1", Label: "Project"}})
+	dispatcher.state.CommitInventory(
+		[]*AgentState{{PaneID: "pane-1", Agent: "codex", Status: "working"}},
+		dispatcher.state.RevisionCounter(),
+	)
+
+	admitted := make(chan struct{})
+	renameDone := make(chan *CommandResult, 1)
+	go func() {
+		renameDone <- dispatcher.HandleTopologyAdmitted(
+			t.Context(),
+			func() { close(admitted) },
+			func(ctx context.Context) *CommandResult {
+				return dispatcher.HandleWorkspaceRename(ctx, "rename-1", "w1", "Renamed")
+			},
+		)
+	}()
+
+	select {
+	case <-admitted:
+	case <-time.After(time.Second):
+		t.Fatal("workspace mutation was not admitted before its Herdr command completed")
+	}
+	select {
+	case result := <-renameDone:
+		t.Fatalf("rename completed before the stalled Herdr command was released: %+v", result)
+	default:
+	}
+
+	promptCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	prompt := dispatcher.Handle(promptCtx, map[string]any{
+		"action":     "submit_prompt",
+		"request_id": "prompt",
+		"pane_id":    "pane-1",
+		"text":       "continue",
+	})
+	if !prompt.OK {
+		t.Fatalf("unrelated command was blocked behind the workspace mutation: %+v", prompt)
+	}
+
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-renameDone:
+		if !result.OK {
+			t.Fatalf("rename result = %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("rename did not complete after the Herdr command was released")
 	}
 }

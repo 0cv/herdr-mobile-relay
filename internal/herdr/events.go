@@ -121,10 +121,22 @@ type TopologySnapshot struct {
 
 type EventClient struct {
 	path string
+	// supportsWorkspaceReordered reports whether the running Herdr build
+	// accepts a workspace.reordered subscription. Herdr 0.7.5 (the supported
+	// minimum) rejects the whole events.subscribe request when the name is
+	// unknown, degrading realtime updates to polling.
+	supportsWorkspaceReordered func() bool
 }
 
 func NewEventClient(path string) *EventClient {
 	return &EventClient{path: path}
+}
+
+// SetWorkspaceReorderedProbe installs the capability probe consulted on each
+// subscribe. The probe runs lazily so constructing the client stays cheap;
+// when unset, workspace.reordered is excluded.
+func (c *EventClient) SetWorkspaceReorderedProbe(probe func() bool) {
+	c.supportsWorkspaceReordered = probe
 }
 
 // Bootstrap subscribes before taking a snapshot. Events arriving while the
@@ -161,7 +173,11 @@ func (c *EventClient) subscribe(ctx context.Context) (*EventStream, error) {
 	request := map[string]any{
 		"id":     eventSubscriptionRequestID,
 		"method": "events.subscribe",
-		"params": map[string]any{"subscriptions": topologySubscriptions()},
+		"params": map[string]any{
+			"subscriptions": topologySubscriptions(
+				c.supportsWorkspaceReordered != nil && c.supportsWorkspaceReordered(),
+			),
+		},
 	}
 	if err := writeSocketJSON(conn, request); err != nil {
 		_ = conn.Close()
@@ -259,7 +275,11 @@ func (c *EventClient) snapshot(ctx context.Context) (SessionSnapshot, error) {
 	return response.Result.Snapshot, nil
 }
 
-func topologySubscriptions() []map[string]string {
+// topologySubscriptions lists the events the relay needs for realtime
+// topology. workspace.reordered exists only in Herdr builds that also expose
+// workspace.move_block; older builds reject the entire events.subscribe
+// request when the name is present, so it is gated on the capability probe.
+func topologySubscriptions(includeWorkspaceReordered bool) []map[string]string {
 	names := []string{
 		"pane.created",
 		"pane.closed",
@@ -277,11 +297,13 @@ func topologySubscriptions() []map[string]string {
 		"workspace.closed",
 		"workspace.renamed",
 		"workspace.moved",
-		"workspace.reordered",
 		"workspace.focused",
 		"worktree.created",
 		"worktree.opened",
 		"worktree.removed",
+	}
+	if includeWorkspaceReordered {
+		names = append(names, "workspace.reordered")
 	}
 	subscriptions := make([]map[string]string, len(names))
 	for index, name := range names {
@@ -477,11 +499,33 @@ func NewSessionCache(snapshot SessionSnapshot) *SessionCache {
 }
 
 func (c *SessionCache) Snapshot() TopologySnapshot {
+	// Tab and pane events update only the tab and pane maps, so counts copied
+	// verbatim from cached workspace records go stale until the next
+	// reconcile poll. Derive them from the maps so every snapshot is
+	// internally consistent.
+	tabCounts := make(map[string]int, len(c.workspaces))
+	for _, tab := range c.tabs {
+		tabCounts[tab.WorkspaceID]++
+	}
+	paneCounts := make(map[string]int, len(c.workspaces))
+	for _, pane := range c.panes {
+		paneCounts[pane.WorkspaceID]++
+	}
 	workspaces := make([]Workspace, 0, len(c.workspaces))
 	for _, id := range c.workspaceOrder {
 		if workspace, ok := c.workspaces[id]; ok {
 			if workspace.Cwd == "" {
 				workspace.Cwd = c.workspaceCwd(id, workspace)
+			}
+			workspace.TabCount = tabCounts[id]
+			workspace.PaneCount = paneCounts[id]
+			if workspace.ActiveTabID != "" {
+				// The successor of a closed active tab cannot be derived
+				// locally; keep the authoritative value otherwise, but never
+				// report a closed tab as active.
+				if _, open := c.tabs[workspace.ActiveTabID]; !open {
+					workspace.ActiveTabID = ""
+				}
 			}
 			workspaces = append(workspaces, workspace)
 		}

@@ -1,0 +1,6 @@
+{
+  "type": "worktree_list",
+  "request_id": "req-worktree-list",
+  "protocol": 2,
+  "workspace_id": "w1"
+}

@@ -488,54 +488,57 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 		case "workspace_create", "workspace_rename", "workspace_reorder", "workspace_close",
 			"worktree_list", "worktree_create", "worktree_open", "worktree_remove":
-			var result *coordinator.CommandResult
-			switch action {
-			case "workspace_create":
-				result = s.dispatcher.HandleWorkspaceCreate(commandCtx, inbound.RequestID, inbound.Cwd, inbound.Label)
-			case "workspace_rename":
-				result = s.dispatcher.HandleWorkspaceRename(commandCtx, inbound.RequestID, inbound.WorkspaceID, inbound.Label)
-			case "workspace_reorder":
-				if len(inbound.WorkspaceIDs) > 0 {
-					result = s.dispatcher.HandleWorkspaceReorderBlock(
-						commandCtx,
+			// The dispatcher signals admitted() as soon as it holds the
+			// topology ordering lock; the Herdr command itself must not
+			// block the hub's global ordered ingress.
+			result := s.dispatcher.HandleTopologyAdmitted(commandCtx, admitted, func(handlerCtx context.Context) *coordinator.CommandResult {
+				switch action {
+				case "workspace_create":
+					return s.dispatcher.HandleWorkspaceCreate(handlerCtx, inbound.RequestID, inbound.Cwd, inbound.Label)
+				case "workspace_rename":
+					return s.dispatcher.HandleWorkspaceRename(handlerCtx, inbound.RequestID, inbound.WorkspaceID, inbound.Label)
+				case "workspace_reorder":
+					if len(inbound.WorkspaceIDs) > 0 {
+						return s.dispatcher.HandleWorkspaceReorderBlock(
+							handlerCtx,
+							inbound.RequestID,
+							inbound.WorkspaceIDs,
+							inbound.BeforeWorkspaceID,
+						)
+					}
+					return s.dispatcher.HandleWorkspaceReorder(handlerCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
+				case "workspace_close":
+					return s.dispatcher.HandleWorkspaceClose(handlerCtx, inbound.RequestID, inbound.WorkspaceID)
+				case "worktree_list":
+					return s.dispatcher.HandleWorktreeList(handlerCtx, inbound.RequestID, inbound.WorkspaceID)
+				case "worktree_create":
+					return s.dispatcher.HandleWorktreeCreate(
+						handlerCtx,
 						inbound.RequestID,
-						inbound.WorkspaceIDs,
-						inbound.BeforeWorkspaceID,
+						inbound.WorkspaceID,
+						inbound.Branch,
+						inbound.Base,
+						inbound.Path,
+						inbound.Label,
 					)
-				} else {
-					result = s.dispatcher.HandleWorkspaceReorder(commandCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
+				case "worktree_open":
+					return s.dispatcher.HandleWorktreeOpen(
+						handlerCtx,
+						inbound.RequestID,
+						inbound.WorkspaceID,
+						inbound.Path,
+						inbound.Branch,
+						inbound.Label,
+					)
+				default:
+					return s.dispatcher.HandleWorktreeRemove(
+						handlerCtx,
+						inbound.RequestID,
+						inbound.WorkspaceID,
+						inbound.Force,
+					)
 				}
-			case "workspace_close":
-				result = s.dispatcher.HandleWorkspaceClose(commandCtx, inbound.RequestID, inbound.WorkspaceID)
-			case "worktree_list":
-				result = s.dispatcher.HandleWorktreeList(commandCtx, inbound.RequestID, inbound.WorkspaceID)
-			case "worktree_create":
-				result = s.dispatcher.HandleWorktreeCreate(
-					commandCtx,
-					inbound.RequestID,
-					inbound.WorkspaceID,
-					inbound.Branch,
-					inbound.Base,
-					inbound.Path,
-					inbound.Label,
-				)
-			case "worktree_open":
-				result = s.dispatcher.HandleWorktreeOpen(
-					commandCtx,
-					inbound.RequestID,
-					inbound.WorkspaceID,
-					inbound.Path,
-					inbound.Branch,
-					inbound.Label,
-				)
-			case "worktree_remove":
-				result = s.dispatcher.HandleWorktreeRemove(
-					commandCtx,
-					inbound.RequestID,
-					inbound.WorkspaceID,
-					inbound.Force,
-				)
-			}
+			})
 			if auditedWrite {
 				s.recordWriteAudit(client, msg, result)
 			}
@@ -819,6 +822,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	startBackground(func() { s.poller.Run(ctx) })
 	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
+	// Herdr builds without workspace.move_block also reject a
+	// workspace.reordered subscription, which would fail the whole
+	// events.subscribe and degrade realtime updates to polling.
+	eventClient.SetWorkspaceReorderedProbe(s.herdrC.SupportsWorkspaceMoveBlock)
 	startBackground(func() { s.poller.RunEvents(ctx, eventClient) })
 	startBackground(func() { s.captureHistoryLoop(ctx) })
 	startBackground(func() { s.paneSizeM.Run(ctx) })

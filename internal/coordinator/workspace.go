@@ -37,6 +37,7 @@ func (d *Dispatcher) HandleWorkspaceCreate(
 	defer cancel()
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
+	d.admitTopology(ctx)
 	created, err := d.herdr.WorkspaceCreate(commandCtx, resolved, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -69,6 +70,7 @@ func (d *Dispatcher) HandleWorkspaceRename(
 	defer cancel()
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
+	d.admitTopology(ctx)
 	if err := d.herdr.WorkspaceRename(commandCtx, workspace.ID, label); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -94,6 +96,7 @@ func (d *Dispatcher) HandleWorkspaceReorder(
 	defer cancel()
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
+	d.admitTopology(ctx)
 	if err := d.herdr.WorkspaceMove(commandCtx, workspace.ID, *insertIndex); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -134,6 +137,7 @@ func (d *Dispatcher) HandleWorkspaceReorderBlock(
 	defer cancel()
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
+	d.admitTopology(ctx)
 	if err := d.herdr.WorkspaceMoveBlock(commandCtx, workspaceIDs, beforeWorkspaceID); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -158,6 +162,7 @@ func (d *Dispatcher) HandleWorkspaceClose(
 	defer cancel()
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
+	d.admitTopology(ctx)
 	if err := d.herdr.WorkspaceClose(commandCtx, workspace.ID); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -210,6 +215,7 @@ func (d *Dispatcher) HandleWorktreeCreate(
 	defer cancel()
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
+	d.admitTopology(ctx)
 	created, err := d.herdr.WorktreeCreate(commandCtx, workspace.ID, branch, base, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -241,6 +247,7 @@ func (d *Dispatcher) HandleWorktreeOpen(
 	defer cancel()
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
+	d.admitTopology(ctx)
 	opened, err := d.herdr.WorktreeOpen(commandCtx, workspace.ID, path, branch, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -267,6 +274,7 @@ func (d *Dispatcher) HandleWorktreeRemove(
 	defer cancel()
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
+	d.admitTopology(ctx)
 	removed, err := d.herdr.WorktreeRemove(commandCtx, workspace.ID, force)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -294,6 +302,16 @@ func (d *Dispatcher) topologyChanged() {
 	d.state.MarkTopologyChanged()
 	if d.wakePoll != nil {
 		d.wakePoll()
+	}
+}
+
+// admitTopology unblocks the hub's global ordered ingress once the caller
+// holds topologyMu: the mutex is the ordering boundary for topology
+// mutations, so the Herdr command itself must not keep later unrelated
+// messages from being admitted. No-op outside HandleTopologyAdmitted.
+func (d *Dispatcher) admitTopology(ctx context.Context) {
+	if admitted, ok := ctx.Value(admissionContextKey{}).(func()); ok && admitted != nil {
+		admitted()
 	}
 }
 

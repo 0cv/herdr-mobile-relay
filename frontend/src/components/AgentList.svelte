@@ -105,12 +105,25 @@
   function workspaceRecordsFor(visible: Agent[], includeEmpty: boolean): RelayWorkspace[] {
     const visibleKeys = new Set(visible.map((agent) => workspaceIdentity(agent)));
     const occupiedKeys = new Set(agents.map((agent) => workspaceIdentity(agent)));
+    // A linked worktree whose repository workspace is not open on the same
+    // relay has no parent card to nest under (relayWorkspaceTrees renders it
+    // top-level), so an empty one must stay visible in its own right.
+    const orphanLinkedWorktree = (workspace: RelayWorkspace): boolean => {
+      const worktree = workspace.worktree;
+      if (worktree?.is_linked_worktree !== true) return false;
+      if (!worktree.repo_key) return true;
+      return !workspaces.some((candidate) => (
+        candidate.relay_id === workspace.relay_id
+        && candidate.worktree?.repo_key === worktree.repo_key
+        && candidate.worktree.is_linked_worktree === false
+      ));
+    };
     const selected = new Set(workspaces.filter((workspace) => {
       const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;
-      const unoccupiedParent = includeEmpty
+      const unoccupiedTopLevel = includeEmpty
         && !occupiedKeys.has(key)
-        && workspace.worktree?.is_linked_worktree !== true;
-      return visibleKeys.has(key) || unoccupiedParent;
+        && (workspace.worktree?.is_linked_worktree !== true || orphanLinkedWorktree(workspace));
+      return visibleKeys.has(key) || unoccupiedTopLevel;
     }).map((workspace) => `${workspace.relay_id}\u0000${workspace.workspace_id}`));
     for (const workspace of workspaces) {
       const key = `${workspace.relay_id}\u0000${workspace.workspace_id}`;

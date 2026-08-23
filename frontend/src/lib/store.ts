@@ -240,6 +240,20 @@ export class CommandError extends Error {
   data?: Record<string, unknown>;
 }
 
+/**
+ * A rejection for a frame that was already written to the transport. The
+ * relay may have received and applied the command even though no result came
+ * back, so callers must never treat a retry as safe (the retry-safety
+ * doctrine's `dispatched_unknown` phase). Definitive pre-send failures —
+ * capability checks, validation, a relay that never connected, a write the
+ * transport refused — stay plain CommandErrors.
+ */
+function dispatchedUnknownError(message: string): CommandError {
+  const error = new CommandError(message);
+  error.data = { dispatched_unknown: true };
+  return error;
+}
+
 class RelayStore {
   readonly relayConfigs = writable<RelayConfig[]>([]);
   readonly connections = writable<Map<string, RelayConnection>>(new Map());
@@ -1137,7 +1151,7 @@ class RelayStore {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        reject(new CommandError('Relay confirmation timed out'));
+        reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, timeoutMs);
       this.pendingRequests.set(requestId, { relayId, action: payload.type, resolve, reject, timer });
       const command: Record<string, unknown> = {
@@ -1188,7 +1202,9 @@ class RelayStore {
   private workspaceManagementAvailable(relayId: string, capability = 'workspace_management'): RelayConnection {
     const connection = this.connectionsValue.get(relayId);
     if (!connection?.capabilities.includes(capability)) {
-      throw new CommandError('This relay does not support workspace management');
+      throw new CommandError(capability === 'worktree_management'
+        ? 'This relay does not support worktree management'
+        : 'This relay does not support workspace management');
     }
     return connection;
   }
@@ -1395,7 +1411,7 @@ class RelayStore {
       clearTimeout(pending.timer);
       pending.timer = setTimeout(() => {
         this.pendingRequests.delete(result.request_id);
-        pending.reject(new CommandError('Relay confirmation timed out'));
+        pending.reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, ACCEPTED_COMMAND_TIMEOUT_MS);
       this.showToast('Command accepted; waiting for agent…');
       return;
@@ -1422,7 +1438,9 @@ class RelayStore {
       if (pending.relayId !== relayId) continue;
       clearTimeout(pending.timer);
       operations.delete(requestId);
-      pending.reject(new CommandError(message));
+      // Every entry here survived its write, so the frame is already on the
+      // wire and the relay may act on it after this rejection.
+      pending.reject(dispatchedUnknownError(message));
     }
   }
 
@@ -1933,7 +1951,7 @@ class RelayStore {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingUploads.delete(requestId);
-        reject(new CommandError('Image upload did not finish in time.'));
+        reject(dispatchedUnknownError('Image upload did not finish in time.'));
       }, timeoutMs);
       this.pendingUploads.set(requestId, {
         relayId: agent.relay_id,

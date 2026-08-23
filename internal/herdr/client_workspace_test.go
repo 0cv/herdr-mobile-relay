@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,5 +63,57 @@ func TestSupportsWorkspaceMoveBlockReadsBundledSchema(t *testing.T) {
 	client := NewClient(path, filepath.Join(t.TempDir(), "herdr.sock"))
 	if !client.SupportsWorkspaceMoveBlock() {
 		t.Fatal("workspace.move_block was not detected")
+	}
+}
+
+// A malformed or missing result envelope after the subprocess reported
+// success means the mutation may have applied: the failure must classify as
+// dispatched-unknown, never as a plain retryable failure.
+func TestWorktreeMutationDecodeFailureIsDispatchedUnknown(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(client *Client) error
+	}{
+		{"create", func(client *Client) error {
+			_, err := client.WorktreeCreate(context.Background(), "w1", "fix/one", "", "")
+			return err
+		}},
+		{"open", func(client *Client) error {
+			_, err := client.WorktreeOpen(context.Background(), "w1", "", "fix/one", "")
+			return err
+		}},
+		{"remove", func(client *Client) error {
+			_, err := client.WorktreeRemove(context.Background(), "w2", false)
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			bin := writeResultScript(t, `{"result":null}`)
+			client := NewClient(bin, filepath.Join(t.TempDir(), "herdr.sock"))
+			err := test.call(client)
+			if err == nil {
+				t.Fatal("malformed envelope did not fail")
+			}
+			if !errors.Is(err, ErrDispatchedUnknown) {
+				t.Fatalf("err = %v, want ErrDispatchedUnknown", err)
+			}
+			if errors.Is(err, ErrNotStarted) {
+				t.Fatalf("err = %v classifies a possibly-applied mutation as retry-safe", err)
+			}
+		})
+	}
+}
+
+// A subprocess that never started keeps its retry-safe classification even
+// though the decode wrapper runs on the same path.
+func TestWorktreeMutationNotStartedStaysRetrySafe(t *testing.T) {
+	client := NewClient(filepath.Join(t.TempDir(), "missing-binary"), filepath.Join(t.TempDir(), "herdr.sock"))
+	_, err := client.WorktreeRemove(context.Background(), "w2", false)
+	if !errors.Is(err, ErrNotStarted) {
+		t.Fatalf("err = %v, want ErrNotStarted", err)
+	}
+	if errors.Is(err, ErrDispatchedUnknown) {
+		t.Fatalf("err = %v classifies an unstarted subprocess as dispatched-unknown", err)
 	}
 }

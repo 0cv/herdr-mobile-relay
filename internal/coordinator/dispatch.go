@@ -308,6 +308,28 @@ func (d *Dispatcher) HandleAdmitted(
 	return result
 }
 
+// HandleTopologyAdmitted mirrors HandleAdmitted for the workspace and
+// worktree handlers, which are called directly rather than through Handle.
+// The handler signals admission via admitTopology once it holds topologyMu —
+// its ordering position is then secured and the hub's global ordered ingress
+// must not stay blocked for the Herdr command itself. The trailing signal
+// covers handlers that return before taking the lock (validation failures,
+// read-only paths).
+func (d *Dispatcher) HandleTopologyAdmitted(
+	ctx context.Context,
+	admitted func(),
+	handle func(context.Context) *CommandResult,
+) *CommandResult {
+	var once sync.Once
+	signal := func() {
+		once.Do(admitted)
+	}
+	ctx = context.WithValue(ctx, admissionContextKey{}, signal)
+	result := handle(ctx)
+	signal()
+	return result
+}
+
 func isQoderAgent(agent string) bool {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
 	case "qoder", "qodercli":

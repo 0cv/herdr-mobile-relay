@@ -317,7 +317,7 @@ func TestSessionCacheKeepsEmptyWorkspacesAndWorktreeChanges(t *testing.T) {
 
 func TestTopologySubscriptionsCoverWorkspaceAndWorktreeMutations(t *testing.T) {
 	seen := make(map[string]bool)
-	for _, subscription := range topologySubscriptions() {
+	for _, subscription := range topologySubscriptions(true) {
 		seen[subscription["type"]] = true
 	}
 	for _, event := range []string{
@@ -332,6 +332,122 @@ func TestTopologySubscriptionsCoverWorkspaceAndWorktreeMutations(t *testing.T) {
 		if !seen[event] {
 			t.Fatalf("topology subscription omits %s", event)
 		}
+	}
+}
+
+// Herdr 0.7.5 — the supported minimum — rejects the entire events.subscribe
+// request when workspace.reordered appears in it, degrading realtime updates
+// to polling. The name must be excluded unless the capability probe passes.
+func TestTopologySubscriptionsGateWorkspaceReorderedBehindProbe(t *testing.T) {
+	for _, subscription := range topologySubscriptions(false) {
+		if subscription["type"] == "workspace.reordered" {
+			t.Fatal("workspace.reordered subscribed without capability support")
+		}
+	}
+	seen := make(map[string]bool)
+	for _, subscription := range topologySubscriptions(false) {
+		seen[subscription["type"]] = true
+	}
+	if !seen["workspace.moved"] || !seen["worktree.removed"] {
+		t.Fatal("gating workspace.reordered dropped unrelated subscriptions")
+	}
+}
+
+func TestEventSubscribeSendsGatedSubscriptionList(t *testing.T) {
+	subscribedTypes := func(t *testing.T, probe func() bool) map[string]bool {
+		t.Helper()
+		socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+		listener, err := net.Listen("unix", socketPath)
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		defer listener.Close()
+		received := make(chan []map[string]string, 1)
+		go func() {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			defer conn.Close()
+			var request struct {
+				ID     string `json:"id"`
+				Params struct {
+					Subscriptions []map[string]string `json:"subscriptions"`
+				} `json:"params"`
+			}
+			if json.NewDecoder(bufio.NewReader(conn)).Decode(&request) != nil {
+				return
+			}
+			received <- request.Params.Subscriptions
+			_ = writeTestJSON(conn, map[string]any{
+				"id":     request.ID,
+				"result": map[string]any{"type": "subscription_started"},
+			})
+		}()
+		client := NewEventClient(socketPath)
+		if probe != nil {
+			client.SetWorkspaceReorderedProbe(probe)
+		}
+		stream, err := client.subscribe(context.Background())
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		defer stream.Close()
+		seen := make(map[string]bool)
+		for _, subscription := range <-received {
+			seen[subscription["type"]] = true
+		}
+		return seen
+	}
+
+	if seen := subscribedTypes(t, nil); seen["workspace.reordered"] {
+		t.Fatal("default subscribe sent workspace.reordered without a probe")
+	}
+	if seen := subscribedTypes(t, func() bool { return true }); !seen["workspace.reordered"] {
+		t.Fatal("supported build did not subscribe to workspace.reordered")
+	}
+}
+
+// tab.created and tab.closed update only the tab and pane maps, so snapshots
+// must derive the per-workspace counts instead of copying the stale values
+// cached from earlier workspace events.
+func TestSessionCacheSnapshotDerivesCountsFromTabAndPaneEvents(t *testing.T) {
+	cache := NewSessionCache(SessionSnapshot{
+		Workspaces: []Workspace{
+			{ID: "w1", Number: 1, Label: "Project", TabCount: 1, PaneCount: 1, ActiveTabID: "t1"},
+		},
+		Tabs:  []Tab{{ID: "t1", WorkspaceID: "w1", Number: 1}},
+		Panes: []SnapshotPane{{ID: "p1", TabID: "t1", WorkspaceID: "w1"}},
+	})
+
+	changed, err := cache.Apply(Event{
+		Event: "tab.created",
+		Data:  json.RawMessage(`{"tab":{"tab_id":"t2","workspace_id":"w1","number":2}}`),
+	})
+	if err != nil || !changed {
+		t.Fatalf("Apply(tab.created) changed=%v err=%v", changed, err)
+	}
+	workspace := cache.Snapshot().Workspaces[0]
+	if workspace.TabCount != 2 || workspace.PaneCount != 1 {
+		t.Fatalf("workspace after tab.created = %+v, want tab_count=2 pane_count=1", workspace)
+	}
+	if workspace.ActiveTabID != "t1" {
+		t.Fatalf("active_tab_id = %q, want authoritative t1", workspace.ActiveTabID)
+	}
+
+	changed, err = cache.Apply(Event{
+		Event: "tab.closed",
+		Data:  json.RawMessage(`{"tab_id":"t1"}`),
+	})
+	if err != nil || !changed {
+		t.Fatalf("Apply(tab.closed) changed=%v err=%v", changed, err)
+	}
+	workspace = cache.Snapshot().Workspaces[0]
+	if workspace.TabCount != 1 || workspace.PaneCount != 0 {
+		t.Fatalf("workspace after tab.closed = %+v, want tab_count=1 pane_count=0", workspace)
+	}
+	if workspace.ActiveTabID == "t1" {
+		t.Fatal("closed tab t1 is still reported active")
 	}
 }
 

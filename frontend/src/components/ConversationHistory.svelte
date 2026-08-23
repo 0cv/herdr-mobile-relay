@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import ConversationMessage from '$components/ConversationMessage.svelte';
   import Button from '$components/ui/Button.svelte';
   import { agentNeedsInspection, agentNeedsResponse, displayName } from '$lib/agents';
+  import { clearPromptDraft, loadPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
   import { relayStore } from '$lib/store';
   import type { Agent, ConversationEntry } from '$lib/types';
 
@@ -23,7 +24,7 @@
   let streamElement = $state<HTMLElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
-  let composer = $state('');
+  let composer = $state(untrack(() => loadPromptDraft(agent)));
   let sendingPrompt = $state(false);
   let uploadingImage = $state(false);
   let uploadStatus = $state('');
@@ -92,6 +93,12 @@
     void tick().then(() => {
       if (value === composer) resizeComposer();
     });
+  });
+
+  // The same per-agent draft store TerminalView uses, so a reply drafted here
+  // survives switching views or panes and continues in the terminal composer.
+  $effect(() => {
+    savePromptDraft(agent, composer);
   });
 
   function trackScroll() {
@@ -234,6 +241,7 @@
     if (!text || inputLocked || sendingPrompt || uploadingImage) return;
     sendingPrompt = true;
     composer = '';
+    clearPromptDraft(agent);
     try {
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
       relayStore.showToast('Prompt sent.');

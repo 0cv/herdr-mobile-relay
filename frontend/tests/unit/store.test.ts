@@ -1,9 +1,9 @@
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setTerminalHistoryLines, setTerminalRefreshInterval } from '$lib/preferences';
-import { relayStore } from '$lib/store';
+import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
-import type { RelayConfig } from '$lib/types';
+import type { RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
@@ -1792,5 +1792,92 @@ describe('relay command store', () => {
     expect(get(relayStore.responding).has('fedora::w1:p1')).toBe(true);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(get(relayStore.responding).has('fedora::w1:p1')).toBe(false);
+  });
+
+  it('tags a command lost to a disconnect after its frame was written as dispatched_unknown', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      inventory: { state: 'ready' },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pending = relayStore.sendCommand(relayId, { type: 'submit_prompt', pane_id: 'w1:p1', text: 'ship it' });
+    expect(JSON.parse(socket.sent.at(-1)!).type).toBe('submit_prompt');
+
+    socket.serverClose();
+    const error = await pending.then(() => null, (caught) => caught as CommandError);
+    expect(error?.message).toBe('Relay disconnected');
+    expect(error?.data).toMatchObject({ dispatched_unknown: true });
+  });
+
+  it('tags an accepted command whose confirmation never arrives as dispatched_unknown', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      inventory: { state: 'ready' },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pending = relayStore.sendCommand(relayId, { type: 'submit_prompt', pane_id: 'w1:p1', text: 'ship it' });
+    const command = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'accepted' });
+    const outcome = pending.then(() => null, (caught) => caught as CommandError);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const error = await outcome;
+    expect(error?.message).toBe('Relay confirmation timed out');
+    expect(error?.data).toMatchObject({ dispatched_unknown: true });
+  });
+
+  it('tags a written command that never hears back at all as dispatched_unknown', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      inventory: { state: 'ready' },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const outcome = relayStore.sendCommand(relayId, { type: 'agent_rename', pane_id: 'w1:p1', name: 'renamed' })
+      .then(() => null, (caught) => caught as CommandError);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    const error = await outcome;
+    expect(error?.message).toBe('Relay confirmation timed out');
+    expect(error?.data).toMatchObject({ dispatched_unknown: true });
+  });
+
+  it('keeps definitive pre-send failures plain and names the missing capability', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      inventory: { state: 'ready' },
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const workspace = {
+      relay_id: relayId, relay_label: 'Fedora', workspace_id: 'w1', number: 1, label: 'Project',
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '',
+      cwd: '/home/user/project',
+    } as RelayWorkspace;
+
+    const workspaceError = await relayStore.createWorkspace(relayId, '/home/user/project', 'Project')
+      .then(() => null, (caught) => caught as CommandError);
+    expect(workspaceError?.message).toBe('This relay does not support workspace management');
+    expect(workspaceError?.data?.dispatched_unknown).toBeUndefined();
+
+    const worktreeError = await relayStore.listWorktrees(workspace)
+      .then(() => null, (caught) => caught as CommandError);
+    expect(worktreeError?.message).toBe('This relay does not support worktree management');
+    expect(worktreeError?.data?.dispatched_unknown).toBeUndefined();
+
+    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });
+    const macId = get(relayStore.relayConfigs).find((relay) => relay.label === 'Mac')!.id;
+    const offlineError = await relayStore.sendCommand(macId, { type: 'refresh_agents' })
+      .then(() => null, (caught) => caught as CommandError);
+    expect(offlineError?.message).toBe('Relay is not connected');
+    expect(offlineError?.data?.dispatched_unknown).toBeUndefined();
   });
 });

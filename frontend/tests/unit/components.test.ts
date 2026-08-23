@@ -2,11 +2,14 @@ import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import AgentList from '$components/AgentList.svelte';
+import ConversationHistory from '$components/ConversationHistory.svelte';
+import WorkspaceManager from '$components/WorkspaceManager.svelte';
 import ActivityView from '$components/ActivityView.svelte';
 import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
-import type { Agent, QuestionInteraction, RelayConnectionView } from '$lib/types';
+import { clearPromptDraft } from '$lib/prompt-drafts';
+import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace } from '$lib/types';
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
@@ -457,5 +460,102 @@ describe('accessible Svelte interactions', () => {
 
     expect(screen.getByRole('radio', { name: 'Signals' })).toBeChecked();
     expect(screen.getByRole('radio', { name: 'Other' })).not.toBeChecked();
+  });
+
+  it('keeps an unoccupied linked worktree visible when its repository parent is absent', () => {
+    const orphan = {
+      relay_id: 'fedora', relay_label: 'Fedora', workspace_id: 'w9', number: 9, label: 'fix-auth',
+      pane_count: 1, tab_count: 1, cwd: '/repos/mobile-fix-auth',
+      worktree: {
+        repo_key: 'repo', repo_name: 'mobile', repo_root: '/repos/mobile',
+        checkout_path: '/repos/mobile-fix-auth', is_linked_worktree: true,
+      },
+    } as RelayWorkspace;
+    // The same repository open on another computer must not hide the orphan.
+    const foreignParent = {
+      relay_id: 'mac', relay_label: 'Mac', workspace_id: 'w1', number: 1, label: 'mobile',
+      pane_count: 1, tab_count: 1, cwd: '/repos/mobile',
+      worktree: {
+        repo_key: 'repo', repo_name: 'mobile', repo_root: '/repos/mobile',
+        checkout_path: '/repos/mobile', is_linked_worktree: false,
+      },
+    } as RelayWorkspace;
+    render(AgentList, {
+      agents: [], relays: [], workspaces: [orphan, foreignParent],
+      responding: new Set<string>(), onopen: vi.fn(),
+    });
+    expect(screen.getByText('fix-auth', { selector: 'summary strong' })).toBeInTheDocument();
+    expect(screen.getByText('mobile', { selector: 'summary strong' })).toBeInTheDocument();
+  });
+
+  it('drops an optimistic workspace order once an authoritative snapshot changes membership', async () => {
+    const workspace = (id: string, label: string): RelayWorkspace => ({
+      relay_id: 'fedora', relay_label: 'Fedora', workspace_id: id, number: 1, label,
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '',
+      cwd: `/home/user/${id}`,
+    });
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    // RelayConnection is store-internal; the rendered manager reads only
+    // status, inventory readiness, and capabilities — all on the view type.
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' },
+      capabilities: ['workspace_management', 'workspace_reorder_block'],
+    } as unknown as RelayConnectionView;
+    relayStore.connections.set(new Map([['fedora', connection as never]]));
+    relayStore.workspaces.set([workspace('w1', 'One'), workspace('w2', 'Two')]);
+    // A never-settling reorder keeps the optimistic order pending under test.
+    const reorder = vi.spyOn(relayStore, 'reorderWorkspaceBlock')
+      .mockReturnValue(new Promise<CommandResult>(() => {}));
+    try {
+      const { container } = render(WorkspaceManager);
+      const labels = () => [...container.querySelectorAll('.workspace-management-slot header strong')]
+        .map((element) => element.textContent);
+      expect(labels()).toEqual(['One', 'Two']);
+
+      await fireEvent.keyDown(screen.getByRole('button', { name: 'Reorder One' }), { key: 'ArrowDown', altKey: true });
+      expect(reorder).toHaveBeenCalledWith('fedora', ['w1'], '', 2);
+      // The optimistic arrangement shows while the relay has not confirmed.
+      expect(labels()).toEqual(['Two', 'One']);
+
+      // A snapshot with different membership invalidates the optimism.
+      relayStore.workspaces.set([workspace('w1', 'One'), workspace('w2', 'Two'), workspace('w3', 'Three')]);
+      await vi.waitFor(() => expect(labels()).toEqual(['One', 'Two', 'Three']));
+    } finally {
+      reorder.mockRestore();
+      relayStore.workspaces.set([]);
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('persists the conversation composer draft across remounts and clears it on send', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p9', pane_id: 'fedora::w1:p9',
+      project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
+    };
+    vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
+      available: true, reason: '', entries: [], hasMore: false, total: 0, fileTruncated: false,
+    });
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'prompt-1', ok: true,
+    });
+    try {
+      const first = render(ConversationHistory, { agent });
+      await user.type(screen.getByRole('textbox', { name: 'Prompt' }), 'Keep me around');
+      first.unmount();
+
+      const second = render(ConversationHistory, { agent });
+      expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue('Keep me around');
+      await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+      expect(send).toHaveBeenCalledWith(agent, { type: 'submit_prompt', text: 'Keep me around' });
+      second.unmount();
+
+      render(ConversationHistory, { agent });
+      expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue('');
+    } finally {
+      clearPromptDraft(agent);
+      vi.restoreAllMocks();
+    }
   });
 });

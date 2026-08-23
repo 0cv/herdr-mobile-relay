@@ -3,6 +3,36 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.17.8] - 2026-08-23
+
+### Fixed
+
+- Workspace and worktree commands no longer stall the relay's inbound command
+  lane while Herdr executes them; a slow worktree creation used to block every
+  client's prompts and reads until it finished. (#14)
+- Realtime topology events survive older compatible Herdr versions again: the
+  event subscription no longer requests `workspace.reordered` when the
+  connected Herdr predates `workspace.move_block`, which previously failed the
+  whole subscription and silently degraded updates to polling. (#14)
+- Uncertain outcomes are reported honestly end to end: a workspace or tab move
+  whose request was written but never answered, and a worktree mutation whose
+  result envelope cannot be read, now surface as "may have applied" instead of
+  inviting a retry; the app treats a disconnect or confirmation timeout after a
+  sent prompt the same way, so a restored draft can no longer double-send.
+  (#13, #14)
+- The Conversation History draft persists per agent across view switches and
+  clears with the sent prompt, matching the terminal composer. (#13)
+- Workspace manager robustness: a directory listing that resolves after
+  switching computers can no longer leak the previous computer's path into
+  Create Workspace; rename state resets when the selected computer changes; an
+  optimistic drag order is dropped once the authoritative workspace set
+  changes; a worktree dialog dismissed mid-request stays closed; Remove
+  Worktree is disabled without worktree support and capability errors name the
+  actual missing feature; the Workspaces button no longer stacks duplicate
+  history entries; empty linked worktrees whose repository workspace is closed
+  stay visible; and workspace tab and pane counts follow desktop tab changes
+  immediately instead of waiting for the next poll. (#14)
+
 ## [0.17.7] - 2026-08-23
 
 ### Changed
@@ -13,8 +43,10 @@ project follows [Semantic Versioning](https://semver.org/).
   ordering, with Alt+arrow keys on the reorder handle; and linked worktrees are
   nested below their repository workspace instead of appearing as unrelated
   top-level cards. Reordering a repository moves its linked-worktree block
-  atomically. A new workspace keeps Herdr's initial tab, and **Start Agent**
-  adds the agent as the following tab. (#14)
+  atomically when the connected Herdr exposes `workspace.move_block`; older
+  compatible Herdr versions can still move standalone workspaces and are asked
+  to update before moving a linked group. A new workspace keeps Herdr's initial
+  tab, and **Start Agent** adds the agent as the following tab. (#14)
 
 ## [0.17.6] - 2026-08-23
 
@@ -1054,6 +1086,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.17.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.7...v0.17.8
 [0.17.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.6...v0.17.7
 [0.17.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.5...v0.17.6
 [0.17.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.4...v0.17.5
