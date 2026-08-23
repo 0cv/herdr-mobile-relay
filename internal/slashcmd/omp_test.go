@@ -3,7 +3,8 @@ package slashcmd
 import "testing"
 
 func TestOMPBuiltinCatalog(t *testing.T) {
-	catalog := CatalogForProfile("omp", "omp", "/tmp", "/nonexistent", nil, "", "17.1.7")
+	isolateAgentEnv(t)
+	catalog := CatalogForProfile("omp", "omp", t.TempDir(), "/nonexistent", nil, "", "17.1.7")
 	if catalog.Truncated {
 		t.Fatal("builtins-only catalog is truncated")
 	}

@@ -1,5 +1,22 @@
 package slashcmd
 
+import (
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+)
+
+// ompCommandFormat is the form Oh My Pi registers skills under. Verified against
+// the omp 18.0.3 bundle, which builds `skill:${e.name}` and parses input with
+// `t.startsWith("/skill:")`.
+const ompCommandFormat = "skill:{name}"
+
+// maxSettingsSize caps an agent settings file the relay parses. Generous enough
+// that a real config.yml is never skipped, bounded so a runaway file is.
+const maxSettingsSize = 256 * 1024
+
 type ompProvider struct{}
 
 func (p *ompProvider) ID() string { return "omp" }
@@ -77,8 +94,228 @@ var ompBuiltins = []Command{
 	{"/quit", "Quit OMP", "builtin", ""},
 }
 
+// Discover reproduces Oh My Pi's own skill resolution: every provider omp
+// registers against the skills capability, gated by the toggles in omp's own
+// config.yml, rendered as the /skill:<name> commands omp registers.
+//
+// Sources are scanned in descending omp priority - project scope before user
+// scope within one source, and the innermost ancestor first - with first-wins
+// dedupe, matching omp's own resolution directly. Scanning the winners first
+// also spends the shared file budget on them, so exhaustion truncates the least
+// important skills, never the highest-priority ones.
 func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
-	return builtinsWithGenericSkills(ompBuiltins, ctx)
+	if ctx.CommandFormat != "" {
+		// The relay's INI configured this profile explicitly, which outranks
+		// discovery.
+		custom, truncated := discoverGenericSkills(ctx.SkillDirs, ctx.CommandFormat)
+		return builtinsWithCustom(ompBuiltins, custom), truncated
+	}
+
+	settings := loadOMPSkillSettings(ctx)
+	if !settings.enabled || !settings.enableSkillCommands {
+		builtins := make([]Command, len(ompBuiltins))
+		copy(builtins, ompBuiltins)
+		return builtins, false
+	}
+
+	truncated := false
+	budget := maxCustomFiles
+	active := make(map[string]Command, len(ompBuiltins))
+	order := make([]string, 0, len(ompBuiltins))
+	apply := func(commands []Command) {
+		for _, command := range commands {
+			if _, exists := active[command.Command]; exists {
+				continue
+			}
+			order = append(order, command.Command)
+			active[command.Command] = command
+		}
+	}
+	apply(ompBuiltins)
+
+	// The ban lists apply to skills only; omp's filters run over discovered
+	// skills, never over its own builtin commands.
+	scan := func(scope string, dirs ...string) {
+		for _, dir := range dirs {
+			if dir == "" {
+				continue
+			}
+			cmds, trunc := scanSkillDirFormat(dir, scope, ompCommandFormat, &budget)
+			allowed := cmds[:0]
+			for _, command := range cmds {
+				if settings.allows(ompSkillName(command.Command)) {
+					allowed = append(allowed, command)
+				}
+			}
+			apply(allowed)
+			truncated = truncated || trunc
+		}
+	}
+	// scanProject scans <ancestor>/<stem>/skills in descending precedence:
+	// innermost ancestor first and, within one ancestor, stems in the order omp
+	// lists them. findProjectDirs returns ancestors outermost first with stems
+	// in argument order, so the stems are passed reversed and the flat list is
+	// walked backwards.
+	scanProject := func(stems ...string) {
+		reversed := make([]string, len(stems))
+		for i, stem := range stems {
+			reversed[len(stems)-1-i] = stem
+		}
+		dirs := findProjectDirs(ctx.Cwd, reversed)
+		for i := len(dirs) - 1; i >= 0; i-- {
+			scan("project", filepath.Join(dirs[i], "skills"))
+		}
+	}
+
+	fallback := settings.sourceFallbackEnabled()
+
+	// 1. native (100)
+	if settings.enablePiProject {
+		scanProject(".omp")
+	}
+	if settings.enablePiUser {
+		scan("personal", agentroots.OMPSkillDirs(ctx.Home)...)
+	}
+
+	// 2. claude (80)
+	if settings.enableClaudeProject {
+		scanProject(".claude")
+	}
+	if settings.enableClaudeUser {
+		scan("personal", filepath.Join(ctx.Home, ".claude", "skills"))
+	}
+
+	// 3. codex (70). omp scans a project .codex/skills even though codex
+	// itself has no such directory, and that project level has no toggle of
+	// its own.
+	if fallback {
+		scanProject(".codex")
+	}
+	if settings.enableCodexUser {
+		scan("personal", filepath.Join(ctx.Home, ".codex", "skills"))
+	}
+
+	// 4. agents (70)
+	if settings.enableAgentsProject {
+		scanProject(".agent", ".agents")
+	}
+	if settings.enableAgentsUser {
+		scan("personal",
+			filepath.Join(ctx.Home, ".agent", "skills"),
+			filepath.Join(ctx.Home, ".agents", "skills"))
+	}
+
+	// 5. opencode (55)
+	if fallback {
+		scanProject(".opencode")
+		scan("personal", filepath.Join(ctx.Home, ".config", "opencode", "skills"))
+	}
+
+	// 6. github (30)
+	if fallback {
+		scanProject(".github")
+	}
+
+	// 7. customDirectories - subject to the ban lists but not to source
+	// toggles. Scanned after every toggled source, so an authored skill of the
+	// same name wins the collision.
+	for _, dir := range settings.customDirectories {
+		scan("personal", expandTilde(dir, ctx.Home))
+	}
+
+	// 8. managed (priority 5) - always enabled, scanned last so it loses every
+	// collision.
+	scan("personal", agentroots.OMPManagedSkillDirs(ctx.Home)...)
+
+	commands := make([]Command, 0, len(order))
+	for _, name := range order {
+		if command, exists := active[name]; exists {
+			commands = append(commands, command)
+		}
+	}
+	if budget <= 0 {
+		truncated = true
+	}
+	return commands, truncated
+}
+
+// ompSkillName recovers the skill name from a rendered /skill:<name> command.
+// A builtin has no such prefix and is returned unchanged, which the ban lists
+// never match because omp bans skills, not builtins.
+func ompSkillName(command string) string {
+	return strings.TrimPrefix(command, "/skill:")
+}
+
+// loadOMPSkillSettings reads the first config.yml (or config.yaml) found across
+// omp's agent directories, then overlays every project-level .omp config from
+// the git root down to the cwd. Where several profiles exist the relay cannot
+// know which one the pane runs, so first-found wins for the user level: the
+// search stops at the first directory containing a config file even when that
+// file cannot be read, because falling through would apply an unrelated
+// profile's settings. The innermost repo scope is applied last, matching omp's
+// precedence, and list-valued keys replace rather than append.
+func loadOMPSkillSettings(ctx DiscoverContext) ompSkillSettings {
+	settings := defaultOMPSkillSettings()
+	for _, dir := range agentroots.OMPConfigDirs(ctx.Home) {
+		data, found, ok := settingsFileIn(dir, "config.yml", "config.yaml")
+		if !found {
+			continue
+		}
+		if ok {
+			parseOMPSkillSettings(data, &settings)
+		}
+		break
+	}
+	for _, dir := range findProjectDirs(ctx.Cwd, []string{".omp"}) {
+		if data, ok := readSettingsFile(dir, "config.yml", "config.yaml"); ok {
+			parseOMPSkillSettings(data, &settings)
+		}
+	}
+	return settings
+}
+
+// readSettingsFile returns the contents of the first readable name in dir.
+func readSettingsFile(dir string, names ...string) ([]byte, bool) {
+	data, _, ok := settingsFileIn(dir, names...)
+	return data, ok
+}
+
+// settingsFileIn reads the first usable candidate name in dir. found reports
+// that dir contains any candidate at all, readable or not, which is what a
+// first-found-wins search over agent directories must stop on; ok reports that
+// data was actually read. A candidate is unusable when it is not a regular
+// file, exceeds maxSettingsSize, or cannot be read.
+func settingsFileIn(dir string, names ...string) ([]byte, bool, bool) {
+	found := false
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		found = true
+		if !info.Mode().IsRegular() || info.Size() > maxSettingsSize {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		return data, true, true
+	}
+	return nil, found, false
+}
+
+// expandTilde resolves a leading "~" against home, matching how omp expands
+// customDirectories.
+func expandTilde(path, home string) string {
+	if path == "~" {
+		return home
+	}
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		return filepath.Join(home, rest)
+	}
+	return path
 }
 
 func init() {
