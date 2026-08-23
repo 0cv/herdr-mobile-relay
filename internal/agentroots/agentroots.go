@@ -90,6 +90,46 @@ func OMP(home string) []string {
 		profileAgentDirs(configRoot)...)
 }
 
+// OMPSkillDirs reports the directories holding Oh My Pi's own (native) skills,
+// one per agent directory resolved for OMP.
+func OMPSkillDirs(home string) []string {
+	configRoot := filepath.Join(home, ".omp")
+	return resolve(OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "skills",
+		profileAgentDirs(configRoot)...)
+}
+
+// OMPManagedSkillDirs reports the directories holding Oh My Pi's managed skills,
+// the ones the agent mints for itself.
+func OMPManagedSkillDirs(home string) []string {
+	configRoot := filepath.Join(home, ".omp")
+	return resolve(OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "managed-skills",
+		profileAgentDirs(configRoot)...)
+}
+
+// OMPConfigDirs reports the Oh My Pi agent directories themselves, where
+// config.yml lives. A named profile keeps its own config file, so this is the
+// only way to reach the settings that actually apply to a profile's pane.
+func OMPConfigDirs(home string) []string {
+	configRoot := filepath.Join(home, ".omp")
+	return resolve(OMPListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "",
+		profileAgentDirs(configRoot)...)
+}
+
+// PiSkillDirs reports the directories holding Pi's own skills.
+func PiSkillDirs(home string) []string {
+	configRoot := filepath.Join(home, ".pi")
+	return resolve(PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "skills",
+		profileAgentDirs(configRoot)...)
+}
+
+// PiConfigDirs reports the Pi agent directories themselves, where settings.json
+// lives.
+func PiConfigDirs(home string) []string {
+	configRoot := filepath.Join(home, ".pi")
+	return resolve(PiListEnv, "PI_CODING_AGENT_DIR", filepath.Join(configRoot, "agent"), "",
+		profileAgentDirs(configRoot)...)
+}
+
 // profileAgentDirs reports the agent directory of every named profile under a
 // config root. Pi and Oh My Pi place one at <config root>/profiles/<name>/agent
 // - verified against the omp bundle, which builds exactly
