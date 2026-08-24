@@ -19,6 +19,25 @@ project follows [Semantic Versioning](https://semver.org/).
   read under the ordering lock so the reconcile poll can never publish an
   older workspace list over a newer one from the event stream, and a
   byte-identical repeat is suppressed.
+- A workspace or worktree command queued behind a running one no longer
+  stalls the relay's whole inbound pipeline. Its ingress admission used to
+  wait for the running Herdr command to finish — up to its 60-second
+  deadline — during which prompts and approvals from every phone sat
+  undispatched. (#14)
+- A `#launch=` deep link now hands the form to its requested computer even
+  when another relay connects first; previously the faster sibling kept the
+  selection and the link's workspace and directory were silently dropped.
+  A relay picked by hand is left alone. (#14)
+- Opening another pane's conversation history via a direct link remounts the
+  view, so the reply draft, transcript, and scroll pin can no longer carry
+  over from the previously shown agent. (#13)
+- The Worktrees dialog ignores a slow listing that resolves after the dialog
+  moved on to another workspace; its Open buttons could otherwise submit one
+  repository's paths under another repository's workspace. (#14)
+- Creating a workspace or worktree whose confirmation was lost in transit no
+  longer invites a blind retry that could apply the mutation twice: the
+  dialog steers to the current list first, matching how prompts already
+  handle an ambiguous outcome. (#13, #14)
 
 ## [0.17.11] - 2026-08-24
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import { clientPaneId } from '$lib/agents';
@@ -29,6 +30,11 @@
   let error = $state(false);
   let submitting = $state(false);
   let loadedRelay = '';
+  // A deep link's target relay may connect after a faster sibling. Until the
+  // reader picks a relay by hand, the requested one may still claim the form
+  // when it becomes ready; without this the first-connected relay wins the
+  // race and the link's workspace and directory are silently dropped.
+  let requestedRelayPending = untrack(() => Boolean(requestedRelayId));
   let directoryLoadGeneration = 0;
   let directoryRelayId = '';
   let directoryBrowser: HTMLDivElement;
@@ -50,6 +56,10 @@
   );
 
   $effect(() => {
+    if (requestedRelayPending && connectedRelays.some((relay) => relay.id === requestedRelayId)) {
+      requestedRelayPending = false;
+      relayId = requestedRelayId;
+    }
     if (!connectedRelays.some((relay) => relay.id === relayId)) {
       relayId = connectedRelays.some((relay) => relay.id === requestedRelayId)
         ? requestedRelayId
@@ -141,7 +151,7 @@
   <Card>
     <form class="form-stack" onfocusin={closeDirectoryForOtherField} onsubmit={submit}>
       <label for="launch-relay">Computer</label>
-      <select id="launch-relay" bind:value={relayId} required>
+      <select id="launch-relay" bind:value={relayId} onchange={() => { requestedRelayPending = false; }} required>
         {#if !connectedRelays.length}<option value="">No ready relays</option>{/if}
         {#each connectedRelays as relay (relay.id)}<option value={relay.id}>{relay.label}</option>{/each}
       </select>

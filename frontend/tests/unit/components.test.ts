@@ -7,10 +7,11 @@ import WorkspaceManager from '$components/WorkspaceManager.svelte';
 import ActivityView from '$components/ActivityView.svelte';
 import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
+import LaunchView from '$components/LaunchView.svelte';
 import { relayStore } from '$lib/store';
 import { clearPromptDraft } from '$lib/prompt-drafts';
 import { setHomeLayout } from '$lib/preferences';
-import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace } from '$lib/types';
+import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace, WorktreeListing } from '$lib/types';
 
 const blockedAgent: Agent = {
   relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: 'fedora::w1:p1',
@@ -527,6 +528,72 @@ describe('accessible Svelte interactions', () => {
       await vi.waitFor(() => expect(labels()).toEqual(['One', 'Two', 'Three']));
     } finally {
       reorder.mockRestore();
+      relayStore.workspaces.set([]);
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('hands the launch form to a deep link relay that connects after a faster sibling', async () => {
+    relayStore.relayConfigs.set([
+      { id: 'fast', label: 'Fast', url: 'wss://fast', token: '' },
+      { id: 'slow', label: 'Slow', url: 'wss://slow', token: '' },
+    ]);
+    const ready = {
+      status: 'connected', inventory: { state: 'ready' }, capabilities: [], agentProfiles: [],
+    } as unknown as RelayConnectionView;
+    relayStore.connections.set(new Map([['fast', ready as never]]));
+    try {
+      render(LaunchView, { relayId: 'slow', cwd: '/home/user/project' });
+      const select = screen.getByRole('combobox', { name: 'Computer' }) as HTMLSelectElement;
+      // The faster sibling wins only while the requested relay is absent.
+      await vi.waitFor(() => expect(select.value).toBe('fast'));
+      relayStore.connections.set(new Map([['fast', ready as never], ['slow', ready as never]]));
+      await vi.waitFor(() => expect(select.value).toBe('slow'));
+    } finally {
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('drops a stale worktree listing that resolves under another workspace dialog', async () => {
+    const user = userEvent.setup();
+    const workspace = (id: string, label: string): RelayWorkspace => ({
+      relay_id: 'fedora', relay_label: 'Fedora', workspace_id: id, number: 1, label,
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '',
+      cwd: `/repos/${id}`,
+    });
+    const listing = (repo: string, branch: string): WorktreeListing => ({
+      source: { repo_key: repo, repo_name: repo, repo_root: `/repos/${repo}` },
+      worktrees: [{ path: `/repos/${repo}-${branch}`, branch, label: branch, is_linked_worktree: true }],
+    } as unknown as WorktreeListing);
+    relayStore.relayConfigs.set([{ id: 'fedora', label: 'Fedora', url: 'wss://fedora', token: '' }]);
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' },
+      capabilities: ['workspace_management', 'worktree_management'],
+    } as unknown as RelayConnectionView;
+    relayStore.connections.set(new Map([['fedora', connection as never]]));
+    relayStore.workspaces.set([workspace('w1', 'One'), workspace('w2', 'Two')]);
+    let releaseFirst = (_: WorktreeListing) => {};
+    const first = new Promise<WorktreeListing>((resolve) => { releaseFirst = resolve; });
+    const list = vi.spyOn(relayStore, 'listWorktrees')
+      .mockImplementationOnce(() => first)
+      .mockImplementationOnce(() => Promise.resolve(listing('two', 'feature-two')));
+    try {
+      render(WorkspaceManager);
+      const buttons = screen.getAllByRole('button', { name: 'Worktrees' });
+      await user.click(buttons[0]);
+      await user.click(buttons[1]);
+      // The second dialog's listing arrives first; the first workspace's
+      // slower response must not replace it afterwards.
+      await vi.waitFor(() => expect(screen.getByText('feature-two')).toBeInTheDocument());
+      releaseFirst(listing('one', 'feature-one'));
+      await first;
+      expect(list).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText('feature-one')).not.toBeInTheDocument();
+      expect(screen.getByText('feature-two')).toBeInTheDocument();
+    } finally {
+      list.mockRestore();
       relayStore.workspaces.set([]);
       relayStore.connections.set(new Map());
       relayStore.relayConfigs.set([]);

@@ -35,9 +35,9 @@ func (d *Dispatcher) HandleWorkspaceCreate(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
+	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	d.admitTopology(ctx)
 	created, err := d.herdr.WorkspaceCreate(commandCtx, resolved, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -68,9 +68,9 @@ func (d *Dispatcher) HandleWorkspaceRename(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
+	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	d.admitTopology(ctx)
 	if err := d.herdr.WorkspaceRename(commandCtx, workspace.ID, label); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -94,9 +94,9 @@ func (d *Dispatcher) HandleWorkspaceReorder(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
+	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	d.admitTopology(ctx)
 	if err := d.herdr.WorkspaceMove(commandCtx, workspace.ID, *insertIndex); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -135,9 +135,9 @@ func (d *Dispatcher) HandleWorkspaceReorderBlock(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
+	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	d.admitTopology(ctx)
 	if err := d.herdr.WorkspaceMoveBlock(commandCtx, workspaceIDs, beforeWorkspaceID); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -160,9 +160,9 @@ func (d *Dispatcher) HandleWorkspaceClose(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
+	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	d.admitTopology(ctx)
 	if err := d.herdr.WorkspaceClose(commandCtx, workspace.ID); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -213,9 +213,9 @@ func (d *Dispatcher) HandleWorktreeCreate(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
 	defer cancel()
+	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	d.admitTopology(ctx)
 	created, err := d.herdr.WorktreeCreate(commandCtx, workspace.ID, branch, base, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -245,9 +245,9 @@ func (d *Dispatcher) HandleWorktreeOpen(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
 	defer cancel()
+	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	d.admitTopology(ctx)
 	opened, err := d.herdr.WorktreeOpen(commandCtx, workspace.ID, path, branch, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -272,9 +272,9 @@ func (d *Dispatcher) HandleWorktreeRemove(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
 	defer cancel()
+	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	d.admitTopology(ctx)
 	removed, err := d.herdr.WorktreeRemove(commandCtx, workspace.ID, force)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
@@ -305,10 +305,15 @@ func (d *Dispatcher) topologyChanged() {
 	}
 }
 
-// admitTopology unblocks the hub's global ordered ingress once the caller
-// holds topologyMu: the mutex is the ordering boundary for topology
-// mutations, so the Herdr command itself must not keep later unrelated
-// messages from being admitted. No-op outside HandleTopologyAdmitted.
+// admitTopology unblocks the hub's global ordered ingress before the caller
+// waits on topologyMu: the mutex serializes the Herdr topology commands
+// themselves, but neither the wait for it nor the command may keep later
+// unrelated messages from being admitted — a queued second mutation used to
+// stall every client's ingress for the running command's full deadline.
+// Arrival order between concurrently queued topology mutations is not
+// preserved; each handler validates against the current topology, and a
+// single phone serializes its own mutations anyway. No-op outside
+// HandleTopologyAdmitted.
 func (d *Dispatcher) admitTopology(ctx context.Context) {
 	if admitted, ok := ctx.Value(admissionContextKey{}).(func()); ok && admitted != nil {
 		admitted()

@@ -123,3 +123,86 @@ func TestWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
 		t.Fatal("rename did not complete after the Herdr command was released")
 	}
 }
+
+// A topology mutation queued behind a running one must be admitted while the
+// first still executes its Herdr command: its admission used to wait for
+// topologyMu, which stalled the hub's global ordered ingress — prompts and
+// approvals from every client — for the running command's full deadline.
+func TestQueuedWorkspaceMutationDoesNotBlockIngressAdmission(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "rename-started")
+	release := filepath.Join(dir, "release-rename")
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"if [ \"$1 $2\" = \"workspace rename\" ]; then\n"+
+		"  touch \""+started+"\"\n"+
+		"  while [ ! -f \""+release+"\" ]; do sleep 0.01; done\n"+
+		"fi\n"+
+		"printf '{\"ok\":true}\\n'\n")
+
+	dispatcher := NewDispatcher(
+		herdr.NewClient(bin, filepath.Join(dir, "sock")),
+		NewState(testLogger()),
+		nil,
+		testLogger(),
+	)
+	t.Cleanup(func() {
+		_ = os.WriteFile(release, nil, 0o600)
+		_ = dispatcher.Close(context.Background())
+	})
+	dispatcher.state.CommitWorkspaces([]herdr.Workspace{
+		{ID: "w1", Label: "Project"},
+		{ID: "w2", Label: "Second"},
+	})
+
+	renameDone := make(chan *CommandResult, 1)
+	go func() {
+		renameDone <- dispatcher.HandleWorkspaceRename(t.Context(), "rename-1", "w1", "Renamed")
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("rename never reached its Herdr command")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	admitted := make(chan struct{})
+	closeDone := make(chan *CommandResult, 1)
+	go func() {
+		closeDone <- dispatcher.HandleTopologyAdmitted(
+			t.Context(),
+			func() { close(admitted) },
+			func(ctx context.Context) *CommandResult {
+				return dispatcher.HandleWorkspaceClose(ctx, "close-1", "w2")
+			},
+		)
+	}()
+
+	select {
+	case <-admitted:
+	case <-time.After(time.Second):
+		t.Fatal("queued topology mutation was not admitted while the running one held topologyMu")
+	}
+	select {
+	case result := <-closeDone:
+		t.Fatalf("close completed before the running mutation released topologyMu: %+v", result)
+	default:
+	}
+
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, done := range map[string]chan *CommandResult{"rename": renameDone, "close": closeDone} {
+		select {
+		case result := <-done:
+			if !result.OK {
+				t.Fatalf("%s result = %+v", name, result)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s did not complete after the Herdr command was released", name)
+		}
+	}
+}

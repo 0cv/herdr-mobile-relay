@@ -50,6 +50,7 @@
   } | null>(null);
   let pendingWorkspaceOrder = $state<{ relayId: string; order: string[] } | null>(null);
   let directoryLoadGeneration = 0;
+  let worktreeLoadGeneration = 0;
 
   const readyRelays = $derived($relays.filter((relay) => {
     const connection = $connections.get(relay.id);
@@ -149,6 +150,16 @@
     if (message) relayStore.showToast(message, failed);
   }
 
+  /**
+   * True when the relay may have applied the mutation even though no
+   * confirmation came back (the store's `dispatched_unknown` phase).
+   * Retrying such a create blindly can duplicate the workspace or worktree,
+   * so callers steer the user to check the current list first.
+   */
+  function ambiguousOutcome(caught: unknown): boolean {
+    return caught instanceof CommandError && caught.data?.dispatched_unknown === true;
+  }
+
   function openCreateWorkspace() {
     label ||= pathBase(cwd);
     directoryOpen = false;
@@ -170,7 +181,14 @@
       label = '';
       closeCreateWorkspace();
     } catch (caught) {
-      setStatus((caught as Error).message, true);
+      if (ambiguousOutcome(caught)) {
+        // Leaving the dialog primed with the same values invites a blind
+        // retry that can create the workspace twice.
+        closeCreateWorkspace();
+        setStatus(`${(caught as Error).message} Check the workspace list before retrying.`, true);
+      } else {
+        setStatus((caught as Error).message, true);
+      }
     } finally {
       busy = false;
     }
@@ -434,17 +452,24 @@
   }
 
   async function showWorktrees(workspace: RelayWorkspace) {
+    const generation = ++worktreeLoadGeneration;
     worktreeWorkspaceId = workspace.workspace_id;
     worktreeOpen = true;
     worktreeListing = null;
     worktreeError = '';
     worktreeLoading = true;
     try {
-      worktreeListing = await relayStore.listWorktrees(workspace);
+      const listing = await relayStore.listWorktrees(workspace);
+      // A slower listing for a previously shown workspace must not land
+      // under the dialog's current title; its Open buttons would then send
+      // paths from one repository with another one's workspace id.
+      if (generation !== worktreeLoadGeneration) return;
+      worktreeListing = listing;
     } catch (caught) {
+      if (generation !== worktreeLoadGeneration) return;
       worktreeError = (caught as Error).message;
     } finally {
-      worktreeLoading = false;
+      if (generation === worktreeLoadGeneration) worktreeLoading = false;
     }
   }
 
@@ -485,7 +510,14 @@
       worktreeLabel = '';
       await refreshWorktrees(workspace);
     } catch (caught) {
-      setStatus((caught as Error).message, true);
+      if (ambiguousOutcome(caught)) {
+        // The worktree may exist despite the lost confirmation; refreshing
+        // the listing shows the truth instead of inviting a duplicate.
+        setStatus(`${(caught as Error).message} Check the worktree list before retrying.`, true);
+        await refreshWorktrees(workspace);
+      } else {
+        setStatus((caught as Error).message, true);
+      }
     } finally {
       busy = false;
     }
@@ -500,7 +532,13 @@
       setStatus(`Opened worktree ${labelValue}.`);
       await refreshWorktrees(workspace);
     } catch (caught) {
-      setStatus((caught as Error).message, true);
+      if (ambiguousOutcome(caught)) {
+        // Opening creates a workspace; a blind retry can open it twice.
+        setStatus(`${(caught as Error).message} Check the workspace list before retrying.`, true);
+        await refreshWorktrees(workspace);
+      } else {
+        setStatus((caught as Error).message, true);
+      }
     } finally {
       busy = false;
     }

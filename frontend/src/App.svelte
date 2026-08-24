@@ -568,7 +568,12 @@
   {:else if $currentView.view === 'activity_detail'}
     <ActivityDetail key={$currentView.key} />
   {:else if $currentView.view === 'history' && activeAgent}
-    <ConversationHistory agent={activeAgent} />
+    <!-- Keyed so a hash navigation straight to another pane's history remounts
+         the view: the reply draft, transcript, and scroll pin are all per-pane
+         state and must never carry over to a different agent. -->
+    {#key activeAgent.pane_id}
+      <ConversationHistory agent={activeAgent} />
+    {/key}
   {:else if $currentView.view === 'history'}
     <main class="page terminal-loading" aria-label="Conversation history unavailable">
       <p role="alert">This agent is not available.</p>
