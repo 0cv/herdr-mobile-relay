@@ -42,12 +42,12 @@ setup and want to know what every screen and control is for.
 ## Workspace navigation and inspection
 
 The home screen keeps agents that need input visible at the top. By default,
-workspaces below them are separated into Done, Working, and Idle sections that
-retain the workspace and tab hierarchy. The **Home Workspaces** setting can mix
-them instead: each workspace appears once with a dot for its most notable
-session — done, then working, then idle. On a phone, tap the magnifying-glass
-button to search projects, workspaces, paths, tabs, sessions, agents, hosts,
-and relays.
+each workspace below them appears once — mixed — with a dot for its most
+notable session: done, then working, then idle. The **Home Workspaces**
+setting can separate them into Done, Working, and Idle sections instead; both
+layouts retain the workspace and tab hierarchy. On a phone, tap the
+magnifying-glass button to search projects, workspaces, paths, tabs, sessions,
+agents, hosts, and relays.
 At 900 CSS pixels and wider, an agent rail keeps those workspace groups beside
 the open terminal.
 

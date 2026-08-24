@@ -9,6 +9,7 @@ import QuestionForm from '$components/QuestionForm.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
 import { clearPromptDraft } from '$lib/prompt-drafts';
+import { setHomeLayout } from '$lib/preferences';
 import type { Agent, CommandResult, QuestionInteraction, RelayConnectionView, RelayWorkspace } from '$lib/types';
 
 const blockedAgent: Agent = {
@@ -241,6 +242,9 @@ describe('accessible Svelte interactions', () => {
   });
 
   it('groups working agents by workspace while keeping inactive workspaces separate', () => {
+    // The by-state sections are opt-in since 0.17.10; this defends their
+    // grouping when selected.
+    setHomeLayout('state');
     const named: Agent = {
       relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w2:p1', pane_id: 'fedora::w2:p1',
       workspace_id: 'work-1', project: 'relay', agent: 'codex', status: 'working',
@@ -263,6 +267,7 @@ describe('accessible Svelte interactions', () => {
     expect(within(working).getByText('my-session')).toBeInTheDocument();
     expect(within(workspaces).getByText('docs', { selector: 'summary strong' })).toBeInTheDocument();
     expect(container.querySelectorAll('.agent-logo')).toHaveLength(3);
+    setHomeLayout('mixed');
   });
 
   it('orders tabs by Herdr position and reorders with Alt+arrow keys on a card', async () => {

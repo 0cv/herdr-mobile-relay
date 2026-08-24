@@ -45,9 +45,12 @@ function savedTerminalRefreshInterval(): TerminalRefreshInterval {
     : 250;
 }
 
+// Mixed by default: one card per workspace with a state dot reads better than
+// three state sections once workspaces carry worktrees, and agents needing
+// input stay on top in both layouts.
 function savedHomeLayout(): HomeLayout {
   const value = localStorage.getItem(HOME_LAYOUT_KEY);
-  return HOME_LAYOUTS.includes(value as HomeLayout) ? value as HomeLayout : 'state';
+  return HOME_LAYOUTS.includes(value as HomeLayout) ? value as HomeLayout : 'mixed';
 }
 
 

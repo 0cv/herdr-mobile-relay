@@ -378,6 +378,9 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
 
   await expect(page.getByText('Project', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Shell Only', { exact: true }).first()).toBeVisible();
+  // Idle-only cards start collapsed in the mixed default; a tap expands them.
+  await expect(page.getByText('No agents are running in this workspace.')).toBeHidden();
+  await page.locator('.workspace-card').filter({ hasText: 'Shell Only' }).locator('summary').click();
   await expect(page.getByText('No agents are running in this workspace.')).toBeVisible();
 
   await page.getByRole('button', { name: 'Manage workspaces' }).click();
@@ -521,7 +524,7 @@ test('groups working agents and synchronizes tab order in both directions', asyn
   ];
   await server(page, 0, { type: 'agents', agents });
 
-  const working = page.locator('.working-section');
+  const working = page.locator('section.workspace-section');
   await expect(working.getByText('mobile', { exact: true }).first()).toBeVisible();
   await expect(working.locator('summary strong')).toHaveCount(1);
   await expect(working.locator('.workspace-tab-header h3')).toHaveText(['First', 'Second']);
@@ -555,10 +558,10 @@ test('groups working agents and synchronizes tab order in both directions', asyn
   await expect(working.locator('.workspace-tab-header h3')).toHaveText(['Second', 'First']);
 
   // The long press must not have opened the agent terminal.
-  await expect(page.locator('.working-section')).toBeVisible();
+  await expect(page.locator('section.workspace-section')).toBeVisible();
 });
 
-test('separates done sessions and offers the mixed workspace layout', async ({ page }) => {
+test('defaults to the mixed workspace layout and separates state sections on demand', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, { capabilities: ['attention_classification'] });
@@ -577,39 +580,44 @@ test('separates done sessions and offers the mixed workspace layout', async ({ p
     ],
   });
 
-  // Default: sections separated by state, done first after the input queue.
+  // Default: one headingless mixed list, one card per workspace with a state
+  // dot, blocked stays on top.
   await expect(page.locator('section.agent-section').first()).toContainText('Needs input');
-  const done = page.locator('.done-section');
-  await expect(done.getByRole('heading', { name: 'Done' })).toBeVisible();
-  await expect(done.locator('summary strong')).toHaveText(['alpha']);
-  await expect(done.locator('.workspace-done-count')).toHaveText('1 done');
-  const working = page.locator('.working-section');
-  await expect(working.locator('summary strong')).toHaveText(['beta']);
-  await expect(page.getByRole('heading', { name: 'Idle' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeHidden();
-
-  // Mixed: one headingless list, one card per workspace with a state dot,
-  // blocked stays on top.
-  await page.getByRole('button', { name: /Settings/ }).click();
-  await page.getByRole('button', { name: 'Mixed' }).click();
-  await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('region', { name: 'Workspaces' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeHidden();
   await expect(page.getByRole('heading', { name: 'Done' })).toBeHidden();
   await expect(page.getByRole('heading', { name: 'Working' })).toBeHidden();
   await expect(page.getByRole('heading', { name: 'Idle' })).toBeHidden();
-  await expect(page.locator('section.agent-section').first()).toContainText('Needs input');
   const card = (project: string) => page.locator('.workspace-card').filter({ hasText: project });
   await expect(card('alpha').getByRole('img', { name: 'Has a done session' })).toBeVisible();
   await expect(card('beta').getByRole('img', { name: 'Has a working session' })).toBeVisible();
   await expect(card('delta').getByRole('img', { name: 'All sessions idle' })).toBeVisible();
   await expect(page.locator('.workspace-card summary strong')).toHaveText(['alpha', 'beta', 'delta']);
+  // Active workspaces start expanded; idle-only cards stay collapsed.
+  await expect(card('alpha')).toHaveAttribute('open', '');
+  await expect(card('beta')).toHaveAttribute('open', '');
+  await expect(card('delta')).not.toHaveAttribute('open', '');
 
-  // Back to the default layout.
+  // By State: sections separated by state, done first after the input queue.
   await page.getByRole('button', { name: /Settings/ }).click();
   await page.getByRole('button', { name: 'By State' }).click();
   await page.getByRole('button', { name: 'Back' }).click();
-  await expect(page.getByRole('heading', { name: 'Done' })).toBeVisible();
+  const done = page.locator('.done-section');
+  await expect(done.getByRole('heading', { name: 'Done' })).toBeVisible();
+  await expect(done.locator('summary strong')).toHaveText(['alpha']);
+  await expect(done.locator('.workspace-done-count')).toHaveText('1 done');
+  const stateWorking = page.locator('.working-section');
+  await expect(stateWorking.locator('summary strong')).toHaveText(['beta']);
+  await expect(page.getByRole('heading', { name: 'Idle' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeHidden();
+  await expect(page.locator('section.agent-section').first()).toContainText('Needs input');
+
+  // Back to the mixed default.
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: 'Mixed' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('heading', { name: 'Done' })).toBeHidden();
+  await expect(page.getByRole('region', { name: 'Workspaces' })).toBeVisible();
 });
 
 test('keeps activity cards inside the page and confirms permanent deletion', async ({ page }) => {
@@ -4399,7 +4407,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
     .toBe(refreshesBeforeBack + 1);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode' }] });
-  await expect(page.getByRole('heading', { name: 'Working' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Terminal app on Fedora' })).toBeVisible();
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '     + Thought: 1.0s\n\u001b[38;5;6m     Safe <img src=x onerror=alert(1)>\u001b[0m\n     Docs https://example.com/report?q=1\n     Details\n     ▣ Build · model · 1s' });
   const terminal = page.getByRole('log');

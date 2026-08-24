@@ -3,6 +3,15 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.17.10] - 2026-08-24
+
+### Changed
+
+- The home screen defaults to the **Mixed** workspace layout: one card per
+  workspace with a dot for its most notable session. **By State** remains
+  available under Settings → Home Workspaces, and a previously saved choice is
+  kept either way. (#14)
+
 ## [0.17.9] - 2026-08-24
 
 ### Changed
@@ -1102,6 +1111,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.17.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.9...v0.17.10
 [0.17.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.8...v0.17.9
 [0.17.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.7...v0.17.8
 [0.17.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.6...v0.17.7

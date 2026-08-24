@@ -539,11 +539,16 @@
       {@const stateTone = kind === 'mixed' ? workspaceStateTone(summary) : ''}
       {@const provenance = workspaceProvenance(workspace)}
       {@const disclosureKey = `${working ? 'working' : done ? 'done' : 'workspace'}:${workspace.key}`}
+      <!-- Mixed mirrors the state sections' opening rules: workspaces with a
+           working or done session start expanded, idle-only cards collapsed. -->
+      {@const openDefault = kind === 'mixed'
+        ? defaultOpen || summary.workingCount > 0 || summary.doneCount > 0
+        : defaultOpen}
       <details
         class:working-workspace-card={working}
         class:done-workspace-card={done}
         class="workspace-card"
-        open={workspaceDisclosure[disclosureKey] ?? defaultOpen}
+        open={workspaceDisclosure[disclosureKey] ?? openDefault}
         ontoggle={(event) => rememberWorkspaceDisclosure(disclosureKey, event)}
       >
         <summary>
