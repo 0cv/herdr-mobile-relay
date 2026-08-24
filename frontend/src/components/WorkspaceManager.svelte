@@ -4,7 +4,7 @@
   import Card from '$components/ui/Card.svelte';
   import { navigate } from '$lib/router';
   import { CommandError, relayStore } from '$lib/store';
-  import { relayWorkspaceTrees, type RelayWorkspaceTree } from '$lib/workspaces';
+  import { informativePath, relayWorkspaceTrees, workspaceProvenance, type RelayWorkspaceTree } from '$lib/workspaces';
   import type { RelayWorkspace, WorktreeListing } from '$lib/types';
 
   const relays = relayStore.relayConfigs;
@@ -523,11 +523,13 @@
         </div>
       </form>
     {:else}
+      {@const checkoutPath = workspace.cwd || workspace.worktree?.checkout_path || ''}
+      {@const shownPath = nested ? informativePath(checkoutPath, workspace.label) : checkoutPath || 'Working directory unavailable'}
+      {@const provenance = workspaceProvenance(workspace, nested)}
       <header>
-        {#if nested}<span class="workspace-tree-branch" aria-hidden="true">↳</span>{/if}
         <span>
           <strong>{workspace.label}</strong>
-          <small>{workspace.cwd || workspace.worktree?.checkout_path || 'Working directory unavailable'}</small>
+          {#if shownPath}<small>{shownPath}</small>{/if}
         </span>
         {#if tree}
           <button
@@ -545,21 +547,21 @@
         {workspace.pane_count} {workspace.pane_count === 1 ? 'pane' : 'panes'} ·
         {agentCount(workspace)} {agentCount(workspace) === 1 ? 'agent' : 'agents'}
       </p>
-      {#if workspace.worktree}
-        <p class="workspace-management-meta">
-          {workspace.worktree.is_linked_worktree ? 'Linked worktree' : 'Repository'} · {workspace.worktree.repo_name}
-        </p>
+      {#if provenance}
+        <p class="workspace-management-meta">{provenance}</p>
       {/if}
       <div class="workspace-management-actions">
         <Button size="sm" disabled={busy || !(workspace.cwd || workspace.worktree?.checkout_path)} onclick={() => startAgent(workspace)}>Start Agent</Button>
         <Button size="sm" variant="secondary" disabled={busy} onclick={() => beginRename(workspace)}>Rename</Button>
-        <Button
-          size="sm"
-          variant="secondary"
-          disabled={busy || !worktreeManagementAvailable}
-          title={worktreeManagementAvailable ? undefined : 'This relay does not support worktree management'}
-          onclick={() => showWorktrees(workspace)}
-        >Worktrees</Button>
+        {#if !workspace.worktree?.is_linked_worktree}
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={busy || !worktreeManagementAvailable}
+            title={worktreeManagementAvailable ? undefined : 'This relay does not support worktree management'}
+            onclick={() => showWorktrees(workspace)}
+          >Worktrees</Button>
+        {/if}
         <Button size="sm" variant="danger" disabled={busy} onclick={() => beginConfirm('close', workspace)}>Close</Button>
         {#if workspace.worktree?.is_linked_worktree}
           <Button

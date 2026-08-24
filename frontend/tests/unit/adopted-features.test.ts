@@ -4,7 +4,7 @@ import { safeMarkdownHtml } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
-import { relayWorkspaceTrees, workspaceGroups, workspaceStateTone } from '$lib/workspaces';
+import { informativePath, relayWorkspaceTrees, workspaceGroups, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -125,6 +125,27 @@ describe('workspace navigation', () => {
       workspaceIds: ['work-1', 'work-2'],
     });
     expect(trees[1].workspace.workspace_id).toBe('work-3');
+  });
+
+  it('shows workspace provenance and worktree paths only when informative', () => {
+    const repo = { repo_key: 'repo-key', repo_name: 'ibkr', repo_root: '/home/user/ibkr' };
+    const parent = { label: 'ibkr', worktree: { ...repo, checkout_path: '/home/user/ibkr', is_linked_worktree: false } };
+    const renamed = { ...parent, label: 'Trading' };
+    const linked = { label: 'fix/one', worktree: { ...repo, checkout_path: '/home/user/worktrees/fix-one', is_linked_worktree: true } };
+
+    // "Repository · ibkr" inside a card titled "ibkr" repeats the title.
+    expect(workspaceProvenance(parent)).toBe('');
+    expect(workspaceProvenance(renamed)).toBe('Repository · ibkr');
+    // Nested under the parent card the tree already says it is a worktree;
+    // orphaned at top level the repository name is the only provenance left.
+    expect(workspaceProvenance(linked, true)).toBe('');
+    expect(workspaceProvenance(linked)).toBe('Worktree of ibkr');
+    expect(workspaceProvenance({ label: 'Shell Only', worktree: null })).toBe('');
+
+    // A checkout named after its label carries no extra information.
+    expect(informativePath('/home/user/worktrees/fix-one', 'fix-one')).toBe('');
+    expect(informativePath('/home/user/worktrees/fix-one', 'fix/one')).toBe('/home/user/worktrees/fix-one');
+    expect(informativePath('', 'fix-one')).toBe('');
   });
 
   it('uses relay activity order when workspace timestamps tie', () => {

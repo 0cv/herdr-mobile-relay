@@ -18,7 +18,7 @@
   import { homeLayout } from '$lib/preferences';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
-  import { workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
+  import { informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents,
@@ -537,6 +537,7 @@
       {@const working = kind === 'working'}
       {@const done = kind === 'done'}
       {@const stateTone = kind === 'mixed' ? workspaceStateTone(summary) : ''}
+      {@const provenance = workspaceProvenance(workspace)}
       {@const disclosureKey = `${working ? 'working' : done ? 'done' : 'workspace'}:${workspace.key}`}
       <details
         class:working-workspace-card={working}
@@ -578,23 +579,27 @@
             {/if}
           </span>
         </summary>
-        {#if workspace.worktree}
-          <p class="workspace-provenance">Repository · {workspace.worktree.repo_name}</p>
+        {#if provenance}
+          <p class="workspace-provenance">{provenance}</p>
         {/if}
         {@render workspaceTabs(workspace)}
-        {#each tree.children as child (child.key)}
-          <section class="workspace-worktree-card" aria-label={`${child.label} worktree`}>
-            <header>
-              <span aria-hidden="true">↳</span>
-              <span>
-                <strong>{child.label}</strong>
-                <small>{child.cwd}</small>
-              </span>
-              <span>{child.tabCount} {child.tabCount === 1 ? 'tab' : 'tabs'}</span>
-            </header>
-            {@render workspaceTabs(child)}
-          </section>
-        {/each}
+        {#if tree.children.length}
+          <div class="workspace-worktree-list" role="group" aria-label={`${workspace.label} worktrees`}>
+            {#each tree.children as child (child.key)}
+              {@const childPath = informativePath(child.cwd, child.label)}
+              <section class="workspace-worktree-card" aria-label={`${child.label} worktree`}>
+                <header>
+                  <span>
+                    <strong>{child.label}</strong>
+                    {#if childPath}<small>{childPath}</small>{/if}
+                  </span>
+                  <span>{child.tabCount} {child.tabCount === 1 ? 'tab' : 'tabs'}</span>
+                </header>
+                {@render workspaceTabs(child)}
+              </section>
+            {/each}
+          </div>
+        {/if}
       </details>
     {/each}
   </div>

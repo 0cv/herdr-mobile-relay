@@ -3,6 +3,22 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.17.9] - 2026-08-24
+
+### Changed
+
+- Linked worktrees now render as a tree with connector rails under their
+  repository workspace on the home screen and the Workspaces page, matching
+  Herdr's own parent/child presentation. Rows no longer repeat what their
+  context already says: the "Linked worktree" label is gone from nested cards,
+  "Repository · name" appears only when the repository differs from the card
+  title, and a checkout path shows only when it differs from the worktree's
+  label. An orphaned worktree whose repository workspace is closed says
+  "Worktree of name" instead. (#14)
+- The **Worktrees** dialog is offered on repository workspaces only. Git
+  worktrees are flat, so Herdr cannot create a worktree from inside a linked
+  worktree; the button no longer appears on those cards. (#14)
+
 ## [0.17.8] - 2026-08-23
 
 ### Fixed
@@ -1086,6 +1102,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.17.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.8...v0.17.9
 [0.17.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.7...v0.17.8
 [0.17.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.6...v0.17.7
 [0.17.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.5...v0.17.6

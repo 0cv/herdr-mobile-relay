@@ -28,10 +28,13 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 123 KiB for the native-style workspace follow-up: shared
 // long-press drag ordering, modal create/worktree flows, and nested linked
 // worktrees add 2,750 B gzip to the 0.17.6 bundle.
+// Raised from 126 KiB for the worktree tree presentation (issue #14 review):
+// connector rails, informative-only provenance/path rows, and the flat-Git
+// worktree gating add 482 B gzip to the 0.17.8 bundle, 19 B past the ceiling.
 // The gzip figure is the measuring runtime's zlib, not a property of the
 // bundle: the same bytes measure ~300 B larger under Bun than under Node, so
 // compare numbers only across runs on the same runtime (the repo uses Bun).
-const limitKiB = 126;
+const limitKiB = 127;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

@@ -73,15 +73,20 @@ Open **Workspaces** from the folder button in the header to:
 - rename or close a workspace, or start an agent as a second tab in a selected
   workspace;
 - open **Worktrees** in a dialog, create a branch-backed worktree, or open an
-  existing checkout as a non-focusing Herdr workspace;
+  existing checkout as a non-focusing Herdr workspace; Git worktrees are flat,
+  so the dialog is offered on repository workspaces only, never inside a
+  linked worktree;
 - close a linked-worktree workspace without deleting its checkout, or remove
   the checkout while retaining its Git branch.
 
 Linked worktrees are nested below their repository workspace on both the home
-screen and the Workspaces page, matching Herdr's parent/child presentation.
-Dragging a repository moves that complete group atomically when Herdr exposes
-`workspace.move_block`; older compatible Herdr versions can still move a
-standalone workspace and ask for an update before moving a linked group.
+screen and the Workspaces page, drawn as a tree with connector rails that
+match Herdr's parent/child presentation. Rows repeat neither the repository
+name nor a checkout path that merely restates the worktree's label; a path
+appears only when it differs. Dragging a repository moves that complete group
+atomically when Herdr exposes `workspace.move_block`; older compatible Herdr
+versions can still move a standalone workspace and ask for an update before
+moving a linked group.
 
 Normal worktree removal refuses a dirty checkout. **Force Remove** is offered
 only after that refusal and requires a second confirmation because it discards

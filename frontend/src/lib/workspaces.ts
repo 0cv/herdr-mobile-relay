@@ -56,6 +56,33 @@ function pathBase(path: string): string {
   return normalized.split(/[\\/]/).filter(Boolean).at(-1) || '';
 }
 
+/**
+ * Provenance text for a workspace card, but only when it says something the
+ * card does not already say. "Repository · ibkr" inside a card titled "ibkr"
+ * repeats the title, and "Linked worktree" under a parent card repeats what
+ * the tree already draws.
+ */
+export function workspaceProvenance(
+  workspace: { label: string; worktree?: WorkspaceWorktree | null },
+  nested = false,
+): string {
+  const worktree = workspace.worktree;
+  if (!worktree || !worktree.repo_name) return '';
+  if (worktree.is_linked_worktree) return nested ? '' : `Worktree of ${worktree.repo_name}`;
+  if (worktree.repo_name.trim().toLowerCase() === workspace.label.trim().toLowerCase()) return '';
+  return `Repository · ${worktree.repo_name}`;
+}
+
+/**
+ * A worktree row's path, but only when it says something the label does not:
+ * a checkout directory named after its workspace label carries no extra
+ * information, and repeating it on every row buries the rows that differ.
+ */
+export function informativePath(path: string, label: string): string {
+  if (!path) return '';
+  return pathBase(path).toLowerCase() === label.trim().toLowerCase() ? '' : path;
+}
+
 export function workspaceIdentity(agent: Agent): string {
   const identity = String(agent.workspace_id || agent.cwd || agent.raw_pane_id || agent.pane_id);
   return `${agent.relay_id}\u0000${identity}`;
