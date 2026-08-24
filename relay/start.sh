@@ -196,7 +196,7 @@ elif command -v cloudflared >/dev/null 2>&1; then
     if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
         echo ""
         echo "  Direct browser fallback:"
-        echo "  $DIRECT_URL"
+        print_phone_setup_url "$DIRECT_URL"
     fi
     echo ""
     echo "  The phone app and relay are both served by this tunnel."

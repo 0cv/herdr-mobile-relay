@@ -8,6 +8,18 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
 
+# Every setup URL sink must use the shared validated output helper. Keep these
+# source checks beside its behavioral coverage so a new plain echo cannot bypass
+# the terminal and URL-safety guards.
+test "$(grep -cF '    print_phone_setup_url "$phone_url"' \
+    "$REPO_DIR/relay/common.sh" || true)" = 1
+for SETUP_URL_CALLER in setup-link.sh start.sh; do
+    test "$(grep -cF '    print_phone_setup_url "$DIRECT_URL"' \
+        "$REPO_DIR/relay/$SETUP_URL_CALLER" || true)" = 1
+    ! grep -Fq 'echo "  $DIRECT_URL"' "$REPO_DIR/relay/$SETUP_URL_CALLER"
+done
+unset SETUP_URL_CALLER
+
 id() {
     if [ "${1:-}" = "-u" ]; then
         printf '0\n'
@@ -213,7 +225,22 @@ cmp -s "$PHONE_SETUP_PLAIN_EXPECTED" "$PHONE_SETUP_ACTUAL"
 assert_phone_setup_rejected() {
     local name="$1"
     local url="$2"
-    local actual="$WORK_DIR/phone-setup-rejected-$name"
+    local link_actual="$WORK_DIR/phone-setup-link-rejected-$name"
+    local setup_actual="$WORK_DIR/phone-setup-rejected-$name"
+
+    if (
+        relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
+        stdout_is_terminal() { return 0; }
+        unset NO_COLOR
+        TERM=xterm-256color print_phone_setup_url "$url"
+    ) > "$link_actual" 2>/dev/null; then
+        echo "setup URL helper accepted unsafe $name URL" >&2
+        exit 1
+    fi
+    if [ -s "$link_actual" ]; then
+        echo "setup URL helper printed unsafe $name URL" >&2
+        exit 1
+    fi
 
     if (
         relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
@@ -221,11 +248,11 @@ assert_phone_setup_rejected() {
         stdout_is_terminal() { return 0; }
         unset NO_COLOR
         TERM=xterm-256color print_phone_setup "$url"
-    ) > "$actual" 2>/dev/null; then
+    ) > "$setup_actual" 2>/dev/null; then
         echo "phone setup accepted unsafe $name URL" >&2
         exit 1
     fi
-    if [ -s "$actual" ]; then
+    if [ -s "$setup_actual" ]; then
         echo "phone setup printed unsafe $name URL" >&2
         exit 1
     fi

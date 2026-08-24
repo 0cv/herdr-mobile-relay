@@ -75,7 +75,7 @@ print_phone_setup "$PHONE_URL"
 if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
     echo ""
     echo "  Direct browser fallback:"
-    echo "  $DIRECT_URL"
+    print_phone_setup_url "$DIRECT_URL"
 fi
 echo ""
 echo "  The relay and tunnel must be running for the link to work:"

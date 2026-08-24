@@ -1589,12 +1589,31 @@ render_setup_qr() {
     "$(relay_binary)" qr --columns "${cols:-80}" "$url" 2>/dev/null || true
 }
 
+# Prints one setup URL only after validating it. OSC 8 is limited to an
+# interactive, capable terminal; redirected and opted-out output stays plain.
+print_phone_setup_url() {
+    local phone_url="$1"
+
+    if ! phone_setup_url_is_safe "$phone_url"; then
+        return 1
+    fi
+    if stdout_is_terminal &&
+       [ -z "${NO_COLOR+x}" ] &&
+       [ "${TERM:-}" != dumb ]; then
+        printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "$phone_url" "$phone_url"
+    else
+        printf '  %s\n' "$phone_url"
+    fi
+}
+
 # Shared tail of quick-start and setup-link output: QR code when possible,
 # always the link. Invalid values fail before either output sink sees them.
 print_phone_setup() {
     local phone_url="$1"
     local qr_code
 
+    # Reject before QR rendering. The output helper validates again so direct
+    # callers receive the same guarantee.
     if ! phone_setup_url_is_safe "$phone_url"; then
         return 1
     fi
@@ -1610,13 +1629,7 @@ print_phone_setup() {
     else
         echo "  Open this private setup link on your phone:"
     fi
-    if stdout_is_terminal &&
-       [ -z "${NO_COLOR+x}" ] &&
-       [ "${TERM:-}" != dumb ]; then
-        printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "$phone_url" "$phone_url"
-    else
-        printf '  %s\n' "$phone_url"
-    fi
+    print_phone_setup_url "$phone_url"
 }
 
 require_supported_platform() {
