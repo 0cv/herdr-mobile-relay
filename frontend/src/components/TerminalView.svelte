@@ -214,14 +214,19 @@
     Boolean($connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
   );
   // The capability only says the relay can lease; it does not mean this pane
-  // has a width yet. The wrapping layout is engaged solely when it does, so a
-  // pane read before the lease lands keeps the fixed layout rather than
-  // wrapping its rows at the phone's container width.
+  // has a width yet. The wrapping layout is engaged solely when it does.
   const resizeLayoutActive = $derived(terminalResizeLayoutEngaged(
     resizeSessionActive,
     measuredCellWidth,
     lastLeasedColumns || renderedResizeColumns,
   ));
+  // Three regimes, not two. A relay that cannot lease at all serves a pane at
+  // its own width, and the fixed layout keeps that pane's columns aligned and
+  // scrolling sideways. A relay that can lease but has not granted a width yet
+  // is showing a pane whose width is nobody's: alignment is already lost, so
+  // those rows wrap at the container instead of stranding the reader on line
+  // tails after every refresh.
+  const resizeLayoutPending = $derived(resizeSessionActive && !resizeLayoutActive);
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -655,7 +660,11 @@
       next.format,
       preserve,
       preserveLineEnds,
-      resizeLayoutActive ? lastLeasedColumns : 0,
+      // Cap box-drawing rows at the width in force. A fixed-grid row is a run
+      // of fixed-width cells with no wrap opportunity between them, so past
+      // the cap it must render as plain text that can wrap instead. Zero means
+      // "no cap", which only a relay that cannot lease is entitled to.
+      resizeLayoutActive ? lastLeasedColumns : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0),
     );
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
@@ -814,7 +823,15 @@
       const measured = virtualHeightCache.get(row.html);
       if (measured) return measured;
       if (row.separator) return lineHeight * 1.2;
-      const wraps = (!lastPreserveLayout || (resizeLayoutActive && !row.fixedGrid))
+      // One line per row only where the row really stays on one line: a leased
+      // pane's fixed-grid rows. Everything else wraps at the width in force,
+      // and estimating those at one line parks the scroll past the content.
+      // Rows wrap in the two regimes that have a width to wrap at: engaged
+      // (the leased width, fixed grids excepted) and pending (the container).
+      // A relay that cannot lease keeps every row on one line.
+      const wraps = (!lastPreserveLayout
+        || resizeLayoutPending
+        || (resizeLayoutActive && !row.fixedGrid))
         ? Math.max(1, Math.ceil(row.columns / wrappingColumns))
         : 1;
       return lineHeight * wraps;
@@ -830,7 +847,7 @@
       nextTop = terminalScreenOffset() + virtualIndex.offset(anchorIndex) + anchorOffset;
     }
 
-    if (!lastPreserveLayout) virtualContentColumns = 0;
+    if (!lastPreserveLayout || resizeLayoutPending) virtualContentColumns = 0;
     else {
       virtualContentColumns = terminalScreenColumns(
         renderedRows,
@@ -1843,7 +1860,7 @@
   {/if}
   <div class="term-wrap">
   <div
-    class:resize-layout={resizeLayoutActive}
+    class:resize-layout={resizeLayoutActive} class:resize-pending={resizeLayoutPending}
     class="term-content preserve-layout"
     style={terminalContentStyle}
     bind:this={terminalElement}

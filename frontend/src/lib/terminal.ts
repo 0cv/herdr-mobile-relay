@@ -806,6 +806,10 @@ export function terminalResizeLayoutEngaged(
  * Columns the screen must be able to show. Under the wrapping layout rows wrap
  * at the cap and only fixed-grid rows may exceed it; otherwise every row keeps
  * its full width, which is what makes the screen scroll rather than wrap.
+ *
+ * A pane whose relay can lease but has not yet granted a width is neither:
+ * the caller claims no width at all so the rows wrap at the container. See
+ * TerminalView's pending regime.
  */
 export function terminalScreenColumns(
   rows: readonly Pick<RenderedTerminalRow, 'columns' | 'fixedGrid'>[],

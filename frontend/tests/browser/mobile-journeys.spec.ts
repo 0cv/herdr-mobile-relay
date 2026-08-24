@@ -1981,34 +1981,102 @@ test('keeps a wide pane readable while its size lease is still pending', async (
   await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
   const wideRow = `${'the pane is far wider than the phone viewport '.repeat(3)}and keeps going`;
+  // A box border padded out to the pane's width. Preserved spaces may hang
+  // past the edge instead of wrapping, which WebKit reports as scrollable
+  // width, handing the reader a pane that pans sideways.
+  const paddedRow = `╰─${' '.repeat(150)}─╯`;
+  // A bordered row of cells: box-drawing renders as a fixed-width cell grid
+  // with no wrap opportunity between cells, so past the phone's width it has
+  // to fall back to text that can wrap.
+  const gridRow = `│ ${'aligned cell '.repeat(12)}│`;
+  // Long unbroken tokens are routine in agent output.
+  const tokenRow = `https://example.test/${'x'.repeat(300)}`;
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
-    content: ['first row', wideRow, 'last row'].join('\n'),
+    content: ['first row', wideRow, paddedRow, gridRow, tokenRow, 'last row'].join('\n'),
   });
 
   const terminal = page.getByRole('log');
   const lines = terminal.locator('.ansi-line');
-  await expect(lines).toHaveCount(3);
+  await expect(lines).toHaveCount(6);
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThan(0);
 
-  // Every row occupies exactly one line: the wide row scrolls instead of
-  // wrapping, so no row is broken mid-word at the container width.
+  // The pane is wider than the phone and no lease has landed, so alignment is
+  // impossible either way. Wrapping at the container keeps the text readable:
+  // sideways scrolling stranded the reader on line tails after every refresh.
   const geometry = await terminal.evaluate((element) => {
     const rows = Array.from(element.querySelectorAll<HTMLElement>('.ansi-line'));
     const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+    const wide = rows[1];
+    // A word split across lines reports more than one client rect. A word too
+    // long to fit a line has to break; one that would have fit must not.
+    let brokenWords = 0;
+    const walker = document.createTreeWalker(wide, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node.textContent || '';
+      const pattern = /\S+/g;
+      for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+        const range = document.createRange();
+        range.setStart(node, match.index);
+        range.setEnd(node, match.index + match[0].length);
+        const rects = Array.from(range.getClientRects());
+        const advance = rects.reduce((total, rect) => total + rect.width, 0);
+        if (rects.length > 1 && advance <= element.clientWidth) brokenWords += 1;
+      }
+    }
     return {
       lineHeight,
-      heights: rows.map((row) => row.getBoundingClientRect().height),
+      wideHeight: wide.getBoundingClientRect().height,
+      narrowHeight: rows[0].getBoundingClientRect().height,
+      brokenWords,
       scrollWidth: element.scrollWidth,
       clientWidth: element.clientWidth,
     };
   });
   expect(geometry.lineHeight).toBeGreaterThan(0);
-  for (const height of geometry.heights) {
-    expect(height).toBeLessThan(geometry.lineHeight * 1.5);
+  expect(geometry.narrowHeight).toBeLessThan(geometry.lineHeight * 1.5);
+  expect(geometry.wideHeight).toBeGreaterThan(geometry.lineHeight * 1.5);
+  expect(geometry.brokenWords).toBe(0);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+});
+
+test('estimates wrapped row heights while a lease is pending', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'omp' }],
+  });
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
+  // Rows that wrap to several lines each. The virtualizer sizes unmounted rows
+  // from an estimate, so an estimate of one line per row understates the whole
+  // log and the scroll geometry lands the reader in the wrong place.
+  const content = Array.from({ length: 400 }, (_, index) =>
+    `row ${String(index + 1).padStart(4, '0')} ${'wide content '.repeat(14)}`).join('\n');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content });
+
+  const terminal = page.getByRole('log');
+  await expect(terminal.locator('.ansi-line').first()).toBeVisible();
+  const estimated = await terminal.evaluate((element) => element.scrollHeight);
+  // Walking the log mounts and measures every row, so the height afterwards is
+  // the truth the estimate was predicting.
+  const step = await terminal.evaluate((element) => Math.max(1, element.clientHeight - 20));
+  for (let top = 0; top <= estimated; top += step) {
+    await terminal.evaluate((element, offset) => {
+      element.scrollTop = offset;
+      element.dispatchEvent(new Event('scroll'));
+    }, top);
+    await page.waitForTimeout(50);
   }
-  expect(geometry.scrollWidth).toBeGreaterThan(geometry.clientWidth);
+  await expect.poll(async () => {
+    const measured = await terminal.evaluate((element) => element.scrollHeight);
+    return Math.abs(measured - estimated) / measured < 0.1;
+  }).toBe(true);
 });
 
 test('reports unavailable Resize Session without exposing legacy width modes', async ({ page }) => {
