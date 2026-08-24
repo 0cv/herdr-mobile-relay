@@ -280,7 +280,9 @@ func TestPaneWatchUpdateSendsResizeSettledDelta(t *testing.T) {
 	}
 }
 
-func TestPreparePaneResponsePreservesHistoryDuringResizeSession(t *testing.T) {
+// A width change makes the agent redraw its transcript, so those frames stay out
+// of history and the phone is shown the viewport alone.
+func TestPreparePaneResponsePreservesHistoryWhileResizeSettles(t *testing.T) {
 	s := testServerWithCacheDir(t.TempDir())
 	s.state.CommitInventory([]*coordinator.AgentState{{
 		PaneID: "pane-1", Agent: "claude", Status: "idle",
@@ -291,7 +293,7 @@ func TestPreparePaneResponsePreservesHistoryDuringResizeSession(t *testing.T) {
 	response := map[string]any{
 		"type": "pane_content", "pane_id": "pane-1",
 		"content": "current 1\ncurrent 2", "format": "ansi",
-		"truncated": false, "viewport_only": true,
+		"truncated": false, "viewport_only": true, "resize_settling": true,
 	}
 	s.preparePaneResponse(
 		map[string]any{"pane_id": "pane-1", "lines": 100, "terminal_columns": 59},
@@ -299,13 +301,302 @@ func TestPreparePaneResponsePreservesHistoryDuringResizeSession(t *testing.T) {
 	)
 
 	if response["content"] != "current 1\ncurrent 2" {
-		t.Fatalf("resized content = %q, want clean current viewport", response["content"])
+		t.Fatalf("settling content = %q, want clean current viewport", response["content"])
 	}
 	if response["truncated"] != false {
-		t.Fatalf("resized truncation = %#v, want false", response["truncated"])
+		t.Fatalf("settling truncation = %#v, want false", response["truncated"])
 	}
 	if content := s.historyM.Content("pane-1", 100); content != baseline {
-		t.Fatalf("history changed during resized read:\n%s", content)
+		t.Fatalf("history changed while the resize settled:\n%s", content)
+	}
+}
+
+// Holding a lease is the steady state while a phone views a pane. Skipping those
+// frames left an alternate-screen agent with no history at all, so the phone
+// could only ever scroll the visible screen.
+func TestPreparePaneResponseServesHistoryUnderStableLease(t *testing.T) {
+	s := testServerWithCacheDir(t.TempDir())
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Status: "idle",
+	}}, s.state.RevisionCounter())
+	s.historyM.Merge("pane-1", "history 1\nhistory 2\nf1\nf2\nf3\nf4\nf5\nf6")
+
+	response := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": "current 1\ncurrent 2\nf1\nf2\nf3\nf4\nf5\nf6", "format": "ansi",
+		"truncated": false, "viewport_only": true,
+	}
+	s.preparePaneResponse(
+		map[string]any{"pane_id": "pane-1", "lines": 100, "terminal_columns": 59},
+		response,
+	)
+
+	content, _ := response["content"].(string)
+	for _, want := range []string{"history 1", "current 2"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("leased content %q lost %q", content, want)
+		}
+	}
+	if depth := s.historyM.Depth("pane-1"); depth != 4 {
+		t.Fatalf("leased frame history depth = %d, want the watched rows appended", depth)
+	}
+}
+
+const seedFooter = "\nf1\nf2\nf3\nf4\nf5\nf6"
+
+func testSeedServer(t *testing.T, harvest func(context.Context, string, int) (string, bool, error)) (*Server, *int) {
+	t.Helper()
+	s := testServerWithCacheDir(t.TempDir())
+	s.historyTasks = newLifecycleTasks(context.Background())
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Status: "idle",
+	}}, s.state.RevisionCounter())
+	s.syncHistoryPanes(s.state.Snapshot())
+	s.paneLeaseActive = func(string) bool { return false }
+	calls := 0
+	s.harvestTranscript = func(ctx context.Context, paneID string, lines int) (string, bool, error) {
+		calls++
+		return harvest(ctx, paneID, lines)
+	}
+	return s, &calls
+}
+
+// runSeed drives one background tick's worth of seeding and waits it out.
+func runSeed(s *Server) {
+	s.scheduleHistorySeed("pane-1", historySeedTargetDepth)
+	s.historyTasks.Stop()
+	s.historyTasks = newLifecycleTasks(context.Background())
+	s.historyCaptureMu.Lock()
+	if seed := s.historySeeds["pane-1"]; seed != nil {
+		seed.lastTry = time.Time{}
+	}
+	s.historyCaptureMu.Unlock()
+}
+
+// walkedTranscript builds a harvest deep enough to be recognized as a real walk
+// rather than a declined one, which returns only the visible screen.
+func walkedTranscript(tail string) string {
+	rows := make([]string, 0, historySeedDeclineRows+20)
+	for index := range historySeedDeclineRows + 20 {
+		rows = append(rows, fmt.Sprintf("walked %03d", index))
+	}
+	return strings.Join(rows, "\n") + "\n" + tail
+}
+
+// An alternate-screen pane serves nothing but the visible rows, so its history
+// has to be walked out of the pane once; afterwards the phone can scroll back
+// through rows the relay never watched.
+func TestHistorySeedFillsAlternateScreenPane(t *testing.T) {
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return walkedTranscript("screen 1" + seedFooter), true, nil
+	})
+	s.historyM.Merge("pane-1", "screen 1"+seedFooter)
+
+	runSeed(s)
+
+	if *calls != 1 {
+		t.Fatalf("pane walked %d times, want exactly one", *calls)
+	}
+	content := s.historyM.Content("pane-1", 2000)
+	for _, want := range []string{"walked 000", "walked 119", "screen 1"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("seeded history %q lost %q", content, want)
+		}
+	}
+	if strings.Count(content, "screen 1") != 1 {
+		t.Fatalf("watched screen duplicated by the walk: %q", content)
+	}
+	runSeed(s)
+	if *calls != 1 {
+		t.Fatalf("pane walked again after a successful walk: %d", *calls)
+	}
+}
+
+// A pane whose history already reaches the walk's own ceiling has nothing a walk
+// could add; scrolling it would disturb the operator for nothing.
+func TestHistorySeedSkippedWhenHistoryAlreadyDeep(t *testing.T) {
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		t.Error("deep pane was walked")
+		return "", false, nil
+	})
+
+	rows := make([]string, 0, historySeedTargetDepth+10)
+	for index := range historySeedTargetDepth + 10 {
+		rows = append(rows, fmt.Sprintf("scrollback %04d", index))
+	}
+	s.historyM.Merge("pane-1", strings.Join(rows, "\n")+seedFooter)
+	runSeed(s)
+
+	if *calls != 0 {
+		t.Fatalf("pane walked %d times despite a deep history", *calls)
+	}
+}
+
+// herdr declines by answering with exactly the visible screen, on internal state
+// that can last hours. A decline must neither retire the seed nor pollute
+// history; the walk lands whenever herdr finally agrees.
+func TestHistorySeedRetriesThroughDeclinesUntilAWalkLands(t *testing.T) {
+	declines := 5
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		if declines > 0 {
+			declines--
+			return "screen 1" + seedFooter, false, nil
+		}
+		return walkedTranscript("screen 1" + seedFooter), true, nil
+	})
+	s.historyM.Merge("pane-1", "screen 1"+seedFooter)
+	before := s.historyM.Depth("pane-1")
+
+	for range 5 {
+		runSeed(s)
+	}
+	if *calls != 5 {
+		t.Fatalf("declined walks = %d, want one per tick", *calls)
+	}
+	if depth := s.historyM.Depth("pane-1"); depth != before {
+		t.Fatalf("a decline changed history depth %d -> %d", before, depth)
+	}
+
+	runSeed(s)
+	if !strings.Contains(s.historyM.Content("pane-1", 2000), "walked 000") {
+		t.Fatalf("walk after declines did not land")
+	}
+	runSeed(s)
+	if *calls != 6 {
+		t.Fatalf("walks = %d after success, want 6 (retired)", *calls)
+	}
+}
+
+// One walk fetches everything herdr will ever serve for the pane, so it retires
+// the seed even when every returned row was already watched - otherwise a pane
+// with a fully-captured transcript would be visibly walked on a loop.
+func TestHistorySeedRealWalkRetiresEvenWithoutNewRows(t *testing.T) {
+	transcript := walkedTranscript("screen 1" + seedFooter)
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return transcript, true, nil
+	})
+	s.historyM.Merge("pane-1", transcript)
+	before := s.historyM.Depth("pane-1")
+
+	runSeed(s)
+	runSeed(s)
+	runSeed(s)
+
+	if *calls != 1 {
+		t.Fatalf("fully-captured pane walked %d times, want 1", *calls)
+	}
+	if depth := s.historyM.Depth("pane-1"); depth != before {
+		t.Fatalf("re-seeding a captured transcript changed depth %d -> %d", before, depth)
+	}
+}
+
+// The walk scrolls the pane, so frames read during it show older screens. Filing
+// them as new output would interleave the transcript with its own past.
+func TestHistorySeedSuppressesMergeWhileWalking(t *testing.T) {
+	s, _ := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return "", false, nil
+	})
+	s.historyM.Merge("pane-1", "watched 1"+seedFooter)
+	before := s.historyM.Depth("pane-1")
+
+	s.historyCaptureMu.Lock()
+	s.historySeeds["pane-1"] = &historySeedState{generation: s.state.Generation("pane-1")}
+	s.historyInflight["pane-1"] = true
+	s.historyCaptureMu.Unlock()
+
+	response := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": "scrolled back row" + seedFooter, "format": "ansi", "truncated": false,
+	}
+	s.preparePaneResponse(map[string]any{"pane_id": "pane-1", "lines": 100}, response)
+	if response["content"] != "scrolled back row"+seedFooter {
+		t.Fatalf("frame read during the walk was rewritten: %q", response["content"])
+	}
+	if depth := s.historyM.Depth("pane-1"); depth != before {
+		t.Fatalf("history depth %d -> %d during the walk", before, depth)
+	}
+}
+
+// Only agents drawing on the alternate screen need a walk; the others are read
+// straight through, history and all.
+func TestHistorySeedIgnoresAgentsWithScrollback(t *testing.T) {
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		t.Error("pane of an agent with scrollback was walked")
+		return "", false, nil
+	})
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "omp", Status: "idle",
+	}}, s.state.RevisionCounter())
+
+	runSeed(s)
+
+	if *calls != 0 {
+		t.Fatalf("omp pane walked %d times", *calls)
+	}
+}
+
+// A working pane is captured in the background already, and herdr declines to
+// walk a pane that repaints under it, so an attempt there would be spent for
+// nothing.
+func TestHistorySeedLeavesWorkingPanesToTheCaptureLoop(t *testing.T) {
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		t.Error("working pane was walked")
+		return "", false, nil
+	})
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Status: "working",
+	}}, s.state.RevisionCounter())
+
+	runSeed(s)
+
+	if *calls != 0 {
+		t.Fatalf("working pane walked %d times", *calls)
+	}
+}
+
+// herdr declines the walk for as long as a lease holds the pane resized and for
+// ~85s after; the seed does not even try then, and picks the pane up once it has
+// been at its own size for the quiet window.
+func TestHistorySeedWaitsOutLeases(t *testing.T) {
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return walkedTranscript("screen 1" + seedFooter), true, nil
+	})
+	leased := true
+	s.paneLeaseActive = func(string) bool { return leased }
+
+	for range 6 {
+		runSeed(s)
+	}
+	if *calls != 0 {
+		t.Fatalf("pane walked %d times while leased", *calls)
+	}
+
+	leased = false
+	runSeed(s)
+	if *calls != 1 {
+		t.Fatalf("pane walked %d times after the lease cleared, want 1", *calls)
+	}
+	if !strings.Contains(s.historyM.Content("pane-1", 2000), "walked 000") {
+		t.Fatalf("post-lease walk did not land")
+	}
+}
+
+// The background tick is what reaches idle panes; without it the walk would only
+// ever run for panes something else already touches.
+func TestHistoryTickWalksIdlePanes(t *testing.T) {
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return walkedTranscript("screen 1" + seedFooter), true, nil
+	})
+	s.historyM.Merge("pane-1", "screen 1"+seedFooter)
+
+	s.tickHistory(context.Background())
+	s.historyTasks.Stop()
+
+	if *calls != 1 {
+		t.Fatalf("idle pane walked %d times from the tick, want 1", *calls)
+	}
+	if !strings.Contains(s.historyM.Content("pane-1", 2000), "walked 000") {
+		t.Fatalf("tick walk did not land")
 	}
 }
 

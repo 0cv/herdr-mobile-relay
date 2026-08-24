@@ -46,6 +46,29 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/workspace"
 )
 
+// A walk that actually walks scrolls the operator's pane for ~2s, returns far
+// more rows than one screen, and retires the seed. herdr declines instead while
+// anything holds the pane resized - a lease, or the measured ~85s after any
+// resize - and on opaque internal state that can last for hours; a decline
+// answers in ~1ms with exactly the visible screen and moves nothing. Declines
+// are therefore retried indefinitely on a spaced timer, costing nothing, and the
+// row count is what tells the two apart: only a response deeper than any screen
+// is a walk. The target depth matches the most herdr returns for one walk.
+const (
+	historySeedDeadline    = 20 * time.Second
+	historySeedRetry       = 15 * time.Second
+	historySeedResizeQuiet = 90 * time.Second
+	historySeedTargetDepth = 1000
+	historySeedDeclineRows = 100
+)
+
+// historySeedState tracks the walk of one pane generation.
+type historySeedState struct {
+	generation int64
+	lastTry    time.Time
+	done       bool
+}
+
 type copyResponseRunner func(
 	context.Context,
 	string,
@@ -112,10 +135,16 @@ type Server struct {
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
 
-	historyCaptureMu  sync.Mutex
-	historyInflight   map[string]bool
-	historyLast       map[string]time.Time
-	historyActive     map[string]bool
+	historyCaptureMu sync.Mutex
+	historyInflight  map[string]bool
+	historyLast      map[string]time.Time
+	historyActive    map[string]bool
+	historySeeds     map[string]*historySeedState
+	// harvestTranscript overrides the pane walk in tests, which must never
+	// scroll a real pane.
+	harvestTranscript func(context.Context, string, int) (string, bool, error)
+	// paneLeaseActive overrides the lease/resize-quiet check in tests.
+	paneLeaseActive   func(string) bool
 	historyReconciled bool
 	transitionTasks   *lifecycleTasks
 	historyTasks      *lifecycleTasks
@@ -169,6 +198,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		historyInflight:     make(map[string]bool),
 		historyLast:         make(map[string]time.Time),
 		historyActive:       make(map[string]bool),
+		historySeeds:        make(map[string]*historySeedState),
 	}
 }
 
@@ -1347,13 +1377,24 @@ func (s *Server) captureHistoryLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			for _, agent := range s.state.Snapshot() {
-				if !isClaudeLike(agent.Agent) || (agent.Status != "working" && agent.Status != "blocked") {
-					continue
-				}
-				s.scheduleHistoryCapture(ctx, agent.PaneID)
-			}
+			s.tickHistory(ctx)
 		}
+	}
+}
+
+// tickHistory routes every claude-like pane to the collector that can reach its
+// transcript: an active pane is captured invisibly from its live frames, an idle
+// one stops producing frames and is walked once instead.
+func (s *Server) tickHistory(ctx context.Context) {
+	for _, agent := range s.state.Snapshot() {
+		if !isClaudeLike(agent.Agent) {
+			continue
+		}
+		if agent.Status == "working" || agent.Status == "blocked" {
+			s.scheduleHistoryCapture(ctx, agent.PaneID)
+			continue
+		}
+		s.scheduleHistorySeed(agent.PaneID, historySeedTargetDepth)
 	}
 }
 
@@ -1402,6 +1443,129 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 	s.historyCaptureMu.Unlock()
 }
 
+func (s *Server) historySeedInFlight(paneID string) bool {
+	s.historyCaptureMu.Lock()
+	defer s.historyCaptureMu.Unlock()
+	seed := s.historySeeds[paneID]
+	return seed != nil && !seed.done && s.historyInflight[paneID]
+}
+
+// scheduleHistorySeed fills a pane's history from the transcript herdr can only
+// reach by walking the pane itself. Claude-like agents draw on the alternate
+// screen, which keeps no scrollback: every display read returns the visible rows
+// and nothing more, so a pane's history used to start at whichever screen the
+// relay first saw, while an agent with a real scrollback (omp) serves a thousand
+// rows on the first read. The walk scrolls the operator's pane for a couple of
+// seconds, so it happens once a client actually opens the pane, at most twice per
+// pane generation, and never while a capture is already reading.
+func (s *Server) scheduleHistorySeed(paneID string, limit int) {
+	harvest := s.harvestTranscript
+	if harvest == nil {
+		if s.dispatcher == nil {
+			return
+		}
+		harvest = s.dispatcher.HarvestPaneTranscript
+	}
+	if s.historyTasks == nil || limit < 1 {
+		return
+	}
+	// A pane whose agent is working or blocked is already captured in the
+	// background every few seconds, invisibly; herdr also declines to walk a
+	// pane that repaints under it. Walking is for the panes that loop ignores:
+	// the idle ones, whose transcript stops growing and would otherwise stay
+	// one screen deep forever.
+	agent, ok := s.state.Agent(paneID)
+	if !ok || !isClaudeLike(agent.Agent) {
+		return
+	}
+	if agent.Status == "working" || agent.Status == "blocked" {
+		return
+	}
+	// herdr declines the walk for as long as a lease holds the pane resized and
+	// for a measured ~85s after any resize. Those declines are not the pane's
+	// fault, so they must not spend its attempts: skip without burning until the
+	// pane has been at its own size for the full quiet window.
+	leased := s.paneLeaseActive
+	if leased == nil && s.paneSizeM != nil {
+		leased = func(id string) bool {
+			if _, ok := s.paneSizeM.ActiveColumns(id); ok {
+				return true
+			}
+			return s.paneSizeM.ResizedWithin(id, historySeedResizeQuiet)
+		}
+	}
+	if leased != nil && leased(paneID) {
+		return
+	}
+	generation := s.state.Generation(paneID)
+	s.historyCaptureMu.Lock()
+	seed := s.historySeeds[paneID]
+	if seed == nil || seed.generation != generation {
+		seed = &historySeedState{generation: generation}
+		s.historySeeds[paneID] = seed
+	}
+	depth := s.historyM.Depth(paneID)
+	switch {
+	case seed.done || s.historyInflight[paneID]:
+		s.historyCaptureMu.Unlock()
+		return
+	case depth >= limit:
+		// Deep enough already: an agent whose own scrollback herdr can read
+		// never needs a walk.
+		seed.done = true
+		s.historyCaptureMu.Unlock()
+		return
+	case !seed.lastTry.IsZero() && time.Since(seed.lastTry) < historySeedRetry:
+		s.historyCaptureMu.Unlock()
+		return
+	}
+	seed.lastTry = time.Now()
+	s.historyInflight[paneID] = true
+	s.historyCaptureMu.Unlock()
+
+	started := s.historyTasks.Start(func(taskCtx context.Context) {
+		defer func() {
+			s.historyCaptureMu.Lock()
+			delete(s.historyInflight, paneID)
+			s.historyCaptureMu.Unlock()
+		}()
+		readCtx, cancel := context.WithTimeout(taskCtx, historySeedDeadline)
+		defer cancel()
+		content, _, err := harvest(readCtx, paneID, history.MaxLines)
+		if err != nil {
+			s.logger.Warn("pane history seed failed", "pane_id", paneID, "error", err)
+			return
+		}
+		if s.state.Generation(paneID) != generation {
+			return
+		}
+		// A decline is exactly the visible screen; the watch frames carry that
+		// content already, and treating it as an answer would retire panes herdr
+		// merely was not ready to walk. Only a response deeper than any screen
+		// proves the pane was walked - and one walk fetches everything herdr
+		// will ever serve, so it retires the seed whether or not it held rows
+		// older than the watched history.
+		if strings.Count(content, "\n")+1 <= historySeedDeclineRows {
+			return
+		}
+		s.historyCaptureMu.Lock()
+		defer s.historyCaptureMu.Unlock()
+		if !s.historyActive[paneID] {
+			return
+		}
+		s.historyM.Seed(paneID, content, limit)
+		if current := s.historySeeds[paneID]; current != nil && current.generation == generation {
+			current.done = true
+		}
+	})
+	if started {
+		return
+	}
+	s.historyCaptureMu.Lock()
+	delete(s.historyInflight, paneID)
+	s.historyCaptureMu.Unlock()
+}
+
 func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 	active := make(map[string]bool, len(agents))
 	for _, agent := range agents {
@@ -1422,6 +1586,7 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 		}
 		delete(s.historyActive, paneID)
 		delete(s.historyLast, paneID)
+		delete(s.historySeeds, paneID)
 		s.historyM.Discard(paneID)
 	}
 	for paneID := range active {
@@ -1830,7 +1995,13 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 		(!strings.Contains(agentLower, "claude") && !strings.Contains(agentLower, "qoder")) {
 		return response
 	}
-	if viewportOnly, _ := response["viewport_only"].(bool); viewportOnly {
+	// A leased pane is resized to the phone and its agent redraws the whole
+	// transcript at the new width, so only the frames inside that window must
+	// stay out of history. Holding a lease is the steady state while a phone
+	// views a pane, so skipping every leased frame left these agents - the only
+	// ones whose scrollback the relay has to accumulate itself - with no history
+	// at all, and nothing to scroll back through.
+	if settling, _ := response["resize_settling"].(bool); settling {
 		return response
 	}
 	historyLimit := messageInt(message["lines"], 30)
@@ -1838,6 +2009,11 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 		historyLimit = 1
 	} else if historyLimit > history.MaxLines {
 		historyLimit = history.MaxLines
+	}
+	// Frames read while a harvest walks the pane show older screens; committing
+	// them would file scrolled-back rows as new output.
+	if s.historySeedInFlight(paneID) {
+		return response
 	}
 	herdrTruncated, _ := response["truncated"].(bool)
 	merged, historyTruncated := s.historyM.MergeLimited(paneID, content, historyLimit)

@@ -1052,6 +1052,21 @@ func (d *Dispatcher) readPaneForDisplay(
 	return d.herdr.ReadPaneRecent(ctx, paneID, lines, format)
 }
 
+// HarvestPaneTranscript returns the pane's transcript from beyond its visible
+// screen. Herdr serves this only in text format, and it pays for it by scrolling
+// the operator's real pane up and snapping it back — seconds of visible movement
+// per call, measured at ~2s for a 1000-line read. No polling path may reach it
+// (see TestTextFormatDisplayReadNeverHarvestsScrollback); it exists to seed the
+// history of an alternate-screen pane, whose display reads can never return more
+// than the screen because it keeps no scrollback of its own.
+func (d *Dispatcher) HarvestPaneTranscript(ctx context.Context, paneID string, lines int) (string, bool, error) {
+	read, err := d.herdr.ReadPane(ctx, paneID, lines, "text")
+	if err != nil {
+		return "", false, err
+	}
+	return string(read.Content), read.Truncated, nil
+}
+
 func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any) map[string]any {
 	paneID := stringValue(message, "pane_id")
 	if paneID == "" {

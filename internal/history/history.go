@@ -106,6 +106,66 @@ func (m *Manager) Content(paneID string, limit int) string {
 	return content
 }
 
+// Depth reports how many history rows are stored for a pane, excluding the
+// footer. Callers use it to decide whether a pane still needs a seed.
+func (m *Manager) Depth(paneID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.loadState(paneID).History)
+}
+
+// Seed installs a transcript harvested from the pane's own scrollback beneath
+// the rows the relay watched. An alternate-screen agent keeps no scrollback a
+// display read can reach, so without a seed a pane's history begins at whatever
+// screen the relay happened to see first. The harvest ends at the pane's current
+// screen, so its tail is the same content the stored history already holds:
+// the overlap is dropped rather than duplicated, and the stored rows win because
+// they carry the ANSI styling the harvested text lost.
+func (m *Manager) Seed(paneID string, rawContent string, limit int) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	state := m.loadState(paneID)
+	body, footer := splitSnapshot(rawContent)
+	if len(body) == 0 {
+		return joinContent(state, limit)
+	}
+	if len(state.History) == 0 {
+		state.History = body
+		if len(state.Footer) == 0 {
+			state.Footer = footer
+		}
+	} else if older := seedPrefix(body, state.History); len(older) > 0 {
+		state.History = append(older, state.History...)
+	}
+	if len(state.History) > MaxLines {
+		state.History = state.History[len(state.History)-MaxLines:]
+	}
+
+	m.maybeSave(paneID, state)
+	return joinContent(state, limit)
+}
+
+// seedPrefix returns the seed rows that precede the stored history. The exact
+// tail-to-head overlap is tried first; a partial match anywhere is the fallback,
+// because a pane read at one width and harvested at another reflows its own
+// output and only some rows survive verbatim.
+func seedPrefix(seed, history []string) []string {
+	seedNorm := normalizeLines(seed)
+	histNorm := normalizeLines(history)
+	if overlap := tailOverlap(seedNorm, histNorm); overlap > 0 {
+		return seed[:len(seed)-overlap]
+	}
+	match := sequenceMatch(seedNorm, histNorm)
+	if match.Size < 2 {
+		return seed
+	}
+	if match.A <= match.B {
+		return nil
+	}
+	return seed[:match.A-match.B]
+}
+
 func (m *Manager) Discard(paneID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

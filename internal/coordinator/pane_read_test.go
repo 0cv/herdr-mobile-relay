@@ -161,3 +161,39 @@ func TestTextFormatDisplayReadNeverHarvestsScrollback(t *testing.T) {
 		t.Fatalf("text-format reads did not all use the visible screen: %s", invocations)
 	}
 }
+
+// The seeding path is the one caller allowed to harvest, and it must ask for the
+// logical transcript in text format: an ansi read of an alternate-screen pane
+// never returns more than the visible screen.
+func TestHarvestPaneTranscriptReadsUnwrappedText(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "invocations.log")
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
+		"echo harvested\n")
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{
+		{PaneID: "pane-claude", Agent: "claude", Status: "idle"},
+	}, state.RevisionCounter())
+	dispatcher := NewDispatcher(
+		herdr.NewClient(bin, filepath.Join(dir, "missing.sock")),
+		state,
+		nil,
+		testLogger(),
+	)
+
+	content, _, err := dispatcher.HarvestPaneTranscript(context.Background(), "pane-claude", 1000)
+	if err != nil {
+		t.Fatalf("harvest failed: %v", err)
+	}
+	if strings.TrimSpace(content) != "harvested" {
+		t.Fatalf("harvested content = %q", content)
+	}
+	invocations, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(invocations), "--lines 1000 --source recent-unwrapped --format text") {
+		t.Fatalf("harvest did not request the logical transcript: %s", invocations)
+	}
+}

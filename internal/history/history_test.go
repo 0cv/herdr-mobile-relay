@@ -220,3 +220,105 @@ func TestReconcileRemovesHistoryLeftByEarlierProcess(t *testing.T) {
 		t.Fatalf("active pane history was removed: %v", err)
 	}
 }
+
+// A pane the relay never watched from the start has no rows to align against,
+// so the harvested transcript becomes the whole history.
+func TestSeedFillsEmptyHistory(t *testing.T) {
+	m := NewManager(t.TempDir())
+	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
+
+	content, _ := m.Seed("pane-1", "old 1\nold 2\nold 3"+footers, 100)
+	if !strings.Contains(content, "old 1") || !strings.Contains(content, "f6") {
+		t.Fatalf("seeded content = %q, want the harvested rows and footer", content)
+	}
+	if depth := m.Depth("pane-1"); depth != 3 {
+		t.Fatalf("seeded depth = %d, want the three harvested body rows", depth)
+	}
+}
+
+// The harvest ends at the screen the relay is already watching, so the rows it
+// shares with the stored history must not appear twice.
+func TestSeedPrependsOnlyOlderRows(t *testing.T) {
+	m := NewManager(t.TempDir())
+	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
+	m.Merge("pane-1", "watched 1\nwatched 2\nwatched 3"+footers)
+
+	content, _ := m.Seed("pane-1", "old 1\nold 2\nwatched 1\nwatched 2\nwatched 3"+footers, 100)
+	if strings.Count(content, "watched 1") != 1 {
+		t.Fatalf("overlapping row duplicated: %q", content)
+	}
+	rows := strings.Split(content, "\n")
+	if rows[0] != "old 1" || rows[2] != "watched 1" {
+		t.Fatalf("seeded order = %#v, want harvested rows beneath watched rows", rows[:3])
+	}
+	if depth := m.Depth("pane-1"); depth != 5 {
+		t.Fatalf("seeded depth = %d, want 2 harvested + 3 watched rows", depth)
+	}
+}
+
+// Styled rows the relay watched outrank the harvest, which loses ANSI.
+func TestSeedKeepsWatchedStyling(t *testing.T) {
+	m := NewManager(t.TempDir())
+	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
+	m.Merge("pane-1", "\x1b[42mApprove\x1b[0m\nwatched tail"+footers)
+
+	content, _ := m.Seed("pane-1", "old 1\nApprove\nwatched tail"+footers, 100)
+	if !strings.Contains(content, "\x1b[42mApprove") {
+		t.Fatalf("seed replaced the styled row: %q", content)
+	}
+	if strings.Count(content, "Approve") != 1 {
+		t.Fatalf("styled row duplicated by its plain harvest: %q", content)
+	}
+}
+
+// A pane read at one width and harvested at another reflows its own output, so
+// only part of the overlap survives verbatim; the partial match still places the
+// seam.
+func TestSeedAlignsOnPartialMatch(t *testing.T) {
+	m := NewManager(t.TempDir())
+	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
+	m.Merge("pane-1", "shared a\nshared b\nreflowed at phone width"+footers)
+
+	content, _ := m.Seed("pane-1", "old 1\nold 2\nshared a\nshared b\nreflowed at desktop width"+footers, 100)
+	if strings.Count(content, "shared a") != 1 {
+		t.Fatalf("matched row duplicated: %q", content)
+	}
+	if !strings.Contains(content, "old 1") {
+		t.Fatalf("older rows dropped: %q", content)
+	}
+	if strings.Contains(content, "reflowed at desktop width") {
+		t.Fatalf("seed kept its own copy of a row the relay already watched: %q", content)
+	}
+}
+
+// Nothing older than the stored history means nothing to prepend.
+func TestSeedIsIdempotent(t *testing.T) {
+	m := NewManager(t.TempDir())
+	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
+	seed := "old 1\nold 2\nold 3" + footers
+	m.Seed("pane-1", seed, 100)
+	first := m.Depth("pane-1")
+
+	m.Seed("pane-1", seed, 100)
+	if second := m.Depth("pane-1"); second != first {
+		t.Fatalf("second seed changed depth %d -> %d", first, second)
+	}
+}
+
+// Live frames keep appending after a seed, and the seeded rows stay beneath them.
+func TestSeedThenMergeKeepsBothEnds(t *testing.T) {
+	m := NewManager(t.TempDir())
+	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
+	m.Merge("pane-1", "watched 1\nwatched 2"+footers)
+	m.Seed("pane-1", "old 1\nwatched 1\nwatched 2"+footers, 100)
+
+	content, _ := m.MergeLimited("pane-1", "watched 2\nwatched 3"+footers, 100)
+	for _, want := range []string{"old 1", "watched 1", "watched 3"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("merged content lost %q: %q", want, content)
+		}
+	}
+	if strings.Count(content, "watched 2") != 1 {
+		t.Fatalf("row duplicated across seed and merge: %q", content)
+	}
+}
