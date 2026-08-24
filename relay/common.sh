@@ -1529,6 +1529,53 @@ record_phone_app_origin() {
     )
 }
 
+# Terminal control sequences belong only on an interactive stdout. Kept small so
+# tests can model a terminal without allocating a pseudo-terminal.
+stdout_is_terminal() {
+    [ -t 1 ]
+}
+
+# The setup URL reaches both the QR encoder and the terminal escape sink. Reject
+# control bytes first, then require an HTTPS origin or the normalizer's exact
+# canonical spelling of a loopback HTTP origin.
+phone_setup_url_is_safe() {
+    local url="$1"
+    local scheme
+    local remainder
+    local authority
+    local origin
+    local normalized
+    local binary
+
+    case "$url" in
+        *[[:cntrl:]]*)
+            return 1
+            ;;
+        https://*)
+            scheme=https
+            ;;
+        http://*)
+            scheme=http
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    remainder="${url#*://}"
+    authority="${remainder%%[/?#]*}"
+    [ -n "$authority" ] || return 1
+    origin="$scheme://$authority"
+
+    if ! binary="$(relay_binary)"; then
+        return 1
+    fi
+    if ! normalized="$("$binary" normalize-origin --allow-loopback-http "$origin" 2>/dev/null)"; then
+        return 1
+    fi
+    [ "$scheme" = https ] || [ "$normalized" = "$origin" ]
+}
+
 # Prints an indented terminal QR code for the URL, or nothing when it cannot
 # be drawn because the terminal is too narrow. A wrapped QR is worse than the
 # plain link.
@@ -1543,10 +1590,14 @@ render_setup_qr() {
 }
 
 # Shared tail of quick-start and setup-link output: QR code when possible,
-# always the link.
+# always the link. Invalid values fail before either output sink sees them.
 print_phone_setup() {
     local phone_url="$1"
     local qr_code
+
+    if ! phone_setup_url_is_safe "$phone_url"; then
+        return 1
+    fi
     qr_code="$(render_setup_qr "$phone_url")"
     if [ -n "$qr_code" ]; then
         echo "  Scan this QR code with your phone camera:"
@@ -1559,7 +1610,13 @@ print_phone_setup() {
     else
         echo "  Open this private setup link on your phone:"
     fi
-    echo "  $phone_url"
+    if stdout_is_terminal &&
+       [ -z "${NO_COLOR+x}" ] &&
+       [ "${TERM:-}" != dumb ]; then
+        printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "$phone_url" "$phone_url"
+    else
+        printf '  %s\n' "$phone_url"
+    fi
 }
 
 require_supported_platform() {
