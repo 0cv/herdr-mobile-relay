@@ -3,6 +3,16 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.17.11] - 2026-08-24
+
+### Changed
+
+- Tab names on home-screen workspace cards sit directly above their agent
+  cards instead of floating in a tall header reserved for the removed reorder
+  buttons.
+- The header workspace icons are drawn taller, matching the height of the
+  neighboring symbols instead of looking vertically compressed.
+
 ## [0.17.10] - 2026-08-24
 
 ### Changed
@@ -1111,6 +1121,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.17.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.10...v0.17.11
 [0.17.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.9...v0.17.10
 [0.17.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.8...v0.17.9
 [0.17.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.7...v0.17.8

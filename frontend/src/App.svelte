@@ -508,7 +508,7 @@
           onclick={() => { workspaceOpen = true; }}
         >
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <path d="M3 6.5h7l2 2h9v10H3z"></path>
+            <path d="M3 5.5h7l2 2h9v11H3z"></path>
           </svg>
         </Button>
         <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
@@ -529,8 +529,8 @@
       {:else}
         <Button variant="ghost" size="icon" aria-label="Manage workspaces" title="Manage workspaces" onclick={() => toggle('workspaces')}>
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <path d="M3 6.5h7l2 2h9v10H3z"></path>
-            <path d="M8 12h8M12 10v4"></path>
+            <path d="M3 5.5h7l2 2h9v11H3z"></path>
+            <path d="M8 13h8M12 9v8"></path>
           </svg>
         </Button>
         <Button variant="ghost" size="icon" aria-label="Start agent" onclick={() => toggle('launch')}>＋</Button>

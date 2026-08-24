@@ -725,7 +725,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-done-count { color: var(--success); font-style: normal; font-weight: 700; }
 .done-workspace-card { border-color: color-mix(in srgb, var(--success) 42%, var(--border)); }
 .workspace-state-dot { margin-inline-start: -.1rem; }
-.workspace-tabs { border-top: 1px solid var(--border); display: grid; gap: .75rem; padding: .7rem; }
+.workspace-tabs { border-top: 1px solid var(--border); display: grid; gap: .55rem; padding: .55rem .7rem .7rem; }
 .workspace-provenance, .workspace-empty { color: var(--muted); font-size: .68rem; margin: 0; padding: .55rem .8rem; }
 .workspace-provenance { border-top: 1px solid var(--border); padding-bottom: 0; }
 .workspace-empty { border-top: 1px solid var(--border); }
@@ -775,7 +775,9 @@ textarea { min-height: 6.5rem; resize: vertical; }
    text-selection and search sheets instead. */
 .agent-list, .agent-rail { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .workspace-tab { position: relative; }
-.workspace-tab-header { align-items: center; display: flex; min-height: 2.4rem; }
+/* The 2.4rem floor dated from the header's removed reorder buttons; the
+   label-only header hugs its tab so name and agent read as one unit. */
+.workspace-tab-header { align-items: center; display: flex; }
 .workspace-tab-header h3 { color: var(--muted); flex: 1; font-size: .65rem; letter-spacing: .04em; margin: 0 0 .35rem .15rem; text-transform: uppercase; }
 .compact-agent-grid .agent-open { touch-action: pan-y; }
 .workspace-tab.tab-dragging { box-shadow: 0 .55rem 1.6rem rgb(0 0 0 / .38); border-radius: .8rem; opacity: .95; z-index: 2; }
