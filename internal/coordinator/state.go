@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -968,6 +969,10 @@ func (s *State) Snapshot() []*AgentState {
 		}
 		result = append(result, &cp)
 	}
+	// s.agents is a map; without an explicit order every snapshot serializes
+	// differently, which defeats broadcast dedupe and hands clients a
+	// re-shuffled payload each poll.
+	sort.Slice(result, func(i, j int) bool { return result[i].PaneID < result[j].PaneID })
 	return result
 }
 

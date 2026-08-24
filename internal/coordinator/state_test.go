@@ -70,6 +70,11 @@ func TestCommitInventoryAndSnapshot(t *testing.T) {
 	if len(snap) != 2 {
 		t.Fatalf("snapshot len = %d, want 2", len(snap))
 	}
+	// The backing store is a map; the snapshot must impose a stable order so
+	// consecutive identical inventories serialize identically.
+	if snap[0].PaneID != "p1" || snap[1].PaneID != "p2" {
+		t.Errorf("snapshot order = %s, %s, want p1, p2", snap[0].PaneID, snap[1].PaneID)
+	}
 	if s.AgentCount() != 2 {
 		t.Errorf("agent count = %d, want 2", s.AgentCount())
 	}

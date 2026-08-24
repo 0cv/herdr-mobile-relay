@@ -3,6 +3,23 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- The relay no longer re-broadcasts a full `agents` snapshot on every
+  reconcile poll while nothing has changed. An idle machine used to push a
+  fresh copy of the whole inventory to every phone at the poll cadence —
+  in a different random order each time, because the snapshot iterated a Go
+  map — so idle phones re-processed an "update" every 15 seconds. Snapshots
+  are now emitted in a stable pane order and a broadcast is skipped when
+  nothing a client renders differs from the previous one; explicit
+  `refresh_agents` requests are still answered immediately.
+- Workspace broadcasts follow the same discipline: the topology snapshot is
+  read under the ordering lock so the reconcile poll can never publish an
+  older workspace list over a newer one from the event stream, and a
+  byte-identical repeat is suppressed.
+
 ## [0.17.11] - 2026-08-24
 
 ### Changed

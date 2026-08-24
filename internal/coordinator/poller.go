@@ -1,11 +1,14 @@
 package coordinator
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +34,13 @@ type Poller struct {
 	topologyRetries     int
 	consecutiveFailures atomic.Int32
 	eventsActive        atomic.Bool
+	// broadcastMu serializes snapshot broadcasts from the reconcile poll and
+	// the event stream, and guards the dedupe state below. Snapshots are read
+	// inside the lock so a slow commit path can never publish an older
+	// topology after a newer one already went out.
+	broadcastMu        sync.Mutex
+	lastAgentsJSON     []byte
+	lastWorkspacesJSON []byte
 }
 
 func NewPoller(client *herdr.Client, state *State, interval time.Duration, logger *slog.Logger) *Poller {
@@ -149,11 +159,9 @@ func (p *Poller) poll(ctx context.Context) {
 	p.notifyStatusChange(previousStatus)
 	p.logger.Debug("inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
 
-	if p.onChange != nil {
-		p.onChange(p.state.Snapshot())
-	}
-	if workspaceChanged && p.onWorkspaceChange != nil {
-		p.onWorkspaceChange(p.state.Workspaces())
+	p.notifyAgentsChanged()
+	if workspaceChanged {
+		p.notifyWorkspacesChanged()
 	}
 }
 
@@ -320,12 +328,64 @@ func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.Topolog
 	workspaceChanged := p.state.CommitTopology(agents, topology.Workspaces, baseRevision)
 	p.notifyStatusChange(previousStatus)
 	p.logger.Debug("event inventory committed", "agents", len(agents), "workspaces", len(topology.Workspaces), "topology", p.state.TopologyGeneration())
-	if p.onChange != nil {
-		p.onChange(p.state.Snapshot())
+	p.notifyAgentsChanged()
+	if workspaceChanged {
+		p.notifyWorkspacesChanged()
 	}
-	if workspaceChanged && p.onWorkspaceChange != nil {
-		p.onWorkspaceChange(p.state.Workspaces())
+}
+
+// notifyAgentsChanged broadcasts the current agent snapshot unless nothing a
+// client renders has changed since the last broadcast. Both freshness sources
+// — the reconcile poll and the Herdr event stream — commit through here, so
+// an idle machine stops producing a full `agents` push every interval and
+// phones on metered or fragile links receive silence instead of a
+// re-shuffled copy of what they already display.
+//
+// StateRevision is excluded from the comparison: every commit stamps every
+// agent with the new revision counter, so including it would re-broadcast
+// identical inventories forever. A suppressed revision-only bump is safe —
+// clients only reject revisions that move backwards.
+func (p *Poller) notifyAgentsChanged() {
+	if p.onChange == nil {
+		return
 	}
+	p.broadcastMu.Lock()
+	defer p.broadcastMu.Unlock()
+	snapshot := p.state.Snapshot()
+	comparable := make([]AgentState, len(snapshot))
+	for i, agent := range snapshot {
+		comparable[i] = *agent
+		comparable[i].StateRevision = 0
+	}
+	encoded, err := json.Marshal(comparable)
+	if err == nil {
+		if bytes.Equal(encoded, p.lastAgentsJSON) {
+			return
+		}
+		p.lastAgentsJSON = encoded
+	}
+	p.onChange(snapshot)
+}
+
+// notifyWorkspacesChanged mirrors notifyAgentsChanged for workspace
+// broadcasts: the snapshot is read under broadcastMu so the poll and event
+// commits publish in commit order, and a byte-identical broadcast — both
+// sources committing the same topology back to back — is suppressed.
+func (p *Poller) notifyWorkspacesChanged() {
+	if p.onWorkspaceChange == nil {
+		return
+	}
+	p.broadcastMu.Lock()
+	defer p.broadcastMu.Unlock()
+	workspaces := p.state.Workspaces()
+	encoded, err := json.Marshal(workspaces)
+	if err == nil {
+		if bytes.Equal(encoded, p.lastWorkspacesJSON) {
+			return
+		}
+		p.lastWorkspacesJSON = encoded
+	}
+	p.onWorkspaceChange(workspaces)
 }
 
 func waitForEventReconnect(ctx context.Context) bool {

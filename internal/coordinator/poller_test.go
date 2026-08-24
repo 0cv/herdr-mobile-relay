@@ -62,6 +62,55 @@ func TestPollerIntervalClampsToReconcileCeiling(t *testing.T) {
 	}
 }
 
+// An idle machine commits an identical inventory every reconcile interval;
+// re-broadcasting it hands every phone a fresh full snapshot to re-render for
+// no reason. Only a snapshot that differs from the last broadcast one may go
+// out; an explicit refresh_agents request is answered separately.
+func TestPollerSkipsUnchangedAgentBroadcasts(t *testing.T) {
+	state := testState()
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	broadcasts := 0
+	poller.SetOnChange(func([]*AgentState) { broadcasts++ })
+
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
+	poller.notifyAgentsChanged()
+	poller.notifyAgentsChanged()
+	poller.notifyAgentsChanged()
+	if broadcasts != 1 {
+		t.Fatalf("broadcasts after identical snapshots = %d, want 1", broadcasts)
+	}
+
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, state.RevisionCounter())
+	poller.notifyAgentsChanged()
+	if broadcasts != 2 {
+		t.Fatalf("broadcasts after a real change = %d, want 2", broadcasts)
+	}
+}
+
+// Workspace broadcasts read the snapshot under the ordering lock and skip a
+// byte-identical repeat, so the reconcile poll and the event stream cannot
+// publish a stale topology over a newer one or re-push what clients already
+// display.
+func TestNotifyWorkspacesChangedSkipsIdenticalTopology(t *testing.T) {
+	state := testState()
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	broadcasts := 0
+	poller.SetOnWorkspaceChange(func(workspaces []herdr.Workspace) { broadcasts++ })
+
+	state.CommitWorkspaces([]herdr.Workspace{{ID: "w1", Label: "One"}})
+	poller.notifyWorkspacesChanged()
+	poller.notifyWorkspacesChanged()
+	if broadcasts != 1 {
+		t.Fatalf("broadcasts after identical topologies = %d, want 1", broadcasts)
+	}
+
+	state.CommitWorkspaces([]herdr.Workspace{{ID: "w1", Label: "Renamed"}})
+	poller.notifyWorkspacesChanged()
+	if broadcasts != 2 {
+		t.Fatalf("broadcasts after a real change = %d, want 2", broadcasts)
+	}
+}
+
 func TestHydrateWorkspaceCwdsKeepsShellOnlyWorkspaceLaunchable(t *testing.T) {
 	workspaces := []herdr.Workspace{{ID: "w1", Label: "Shell only"}}
 	hydrateWorkspaceCwds(workspaces, nil, []herdr.Pane{{
