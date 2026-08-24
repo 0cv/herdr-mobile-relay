@@ -133,6 +133,85 @@ func TestRunRejectsWebBundleThatDoesNotMatchReleaseManifest(t *testing.T) {
 	if state.State != "failed" || state.FinishedAt == "" || !strings.Contains(state.Error, "verified release manifest") {
 		t.Fatalf("state = %#v", state)
 	}
+	if _, err := os.Stat(jobPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed deployment left its job file behind: %v", err)
+	}
+}
+
+func TestRunPinsWranglerToRelayOwnedWorkingDirectory(t *testing.T) {
+	t.Setenv("HERDR_RELAY_ENV", "")
+	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "")
+	root := t.TempDir()
+	nodeDir := filepath.Join(root, "node")
+	web := filepath.Join(root, "web")
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(web, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeDir, "node"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recorded := filepath.Join(root, "wrangler-cwd")
+	npx := filepath.Join(root, "npx")
+	script := fmt.Sprintf("#!/bin/sh\npwd -P > %q\nexit 1\n", recorded)
+	if err := os.WriteFile(npx, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(web, "version.json"), []byte(`{"release_version":"1.2.3","revision":"abc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	webHash, err := release.WebHashFS(os.DirFS(web))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{
+		RuntimeDir: root,
+		WebRoot:    web,
+		Origin:     "https://example.test",
+		Project:    "relay-app",
+		Branch:     "main",
+		Version:    "1.2.3",
+		Revision:   "abc",
+		WebHash:    webHash,
+		NPXPath:    npx,
+		NodeDir:    nodeDir,
+	}
+	jobPath := filepath.Join(root, "job.json")
+	if err := writeManagerJSON(jobPath, job); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeState(filepath.Join(root, "app-deploy-state.json"), State{
+		State:          "scheduled",
+		TargetVersion:  job.Version,
+		TargetRevision: job.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The worker is spawned by launchctl/systemd-run, so its inherited working
+	// directory is unrelated to the relay and may be unwritable.
+	t.Chdir(t.TempDir())
+
+	if err := Run(t.Context(), jobPath); err == nil ||
+		!strings.Contains(err.Error(), "Wrangler deployment failed") {
+		t.Fatalf("Run() error = %v, want Wrangler deployment failure", err)
+	}
+	data, err := os.ReadFile(recorded)
+	if err != nil {
+		t.Fatalf("Wrangler did not run: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(root, "wrangler"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != want {
+		t.Fatalf("Wrangler working directory = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(jobPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed deployment left its job file behind: %v", err)
+	}
 }
 
 func TestRunDoesNotOverwriteStateOwnedByAnotherWorker(t *testing.T) {

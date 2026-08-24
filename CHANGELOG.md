@@ -3,6 +3,28 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Phone-app deployment no longer fails on macOS with an error that blames the
+  release bundle. The relay starts its deployment worker with `launchctl
+  submit`, which runs it from the filesystem root, and Wrangler resolves its
+  working files relative to whatever directory it is started in — so every
+  deployment died creating `/.wrangler/cache`, then `/.wrangler/tmp`, on the
+  read-only system volume. Wrangler reports those as missing directories, and
+  the shortened diagnostic dropped the line naming them, so the update looked
+  as though the staged release had disappeared even though the relay had
+  already verified that bundle byte for byte. Deployment now runs from a
+  directory the relay owns, which covers every path Wrangler derives from its
+  working directory. This is separate from the asset cache skipped in 0.18.0:
+  that option covers the Pages upload cache only.
+- A failed phone-app deployment no longer leaves its job file behind. Only
+  successful deployments removed theirs, so a relay retrying a deployment it
+  could not complete accumulated one file per attempt — thousands on a relay
+  left retrying. Nothing ever re-reads a job file, so the worker now discards
+  it whichever way the deployment ends.
+
 ## [0.18.0] - 2026-08-24
 
 ### Fixed

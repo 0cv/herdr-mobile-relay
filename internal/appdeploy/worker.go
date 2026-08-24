@@ -73,6 +73,12 @@ func Run(ctx context.Context, jobPath string) error {
 	if err != nil {
 		return err
 	}
+	// A job file has exactly one consumer: the worker handed its path. Nothing
+	// rescans the runtime directory, so a job that is not removed is garbage
+	// for good. Removing it only on success leaked one file per failed
+	// deployment, and a relay retrying a broken deployment accumulated
+	// thousands.
+	defer func() { _ = os.Remove(jobPath) }()
 	started := time.Now().UTC().Format(time.RFC3339)
 	statePath := filepath.Join(job.RuntimeDir, "app-deploy-state.json")
 	fail := func(deployErr error) error {
@@ -128,7 +134,21 @@ func Run(ctx context.Context, jobPath string) error {
 		write("failed", err)
 		return err
 	}
+	// launchctl submit (macOS) and systemd-run (Linux) hand the worker an
+	// inherited working directory the deploy does not own: on macOS that is the
+	// read-only filesystem root. Wrangler resolves its account config cache at
+	// $PWD/.wrangler/cache and aborts the whole deployment when that mkdir
+	// fails, so pin every deployment to a relay-owned directory instead of
+	// inheriting one. --skip-caching below does not cover this: it only skips
+	// the Pages asset upload cache, not the config cache.
+	workDir := filepath.Join(job.RuntimeDir, "wrangler")
+	if err := os.MkdirAll(workDir, 0o700); err != nil {
+		deployErr := fmt.Errorf("create Wrangler working directory: %w", err)
+		write("failed", deployErr)
+		return deployErr
+	}
 	command := exec.Command(job.NPXPath, wranglerDeployArgs(job)...)
+	command.Dir = workDir
 	environment, credentialErr := commandEnvironmentWithCloudflareCredentials(job.NodeDir, os.Environ())
 	environment = replaceEnvironmentValue(environment, "NO_COLOR", "1")
 	if credentialErr != nil {
@@ -151,7 +171,6 @@ func Run(ctx context.Context, jobPath string) error {
 		return err
 	}
 	write("succeeded", nil)
-	_ = os.Remove(jobPath)
 	return nil
 }
 
