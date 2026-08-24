@@ -64,8 +64,9 @@ if [ "$TUNNEL_TARGET_HOST" = "0.0.0.0" ]; then
     TUNNEL_TARGET_HOST="127.0.0.1"
 fi
 
-if installed_relay_service_active; then
-    assert_service_env_matches "$ENV_FILE"
+if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] && installed_relay_service_active; then
+    # The checkout's dev tunnel intentionally uses isolated ports and state,
+    # so it may coexist with the installed production service.
     echo "▸ Restarting the installed background relay instead of starting a duplicate..."
     restart_installed_relay_service
     if ! HEALTH="$(wait_for_relay_health "$PORT")"; then
