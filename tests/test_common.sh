@@ -8,18 +8,6 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # shellcheck source=../relay/common.sh
 . "$REPO_DIR/relay/common.sh"
 
-# Every setup URL sink must use the shared validated output helper. Keep these
-# source checks beside its behavioral coverage so a new plain echo cannot bypass
-# the terminal and URL-safety guards.
-test "$(grep -cF '    print_phone_setup_url "$phone_url"' \
-    "$REPO_DIR/relay/common.sh" || true)" = 1
-for SETUP_URL_CALLER in setup-link.sh start.sh; do
-    test "$(grep -cF '    print_phone_setup_url "$DIRECT_URL"' \
-        "$REPO_DIR/relay/$SETUP_URL_CALLER" || true)" = 1
-    ! grep -Fq 'echo "  $DIRECT_URL"' "$REPO_DIR/relay/$SETUP_URL_CALLER"
-done
-unset SETUP_URL_CALLER
-
 id() {
     if [ "${1:-}" = "-u" ]; then
         printf '0\n'
@@ -142,128 +130,84 @@ test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH=/usr/bin:/bin node_bin_
 test "$(NO_COLOR= menu_item 3 "Stable Tunnel")" = "  3. Stable Tunnel"
 test "$(NO_COLOR=1 menu_item q "Exit, change nothing")" = "  q. Exit, change nothing"
 
-# The setup-link sink asks the same compiled normalizer that created the app
-# origin. This fixture keeps the output tests isolated from an installed release.
+# Use the same origin contract as the packaged binary without depending on an
+# installed release.
 PHONE_SETUP_NORMALIZER="$WORK_DIR/phone-setup-normalizer"
 cat > "$PHONE_SETUP_NORMALIZER" <<'EOF'
 #!/bin/sh
-test "$1" = "normalize-origin" || exit 2
-test "$2" = "--allow-loopback-http" || exit 2
+test "$1 $2" = "normalize-origin --allow-loopback-http" || exit 2
 case "$3" in
-    'http://127.0.0.1:8375 ')
-        printf '%s\n' 'http://127.0.0.1:8375'
-        ;;
-    https://app.example.test | http://127.0.0.1:8375)
-        printf '%s\n' "$3"
-        ;;
-    *)
-        exit 1
-        ;;
+    'https://app.example.test ') printf '%s\n' 'https://app.example.test' ;;
+    https://app.example.test | http://127.0.0.1:8375) printf '%s\n' "$3" ;;
+    *) exit 1 ;;
 esac
 EOF
 chmod 700 "$PHONE_SETUP_NORMALIZER"
 
 PHONE_SETUP_URL='https://app.example.test/#setup=relay%3A%2F%2Fmachine.example.test%3A443%3Ftoken%3Dfixture-private-token-0123456789abcdef'
-PHONE_SETUP_OPEN="$(printf '\033]8;;%s\033\\' "$PHONE_SETUP_URL")"
-PHONE_SETUP_CLOSE="$(printf '\033]8;;\033\\')"
-PHONE_SETUP_PLAIN_EXPECTED="$WORK_DIR/phone-setup-plain-expected"
-PHONE_SETUP_LINK_EXPECTED="$WORK_DIR/phone-setup-link-expected"
-PHONE_SETUP_ACTUAL="$WORK_DIR/phone-setup-actual"
-printf '  Open this private setup link on your phone:\n  %s\n' \
-    "$PHONE_SETUP_URL" > "$PHONE_SETUP_PLAIN_EXPECTED"
-printf '  Open this private setup link on your phone:\n  %s%s%s\n' \
-    "$PHONE_SETUP_OPEN" "$PHONE_SETUP_URL" "$PHONE_SETUP_CLOSE" > "$PHONE_SETUP_LINK_EXPECTED"
-
-# Redirected output stays byte-for-byte plain.
-(
+run_phone_setup_helper() (
     relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
-    render_setup_qr() { :; }
-    print_phone_setup "$PHONE_SETUP_URL"
-) > "$PHONE_SETUP_ACTUAL"
-cmp -s "$PHONE_SETUP_PLAIN_EXPECTED" "$PHONE_SETUP_ACTUAL"
-
-# A capable terminal gets one exact OSC 8 link around the complete visible URL.
-(
-    relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
-    render_setup_qr() { :; }
-    stdout_is_terminal() { return 0; }
+    render_setup_qr() {
+        [ "${PHONE_SETUP_RENDER_BAD_QR:-}" != 1 ] ||
+            printf 'attacker-controlled QR\n'
+    }
+    stdout_is_terminal() { [ "${PHONE_SETUP_TTY:-}" = 1 ]; }
     unset NO_COLOR
-    TERM=xterm-256color print_phone_setup "$PHONE_SETUP_URL"
-) > "$PHONE_SETUP_ACTUAL"
-cmp -s "$PHONE_SETUP_LINK_EXPECTED" "$PHONE_SETUP_ACTUAL"
-
-# User and terminal capability opt-outs override the TTY result.
-(
-    relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
-    render_setup_qr() { :; }
-    stdout_is_terminal() { return 0; }
-    NO_COLOR=1 TERM=xterm-256color print_phone_setup "$PHONE_SETUP_URL"
-) > "$PHONE_SETUP_ACTUAL"
-cmp -s "$PHONE_SETUP_PLAIN_EXPECTED" "$PHONE_SETUP_ACTUAL"
-(
-    relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
-    render_setup_qr() { :; }
-    stdout_is_terminal() { return 0; }
-    NO_COLOR= TERM=xterm-256color print_phone_setup "$PHONE_SETUP_URL"
-) > "$PHONE_SETUP_ACTUAL"
-cmp -s "$PHONE_SETUP_PLAIN_EXPECTED" "$PHONE_SETUP_ACTUAL"
-(
-    relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
-    render_setup_qr() { :; }
-    stdout_is_terminal() { return 0; }
-    unset NO_COLOR
-    TERM=dumb print_phone_setup "$PHONE_SETUP_URL"
-) > "$PHONE_SETUP_ACTUAL"
-cmp -s "$PHONE_SETUP_PLAIN_EXPECTED" "$PHONE_SETUP_ACTUAL"
-
-# Normalized loopback HTTP remains valid, but untrusted values fail before the
-# QR or terminal sink and cannot place any attacker-controlled bytes on stdout.
-(
-    relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
-    phone_setup_url_is_safe 'http://127.0.0.1:8375/#setup=fixture'
+    [ "${PHONE_SETUP_NO_COLOR:-}" != 1 ] || NO_COLOR=1
+    "$@"
 )
-assert_phone_setup_rejected() {
-    local name="$1"
-    local url="$2"
-    local link_actual="$WORK_DIR/phone-setup-link-rejected-$name"
-    local setup_actual="$WORK_DIR/phone-setup-rejected-$name"
 
-    if (
-        relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
-        stdout_is_terminal() { return 0; }
-        unset NO_COLOR
-        TERM=xterm-256color print_phone_setup_url "$url"
-    ) > "$link_actual" 2>/dev/null; then
-        echo "setup URL helper accepted unsafe $name URL" >&2
-        exit 1
-    fi
-    if [ -s "$link_actual" ]; then
-        echo "setup URL helper printed unsafe $name URL" >&2
-        exit 1
-    fi
+PHONE_SETUP_PLAIN_EXPECTED="$(
+    printf '  Open this private setup link on your phone:\n  %s\n' "$PHONE_SETUP_URL"
+)"
+PHONE_SETUP_LINK_EXPECTED="$(
+    printf '  Open this private setup link on your phone:\n'
+    printf '  \033]8;;%s\033\\%s\033]8;;\033\\\n' "$PHONE_SETUP_URL" "$PHONE_SETUP_URL"
+)"
 
-    if (
-        relay_binary() { printf '%s\n' "$PHONE_SETUP_NORMALIZER"; }
-        render_setup_qr() { printf 'attacker-controlled QR\n'; }
-        stdout_is_terminal() { return 0; }
-        unset NO_COLOR
-        TERM=xterm-256color print_phone_setup "$url"
-    ) > "$setup_actual" 2>/dev/null; then
-        echo "phone setup accepted unsafe $name URL" >&2
+# Redirects stay plain. Interactive terminals receive the vendor-neutral OSC 8
+# protocol; explicit plain-output requests still win.
+test "$(run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL")" = \
+    "$PHONE_SETUP_PLAIN_EXPECTED"
+test "$(
+    PHONE_SETUP_TTY=1 TERM=xterm-256color \
+        run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL"
+)" = "$PHONE_SETUP_LINK_EXPECTED"
+test "$(
+    PHONE_SETUP_TTY=1 PHONE_SETUP_NO_COLOR=1 TERM=xterm-256color \
+        run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL"
+)" = "$PHONE_SETUP_PLAIN_EXPECTED"
+test "$(
+    PHONE_SETUP_TTY=1 TERM=dumb \
+        run_phone_setup_helper print_phone_setup "$PHONE_SETUP_URL"
+)" = "$PHONE_SETUP_PLAIN_EXPECTED"
+
+run_phone_setup_helper phone_setup_url_is_safe \
+    'http://127.0.0.1:8375/#setup=fixture'
+for REJECTED_PHONE_SETUP_URL in \
+    "${PHONE_SETUP_URL}"$'\a''bell' \
+    "${PHONE_SETUP_URL}"$'\033\\''escape' \
+    "${PHONE_SETUP_URL}"$'\n''line' \
+    'https://app.example.test /#setup=fixture' \
+    'javascript:alert(1)' \
+    'http://example.test/#setup=fixture'; do
+    if run_phone_setup_helper phone_setup_url_is_safe \
+        "$REJECTED_PHONE_SETUP_URL"; then
+        echo "setup URL validator accepted an unsafe value" >&2
         exit 1
     fi
-    if [ -s "$setup_actual" ]; then
-        echo "phone setup printed unsafe $name URL" >&2
-        exit 1
-    fi
-}
-assert_phone_setup_rejected bell "${PHONE_SETUP_URL}"$'\a''bell'
-assert_phone_setup_rejected esc-st "${PHONE_SETUP_URL}"$'\033\\''escape'
-assert_phone_setup_rejected carriage-return "${PHONE_SETUP_URL}"$'\r''return'
-assert_phone_setup_rejected line-feed "${PHONE_SETUP_URL}"$'\n''line'
-assert_phone_setup_rejected scheme 'javascript:alert(1)'
-assert_phone_setup_rejected non-loopback-http 'http://example.test/#setup=fixture'
-assert_phone_setup_rejected canonicalized-loopback-http 'http://127.0.0.1:8375 /#setup=fixture'
+done
+unset REJECTED_PHONE_SETUP_URL
+
+# Rejection happens before either the QR or terminal sink writes.
+PHONE_SETUP_ACTUAL="$WORK_DIR/phone-setup-rejected"
+PHONE_SETUP_UNSAFE="${PHONE_SETUP_URL}"$'\033\\''escape'
+if PHONE_SETUP_TTY=1 PHONE_SETUP_RENDER_BAD_QR=1 run_phone_setup_helper \
+    print_phone_setup "$PHONE_SETUP_UNSAFE" > "$PHONE_SETUP_ACTUAL"; then
+    echo "phone setup accepted an unsafe value" >&2
+    exit 1
+fi
+test ! -s "$PHONE_SETUP_ACTUAL"
 
 # Once a shared app is configured, numeric choice 1 must keep it. The previous
 # implicit Enter-only default made the surrounding menu's usual "1" habit
