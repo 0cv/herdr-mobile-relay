@@ -3,6 +3,12 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.18.2] - 2026-08-25
+
+### Fixed
+
+- Setup links preserve their complete target across wrapped terminal output and reject malformed values before QR or terminal rendering.
+
 ## [0.18.1] - 2026-08-24
 
 ### Fixed
@@ -1178,6 +1184,8 @@ project follows [Semantic Versioning](https://semver.org/).
   distorting their cells.
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
+
+[0.18.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.1...v0.18.2
 
 [0.18.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.17.5...v0.18.0
