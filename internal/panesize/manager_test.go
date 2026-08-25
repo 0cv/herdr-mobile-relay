@@ -170,9 +170,18 @@ func TestResizedWithinTracksActualColumnChanges(t *testing.T) {
 	if manager.ResizedWithin("pane-1", 3*time.Second) {
 		t.Fatal("settle window did not close after the timeout")
 	}
-	// Renewal at the same columns: no SIGWINCH, no re-render, no window.
-	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 46, 0); err != nil {
-		t.Fatal(err)
+	// Renewal at the same dimensions must only extend the lease. Running
+	// `stty cols` again reaches the TTY resize syscall every ten seconds and
+	// can make an agent repaint even though its geometry did not change.
+	resizeWrites := len(runner.setValues)
+	for renewal := range 12 {
+		now = now.Add(10 * time.Second)
+		if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 46, 0); err != nil {
+			t.Fatalf("renewal %d: %v", renewal+1, err)
+		}
+	}
+	if len(runner.setValues) != resizeWrites {
+		t.Fatalf("same-width renewal issued another terminal resize: values=%v", runner.setValues)
 	}
 	if manager.ResizedWithin("pane-1", 3*time.Second) {
 		t.Fatal("same-width renewal re-opened the settle window")
@@ -256,8 +265,8 @@ func TestReleaseKeepsTheWidthForAReturningLeaseOwner(t *testing.T) {
 	if _, _, err := manager.Acquire(context.Background(), "client-a", "pane-1", 84, 0); err != nil {
 		t.Fatalf("returning Acquire() error = %v", err)
 	}
-	if !slices.Equal(runner.setValues, []int{84, 84}) {
-		t.Fatalf("applied columns = %v, want the leased width twice and no baseline flip", runner.setValues)
+	if !slices.Equal(runner.setValues, []int{84}) {
+		t.Fatalf("applied columns = %v, want one resize before the grace-window reacquisition", runner.setValues)
 	}
 	if manager.ResizedWithin("pane-1", time.Second) {
 		t.Fatal("returning to the terminal reopened the resize settle window")
@@ -514,8 +523,8 @@ func TestRowLeasesApplyMinimumAndRestoreBaselineHeight(t *testing.T) {
 		t.Fatalf("ActiveRows() with width-only lease = %d, %v, want 64, true", got, ok)
 	}
 
-	// Last client gone: full restore, with the height asserted exactly once
-	// for the restore and never again.
+	// Last client gone: full restore. Same-size lease additions above did not
+	// reassert the active row constraint; only real row changes reached stty.
 	if err := manager.Release(context.Background(), "desk-c", "pane-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -526,8 +535,8 @@ func TestRowLeasesApplyMinimumAndRestoreBaselineHeight(t *testing.T) {
 	if got := runner.sizes["/dev/pts/15"]; got.rows != 64 || got.columns != 180 {
 		t.Fatalf("restored size = %+v, want 180x64", got)
 	}
-	if !slices.Equal(runner.setRowValues, []int{30, 30, 30, 26, 64}) {
-		t.Fatalf("applied rows = %v, want [30 30 30 26 64]", runner.setRowValues)
+	if !slices.Equal(runner.setRowValues, []int{30, 26, 64}) {
+		t.Fatalf("applied rows = %v, want [30 26 64]", runner.setRowValues)
 	}
 	if len(manager.panes) != 0 {
 		t.Fatalf("tracked panes = %d after final release", len(manager.panes))

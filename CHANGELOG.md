@@ -3,6 +3,26 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.18.3] - 2026-08-25
+
+### Fixed
+
+- Pane-size lease renewals no longer run `stty` when the TTY already has the
+  requested rows and columns. The phone renews its lease every ten seconds;
+  reasserting an unchanged size still reached the TTY resize syscall, which
+  could make an agent repaint and the streamed terminal reflow at that exact
+  cadence even though its geometry had not changed. Renewals now extend only
+  the lease TTL; real phone, desktop, and multi-client size changes still
+  resize the pane.
+- A failed app cutover no longer traps the phone in a rapid reload loop. The
+  successful deployment announcement persists across page loads, but the old
+  client kept its reload guard only in memory; if the old bundle survived the
+  first navigation, every new instance connected, saw 0.18.2 already deployed,
+  and immediately navigated again. Automatic reload attempts are now recorded
+  per target in session storage and cleared only after that version actually
+  loads. Cloudflare Pages' `/index.html` → `/` redirect is also normalized
+  without leaving the cache-bust marker in the installed app URL.
+
 ## [0.18.2] - 2026-08-25
 
 ### Fixed
@@ -1184,6 +1204,8 @@ project follows [Semantic Versioning](https://semver.org/).
   distorting their cells.
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
+
+[0.18.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.2...v0.18.3
 
 [0.18.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.1...v0.18.2
 

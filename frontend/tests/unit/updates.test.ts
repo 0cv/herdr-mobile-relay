@@ -193,6 +193,10 @@ describe('release updates', () => {
     expect(next.hash).toBe('#settings');
     expect(normalizeReloadedAppUrl(next.toString()))
       .toBe('https://app.example.test/?setup=preserved#settings');
+    const redirected = new URL(next);
+    redirected.pathname = '/';
+    expect(normalizeReloadedAppUrl(redirected.toString()))
+      .toBe('https://app.example.test/?setup=preserved#settings');
     expect(normalizeReloadedAppUrl('https://app.example.test/index.html#settings')).toBeNull();
   });
 
@@ -253,6 +257,22 @@ describe('release updates', () => {
     vi.stubGlobal('fetch', fetcher);
 
     await expect(reloadUpdatedSameOriginApp(APP_VERSION)).resolves.toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+  });
+
+  it('attempts an automatic reload target only once per browser session', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const target = `${major}.${minor + 1}.${patch}`;
+    sessionStorage.setItem('herdr_app_reload_target', target);
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+
+    // A new app instance sees the persistent deployment announcement again,
+    // but the previous navigation already tried this target. It must stay put
+    // instead of creating the connect/reload loop seen on the phone.
+    await expect(reloadUpdatedSameOriginApp(target)).resolves.toBe(false);
     expect(fetcher).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();

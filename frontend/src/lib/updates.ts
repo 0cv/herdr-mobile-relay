@@ -6,6 +6,7 @@ const APP_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 const APP_RECHECK_INTERVAL_MS = 60 * 1_000;
 const PENDING_RELAY_UPDATES_KEY = 'herdr_pending_relay_updates';
 const UPDATE_PROGRESS_KEY = 'herdr_update_progress';
+const APP_RELOAD_TARGET_KEY = 'herdr_app_reload_target';
 const APP_DEPLOY_SELF_UPDATE_MIN_VERSION = '0.13.3';
 export const MANAGED_UPDATE_COMMAND = 'HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes';
 export const CHECKOUT_UPDATE_COMMAND = 'git pull --ff-only && make service-install';
@@ -221,6 +222,14 @@ export async function checkAppUpdate(
 }
 
 export function initializeAppUpdates(): () => void {
+  try {
+    const attempted = sessionStorage.getItem(APP_RELOAD_TARGET_KEY) || '';
+    if (attempted && !newerVersion(attempted, APP_VERSION)) {
+      sessionStorage.removeItem(APP_RELOAD_TARGET_KEY);
+    }
+  } catch {
+    // Storage can be unavailable in a hardened browser.
+  }
   const normalizedUrl = normalizeReloadedAppUrl(location.href);
   if (normalizedUrl) history.replaceState(history.state, '', normalizedUrl);
   void checkAppUpdate();
@@ -292,7 +301,11 @@ export function cacheBustedAppUrl(currentUrl: string, version: string, nonce = D
 
 export function normalizeReloadedAppUrl(currentUrl: string): string | null {
   const url = new URL(currentUrl);
-  if (url.pathname !== '/index.html' || !url.searchParams.has('herdr_reload')) return null;
+  if (!url.searchParams.has('herdr_reload')) return null;
+  // Cloudflare Pages canonically redirects /index.html to / while preserving
+  // the query. Accept both so a successful reload never leaves its cache-bust
+  // marker in the installed app's address.
+  if (url.pathname !== '/index.html' && url.pathname !== '/') return null;
   url.pathname = '/';
   url.searchParams.delete('herdr_reload');
   return url.toString();
@@ -337,6 +350,14 @@ let automaticReload: Promise<boolean> | null = null;
 
 export function reloadUpdatedSameOriginApp(version: string): Promise<boolean> {
   if (!newerVersion(version, APP_VERSION)) return Promise.resolve(false);
+  try {
+    const attempted = sessionStorage.getItem(APP_RELOAD_TARGET_KEY) || '';
+    // One automatic attempt covers that version and any older deployment
+    // announcement. A genuinely newer target still gets its own attempt.
+    if (attempted && !newerVersion(version, attempted)) return Promise.resolve(false);
+  } catch {
+    // Storage can be unavailable in a hardened browser; navigation still works.
+  }
   if (automaticReload) return automaticReload;
   automaticReload = (async () => {
     const status = await waitForDeployedApp(version);
@@ -352,8 +373,17 @@ export function reloadUpdatedSameOriginApp(version: string): Promise<boolean> {
 export function reloadApp(version = ''): void {
   // A versioned navigation bypasses a stale document retained by a sleeping
   // PWA or the back-forward cache. Replace avoids leaving that document behind
-  // as the Back destination.
-  location.replace(cacheBustedAppUrl(location.href, version || get(appUpdateStatus).deployedVersion));
+  // as the Back destination. Persist the target first: if the old document
+  // survives the cutover, its next instance must not reload in a tight loop.
+  const target = version || get(appUpdateStatus).deployedVersion;
+  if (target) {
+    try {
+      sessionStorage.setItem(APP_RELOAD_TARGET_KEY, target);
+    } catch {
+      // Storage can be unavailable in a hardened browser; navigation still works.
+    }
+  }
+  location.replace(cacheBustedAppUrl(location.href, target));
 }
 
 function saveUpdateProgress(plan: UpdateProgressPlan | null): void {

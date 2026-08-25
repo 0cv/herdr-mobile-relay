@@ -154,25 +154,28 @@ func (m *Manager) Acquire(
 	now := m.now()
 	state := m.panes[paneID]
 	newState := state == nil
+	var current terminalSize
 	if newState {
 		var err error
 		state, err = m.resolvePane(ctx, paneID)
 		if err != nil {
 			return 0, 0, err
 		}
+		current = terminalSize{rows: state.appliedRows, columns: state.appliedColumns}
 	} else {
 		m.removeExpired(state, now)
-		size, err := m.readSize(ctx, state.tty)
+		var err error
+		current, err = m.readSize(ctx, state.tty)
 		if err != nil {
 			return 0, 0, err
 		}
 		// A local terminal resize while the lease is active becomes the new
 		// restore point, per dimension.
-		if size.columns != state.appliedColumns {
-			state.baselineColumns = size.columns
+		if current.columns != state.appliedColumns {
+			state.baselineColumns = current.columns
 		}
-		if size.rows != state.appliedRows {
-			state.baselineRows = size.rows
+		if current.rows != state.appliedRows {
+			state.baselineRows = current.rows
 		}
 	}
 	if ctx.Err() != nil {
@@ -193,18 +196,25 @@ func (m *Manager) Acquire(
 	if !constrainedRows && targetRows == state.appliedRows {
 		sttyRows = 0
 	}
-	if err := m.setSize(ctx, state.tty, targetColumns, sttyRows); err != nil {
-		if hadPrevious {
-			state.leases[clientID] = previous
-		} else {
-			delete(state.leases, clientID)
-		}
-		if newState {
-			m.panes[paneID] = state
-		}
-		return 0, 0, err
+	// A renewal extends the lease only. Calling stty with dimensions the TTY
+	// already has reaches its resize syscall every ten seconds; some terminal
+	// stacks repaint on that request even though the dimensions are unchanged.
+	resizeNeeded := targetColumns != current.columns
+	if sttyRows > 0 && targetRows != current.rows {
+		resizeNeeded = true
 	}
-	if targetColumns != state.appliedColumns || targetRows != state.appliedRows {
+	if resizeNeeded {
+		if err := m.setSize(ctx, state.tty, targetColumns, sttyRows); err != nil {
+			if hadPrevious {
+				state.leases[clientID] = previous
+			} else {
+				delete(state.leases, clientID)
+			}
+			if newState {
+				m.panes[paneID] = state
+			}
+			return 0, 0, err
+		}
 		state.resizedAt = now
 	}
 	state.appliedColumns = targetColumns
