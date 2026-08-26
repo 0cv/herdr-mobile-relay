@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.17.5`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.17.5) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.18.3`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.18.3) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -56,13 +56,15 @@ paths.
 | <img src="images/home.jpeg" alt="Mobile list of Herdr agents" width="392"> | <img src="images/agent_plan.jpeg" alt="Structured plan question navigation" width="392"> |
 
 - Monitor and control agents across several computers, grouped by status and
-  workspace, with agents that need input pinned on top.
+  authoritative Herdr workspace, with agents that need input pinned on top.
+- Create, rename, reorder, and close workspaces; create, open, and safely remove
+  Git worktrees without stealing desktop focus.
 - Start, rename, clear, and stop agents; send prompts, terminal keys, slash
   commands, screenshots, and photos.
 - Answer verified approvals and structured plan questions from Codex, Claude
   Code, Qoder, OpenCode, Oh My Pi, and Pi.
-- Read searchable native conversation history, and inspect workspace files,
-  images, and Git diffs read-only.
+- Read and reply from searchable native conversation history, and inspect
+  workspace files, images, and Git diffs read-only.
 - Receive blocked-agent notifications, with completion notifications optional.
 
 **[Full feature tour →](docs/mobile-app.md)**
@@ -100,13 +102,21 @@ inherits the shell environment a Herdr pane runs in. If a pane sets
 profile — one per herdr setup — the pane keeps whatever title herdr itself
 reports, but the relay-resolved session name and the transcript both come up
 empty, and the conversation view shows "No conversation log is available for
-this session."
+this session." For Pi and Oh My Pi the same lists below also decide where that
+profile's slash commands and skills are discovered, so a profile whose commands
+are missing from the palette has the same root cause. Claude Code and Qoder
+resolve their personal commands and skills from `~/.claude` and `~/.qoder`
+directly, so those lists do not move command discovery for them.
 
 Pi and Oh My Pi need no configuration for their named profiles as long as the
 config root stays at its default, `~/.pi` or `~/.omp`: both keep a profile's
 sessions at `<config root>/profiles/<name>/agent`, so the relay discovers
-`~/.omp/profiles/*/agent` and `~/.pi/profiles/*/agent` on startup. Restart the
-relay after adding a profile. Auto-discovery only ever expands the home config
+`~/.omp/profiles/*/agent` and `~/.pi/profiles/*/agent` on every lookup, not
+just at startup — a profile created while the relay is already running is
+picked up with no restart. The one lag: a pane's already-resolved session
+title can stay cached for up to 60 seconds, so it can take that long to
+reflect a brand-new profile; the transcript itself is never cached and is
+always current. Auto-discovery only ever expands the home config
 root, never a configured one — so a relocated Pi or Oh My Pi config root does
 not get its profiles discovered, even after its `<root>/agent` is added to the
 matching `HERDR_*_CONFIG_DIRS` list. Each profile under a relocated root must
