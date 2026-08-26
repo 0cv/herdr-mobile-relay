@@ -306,7 +306,7 @@ func TestPreparePaneResponsePreservesHistoryWhileResizeSettles(t *testing.T) {
 	if response["truncated"] != false {
 		t.Fatalf("settling truncation = %#v, want false", response["truncated"])
 	}
-	if content := s.historyM.Content("pane-1", 100); content != baseline {
+	if content, _ := s.historyM.Content("pane-1", 100); content != baseline {
 		t.Fatalf("history changed while the resize settled:\n%s", content)
 	}
 }
@@ -397,7 +397,7 @@ func TestHistorySeedFillsAlternateScreenPane(t *testing.T) {
 	if *calls != 1 {
 		t.Fatalf("pane walked %d times, want exactly one", *calls)
 	}
-	content := s.historyM.Content("pane-1", 2000)
+	content, _ := s.historyM.Content("pane-1", 2000)
 	for _, want := range []string{"walked 000", "walked 119", "screen 1"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("seeded history %q lost %q", content, want)
@@ -458,7 +458,7 @@ func TestHistorySeedRetriesThroughDeclinesUntilAWalkLands(t *testing.T) {
 	}
 
 	runSeed(s)
-	if !strings.Contains(s.historyM.Content("pane-1", 2000), "walked 000") {
+	if seeded, _ := s.historyM.Content("pane-1", 2000); !strings.Contains(seeded, "walked 000") {
 		t.Fatalf("walk after declines did not land")
 	}
 	runSeed(s)
@@ -490,17 +490,46 @@ func TestHistorySeedRealWalkRetiresEvenWithoutNewRows(t *testing.T) {
 	}
 }
 
-// The walk scrolls the pane, so frames read during it show older screens. Filing
-// them as new output would interleave the transcript with its own past.
+// A harvest that fails is as uninformative as a decline and far more repeatable:
+// an older herdr with no walkable source, a missing CLI fallback, or a socket
+// that refuses this one call fails identically every time. Without a bounded
+// budget the 15s retry re-read such a pane, and logged a warning, for as long as
+// the relay ran.
+func TestHistorySeedStopsWalkingAfterRepeatedFailures(t *testing.T) {
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return "", false, errors.New("herdr cannot walk this pane")
+	})
+	s.historyM.Merge("pane-1", "screen 1"+seedFooter)
+	before := s.historyM.Depth("pane-1")
+
+	for range historySeedMaxAttempts + 4 {
+		runSeed(s)
+	}
+
+	if *calls != historySeedMaxAttempts {
+		t.Fatalf("failed walks = %d, want the seed retired after %d", *calls, historySeedMaxAttempts)
+	}
+	if depth := s.historyM.Depth("pane-1"); depth != before {
+		t.Fatalf("a failed walk changed history depth %d -> %d", before, depth)
+	}
+}
+
+// The walk scrolls the operator's real pane and snaps it back, so frames read
+// during it show older screens. Filing them as new output would interleave the
+// transcript with its own past, and serving one would show the phone a screen
+// from the middle of the walk as though it were the live pane.
 func TestHistorySeedSuppressesMergeWhileWalking(t *testing.T) {
 	s, _ := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
 		return "", false, nil
 	})
 	s.historyM.Merge("pane-1", "watched 1"+seedFooter)
 	before := s.historyM.Depth("pane-1")
+	stored, _ := s.historyM.Content("pane-1", 100)
 
 	s.historyCaptureMu.Lock()
-	s.historySeeds["pane-1"] = &historySeedState{generation: s.state.Generation("pane-1")}
+	s.historySeeds["pane-1"] = &historySeedState{
+		generation: s.state.Generation("pane-1"), walking: true,
+	}
 	s.historyInflight["pane-1"] = true
 	s.historyCaptureMu.Unlock()
 
@@ -509,11 +538,160 @@ func TestHistorySeedSuppressesMergeWhileWalking(t *testing.T) {
 		"content": "scrolled back row" + seedFooter, "format": "ansi", "truncated": false,
 	}
 	s.preparePaneResponse(map[string]any{"pane_id": "pane-1", "lines": 100}, response)
-	if response["content"] != "scrolled back row"+seedFooter {
-		t.Fatalf("frame read during the walk was rewritten: %q", response["content"])
+	if response["content"] != stored {
+		t.Fatalf("mid-walk frame served as the live pane: %q, want the stored history %q",
+			response["content"], stored)
 	}
 	if depth := s.historyM.Depth("pane-1"); depth != before {
 		t.Fatalf("history depth %d -> %d during the walk", before, depth)
+	}
+}
+
+// The very first walk of a pane has nothing stored to serve instead, and a blank
+// terminal is worse than a scrolled one, so that frame is passed through.
+func TestHistorySeedServesTheFrameWhileWalkingAnEmptyHistory(t *testing.T) {
+	s, _ := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return "", false, nil
+	})
+
+	s.historyCaptureMu.Lock()
+	s.historySeeds["pane-1"] = &historySeedState{
+		generation: s.state.Generation("pane-1"), walking: true,
+	}
+	s.historyInflight["pane-1"] = true
+	s.historyCaptureMu.Unlock()
+
+	response := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": "first screen" + seedFooter, "format": "ansi", "truncated": false,
+	}
+	s.preparePaneResponse(map[string]any{"pane_id": "pane-1", "lines": 100}, response)
+	if response["content"] != "first screen"+seedFooter {
+		t.Fatalf("frame blanked while walking an empty history: %q", response["content"])
+	}
+	// Falling through to the merge would return this same frame, so the returned
+	// content alone cannot tell the fallback from the bug the guard exists to
+	// prevent: the mid-walk screen must not be committed either.
+	if depth := s.historyM.Depth("pane-1"); depth != 0 {
+		t.Fatalf("mid-walk frame committed to history: depth = %d, want 0", depth)
+	}
+}
+
+// Clipping the substituted history to the requested lines drops older rows just
+// as a merge would, and the phone renders that flag as "Older terminal history
+// is not shown". The flag has to describe the rows actually served: reporting
+// the discarded frame's truncation got it wrong in both directions - the notice
+// vanished while a clipped transcript was served, and appeared while a complete
+// one was.
+func TestHistorySeedReportsTruncationOfSubstitutedHistory(t *testing.T) {
+	s, _ := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return "", false, nil
+	})
+	rows := make([]string, 0, 40)
+	for index := range 40 {
+		rows = append(rows, fmt.Sprintf("stored %02d", index))
+	}
+	s.historyM.Merge("pane-1", strings.Join(rows, "\n")+seedFooter)
+
+	s.historyCaptureMu.Lock()
+	s.historySeeds["pane-1"] = &historySeedState{
+		generation: s.state.Generation("pane-1"), walking: true,
+	}
+	s.historyInflight["pane-1"] = true
+	s.historyCaptureMu.Unlock()
+
+	response := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": "scrolled back row" + seedFooter, "format": "ansi", "truncated": false,
+	}
+	s.preparePaneResponse(map[string]any{"pane_id": "pane-1", "lines": 10}, response)
+
+	if response["truncated"] != true {
+		t.Fatalf("mid-walk truncation = %#v, want true: the served history is clipped to 10 rows",
+			response["truncated"])
+	}
+	served, _ := response["content"].(string)
+	if strings.Contains(served, "stored 00") {
+		t.Fatalf("served content was not clipped to the requested lines: %q", served)
+	}
+	if !strings.Contains(served, "stored 39") {
+		t.Fatalf("served content lost the newest stored rows: %q", served)
+	}
+
+	// The converse: the discarded frame's own flag must not leak into a response
+	// whose stored history fits the request whole.
+	whole := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": "scrolled back row" + seedFooter, "format": "ansi", "truncated": true,
+	}
+	s.preparePaneResponse(map[string]any{"pane_id": "pane-1", "lines": 100}, whole)
+	if whole["truncated"] != false {
+		t.Fatalf("complete history reported as clipped: %#v, want false", whole["truncated"])
+	}
+}
+
+// A pane keeps its seed record after a declined walk, and the ordinary capture
+// loop marks the same pane in flight every few seconds. Reading the shared
+// in-flight map as "a walk is running" therefore dropped watch frames from
+// history for seconds at a time, on a pane nothing was scrolling - and for an
+// alternate-screen agent the relay is the only thing accumulating that
+// scrollback, so those rows were lost for good.
+func TestHistoryMergesFrameWhileOrdinaryCaptureRuns(t *testing.T) {
+	s, _ := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return "", false, nil
+	})
+	s.historyM.Merge("pane-1", "watched 1\nwatched 2"+seedFooter)
+	before := s.historyM.Depth("pane-1")
+
+	s.historyCaptureMu.Lock()
+	// A seed left over from a declined walk: still pending, but not walking.
+	s.historySeeds["pane-1"] = &historySeedState{generation: s.state.Generation("pane-1")}
+	// The background capture loop holds the pane for the length of its read.
+	s.historyInflight["pane-1"] = true
+	s.historyCaptureMu.Unlock()
+
+	response := map[string]any{
+		"type": "pane_content", "pane_id": "pane-1",
+		"content": "current 1\ncurrent 2" + seedFooter, "format": "ansi", "truncated": false,
+	}
+	s.preparePaneResponse(map[string]any{"pane_id": "pane-1", "lines": 100}, response)
+
+	content, _ := response["content"].(string)
+	for _, want := range []string{"watched 1", "current 2"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("frame content %q lost %q", content, want)
+		}
+	}
+	if depth := s.historyM.Depth("pane-1"); depth != before+2 {
+		t.Fatalf("history depth %d -> %d, want the frame's rows appended", before, depth)
+	}
+}
+
+// A pane whose entire transcript fits on one screen answers a real walk with as
+// few rows as a decline does, and nothing in the response separates the two. Such
+// a pane can never reach the target depth either, so retrying it forever scrolled
+// the operator's pane every 15s for as long as the pane lived.
+func TestHistorySeedStopsWalkingAPaneThatOnlyEverAnswersShort(t *testing.T) {
+	s, calls := testSeedServer(t, func(context.Context, string, int) (string, bool, error) {
+		return "screen 1" + seedFooter, false, nil
+	})
+	s.historyM.Merge("pane-1", "screen 1"+seedFooter)
+
+	for range historySeedMaxAttempts + 4 {
+		runSeed(s)
+	}
+
+	if *calls != historySeedMaxAttempts {
+		t.Fatalf("short pane walked %d times, want at most %d", *calls, historySeedMaxAttempts)
+	}
+	s.historyCaptureMu.Lock()
+	seed := s.historySeeds["pane-1"]
+	s.historyCaptureMu.Unlock()
+	if seed == nil {
+		t.Fatal("seed record for a live pane disappeared")
+	}
+	if !seed.done {
+		t.Fatalf("seed still pending after %d short walks, want retired", seed.attempts)
 	}
 }
 
@@ -576,7 +754,7 @@ func TestHistorySeedWaitsOutLeases(t *testing.T) {
 	if *calls != 1 {
 		t.Fatalf("pane walked %d times after the lease cleared, want 1", *calls)
 	}
-	if !strings.Contains(s.historyM.Content("pane-1", 2000), "walked 000") {
+	if seeded, _ := s.historyM.Content("pane-1", 2000); !strings.Contains(seeded, "walked 000") {
 		t.Fatalf("post-lease walk did not land")
 	}
 }
@@ -595,7 +773,7 @@ func TestHistoryTickWalksIdlePanes(t *testing.T) {
 	if *calls != 1 {
 		t.Fatalf("idle pane walked %d times from the tick, want 1", *calls)
 	}
-	if !strings.Contains(s.historyM.Content("pane-1", 2000), "walked 000") {
+	if seeded, _ := s.historyM.Content("pane-1", 2000); !strings.Contains(seeded, "walked 000") {
 		t.Fatalf("tick walk did not land")
 	}
 }
@@ -1398,7 +1576,11 @@ func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
 
 	s.scheduleHistoryCapture(context.Background(), "pane-1")
 	deadline := time.Now().Add(2 * time.Second)
-	for !strings.Contains(s.historyM.Content("pane-1", 100), "second output") {
+	captured := func() string {
+		content, _ := s.historyM.Content("pane-1", 100)
+		return content
+	}
+	for !strings.Contains(captured(), "second output") {
 		if time.Now().After(deadline) {
 			t.Fatal("background capture did not persist Claude pane output")
 		}

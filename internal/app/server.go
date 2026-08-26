@@ -50,23 +50,45 @@ import (
 // more rows than one screen, and retires the seed. herdr declines instead while
 // anything holds the pane resized - a lease, or the measured ~85s after any
 // resize - and on opaque internal state that can last for hours; a decline
-// answers in ~1ms with exactly the visible screen and moves nothing. Declines
-// are therefore retried indefinitely on a spaced timer, costing nothing, and the
-// row count is what tells the two apart: only a response deeper than any screen
-// is a walk. The target depth matches the most herdr returns for one walk.
+// answers in ~1ms with exactly the visible screen and moves nothing. The row
+// count is all that tells the two apart, and it cannot separate a decline from a
+// real walk of a pane whose whole transcript fits on one screen: only a response
+// deeper than any screen is certainly a walk. Short responses are therefore
+// retried on a spaced timer, but only a bounded number of times, so a genuinely
+// short pane stops being scrolled. The target depth matches the most herdr
+// returns for one walk.
 const (
 	historySeedDeadline    = 20 * time.Second
 	historySeedRetry       = 15 * time.Second
 	historySeedResizeQuiet = 90 * time.Second
 	historySeedTargetDepth = 1000
 	historySeedDeclineRows = 100
+	// historySeedMaxAttempts bounds the inconclusive answers one pane generation
+	// may produce. Declines cost nothing, but neither a walk that is short
+	// because the transcript is short nor a harvest that fails outright can be
+	// told apart from one, and retrying either forever scrolls the operator's
+	// pane - or burns an RPC and logs a warning - every 15s for as long as the
+	// pane lives. Eight attempts spend at most ~16s of visible movement when the
+	// pane answers fast, or eight historySeedDeadline reads when it does not
+	// answer at all; either way the seed is then retired, and only a new pane
+	// generation restores the budget. A merely slow pane is retired too, which
+	// is the price of bounding one the relay can never walk.
+	historySeedMaxAttempts = 8
 )
 
 // historySeedState tracks the walk of one pane generation.
 type historySeedState struct {
 	generation int64
 	lastTry    time.Time
-	done       bool
+	// walking is true only while this pane's harvest is running. The shared
+	// historyInflight map cannot stand in for it: an ordinary background
+	// capture sets that too, and a frame read during one of those is a plain
+	// frame that belongs in history.
+	walking bool
+	// attempts counts the inconclusive answers seen so far - short responses and
+	// failed harvests alike - bounded by historySeedMaxAttempts.
+	attempts int
+	done     bool
 }
 
 type copyResponseRunner func(
@@ -1443,11 +1465,28 @@ func (s *Server) scheduleHistoryCapture(ctx context.Context, paneID string) {
 	s.historyCaptureMu.Unlock()
 }
 
+// historySeedInFlight reports whether a harvest is currently scrolling the pane.
 func (s *Server) historySeedInFlight(paneID string) bool {
 	s.historyCaptureMu.Lock()
 	defer s.historyCaptureMu.Unlock()
 	seed := s.historySeeds[paneID]
-	return seed != nil && !seed.done && s.historyInflight[paneID]
+	return seed != nil && seed.walking
+}
+
+// spendSeedAttempt charges one attempt to a pane generation's seed and retires
+// the seed once the budget is gone. A stale generation is ignored: the pane it
+// described is gone, and its successor starts with a fresh budget.
+func (s *Server) spendSeedAttempt(paneID string, generation int64) {
+	s.historyCaptureMu.Lock()
+	defer s.historyCaptureMu.Unlock()
+	current := s.historySeeds[paneID]
+	if current == nil || current.generation != generation {
+		return
+	}
+	current.attempts++
+	if current.attempts >= historySeedMaxAttempts {
+		current.done = true
+	}
 }
 
 // scheduleHistorySeed fills a pane's history from the transcript herdr can only
@@ -1456,8 +1495,9 @@ func (s *Server) historySeedInFlight(paneID string) bool {
 // and nothing more, so a pane's history used to start at whichever screen the
 // relay first saw, while an agent with a real scrollback (omp) serves a thousand
 // rows on the first read. The walk scrolls the operator's pane for a couple of
-// seconds, so it happens once a client actually opens the pane, at most twice per
-// pane generation, and never while a capture is already reading.
+// seconds, so the background history tick walks every idle claude-like pane no
+// more often than historySeedRetry, never while a capture is already reading
+// that pane, and stops once a walk lands or the seed is retired.
 func (s *Server) scheduleHistorySeed(paneID string, limit int) {
 	harvest := s.harvestTranscript
 	if harvest == nil {
@@ -1520,6 +1560,7 @@ func (s *Server) scheduleHistorySeed(paneID string, limit int) {
 		return
 	}
 	seed.lastTry = time.Now()
+	seed.walking = true
 	s.historyInflight[paneID] = true
 	s.historyCaptureMu.Unlock()
 
@@ -1527,13 +1568,25 @@ func (s *Server) scheduleHistorySeed(paneID string, limit int) {
 		defer func() {
 			s.historyCaptureMu.Lock()
 			delete(s.historyInflight, paneID)
+			if current := s.historySeeds[paneID]; current != nil && current.generation == generation {
+				current.walking = false
+			}
 			s.historyCaptureMu.Unlock()
 		}()
 		readCtx, cancel := context.WithTimeout(taskCtx, historySeedDeadline)
 		defer cancel()
 		content, _, err := harvest(readCtx, paneID, history.MaxLines)
 		if err != nil {
+			// A failure is as inconclusive as a short response and just as
+			// repeatable: an older herdr with no walkable source, a missing CLI
+			// fallback, or a socket that answers but refuses this call all fail
+			// every time. Spending an attempt is what stops the 15s retry from
+			// re-reading such a pane for the life of the relay. A goroutine whose
+			// generation has already been replaced charges nothing:
+			// spendSeedAttempt matches on the seed record it started against, and
+			// the successor's record starts with a fresh budget.
 			s.logger.Warn("pane history seed failed", "pane_id", paneID, "error", err)
+			s.spendSeedAttempt(paneID, generation)
 			return
 		}
 		if s.state.Generation(paneID) != generation {
@@ -1545,7 +1598,15 @@ func (s *Server) scheduleHistorySeed(paneID string, limit int) {
 		// proves the pane was walked - and one walk fetches everything herdr
 		// will ever serve, so it retires the seed whether or not it held rows
 		// older than the watched history.
+		//
+		// A pane whose entire transcript fits on one screen answers a real walk
+		// with the same shape as a decline, and nothing in the response tells
+		// them apart: herdr's truncated flag only reports that it clipped the
+		// reply to the requested line count, so it is false for both, and the
+		// CLI fallback never sets it at all. Short responses are retried, but
+		// only historySeedMaxAttempts times, so such a pane stops being walked.
 		if strings.Count(content, "\n")+1 <= historySeedDeclineRows {
+			s.spendSeedAttempt(paneID, generation)
 			return
 		}
 		s.historyCaptureMu.Lock()
@@ -1553,7 +1614,7 @@ func (s *Server) scheduleHistorySeed(paneID string, limit int) {
 		if !s.historyActive[paneID] {
 			return
 		}
-		s.historyM.Seed(paneID, content, limit)
+		s.historyM.Seed(paneID, content)
 		if current := s.historySeeds[paneID]; current != nil && current.generation == generation {
 			current.done = true
 		}
@@ -1563,6 +1624,9 @@ func (s *Server) scheduleHistorySeed(paneID string, limit int) {
 	}
 	s.historyCaptureMu.Lock()
 	delete(s.historyInflight, paneID)
+	if current := s.historySeeds[paneID]; current != nil && current.generation == generation {
+		current.walking = false
+	}
 	s.historyCaptureMu.Unlock()
 }
 
@@ -2010,9 +2074,23 @@ func (s *Server) classifyPaneResponse(message, response map[string]any) map[stri
 	} else if historyLimit > history.MaxLines {
 		historyLimit = history.MaxLines
 	}
-	// Frames read while a harvest walks the pane show older screens; committing
-	// them would file scrolled-back rows as new output.
+	// A harvest scrolls the operator's real pane and snaps it back (see
+	// Dispatcher.HarvestPaneTranscript), so a frame read while one runs is a
+	// screen from the middle of that walk. Committing it would file scrolled-back
+	// rows as new output, and serving it would show the phone an old screen as
+	// the live pane. The stored rows are the honest answer until the walk ends;
+	// only a pane with nothing stored yet falls back to the frame itself.
 	if s.historySeedInFlight(paneID) {
+		// truncated describes the content actually returned, and that content is
+		// entirely the stored history: clipping it to historyLimit drops older
+		// rows, which the phone reports to the operator. herdr's flag describes
+		// the frame being discarded, so it must not survive the substitution -
+		// ORing it in would claim a complete transcript is clipped. The merge
+		// path below does OR, correctly, because it returns that frame.
+		if stored, storedTruncated := s.historyM.Content(paneID, historyLimit); stored != "" {
+			response["content"] = stored
+			response["truncated"] = storedTruncated
+		}
 		return response
 	}
 	herdrTruncated, _ := response["truncated"].(bool)

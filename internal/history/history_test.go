@@ -227,7 +227,8 @@ func TestSeedFillsEmptyHistory(t *testing.T) {
 	m := NewManager(t.TempDir())
 	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
 
-	content, _ := m.Seed("pane-1", "old 1\nold 2\nold 3"+footers, 100)
+	m.Seed("pane-1", "old 1\nold 2\nold 3"+footers)
+	content, _ := m.Content("pane-1", 100)
 	if !strings.Contains(content, "old 1") || !strings.Contains(content, "f6") {
 		t.Fatalf("seeded content = %q, want the harvested rows and footer", content)
 	}
@@ -243,7 +244,8 @@ func TestSeedPrependsOnlyOlderRows(t *testing.T) {
 	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
 	m.Merge("pane-1", "watched 1\nwatched 2\nwatched 3"+footers)
 
-	content, _ := m.Seed("pane-1", "old 1\nold 2\nwatched 1\nwatched 2\nwatched 3"+footers, 100)
+	m.Seed("pane-1", "old 1\nold 2\nwatched 1\nwatched 2\nwatched 3"+footers)
+	content, _ := m.Content("pane-1", 100)
 	if strings.Count(content, "watched 1") != 1 {
 		t.Fatalf("overlapping row duplicated: %q", content)
 	}
@@ -262,7 +264,8 @@ func TestSeedKeepsWatchedStyling(t *testing.T) {
 	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
 	m.Merge("pane-1", "\x1b[42mApprove\x1b[0m\nwatched tail"+footers)
 
-	content, _ := m.Seed("pane-1", "old 1\nApprove\nwatched tail"+footers, 100)
+	m.Seed("pane-1", "old 1\nApprove\nwatched tail"+footers)
+	content, _ := m.Content("pane-1", 100)
 	if !strings.Contains(content, "\x1b[42mApprove") {
 		t.Fatalf("seed replaced the styled row: %q", content)
 	}
@@ -279,7 +282,8 @@ func TestSeedAlignsOnPartialMatch(t *testing.T) {
 	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
 	m.Merge("pane-1", "shared a\nshared b\nreflowed at phone width"+footers)
 
-	content, _ := m.Seed("pane-1", "old 1\nold 2\nshared a\nshared b\nreflowed at desktop width"+footers, 100)
+	m.Seed("pane-1", "old 1\nold 2\nshared a\nshared b\nreflowed at desktop width"+footers)
+	content, _ := m.Content("pane-1", 100)
 	if strings.Count(content, "shared a") != 1 {
 		t.Fatalf("matched row duplicated: %q", content)
 	}
@@ -296,10 +300,10 @@ func TestSeedIsIdempotent(t *testing.T) {
 	m := NewManager(t.TempDir())
 	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
 	seed := "old 1\nold 2\nold 3" + footers
-	m.Seed("pane-1", seed, 100)
+	m.Seed("pane-1", seed)
 	first := m.Depth("pane-1")
 
-	m.Seed("pane-1", seed, 100)
+	m.Seed("pane-1", seed)
 	if second := m.Depth("pane-1"); second != first {
 		t.Fatalf("second seed changed depth %d -> %d", first, second)
 	}
@@ -310,7 +314,7 @@ func TestSeedThenMergeKeepsBothEnds(t *testing.T) {
 	m := NewManager(t.TempDir())
 	footers := "\nf1\nf2\nf3\nf4\nf5\nf6"
 	m.Merge("pane-1", "watched 1\nwatched 2"+footers)
-	m.Seed("pane-1", "old 1\nwatched 1\nwatched 2"+footers, 100)
+	m.Seed("pane-1", "old 1\nwatched 1\nwatched 2"+footers)
 
 	content, _ := m.MergeLimited("pane-1", "watched 2\nwatched 3"+footers, 100)
 	for _, want := range []string{"old 1", "watched 1", "watched 3"} {

@@ -97,13 +97,15 @@ func (m *Manager) merge(paneID string, rawContent string, limit int) (string, bo
 	return joinContent(state, limit)
 }
 
-func (m *Manager) Content(paneID string, limit int) string {
+// Content returns the pane's stored history clipped to its newest limit lines,
+// and whether clipping dropped anything - the same contract as MergeLimited,
+// because a caller that serves this to a client has to tell it the transcript
+// continues above what it received.
+func (m *Manager) Content(paneID string, limit int) (string, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	state := m.loadState(paneID)
-	content, _ := joinContent(state, limit)
-	return content
+	return joinContent(m.loadState(paneID), limit)
 }
 
 // Depth reports how many history rows are stored for a pane, excluding the
@@ -121,14 +123,19 @@ func (m *Manager) Depth(paneID string) int {
 // screen, so its tail is the same content the stored history already holds:
 // the overlap is dropped rather than duplicated, and the stored rows win because
 // they carry the ANSI styling the harvested text lost.
-func (m *Manager) Seed(paneID string, rawContent string, limit int) (string, bool) {
+//
+// Seeding is a store, not a read: it returns nothing because joining up to
+// MaxLines rows into one string costs an allocation and a copy of the whole
+// transcript, and a seed happens once per pane rather than per frame. Callers
+// that want the result read it back with Content.
+func (m *Manager) Seed(paneID string, rawContent string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	state := m.loadState(paneID)
 	body, footer := splitSnapshot(rawContent)
 	if len(body) == 0 {
-		return joinContent(state, limit)
+		return
 	}
 	if len(state.History) == 0 {
 		state.History = body
@@ -143,7 +150,6 @@ func (m *Manager) Seed(paneID string, rawContent string, limit int) (string, boo
 	}
 
 	m.maybeSave(paneID, state)
-	return joinContent(state, limit)
 }
 
 // seedPrefix returns the seed rows that precede the stored history. The exact
