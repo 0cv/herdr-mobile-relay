@@ -217,19 +217,25 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
                     id: 'turn-2',
                     timestamp: '2026-08-12T09:00:01Z',
                     role: 'assistant',
-                    text: 'intermediate progress update',
+                    text: '',
                     tools: [{ id: 'tool-1', name: 'Read', input: 'README.md', output: 'file contents' }],
                   },
                   {
-                    id: 'turn-2-final',
+                    id: 'turn-2-progress',
                     timestamp: '2026-08-12T09:00:02Z',
+                    role: 'assistant',
+                    text: 'intermediate progress update',
+                  },
+                  {
+                    id: 'turn-2-final',
+                    timestamp: '2026-08-12T09:00:03Z',
                     role: 'assistant',
                     text: '# middle retained answer',
                   },
-                  { id: 'turn-3', timestamp: '2026-08-12T09:00:03Z', role: 'user', text: 'latest retained question' },
+                  { id: 'turn-3', timestamp: '2026-08-12T09:00:04Z', role: 'user', text: 'latest retained question' },
                 ],
               has_more: !older,
-              total: 4,
+              total: 5,
               file_truncated: true,
             },
           }));
@@ -3112,13 +3118,15 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('middle retained answer')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeVisible();
-  await expect(page.getByText('4 recorded messages')).toBeVisible();
+  await expect(page.getByText('5 recorded messages')).toBeVisible();
   await expect(page.getByText(/session log is larger than 16 MB/)).toBeVisible();
   await page.getByRole('button', { name: 'Copy History app message as Markdown' }).click();
   await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedConversation')))
     .toBe('# middle retained answer');
+  // Superseded prose collapses out of the compact view; a tool call is a
+  // distinct event and stays, so the Read call is visible in both modes.
   await expect(page.getByText('intermediate progress update')).toBeHidden();
-  await expect(page.getByText('Read', { exact: true })).toBeHidden();
+  await expect(page.getByText('Read', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Full history' }).click();
   await expect(page.getByText('intermediate progress update')).toBeVisible();
   await expect(page.getByText('Read', { exact: true })).toBeVisible();

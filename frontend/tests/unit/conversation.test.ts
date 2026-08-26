@@ -51,6 +51,17 @@ describe('conversationEntries', () => {
     expect(kept.map((entry) => entry.id)).toEqual(['u1', 'a1']);
   });
 
+  it('keeps a tool-bearing entry when a later prose-only turn follows it', () => {
+    const kept = conversationEntries([
+      turn('u1', 'user', 'question'),
+      turn('a1', 'assistant', 'ran it', [bashTool]),
+      turn('a2', 'assistant', 'final answer'),
+    ]);
+    expect(kept.map((entry) => entry.id)).toEqual(['u1', 'a1', 'a2']);
+    expect(kept.filter((entry) => entry.id === 'a1')).toHaveLength(1);
+    expect(kept.find((entry) => entry.id === 'a1')?.tools).toEqual([bashTool]);
+  });
+
   it('keeps chronological order when prose precedes tool activity', () => {
     const kept = conversationEntries([
       turn('u1', 'user', 'question'),

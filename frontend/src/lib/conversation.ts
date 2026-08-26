@@ -9,12 +9,13 @@ export const maxPayloadChars = 2000;
  * conversationEntries reduces a recorded transcript to the compact view: every
  * user turn, plus the agent work between them.
  *
- * Prose answers collapse - only the most recent text-bearing assistant entry of
- * an exchange survives, because an agent that revises its answer supersedes the
- * earlier draft. Tool calls do not collapse: each one is a distinct event, and
- * agents that emit one text-less assistant entry per tool call (Claude Code does
- * this for every Bash/Write/MCP invocation) would otherwise have the majority of
- * their transcript discarded before rendering.
+ * Prose-only answers collapse - only the most recent text-bearing assistant
+ * entry without tools survives, because an agent that revises its answer
+ * supersedes the earlier draft. Any entry carrying tools is a distinct event
+ * and never collapses, whether or not it also carries prose: agents that emit
+ * one text-less assistant entry per tool call (Claude Code does this for every
+ * Bash/Write/MCP invocation) would otherwise have the majority of their
+ * transcript discarded before rendering.
  *
  * A pending answer is flushed when a tool entry arrives so that the rendered
  * order stays chronological.
@@ -33,14 +34,17 @@ export function conversationEntries(recorded: ConversationEntry[]): Conversation
       continue;
     }
     // An entry carrying both prose and tools is one message; the renderer draws
-    // both parts, so it must not also be pushed as a separate tool event.
-    if (entry.text.trim()) {
-      latestAssistant = entry;
-      continue;
-    }
+    // both parts, so it must not also be pushed as a separate tool event. It is
+    // still a distinct event from any pending prose answer, so it flushes that
+    // pending answer rather than merging with it.
     if (entry.tools?.length) {
       flush();
       conversation.push(entry);
+      continue;
+    }
+    if (entry.text.trim()) {
+      latestAssistant = entry;
+      continue;
     }
   }
   flush();
