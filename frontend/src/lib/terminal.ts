@@ -1,15 +1,63 @@
-const ANSI_COLORS: Record<number, string> = {
-  30: '#555', 31: '#ff5f5f', 32: '#5fd75f', 33: '#ffd75f',
-  34: '#5fafff', 35: '#d75fff', 36: '#1abc9c', 37: '#e5e5e5',
-  90: '#777', 91: '#ff8080', 92: '#80ff80', 93: '#ffff80',
-  94: '#80bfff', 95: '#ff80ff', 96: '#80ffff', 97: '#fff',
+import type { TerminalScheme } from './config';
+
+// Everything that depends on whether the phone's terminal pane is dark or
+// light. The desktop pane may run the opposite scheme, so each entry also says
+// which of its colors would vanish against this pane and need normalizing.
+interface TerminalSchemeSpec {
+  colors: Record<number, string>;
+  headingAccent: string;
+  // Replaces a row background painted for the opposite scheme.
+  rowFallback: string;
+  opposingBackground(color: string): boolean;
+  // Neutral text that disappears entirely takes the pane's text color.
+  vanishingText(channels: number[], spread: number): boolean;
+  // Tinted text that merely fades is mixed toward the pane's text color.
+  faintText(luminance: number): boolean;
+}
+
+const TERMINAL_SCHEMES: Record<TerminalScheme, TerminalSchemeSpec> = {
+  dark: {
+    colors: {
+      30: '#555', 31: '#ff5f5f', 32: '#5fd75f', 33: '#ffd75f',
+      34: '#5fafff', 35: '#d75fff', 36: '#1abc9c', 37: '#e5e5e5',
+      90: '#777', 91: '#ff8080', 92: '#80ff80', 93: '#ffff80',
+      94: '#80bfff', 95: '#ff80ff', 96: '#80ffff', 97: '#fff',
+    },
+    headingAccent: '#3daee9',
+    rowFallback: 'rgb(61,64,64)',
+    opposingBackground: isNearWhiteAnsiColor,
+    vanishingText: (channels, spread) => Math.max(...channels) <= 96 && spread <= 30,
+    faintText: (luminance) => luminance < 0.14,
+  },
+  // Catppuccin Latte's terminal palette, so a desktop on the matching light
+  // scheme reads the same on the phone.
+  light: {
+    colors: {
+      30: '#5c5f77', 31: '#d20f39', 32: '#40a02b', 33: '#df8e1d',
+      34: '#1e66f5', 35: '#ea76cb', 36: '#179299', 37: '#acb0be',
+      90: '#6c6f85', 91: '#de293e', 92: '#49af3d', 93: '#eea02d',
+      94: '#456eff', 95: '#fe85d8', 96: '#2d9fa8', 97: '#bcc0cc',
+    },
+    headingAccent: '#1e66f5',
+    rowFallback: 'rgb(204,208,218)',
+    opposingBackground: isNearBlackAnsiColor,
+    vanishingText: (channels, spread) => Math.min(...channels) >= 160 && spread <= 30,
+    faintText: (luminance) => luminance > 0.6,
+  },
 };
+
+// The renderer is pure over its text input; the active scheme is process-wide
+// state set from the theme preference. Terminal views repaint their cached
+// frame when it changes.
+let scheme = TERMINAL_SCHEMES.dark;
+
+export function setTerminalScheme(next: TerminalScheme): void {
+  scheme = TERMINAL_SCHEMES[next];
+}
 
 export const TERMINAL_SEPARATOR_TOKEN = '\uE000HERDR_SEPARATOR\uE000';
 export const TERMINAL_REPEATED_RUN_LIMIT = 24;
 const TERMINAL_REPEATED_RUN_TRIGGER = 32;
-const LIGHT_ROW_FALLBACK_BACKGROUND = 'rgb(61,64,64)';
-const ANSI_HEADING_ACCENT = '#3daee9';
 const TERMINAL_GRAPHEME_SEGMENTER = typeof Intl !== 'undefined' && 'Segmenter' in Intl
   ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
   : null;
@@ -516,8 +564,13 @@ function ansiRelativeLuminance(color: string): number | null {
   return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
 }
 
+function isNearBlackAnsiColor(color: string): boolean {
+  const channels = ansiColorChannels(color);
+  return Boolean(channels && Math.max(...channels) <= 48 && Math.max(...channels) - Math.min(...channels) <= 24);
+}
+
 function normalizedAnsiBackground(color: string, normalize: boolean): string {
-  return normalize && isNearWhiteAnsiColor(color) ? LIGHT_ROW_FALLBACK_BACKGROUND : color;
+  return normalize && scheme.opposingBackground(color) ? scheme.rowFallback : color;
 }
 
 function normalizedAnsiForeground(color: string, normalize: boolean): string {
@@ -526,8 +579,8 @@ function normalizedAnsiForeground(color: string, normalize: boolean): string {
   const luminance = ansiRelativeLuminance(color);
   if (!channels || luminance === null) return color;
   const spread = Math.max(...channels) - Math.min(...channels);
-  if (Math.max(...channels) <= 96 && spread <= 30) return 'var(--terminal-text)';
-  if (luminance < 0.14) {
+  if (scheme.vanishingText(channels, spread)) return 'var(--terminal-text)';
+  if (scheme.faintText(luminance)) {
     return `color-mix(in srgb, ${color} 35%, var(--terminal-text))`;
   }
   return color;
@@ -536,8 +589,8 @@ function normalizedAnsiForeground(color: string, normalize: boolean): string {
 export function ansi256Color(index: number): string {
   const value = Number(index);
   if (!Number.isInteger(value) || value < 0 || value > 255) return '';
-  if (value < 8) return ANSI_COLORS[30 + value];
-  if (value < 16) return ANSI_COLORS[90 + value - 8];
+  if (value < 8) return scheme.colors[30 + value];
+  if (value < 16) return scheme.colors[90 + value - 8];
   if (value < 232) {
     const offset = value - 16;
     const levels = [0, 95, 135, 175, 215, 255];
@@ -617,14 +670,14 @@ export function ansiToHtml(
           else styles.backgroundColor = normalizedAnsiBackground(extended.color, normalizeNearWhiteBackground);
         }
         position += extended.consumed;
-      } else if (ANSI_COLORS[code]) {
-        styles.color = normalizedAnsiForeground(ANSI_COLORS[code], normalizeNearBlackForeground);
-      } else if (ANSI_COLORS[code - 10]) {
-        styles.backgroundColor = normalizedAnsiBackground(ANSI_COLORS[code - 10], normalizeNearWhiteBackground);
+      } else if (scheme.colors[code]) {
+        styles.color = normalizedAnsiForeground(scheme.colors[code], normalizeNearBlackForeground);
+      } else if (scheme.colors[code - 10]) {
+        styles.backgroundColor = normalizedAnsiBackground(scheme.colors[code - 10], normalizeNearWhiteBackground);
       }
     }
     const effective = styles.fontStyle === 'italic' && styles.fontWeight === '700' && !styles.color
-      ? { ...styles, color: ANSI_HEADING_ACCENT }
+      ? { ...styles, color: scheme.headingAccent }
       : styles;
     const style = Object.entries(effective).map(([name, value]) => `${ansiStyleName(name)}:${value}`).join(';');
     if (style) {
@@ -656,7 +709,7 @@ export function ansiLineBackground(line: string): string {
         const extended = ansiExtendedColor(codes, position);
         if (extended.color) background = extended.color;
         position += extended.consumed;
-      } else if (ANSI_COLORS[code - 10]) background = ANSI_COLORS[code - 10];
+      } else if (scheme.colors[code - 10]) background = scheme.colors[code - 10];
     }
   }
   return background;
@@ -677,7 +730,7 @@ export function ansiLineBackgroundIndent(line: string): number {
         position += ansiExtendedColor(codes, position).consumed;
         continue;
       }
-      if (code === 48 || ANSI_COLORS[code - 10]) {
+      if (code === 48 || scheme.colors[code - 10]) {
         return visiblePrefix.trim() ? 0 : visiblePrefix.replaceAll('\t', '    ').length;
       }
     }
@@ -823,7 +876,7 @@ export function terminalHtmlRows(
       ? (line.endsWith('\r') ? line.slice(0, -1) : line)
       : trimAnsiLineEnd(line);
     const sourceBackground = backgrounds[index];
-    const normalizeRow = normalizeLightPalette && isNearWhiteAnsiColor(sourceBackground);
+    const normalizeRow = normalizeLightPalette && scheme.opposingBackground(sourceBackground);
     const normalizeDarkText = normalizeLightPalette && (!sourceBackground || normalizeRow);
     const background = normalizedAnsiBackground(sourceBackground, normalizeRow);
     const renderedText = stripAnsi(renderedLine);
