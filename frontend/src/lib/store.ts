@@ -9,6 +9,7 @@ import {
   MIN_PANE_SIZE_ROWS,
   normalizeRelayConfig,
   saveRelayConfigs,
+  shouldRetainSetupFragment,
 } from './config';
 import {
   agentStatusGroup,
@@ -304,7 +305,9 @@ class RelayStore {
     if (imported) {
       relays = imported;
       saveRelayConfigs(relays);
-      history.replaceState(history.state, '', location.pathname + location.search);
+      if (!shouldRetainSetupFragment(location, navigator.standalone)) {
+        history.replaceState(history.state, '', location.pathname + location.search);
+      }
     }
     this.relayConfigs.set(relays);
     if (connect) this.connectAll();
@@ -315,7 +318,9 @@ class RelayStore {
     if (!imported) return false;
     this.relayConfigs.set(imported);
     saveRelayConfigs(imported);
-    history.replaceState(history.state, '', locationValue.pathname + locationValue.search);
+    if (!shouldRetainSetupFragment(locationValue, navigator.standalone)) {
+      history.replaceState(history.state, '', locationValue.pathname + locationValue.search);
+    }
     if (connect) this.connectAll(true);
     this.showToast('Relay added from the setup link.');
     return true;

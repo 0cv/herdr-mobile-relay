@@ -17,11 +17,15 @@ interface RelayFixture {
 
 interface BootOptions {
   standalone?: boolean;
+  navigatorStandalone?: boolean;
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.addInitScript(({ savedRelays, standalone }) => {
+  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
+    if (navigatorStandalone !== null) {
+      Object.defineProperty(navigator, 'standalone', { configurable: true, value: navigatorStandalone });
+    }
     if (standalone) {
       const nativeMatchMedia = window.matchMedia.bind(window);
       Object.defineProperty(window, 'matchMedia', {
@@ -292,6 +296,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
   }, {
     savedRelays: relays,
     standalone: options.standalone ?? false,
+    navigatorStandalone: options.navigatorStandalone ?? null,
   });
   await page.goto(path);
 }
@@ -750,12 +755,27 @@ test('keeps device verification modal until native authentication succeeds', asy
   await expect.poll(() => socketCount(page)).toBe(1);
 });
 
+test('keeps an iOS setup link available for Home Screen installation', async ({ page }) => {
+  const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
+  await boot(page, [], `/${setupHash}`, { navigatorStandalone: false });
+
+  await expect.poll(() => socketCount(page)).toBe(1);
+  expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('setup.webmanifest');
+  expect(await page.evaluate(() => location.hash)).toBe(setupHash);
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_relays') || '[]')[0]))
+    .toMatchObject({
+      label: 'Fedora Workstation',
+      url: 'wss://relay-fedora.example.com',
+      token: '0123456789abcdef0123456789abcdef',
+    });
+});
+
 test('imports quick setup and merges agents from multiple relays', async ({ page }) => {
   await boot(
     page,
     [],
     '/#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com',
-    { standalone: true },
+    { standalone: true, navigatorStandalone: true },
   );
   await expect(page.getByRole('button', { name: 'Activity history' }).locator('svg')).toBeVisible();
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -766,6 +786,7 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
       token: '0123456789abcdef0123456789abcdef',
     });
   expect(await page.evaluate(() => location.hash)).toBe('');
+  expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('manifest.webmanifest');
 
   await page.evaluate(() => {
     location.hash = '#setup=abcdef0123456789abcdef0123456789&label=Mac&relay=wss%3A%2F%2Fmac.example';

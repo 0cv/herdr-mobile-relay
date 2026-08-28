@@ -26,7 +26,7 @@
     terminalRowOffsets,
     terminalSearchText,
   } from '$lib/terminal-find';
-  import { interfaceSize, terminalHeightLease } from '$lib/preferences';
+  import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
@@ -337,6 +337,19 @@
     ];
     void highlightState;
     void tick().then(applyTerminalFindHighlights);
+  });
+
+  // The ANSI palette follows the theme's terminal scheme, so a theme change
+  // must repaint the cached frame rather than wait for the next output.
+  $effect(() => {
+    void $theme;
+    untrack(() => {
+      if (!lastContent) return;
+      const next = frame;
+      if (!next || next.paneId !== agent.pane_id) return;
+      lastContent = '';
+      void applyFrame(next, lastPreserveLayout, lastPreserveLineEnds);
+    });
   });
 
   $effect(() => {

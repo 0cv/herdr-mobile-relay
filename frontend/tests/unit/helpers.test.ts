@@ -39,6 +39,7 @@ import {
   latestCompletedResponse,
   renderTerminalContent,
   renderedRowShift,
+  setTerminalScheme,
   stripAnsi,
   TERMINAL_REPEATED_RUN_LIMIT,
   TERMINAL_SEPARATOR_TOKEN,
@@ -213,6 +214,30 @@ describe('terminal rendering', () => {
 
     const brightAccent = renderTerminalContent('\x1b[38;2;95;175;255mAccent\x1b[0m', 'ansi');
     expect(brightAccent.html).toContain('color:rgb(95,175,255)');
+  });
+
+  it('normalizes dark-origin ANSI colors onto a light mobile terminal', () => {
+    setTerminalScheme('light');
+    try {
+      const whiteText = renderTerminalContent('\x1b[38;2;229;229;229mMac text\x1b[0m', 'ansi');
+      expect(whiteText.html).toContain('color:var(--terminal-text)');
+
+      const paleYellow = renderTerminalContent('\x1b[38;2;255;255;128mPale text\x1b[0m', 'ansi');
+      expect(paleYellow.html).toContain('color:color-mix(in srgb, rgb(255,255,128) 35%, var(--terminal-text))');
+
+      const darkRow = renderTerminalContent('\x1b[48;2;8;8;8;38;2;229;229;229mDark terminal row\x1b[0m', 'ansi');
+      expect(darkRow.html).toContain('background-color:rgb(204,208,218)');
+      expect(darkRow.html).toContain('color:var(--terminal-text)');
+
+      const lightRow = renderTerminalContent('\x1b[48;2;250;250;250;38;2;20;20;20mLight terminal row\x1b[0m', 'ansi');
+      expect(lightRow.html).toContain('background-color:rgb(250,250,250)');
+      expect(lightRow.html).toContain('color:rgb(20,20,20)');
+
+      const basicRed = renderTerminalContent('\x1b[31mError\x1b[0m', 'ansi');
+      expect(basicRed.html).toContain('color:#d20f39');
+    } finally {
+      setTerminalScheme('dark');
+    }
   });
 
   it('limits blank gaps and merges separator fragments across whitespace', () => {

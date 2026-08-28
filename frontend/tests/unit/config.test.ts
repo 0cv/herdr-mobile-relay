@@ -4,6 +4,7 @@ import {
   loadRelayConfigs,
   normalizeRelayConfig,
   quickSetupConfig,
+  shouldRetainSetupFragment,
   saveRelayConfigs,
 } from '$lib/config';
 
@@ -13,6 +14,19 @@ const TOKEN = '0123456789abcdef0123456789abcdef';
 function setupLink(fragment: string): Pick<Location, 'hash' | 'protocol' | 'host'> {
   return { hash: `#setup=${TOKEN}&${fragment}`, protocol: 'https:', host: 'app.example.com' };
 }
+
+describe('Home Screen setup handoff', () => {
+  it('retains a valid setup fragment only in an iOS browser tab', () => {
+    const locationValue = setupLink('label=Fedora&relay=wss%3A%2F%2Frelay.example.com');
+    expect(shouldRetainSetupFragment(locationValue, false)).toBe(true);
+    expect(shouldRetainSetupFragment(locationValue, true)).toBe(false);
+    expect(shouldRetainSetupFragment(locationValue, undefined)).toBe(false);
+    expect(shouldRetainSetupFragment({
+      ...locationValue,
+      hash: '#setup=short',
+    }, false)).toBe(false);
+  });
+});
 
 describe('ordered gateway lists', () => {
   it('reads the whole ordered list out of a setup fragment', () => {
