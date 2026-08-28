@@ -224,6 +224,13 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
   return { label, url, token };
 }
 
+export function shouldRetainSetupFragment(
+  locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>,
+  standalone: boolean | undefined,
+): boolean {
+  return standalone === false && quickSetupConfig(locationValue) !== null;
+}
+
 export function importQuickSetup(
   relays: RelayConfig[],
   locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>,

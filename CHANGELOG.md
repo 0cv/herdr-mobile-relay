@@ -3,6 +3,22 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.18.4] - 2026-08-28
+
+### Added
+
+- Catppuccin Latte is available as a light app theme with a matching light
+  terminal pane. (#26)
+
+### Fixed
+
+- Installing a setup link to an iPhone Home Screen now carries its relay or
+  gateway address and key into the isolated standalone app, so the installed
+  app connects without entering the setup details again.
+- Terminal and conversation-history views now fill the complete iPhone screen
+  in standalone mode instead of leaving a blank strip beneath the terminal
+  controls. (#25)
+
 ## [0.18.3] - 2026-08-25
 
 ### Fixed
@@ -1204,6 +1220,8 @@ project follows [Semantic Versioning](https://semver.org/).
   distorting their cells.
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
+
+[0.18.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.3...v0.18.4
 
 [0.18.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.2...v0.18.3
 

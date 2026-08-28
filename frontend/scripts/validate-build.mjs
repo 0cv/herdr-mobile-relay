@@ -11,7 +11,9 @@ if (!productVersion) throw new Error('herdr-plugin.toml must declare a MAJOR.MIN
 const required = [
   '_headers',
   'index.html',
+  'manifest-loader.js',
   'manifest.webmanifest',
+  'setup.webmanifest',
   'notification-icons.js',
   'sw.js',
   'version.json',
@@ -77,11 +79,17 @@ if (!serviceWorker.includes(`notification-icons.js?v=${versions.notificationIcon
 }
 
 const manifest = JSON.parse(await readFile(join(root, 'manifest.webmanifest'), 'utf8'));
-if (manifest.start_url !== './' || manifest.scope !== './' || manifest.display !== 'standalone') {
-  throw new Error('PWA manifest start_url, scope, or display contract changed');
+if (manifest.id !== './' || manifest.start_url !== './' || manifest.scope !== './' || manifest.display !== 'standalone') {
+  throw new Error('PWA manifest id, start_url, scope, or display contract changed');
 }
 if (!Array.isArray(manifest.icons) || manifest.icons.length < 3) {
   throw new Error('PWA manifest icons are incomplete');
+}
+const setupManifest = JSON.parse(await readFile(join(root, 'setup.webmanifest'), 'utf8'));
+const expectedSetupManifest = JSON.parse(JSON.stringify(manifest));
+delete expectedSetupManifest.start_url;
+if (JSON.stringify(setupManifest) !== JSON.stringify(expectedSetupManifest)) {
+  throw new Error('Setup manifest must match the PWA manifest without start_url');
 }
 
 console.log(`Validated release structure in ${root}`);
