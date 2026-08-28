@@ -147,13 +147,34 @@ html { background: var(--background); font-family: Inter, ui-sans-serif, system-
 :root[data-interface-size='large'] { --composer-max-height: 12rem; --composer-min-height: 3.05rem; --composer-padding-block: .76rem; font-size: 18px; }
 body { background: var(--background); color: var(--foreground); font-size: 1rem; overflow-x: hidden; }
 body[data-view='terminal'], body[data-view='history'] { overflow: hidden; }
+/* Full-screen views pin the shell to the viewport and let flex size the body
+   under the header, so no descendant needs a viewport unit. */
 body[data-view='terminal'] .app-shell, body[data-view='history'] .app-shell {
-  height: 100dvh;
+  display: flex;
+  flex-direction: column;
   inset: 0;
   min-height: 0;
   overflow: hidden;
   position: fixed;
   width: 100%;
+}
+body[data-view='terminal'] .app-header, body[data-view='history'] .app-header { flex: 0 0 auto; }
+/* iOS home-screen apps (measured on iOS 18.7 with the black-translucent status
+   bar and viewport-fit=cover): the layout viewport that fixed boxes,
+   percentages, dvh and svh resolve against is the screen minus the status-bar
+   height, anchored to the top, and anything laid out below it is cropped. A
+   fixed shell therefore stopped one status bar short of the bottom edge and
+   left a blank strip under the terminal keys. Only 100vh spans the screen
+   there, and only an in-flow box escapes the crop, so standalone mode keeps
+   the shell in flow at 100vh and locks the document instead. Browser tabs keep
+   the fixed shell, which tracks Safari's collapsing toolbars. */
+@media (display-mode: standalone) {
+  body[data-view='terminal'], body[data-view='history'] { height: 100vh; overscroll-behavior: none; }
+  body[data-view='terminal'] .app-shell, body[data-view='history'] .app-shell {
+    height: 100vh;
+    inset: auto;
+    position: relative;
+  }
 }
 button, input, select, textarea { font: inherit; }
 button { touch-action: manipulation; }
@@ -360,7 +381,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .activity-detail-head { align-items: center; display: flex; gap: .5rem; }
 .activity-detail-head h2 { flex: 1; font-size: 1rem; margin: 0; }
 
-.conversation-page { display: flex; flex-direction: column; gap: .65rem; height: calc(100dvh - var(--app-header-height) - env(safe-area-inset-top)); margin: 0 auto; max-width: 48rem; padding: .75rem .85rem calc(.75rem + env(safe-area-inset-bottom)); }
+.conversation-page { display: flex; flex: 1 1 auto; flex-direction: column; gap: .65rem; margin: 0 auto; max-width: 48rem; min-height: 0; padding: .75rem .85rem calc(.75rem + env(safe-area-inset-bottom)); width: 100%; }
 .conversation-toolbar { align-items: center; display: flex; flex: 0 0 auto; gap: .75rem; justify-content: space-between; }
 .conversation-toolbar h2 { font-size: 1rem; margin: 0; }
 .conversation-toolbar p { color: var(--muted); font-size: .68rem; margin: .15rem 0 0; }
@@ -441,7 +462,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .activity-detail-actions { display: flex; gap: .6rem; }
 .activity-detail-gone { color: var(--muted); font-size: .78rem; margin: 0; }
 
-.terminal-view { display: flex; flex-direction: column; height: calc(100dvh - var(--app-header-height) - env(safe-area-inset-top)); position: relative; }
+.terminal-view { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; position: relative; }
 .terminal-view.question-only { overflow: hidden; }
 .terminal-view.question-only .question-form { border-top: 0; flex: 1 1 auto; max-height: none; }
 .term { display: contents; }
@@ -879,7 +900,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-error { color: var(--danger) !important; }
 .workspace-notice { color: var(--warning); padding: .55rem; }
 
-.terminal-layout { height: calc(100dvh - var(--app-header-height) - env(safe-area-inset-top)); }
+.terminal-layout { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
 .agent-rail { display: none; }
 
 @media (max-width: 679px) {
