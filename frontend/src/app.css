@@ -31,6 +31,8 @@
   --trust: #a178df;
   --terminal: #080808;
   --terminal-text: #e5e5e5;
+  --terminal-link: #80bfff;
+  --terminal-link-visited: #c8a2ff;
 }
 
 :root[data-theme='light'] {
@@ -111,6 +113,30 @@
   --trust: #c4a7e7;
   --terminal: #12101c;
   --terminal-text: #e0def4;
+}
+
+/* Catppuccin Latte: the one theme whose terminal pane is light as well, so a
+   desktop running the matching light scheme reads the same on the phone. */
+:root[data-theme='latte'] {
+  color-scheme: light;
+  --background: #eff1f5;
+  --foreground: #4c4f69;
+  --card: #e6e9ef;
+  --card-hover: #dce0e8;
+  --muted: #6c6f85;
+  --border: #ccd0da;
+  --input: #fff;
+  --primary: #1e66f5;
+  --primary-foreground: #fff;
+  --secondary: #ccd0da;
+  --danger: #d20f39;
+  --success: #40a02b;
+  --warning: #df8e1d;
+  --trust: #8839ef;
+  --terminal: #eff1f5;
+  --terminal-text: #4c4f69;
+  --terminal-link: #1e66f5;
+  --terminal-link-visited: #8839ef;
 }
 
 * { box-sizing: border-box; }
@@ -406,8 +432,8 @@ textarea { min-height: 6.5rem; resize: vertical; }
   line-height: 1.45;
 }
 .activity-extract { background: var(--terminal); border: 1px solid var(--border); border-radius: .7rem; position: relative; }
-.term-content a.terminal-link { color: #80bfff; cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 60%, transparent); text-underline-offset: .12em; }
-.term-content a.terminal-link:visited { color: #c8a2ff; }
+.term-content a.terminal-link { color: var(--terminal-link); cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 60%, transparent); text-underline-offset: .12em; }
+.term-content a.terminal-link:visited { color: var(--terminal-link-visited); }
 .activity-extract pre { color: var(--terminal-text); margin: 0; max-height: 55dvh; overflow: auto; overflow-wrap: anywhere; padding: .8rem; padding-top: 2.4rem; white-space: pre-wrap; word-break: normal; }
 .activity-extract .empty-state { color: color-mix(in srgb, var(--terminal-text) 60%, transparent); padding: 1rem; }
 .copy-extract { color: var(--terminal-text); height: 2rem; min-height: 2rem; opacity: .65; position: absolute; right: .35rem; top: .35rem; width: 2rem; }
