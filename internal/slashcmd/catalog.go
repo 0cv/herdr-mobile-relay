@@ -25,26 +25,33 @@ type Catalog struct {
 	Truncated bool      `json:"truncated"`
 }
 
-func CatalogFor(agent, cwd, home string) Catalog {
-	agentLower := strings.ToLower(strings.TrimSpace(agent))
-	var profileID string
-	switch agentLower {
+// profileIDForAgentName maps an agent name as herdr reports it onto a provider
+// profile ID. Both entrypoints resolve through this one table on purpose: while
+// they carried separate switches the two drifted, and a kimi or opencode pane
+// whose binary was missing from the relay's PATH fell through to the generic
+// path and got an empty palette - not even builtins.
+func profileIDForAgentName(agent string) string {
+	switch strings.ToLower(strings.TrimSpace(agent)) {
 	case "claude", "claude-code", "claude code":
-		profileID = "claude"
+		return "claude"
 	case "codex":
-		profileID = "codex"
+		return "codex"
 	case "qoder", "qodercli":
-		profileID = "qoder"
+		return "qoder"
 	case "pi", "pi-coding-agent":
-		profileID = "pi"
+		return "pi"
 	case "omp", "oh my pi", "oh-my-pi":
-		profileID = "omp"
+		return "omp"
 	case "kimi", "kimi code", "kimi-code", "kimi-cli":
-		profileID = "kimi"
+		return "kimi"
 	case "opencode", "open code", "open-code":
-		profileID = "opencode"
+		return "opencode"
 	}
-	return CatalogForProfile(profileID, agent, cwd, home, nil, "", "")
+	return ""
+}
+
+func CatalogFor(agent, cwd, home string) Catalog {
+	return CatalogForProfile(profileIDForAgentName(agent), agent, cwd, home, nil, "", "")
 }
 
 func CatalogForProfile(
@@ -65,19 +72,7 @@ func CatalogForProfile(
 
 	p := resolveProvider(profileID)
 	if p == nil && reportedAgent != "" {
-		agentLower := strings.ToLower(strings.TrimSpace(reportedAgent))
-		switch agentLower {
-		case "claude", "claude-code", "claude code":
-			p = resolveProvider("claude")
-		case "codex":
-			p = resolveProvider("codex")
-		case "qoder", "qodercli":
-			p = resolveProvider("qoder")
-		case "pi", "pi-coding-agent":
-			p = resolveProvider("pi")
-		case "omp", "oh my pi", "oh-my-pi":
-			p = resolveProvider("omp")
-		}
+		p = resolveProvider(profileIDForAgentName(reportedAgent))
 	}
 
 	if p != nil {
