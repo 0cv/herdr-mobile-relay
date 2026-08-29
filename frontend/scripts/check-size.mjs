@@ -34,7 +34,10 @@ import { constants, gzipSync } from 'node:zlib';
 // The gzip figure is the measuring runtime's zlib, not a property of the
 // bundle: the same bytes measure ~300 B larger under Bun than under Node, so
 // compare numbers only across runs on the same runtime (the repo uses Bun).
-const limitKiB = 127;
+// Raised from 127 KiB for compact conversation tool cards and pending-lease
+// terminal recovery: payload formatting/clamping and bounded resize handling
+// both ship in the single bootstrap bundle.
+const limitKiB = 128;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

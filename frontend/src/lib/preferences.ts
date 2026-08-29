@@ -12,6 +12,7 @@ import {
   TERMINAL_REFRESH_OPTIONS,
   THEME_COLORS,
   THEME_KEY,
+  THEME_TERMINAL_SCHEMES,
   THEMES,
   type HomeLayout,
   type InterfaceSize,
@@ -19,6 +20,7 @@ import {
   type TerminalRefreshInterval,
   type Theme,
 } from './config';
+import { setTerminalScheme } from './terminal';
 
 function savedTheme(): Theme {
   const value = localStorage.getItem(THEME_KEY);
@@ -67,11 +69,16 @@ export const terminalHeightLease = writable<boolean>(
   localStorage.getItem(TERMINAL_HEIGHT_LEASE_KEY) === 'true',
 );
 
-export function setTheme(value: Theme): void {
-  localStorage.setItem(THEME_KEY, value);
-  theme.set(value);
+function applyTheme(value: Theme): void {
   document.documentElement.dataset.theme = value;
   document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', THEME_COLORS[value]);
+  setTerminalScheme(THEME_TERMINAL_SCHEMES[value]);
+}
+
+export function setTheme(value: Theme): void {
+  localStorage.setItem(THEME_KEY, value);
+  applyTheme(value);
+  theme.set(value);
 }
 
 export function setInterfaceSize(value: InterfaceSize): void {
@@ -103,9 +110,6 @@ export function setHomeLayout(value: HomeLayout): void {
 
 
 export function initializePreferences(): void {
-  theme.subscribe((value) => {
-    document.documentElement.dataset.theme = value;
-    document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.setAttribute('content', THEME_COLORS[value]);
-  })();
+  theme.subscribe(applyTheme)();
   interfaceSize.subscribe((value) => { document.documentElement.dataset.interfaceSize = value; })();
 }

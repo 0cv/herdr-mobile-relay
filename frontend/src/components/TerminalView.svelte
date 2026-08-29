@@ -26,7 +26,7 @@
     terminalRowOffsets,
     terminalSearchText,
   } from '$lib/terminal-find';
-  import { interfaceSize, terminalHeightLease } from '$lib/preferences';
+  import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
@@ -36,6 +36,8 @@
     stripAnsi,
     TERMINAL_SEPARATOR_TOKEN,
     renderTerminalContent,
+    terminalResizeLayoutEngaged,
+    terminalScreenColumns,
   } from '$lib/terminal';
   import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
   import type {
@@ -101,6 +103,12 @@
   // the agent repaints at the new width.
   // Raw state: the effect compares frame identity, which a deep proxy breaks.
   let resizeFrameBaseline = $state.raw<TerminalFrame | undefined>(undefined);
+  // The relay flags frames while a pane repaints at a new size. Suppressing
+  // them keeps a half-drawn screen off the phone, but a shared session whose
+  // desktop client keeps fighting the leased size can flag every frame, so the
+  // wait is bounded: a stale screen is worse than a transient one.
+  let resizeWaitExpired = $state(false);
+  let resizeWaitTimer: ReturnType<typeof setTimeout> | null = null;
   let displayed = $state('');
   let renderedHtml = $state('');
   let renderedRows = $state<RenderedTerminalRow[]>([]);
@@ -152,6 +160,8 @@
   const CELL_MEASURE_TEXT = '0000000000';
   const PANE_SIZE_LEASE_REFRESH_MS = 10_000;
   const PANE_REALTIME_RESYNC_MS = 15_000;
+  // One relay poll of slack over its own three-second settling window.
+  const PANE_RESIZE_WAIT_MAX_MS = 4_000;
   // Herdr's key parser covers f1..f24; the pad exposes the range phones need.
   const FUNCTION_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   const RESPONSE_COPY_AGENT_IDS = new Set([
@@ -203,6 +213,20 @@
   const resizeSessionActive = $derived(
     Boolean($connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
   );
+  // The capability only says the relay can lease; it does not mean this pane
+  // has a width yet. The wrapping layout is engaged solely when it does.
+  const resizeLayoutActive = $derived(terminalResizeLayoutEngaged(
+    resizeSessionActive,
+    measuredCellWidth,
+    lastLeasedColumns || renderedResizeColumns,
+  ));
+  // Three regimes, not two. A relay that cannot lease at all serves a pane at
+  // its own width, and the fixed layout keeps that pane's columns aligned and
+  // scrolling sideways. A relay that can lease but has not granted a width yet
+  // is showing a pane whose width is nobody's: alignment is already lost, so
+  // those rows wrap at the container instead of stranding the reader on line
+  // tails after every refresh.
+  const resizeLayoutPending = $derived(resizeSessionActive && !resizeLayoutActive);
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -266,13 +290,14 @@
     // Every width is emitted in px of the measured probe cell, never in ch:
     // Safari's Core Text port resolves 1ch against different font metrics
     // than the rendered glyph advance, so an Nch cap wraps short of N cells.
-    // Before the probe is measured no cap is emitted at all, so the declared
-    // fallbacks (100% for the wrap cap, auto for the row background) apply
-    // instead of a ch-derived width that would be wrong on those engines.
+    // Before the probe is measured no cap is emitted at all. The wrapping
+    // layout is gated on the same predicate, so the missing cap can no longer
+    // fall back to the container width and shred rows mid-word: the fixed
+    // layout applies instead until a real cap exists.
     if (measuredCellWidth <= 0) return undefined;
     const capColumns = lastLeasedColumns || renderedResizeColumns;
     const styles = [`--terminal-cell-width: ${measuredCellWidth.toFixed(4)}px`];
-    if (resizeSessionActive && capColumns) {
+    if (resizeLayoutActive) {
       styles.push(`--terminal-width: ${(capColumns * measuredCellWidth).toFixed(4)}px`);
     }
     if (virtualContentColumns > 0) {
@@ -339,15 +364,35 @@
     void tick().then(applyTerminalFindHighlights);
   });
 
+  // The ANSI palette follows the theme's terminal scheme, so a theme change
+  // must repaint the cached frame rather than wait for the next output.
+  $effect(() => {
+    void $theme;
+    untrack(() => {
+      if (!lastContent) return;
+      const next = frame;
+      if (!next || next.paneId !== agent.pane_id) return;
+      lastContent = '';
+      void applyFrame(next, lastPreserveLayout, lastPreserveLineEnds);
+    });
+  });
+
   $effect(() => {
     const next = frame;
     const matchingFrame = next?.paneId === agent.pane_id ? next : undefined;
     const preserve = true;
+    // Keyed to the session, not to resizeLayoutActive, on purpose: a relay that
+    // can lease will repaint this pane at the phone's width, so trailing padding
+    // measured at the desktop width is stale whether or not the width has landed
+    // yet. Only a relay that cannot lease keeps its line ends.
     const preserveLineEnds = !resizeSessionActive;
     // A frame read while the agent repaints at a new width is transient. Keep
-    // the phone's last stable frame painted until the new stable frame lands.
+    // the phone's last stable frame painted until the new stable frame lands,
+    // but never past the deadline: a relay that keeps flagging frames would
+    // otherwise freeze this pane on a screen that is minutes old.
     const waitingForResizedFrame = resizeSessionActive
       && !paneSizeLeaseError
+      && !resizeWaitExpired
       && (lastLeasedColumns === 0
         || (Boolean(resizeFrameBaseline)
           && (next === resizeFrameBaseline || next?.resizeSettling === true)));
@@ -615,7 +660,11 @@
       next.format,
       preserve,
       preserveLineEnds,
-      resizeSessionActive ? lastLeasedColumns : 0,
+      // Cap box-drawing rows at the width in force. A fixed-grid row is a run
+      // of fixed-width cells with no wrap opportunity between them, so past
+      // the cap it must render as plain text that can wrap instead. Zero means
+      // "no cap", which only a relay that cannot lease is entitled to.
+      resizeLayoutActive ? lastLeasedColumns : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0),
     );
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
@@ -750,7 +799,7 @@
       || Math.round(window.visualViewport?.width || window.innerWidth);
     const layoutSignature = [
       lastPreserveLayout ? 'preserve' : 'readable',
-      resizeSessionActive ? 'resize' : 'fixed',
+      resizeLayoutActive ? 'resize' : 'fixed',
       lastPreserveLineEnds ? 'line-ends' : 'wrapped',
       lastLeasedColumns || renderedResizeColumns,
       $interfaceSize,
@@ -774,7 +823,15 @@
       const measured = virtualHeightCache.get(row.html);
       if (measured) return measured;
       if (row.separator) return lineHeight * 1.2;
-      const wraps = (!lastPreserveLayout || (resizeSessionActive && !row.fixedGrid))
+      // One line per row only where the row really stays on one line: a leased
+      // pane's fixed-grid rows. Everything else wraps at the width in force,
+      // and estimating those at one line parks the scroll past the content.
+      // Rows wrap in the two regimes that have a width to wrap at: engaged
+      // (the leased width, fixed grids excepted) and pending (the container).
+      // A relay that cannot lease keeps every row on one line.
+      const wraps = (!lastPreserveLayout
+        || resizeLayoutPending
+        || (resizeLayoutActive && !row.fixedGrid))
         ? Math.max(1, Math.ceil(row.columns / wrappingColumns))
         : 1;
       return lineHeight * wraps;
@@ -790,13 +847,13 @@
       nextTop = terminalScreenOffset() + virtualIndex.offset(anchorIndex) + anchorOffset;
     }
 
-    if (!lastPreserveLayout) virtualContentColumns = 0;
+    if (!lastPreserveLayout || resizeLayoutPending) virtualContentColumns = 0;
     else {
-      let columns = resizeSessionActive ? (lastLeasedColumns || renderedResizeColumns) : 0;
-      for (const row of renderedRows) {
-        if (!resizeSessionActive || row.fixedGrid) columns = Math.max(columns, row.columns);
-      }
-      virtualContentColumns = columns;
+      virtualContentColumns = terminalScreenColumns(
+        renderedRows,
+        resizeLayoutActive,
+        lastLeasedColumns || renderedResizeColumns,
+      );
     }
     renderVirtualWindow(nextTop, true);
     return nextTop;
@@ -1501,10 +1558,20 @@
 
   function beginResizeSettling() {
     resizeFrameBaseline = frame;
+    resizeWaitExpired = false;
+    if (resizeWaitTimer !== null) clearTimeout(resizeWaitTimer);
+    resizeWaitTimer = setTimeout(() => {
+      resizeWaitTimer = null;
+      resizeWaitExpired = true;
+    }, PANE_RESIZE_WAIT_MAX_MS);
   }
 
   function clearResizeSettling() {
     resizeFrameBaseline = undefined;
+    resizeWaitExpired = false;
+    if (resizeWaitTimer === null) return;
+    clearTimeout(resizeWaitTimer);
+    resizeWaitTimer = null;
   }
 
   function discardPaneSizeLease() {
@@ -1793,7 +1860,7 @@
   {/if}
   <div class="term-wrap">
   <div
-    class:resize-layout={resizeSessionActive}
+    class:resize-layout={resizeLayoutActive} class:resize-pending={resizeLayoutPending}
     class="term-content preserve-layout"
     style={terminalContentStyle}
     bind:this={terminalElement}
