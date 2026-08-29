@@ -7,47 +7,51 @@ export const maxPayloadChars = 2000;
 
 /**
  * conversationEntries reduces a recorded transcript to the compact view: every
- * user turn, plus the agent work between them.
+ * user turn, every tool event, and only the latest assistant prose from each
+ * exchange.
  *
- * Prose-only answers collapse - only the most recent text-bearing assistant
- * entry without tools survives, because an agent that revises its answer
- * supersedes the earlier draft. Any entry carrying tools is a distinct event
- * and never collapses, whether or not it also carries prose: agents that emit
- * one text-less assistant entry per tool call (Claude Code does this for every
- * Bash/Write/MCP invocation) would otherwise have the majority of their
- * transcript discarded before rendering.
- *
- * A pending answer is flushed when a tool entry arrives so that the rendered
- * order stays chronological.
+ * Tool activity stays at its recorded position because it is useful even when
+ * a later answer supersedes the prose around it. When a tool-bearing entry also
+ * carries superseded prose, the compact view projects that entry to tools only;
+ * Full history still receives the untouched recorded entry.
  */
 export function conversationEntries(recorded: ConversationEntry[]): ConversationEntry[] {
   const conversation: ConversationEntry[] = [];
-  let latestAssistant: ConversationEntry | null = null;
-  const flush = () => {
-    if (latestAssistant) conversation.push(latestAssistant);
-    latestAssistant = null;
+  let assistantExchange: ConversationEntry[] = [];
+
+  const flushAssistantExchange = () => {
+    let latestTextIndex = -1;
+    for (let index = 0; index < assistantExchange.length; index += 1) {
+      if (assistantExchange[index].text.trim()) latestTextIndex = index;
+    }
+
+    for (let index = 0; index < assistantExchange.length; index += 1) {
+      const entry = assistantExchange[index];
+      if (index === latestTextIndex) {
+        conversation.push(entry);
+        continue;
+      }
+      if (!entry.tools?.length) continue;
+      if (!entry.text.trim()) {
+        conversation.push(entry);
+        continue;
+      }
+      const toolsOnly = { ...entry, text: '' };
+      delete toolsOnly.truncated;
+      conversation.push(toolsOnly);
+    }
+    assistantExchange = [];
   };
+
   for (const entry of recorded) {
     if (entry.role === 'user') {
-      flush();
+      flushAssistantExchange();
       conversation.push(entry);
       continue;
     }
-    // An entry carrying both prose and tools is one message; the renderer draws
-    // both parts, so it must not also be pushed as a separate tool event. It is
-    // still a distinct event from any pending prose answer, so it flushes that
-    // pending answer rather than merging with it.
-    if (entry.tools?.length) {
-      flush();
-      conversation.push(entry);
-      continue;
-    }
-    if (entry.text.trim()) {
-      latestAssistant = entry;
-      continue;
-    }
+    assistantExchange.push(entry);
   }
-  flush();
+  flushAssistantExchange();
   return conversation;
 }
 

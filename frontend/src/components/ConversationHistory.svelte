@@ -50,7 +50,7 @@
     if (!needle) return modeEntries;
     return modeEntries.filter((entry) => [
       entry.text,
-      ...(mode === 'activity' ? (entry.tools || []).flatMap((tool) => [tool.name, tool.input || '', tool.output || '']) : []),
+      ...(entry.tools || []).flatMap((tool) => [tool.name, tool.input || '', tool.output || '']),
     ].join(' ').toLocaleLowerCase().includes(needle));
   });
 

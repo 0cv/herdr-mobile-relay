@@ -217,25 +217,19 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
                     id: 'turn-2',
                     timestamp: '2026-08-12T09:00:01Z',
                     role: 'assistant',
-                    text: '',
+                    text: 'intermediate progress update',
                     tools: [{ id: 'tool-1', name: 'Read', input: 'README.md', output: 'file contents' }],
                   },
                   {
-                    id: 'turn-2-progress',
-                    timestamp: '2026-08-12T09:00:02Z',
-                    role: 'assistant',
-                    text: 'intermediate progress update',
-                  },
-                  {
                     id: 'turn-2-final',
-                    timestamp: '2026-08-12T09:00:03Z',
+                    timestamp: '2026-08-12T09:00:02Z',
                     role: 'assistant',
                     text: '# middle retained answer',
                   },
-                  { id: 'turn-3', timestamp: '2026-08-12T09:00:04Z', role: 'user', text: 'latest retained question' },
+                  { id: 'turn-3', timestamp: '2026-08-12T09:00:03Z', role: 'user', text: 'latest retained question' },
                 ],
               has_more: !older,
-              total: 5,
+              total: 4,
               file_truncated: true,
             },
           }));
@@ -3320,7 +3314,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('middle retained answer')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeVisible();
-  await expect(page.getByText('5 recorded messages')).toBeVisible();
+  await expect(page.getByText('4 recorded messages')).toBeVisible();
   await expect(page.getByText(/session log is larger than 16 MB/)).toBeVisible();
   await page.getByRole('button', { name: 'Copy History app message as Markdown' }).click();
   await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedConversation')))
@@ -3500,6 +3494,10 @@ test('keeps tool-only agent turns and decodes their arguments', async ({ page })
   // The compact view must keep the tool turn: it is the only record of the work.
   const card = page.getByLabel(/^Conversation with/).locator('details').filter({ hasText: 'Bash' });
   await expect(card).toBeVisible();
+  const search = page.getByRole('searchbox', { name: 'Search displayed conversation' });
+  await search.fill('Bash');
+  await expect(card).toBeVisible();
+  await search.fill('');
   await card.locator('summary').click();
 
   const panels = card.locator('pre');

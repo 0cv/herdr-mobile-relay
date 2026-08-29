@@ -51,15 +51,34 @@ describe('conversationEntries', () => {
     expect(kept.map((entry) => entry.id)).toEqual(['u1', 'a1']);
   });
 
-  it('keeps a tool-bearing entry when a later prose-only turn follows it', () => {
+  it('keeps a tool-bearing entry but removes prose superseded by a later answer', () => {
+    const superseded = turn('a1', 'assistant', 'ran it', [bashTool]);
+    superseded.truncated = true;
     const kept = conversationEntries([
       turn('u1', 'user', 'question'),
-      turn('a1', 'assistant', 'ran it', [bashTool]),
+      superseded,
       turn('a2', 'assistant', 'final answer'),
     ]);
     expect(kept.map((entry) => entry.id)).toEqual(['u1', 'a1', 'a2']);
-    expect(kept.filter((entry) => entry.id === 'a1')).toHaveLength(1);
-    expect(kept.find((entry) => entry.id === 'a1')?.tools).toEqual([bashTool]);
+    const projected = kept.find((entry) => entry.id === 'a1');
+    expect(projected?.text).toBe('');
+    expect(projected?.tools).toEqual([bashTool]);
+    expect(projected?.truncated).toBeUndefined();
+    expect(superseded.text).toBe('ran it');
+    expect(superseded.truncated).toBe(true);
+  });
+
+  it('keeps only final prose across interleaved tool activity', () => {
+    const kept = conversationEntries([
+      turn('u1', 'user', 'question'),
+      turn('a1', 'assistant', 'draft answer'),
+      turn('t1', 'assistant', '', [bashTool]),
+      turn('a2', 'assistant', 'progress answer'),
+      turn('t2', 'assistant', '', [{ name: 'Write', input: writeInput, output: 'created' }]),
+      turn('a3', 'assistant', 'final answer'),
+    ]);
+    expect(kept.map((entry) => entry.id)).toEqual(['u1', 't1', 't2', 'a3']);
+    expect(kept.map((entry) => entry.text)).toEqual(['question', '', '', 'final answer']);
   });
 
   it('keeps chronological order when prose precedes tool activity', () => {
