@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 )
 
-// findProjectDirs returns every existing <ancestor>/<stem> directory between the
-// git root and cwd, outermost first, and in stem order within one ancestor.
-// Without a git root only cwd is examined. Directories are de-duplicated.
+// findProjectDirs returns every existing <ancestor>/<stem> directory from the
+// git root to cwd, or from the filesystem root when cwd is not in a repository,
+// outermost first and in stem order within one ancestor.
 //
 // os.Stat is used rather than DirEntry.IsDir so a symlinked directory is
 // followed; symlinking an agent config tree out of a dotfiles repo is common.
@@ -31,16 +31,13 @@ func findProjectDirs(cwd string, stems []string) []string {
 		}
 	}
 
-	gitRoot := findGitRoot(cwd)
-	if gitRoot == "" {
-		appendStems(cwd, &dirs)
-		return dirs
+	stop := findGitRoot(cwd)
+	if stop == "" {
+		stop = filepath.VolumeName(cwd) + string(filepath.Separator)
 	}
 
-	appendStems(gitRoot, &dirs)
-
-	// Walk from cwd upward to the git root, then reverse so the outermost scope
-	// comes first (git root direction).
+	// Walk from cwd upward to the repository or filesystem root, then reverse so
+	// the outermost scope comes first.
 	var chain [][]string
 	dir := cwd
 	for range maxGitWalkDepth {
@@ -49,7 +46,7 @@ func findProjectDirs(cwd string, stems []string) []string {
 		if len(level) > 0 {
 			chain = append(chain, level)
 		}
-		if dir == gitRoot {
+		if dir == stop {
 			break
 		}
 		parent := filepath.Dir(dir)

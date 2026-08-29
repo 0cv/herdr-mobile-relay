@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
@@ -19,10 +21,13 @@ import (
 )
 
 const (
-	maxConversationBytes = 16 * 1024 * 1024
-	maxEntryBytes        = 128 * 1024
-	defaultPageSize      = 80
-	maxPageSize          = 200
+	maxConversationBytes    = 16 * 1024 * 1024
+	maxEntryBytes           = 128 * 1024
+	defaultPageSize         = 80
+	maxPageSize             = 200
+	locationCacheTTL        = 60 * time.Second
+	locationMissTTL         = 5 * time.Second
+	maxLocationCacheEntries = 2048
 )
 
 var canonicalSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -53,9 +58,16 @@ type Page struct {
 	Total         int     `json:"total"`
 	FileTruncated bool    `json:"file_truncated,omitempty"`
 }
-
 type Reader struct {
-	home string
+	home      string
+	mu        sync.Mutex
+	locations map[string]locationCacheEntry
+	locating  map[string]chan struct{}
+}
+
+type locationCacheEntry struct {
+	location Location
+	expires  time.Time
 }
 
 // Location identifies the exact transcript selected for a pane and the
@@ -66,9 +78,12 @@ type Location struct {
 	Root string
 }
 
-// NewReader keeps home so roots can be refreshed when a lookup is not cached.
+// NewReader keeps a bounded tuple-to-location cache. Sharing one Reader between
 func NewReader(home string) *Reader {
-	return &Reader{home: home}
+	return &Reader{
+		home: home, locations: make(map[string]locationCacheEntry),
+		locating: make(map[string]chan struct{}),
+	}
 }
 
 func (r *Reader) claudeRoots() []string { return agentroots.Claude(r.home) }
@@ -161,9 +176,54 @@ func unavailable(reason string) Page {
 
 // Locate returns the exact contained transcript selected for agent, cwd and
 // sessionID. Root order is authoritative; within Claude/Qoder roots cwd selects
-// the project directory when it is known.
+// the project directory when it is known. Cached tuple locations are returned
+// before any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 	sessionID = strings.TrimSpace(sessionID)
+	key := normalizedAgent(agent) + "\x00" + cwd + "\x00" + sessionID
+	for {
+		now := time.Now()
+		r.mu.Lock()
+		if cached, ok := r.locations[key]; ok && now.Before(cached.expires) {
+			r.mu.Unlock()
+			return cached.location
+		}
+		if ready, ok := r.locating[key]; ok {
+			r.mu.Unlock()
+			<-ready
+			continue
+		}
+		r.locating[key] = make(chan struct{})
+		r.mu.Unlock()
+		break
+	}
+
+	location := r.locate(agent, cwd, sessionID)
+	ttl := locationCacheTTL
+	if location.Path == "" {
+		ttl = locationMissTTL
+	}
+	now := time.Now()
+	r.mu.Lock()
+	if len(r.locations) >= maxLocationCacheEntries {
+		for cachedKey, cached := range r.locations {
+			if !now.Before(cached.expires) {
+				delete(r.locations, cachedKey)
+			}
+		}
+		if len(r.locations) >= maxLocationCacheEntries {
+			clear(r.locations)
+		}
+	}
+	r.locations[key] = locationCacheEntry{location: location, expires: now.Add(ttl)}
+	ready := r.locating[key]
+	delete(r.locating, key)
+	close(ready)
+	r.mu.Unlock()
+	return location
+}
+
+func (r *Reader) locate(agent, cwd, sessionID string) Location {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode":
 		if !safeSessionID(sessionID) {

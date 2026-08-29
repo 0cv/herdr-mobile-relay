@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
@@ -171,8 +172,9 @@ func TestOMPSessionName(t *testing.T) {
 	if err := os.WriteFile(sessionPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	expireTitleCache(resolver, "omp|/home/user/app|"+sessionPath)
 	if got := resolver.SessionName("omp", "/home/user/app", sessionPath); got != "session_fix_renamed" {
-		t.Fatalf("updated session name = %q, want %q", got, "session_fix_renamed")
+		t.Fatalf("updated session name = %q, want %q after cache expiry", got, "session_fix_renamed")
 	}
 }
 
@@ -229,14 +231,16 @@ func TestCacheTTL(t *testing.T) {
 		t.Fatalf("first call = %q", name1)
 	}
 
-	// Overwrite file — the source signature invalidates the cache immediately.
+	// The title cache is intentionally consulted before any filesystem work.
 	entry2 := map[string]any{"type": "summary", "title": "Second Title"}
 	data2, _ := json.Marshal(entry2)
 	os.WriteFile(filepath.Join(projDir, "s1.jsonl"), append(data2, '\n'), 0o644)
-
-	name2 := r.SessionName("qoder", "/home/user/proj", "s1")
-	if name2 != "Second Title" {
-		t.Errorf("refreshed call = %q, want 'Second Title'", name2)
+	if got := r.SessionName("qoder", "/home/user/proj", "s1"); got != "First Title" {
+		t.Fatalf("cached call = %q, want stable title before TTL expiry", got)
+	}
+	expireTitleCache(r, "qoder|/home/user/proj|s1")
+	if got := r.SessionName("qoder", "/home/user/proj", "s1"); got != "Second Title" {
+		t.Errorf("expired call = %q, want 'Second Title'", got)
 	}
 }
 
@@ -446,19 +450,13 @@ func TestCodexTitleFromSecondConfiguredHome(t *testing.T) {
 	}
 }
 
-// Mirrors TestCacheTTL, but for a session reachable only through a non-default
-// root: sourceSignature has to sign the file the title actually came from. The
-// fixture sits in the SECOND root on purpose - with it in the first root a
-// signature that only ever signed roots[0] would pass, and the bug this test
-// names would go unnoticed.
-func TestCacheInvalidationWithNonDefaultClaudeRoot(t *testing.T) {
+func TestTitleCacheTTLWithNonDefaultClaudeRoot(t *testing.T) {
 	clearAgentRootEnv(t)
 	home := t.TempDir()
 	first := t.TempDir()
 	second := t.TempDir()
 	t.Setenv(agentroots.ClaudeListEnv, first+string(os.PathListSeparator)+second)
 
-	// The first root holds no project directory for this cwd at all.
 	if err := os.MkdirAll(filepath.Join(first, "projects"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -471,26 +469,22 @@ func TestCacheInvalidationWithNonDefaultClaudeRoot(t *testing.T) {
 	}
 
 	writeTitleFile(t, sessionFile, "Second Title After Rename")
+	if got := r.SessionName("claude", "/home/user/proj", "s1"); got != "First Title" {
+		t.Fatalf("cached call = %q, want stable title before TTL expiry", got)
+	}
+	expireTitleCache(r, "claude|/home/user/proj|s1")
 	if got := r.SessionName("claude", "/home/user/proj", "s1"); got != "Second Title After Rename" {
-		t.Fatalf("refreshed call = %q, want %q", got, "Second Title After Rename")
+		t.Fatalf("expired call = %q, want %q", got, "Second Title After Rename")
 	}
 }
 
-// Regression guard for the title cache. projectSessionTitle keeps searching
-// roots until one holds the session, so sourceSignature must sign the
-// candidate in EVERY root. Signing only the first root that happens to have a
-// project directory for this cwd - which it did - signs a file the title never
-// came from, and the cached title then survives an edit to the file it really
-// came from for the whole 60s TTL.
-func TestTitleCacheTracksTheRootTheTitleActuallyCameFrom(t *testing.T) {
+func TestTitleCacheKeepsSelectedRootUntilExpiry(t *testing.T) {
 	clearAgentRootEnv(t)
 	home := t.TempDir()
 	first := t.TempDir()
 	second := t.TempDir()
 	t.Setenv(agentroots.ClaudeListEnv, first+string(os.PathListSeparator)+second)
 
-	// The first root has a project directory for this cwd but NOT this session,
-	// so the title has to come from the second root.
 	writeTitleFile(t, filepath.Join(first, "projects", "home-user-app", "other.jsonl"), "Unrelated")
 	target := filepath.Join(second, "projects", "home-user-app", "wanted.jsonl")
 	writeTitleFile(t, target, "First Title")
@@ -501,8 +495,12 @@ func TestTitleCacheTracksTheRootTheTitleActuallyCameFrom(t *testing.T) {
 	}
 
 	writeTitleFile(t, target, "Renamed Title")
+	if got := r.SessionName("claude", "/home/user/app", "wanted"); got != "First Title" {
+		t.Fatalf("cached call = %q, want stable title before TTL expiry", got)
+	}
+	expireTitleCache(r, "claude|/home/user/app|wanted")
 	if got := r.SessionName("claude", "/home/user/app", "wanted"); got != "Renamed Title" {
-		t.Fatalf("second call = %q, want %q - the cache signed the wrong root", got, "Renamed Title")
+		t.Fatalf("expired call = %q, want %q", got, "Renamed Title")
 	}
 }
 
@@ -541,6 +539,14 @@ func TestLegacyClaudeConfigDirWidensWithoutDroppingTheHomeDefault(t *testing.T) 
 	if got := r.SessionName("claude", "/home/user/app", "sess-profile"); got != "Profile Title" {
 		t.Errorf("configured-directory session title = %q, want %q", got, "Profile Title")
 	}
+}
+
+func expireTitleCache(r *Resolver, key string) {
+	r.mu.Lock()
+	entry := r.cache[key]
+	entry.expires = time.Time{}
+	r.cache[key] = entry
+	r.mu.Unlock()
 }
 
 // Same widening guarantee for the agents whose roots used to be hardcoded with

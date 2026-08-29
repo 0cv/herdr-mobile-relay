@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,6 +47,8 @@ func newPiFixture(t *testing.T) piFixture {
 	}
 	mkdirAll(t, filepath.Join(fixture.home, ".pi", "agent"))
 	mkdirAll(t, fixture.repo)
+	writeFile(t, filepath.Join(fixture.home, ".pi", "agent", "trust.json"),
+		fmt.Sprintf("{%q:true}", fixture.repo))
 	return fixture
 }
 
@@ -75,15 +78,15 @@ func TestPiDiscoversProjectPiSkills(t *testing.T) {
 	}
 }
 
-func TestPiDiscoversProjectSkillsFromSubdirectory(t *testing.T) {
+func TestPiDoesNotInheritAncestorPiSkills(t *testing.T) {
 	f := newPiFixture(t)
 	f.gitRepo(t)
 	writeSkill(t, filepath.Join(f.repo, ".pi", "skills"), "deploy", "Ship the service")
 	nested := filepath.Join(f.repo, "services", "api")
 	mkdirAll(t, nested)
 
-	if _, ok := commandByName(f.catalog(nested), "/skill:deploy"); !ok {
-		t.Fatal("walk-up from a subdirectory did not reach the git root's .pi/skills")
+	if _, ok := commandByName(f.catalog(nested), "/skill:deploy"); ok {
+		t.Fatal("Pi must scan .pi/skills only in the current working directory")
 	}
 }
 
@@ -294,5 +297,104 @@ func TestPiEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
 	catalog := CatalogForProfile("pi", "pi", repo, "", nil, "", "0.82.1", "")
 	if _, ok := commandByName(catalog, "/skill:leak-pi"); ok {
 		t.Fatal("empty ctx.Home must not make Pi scan the service's own working directory")
+	}
+}
+
+func TestPiInheritsAgentsSkillsFromGitAncestor(t *testing.T) {
+	f := newPiFixture(t)
+	f.gitRepo(t)
+	writeSkill(t, filepath.Join(f.repo, ".agents", "skills"), "ancestor-agent", "Inherited generic skill")
+	nested := filepath.Join(f.repo, "services", "api")
+	mkdirAll(t, nested)
+
+	if _, ok := commandByName(f.catalog(nested), "/skill:ancestor-agent"); !ok {
+		t.Fatal("Pi did not inherit .agents/skills from the git root")
+	}
+}
+
+func TestPiInheritsAgentsSkillsOutsideGit(t *testing.T) {
+	f := newPiFixture(t)
+	parent := filepath.Join(f.repo, "workspace")
+	nested := filepath.Join(parent, "services", "api")
+	mkdirAll(t, nested)
+	writeSkill(t, filepath.Join(parent, ".agents", "skills"), "outside-git", "Filesystem ancestor")
+
+	if _, ok := commandByName(f.catalog(nested), "/skill:outside-git"); !ok {
+		t.Fatal("Pi did not inherit .agents/skills from a filesystem ancestor")
+	}
+}
+
+func TestPiDiscoversGlobalSettingsSkillArray(t *testing.T) {
+	f := newPiFixture(t)
+	configured := filepath.Join(f.home, ".pi", "agent", "configured")
+	writeSkill(t, configured, "from-settings", "Configured globally")
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "settings.json"),
+		`{"skills":["configured"]}`)
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:from-settings"); !ok {
+		t.Fatal("global Pi settings skills array was not discovered")
+	}
+}
+
+func TestPiTrustedProjectSettingsOverrideGlobalSettings(t *testing.T) {
+	f := newPiFixture(t)
+	global := filepath.Join(f.home, ".pi", "agent", "global")
+	project := filepath.Join(f.repo, ".pi", "project")
+	writeSkill(t, global, "global-setting", "Global setting")
+	writeSkill(t, project, "project-setting", "Project setting")
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "settings.json"),
+		`{"enableSkillCommands":false,"skills":["global"]}`)
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "trust.json"),
+		fmt.Sprintf("{%q:true}", f.repo))
+	writeFile(t, filepath.Join(f.repo, ".pi", "settings.json"),
+		`{"enableSkillCommands":true,"skills":["project"]}`)
+
+	catalog := f.catalog(f.repo)
+	if _, ok := commandByName(catalog, "/skill:project-setting"); !ok {
+		t.Fatal("trusted project Pi settings did not enable and replace skill paths")
+	}
+	if _, ok := commandByName(catalog, "/skill:global-setting"); ok {
+		t.Fatal("project Pi settings skills array must replace the global array")
+	}
+}
+
+func TestPiUntrustedProjectSettingsDoNotOverrideGlobal(t *testing.T) {
+	f := newPiFixture(t)
+	writeSkill(t, filepath.Join(f.home, ".pi", "agent", "skills"), "personal", "Personal skill")
+	writeSkill(t, filepath.Join(f.repo, ".pi", "skills"), "untrusted-project", "Untrusted project")
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "trust.json"),
+		fmt.Sprintf("{%q:false}", f.repo))
+	writeFile(t, filepath.Join(f.repo, ".pi", "settings.json"),
+		`{"enableSkillCommands":false}`)
+
+	catalog := f.catalog(f.repo)
+	if _, ok := commandByName(catalog, "/skill:personal"); !ok {
+		t.Fatal("untrusted project settings overrode the global defaults")
+	}
+	if _, ok := commandByName(catalog, "/skill:untrusted-project"); ok {
+		t.Fatal("untrusted project skills were discovered")
+	}
+}
+
+func TestPiSupportsLegacyNestedSkillCommandSetting(t *testing.T) {
+	f := newPiFixture(t)
+	writeSkill(t, filepath.Join(f.home, ".pi", "agent", "skills"), "personal", "Personal skill")
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "settings.json"),
+		`{"skills":{"enableSkillCommands":false}}`)
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:personal"); ok {
+		t.Fatal("legacy nested skills.enableSkillCommands=false was ignored")
+	}
+}
+
+func TestPiDefaultProjectTrustAlwaysEnablesProjectSettings(t *testing.T) {
+	f := newPiFixture(t)
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "trust.json"), `{}`)
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "settings.json"),
+		`{"defaultProjectTrust":"always"}`)
+	writeSkill(t, filepath.Join(f.repo, ".pi", "skills"), "default-trusted", "Default trusted project")
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:default-trusted"); !ok {
+		t.Fatal("defaultProjectTrust=always did not enable project resources")
 	}
 }

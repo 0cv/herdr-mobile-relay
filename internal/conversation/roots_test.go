@@ -143,9 +143,8 @@ func TestClaudeConversationEarliestRootWinsForDuplicateSessionID(t *testing.T) {
 
 // TestOMPConversationDiscoversProfileCreatedAfterReaderConstructed guards
 // against snapshotting roots in NewReader: the profile directory is created
-// only after the Reader exists, so this fails unless every root list is
-// re-resolved (and agentroots.OMP re-scans <configRoot>/profiles) on each
-// call.
+// only after the Reader exists, so the first tuple lookup must resolve roots
+// lazily.
 func TestOMPConversationDiscoversProfileCreatedAfterReaderConstructed(t *testing.T) {
 	reader, home := testReader(t)
 
@@ -191,5 +190,34 @@ func TestClaudeConversationSearchesSymlinkedProjectDirectory(t *testing.T) {
 	}
 	if !page.Available || page.Total != 1 || page.Entries[0].Text != "via symlinked project directory" {
 		t.Fatalf("page = %#v, want the symlinked project directory to be searched", page)
+	}
+}
+
+func TestReaderKeepsLocatedDuplicateStableAcrossRequests(t *testing.T) {
+	_, home := testReader(t)
+	first := t.TempDir()
+	second := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, first+string(os.PathListSeparator)+second)
+	reader := NewReader(home)
+
+	secondPath := filepath.Join(second, "projects", "-work", testSessionID+".jsonl")
+	writeRows(t, secondPath,
+		map[string]any{"type": "user", "uuid": "u1", "message": map[string]any{"content": "second root"}})
+	firstLocation := reader.Locate("claude", "/work", testSessionID)
+	if firstLocation.Path != secondPath {
+		t.Fatalf("initial location = %q, want %q", firstLocation.Path, secondPath)
+	}
+
+	writeRows(t, filepath.Join(first, "projects", "-work", testSessionID+".jsonl"),
+		map[string]any{"type": "user", "uuid": "u2", "message": map[string]any{"content": "new first root"}})
+	if got := reader.Locate("claude", "/work", testSessionID); got.Path != secondPath {
+		t.Fatalf("cached location flipped to %q, want stable %q", got.Path, secondPath)
+	}
+	page, err := reader.ReadFor("claude", "/work", testSessionID, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Available || page.Entries[0].Text != "second root" {
+		t.Fatalf("page = %#v, want the originally located transcript", page)
 	}
 }

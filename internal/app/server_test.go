@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
@@ -175,7 +176,7 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 	s := testServer()
 	s.conversationM = conversation.NewReader(home)
 	want := rows[1]["message"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	if got := s.captureFinishedPane(context.Background(), "pane-1", "omp", sessionID); got != want {
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "omp", "", sessionID); got != want {
 		t.Fatalf("captured response = %q, want full conversation response %q", got, want)
 	}
 
@@ -189,6 +190,65 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 	backfilled := s.recentActivities(1)
 	if len(backfilled) != 1 || backfilled[0].Extract != want {
 		t.Fatalf("backfilled activity = %#v, want full conversation response", backfilled)
+	}
+}
+
+func TestCaptureFinishedPaneUsesOriginalConversationCwd(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174321"
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-old", sessionID+".jsonl"),
+		"Old work", "answer from original cwd")
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-new", sessionID+".jsonl"),
+		"New work", "answer from current cwd")
+
+	s := testServer()
+	s.conversationM = conversation.NewReader(home)
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new", SessionID: sessionID,
+	}}, s.state.RevisionCounter())
+
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "claude", "/work/old", sessionID); got != "answer from original cwd" {
+		t.Fatalf("captured response = %q, want the transcript bound to the completion's original cwd", got)
+	}
+}
+
+func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.OMPListEnv, profile)
+	const sessionID = "123e4567-e89b-12d3-a456-426614174321"
+	path := filepath.Join(profile, "sessions", "-work", "session_"+sessionID+".jsonl")
+	writeInvariantRows(t, path,
+		map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": "question"}})
+
+	reader := conversation.NewReader(home)
+	location := reader.Locate("omp", "/work", sessionID)
+	if location.Path != path {
+		t.Fatalf("location = %#v, want profile transcript %q", location, path)
+	}
+	if got := locatedAgentDir(home, "omp", location); got != profile {
+		t.Fatalf("agent dir = %q, want active profile %q", got, profile)
+	}
+	if raw := agentroots.AgentDirForSession(home, "omp", sessionID); raw != "" {
+		t.Fatalf("raw session ID unexpectedly selected an agent directory: %q", raw)
+	}
+}
+
+func TestConversationTupleIncludesAgentCwdAndSession(t *testing.T) {
+	base := &coordinator.AgentState{Agent: "claude", Cwd: "/work", SessionID: "session"}
+	if !sameConversationTuple(base, &coordinator.AgentState{Agent: "claude", Cwd: "/work", SessionID: "session"}) {
+		t.Fatal("identical conversation tuples did not match")
+	}
+	for name, changed := range map[string]*coordinator.AgentState{
+		"agent":   {Agent: "qoder", Cwd: "/work", SessionID: "session"},
+		"cwd":     {Agent: "claude", Cwd: "/other", SessionID: "session"},
+		"session": {Agent: "claude", Cwd: "/work", SessionID: "other"},
+	} {
+		if sameConversationTuple(base, changed) {
+			t.Errorf("%s change was not detected", name)
+		}
 	}
 }
 

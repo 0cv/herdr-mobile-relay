@@ -181,13 +181,17 @@ func TestOMPSkillsDisabledYieldsBuiltinsOnly(t *testing.T) {
 	}
 }
 
-func TestOMPDropsSkillWithoutDescription(t *testing.T) {
+func TestOMPListsSkillWithoutDescription(t *testing.T) {
 	f := newOMPFixture(t)
 	f.gitRepo(t)
 	writeSkill(t, filepath.Join(f.repo, ".omp", "skills"), "nodesc", "")
 
-	if _, ok := commandByName(f.catalog(f.repo), "/skill:nodesc"); ok {
-		t.Fatal("a skill without a description must not be listed")
+	command, ok := commandByName(f.catalog(f.repo), "/skill:nodesc")
+	if !ok {
+		t.Fatal("OMP compatibility skills do not require a description")
+	}
+	if command.Description != "Nodesc skill" {
+		t.Fatalf("fallback description = %q", command.Description)
 	}
 }
 
@@ -586,10 +590,10 @@ func TestOMPDiscoversConfiguredExtensionPackageSkills(t *testing.T) {
 
 func TestOMPDiscoversInstalledExtensionDependencySkills(t *testing.T) {
 	f := newOMPFixture(t)
-	agentDir := filepath.Join(f.home, ".omp", "agent")
-	writeFile(t, filepath.Join(agentDir, "package.json"),
+	pluginRoot := filepath.Join(f.home, ".omp", "plugins")
+	writeFile(t, filepath.Join(pluginRoot, "package.json"),
 		`{"dependencies":{"@acme/release-tools":"1.0.0"}}`)
-	extension := filepath.Join(agentDir, "node_modules", "@acme", "release-tools")
+	extension := filepath.Join(pluginRoot, "node_modules", "@acme", "release-tools")
 	writeFile(t, filepath.Join(extension, "package.json"), `{"omp":{}}`)
 	writeSkill(t, filepath.Join(extension, "skills"), "publish", "Publish from installed extension")
 
@@ -599,5 +603,151 @@ func TestOMPDiscoversInstalledExtensionDependencySkills(t *testing.T) {
 	}
 	if command.Description != "Publish from installed extension" {
 		t.Fatalf("command = %+v", command)
+	}
+}
+
+func TestOMPProjectCustomDirectoryCannotEscapeProject(t *testing.T) {
+	f := newOMPFixture(t)
+	external := filepath.Join(f.home, "external-skills")
+	writeSkill(t, external, "leaked", "Must remain private")
+	writeFile(t, filepath.Join(f.repo, ".omp", "config.yml"),
+		fmt.Sprintf("skills:\n  customDirectories: [%q]\n", external))
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:leaked"); ok {
+		t.Fatal("project customDirectories exposed a skill outside the project boundary")
+	}
+}
+
+func TestOMPProjectCustomDirectoryInsideProjectIsProjectScoped(t *testing.T) {
+	f := newOMPFixture(t)
+	writeSkill(t, filepath.Join(f.repo, "team-skills"), "inside", "Inside project")
+	writeFile(t, filepath.Join(f.repo, ".omp", "config.yml"),
+		"skills:\n  customDirectories: [team-skills]\n")
+
+	command, ok := commandByName(f.catalog(f.repo), "/skill:inside")
+	if !ok {
+		t.Fatal("contained project customDirectories skill was not discovered")
+	}
+	if command.Source != "project" {
+		t.Fatalf("source = %q, want project", command.Source)
+	}
+}
+
+func TestOMPDiscoversClaudeMarketplacePluginSkills(t *testing.T) {
+	f := newOMPFixture(t)
+	install := filepath.Join(f.home, "marketplace", "release-tools")
+	writeSkill(t, filepath.Join(install, "skills"), "market-release", "Marketplace release")
+	writeSkill(t, filepath.Join(install, "team-skills"), "manifest-skill", "Manifest skill directory")
+	writeFile(t, filepath.Join(install, ".claude-plugin", "plugin.json"),
+		`{"skills":["team-skills"]}`)
+	disabled := filepath.Join(f.home, "marketplace", "disabled-tools")
+	writeSkill(t, filepath.Join(disabled, "skills"), "disabled-plugin", "Disabled plugin")
+	registry, err := json.Marshal(map[string]any{
+		"version": 2,
+		"plugins": map[string]any{
+			"release-tools@acme": []any{map[string]any{
+				"installPath": install,
+				"enabled":     true,
+				"scope":       "user",
+			}},
+			"disabled-tools@acme": []any{map[string]any{
+				"installPath": disabled,
+				"enabled":     false,
+				"scope":       "user",
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(f.home, ".claude", "plugins", "installed_plugins.json"), string(registry))
+
+	catalog := f.catalog(f.repo)
+	for _, name := range []string{"/skill:market-release", "/skill:manifest-skill"} {
+		if _, ok := commandByName(catalog, name); !ok {
+			t.Fatalf("Claude marketplace plugin skill %s was not discovered", name)
+		}
+	}
+	if _, ok := commandByName(catalog, "/skill:disabled-plugin"); ok {
+		t.Fatal("disabled Claude marketplace plugin was discovered")
+	}
+}
+
+func TestOMPAgentsSkillsBeatCodexAtEqualPriority(t *testing.T) {
+	f := newOMPFixture(t)
+	writeSkill(t, filepath.Join(f.home, ".agents", "skills"), "shared-tie", "Agents copy")
+	writeSkill(t, filepath.Join(f.home, ".codex", "skills"), "shared-tie", "Codex copy")
+
+	command, ok := commandByName(f.catalog(f.repo), "/skill:shared-tie")
+	if !ok {
+		t.Fatal("equal-priority compatibility skill missing")
+	}
+	if command.Description != "Agents copy" {
+		t.Fatalf("description = %q, want Agents provider to win the tie", command.Description)
+	}
+}
+
+func TestOMPSkipsFrontmatterDisabledSkill(t *testing.T) {
+	f := newOMPFixture(t)
+	writeFile(t, filepath.Join(f.repo, ".omp", "skills", "off", "SKILL.md"),
+		"---\nname: off\ndescription: Disabled\nenabled: false\n---\n")
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:off"); ok {
+		t.Fatal("frontmatter enabled:false skill was listed")
+	}
+}
+
+func TestOMPProjectConfigDoesNotInheritFromAncestor(t *testing.T) {
+	f := newOMPFixture(t)
+	nested := filepath.Join(f.repo, "services", "api")
+	mkdirAll(t, nested)
+	writeSkill(t, filepath.Join(nested, ".omp", "skills"), "local", "Local skill")
+	writeFile(t, filepath.Join(f.repo, ".omp", "config.yml"),
+		"skills:\n  enableSkillCommands: false\n")
+
+	if _, ok := commandByName(f.catalog(nested), "/skill:local"); !ok {
+		t.Fatal("ancestor .omp/config.yml incorrectly disabled cwd skill discovery")
+	}
+}
+
+func TestOMPWalksSkillAncestorsOutsideGit(t *testing.T) {
+	f := newOMPFixture(t)
+	parent := filepath.Join(f.repo, "workspace")
+	nested := filepath.Join(parent, "services", "api")
+	mkdirAll(t, nested)
+	writeSkill(t, filepath.Join(parent, ".omp", "skills"), "ancestor", "Ancestor skill")
+
+	if _, ok := commandByName(f.catalog(nested), "/skill:ancestor"); !ok {
+		t.Fatal("non-git ancestor .omp/skills was not discovered")
+	}
+}
+
+func TestOMPFlowListKeepsCommaInsideQuotedPath(t *testing.T) {
+	f := newOMPFixture(t)
+	custom := filepath.Join(f.home, "skills,shared")
+	writeSkill(t, custom, "comma-path", "Quoted comma path")
+	writeFile(t, filepath.Join(f.home, ".omp", "agent", "config.yml"),
+		fmt.Sprintf("skills:\n  customDirectories: [%q]\n", custom))
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:comma-path"); !ok {
+		t.Fatal("quoted YAML flow-list comma split one custom directory into two")
+	}
+}
+
+func TestOMPDiscoversProjectPluginRootSkills(t *testing.T) {
+	f := newOMPFixture(t)
+	pluginRoot := filepath.Join(f.repo, ".omp", "plugins")
+	writeFile(t, filepath.Join(pluginRoot, "package.json"),
+		`{"dependencies":{"project-tools":"1.0.0"}}`)
+	extension := filepath.Join(pluginRoot, "node_modules", "project-tools")
+	writeFile(t, filepath.Join(extension, "package.json"), `{"omp":{}}`)
+	writeSkill(t, filepath.Join(extension, "skills"), "project-plugin", "Project plugin")
+
+	command, ok := commandByName(f.catalog(f.repo), "/skill:project-plugin")
+	if !ok {
+		t.Fatal("project .omp/plugins dependency skill was not discovered")
+	}
+	if command.Source != "project" {
+		t.Fatalf("source = %q, want project", command.Source)
 	}
 }

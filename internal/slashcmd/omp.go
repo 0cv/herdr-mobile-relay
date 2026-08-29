@@ -142,12 +142,17 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		}
 	}
 
-	scanUsing := func(scope string, applyCommands func([]Command), dirs ...string) {
+	scanUsing := func(scope, boundary string, applyCommands func([]Command), dirs ...string) {
 		for _, dir := range dirs {
 			if dir == "" || !filepath.IsAbs(dir) {
 				continue
 			}
-			cmds, trunc := scanSkillDirFormat(dir, scope, ompCommandFormat, &budget)
+			options := skillScanOptions{
+				boundary:           boundary,
+				requireDescription: false,
+				respectEnabled:     true,
+			}
+			cmds, trunc := scanSkillDirFormatOptions(dir, scope, ompCommandFormat, &budget, options)
 			allowed := cmds[:0]
 			for _, command := range cmds {
 				if settings.allows(ompSkillName(command.Command)) {
@@ -159,10 +164,10 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		}
 	}
 	scan := func(scope string, dirs ...string) {
-		scanUsing(scope, apply, dirs...)
+		scanUsing(scope, "", apply, dirs...)
 	}
-	scanOverride := func(scope string, dirs ...string) {
-		scanUsing(scope, applyOverride, dirs...)
+	scanOverride := func(scope, boundary string, dirs ...string) {
+		scanUsing(scope, boundary, applyOverride, dirs...)
 	}
 	// scanProject scans <ancestor>/<stem>/skills in descending precedence:
 	// innermost ancestor first and, within one ancestor, stems in the order omp
@@ -194,7 +199,11 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// Extension packages register below native skills and above compatibility
 	// providers, matching OMP's built-in omp-plugins provider priority.
 	for _, extension := range ompExtensionSkillDirs(ctx) {
-		scan(extension.source, filepath.Join(extension.path, "skills"))
+		skillDir := filepath.Join(extension.path, "skills")
+		if extension.directSkillDir {
+			skillDir = extension.path
+		}
+		scan(extension.source, skillDir)
 	}
 
 	// 2. claude (80)
@@ -205,17 +214,8 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scan("personal", filepath.Join(ctx.Home, ".claude", "skills"))
 	}
 
-	// 3. codex (70). omp scans a project .codex/skills even though codex
-	// itself has no such directory, and that project level has no toggle of
-	// its own.
-	if fallback {
-		scanProject(".codex")
-	}
-	if settings.enableCodexUser {
-		scan("personal", filepath.Join(ctx.Home, ".codex", "skills"))
-	}
-
-	// 4. agents (70)
+	// 3. agents (70). OMP registers the generic compatibility provider before
+	// Codex at equal priority, so it wins same-name ties.
 	if settings.enableAgentsProject {
 		scanProject(".agent", ".agents")
 	}
@@ -223,6 +223,15 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scan("personal",
 			filepath.Join(ctx.Home, ".agent", "skills"),
 			filepath.Join(ctx.Home, ".agents", "skills"))
+	}
+
+	// 4. codex (70). OMP scans a project .codex/skills even though codex
+	// itself has no such directory, and that project level has no toggle.
+	if fallback {
+		scanProject(".codex")
+	}
+	if settings.enableCodexUser {
+		scan("personal", filepath.Join(ctx.Home, ".codex", "skills"))
 	}
 
 	// 5. opencode (55)
@@ -236,24 +245,25 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scanProject(".github")
 	}
 
-	// 7. customDirectories - subject to the ban lists but not to source
-	// toggles. Scanned after every toggled source, so an authored skill of the
-	// same name wins the collision. A relative entry is far more likely to
-	// mean "relative to my project" than to be a mistake - config.yml is
-	// often itself project-scoped - so it resolves against ctx.Cwd (the
-	// pane's directory), matching how kimi.go resolves a relative
-	// extra_skill_dirs entry against the project root. Skip it when the
-	// pane's cwd is unknown rather than falling through to scan's own guard,
-	// which would otherwise resolve against the service's unrelated cwd.
-	for _, dir := range settings.customDirectories {
-		dir = expandTilde(dir, ctx.Home)
+	// 7. customDirectories - subject to the ban lists but not source toggles.
+	// A project config may only expose skills that remain under that project;
+	// user-configured directories retain OMP's unrestricted personal behavior.
+	for _, configured := range settings.customDirectories {
+		dir := expandTilde(configured, ctx.Home)
+		if strings.HasPrefix(dir, "~") {
+			continue
+		}
 		if !filepath.IsAbs(dir) {
 			if ctx.Cwd == "" {
 				continue
 			}
 			dir = filepath.Join(ctx.Cwd, dir)
 		}
-		scanOverride("personal", dir)
+		if settings.customDirectorySource == "project" {
+			scanOverride("project", settings.customDirectoryBoundary, dir)
+		} else {
+			scanOverride("personal", "", dir)
+		}
 	}
 
 	// 8. managed (priority 5) - always enabled, scanned last so it loses every
@@ -280,22 +290,31 @@ func ompSkillName(command string) string {
 	return strings.TrimPrefix(command, "/skill:")
 }
 
-// loadOMPSkillSettings reads the pane's active agent config, then overlays
-// every project-level .omp config from the git root down to the cwd. The
-// innermost repo scope is applied last, matching OMP's precedence, and
-// list-valued keys replace rather than append.
+// loadOMPSkillSettings reads the pane's active agent config, then overlays only
+// <cwd>/.omp/config.yml. OMP does not inherit native config from ancestors.
 func loadOMPSkillSettings(ctx DiscoverContext) ompSkillSettings {
 	settings := defaultOMPSkillSettings()
 	dir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
 	if dir != "" {
 		data, found, ok := settingsFileIn(dir, "config.yml", "config.yaml")
 		if found && ok {
+			settings.customDirectoriesSet = false
 			parseOMPSkillSettings(data, &settings)
+			if settings.customDirectoriesSet {
+				settings.customDirectorySource = "personal"
+				settings.customDirectoryBoundary = ""
+			}
 		}
 	}
-	for _, dir := range findProjectDirs(ctx.Cwd, []string{".omp"}) {
-		if data, ok := readSettingsFile(dir, "config.yml", "config.yaml"); ok {
+	if ctx.Cwd != "" {
+		projectDir := filepath.Join(ctx.Cwd, ".omp")
+		if data, ok := readSettingsFile(projectDir, "config.yml", "config.yaml"); ok {
+			settings.customDirectoriesSet = false
 			parseOMPSkillSettings(data, &settings)
+			if settings.customDirectoriesSet {
+				settings.customDirectorySource = "project"
+				settings.customDirectoryBoundary = ctx.Cwd
+			}
 		}
 	}
 	return settings

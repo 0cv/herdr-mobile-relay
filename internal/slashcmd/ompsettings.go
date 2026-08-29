@@ -10,18 +10,21 @@ import (
 // skills become /skill:<name> commands. Every boolean defaults to true, so an
 // unreadable or unparsable config file yields the agent's own defaults.
 type ompSkillSettings struct {
-	enabled             bool
-	enableSkillCommands bool
-	enableCodexUser     bool
-	enableClaudeUser    bool
-	enableClaudeProject bool
-	enablePiUser        bool
-	enablePiProject     bool
-	enableAgentsUser    bool
-	enableAgentsProject bool
-	customDirectories   []string
-	ignoredSkills       []string
-	includeSkills       []string
+	enabled                 bool
+	enableSkillCommands     bool
+	enableCodexUser         bool
+	enableClaudeUser        bool
+	enableClaudeProject     bool
+	enablePiUser            bool
+	enablePiProject         bool
+	enableAgentsUser        bool
+	enableAgentsProject     bool
+	customDirectories       []string
+	customDirectoriesSet    bool
+	customDirectorySource   string
+	customDirectoryBoundary string
+	ignoredSkills           []string
+	includeSkills           []string
 	// disabledSkills holds names from the top-level disabledExtensions list that
 	// carried the "skill:" prefix.
 	disabledSkills map[string]bool
@@ -192,11 +195,13 @@ func parseOMPSkillSettings(data []byte, s *ompSkillSettings) {
 			case "enableAgentsProject":
 				setScalarBool(&s.enableAgentsProject, value)
 			case "customDirectories":
-				listTarget = setOMPList(&s.customDirectories, value)
+				var applied bool
+				listTarget, applied = setOMPList(&s.customDirectories, value)
+				s.customDirectoriesSet = s.customDirectoriesSet || applied
 			case "ignoredSkills":
-				listTarget = setOMPList(&s.ignoredSkills, value)
+				listTarget, _ = setOMPList(&s.ignoredSkills, value)
 			case "includeSkills":
-				listTarget = setOMPList(&s.includeSkills, value)
+				listTarget, _ = setOMPList(&s.includeSkills, value)
 			}
 		}
 	}
@@ -213,21 +218,17 @@ func addDisabledSkill(s *ompSkillSettings, id string) {
 	s.disabledSkills[name] = true
 }
 
-// setOMPList assigns a list-valued key. List keys replace rather than append
-// across config levels, matching omp's own merge semantics. A block-form key
-// returns the slice so following "- item" lines extend it; a value the parser
-// does not understand leaves the key untouched.
-func setOMPList(target *[]string, value string) *[]string {
+func setOMPList(target *[]string, value string) (*[]string, bool) {
 	items, listed, block := ompListValue(value)
 	if block {
 		*target = nil
-		return target
+		return target, true
 	}
 	if !listed {
-		return nil
+		return nil, false
 	}
 	*target = items
-	return nil
+	return nil, true
 }
 
 // ompListValue interprets the scalar part of a list-valued key. block reports
@@ -245,12 +246,56 @@ func ompListValue(value string) (items []string, listed, block bool) {
 	if inner == "" {
 		return nil, true, false
 	}
-	for _, field := range strings.Split(inner, ",") {
+	fields, ok := splitOMPFlowFields(inner)
+	if !ok {
+		return nil, false, false
+	}
+	for _, field := range fields {
 		if item := unquoteScalar(field); item != "" {
 			items = append(items, item)
 		}
 	}
 	return items, true, false
+}
+
+func splitOMPFlowFields(value string) ([]string, bool) {
+	var fields []string
+	start := 0
+	var quote byte
+	escaped := false
+	for i := 0; i < len(value); i++ {
+		current := value[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' && current == '\\' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if quote == '\'' && current == '\'' && i+1 < len(value) && value[i+1] == '\'' {
+				i++
+				continue
+			}
+			if current == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch current {
+		case '\'', '"':
+			quote = current
+		case ',':
+			fields = append(fields, value[start:i])
+			start = i + 1
+		}
+	}
+	if quote != 0 || escaped {
+		return nil, false
+	}
+	fields = append(fields, value[start:])
+	return fields, true
 }
 
 func ompListItem(trimmed string) (string, bool) {

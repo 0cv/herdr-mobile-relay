@@ -3,6 +3,7 @@ package slashcmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // kimiBuiltins mirrors the primary interactive TUI commands in Kimi Code
@@ -78,8 +79,13 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 
 	settings := defaultKimiSkillSettings()
-	if filepath.IsAbs(ctx.Home) {
-		if data, ok := readSettingsFile(filepath.Join(ctx.Home, ".kimi"), "config.toml"); ok {
+	configDir := filepath.Join(ctx.Home, ".kimi")
+	if configured := expandTilde(strings.TrimSpace(os.Getenv("KIMI_SHARE_DIR")), ctx.Home); configured != "" &&
+		filepath.IsAbs(configured) {
+		configDir = configured
+	}
+	if filepath.IsAbs(configDir) {
+		if data, ok := readSettingsFile(configDir, "config.toml"); ok {
 			parseKimiSkillSettings(data, &settings)
 		}
 	}
@@ -179,6 +185,9 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	// home and a relative entry against the project root, as Kimi documents.
 	for _, dir := range settings.extraSkillDirs {
 		dir = expandTilde(dir, ctx.Home)
+		if strings.HasPrefix(dir, "~") {
+			continue
+		}
 		if !filepath.IsAbs(dir) {
 			if projectRoot == "" {
 				continue

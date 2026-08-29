@@ -1,7 +1,6 @@
 package slashcmd
 
 import (
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -23,8 +22,6 @@ func defaultKimiSkillSettings() kimiSkillSettings {
 	return kimiSkillSettings{mergeAllAvailableSkills: true}
 }
 
-var kimiTOMLKeyPattern = regexp.MustCompile(`^([A-Za-z0-9_.-]+)[ \t]*=[ \t]*(.*)$`)
-
 // parseKimiSkillSettings applies the root-table skill settings from config.toml.
 // It accepts both compact and multiline arrays while ignoring comments and
 // quoted brackets.
@@ -43,12 +40,11 @@ func parseKimiSkillSettings(data []byte, settings *kimiSkillSettings) {
 		if !root {
 			continue
 		}
-		matches := kimiTOMLKeyPattern.FindStringSubmatch(trimmed)
-		if matches == nil {
+		key, value, ok := splitKimiAssignment(trimmed)
+		if !ok {
 			continue
 		}
-		value := strings.TrimSpace(matches[2])
-		switch matches[1] {
+		switch key {
 		case "merge_all_available_skills":
 			setScalarBool(&settings.mergeAllAvailableSkills, value)
 		case "extra_skill_dirs":
@@ -166,6 +162,65 @@ func splitKimiArray(value string) ([]string, bool) {
 	return fields, true
 }
 
+func splitKimiAssignment(line string) (key, value string, ok bool) {
+	var quote byte
+	escaped := false
+	equals := -1
+	for index := 0; index < len(line); index++ {
+		current := line[index]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' && current == '\\' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if current == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch current {
+		case '\'', '"':
+			quote = current
+		case '=':
+			equals = index
+			index = len(line)
+		}
+	}
+	if equals < 0 || quote != 0 {
+		return "", "", false
+	}
+	rawKey := strings.TrimSpace(line[:equals])
+	value = strings.TrimSpace(line[equals+1:])
+	if rawKey == "" {
+		return "", "", false
+	}
+	if rawKey[0] == '\'' {
+		if len(rawKey) < 2 || rawKey[len(rawKey)-1] != '\'' {
+			return "", "", false
+		}
+		key = rawKey[1 : len(rawKey)-1]
+	} else if rawKey[0] == '"' {
+		decoded, err := strconv.Unquote(rawKey)
+		if err != nil {
+			return "", "", false
+		}
+		key = decoded
+	} else {
+		for _, current := range rawKey {
+			if !(current == '_' || current == '-' || current >= 'A' && current <= 'Z' ||
+				current >= 'a' && current <= 'z' || current >= '0' && current <= '9') {
+				return "", "", false
+			}
+		}
+		key = rawKey
+	}
+	return key, value, true
+}
+
 func unquoteKimiString(value string) (string, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -181,5 +236,5 @@ func unquoteKimiString(value string) (string, bool) {
 		return "", false
 	}
 	unquoted, err := strconv.Unquote(value)
-	return strings.TrimSpace(unquoted), err == nil
+	return unquoted, err == nil
 }

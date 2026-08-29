@@ -138,7 +138,8 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		hostname = hostname[:idx]
 	}
 	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
-	sessResolver := session.NewResolver(home)
+	conversationReader := conversation.NewReader(home)
+	sessResolver := session.NewResolverWithReader(home, conversationReader)
 	histManager := history.NewManager(cfg.CacheDir)
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", cfg.Port)
 
@@ -160,7 +161,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,
-		conversationM:       conversation.NewReader(home),
+		conversationM:       conversationReader,
 		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		startedAt:           time.Now(),
@@ -439,7 +440,9 @@ func (s *Server) Run(ctx context.Context) error {
 				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
 				break
 			}
-			if !s.state.PaneSessionCurrent(inbound.PaneID, uint64(generation)) {
+			current, currentExists := s.state.Agent(inbound.PaneID)
+			if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
+				!sameConversationTuple(agent, current) {
 				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
 				break
 			}
@@ -577,7 +580,8 @@ func (s *Server) Run(ctx context.Context) error {
 			profileID := s.profiles.ResolvePane(paneID, agent)
 			skillDirs, commandFormat, _ := s.profiles.CommandConfig(profileID)
 			agentVersion := s.profiles.AgentVersion(profileID)
-			agentDir := agentroots.AgentDirForSession(home, agent, activeAgent.SessionID)
+			location := s.conversationM.Locate(agent, cwd, activeAgent.SessionID)
+			agentDir := locatedAgentDir(home, agent, location)
 			catalog := slashcmd.CatalogForProfile(profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir)
 			if s.state.Generation(paneID) != generation {
 				s.sendCommandResult(
@@ -950,6 +954,8 @@ func (s *Server) handleTransition(
 	agentState, agentExists := s.state.Agent(paneID)
 	var session string
 	var sessionID string
+	conversationAgent := agent
+	var conversationCwd string
 	var blockedEventID string
 	var paneGeneration uint64
 	var blockedContentRevision int64
@@ -958,6 +964,8 @@ func (s *Server) handleTransition(
 			session = agentState.Session
 		}
 		sessionID = agentState.SessionID
+		conversationAgent = agentState.Agent
+		conversationCwd = agentState.Cwd
 		blockedEventID = agentState.BlockedEventID
 		blockedContentRevision = s.state.ContentRevision(paneID)
 	}
@@ -1095,8 +1103,10 @@ func (s *Server) handleTransition(
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
-	extract := s.captureFinishedPane(ctx, paneID, agent, sessionID)
-	if !transitionCurrent() {
+	extract := s.captureFinishedPane(ctx, paneID, conversationAgent, conversationCwd, sessionID)
+	currentAgent, currentExists := s.state.Agent(paneID)
+	if !transitionCurrent() || agentExists != currentExists ||
+		(agentExists && !sameConversationTuple(agentState, currentAgent)) {
 		return
 	}
 	summary := agent + " completed"
@@ -1458,11 +1468,7 @@ func (s *Server) latestConversationResponse(agent, cwd, sessionID string) string
 	return entry.Text
 }
 
-func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, sessionID string) string {
-	var cwd string
-	if active, ok := s.state.Agent(paneID); ok {
-		cwd = active.Cwd
-	}
+func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string) string {
 	if response := s.latestConversationResponse(agent, cwd, sessionID); response != "" {
 		return response
 	}
@@ -1484,6 +1490,16 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, session
 	return question.PaneSummary(completionContent)
 }
 
+func locatedAgentDir(home, agent string, location conversation.Location) string {
+	return agentroots.AgentDirForSession(home, agent, location.Path)
+}
+
+func sameConversationTuple(left, right *coordinator.AgentState) bool {
+	return left != nil && right != nil &&
+		left.Agent == right.Agent &&
+		left.Cwd == right.Cwd &&
+		left.SessionID == right.SessionID
+}
 func isClaudeLike(agent string) bool {
 	lower := strings.ToLower(agent)
 	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")

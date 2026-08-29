@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +18,6 @@ const cacheTTL = 60 * time.Second
 type cacheEntry struct {
 	name    string
 	expires time.Time
-	sig     string
 }
 
 type Resolver struct {
@@ -29,12 +27,18 @@ type Resolver struct {
 	reader *conversation.Reader
 }
 
+// NewResolver creates an independent title and transcript resolver.
 func NewResolver(home string) *Resolver {
-	return &Resolver{
-		cache:  make(map[string]cacheEntry),
-		home:   home,
-		reader: conversation.NewReader(home),
+	return NewResolverWithReader(home, conversation.NewReader(home))
+}
+
+// NewResolverWithReader shares transcript-location decisions with conversation
+// history consumers.
+func NewResolverWithReader(home string, reader *conversation.Reader) *Resolver {
+	if reader == nil {
+		reader = conversation.NewReader(home)
 	}
+	return &Resolver{cache: make(map[string]cacheEntry), home: home, reader: reader}
 }
 
 // Root accessors remain useful in tests that pin configuration precedence.
@@ -49,25 +53,25 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	if sessionID == "" {
 		return ""
 	}
-
-	// Title resolution starts from the exact contained transcript selected by
-	// conversation.Reader. The title and conversation therefore cannot diverge
-	// on duplicate IDs, configured-root precedence, or symlink containment.
-	location := r.reader.Locate(agent, cwd, sessionID)
-	if location.Path == "" {
-		return ""
-	}
-
 	agentLower := strings.ToLower(strings.TrimSpace(agent))
 	key := agentLower + "|" + cwd + "|" + sessionID
-	sig := locationSignature(agentLower, location)
-
+	now := time.Now()
 	r.mu.Lock()
-	if entry, ok := r.cache[key]; ok && entry.sig == sig && time.Now().Before(entry.expires) {
+	if entry, ok := r.cache[key]; ok && now.Before(entry.expires) {
 		r.mu.Unlock()
 		return entry.name
 	}
 	r.mu.Unlock()
+
+	// Title resolution starts from the exact contained transcript selected by
+	// the shared conversation.Reader.
+	location := r.reader.Locate(agent, cwd, sessionID)
+	if location.Path == "" {
+		r.mu.Lock()
+		r.cache[key] = cacheEntry{expires: now.Add(cacheTTL)}
+		r.mu.Unlock()
+		return ""
+	}
 
 	var name string
 	switch {
@@ -82,7 +86,7 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	}
 
 	r.mu.Lock()
-	r.cache[key] = cacheEntry{name: name, expires: time.Now().Add(cacheTTL), sig: sig}
+	r.cache[key] = cacheEntry{name: name, expires: now.Add(cacheTTL)}
 	r.mu.Unlock()
 	return name
 }
@@ -229,20 +233,4 @@ func extractTitle(path string) string {
 		}
 	}
 	return ""
-}
-
-func locationSignature(agent string, location conversation.Location) string {
-	signature := pathSignature(location.Path)
-	if strings.Contains(agent, "codex") {
-		signature += "|" + pathSignature(filepath.Join(filepath.Dir(location.Root), "session_index.jsonl"))
-	}
-	return signature
-}
-
-func pathSignature(path string) string {
-	info, err := os.Stat(path)
-	if err != nil {
-		return path + "|missing"
-	}
-	return path + "|" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10)
 }

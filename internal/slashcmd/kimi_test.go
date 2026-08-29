@@ -141,6 +141,18 @@ func TestParseKimiSkillSettings(t *testing.T) {
 			data:      "merge_all_available_skills = false\n[tui]\ntheme = \"dark\"\n",
 			wantMerge: false,
 		},
+		{
+			name:      "quoted key",
+			data:      `"extra_skill_dirs" = ["~/quoted-key"]` + "\n",
+			wantMerge: true,
+			wantDirs:  []string{"~/quoted-key"},
+		},
+		{
+			name:      "basic string whitespace preserved",
+			data:      `extra_skill_dirs = ["  ~/spaced  "]` + "\n",
+			wantMerge: true,
+			wantDirs:  []string{"  ~/spaced  "},
+		},
 	}
 
 	for _, tc := range cases {
@@ -538,5 +550,28 @@ func TestKimiEmptyHomeDoesNotReadServiceWorkingDirectoryConfig(t *testing.T) {
 	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.29.2", "")
 	if _, ok := commandByName(catalog, "/skill:leak-kimi-config"); ok {
 		t.Fatal("empty ctx.Home must not make Kimi read a config.toml from the service's own working directory")
+	}
+}
+
+func TestKimiReadsConfigFromShareDirectory(t *testing.T) {
+	f := newKimiFixture(t)
+	share := filepath.Join(f.home, "kimi-share")
+	t.Setenv("KIMI_SHARE_DIR", share)
+	writeFile(t, filepath.Join(share, "config.toml"),
+		`"extra_skill_dirs" = ["configured-skills"]`+"\n")
+	writeSkill(t, filepath.Join(f.repo, "configured-skills"), "shared-config", "From share config")
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:shared-config"); !ok {
+		t.Fatal("KIMI_SHARE_DIR/config.toml was not read")
+	}
+}
+
+func TestKimiRejectsUnsupportedTildeUserSkillPath(t *testing.T) {
+	f := newKimiFixture(t)
+	f.config(t, `extra_skill_dirs = ["~another/skills"]`+"\n")
+	writeSkill(t, filepath.Join(f.repo, "~another", "skills"), "tilde-user", "Must not resolve relatively")
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:tilde-user"); ok {
+		t.Fatal("unsupported ~user path was treated as project-relative")
 	}
 }

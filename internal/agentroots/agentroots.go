@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Relay-side overrides. Each holds a colon-separated list (the platform
@@ -186,9 +187,12 @@ func containedPath(path, root string) bool {
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
+const profileCacheTTL = 60 * time.Second
+
 type profileCacheEntry struct {
 	signature string
 	dirs      []string
+	expires   time.Time
 }
 
 var profileCache = struct {
@@ -236,7 +240,7 @@ func profileAgentDirs(configRoot string) []string {
 	profileCache.Lock()
 	cached, ok := profileCache.entries[profiles]
 	profileCache.Unlock()
-	if ok && cached.signature == signature {
+	if ok && cached.signature == signature && time.Now().Before(cached.expires) {
 		return append([]string(nil), cached.dirs...)
 	}
 
@@ -257,6 +261,7 @@ func profileAgentDirs(configRoot string) []string {
 	profileCache.entries[profiles] = profileCacheEntry{
 		signature: signature,
 		dirs:      append([]string(nil), dirs...),
+		expires:   time.Now().Add(profileCacheTTL),
 	}
 	profileCache.Unlock()
 	return dirs
@@ -320,6 +325,19 @@ func resolve(home, listEnv, singleEnv, homeBase, leaf string, discovered ...stri
 		add(base)
 	}
 	add(homeBase)
+
+	// The home default is a fallback, even when it was also named explicitly.
+	// Remove its earlier occurrence and append it once at the end.
+	homeRoot := filepath.Clean(filepath.Join(expandTilde(strings.TrimSpace(homeBase), home), leaf))
+	if filepath.IsAbs(homeRoot) {
+		filtered := roots[:0]
+		for _, root := range roots {
+			if root != homeRoot {
+				filtered = append(filtered, root)
+			}
+		}
+		roots = append(filtered, homeRoot)
+	}
 	return roots
 }
 

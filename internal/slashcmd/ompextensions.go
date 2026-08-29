@@ -8,8 +8,9 @@ import (
 )
 
 type ompExtensionDir struct {
-	path   string
-	source string
+	path           string
+	source         string
+	directSkillDir bool
 }
 
 type ompExtensionSettings struct {
@@ -25,28 +26,125 @@ func ompExtensionSkillDirs(ctx DiscoverContext) []ompExtensionDir {
 	projectDirs := findProjectDirs(ctx.Cwd, []string{".omp"})
 	for index := len(projectDirs) - 1; index >= 0; index-- {
 		dir := projectDirs[index]
+		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(dir, "plugins", "installed_plugins.json"), "project")...)
 		roots = append(roots, configuredOMPExtensions(ctx, dir, "project")...)
-		roots = append(roots, installedOMPExtensions(dir, "project")...)
+		roots = append(roots, installedOMPExtensions(filepath.Join(dir, "plugins"), "project")...)
 	}
 
 	agentDir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
 	if agentDir != "" {
 		roots = append(roots, configuredOMPExtensions(ctx, agentDir, "personal")...)
-		roots = append(roots, installedOMPExtensions(agentDir, "personal")...)
+	}
+	if ctx.Home != "" {
+		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(ctx.Home, ".claude", "plugins", "installed_plugins.json"), "personal")...)
+		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(ctx.Home, ".omp", "plugins", "installed_plugins.json"), "personal")...)
+		roots = append(roots, installedOMPExtensions(filepath.Join(ctx.Home, ".omp", "plugins"), "personal")...)
 	}
 
 	seen := make(map[string]bool, len(roots))
 	unique := roots[:0]
 	for _, root := range roots {
 		clean := filepath.Clean(root.path)
-		if seen[clean] {
+		key := clean
+		if root.directSkillDir {
+			key += "\x00direct"
+		}
+		if seen[key] {
 			continue
 		}
-		seen[clean] = true
+		seen[key] = true
 		root.path = clean
 		unique = append(unique, root)
 	}
 	return unique
+}
+
+type claudeMarketplaceRegistry struct {
+	Plugins map[string][]struct {
+		InstallPath string `json:"installPath"`
+		Enabled     *bool  `json:"enabled"`
+		Scope       string `json:"scope"`
+		ProjectPath string `json:"projectPath"`
+	} `json:"plugins"`
+}
+
+func claudeMarketplaceExtensions(ctx DiscoverContext, registryPath, source string) []ompExtensionDir {
+	data, found, ok := settingsFileIn(filepath.Dir(registryPath), filepath.Base(registryPath))
+	if !found || !ok {
+		return nil
+	}
+	var registry claudeMarketplaceRegistry
+	if json.Unmarshal(data, &registry) != nil {
+		return nil
+	}
+	var roots []ompExtensionDir
+	for _, installs := range registry.Plugins {
+		for _, install := range installs {
+			if install.Enabled != nil && !*install.Enabled {
+				continue
+			}
+			root := expandTilde(strings.TrimSpace(install.InstallPath), ctx.Home)
+			if root == "" || !filepath.IsAbs(root) {
+				continue
+			}
+			if install.Scope == "project" && install.ProjectPath != "" &&
+				!pathWithin(ctx.Cwd, expandTilde(install.ProjectPath, ctx.Home)) {
+				continue
+			}
+			roots = append(roots, claudeMarketplaceSkillDirs(root, source)...)
+		}
+	}
+	return roots
+}
+
+type claudePluginManifest struct {
+	Skills json.RawMessage `json:"skills"`
+}
+
+func claudeMarketplaceSkillDirs(root, source string) []ompExtensionDir {
+	result := []ompExtensionDir{{path: root, source: source}}
+	data, found, ok := settingsFileIn(filepath.Join(root, ".claude-plugin"), "plugin.json")
+	if !found || !ok {
+		return result
+	}
+	var manifest claudePluginManifest
+	if json.Unmarshal(data, &manifest) != nil || len(manifest.Skills) == 0 {
+		return result
+	}
+	var configured []string
+	var single string
+	if json.Unmarshal(manifest.Skills, &single) == nil {
+		configured = []string{single}
+	} else if json.Unmarshal(manifest.Skills, &configured) != nil {
+		return result
+	}
+	for _, skillDir := range configured {
+		skillDir = strings.TrimSpace(skillDir)
+		if skillDir == "" || strings.HasPrefix(skillDir, "~") {
+			continue
+		}
+		if !filepath.IsAbs(skillDir) {
+			skillDir = filepath.Join(root, skillDir)
+		}
+		result = append(result, ompExtensionDir{path: skillDir, source: source, directSkillDir: true})
+	}
+	return result
+}
+
+func pathWithin(path, root string) bool {
+	if path == "" || root == "" {
+		return false
+	}
+	cleanPath := filepath.Clean(path)
+	cleanRoot := filepath.Clean(root)
+	if resolved, err := filepath.EvalSymlinks(cleanPath); err == nil {
+		cleanPath = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(cleanRoot); err == nil {
+		cleanRoot = resolved
+	}
+	relative, err := filepath.Rel(cleanRoot, cleanPath)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func configuredOMPExtensions(ctx DiscoverContext, settingsDir, source string) []ompExtensionDir {

@@ -190,7 +190,7 @@ func entryIsDir(e os.DirEntry, path string) bool {
 // os.Root permits symlinks that remain inside that boundary and rejects skill
 // directories or SKILL.md links that escape it. Personal roots intentionally
 // retain their symlink-friendly behavior.
-func scopedSkillMetadata(dir, entry, source string) (map[string]string, string, bool) {
+func scopedSkillMetadata(dir, entry, source, boundary string) (map[string]string, string, bool) {
 	skillFile := filepath.Join(dir, entry, "SKILL.md")
 	if source != "project" {
 		info, err := os.Stat(skillFile)
@@ -205,7 +205,10 @@ func scopedSkillMetadata(dir, entry, source string) (map[string]string, string, 
 		return metadata, resolved, ok
 	}
 
-	projectRoot := filepath.Dir(filepath.Dir(filepath.Clean(dir)))
+	projectRoot := boundary
+	if projectRoot == "" {
+		projectRoot = filepath.Dir(filepath.Dir(filepath.Clean(dir)))
+	}
 	realRoot, err := filepath.EvalSymlinks(projectRoot)
 	if err != nil {
 		return nil, "", false
@@ -265,7 +268,7 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 		if !entryIsDir(e, skillDir) {
 			continue
 		}
-		metadata, resolved, ok := scopedSkillMetadata(dir, e.Name(), source)
+		metadata, resolved, ok := scopedSkillMetadata(dir, e.Name(), source, "")
 		if !ok {
 			continue
 		}
@@ -283,16 +286,23 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 	return commands, suppressed, truncated
 }
 
+type skillScanOptions struct {
+	boundary           string
+	requireDescription bool
+	respectEnabled     bool
+}
+
 // scanSkillDirFormat scans dir for <entry>/SKILL.md and renders each skill
-// through format, which must contain exactly one "{name}". The skill name comes
-// from frontmatter "name", falling back to the directory name, matching how omp,
-// Pi and Kimi resolve it. Skills without a description are dropped, as those
-// agents require one. Reports whether budget ran out.
-//
-// Symlinked personal skills are followed and de-duplicated by real path.
-// Project skills follow links only while they remain inside the project root.
+// through format, which must contain exactly one "{name}".
 func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, bool) {
+	return scanSkillDirFormatOptions(dir, source, format, budget, skillScanOptions{requireDescription: true})
+}
+
+func scanSkillDirFormatOptions(dir, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
 	if strings.Count(format, "{name}") != 1 {
+		return nil, false
+	}
+	if options.boundary != "" && !pathWithin(dir, options.boundary) {
 		return nil, false
 	}
 	entries, err := os.ReadDir(dir)
@@ -314,7 +324,7 @@ func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, boo
 		if info, err := os.Stat(skillDir); err != nil || !info.IsDir() {
 			continue
 		}
-		metadata, real, ok := scopedSkillMetadata(dir, e.Name(), source)
+		metadata, real, ok := scopedSkillMetadata(dir, e.Name(), source, options.boundary)
 		if !ok {
 			continue
 		}
@@ -323,6 +333,9 @@ func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, boo
 		}
 		seen[real] = true
 		*budget--
+		if options.respectEnabled && strings.EqualFold(strings.TrimSpace(metadata["enabled"]), "false") {
+			continue
+		}
 		name := metadata["name"]
 		if name == "" {
 			name = e.Name()
@@ -332,7 +345,10 @@ func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, boo
 		}
 		description := metadata["description"]
 		if description == "" {
-			continue
+			if options.requireDescription {
+				continue
+			}
+			description = strings.ToUpper(name[:1]) + name[1:] + " skill"
 		}
 		commands = append(commands, Command{
 			Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),

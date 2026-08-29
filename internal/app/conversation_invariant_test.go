@@ -255,3 +255,107 @@ func TestTitleAndTranscriptComeFromTheSameRootForADuplicateSessionID(t *testing.
 		t.Fatalf("title = %q, want the first root's own title - it has no summary record, so it is empty", title)
 	}
 }
+
+func TestTitleAndTranscriptInvariantAcrossSupportedAgents(t *testing.T) {
+	clearAgentEnv(t)
+	const cwd = "/work/app"
+	type fixture struct {
+		agent string
+		setup func(t *testing.T, home string) string
+	}
+	fixtures := []fixture{
+		{
+			agent: "qoder",
+			setup: func(t *testing.T, home string) string {
+				path := filepath.Join(home, ".qoder", "projects", "-work-app", invariantSession+".jsonl")
+				writeClaudeTranscript(t, path, "Qoder title")
+				return invariantSession
+			},
+		},
+		{
+			agent: "codex",
+			setup: func(t *testing.T, home string) string {
+				root := filepath.Join(home, ".codex")
+				writeInvariantRows(t, filepath.Join(root, "sessions", "2026", "08", "12",
+					"rollout-2026-08-12T10-00-00-"+invariantSession+".jsonl"),
+					map[string]any{"type": "response_item", "payload": map[string]any{
+						"type": "message", "role": "user",
+						"content": []any{map[string]any{"type": "input_text", "text": "question"}},
+					}},
+					map[string]any{"type": "response_item", "payload": map[string]any{
+						"type": "message", "role": "assistant",
+						"content": []any{map[string]any{"type": "output_text", "text": "answer"}},
+					}},
+				)
+				writeInvariantRows(t, filepath.Join(root, "session_index.jsonl"),
+					map[string]any{"id": invariantSession, "thread_name": "Codex title"})
+				return invariantSession
+			},
+		},
+		{
+			agent: "pi",
+			setup: func(t *testing.T, home string) string {
+				path := filepath.Join(home, ".pi", "agent", "sessions", "-work", "session.jsonl")
+				writeInvariantRows(t, path,
+					map[string]any{"type": "session_info", "name": "Pi title"},
+					map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": "question"}},
+					map[string]any{"type": "message", "message": map[string]any{"role": "assistant", "content": "answer"}},
+				)
+				return path
+			},
+		},
+		{
+			agent: "omp",
+			setup: func(t *testing.T, home string) string {
+				path := filepath.Join(home, ".omp", "agent", "sessions", "-work",
+					"session_"+invariantSession+".jsonl")
+				writeInvariantRows(t, path,
+					map[string]any{"type": "title", "title": "OMP title"},
+					map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": "question"}},
+					map[string]any{"type": "message", "message": map[string]any{"role": "assistant", "content": "answer"}},
+				)
+				return invariantSession
+			},
+		},
+	}
+
+	for _, fixture := range fixtures {
+		t.Run(fixture.agent, func(t *testing.T) {
+			home := t.TempDir()
+			sessionID := fixture.setup(t, home)
+			reader := conversation.NewReader(home)
+			resolver := session.NewResolverWithReader(home, reader)
+			title := resolver.SessionName(fixture.agent, cwd, sessionID)
+			page, err := reader.ReadFor(fixture.agent, cwd, sessionID, "", 80)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if title == "" || !page.Available {
+				t.Fatalf("INVARIANT BROKEN for %s: title=%q available=%v reason=%q",
+					fixture.agent, title, page.Available, page.Reason)
+			}
+			if page.Total != 2 {
+				t.Fatalf("%s page total = %d, want user and assistant turns", fixture.agent, page.Total)
+			}
+		})
+	}
+}
+
+func writeInvariantRows(t *testing.T, path string, rows ...map[string]any) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var content []byte
+	for _, row := range rows {
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		content = append(content, encoded...)
+		content = append(content, '\n')
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

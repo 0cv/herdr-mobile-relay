@@ -18,8 +18,10 @@ project follows [Semantic Versioning](https://semver.org/).
   transcript, so copied session IDs, stale Codex index rows, and project
   symlinks can no longer pair a title with a missing or different conversation.
 - Slash-command discovery now scopes Pi and Oh My Pi skills to the pane's
-  active profile, includes OMP extension-package skills, honors OMP custom
-  directory overrides, and parses multiline Kimi skill-directory arrays.
+  active profile, follows Pi's distinct `.pi`/`.agents` traversal and trusted
+  settings, reads OMP plugin and Claude marketplace skills without allowing
+  project configuration to escape its workspace, and matches Kimi's config
+  directory and TOML path parsing.
 - A failed app cutover no longer traps the phone in a rapid reload loop. The
   successful deployment announcement persists across page loads, but the old
   client kept its reload guard only in memory; if the old bundle survived the

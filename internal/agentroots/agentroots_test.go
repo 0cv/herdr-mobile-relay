@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // clearAllEnv resets every environment variable agentroots reads, so a
@@ -655,5 +656,51 @@ func TestAgentDirForSessionRejectsPathOutsideRoots(t *testing.T) {
 	}
 	if got := AgentDirForSession(home, "omp", session); got != "" {
 		t.Fatalf("AgentDirForSession = %q, want empty for external path", got)
+	}
+}
+
+func TestHomeDefaultRemainsLastWhenExplicitlyConfigured(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	homeAgent := filepath.Join(home, ".omp", "agent")
+	otherAgent := filepath.Join(home, "other", "agent")
+	t.Setenv(OMPListEnv, strings.Join([]string{homeAgent, otherAgent}, string(os.PathListSeparator)))
+
+	want := []string{
+		filepath.Join(otherAgent, "sessions"),
+		filepath.Join(homeAgent, "sessions"),
+	}
+	if got := OMP(home); !slices.Equal(got, want) {
+		t.Fatalf("OMP(home) = %v, want explicit non-default root before home fallback %v", got, want)
+	}
+}
+
+func TestProfileCacheRefreshesDanglingSymlinkAfterExpiry(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	profiles := filepath.Join(home, ".omp", "profiles")
+	if err := os.MkdirAll(profiles, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, "mounted-profile")
+	if err := os.Symlink(target, filepath.Join(profiles, "mounted")); err != nil {
+		t.Fatal(err)
+	}
+	if got := OMP(home); len(got) != 1 {
+		t.Fatalf("initial roots = %v, want only the home default while target is absent", got)
+	}
+	if err := os.MkdirAll(filepath.Join(target, "agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	profileCache.Lock()
+	entry := profileCache.entries[profiles]
+	entry.expires = time.Time{}
+	profileCache.entries[profiles] = entry
+	profileCache.Unlock()
+
+	wantProfile := filepath.Join(profiles, "mounted", "agent", "sessions")
+	if got := OMP(home); len(got) < 1 || got[0] != wantProfile {
+		t.Fatalf("refreshed roots = %v, want mounted profile %q", got, wantProfile)
 	}
 }
