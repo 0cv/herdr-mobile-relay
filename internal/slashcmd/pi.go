@@ -245,8 +245,10 @@ func piProjectTrusted(agentDir, cwd, defaultTrust string) bool {
 	}
 	var decisions map[string]*bool
 	if filepath.IsAbs(agentDir) {
-		if data, found, ok := settingsFileIn(agentDir, "trust.json"); found && ok {
-			_ = json.Unmarshal(data, &decisions)
+		if data, found, ok := settingsFileIn(agentDir, "trust.json"); found {
+			if !ok || json.Unmarshal(data, &decisions) != nil {
+				return false
+			}
 		}
 	}
 	current, err := filepath.Abs(cwd)

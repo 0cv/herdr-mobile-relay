@@ -27,6 +27,11 @@ var qoderBuiltins = []Command{
 }
 
 func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	if ctx.SuppressNative {
+		builtins := make([]Command, len(qoderBuiltins))
+		copy(builtins, qoderBuiltins)
+		return builtins, false
+	}
 	truncated := false
 	budget := maxCustomFiles
 

@@ -186,17 +186,22 @@ func TestUnknownProfileHasNoClaudeFallback(t *testing.T) {
 func TestExplicitSuppressionSkipsNativeDiscovery(t *testing.T) {
 	isolateAgentEnv(t)
 	cases := []struct {
-		profile  string
-		builtins int
+		profile   string
+		builtins  int
+		skillRoot string
 	}{
-		{"pi", len(piBuiltins)},
-		{"omp", len(ompBuiltins)},
-		{"kimi", len(kimiBuiltins)},
+		{"claude", len(claudeBuiltins), filepath.Join(".claude", "skills")},
+		{"qoder", len(qoderBuiltins), filepath.Join(".qoder", "skills")},
+		{"pi", len(piBuiltins), filepath.Join(".pi", "agent", "skills")},
+		{"omp", len(ompBuiltins), filepath.Join(".omp", "agent", "skills")},
+		{"kimi", len(kimiBuiltins), filepath.Join(".kimi", "skills")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.profile, func(t *testing.T) {
+			home := t.TempDir()
+			writeSkill(t, filepath.Join(home, tc.skillRoot), "native-only", "Must stay suppressed")
 			catalog := CatalogForProfileWithSuppression(
-				tc.profile, tc.profile, t.TempDir(), t.TempDir(), nil, "", "", "", true,
+				tc.profile, tc.profile, t.TempDir(), home, nil, "", "", "", true,
 			)
 			if len(catalog.Commands) != tc.builtins {
 				t.Fatalf("commands = %d, want %d builtins", len(catalog.Commands), tc.builtins)

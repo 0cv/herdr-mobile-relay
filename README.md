@@ -107,16 +107,20 @@ profile's slash commands and skills are discovered, so a profile whose commands
 are missing from the palette has the same root cause. Claude Code and Qoder
 resolve their personal commands and skills from `~/.claude` and `~/.qoder`
 directly, so those lists do not move command discovery for them.
+Native palette discovery follows the verified loader behavior of specific agent
+versions on a best-effort basis; newer agent releases can change edge-case
+discovery semantics before the relay catches up.
 
 Pi and Oh My Pi need no configuration for their named profiles as long as the
 config root stays at its default, `~/.pi` or `~/.omp`: both keep a profile's
 sessions at `<config root>/profiles/<name>/agent`, so the relay discovers
-`~/.omp/profiles/*/agent` and `~/.pi/profiles/*/agent` on every lookup, not
-just at startup — a profile created while the relay is already running is
-picked up with no restart. The one lag: a pane's already-resolved session
-title can stay cached for up to 60 seconds, so it can take that long to
-reflect a brand-new profile; the transcript itself is never cached and is
-always current. Auto-discovery only ever expands the home config
+`~/.omp/profiles/*/agent` and `~/.pi/profiles/*/agent` during lookups rather
+than only at startup. A profile created while the relay is running is picked up
+after the discovery cache refreshes, with no restart. Transcript-location hits
+and session titles can remain cached for up to 60 seconds; location misses are
+retried after 5 seconds.
+Transcript content is read fresh from the selected location. Auto-discovery
+only ever expands the home config
 root, never a configured one — so a relocated Pi or Oh My Pi config root does
 not get its profiles discovered, even after its `<root>/agent` is added to the
 matching `HERDR_*_CONFIG_DIRS` list. Each profile under a relocated root must

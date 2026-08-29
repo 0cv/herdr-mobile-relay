@@ -450,3 +450,15 @@ func TestPiTrustUsesCanonicalUncappedAncestors(t *testing.T) {
 		t.Fatal("Pi trust did not canonicalize cwd or search beyond 32 ancestors")
 	}
 }
+
+func TestPiMalformedTrustStoreFailsClosed(t *testing.T) {
+	f := newPiFixture(t)
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "settings.json"),
+		`{"defaultProjectTrust":"always"}`)
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "trust.json"), `{malformed`)
+	writeSkill(t, filepath.Join(f.repo, ".pi", "skills"), "must-stay-untrusted", "Project skill")
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:must-stay-untrusted"); ok {
+		t.Fatal("malformed Pi trust store fell through to defaultProjectTrust=always")
+	}
+}

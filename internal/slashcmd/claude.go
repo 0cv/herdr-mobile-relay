@@ -66,6 +66,11 @@ var claudeBuiltins = []Command{
 }
 
 func (p *claudeProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	if ctx.SuppressNative {
+		builtins := make([]Command, len(claudeBuiltins))
+		copy(builtins, claudeBuiltins)
+		return builtins, false
+	}
 	truncated := false
 	budget := maxCustomFiles
 	active := make(map[string]Command, len(claudeBuiltins))
