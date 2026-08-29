@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,7 +53,7 @@ func (f ompFixture) gitRepo(t *testing.T) {
 }
 
 func (f ompFixture) catalog(cwd string) Catalog {
-	return CatalogForProfile("omp", "omp", cwd, f.home, nil, "", "18.0.3")
+	return CatalogForProfile("omp", "omp", cwd, f.home, nil, "", "18.0.3", "")
 }
 
 func commandByName(catalog Catalog, name string) (Command, bool) {
@@ -227,17 +228,23 @@ func TestOMPProjectSkillBeatsUserSkill(t *testing.T) {
 	}
 }
 
-func TestOMPDiscoversUserSkillsFromProfileAgentDir(t *testing.T) {
+func TestOMPDiscoversUserSkillsFromActiveProfileAgentDir(t *testing.T) {
 	f := newOMPFixture(t)
-	writeSkill(t, filepath.Join(f.home, ".omp", "profiles", "personal", "agent", "skills"),
-		"profile-skill", "From a named profile")
+	agentDir := filepath.Join(f.home, ".omp", "profiles", "personal", "agent")
+	writeSkill(t, filepath.Join(agentDir, "skills"), "profile-skill", "From a named profile")
+	writeSkill(t, filepath.Join(f.home, ".omp", "profiles", "other", "agent", "skills"),
+		"other-skill", "From another profile")
 
-	command, ok := commandByName(f.catalog(f.repo), "/skill:profile-skill")
+	catalog := CatalogForProfile("omp", "omp", f.repo, f.home, nil, "", "18.0.3", agentDir)
+	command, ok := commandByName(catalog, "/skill:profile-skill")
 	if !ok {
-		t.Fatal("a named profile's skills must be discovered")
+		t.Fatal("the active named profile's skills must be discovered")
 	}
 	if command.Source != "personal" {
 		t.Errorf("source = %q, want personal", command.Source)
+	}
+	if _, ok := commandByName(catalog, "/skill:other-skill"); ok {
+		t.Fatal("another named profile's skill leaked into the active catalog")
 	}
 }
 
@@ -363,19 +370,19 @@ func TestOMPIncludeSkillsActsAsAllowList(t *testing.T) {
 	}
 }
 
-func TestOMPFollowsSymlinkedSkillDirectory(t *testing.T) {
+func TestOMPFollowsContainedSymlinkedSkillDirectory(t *testing.T) {
 	f := newOMPFixture(t)
 	f.gitRepo(t)
-	real := filepath.Join(f.home, "dotfiles", "deploy")
+	real := filepath.Join(f.repo, ".skill-store", "deploy")
 	writeFile(t, filepath.Join(real, "SKILL.md"), "---\nname: deploy\ndescription: Ship it\n---\n")
 	skillsDir := filepath.Join(f.repo, ".omp", "skills")
 	mkdirAll(t, skillsDir)
-	if err := os.Symlink(real, filepath.Join(skillsDir, "deploy")); err != nil {
+	if err := os.Symlink(filepath.Join("..", "..", ".skill-store", "deploy"), filepath.Join(skillsDir, "deploy")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 
 	if _, ok := commandByName(f.catalog(f.repo), "/skill:deploy"); !ok {
-		t.Fatal("a symlinked skill directory must be followed")
+		t.Fatal("a skill directory symlinked within the project must be followed")
 	}
 }
 
@@ -387,7 +394,7 @@ func TestOMPINIConfiguredFormatSkipsNativeDiscovery(t *testing.T) {
 	writeSkill(t, explicit, "explicit-one", "Explicitly configured")
 
 	catalog := CatalogForProfile("omp", "omp", f.repo, f.home,
-		[]string{explicit}, "skill:{name}", "18.0.3")
+		[]string{explicit}, "skill:{name}", "18.0.3", "")
 	if _, ok := commandByName(catalog, "/skill:explicit-one"); !ok {
 		t.Error("the INI-configured directory must be scanned")
 	}
@@ -396,7 +403,7 @@ func TestOMPINIConfiguredFormatSkipsNativeDiscovery(t *testing.T) {
 	}
 }
 
-func TestOMPUnusableConfigStopsAtFirstConfigDir(t *testing.T) {
+func TestOMPInactiveProfileConfigDoesNotOverrideDefault(t *testing.T) {
 	f := newOMPFixture(t)
 	f.gitRepo(t)
 	writeSkill(t, filepath.Join(f.repo, ".omp", "skills"), "deploy", "Ship the service")
@@ -405,25 +412,25 @@ func TestOMPUnusableConfigStopsAtFirstConfigDir(t *testing.T) {
 	writeFile(t, filepath.Join(f.home, ".omp", "agent", "config.yml"),
 		"disabledExtensions:\n  - skill:deploy\n")
 
-	if _, ok := commandByName(f.catalog(f.repo), "/skill:deploy"); !ok {
-		t.Fatal("first-found wins: an unusable config.yml in the first agent directory must stop the search and fail open, not fall through to another profile's bans")
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:deploy"); ok {
+		t.Fatal("an inactive profile must not make the default profile ignore its own bans")
 	}
 }
 
-func TestOMPProfileConfigGovernsDiscovery(t *testing.T) {
+func TestOMPActiveProfileConfigGovernsDiscovery(t *testing.T) {
 	f := newOMPFixture(t)
 	f.gitRepo(t)
 	writeSkill(t, filepath.Join(f.repo, ".omp", "skills"), "deploy", "Ship the service")
 	writeSkill(t, filepath.Join(f.repo, ".omp", "skills"), "audit", "Audit the tree")
-	writeFile(t, filepath.Join(f.home, ".omp", "profiles", "personal", "agent", "config.yml"),
-		"disabledExtensions:\n  - skill:deploy\n")
+	agentDir := filepath.Join(f.home, ".omp", "profiles", "personal", "agent")
+	writeFile(t, filepath.Join(agentDir, "config.yml"), "disabledExtensions:\n  - skill:deploy\n")
 
-	catalog := f.catalog(f.repo)
+	catalog := CatalogForProfile("omp", "omp", f.repo, f.home, nil, "", "18.0.3", agentDir)
 	if _, ok := commandByName(catalog, "/skill:deploy"); ok {
-		t.Error("a named profile's config.yml must be found and its bans applied")
+		t.Error("the active profile's config.yml must apply its bans")
 	}
 	if _, ok := commandByName(catalog, "/skill:audit"); !ok {
-		t.Error("discovery must stay on for skills the profile does not ban")
+		t.Error("discovery must stay on for skills the active profile does not ban")
 	}
 }
 
@@ -481,7 +488,7 @@ func TestOMPEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
 	writeSkill(t, filepath.Join(scratch, ".claude", "skills"), "leak-omp", "Should never be discovered")
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("omp", "omp", repo, "", nil, "", "18.0.3")
+	catalog := CatalogForProfile("omp", "omp", repo, "", nil, "", "18.0.3", "")
 	if _, ok := commandByName(catalog, "/skill:leak-omp"); ok {
 		t.Fatal("empty ctx.Home must not make omp scan the service's own working directory")
 	}
@@ -518,8 +525,79 @@ func TestOMPCustomDirectorySkippedWhenCwdUnknown(t *testing.T) {
 	writeSkill(t, filepath.Join(scratch, "relskills"), "stray", "Should never be discovered")
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("omp", "omp", "", f.home, nil, "", "18.0.3")
+	catalog := CatalogForProfile("omp", "omp", "", f.home, nil, "", "18.0.3", "")
 	if _, ok := commandByName(catalog, "/skill:stray"); ok {
 		t.Fatal("a relative customDirectories entry must not resolve against the service's cwd when ctx.Cwd is empty")
+	}
+}
+
+func TestOMPRejectsProjectSkillMetadataSymlinkEscapingRoot(t *testing.T) {
+	f := newOMPFixture(t)
+	f.gitRepo(t)
+	external := filepath.Join(t.TempDir(), "SKILL.md")
+	writeFile(t, external, "---\nname: leaked\ndescription: Outside the project\n---\n")
+	skillDir := filepath.Join(f.repo, ".omp", "skills", "leaked")
+	mkdirAll(t, skillDir)
+	if err := os.Symlink(external, filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:leaked"); ok {
+		t.Fatal("project skill metadata symlinked outside the project root was exposed")
+	}
+}
+
+func TestOMPCustomDirectoryOverridesDefaultProvider(t *testing.T) {
+	f := newOMPFixture(t)
+	f.gitRepo(t)
+	writeSkill(t, filepath.Join(f.repo, ".omp", "skills"), "deploy", "Native copy")
+	custom := filepath.Join(f.home, "custom-skills")
+	writeSkill(t, custom, "deploy", "Custom copy")
+	writeFile(t, filepath.Join(f.home, ".omp", "agent", "config.yml"),
+		fmt.Sprintf("skills:\n  customDirectories:\n    - %s\n", custom))
+
+	command, ok := commandByName(f.catalog(f.repo), "/skill:deploy")
+	if !ok {
+		t.Fatal("/skill:deploy missing")
+	}
+	if command.Description != "Custom copy" {
+		t.Fatalf("description = %q, want custom directory override", command.Description)
+	}
+}
+
+func TestOMPDiscoversConfiguredExtensionPackageSkills(t *testing.T) {
+	f := newOMPFixture(t)
+	extension := filepath.Join(f.home, "extensions", "release-tools")
+	writeSkill(t, filepath.Join(extension, "skills"), "release", "Release from extension")
+	settings, err := json.Marshal(map[string]any{"extensions": []string{extension}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(f.home, ".omp", "agent", "settings.json"), string(settings))
+
+	command, ok := commandByName(f.catalog(f.repo), "/skill:release")
+	if !ok {
+		t.Fatal("an OMP extension package's skills were not discovered")
+	}
+	if command.Description != "Release from extension" {
+		t.Fatalf("command = %+v", command)
+	}
+}
+
+func TestOMPDiscoversInstalledExtensionDependencySkills(t *testing.T) {
+	f := newOMPFixture(t)
+	agentDir := filepath.Join(f.home, ".omp", "agent")
+	writeFile(t, filepath.Join(agentDir, "package.json"),
+		`{"dependencies":{"@acme/release-tools":"1.0.0"}}`)
+	extension := filepath.Join(agentDir, "node_modules", "@acme", "release-tools")
+	writeFile(t, filepath.Join(extension, "package.json"), `{"omp":{}}`)
+	writeSkill(t, filepath.Join(extension, "skills"), "publish", "Publish from installed extension")
+
+	command, ok := commandByName(f.catalog(f.repo), "/skill:publish")
+	if !ok {
+		t.Fatal("an installed OMP extension dependency's skills were not discovered")
+	}
+	if command.Description != "Publish from installed extension" {
+		t.Fatalf("command = %+v", command)
 	}
 }

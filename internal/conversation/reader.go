@@ -58,13 +58,15 @@ type Reader struct {
 	home string
 }
 
-// NewReader keeps only home: the root lists below are resolved per call via
-// the accessor methods rather than snapshotted here. agentroots.Pi/OMP scan
-// <configRoot>/profiles on every call, so a profile created after the relay
-// started is still found instead of requiring a restart. The added cost is
-// one ReadDir of <configRoot>/profiles plus one Stat per discovered profile,
-// against a walk of every project directory that already happens on each
-// read.
+// Location identifies the exact transcript selected for a pane and the
+// configured root that contains it. Session-title resolution consumes the same
+// location so it cannot read a different copy of the session.
+type Location struct {
+	Path string
+	Root string
+}
+
+// NewReader keeps home so roots can be refreshed when a lookup is not cached.
 func NewReader(home string) *Reader {
 	return &Reader{home: home}
 }
@@ -95,7 +97,19 @@ func normalizedAgent(agent string) string {
 	return value
 }
 
+// Read resolves a conversation without project context. It is used for
+// historical activity where the pane cwd is no longer available.
 func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) {
+	return r.read(agent, "", sessionID, before, limit)
+}
+
+// ReadFor resolves a pane conversation using the same cwd-aware locator as the
+// session-title resolver.
+func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
+	return r.read(agent, cwd, sessionID, before, limit)
+}
+
+func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
 	if !Supported(agent) {
 		return unavailable("Conversation history is not available for this agent."), nil
 	}
@@ -103,11 +117,11 @@ func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) 
 	if sessionID == "" {
 		return unavailable("This agent has not reported a conversation session yet."), nil
 	}
-	path := r.resolve(agent, sessionID)
-	if path == "" {
+	location := r.Locate(agent, cwd, sessionID)
+	if location.Path == "" {
 		return unavailable("No conversation log is available for this session."), nil
 	}
-	text, clipped, err := loadTail(path, maxConversationBytes)
+	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
 		return Page{}, fmt.Errorf("read conversation log: %w", err)
 	}
@@ -145,21 +159,25 @@ func unavailable(reason string) Page {
 	return Page{Available: false, Reason: reason, Entries: []Entry{}}
 }
 
-func (r *Reader) resolve(agent, sessionID string) string {
+// Locate returns the exact contained transcript selected for agent, cwd and
+// sessionID. Root order is authoritative; within Claude/Qoder roots cwd selects
+// the project directory when it is known.
+func (r *Reader) Locate(agent, cwd, sessionID string) Location {
+	sessionID = strings.TrimSpace(sessionID)
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode":
 		if !safeSessionID(sessionID) {
-			return ""
+			return Location{}
 		}
-		return findProjectSession(r.claudeRoots(), sessionID+".jsonl")
+		return findProjectSession(r.claudeRoots(), cwd, sessionID+".jsonl")
 	case "qoder", "qodercli":
 		if !safeSessionID(sessionID) {
-			return ""
+			return Location{}
 		}
-		return findProjectSession(r.qoderRoots(), sessionID+".jsonl")
+		return findProjectSession(r.qoderRoots(), cwd, sessionID+".jsonl")
 	case "codex", "openaicodex":
 		if !canonicalSessionID.MatchString(sessionID) {
-			return ""
+			return Location{}
 		}
 		return findCodexSession(r.codexRoots(), sessionID)
 	case "pi", "picodingagent":
@@ -167,7 +185,7 @@ func (r *Reader) resolve(agent, sessionID string) string {
 	case "omp", "ohmypi":
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	default:
-		return ""
+		return Location{}
 	}
 }
 
@@ -196,30 +214,65 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func findProjectSession(roots []string, filename string) string {
+func findProjectSession(roots []string, cwd, filename string) Location {
 	for _, root := range roots {
-		directories, err := os.ReadDir(root)
-		if err != nil {
-			continue
-		}
-		for _, directory := range directories {
-			projectDir := filepath.Join(root, directory.Name())
-			if !isDir(projectDir) {
-				continue
-			}
-			candidate := filepath.Join(projectDir, filename)
-			if path := containedRegularFile(candidate, root); path != "" {
-				// Earliest root wins: preserves CLAUDE_CONFIG_DIR/CODEX_HOME
-				// (searched first) as genuine overrides over discovery and
-				// the home default.
-				return path
+		for _, projectDir := range projectDirectories(root, cwd) {
+			if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
+				return Location{Path: path, Root: root}
 			}
 		}
 	}
-	return ""
+	return Location{}
 }
 
-func findCodexSession(roots []string, sessionID string) string {
+func projectDirectories(root, cwd string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	if strings.TrimSpace(cwd) == "" {
+		directories := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			path := filepath.Join(root, entry.Name())
+			if isDir(path) {
+				directories = append(directories, path)
+			}
+		}
+		return directories
+	}
+
+	encoded := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+	exact := map[string]bool{encoded: true, "-" + encoded: true}
+	directories := make([]string, 0, 2)
+	seen := make(map[string]bool, 2)
+	for _, entry := range entries {
+		if !exact[entry.Name()] {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		if isDir(path) {
+			directories = append(directories, path)
+			seen[path] = true
+		}
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if seen[path] || !isDir(path) {
+			continue
+		}
+		cwdFile := containedRegularFile(filepath.Join(path, "cwd"), root)
+		if cwdFile == "" {
+			continue
+		}
+		data, err := os.ReadFile(cwdFile)
+		if err == nil && strings.TrimSpace(string(data)) == cwd {
+			directories = append(directories, path)
+		}
+	}
+	return directories
+}
+
+func findCodexSession(roots []string, sessionID string) Location {
 	suffix := "-" + strings.ToLower(sessionID) + ".jsonl"
 	for _, root := range roots {
 		for _, year := range descendingDirectories(root) {
@@ -239,17 +292,14 @@ func findCodexSession(roots []string, sessionID string) string {
 							continue
 						}
 						if path := containedRegularFile(filePath, root); path != "" {
-							// Earliest root wins: preserves CLAUDE_CONFIG_DIR/
-							// CODEX_HOME (searched first) as genuine
-							// overrides over discovery and the home default.
-							return path
+							return Location{Path: path, Root: root}
 						}
 					}
 				}
 			}
 		}
 	}
-	return ""
+	return Location{}
 }
 
 func descendingDirectories(path string) []string {
@@ -267,20 +317,17 @@ func descendingDirectories(path string) []string {
 	return directories
 }
 
-func resolvePathOrSession(roots []string, sessionID, separator string) string {
+func resolvePathOrSession(roots []string, sessionID, separator string) Location {
 	if filepath.IsAbs(sessionID) && strings.HasSuffix(strings.ToLower(sessionID), ".jsonl") {
 		for _, root := range roots {
 			if path := containedRegularFile(sessionID, root); path != "" {
-				// Earliest root wins: preserves CLAUDE_CONFIG_DIR/CODEX_HOME
-				// (searched first) as genuine overrides over discovery and
-				// the home default.
-				return path
+				return Location{Path: path, Root: root}
 			}
 		}
-		return ""
+		return Location{}
 	}
 	if !canonicalSessionID.MatchString(sessionID) {
-		return ""
+		return Location{}
 	}
 	suffix := separator + strings.ToLower(sessionID) + ".jsonl"
 	for _, root := range roots {
@@ -303,15 +350,12 @@ func resolvePathOrSession(roots []string, sessionID, separator string) string {
 					continue
 				}
 				if path := containedRegularFile(filePath, root); path != "" {
-					// Earliest root wins: preserves CLAUDE_CONFIG_DIR/
-					// CODEX_HOME (searched first) as genuine overrides over
-					// discovery and the home default.
-					return path
+					return Location{Path: path, Root: root}
 				}
 			}
 		}
 	}
-	return ""
+	return Location{}
 }
 
 func containedRegularFile(path, root string) string {

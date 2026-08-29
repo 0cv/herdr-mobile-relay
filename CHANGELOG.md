@@ -14,6 +14,12 @@ project follows [Semantic Versioning](https://semver.org/).
   cadence even though its geometry had not changed. Renewals now extend only
   the lease TTL; real phone, desktop, and multi-client size changes still
   resize the pane.
+- Conversation titles and history now resolve through the same contained
+  transcript, so copied session IDs, stale Codex index rows, and project
+  symlinks can no longer pair a title with a missing or different conversation.
+- Slash-command discovery now scopes Pi and Oh My Pi skills to the pane's
+  active profile, includes OMP extension-package skills, honors OMP custom
+  directory overrides, and parses multiline Kimi skill-directory arrays.
 - A failed app cutover no longer traps the phone in a rapid reload loop. The
   successful deployment announcement persists across page loads, but the old
   client kept its reload guard only in memory; if the old bundle survived the

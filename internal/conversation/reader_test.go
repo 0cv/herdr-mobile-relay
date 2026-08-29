@@ -398,3 +398,42 @@ func TestClaudeConversationKeepsPromptWhenEnvelopeComesFirst(t *testing.T) {
 		t.Fatalf("entries = %#v, want only the real prompt text", page.Entries)
 	}
 }
+
+func TestClaudeConversationReadForSelectsCurrentProjectOnDuplicateID(t *testing.T) {
+	reader, home := testReader(t)
+	projects := filepath.Join(home, ".claude", "projects")
+	writeRows(t, filepath.Join(projects, "-old", testSessionID+".jsonl"),
+		map[string]any{"type": "assistant", "uuid": "old", "message": map[string]any{"content": "old response"}})
+	writeRows(t, filepath.Join(projects, "-work", testSessionID+".jsonl"),
+		map[string]any{"type": "assistant", "uuid": "current", "message": map[string]any{"content": "current response"}})
+
+	page, err := reader.ReadFor("claude", "/work", testSessionID, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Available || len(page.Entries) != 1 || page.Entries[0].Text != "current response" {
+		t.Fatalf("page = %#v, want the transcript from the current project only", page)
+	}
+}
+
+func TestClaudeConversationReadForRejectsProjectDirectoryEscape(t *testing.T) {
+	reader, home := testReader(t)
+	external := filepath.Join(t.TempDir(), "external-project")
+	writeRows(t, filepath.Join(external, testSessionID+".jsonl"),
+		map[string]any{"type": "assistant", "uuid": "outside", "message": map[string]any{"content": "outside response"}})
+	projects := filepath.Join(home, ".claude", "projects")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(projects, "-work")); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := reader.ReadFor("claude", "/work", testSessionID, "", 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Available {
+		t.Fatalf("page = %#v, want an escaping project symlink rejected", page)
+	}
+}

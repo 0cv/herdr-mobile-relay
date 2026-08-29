@@ -628,3 +628,32 @@ func TestDeduplicationNormalizesEquivalentSpellings(t *testing.T) {
 		t.Fatalf("Claude(%q) = %v, want %v (equivalent spellings of one directory must collapse to a single root)", home, got, want)
 	}
 }
+
+func TestAgentDirForSessionSelectsContainingProfile(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	agentDir := filepath.Join(home, ".omp", "profiles", "work", "agent")
+	session := filepath.Join(agentDir, "sessions", "project", "session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(session), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(session, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := AgentDirForSession(home, "oh-my-pi", session); got != agentDir {
+		t.Fatalf("AgentDirForSession = %q, want active profile %q", got, agentDir)
+	}
+}
+
+func TestAgentDirForSessionRejectsPathOutsideRoots(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	session := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(session, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := AgentDirForSession(home, "omp", session); got != "" {
+		t.Fatalf("AgentDirForSession = %q, want empty for external path", got)
+	}
+}

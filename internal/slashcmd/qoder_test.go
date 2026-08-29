@@ -98,7 +98,7 @@ func TestQoderSameNameCommandsCoexist(t *testing.T) {
 }
 
 func TestQodercliProfileID(t *testing.T) {
-	catalog := CatalogForProfile("qodercli", "qodercli", "/tmp", "/nonexistent", nil, "", "")
+	catalog := CatalogForProfile("qodercli", "qodercli", "/tmp", "/nonexistent", nil, "", "", "")
 	if !hasCommand(catalog, "/clear") {
 		t.Error("qodercli profile should resolve to qoder provider")
 	}

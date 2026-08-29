@@ -8,7 +8,7 @@ import (
 
 func TestPiBuiltinCatalog(t *testing.T) {
 	isolateAgentEnv(t)
-	catalog := CatalogForProfile("pi", "pi", t.TempDir(), "/nonexistent", nil, "", "0.82.1")
+	catalog := CatalogForProfile("pi", "pi", t.TempDir(), "/nonexistent", nil, "", "0.82.1", "")
 	if catalog.Truncated {
 		t.Fatal("builtins-only catalog is truncated")
 	}
@@ -55,7 +55,7 @@ func (f piFixture) gitRepo(t *testing.T) {
 }
 
 func (f piFixture) catalog(cwd string) Catalog {
-	return CatalogForProfile("pi", "pi", cwd, f.home, nil, "", "0.82.1")
+	return CatalogForProfile("pi", "pi", cwd, f.home, nil, "", "0.82.1", "")
 }
 
 func TestPiDiscoversProjectPiSkills(t *testing.T) {
@@ -127,17 +127,23 @@ func TestPiDiscoversUserAgentsSkills(t *testing.T) {
 	}
 }
 
-func TestPiDiscoversUserSkillsFromProfileAgentDir(t *testing.T) {
+func TestPiDiscoversUserSkillsFromActiveProfileAgentDir(t *testing.T) {
 	f := newPiFixture(t)
-	writeSkill(t, filepath.Join(f.home, ".pi", "profiles", "personal", "agent", "skills"),
-		"prof", "From a named profile")
+	agentDir := filepath.Join(f.home, ".pi", "profiles", "personal", "agent")
+	writeSkill(t, filepath.Join(agentDir, "skills"), "prof", "From a named profile")
+	writeSkill(t, filepath.Join(f.home, ".pi", "profiles", "other", "agent", "skills"),
+		"other", "From another named profile")
 
-	command, ok := commandByName(f.catalog(f.repo), "/skill:prof")
+	catalog := CatalogForProfile("pi", "pi", f.repo, f.home, nil, "", "0.82.1", agentDir)
+	command, ok := commandByName(catalog, "/skill:prof")
 	if !ok {
-		t.Fatal("a named profile's skills must be discovered")
+		t.Fatal("the active named profile's skills must be discovered")
 	}
 	if command.Source != "personal" {
 		t.Errorf("source = %q, want personal", command.Source)
+	}
+	if _, ok := commandByName(catalog, "/skill:other"); ok {
+		t.Fatal("another named profile's skill leaked into the active catalog")
 	}
 }
 
@@ -218,7 +224,7 @@ func TestPiINIConfiguredFormatSkipsNativeDiscovery(t *testing.T) {
 	writeSkill(t, explicit, "explicit-one", "Explicitly configured")
 
 	catalog := CatalogForProfile("pi", "pi", f.repo, f.home,
-		[]string{explicit}, "skill:{name}", "0.82.1")
+		[]string{explicit}, "skill:{name}", "0.82.1", "")
 	if _, ok := commandByName(catalog, "/skill:explicit-one"); !ok {
 		t.Error("the INI-configured directory must be scanned")
 	}
@@ -258,7 +264,7 @@ func TestPiBrandBeatsGenericAtProjectScope(t *testing.T) {
 	}
 }
 
-func TestPiUnusableSettingsStopsAtFirstConfigDir(t *testing.T) {
+func TestPiInactiveProfileSettingsDoNotOverrideDefault(t *testing.T) {
 	f := newPiFixture(t)
 	f.gitRepo(t)
 	writeSkill(t, filepath.Join(f.repo, ".pi", "skills"), "deploy", "Ship the service")
@@ -267,8 +273,8 @@ func TestPiUnusableSettingsStopsAtFirstConfigDir(t *testing.T) {
 	writeFile(t, filepath.Join(f.home, ".pi", "agent", "settings.json"),
 		"{\"enableSkillCommands\": false}\n")
 
-	if _, ok := commandByName(f.catalog(f.repo), "/skill:deploy"); !ok {
-		t.Fatal("first-found wins: an unusable settings.json in the first agent directory must stop the search and fail open, not fall through to another profile's settings")
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:deploy"); ok {
+		t.Fatal("an inactive profile must not make the default profile ignore its own settings")
 	}
 }
 
@@ -285,7 +291,7 @@ func TestPiEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
 	writeSkill(t, filepath.Join(scratch, ".agents", "skills"), "leak-pi", "Should never be discovered")
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("pi", "pi", repo, "", nil, "", "0.82.1")
+	catalog := CatalogForProfile("pi", "pi", repo, "", nil, "", "0.82.1", "")
 	if _, ok := commandByName(catalog, "/skill:leak-pi"); ok {
 		t.Fatal("empty ctx.Home must not make Pi scan the service's own working directory")
 	}

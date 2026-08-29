@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/audit"
 	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
@@ -432,7 +433,7 @@ func (s *Server) Run(ctx context.Context) error {
 				break
 			}
 			generation := s.state.Generation(inbound.PaneID)
-			page, historyErr := s.conversationM.Read(agent.Agent, agent.SessionID, inbound.Before, inbound.Limit)
+			page, historyErr := s.conversationM.ReadFor(agent.Agent, agent.Cwd, agent.SessionID, inbound.Before, inbound.Limit)
 			if historyErr != nil {
 				s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
 				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
@@ -565,17 +566,19 @@ func (s *Server) Run(ctx context.Context) error {
 				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent is required", paneID, nil)
 				break
 			}
-			if _, ok := s.state.Agent(paneID); !ok {
+			activeAgent, ok := s.state.Agent(paneID)
+			if !ok {
 				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent pane not found", paneID, nil)
 				break
 			}
 			generation := s.state.Generation(paneID)
-			agent, cwd := s.agentInfo(paneID)
+			agent, cwd := activeAgent.Agent, activeAgent.Cwd
 			home, _ := os.UserHomeDir()
 			profileID := s.profiles.ResolvePane(paneID, agent)
 			skillDirs, commandFormat, _ := s.profiles.CommandConfig(profileID)
 			agentVersion := s.profiles.AgentVersion(profileID)
-			catalog := slashcmd.CatalogForProfile(profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion)
+			agentDir := agentroots.AgentDirForSession(home, agent, activeAgent.SessionID)
+			catalog := slashcmd.CatalogForProfile(profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir)
 			if s.state.Generation(paneID) != generation {
 				s.sendCommandResult(
 					client,
@@ -1440,11 +1443,11 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 
 // Conversation logs preserve the full assistant message; the terminal pane is
 // only a bounded fallback for agents without a readable transcript.
-func (s *Server) latestConversationResponse(agent, sessionID string) string {
+func (s *Server) latestConversationResponse(agent, cwd, sessionID string) string {
 	if s.conversationM == nil || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
 		return ""
 	}
-	page, err := s.conversationM.Read(agent, sessionID, "", 1)
+	page, err := s.conversationM.ReadFor(agent, cwd, sessionID, "", 1)
 	if err != nil || !page.Available || len(page.Entries) == 0 {
 		return ""
 	}
@@ -1456,7 +1459,11 @@ func (s *Server) latestConversationResponse(agent, sessionID string) string {
 }
 
 func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, sessionID string) string {
-	if response := s.latestConversationResponse(agent, sessionID); response != "" {
+	var cwd string
+	if active, ok := s.state.Agent(paneID); ok {
+		cwd = active.Cwd
+	}
+	if response := s.latestConversationResponse(agent, cwd, sessionID); response != "" {
 		return response
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -2640,7 +2647,9 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		}
 		agentName := strings.TrimSpace(entry.Agent)
 		sessionID := strings.TrimSpace(entry.Session)
+		var cwd string
 		if current := agents[entry.PaneID]; current != nil {
+			cwd = current.Cwd
 			if strings.TrimSpace(current.Agent) != "" {
 				agentName = current.Agent
 			}
@@ -2651,10 +2660,10 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		if agentName == "" || sessionID == "" || !conversation.Supported(agentName) {
 			continue
 		}
-		cacheKey := agentName + "\x00" + sessionID
+		cacheKey := agentName + "\x00" + cwd + "\x00" + sessionID
 		page, loaded := pages[cacheKey]
 		if !loaded {
-			page, _ = s.conversationM.Read(agentName, sessionID, "", 200)
+			page, _ = s.conversationM.ReadFor(agentName, cwd, sessionID, "", 200)
 			pages[cacheKey] = page
 		}
 		if response := conversationResponseAt(page.Entries, int64(entry.Timestamp)); response != "" {

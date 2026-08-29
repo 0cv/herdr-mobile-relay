@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 // ompCommandFormat is the form Oh My Pi registers skills under. Verified against
@@ -135,19 +133,18 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	// The ban lists apply to skills only; omp's filters run over discovered
 	// skills, never over its own builtin commands.
-	scan := func(scope string, dirs ...string) {
-		for _, dir := range dirs {
-			if dir == "" {
-				continue
+	applyOverride := func(commands []Command) {
+		for _, command := range commands {
+			if _, exists := active[command.Command]; !exists {
+				order = append(order, command.Command)
 			}
-			if !filepath.IsAbs(dir) {
-				// ctx.Home is the *service's* os.UserHomeDir(), not the
-				// pane's, and is empty whenever that lookup failed - the
-				// relay runs headless under launchd/systemd with an
-				// arbitrary working directory unrelated to any project, so a
-				// relative dir here would silently scan whatever skills
-				// happen to sit under the service's own cwd and label them
-				// "personal" or "project" as if they were the user's.
+			active[command.Command] = command
+		}
+	}
+
+	scanUsing := func(scope string, applyCommands func([]Command), dirs ...string) {
+		for _, dir := range dirs {
+			if dir == "" || !filepath.IsAbs(dir) {
 				continue
 			}
 			cmds, trunc := scanSkillDirFormat(dir, scope, ompCommandFormat, &budget)
@@ -157,9 +154,15 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 					allowed = append(allowed, command)
 				}
 			}
-			apply(allowed)
+			applyCommands(allowed)
 			truncated = truncated || trunc
 		}
+	}
+	scan := func(scope string, dirs ...string) {
+		scanUsing(scope, apply, dirs...)
+	}
+	scanOverride := func(scope string, dirs ...string) {
+		scanUsing(scope, applyOverride, dirs...)
 	}
 	// scanProject scans <ancestor>/<stem>/skills in descending precedence:
 	// innermost ancestor first and, within one ancestor, stems in the order omp
@@ -184,7 +187,14 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scanProject(".omp")
 	}
 	if settings.enablePiUser {
-		scan("personal", agentroots.OMPSkillDirs(ctx.Home)...)
+		agentDir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
+		scan("personal", filepath.Join(agentDir, "skills"))
+	}
+
+	// Extension packages register below native skills and above compatibility
+	// providers, matching OMP's built-in omp-plugins provider priority.
+	for _, extension := range ompExtensionSkillDirs(ctx) {
+		scan(extension.source, filepath.Join(extension.path, "skills"))
 	}
 
 	// 2. claude (80)
@@ -243,12 +253,13 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			}
 			dir = filepath.Join(ctx.Cwd, dir)
 		}
-		scan("personal", dir)
+		scanOverride("personal", dir)
 	}
 
 	// 8. managed (priority 5) - always enabled, scanned last so it loses every
 	// collision.
-	scan("personal", agentroots.OMPManagedSkillDirs(ctx.Home)...)
+	agentDir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
+	scan("personal", filepath.Join(agentDir, "managed-skills"))
 
 	commands := make([]Command, 0, len(order))
 	for _, name := range order {
@@ -264,30 +275,23 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 // ompSkillName recovers the skill name from a rendered /skill:<name> command.
 // A builtin has no such prefix and is returned unchanged, which the ban lists
-// never match because omp bans skills, not builtins.
+// never match because OMP bans skills, not builtins.
 func ompSkillName(command string) string {
 	return strings.TrimPrefix(command, "/skill:")
 }
 
-// loadOMPSkillSettings reads the first config.yml (or config.yaml) found across
-// omp's agent directories, then overlays every project-level .omp config from
-// the git root down to the cwd. Where several profiles exist the relay cannot
-// know which one the pane runs, so first-found wins for the user level: the
-// search stops at the first directory containing a config file even when that
-// file cannot be read, because falling through would apply an unrelated
-// profile's settings. The innermost repo scope is applied last, matching omp's
-// precedence, and list-valued keys replace rather than append.
+// loadOMPSkillSettings reads the pane's active agent config, then overlays
+// every project-level .omp config from the git root down to the cwd. The
+// innermost repo scope is applied last, matching OMP's precedence, and
+// list-valued keys replace rather than append.
 func loadOMPSkillSettings(ctx DiscoverContext) ompSkillSettings {
 	settings := defaultOMPSkillSettings()
-	for _, dir := range agentroots.OMPConfigDirs(ctx.Home) {
+	dir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
+	if dir != "" {
 		data, found, ok := settingsFileIn(dir, "config.yml", "config.yaml")
-		if !found {
-			continue
-		}
-		if ok {
+		if found && ok {
 			parseOMPSkillSettings(data, &settings)
 		}
-		break
 	}
 	for _, dir := range findProjectDirs(ctx.Cwd, []string{".omp"}) {
 		if data, ok := readSettingsFile(dir, "config.yml", "config.yaml"); ok {

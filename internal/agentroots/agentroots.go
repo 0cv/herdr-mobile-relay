@@ -32,7 +32,9 @@ package agentroots
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 // Relay-side overrides. Each holds a colon-separated list (the platform
@@ -145,6 +147,55 @@ func PiConfigDirs(home string) []string {
 		profileAgentDirs(configRoot)...)
 }
 
+// AgentDirForSession returns the Pi/OMP agent directory that contains an
+// absolute session path. It lets pane-scoped skill discovery select the active
+// profile instead of merging every profile into one catalog.
+func AgentDirForSession(home, agent, sessionPath string) string {
+	var roots []string
+	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(agent)))
+	switch normalized {
+	case "pi", "picodingagent":
+		roots = Pi(home)
+	case "omp", "ohmypi":
+		roots = OMP(home)
+	default:
+		return ""
+	}
+	for _, root := range roots {
+		if containedPath(sessionPath, root) {
+			return filepath.Dir(root)
+		}
+	}
+	return ""
+}
+
+func containedPath(path, root string) bool {
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(realRoot, realPath)
+	return err == nil && relative != "." && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+type profileCacheEntry struct {
+	signature string
+	dirs      []string
+}
+
+var profileCache = struct {
+	sync.Mutex
+	entries map[string]profileCacheEntry
+}{entries: make(map[string]profileCacheEntry)}
+
 // profileAgentDirs reports the agent directory of every named profile under a
 // config root. Pi and Oh My Pi place one at <config root>/profiles/<name>/agent
 // - verified against the omp bundle, which builds exactly
@@ -169,13 +220,26 @@ func PiConfigDirs(home string) []string {
 // relay has to as well; symlinked profile directories are a normal way to keep
 // agent configuration on another volume or in a dotfiles repo.
 func profileAgentDirs(configRoot string) []string {
-	// A relative config root would make this scan directories under the relay's
-	// working directory, which is never what the caller means. This happens only
-	// when os.UserHomeDir() failed and home is empty.
 	if !filepath.IsAbs(configRoot) {
 		return nil
 	}
 	profiles := filepath.Join(configRoot, "profiles")
+	info, err := os.Stat(profiles)
+	if err != nil || !info.IsDir() {
+		profileCache.Lock()
+		delete(profileCache.entries, profiles)
+		profileCache.Unlock()
+		return nil
+	}
+	signature := strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10)
+
+	profileCache.Lock()
+	cached, ok := profileCache.entries[profiles]
+	profileCache.Unlock()
+	if ok && cached.signature == signature {
+		return append([]string(nil), cached.dirs...)
+	}
+
 	entries, err := os.ReadDir(profiles)
 	if err != nil {
 		return nil
@@ -183,12 +247,18 @@ func profileAgentDirs(configRoot string) []string {
 	dirs := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		candidate := filepath.Join(profiles, entry.Name())
-		info, err := os.Stat(candidate)
-		if err != nil || !info.IsDir() {
+		entryInfo, err := os.Stat(candidate)
+		if err != nil || !entryInfo.IsDir() {
 			continue
 		}
 		dirs = append(dirs, filepath.Join(candidate, "agent"))
 	}
+	profileCache.Lock()
+	profileCache.entries[profiles] = profileCacheEntry{
+		signature: signature,
+		dirs:      append([]string(nil), dirs...),
+	}
+	profileCache.Unlock()
 	return dirs
 }
 

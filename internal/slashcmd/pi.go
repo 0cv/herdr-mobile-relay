@@ -3,8 +3,6 @@ package slashcmd
 import (
 	"encoding/json"
 	"path/filepath"
-
-	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
 
 type piProvider struct{}
@@ -61,7 +59,7 @@ func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		return builtinsWithCustom(piBuiltins, custom), truncated
 	}
 
-	if !piSkillCommandsEnabled(ctx.Home) {
+	if !piSkillCommandsEnabled(ctx) {
 		builtins := make([]Command, len(piBuiltins))
 		copy(builtins, piBuiltins)
 		return builtins, false
@@ -108,7 +106,8 @@ func (p *piProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		scan("project", filepath.Join(projectDirs[i], "skills"))
 	}
 
-	scan("personal", agentroots.PiSkillDirs(ctx.Home)...)
+	agentDir := selectedAgentDir(ctx, ".pi", "HERDR_PI_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
+	scan("personal", filepath.Join(agentDir, "skills"))
 	scan("personal", filepath.Join(ctx.Home, ".agents", "skills"))
 
 	commands := make([]Command, 0, len(order))
@@ -129,19 +128,16 @@ type piSkillSettings struct {
 	EnableSkillCommands *bool `json:"enableSkillCommands"`
 }
 
-// piSkillCommandsEnabled reports whether Pi registers skills as /skill:<name>
-// commands. The first settings.json found across Pi's agent directories
-// decides; where several profiles exist the relay cannot know which one the
-// pane runs, so first-found wins - the search stops at the first directory
-// containing a settings.json even when that file cannot be read, because
-// falling through would apply an unrelated profile's settings. An absent,
-// unreadable or unparsable file leaves Pi's documented default of true, because
-// failing open can only show a command the user could have run, never hide one.
-func piSkillCommandsEnabled(home string) bool {
-	for _, dir := range agentroots.PiConfigDirs(home) {
+// piSkillCommandsEnabled reports whether Pi registers skills as
+// /skill:<name> commands. Only the pane's active agent directory is read, so
+// another named profile cannot enable or disable this pane's skill commands.
+// An absent, unreadable, or unparsable file keeps Pi's documented default.
+func piSkillCommandsEnabled(ctx DiscoverContext) bool {
+	dir := selectedAgentDir(ctx, ".pi", "HERDR_PI_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
+	if dir != "" {
 		data, found, ok := settingsFileIn(dir, "settings.json")
 		if !found {
-			continue
+			return true
 		}
 		if !ok {
 			return true

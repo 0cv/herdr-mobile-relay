@@ -44,18 +44,20 @@ func CatalogFor(agent, cwd, home string) Catalog {
 	case "opencode", "open code", "open-code":
 		profileID = "opencode"
 	}
-	return CatalogForProfile(profileID, agent, cwd, home, nil, "", "")
+	return CatalogForProfile(profileID, agent, cwd, home, nil, "", "", "")
 }
 
 func CatalogForProfile(
 	profileID, reportedAgent, cwd, home string,
 	skillDirs []string,
-	commandFormat, agentVersion string,
+	commandFormat, agentVersion, agentDir string,
 ) Catalog {
 	var commands []Command
 	var truncated bool
 
 	ctx := DiscoverContext{
+		ProfileID:     profileID,
+		AgentDir:      agentDir,
 		Cwd:           cwd,
 		Home:          home,
 		SkillDirs:     skillDirs,

@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -33,7 +34,16 @@ func parseFrontmatterBytes(data []byte) (map[string]string, bool) {
 }
 
 func readSkillMetadata(path string) (map[string]string, bool) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer file.Close()
+	return readSkillMetadataFile(file)
+}
+
+func readSkillMetadataFile(file *os.File) (map[string]string, bool) {
+	data, err := io.ReadAll(io.LimitReader(file, maxMetadataSize+1))
 	if err != nil || len(data) > maxMetadataSize {
 		return nil, false
 	}

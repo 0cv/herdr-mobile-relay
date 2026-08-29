@@ -117,6 +117,10 @@ func parseSkillEntry(skillFile, dirName, namespace, source string) (*Command, st
 	if !ok {
 		return nil, ""
 	}
+	return parseSkillMetadata(metadata, dirName, namespace, source)
+}
+
+func parseSkillMetadata(metadata map[string]string, dirName, namespace, source string) (*Command, string) {
 	name := metadata["name"]
 	if name == "" {
 		name = dirName
@@ -182,6 +186,64 @@ func entryIsDir(e os.DirEntry, path string) bool {
 	return err == nil && info.IsDir()
 }
 
+// scopedSkillMetadata opens project skills relative to the project boundary.
+// os.Root permits symlinks that remain inside that boundary and rejects skill
+// directories or SKILL.md links that escape it. Personal roots intentionally
+// retain their symlink-friendly behavior.
+func scopedSkillMetadata(dir, entry, source string) (map[string]string, string, bool) {
+	skillFile := filepath.Join(dir, entry, "SKILL.md")
+	if source != "project" {
+		info, err := os.Stat(skillFile)
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, "", false
+		}
+		resolved, err := filepath.EvalSymlinks(skillFile)
+		if err != nil {
+			resolved = skillFile
+		}
+		metadata, ok := readSkillMetadata(skillFile)
+		return metadata, resolved, ok
+	}
+
+	projectRoot := filepath.Dir(filepath.Dir(filepath.Clean(dir)))
+	realRoot, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return nil, "", false
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, "", false
+	}
+	relativeDir, err := filepath.Rel(realRoot, realDir)
+	if err != nil || relativeDir == ".." || strings.HasPrefix(relativeDir, ".."+string(filepath.Separator)) {
+		return nil, "", false
+	}
+	root, err := os.OpenRoot(realRoot)
+	if err != nil {
+		return nil, "", false
+	}
+	defer root.Close()
+	relativeFile := filepath.Join(relativeDir, entry, "SKILL.md")
+	file, err := root.Open(relativeFile)
+	if err != nil {
+		return nil, "", false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, "", false
+	}
+	metadata, ok := readSkillMetadataFile(file)
+	if !ok {
+		return nil, "", false
+	}
+	resolved, err := filepath.EvalSymlinks(skillFile)
+	if err != nil {
+		resolved = skillFile
+	}
+	return metadata, resolved, true
+}
+
 func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -203,24 +265,16 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 		if !entryIsDir(e, skillDir) {
 			continue
 		}
-		skillFile := filepath.Join(skillDir, "SKILL.md")
-		info, err := os.Stat(skillFile)
-		if err != nil || !info.Mode().IsRegular() {
+		metadata, resolved, ok := scopedSkillMetadata(dir, e.Name(), source)
+		if !ok {
 			continue
-		}
-		// Once symlinks are followed two entries can name one real skill.
-		// scanSkillDirFormat de-duplicates by resolved path for the same
-		// reason; keep the two scanners consistent.
-		resolved, err := filepath.EvalSymlinks(skillFile)
-		if err != nil {
-			resolved = skillFile
 		}
 		if seen[resolved] {
 			continue
 		}
 		seen[resolved] = true
 		*budget--
-		if cmd, suppressedName := parseSkillEntry(skillFile, e.Name(), "", source); cmd != nil {
+		if cmd, suppressedName := parseSkillMetadata(metadata, e.Name(), "", source); cmd != nil {
 			commands = append(commands, *cmd)
 		} else if suppressedName != "" {
 			suppressed = append(suppressed, suppressedName)
@@ -235,10 +289,8 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 // Pi and Kimi resolve it. Skills without a description are dropped, as those
 // agents require one. Reports whether budget ran out.
 //
-// Unlike scanSkillDirBudget this follows symlinked skill directories and
-// de-duplicates by real path, matching omp, and returns no suppression list:
-// none of omp, Pi or Kimi has a frontmatter field that hides a skill from the
-// command palette.
+// Symlinked personal skills are followed and de-duplicated by real path.
+// Project skills follow links only while they remain inside the project root.
 func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, bool) {
 	if strings.Count(format, "{name}") != 1 {
 		return nil, false
@@ -262,24 +314,15 @@ func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, boo
 		if info, err := os.Stat(skillDir); err != nil || !info.IsDir() {
 			continue
 		}
-		skillFile := filepath.Join(skillDir, "SKILL.md")
-		info, err := os.Stat(skillFile)
-		if err != nil || !info.Mode().IsRegular() {
+		metadata, real, ok := scopedSkillMetadata(dir, e.Name(), source)
+		if !ok {
 			continue
-		}
-		real, err := filepath.EvalSymlinks(skillFile)
-		if err != nil {
-			real = skillFile
 		}
 		if seen[real] {
 			continue
 		}
 		seen[real] = true
 		*budget--
-		metadata, ok := readSkillMetadata(skillFile)
-		if !ok {
-			continue
-		}
 		name := metadata["name"]
 		if name == "" {
 			name = e.Name()

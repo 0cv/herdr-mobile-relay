@@ -128,14 +128,15 @@ func TestClaudeSessionName(t *testing.T) {
 func TestCodexSessionName(t *testing.T) {
 	home := t.TempDir()
 	codexDir := filepath.Join(home, ".codex")
-	os.MkdirAll(codexDir, 0o755)
+	sessionID := "0194f6c8-1111-7222-8333-123456789abc"
+	writeCodexRollout(t, codexDir, sessionID)
 
-	entry := map[string]any{"id": "sess-456", "thread_name": "Build API endpoint"}
+	entry := map[string]any{"id": sessionID, "thread_name": "Build API endpoint"}
 	data, _ := json.Marshal(entry)
 	os.WriteFile(filepath.Join(codexDir, "session_index.jsonl"), append(data, '\n'), 0o644)
 
 	r := NewResolver(home)
-	name := r.SessionName("codex", "/tmp", "sess-456")
+	name := r.SessionName("codex", "/tmp", sessionID)
 	if name != "Build API endpoint" {
 		t.Errorf("session name = %q, want 'Build API endpoint'", name)
 	}
@@ -429,8 +430,10 @@ func TestCodexTitleFromSecondConfiguredHome(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()
 	t.Setenv(agentroots.CodexListEnv, strings.Join([]string{first, second}, string(filepath.ListSeparator)))
+	sessionID := "0194f6c8-2222-7333-8444-abcdef123456"
+	writeCodexRollout(t, second, sessionID)
 
-	data, err := json.Marshal(map[string]any{"id": "sess-second", "thread_name": "Second home thread"})
+	data, err := json.Marshal(map[string]any{"id": sessionID, "thread_name": "Second home thread"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,8 +441,8 @@ func TestCodexTitleFromSecondConfiguredHome(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := NewResolver(home).SessionName("codex", "/tmp", "sess-second"); got != "Second home thread" {
-		t.Fatalf("session name = %q, want %q; the first home has no index file and must not end the search", got, "Second home thread")
+	if got := NewResolver(home).SessionName("codex", "/tmp", sessionID); got != "Second home thread" {
+		t.Fatalf("session name = %q, want %q from the home containing the rollout", got, "Second home thread")
 	}
 }
 
@@ -605,20 +608,15 @@ func TestProfileCreatedAfterTheResolverWasBuiltIsStillResolved(t *testing.T) {
 func TestSymlinkedProjectDirectoryIsFoundByItsEncodedName(t *testing.T) {
 	clearAgentRootEnv(t)
 	home := t.TempDir()
-	elsewhere := t.TempDir()
-
-	target := filepath.Join(elsewhere, "dotfiles-app")
-	writeTitleFile(t, filepath.Join(target, "sess-link.jsonl"), "Symlinked project title")
 	projects := filepath.Join(home, ".claude", "projects")
-	if err := os.MkdirAll(projects, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	target := filepath.Join(projects, ".store", "dotfiles-app")
+	writeTitleFile(t, filepath.Join(target, "sess-link.jsonl"), "Symlinked project title")
 	if err := os.Symlink(target, filepath.Join(projects, "home-user-app")); err != nil {
 		t.Fatal(err)
 	}
 
 	if got := NewResolver(home).SessionName("claude", "/home/user/app", "sess-link"); got != "Symlinked project title" {
-		t.Fatalf("session name = %q, want %q from a symlinked project directory", got, "Symlinked project title")
+		t.Fatalf("session name = %q, want %q from a contained symlinked project directory", got, "Symlinked project title")
 	}
 }
 
@@ -627,15 +625,10 @@ func TestSymlinkedProjectDirectoryIsFoundByItsEncodedName(t *testing.T) {
 func TestSymlinkedProjectDirectoryIsFoundByItsCwdFile(t *testing.T) {
 	clearAgentRootEnv(t)
 	home := t.TempDir()
-	elsewhere := t.TempDir()
-
-	target := filepath.Join(elsewhere, "dotfiles-app")
+	projects := filepath.Join(home, ".claude", "projects")
+	target := filepath.Join(projects, ".store", "dotfiles-app")
 	writeTitleFile(t, filepath.Join(target, "sess-link.jsonl"), "Cwd-matched symlink title")
 	if err := os.WriteFile(filepath.Join(target, "cwd"), []byte("/home/user/app\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	projects := filepath.Join(home, ".claude", "projects")
-	if err := os.MkdirAll(projects, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(projects, "not-the-encoded-name")); err != nil {
@@ -643,6 +636,60 @@ func TestSymlinkedProjectDirectoryIsFoundByItsCwdFile(t *testing.T) {
 	}
 
 	if got := NewResolver(home).SessionName("claude", "/home/user/app", "sess-link"); got != "Cwd-matched symlink title" {
-		t.Fatalf("session name = %q, want %q from a symlinked project directory matched by its cwd file", got, "Cwd-matched symlink title")
+		t.Fatalf("session name = %q, want %q from a contained symlink matched by cwd", got, "Cwd-matched symlink title")
+	}
+}
+
+func TestCodexIndexWithoutRolloutHasNoTitle(t *testing.T) {
+	home := t.TempDir()
+	codexDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionID := "0194f6c8-3333-7444-8555-fedcba987654"
+	data, _ := json.Marshal(map[string]any{"id": sessionID, "thread_name": "Orphan title"})
+	if err := os.WriteFile(filepath.Join(codexDir, "session_index.jsonl"), append(data, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewResolver(home).SessionName("codex", "/tmp", sessionID); got != "" {
+		t.Fatalf("session name = %q, want empty without a readable rollout", got)
+	}
+}
+
+func TestProjectSessionSymlinkEscapingRootHasNoTitle(t *testing.T) {
+	home := t.TempDir()
+	projects := filepath.Join(home, ".claude", "projects")
+	target := filepath.Join(t.TempDir(), "external")
+	writeTitleFile(t, filepath.Join(target, "session.jsonl"), "External title")
+	if err := os.MkdirAll(projects, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(projects, "home-user-app")); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewResolver(home).SessionName("claude", "/home/user/app", "session"); got != "" {
+		t.Fatalf("session name = %q, want empty for project symlink escaping the transcript root", got)
+	}
+}
+
+func TestClaudeTitleSelectsCurrentProjectOnDuplicateID(t *testing.T) {
+	home := t.TempDir()
+	projects := filepath.Join(home, ".claude", "projects")
+	writeTitleFile(t, filepath.Join(projects, "-old", "duplicate.jsonl"), "Old project title")
+	writeTitleFile(t, filepath.Join(projects, "-work", "duplicate.jsonl"), "Current project title")
+
+	if got := NewResolver(home).SessionName("claude", "/work", "duplicate"); got != "Current project title" {
+		t.Fatalf("session name = %q, want title from the current project's transcript", got)
+	}
+}
+
+func writeCodexRollout(t *testing.T, codexDir, sessionID string) {
+	t.Helper()
+	path := filepath.Join(codexDir, "sessions", "2026", "08", "24", "rollout-2026-08-24T00-00-00-"+sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

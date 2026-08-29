@@ -3,7 +3,7 @@ package slashcmd
 import "testing"
 
 func TestOpenCodeBuiltinCatalog(t *testing.T) {
-	catalog := CatalogForProfile("opencode", "opencode", "/tmp", "/nonexistent", nil, "", "1.18.5")
+	catalog := CatalogForProfile("opencode", "opencode", "/tmp", "/nonexistent", nil, "", "1.18.5", "")
 	if catalog.Truncated {
 		t.Fatal("OpenCode builtins should not be truncated")
 	}
