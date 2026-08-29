@@ -524,6 +524,22 @@ textarea { min-height: 6.5rem; resize: vertical; }
 }
 .term-content.preserve-layout.resize-layout .terminal-grid-line .terminal-cell-run { display: inline-block; }
 .term-content.preserve-layout.resize-layout .terminal-cell-run { display: inline; }
+/* No lease has landed: the pane's width is not the phone's, so column
+   alignment is already lost. Wrap at the container rather than scrolling
+   sideways - a pan survives every refresh, stranding the reader on the tails
+   of the newest lines. A leased pane keeps the rules above, where the pane
+   really is this wide. Box-drawing rows are handled in TerminalView, which
+   renders them as wrappable text past this width instead of a cell grid. */
+.term-content.preserve-layout.resize-pending > .term-screen > .ansi-line {
+  /* `anywhere`, not `break-word`: only `anywhere` also shrinks a row's
+     min-content, which keeps one long token from holding a run wider than the
+     pane. Words still break at spaces first, so prose stays whole. */
+  overflow-wrap: anywhere;
+  /* `break-spaces`, not `pre-wrap`: terminal rows are padded out with spaces,
+     and pre-wrap lets such a run hang past the edge instead of wrapping, which
+     WebKit then reports as scrollable width - the pane pans sideways again. */
+  white-space: break-spaces;
+}
 :root[data-interface-size='regular'] :is(.activity-extract pre, .term-content) { font-size: .82rem; }
 :root[data-interface-size='large'] :is(.activity-extract pre, .term-content) { font-size: .94rem; }
 .term-content.preserve-layout .terminal-cell-run { display: inline-block; }

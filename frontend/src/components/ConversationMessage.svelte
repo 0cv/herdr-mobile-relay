@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ToolPayload from '$components/ToolPayload.svelte';
   import { safeMarkdownHtml } from '$lib/markdown';
   import type { ConversationTool } from '$lib/types';
 
@@ -30,16 +31,10 @@
         </summary>
         <div class="conversation-tool-detail">
           {#if tool.input}
-            <section>
-              <h4>Input</h4>
-              <pre>{tool.input}</pre>
-            </section>
+            <ToolPayload label="Input" raw={tool.input} />
           {/if}
           {#if tool.output}
-            <section>
-              <h4>Output</h4>
-              <pre>{tool.output}</pre>
-            </section>
+            <ToolPayload label="Output" raw={tool.output} />
           {:else}
             <p>No output was captured in this session log.</p>
           {/if}
