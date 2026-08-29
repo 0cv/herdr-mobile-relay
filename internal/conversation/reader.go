@@ -12,16 +12,22 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	panehistory "github.com/0cv/herdr-mobile-relay/internal/history"
 )
 
 const (
-	maxConversationBytes = 16 * 1024 * 1024
-	maxEntryBytes        = 128 * 1024
-	defaultPageSize      = 80
-	maxPageSize          = 200
+	maxConversationBytes    = 16 * 1024 * 1024
+	maxEntryBytes           = 128 * 1024
+	defaultPageSize         = 80
+	maxPageSize             = 200
+	locationCacheTTL        = 60 * time.Second
+	locationMissTTL         = 5 * time.Second
+	maxLocationCacheEntries = 2048
 )
 
 var canonicalSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -52,34 +58,43 @@ type Page struct {
 	Total         int     `json:"total"`
 	FileTruncated bool    `json:"file_truncated,omitempty"`
 }
-
 type Reader struct {
-	claudeRoots []string
-	qoderRoots  []string
-	codexRoots  []string
-	piRoots     []string
-	ompRoots    []string
+	home      string
+	mu        sync.Mutex
+	locations map[string]locationCacheEntry
+	locating  map[string]chan struct{}
 }
 
+type locationCacheEntry struct {
+	location Location
+	expires  time.Time
+}
+
+// Location identifies the exact transcript selected for a pane and the
+// configured root that contains it. Session-title resolution consumes the same
+// location so it cannot read a different copy of the session.
+type Location struct {
+	Path string
+	Root string
+}
+
+// NewReader keeps a bounded tuple-to-location cache. Sharing one Reader between
 func NewReader(home string) *Reader {
-	claudeHome := firstConfiguredRoot("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
-	codexHome := firstConfiguredRoot("CODEX_HOME", filepath.Join(home, ".codex"))
-	piHome := firstConfiguredRoot("PI_CODING_AGENT_DIR", filepath.Join(home, ".pi", "agent"))
 	return &Reader{
-		claudeRoots: []string{filepath.Join(claudeHome, "projects")},
-		qoderRoots:  []string{filepath.Join(home, ".qoder", "projects")},
-		codexRoots:  []string{filepath.Join(codexHome, "sessions")},
-		piRoots:     []string{filepath.Join(piHome, "sessions")},
-		ompRoots:    []string{filepath.Join(home, ".omp", "agent", "sessions")},
+		home: home, locations: make(map[string]locationCacheEntry),
+		locating: make(map[string]chan struct{}),
 	}
 }
 
-func firstConfiguredRoot(environment, fallback string) string {
-	if configured := strings.TrimSpace(os.Getenv(environment)); configured != "" {
-		return configured
-	}
-	return fallback
-}
+func (r *Reader) claudeRoots() []string { return agentroots.Claude(r.home) }
+
+func (r *Reader) qoderRoots() []string { return agentroots.Qoder(r.home) }
+
+func (r *Reader) codexRoots() []string { return agentroots.Codex(r.home) }
+
+func (r *Reader) piRoots() []string { return agentroots.Pi(r.home) }
+
+func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 
 func Supported(agent string) bool {
 	switch normalizedAgent(agent) {
@@ -97,7 +112,19 @@ func normalizedAgent(agent string) string {
 	return value
 }
 
+// Read resolves a conversation without project context. It is used for
+// historical activity where the pane cwd is no longer available.
 func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) {
+	return r.read(agent, "", sessionID, before, limit)
+}
+
+// ReadFor resolves a pane conversation using the same cwd-aware locator as the
+// session-title resolver.
+func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
+	return r.read(agent, cwd, sessionID, before, limit)
+}
+
+func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
 	if !Supported(agent) {
 		return unavailable("Conversation history is not available for this agent."), nil
 	}
@@ -105,11 +132,11 @@ func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) 
 	if sessionID == "" {
 		return unavailable("This agent has not reported a conversation session yet."), nil
 	}
-	path := r.resolve(agent, sessionID)
-	if path == "" {
+	location := r.Locate(agent, cwd, sessionID)
+	if location.Path == "" {
 		return unavailable("No conversation log is available for this session."), nil
 	}
-	text, clipped, err := loadTail(path, maxConversationBytes)
+	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
 		return Page{}, fmt.Errorf("read conversation log: %w", err)
 	}
@@ -147,29 +174,78 @@ func unavailable(reason string) Page {
 	return Page{Available: false, Reason: reason, Entries: []Entry{}}
 }
 
-func (r *Reader) resolve(agent, sessionID string) string {
+// Locate returns the exact contained transcript selected for agent, cwd and
+// sessionID. Root order is authoritative; within Claude/Qoder roots cwd selects
+// the project directory when it is known. Cached tuple locations are returned
+// before any filesystem walk, keeping title and history on the same copy.
+func (r *Reader) Locate(agent, cwd, sessionID string) Location {
+	sessionID = strings.TrimSpace(sessionID)
+	key := normalizedAgent(agent) + "\x00" + cwd + "\x00" + sessionID
+	for {
+		now := time.Now()
+		r.mu.Lock()
+		if cached, ok := r.locations[key]; ok && now.Before(cached.expires) {
+			r.mu.Unlock()
+			return cached.location
+		}
+		if ready, ok := r.locating[key]; ok {
+			r.mu.Unlock()
+			<-ready
+			continue
+		}
+		r.locating[key] = make(chan struct{})
+		r.mu.Unlock()
+		break
+	}
+
+	location := r.locate(agent, cwd, sessionID)
+	ttl := locationCacheTTL
+	if location.Path == "" {
+		ttl = locationMissTTL
+	}
+	now := time.Now()
+	r.mu.Lock()
+	if len(r.locations) >= maxLocationCacheEntries {
+		for cachedKey, cached := range r.locations {
+			if !now.Before(cached.expires) {
+				delete(r.locations, cachedKey)
+			}
+		}
+		if len(r.locations) >= maxLocationCacheEntries {
+			clear(r.locations)
+		}
+	}
+	r.locations[key] = locationCacheEntry{location: location, expires: now.Add(ttl)}
+	ready := r.locating[key]
+	delete(r.locating, key)
+	close(ready)
+	r.mu.Unlock()
+	return location
+}
+
+func (r *Reader) locate(agent, cwd, sessionID string) Location {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode":
 		if !safeSessionID(sessionID) {
-			return ""
+			return Location{}
 		}
-		return findProjectSession(r.claudeRoots, sessionID+".jsonl")
+		return findProjectSession(r.claudeRoots(), cwd, sessionID+".jsonl")
 	case "qoder", "qodercli":
 		if !safeSessionID(sessionID) {
-			return ""
+			return Location{}
 		}
-		return findProjectSession(r.qoderRoots, sessionID+".jsonl")
+		return findProjectSession(r.qoderRoots(), cwd, sessionID+".jsonl")
 	case "codex", "openaicodex":
 		if !canonicalSessionID.MatchString(sessionID) {
-			return ""
+			return Location{}
 		}
-		return findCodexSession(r.codexRoots, sessionID)
+		return findCodexSession(r.codexRoots(), sessionID)
 	case "pi", "picodingagent":
-		return resolvePathOrSession(r.piRoots, sessionID, "_")
+		return resolvePathOrSession(r.piRoots(), sessionID, "_")
 	case "omp", "ohmypi":
-		return resolvePathOrSession(r.ompRoots, sessionID, "_")
+		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	default:
-		return ""
+		return Location{}
 	}
 }
 
@@ -188,26 +264,75 @@ func safeSessionID(value string) bool {
 	return true
 }
 
-func findProjectSession(roots []string, filename string) string {
+// isDir reports whether path is a directory, following symlinks. DirEntry's
+// IsDir reports the entry's own type bits, which are ModeSymlink for a
+// symlink, so it is false for a symlink to a directory - the same hazard
+// agentroots.profileAgentDirs documents. Stat follows the link so a
+// symlinked project or profile directory is still searched.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func findProjectSession(roots []string, cwd, filename string) Location {
 	for _, root := range roots {
-		directories, err := os.ReadDir(root)
-		if err != nil {
-			continue
-		}
-		for _, directory := range directories {
-			if !directory.IsDir() {
-				continue
-			}
-			candidate := filepath.Join(root, directory.Name(), filename)
-			if path := containedRegularFile(candidate, root); path != "" {
-				return path
+		for _, projectDir := range projectDirectories(root, cwd) {
+			if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
+				return Location{Path: path, Root: root}
 			}
 		}
 	}
-	return ""
+	return Location{}
 }
 
-func findCodexSession(roots []string, sessionID string) string {
+func projectDirectories(root, cwd string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	if strings.TrimSpace(cwd) == "" {
+		directories := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			path := filepath.Join(root, entry.Name())
+			if isDir(path) {
+				directories = append(directories, path)
+			}
+		}
+		return directories
+	}
+
+	encoded := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+	exact := map[string]bool{encoded: true, "-" + encoded: true}
+	directories := make([]string, 0, 2)
+	seen := make(map[string]bool, 2)
+	for _, entry := range entries {
+		if !exact[entry.Name()] {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		if isDir(path) {
+			directories = append(directories, path)
+			seen[path] = true
+		}
+	}
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if seen[path] || !isDir(path) {
+			continue
+		}
+		cwdFile := containedRegularFile(filepath.Join(path, "cwd"), root)
+		if cwdFile == "" {
+			continue
+		}
+		data, err := os.ReadFile(cwdFile)
+		if err == nil && strings.TrimSpace(string(data)) == cwd {
+			directories = append(directories, path)
+		}
+	}
+	return directories
+}
+
+func findCodexSession(roots []string, sessionID string) Location {
 	suffix := "-" + strings.ToLower(sessionID) + ".jsonl"
 	for _, root := range roots {
 		for _, year := range descendingDirectories(root) {
@@ -222,18 +347,19 @@ func findCodexSession(roots []string, sessionID string) string {
 					}
 					for _, file := range files {
 						name := strings.ToLower(file.Name())
-						if file.IsDir() || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
+						filePath := filepath.Join(dayPath, file.Name())
+						if isDir(filePath) || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, suffix) {
 							continue
 						}
-						if path := containedRegularFile(filepath.Join(dayPath, file.Name()), root); path != "" {
-							return path
+						if path := containedRegularFile(filePath, root); path != "" {
+							return Location{Path: path, Root: root}
 						}
 					}
 				}
 			}
 		}
 	}
-	return ""
+	return Location{}
 }
 
 func descendingDirectories(path string) []string {
@@ -243,7 +369,7 @@ func descendingDirectories(path string) []string {
 	}
 	directories := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if isDir(filepath.Join(path, entry.Name())) {
 			directories = append(directories, entry.Name())
 		}
 	}
@@ -251,17 +377,17 @@ func descendingDirectories(path string) []string {
 	return directories
 }
 
-func resolvePathOrSession(roots []string, sessionID, separator string) string {
+func resolvePathOrSession(roots []string, sessionID, separator string) Location {
 	if filepath.IsAbs(sessionID) && strings.HasSuffix(strings.ToLower(sessionID), ".jsonl") {
 		for _, root := range roots {
 			if path := containedRegularFile(sessionID, root); path != "" {
-				return path
+				return Location{Path: path, Root: root}
 			}
 		}
-		return ""
+		return Location{}
 	}
 	if !canonicalSessionID.MatchString(sessionID) {
-		return ""
+		return Location{}
 	}
 	suffix := separator + strings.ToLower(sessionID) + ".jsonl"
 	for _, root := range roots {
@@ -270,24 +396,26 @@ func resolvePathOrSession(roots []string, sessionID, separator string) string {
 			continue
 		}
 		for _, directory := range directories {
-			if !directory.IsDir() {
+			projectDir := filepath.Join(root, directory.Name())
+			if !isDir(projectDir) {
 				continue
 			}
-			files, err := os.ReadDir(filepath.Join(root, directory.Name()))
+			files, err := os.ReadDir(projectDir)
 			if err != nil {
 				continue
 			}
 			for _, file := range files {
-				if file.IsDir() || !strings.HasSuffix(strings.ToLower(file.Name()), suffix) {
+				filePath := filepath.Join(projectDir, file.Name())
+				if isDir(filePath) || !strings.HasSuffix(strings.ToLower(file.Name()), suffix) {
 					continue
 				}
-				if path := containedRegularFile(filepath.Join(root, directory.Name(), file.Name()), root); path != "" {
-					return path
+				if path := containedRegularFile(filePath, root); path != "" {
+					return Location{Path: path, Root: root}
 				}
 			}
 		}
 	}
-	return ""
+	return Location{}
 }
 
 func containedRegularFile(path, root string) string {
@@ -549,7 +677,21 @@ func parseClaudeRecord(record map[string]any) (string, string) {
 		return role, humanClaudeText(raw)
 	}
 	if role == "user" {
-		return "", ""
+		// Filter per block, not on the joined string: humanClaudeText anchors its
+		// envelope checks on the start of what it is given, so joining first
+		// would let a <system-reminder> in any block after the first survive
+		// into the phone's conversation view.
+		blocks := textBlockList(content)
+		kept := make([]string, 0, len(blocks))
+		for _, block := range blocks {
+			if text := humanClaudeText(block); strings.TrimSpace(text) != "" {
+				kept = append(kept, text)
+			}
+		}
+		if len(kept) == 0 {
+			return "", ""
+		}
+		return role, strings.Join(kept, "\n")
 	}
 	return role, textBlocks(content)
 }
@@ -621,9 +763,16 @@ func textBlocks(value any) string {
 	if text, ok := value.(string); ok {
 		return text
 	}
+	return strings.Join(textBlockList(value), "\n")
+}
+
+// textBlockList reports the text carried by each text-like block separately.
+// Callers that filter per block need the boundaries: joining first would let an
+// envelope in a later block escape a prefix test anchored on the whole string.
+func textBlockList(value any) []string {
 	blocks, ok := value.([]any)
 	if !ok {
-		return ""
+		return nil
 	}
 	texts := make([]string, 0, len(blocks))
 	for _, rawBlock := range blocks {
@@ -639,7 +788,7 @@ func textBlocks(value any) string {
 			texts = append(texts, text)
 		}
 	}
-	return strings.Join(texts, "\n")
+	return texts
 }
 
 func sanitizeText(text string) string {

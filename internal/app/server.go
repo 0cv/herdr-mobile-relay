@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
 	"github.com/0cv/herdr-mobile-relay/internal/audit"
 	"github.com/0cv/herdr-mobile-relay/internal/clipboard"
@@ -137,7 +138,8 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		hostname = hostname[:idx]
 	}
 	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
-	sessResolver := session.NewResolver(home)
+	conversationReader := conversation.NewReader(home)
+	sessResolver := session.NewResolverWithReader(home, conversationReader)
 	histManager := history.NewManager(cfg.CacheDir)
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", cfg.Port)
 
@@ -159,7 +161,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		profiles:            profResolver,
 		sessions:            sessResolver,
 		historyM:            histManager,
-		conversationM:       conversation.NewReader(home),
+		conversationM:       conversationReader,
 		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		startedAt:           time.Now(),
@@ -174,12 +176,21 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 
 func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	agent.SessionName = ""
-	agent.SessionID = agent.Session
-	agent.ConversationHistoryAvailable = agent.SessionID != "" && conversation.Supported(agent.Agent)
-	if agent.Session == "" {
+	// Every other consumer of a pane's reported session (Reader.Read,
+	// latestConversationResponse, the activity backfill path) TrimSpaces it
+	// before deciding anything. Trimming once here, before it reaches
+	// SessionID or the resolver, is what keeps a whitespace-only value from
+	// looking like a real session id: untrimmed, it survives the `== ""`
+	// checks below and can still reach the resolver's empty-id
+	// sole-transcript heuristic, inventing a title over a conversation view
+	// that Reader.Read reports as unavailable.
+	sessionID := strings.TrimSpace(agent.Session)
+	agent.SessionID = sessionID
+	agent.ConversationHistoryAvailable = sessionID != "" && conversation.Supported(agent.Agent)
+	if sessionID == "" {
 		return
 	}
-	title := s.sessions.SessionName(agent.Agent, agent.Cwd, agent.Session)
+	title := s.sessions.SessionName(agent.Agent, agent.Cwd, sessionID)
 	if title == "" {
 		return
 	}
@@ -423,13 +434,15 @@ func (s *Server) Run(ctx context.Context) error {
 				break
 			}
 			generation := s.state.Generation(inbound.PaneID)
-			page, historyErr := s.conversationM.Read(agent.Agent, agent.SessionID, inbound.Before, inbound.Limit)
+			page, historyErr := s.conversationM.ReadFor(agent.Agent, agent.Cwd, agent.SessionID, inbound.Before, inbound.Limit)
 			if historyErr != nil {
 				s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
 				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
 				break
 			}
-			if !s.state.PaneSessionCurrent(inbound.PaneID, uint64(generation)) {
+			current, currentExists := s.state.Agent(inbound.PaneID)
+			if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
+				!sameConversationTuple(agent, current) {
 				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
 				break
 			}
@@ -556,17 +569,22 @@ func (s *Server) Run(ctx context.Context) error {
 				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent is required", paneID, nil)
 				break
 			}
-			if _, ok := s.state.Agent(paneID); !ok {
+			activeAgent, ok := s.state.Agent(paneID)
+			if !ok {
 				s.sendCommandResult(client, requestID, "list_slash_commands", false, "failed", "Agent pane not found", paneID, nil)
 				break
 			}
 			generation := s.state.Generation(paneID)
-			agent, cwd := s.agentInfo(paneID)
+			agent, cwd := activeAgent.Agent, activeAgent.Cwd
 			home, _ := os.UserHomeDir()
 			profileID := s.profiles.ResolvePane(paneID, agent)
-			skillDirs, commandFormat, _ := s.profiles.CommandConfig(profileID)
+			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
 			agentVersion := s.profiles.AgentVersion(profileID)
-			catalog := slashcmd.CatalogForProfile(profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion)
+			location := s.conversationM.Locate(agent, cwd, activeAgent.SessionID)
+			agentDir := locatedAgentDir(home, agent, location)
+			catalog := slashcmd.CatalogForProfileWithSuppression(
+				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
+			)
 			if s.state.Generation(paneID) != generation {
 				s.sendCommandResult(
 					client,
@@ -938,6 +956,8 @@ func (s *Server) handleTransition(
 	agentState, agentExists := s.state.Agent(paneID)
 	var session string
 	var sessionID string
+	conversationAgent := agent
+	var conversationCwd string
 	var blockedEventID string
 	var paneGeneration uint64
 	var blockedContentRevision int64
@@ -946,6 +966,8 @@ func (s *Server) handleTransition(
 			session = agentState.Session
 		}
 		sessionID = agentState.SessionID
+		conversationAgent = agentState.Agent
+		conversationCwd = agentState.Cwd
 		blockedEventID = agentState.BlockedEventID
 		blockedContentRevision = s.state.ContentRevision(paneID)
 	}
@@ -1083,8 +1105,10 @@ func (s *Server) handleTransition(
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
-	extract := s.captureFinishedPane(ctx, paneID, agent, sessionID)
-	if !transitionCurrent() {
+	extract := s.captureFinishedPane(ctx, paneID, conversationAgent, conversationCwd, sessionID)
+	currentAgent, currentExists := s.state.Agent(paneID)
+	if !transitionCurrent() || agentExists != currentExists ||
+		(agentExists && !sameConversationTuple(agentState, currentAgent)) {
 		return
 	}
 	summary := agent + " completed"
@@ -1431,11 +1455,11 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 
 // Conversation logs preserve the full assistant message; the terminal pane is
 // only a bounded fallback for agents without a readable transcript.
-func (s *Server) latestConversationResponse(agent, sessionID string) string {
+func (s *Server) latestConversationResponse(agent, cwd, sessionID string) string {
 	if s.conversationM == nil || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
 		return ""
 	}
-	page, err := s.conversationM.Read(agent, sessionID, "", 1)
+	page, err := s.conversationM.ReadFor(agent, cwd, sessionID, "", 1)
 	if err != nil || !page.Available || len(page.Entries) == 0 {
 		return ""
 	}
@@ -1446,8 +1470,8 @@ func (s *Server) latestConversationResponse(agent, sessionID string) string {
 	return entry.Text
 }
 
-func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, sessionID string) string {
-	if response := s.latestConversationResponse(agent, sessionID); response != "" {
+func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string) string {
+	if response := s.latestConversationResponse(agent, cwd, sessionID); response != "" {
 		return response
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -1468,6 +1492,16 @@ func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, session
 	return question.PaneSummary(completionContent)
 }
 
+func locatedAgentDir(home, agent string, location conversation.Location) string {
+	return agentroots.AgentDirForSession(home, agent, location.Path)
+}
+
+func sameConversationTuple(left, right *coordinator.AgentState) bool {
+	return left != nil && right != nil &&
+		left.Agent == right.Agent &&
+		left.Cwd == right.Cwd &&
+		left.SessionID == right.SessionID
+}
 func isClaudeLike(agent string) bool {
 	lower := strings.ToLower(agent)
 	return strings.Contains(lower, "claude") || strings.Contains(lower, "qoder")
@@ -2631,21 +2665,23 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		}
 		agentName := strings.TrimSpace(entry.Agent)
 		sessionID := strings.TrimSpace(entry.Session)
+		var cwd string
 		if current := agents[entry.PaneID]; current != nil {
 			if strings.TrimSpace(current.Agent) != "" {
 				agentName = current.Agent
 			}
 			if strings.TrimSpace(current.SessionID) != "" {
 				sessionID = current.SessionID
+				cwd = current.Cwd
 			}
 		}
 		if agentName == "" || sessionID == "" || !conversation.Supported(agentName) {
 			continue
 		}
-		cacheKey := agentName + "\x00" + sessionID
+		cacheKey := agentName + "\x00" + cwd + "\x00" + sessionID
 		page, loaded := pages[cacheKey]
 		if !loaded {
-			page, _ = s.conversationM.Read(agentName, sessionID, "", 200)
+			page, _ = s.conversationM.ReadFor(agentName, cwd, sessionID, "", 200)
 			pages[cacheKey] = page
 		}
 		if response := conversationResponseAt(page.Entries, int64(entry.Timestamp)); response != "" {

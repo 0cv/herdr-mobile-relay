@@ -3,6 +3,45 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.19.0] - 2026-08-29
+
+### Added
+
+- Transcript, session-title, and native skill discovery now resolve through
+  profile-aware agent roots. Relay-side path lists cover Claude Code, Qoder,
+  Codex, Pi, and Oh My Pi, while named Pi and Oh My Pi profiles under their
+  default configuration roots are discovered automatically.
+- Slash-command palettes follow the current native skill and extension sources
+  for Pi, Oh My Pi, and standalone Kimi Code, including project scope, trust,
+  configured directories, plugin overrides, and contained manifest paths.
+
+### Fixed
+
+- Conversation titles and history now resolve through the same contained
+  transcript, so copied session IDs, stale Codex index rows, and project
+  symlinks can no longer pair a title with a missing or different conversation.
+- Explicit per-profile command opt-outs are preserved instead of falling
+  through to native skill discovery.
+- Oh My Pi tool-approval dialogs are classified as live approvals.
+- Slash-command names and descriptions use a stacked mobile layout, so long
+  skill names cannot overlap or squeeze their descriptions.
+
+## [0.18.4] - 2026-08-28
+
+### Added
+
+- Catppuccin Latte is available as a light app theme with a matching light
+  terminal pane. (#26)
+
+### Fixed
+
+- Installing a setup link to an iPhone Home Screen now carries its relay or
+  gateway address and key into the isolated standalone app, so the installed
+  app connects without entering the setup details again.
+- Terminal and conversation-history views now fill the complete iPhone screen
+  in standalone mode instead of leaving a blank strip beneath the terminal
+  controls. (#25)
+
 ## [0.18.3] - 2026-08-25
 
 ### Fixed
@@ -1204,6 +1243,10 @@ project follows [Semantic Versioning](https://semver.org/).
   distorting their cells.
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
+
+[0.19.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.4...v0.19.0
+
+[0.18.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.3...v0.18.4
 
 [0.18.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.2...v0.18.3
 

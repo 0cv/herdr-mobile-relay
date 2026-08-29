@@ -2,7 +2,6 @@
   "id": "./",
   "name": "Herdr Mobile Relay",
   "short_name": "Herdr Relay",
-  "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "launch_handler": {

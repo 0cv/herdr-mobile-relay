@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/config"
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
@@ -45,10 +46,23 @@ func testServerWithCacheDir(cacheDir string) *Server {
 func TestResolveAgentSessionName(t *testing.T) {
 	home := t.TempDir()
 	codexDir := filepath.Join(home, ".codex")
-	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+	const codexSessionID = "123e4567-e89b-12d3-a456-426614174001"
+	rolloutPath := filepath.Join(codexDir, "sessions", "2026", "08", "12", "rollout-2026-08-12T10-00-00-"+codexSessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(rolloutPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	index := []byte("{\"id\":\"session-1\",\"thread_name\":\"current-session\"}\n")
+	row, err := json.Marshal(map[string]any{
+		"timestamp": "2026-08-12T10:00:00Z", "type": "response_item",
+		"payload": map[string]any{"type": "message", "role": "user",
+			"content": []any{map[string]any{"type": "input_text", "text": "build it"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rolloutPath, append(row, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	index := []byte("{\"id\":\"" + codexSessionID + "\",\"thread_name\":\"current-session\"}\n")
 	if err := os.WriteFile(filepath.Join(codexDir, "session_index.jsonl"), index, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -56,10 +70,12 @@ func TestResolveAgentSessionName(t *testing.T) {
 	s := testServer()
 	s.sessions = session.NewResolver(home)
 
-	named := &coordinator.AgentState{Agent: "codex", Session: "session-1"}
+	// named carries a canonical session id with both an index record and the
+	// rollout the reader would serve, the shape Locate requires post round-3.
+	named := &coordinator.AgentState{Agent: "codex", Session: codexSessionID}
 	s.resolveAgentSessionName(named)
 	if named.SessionName != "current-session" || named.Session != "current-session" ||
-		named.SessionID != "session-1" || !named.ConversationHistoryAvailable {
+		named.SessionID != codexSessionID || !named.ConversationHistoryAvailable {
 		t.Fatalf("named session = %#v, want resolved display name and retained history identity", named)
 	}
 
@@ -68,6 +84,38 @@ func TestResolveAgentSessionName(t *testing.T) {
 	if unnamed.SessionName != "" || unnamed.Session != "missing-session" ||
 		unnamed.SessionID != "missing-session" || !unnamed.ConversationHistoryAvailable {
 		t.Fatalf("unnamed session = %#v, want preserved history identity", unnamed)
+	}
+}
+
+// A whitespace-only session value is what herdr reports for a pane with no
+// real session yet - not the same as an empty string, but every other
+// consumer (Reader.Read, latestConversationResponse, the activity backfill
+// path) treats it as one via TrimSpace. Before the fix,
+// resolveAgentSessionName did not, so the untrimmed value survived the
+// `== ""` guard and reached the resolver's empty-id sole-transcript
+// heuristic, which - given a cwd whose project directory holds exactly one
+// transcript - invents a title for a session that was never reported. The
+// conversation view for the same (agent, cwd) reads its session id through
+// Reader.Read, which trims it back to empty and answers "not available", so
+// the pane would show a confident title next to an unavailable transcript.
+func TestResolveAgentSessionNameTrimsWhitespaceOnlySession(t *testing.T) {
+	home := t.TempDir()
+	const cwd = "/work/app"
+	writeClaudeTranscript(t, filepath.Join(home, ".claude", "projects", "-work-app", invariantSession+".jsonl"), "Sole Transcript Title")
+
+	s := testServer()
+	s.sessions = session.NewResolver(home)
+
+	agent := &coordinator.AgentState{Agent: "claude", Cwd: cwd, Session: "   "}
+	s.resolveAgentSessionName(agent)
+	if agent.SessionName != "" {
+		t.Fatalf("SessionName = %q, want empty for a whitespace-only session", agent.SessionName)
+	}
+	if agent.SessionID != "" {
+		t.Fatalf("SessionID = %q, want empty for a whitespace-only session", agent.SessionID)
+	}
+	if agent.ConversationHistoryAvailable {
+		t.Fatal("ConversationHistoryAvailable = true, want false for a whitespace-only session")
 	}
 }
 
@@ -128,7 +176,7 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 	s := testServer()
 	s.conversationM = conversation.NewReader(home)
 	want := rows[1]["message"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	if got := s.captureFinishedPane(context.Background(), "pane-1", "omp", sessionID); got != want {
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "omp", "", sessionID); got != want {
 		t.Fatalf("captured response = %q, want full conversation response %q", got, want)
 	}
 
@@ -142,6 +190,93 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 	backfilled := s.recentActivities(1)
 	if len(backfilled) != 1 || backfilled[0].Extract != want {
 		t.Fatalf("backfilled activity = %#v, want full conversation response", backfilled)
+	}
+}
+
+func TestCaptureFinishedPaneUsesOriginalConversationCwd(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174321"
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-old", sessionID+".jsonl"),
+		"Old work", "answer from original cwd")
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-new", sessionID+".jsonl"),
+		"New work", "answer from current cwd")
+
+	s := testServer()
+	s.conversationM = conversation.NewReader(home)
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new", SessionID: sessionID,
+	}}, s.state.RevisionCounter())
+
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "claude", "/work/old", sessionID); got != "answer from original cwd" {
+		t.Fatalf("captured response = %q, want the transcript bound to the completion's original cwd", got)
+	}
+}
+
+func TestActivityBackfillKeepsHistoricalSessionCwdEmpty(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174399"
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-old", sessionID+".jsonl"),
+		"Old work", "historical answer")
+
+	s := testServer()
+	s.conversationM = conversation.NewReader(home)
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new",
+	}}, s.state.RevisionCounter())
+	s.activityView = []activity.Entry{{
+		ID:        "historical-finished",
+		Timestamp: activity.MilliTimestamp(time.Date(2026, time.August, 12, 10, 0, 2, 0, time.UTC).UnixMilli()),
+		Kind:      "finished",
+		Status:    "completed",
+		Agent:     "claude",
+		PaneID:    "pane-1",
+		Session:   sessionID,
+	}}
+
+	backfilled := s.recentActivities(1)
+	if len(backfilled) != 1 || backfilled[0].Extract != "historical answer" {
+		t.Fatalf("historical activity = %#v, want response located without current pane cwd", backfilled)
+	}
+}
+
+func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.OMPListEnv, profile)
+	const sessionID = "123e4567-e89b-12d3-a456-426614174321"
+	path := filepath.Join(profile, "sessions", "-work", "session_"+sessionID+".jsonl")
+	writeInvariantRows(t, path,
+		map[string]any{"type": "message", "message": map[string]any{"role": "user", "content": "question"}})
+
+	reader := conversation.NewReader(home)
+	location := reader.Locate("omp", "/work", sessionID)
+	if location.Path != path {
+		t.Fatalf("location = %#v, want profile transcript %q", location, path)
+	}
+	if got := locatedAgentDir(home, "omp", location); got != profile {
+		t.Fatalf("agent dir = %q, want active profile %q", got, profile)
+	}
+	if raw := agentroots.AgentDirForSession(home, "omp", sessionID); raw != "" {
+		t.Fatalf("raw session ID unexpectedly selected an agent directory: %q", raw)
+	}
+}
+
+func TestConversationTupleIncludesAgentCwdAndSession(t *testing.T) {
+	base := &coordinator.AgentState{Agent: "claude", Cwd: "/work", SessionID: "session"}
+	if !sameConversationTuple(base, &coordinator.AgentState{Agent: "claude", Cwd: "/work", SessionID: "session"}) {
+		t.Fatal("identical conversation tuples did not match")
+	}
+	for name, changed := range map[string]*coordinator.AgentState{
+		"agent":   {Agent: "qoder", Cwd: "/work", SessionID: "session"},
+		"cwd":     {Agent: "claude", Cwd: "/other", SessionID: "session"},
+		"session": {Agent: "claude", Cwd: "/work", SessionID: "other"},
+	} {
+		if sameConversationTuple(base, changed) {
+			t.Errorf("%s change was not detected", name)
+		}
 	}
 }
 

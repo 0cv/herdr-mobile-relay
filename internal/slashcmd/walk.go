@@ -47,6 +47,14 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
+		// Symlinks stay skipped here, unlike in the skill scanners. A command
+		// tree is namespaced by directory, so following a link that resolves
+		// inside the same tree would publish one command file twice under two
+		// namespaces, and which name wins would fall out of os.ReadDir
+		// ordering. TestWalkSymlinkDirSkipped and TestWalkSymlinkFileSkipped
+		// pin that. Skill directories carry no namespace and are
+		// de-duplicated by resolved path, so scanSkillDirBudget can and does
+		// follow them.
 		if e.Type()&fs.ModeSymlink != 0 {
 			continue
 		}
@@ -67,6 +75,12 @@ func walkDirBudget(dir, namespace, source string, out *[]Command, suppressed *[]
 				childNS = namespace + ":" + name
 			}
 			walkDirBudget(fullPath, childNS, source, out, suppressed, budget, truncated)
+			continue
+		}
+		// A FIFO or socket named *.md would reach fileFrontmatter, whose
+		// os.ReadFile blocks on a pipe with no writer - a permanent hang in a
+		// service that polls. Only regular files can be commands.
+		if !e.Type().IsRegular() {
 			continue
 		}
 		if !strings.HasSuffix(name, ".md") {
@@ -103,6 +117,10 @@ func parseSkillEntry(skillFile, dirName, namespace, source string) (*Command, st
 	if !ok {
 		return nil, ""
 	}
+	return parseSkillMetadata(metadata, dirName, namespace, source)
+}
+
+func parseSkillMetadata(metadata map[string]string, dirName, namespace, source string) (*Command, string) {
 	name := metadata["name"]
 	if name == "" {
 		name = dirName
@@ -151,6 +169,84 @@ func scanSkillDir(dir, source string) []Command {
 	return cmds
 }
 
+// entryIsDir classifies a directory entry by what it points at, not by its own
+// type bits. os.ReadDir reports ModeSymlink for a symlink, so DirEntry.IsDir()
+// is false for a symlink to a directory and a skill directory symlinked in
+// from a dotfiles repo would be silently skipped - the same hazard
+// agentroots.profileAgentDirs documents at length. Only a symlink needs the
+// stat: the type bits already settle every other entry.
+func entryIsDir(e os.DirEntry, path string) bool {
+	if e.IsDir() {
+		return true
+	}
+	if e.Type()&fs.ModeSymlink == 0 {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// scopedSkillMetadata opens project skills relative to the project boundary.
+// os.Root permits symlinks that remain inside that boundary and rejects skill
+// directories or SKILL.md links that escape it. Personal roots intentionally
+// retain their symlink-friendly behavior.
+func scopedSkillMetadata(dir, entry, source, boundary string) (map[string]string, string, bool) {
+	skillFile := filepath.Join(dir, entry, "SKILL.md")
+	if source != "project" {
+		info, err := os.Stat(skillFile)
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, "", false
+		}
+		resolved, err := filepath.EvalSymlinks(skillFile)
+		if err != nil {
+			resolved = skillFile
+		}
+		metadata, ok := readSkillMetadata(skillFile)
+		return metadata, resolved, ok
+	}
+
+	projectRoot := boundary
+	if projectRoot == "" {
+		projectRoot = filepath.Dir(filepath.Dir(filepath.Clean(dir)))
+	}
+	realRoot, err := filepath.EvalSymlinks(projectRoot)
+	if err != nil {
+		return nil, "", false
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, "", false
+	}
+	relativeDir, err := filepath.Rel(realRoot, realDir)
+	if err != nil || relativeDir == ".." || strings.HasPrefix(relativeDir, ".."+string(filepath.Separator)) {
+		return nil, "", false
+	}
+	root, err := os.OpenRoot(realRoot)
+	if err != nil {
+		return nil, "", false
+	}
+	defer root.Close()
+	relativeFile := filepath.Join(relativeDir, entry, "SKILL.md")
+	file, err := root.Open(relativeFile)
+	if err != nil {
+		return nil, "", false
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, "", false
+	}
+	metadata, ok := readSkillMetadataFile(file)
+	if !ok {
+		return nil, "", false
+	}
+	resolved, err := filepath.EvalSymlinks(skillFile)
+	if err != nil {
+		resolved = skillFile
+	}
+	return metadata, resolved, true
+}
+
 func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -158,34 +254,186 @@ func scanSkillDirBudget(dir, source string, budget *int) ([]Command, []string, b
 	}
 	var commands []Command
 	var suppressed []string
+	seen := make(map[string]bool, len(entries))
 	truncated := false
 	for _, e := range entries {
 		if *budget <= 0 {
 			truncated = true
 			break
 		}
-		if !e.IsDir() {
-			continue
-		}
-		if e.Type()&fs.ModeSymlink != 0 {
-			continue
-		}
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		skillFile := filepath.Join(dir, e.Name(), "SKILL.md")
-		info, err := os.Stat(skillFile)
-		if err != nil || !info.Mode().IsRegular() {
+		skillDir := filepath.Join(dir, e.Name())
+		if !entryIsDir(e, skillDir) {
 			continue
 		}
+		metadata, resolved, ok := scopedSkillMetadata(dir, e.Name(), source, "")
+		if !ok {
+			continue
+		}
+		if seen[resolved] {
+			continue
+		}
+		seen[resolved] = true
 		*budget--
-		if cmd, suppressedName := parseSkillEntry(skillFile, e.Name(), "", source); cmd != nil {
+		if cmd, suppressedName := parseSkillMetadata(metadata, e.Name(), "", source); cmd != nil {
 			commands = append(commands, *cmd)
 		} else if suppressedName != "" {
 			suppressed = append(suppressed, suppressedName)
 		}
 	}
 	return commands, suppressed, truncated
+}
+
+type skillScanOptions struct {
+	boundary           string
+	requireDescription bool
+	respectEnabled     bool
+}
+
+// scanSkillDirFormat scans dir for <entry>/SKILL.md and renders each skill
+// through format, which must contain exactly one "{name}".
+func scanSkillDirFormat(dir, source, format string, budget *int) ([]Command, bool) {
+	return scanSkillDirFormatOptions(dir, source, format, budget, skillScanOptions{requireDescription: true})
+}
+
+func scanSkillDirFormatOptions(dir, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
+	if strings.Count(format, "{name}") != 1 {
+		return nil, false
+	}
+	if options.boundary != "" && !pathWithin(dir, options.boundary) {
+		return nil, false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, false
+	}
+	var commands []Command
+	seen := make(map[string]bool, len(entries))
+	truncated := false
+	for _, e := range entries {
+		if *budget <= 0 {
+			truncated = true
+			break
+		}
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		skillDir := filepath.Join(dir, e.Name())
+		if info, err := os.Stat(skillDir); err != nil || !info.IsDir() {
+			continue
+		}
+		metadata, real, ok := scopedSkillMetadata(dir, e.Name(), source, options.boundary)
+		if !ok {
+			continue
+		}
+		if seen[real] {
+			continue
+		}
+		seen[real] = true
+		*budget--
+		if options.respectEnabled && strings.EqualFold(strings.TrimSpace(metadata["enabled"]), "false") {
+			continue
+		}
+		name := metadata["name"]
+		if name == "" {
+			name = e.Name()
+		}
+		if !commandNamePattern.MatchString(name) {
+			continue
+		}
+		description := metadata["description"]
+		if description == "" {
+			if options.requireDescription {
+				continue
+			}
+			description = strings.ToUpper(name[:1]) + name[1:] + " skill"
+		}
+		commands = append(commands, Command{
+			Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
+			Description:  compact(description, 240),
+			Source:       source,
+			ArgumentHint: compact(metadata["argument-hint"], 120),
+		})
+	}
+	return commands, truncated
+}
+
+// scanSkillPathFormatOptions accepts either a skill directory containing
+// SKILL.md, a single Markdown skill file, or a directory of skill
+// subdirectories. It is used for explicit manifest paths, where the path itself
+// can name the skill.
+func scanSkillPathFormatOptions(path, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
+	if strings.Count(format, "{name}") != 1 || *budget <= 0 {
+		return nil, *budget <= 0
+	}
+	if options.boundary != "" && !pathWithin(path, options.boundary) {
+		return nil, false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, false
+	}
+	if info.Mode().IsRegular() {
+		if !strings.EqualFold(filepath.Ext(path), ".md") {
+			return nil, false
+		}
+		command := skillCommandFromFile(path, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), source, format, budget, options)
+		if command == nil {
+			return nil, false
+		}
+		return []Command{*command}, false
+	}
+	if !info.IsDir() {
+		return nil, false
+	}
+	skillFile := filepath.Join(path, "SKILL.md")
+	if skillInfo, err := os.Stat(skillFile); err == nil && skillInfo.Mode().IsRegular() {
+		command := skillCommandFromFile(skillFile, filepath.Base(path), source, format, budget, options)
+		if command == nil {
+			return nil, false
+		}
+		return []Command{*command}, false
+	}
+	return scanSkillDirFormatOptions(path, source, format, budget, options)
+}
+
+func skillCommandFromFile(path, fallbackName, source, format string, budget *int, options skillScanOptions) *Command {
+	if *budget <= 0 {
+		return nil
+	}
+	if options.boundary != "" && !pathWithin(path, options.boundary) {
+		return nil
+	}
+	metadata, ok := readSkillMetadata(path)
+	if !ok {
+		return nil
+	}
+	*budget--
+	if options.respectEnabled && strings.EqualFold(strings.TrimSpace(metadata["enabled"]), "false") {
+		return nil
+	}
+	name := metadata["name"]
+	if name == "" {
+		name = fallbackName
+	}
+	if !commandNamePattern.MatchString(name) {
+		return nil
+	}
+	description := metadata["description"]
+	if description == "" {
+		if options.requireDescription {
+			return nil
+		}
+		description = strings.ToUpper(name[:1]) + name[1:] + " skill"
+	}
+	return &Command{
+		Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
+		Description:  compact(description, 240),
+		Source:       source,
+		ArgumentHint: compact(metadata["argument-hint"], 120),
+	}
 }
 
 func fileFrontmatter(path string) map[string]string {
