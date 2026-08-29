@@ -69,6 +69,34 @@ const ompPlanApprovalView = `
 ╰────────────────────────────────────────────────────────────╯
 `
 
+const ompToolApprovalView = `
+╭─ Allow tool: bash ─────────────────────────────────────────────────────╮
+│                                                                        │
+│ Command: touch /tmp/push-approval-test                                 │
+│                                                                        │
+│   Approve                                                             │
+│    Deny                                                                │
+│                                                                        │
+│ up/down navigate  enter select  esc cancel                             │
+│                                                                        │
+╰────────────────────────────────────────────────────────────────────────╯
+`
+
+const ompWriteApprovalView = `
+╭─ Allow tool: write ────────────────────────────────────────────────────╮
+│                                                                        │
+│ Path: /tmp/variant-check.txt                                           │
+│ Content:                                                               │
+│ hello                                                                  │
+│                                                                        │
+│   Approve                                                             │
+│    Deny                                                                │
+│                                                                        │
+│ up/down navigate  enter select  esc cancel                             │
+│                                                                        │
+╰────────────────────────────────────────────────────────────────────────╯
+`
+
 func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -85,6 +113,7 @@ func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 			"Approve and execute", "Approve and compact context",
 			"Approve and keep context (~59k / 1m)", "Refine plan",
 		}},
+		{"omp tool approval", "omp", ompToolApprovalView, []string{"Approve", "Deny"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -111,6 +140,75 @@ func TestClassifyOMPPlanApprovalFocus(t *testing.T) {
 	if got := Classify(stale, "omp"); got.Kind == AttentionApproval {
 		t.Fatalf("stale classification = %+v, want no approval", got)
 	}
+}
+
+func TestClassifyOMPToolApproval(t *testing.T) {
+	t.Run("bash dialog with focus on Approve", func(t *testing.T) {
+		got := Classify(ompToolApprovalView, "omp")
+		if got.Kind != AttentionApproval || got.ApprovalFocus != 0 ||
+			got.Command != "touch /tmp/push-approval-test" {
+			t.Fatalf("classification = %+v, want focus 0 and the dialog's command", got)
+		}
+	})
+	t.Run("focus marker on Deny", func(t *testing.T) {
+		moved := strings.Replace(ompToolApprovalView, "\uf054 Approve", "  Approve", 1)
+		moved = strings.Replace(moved, "   Deny", " \uf054 Deny", 1)
+		got := Classify(moved, "omp")
+		if got.Kind != AttentionApproval || got.ApprovalFocus != 1 {
+			t.Fatalf("classification = %+v, want focus 1", got)
+		}
+	})
+	t.Run("wrapped command folds into the command, not the options", func(t *testing.T) {
+		wrapped := strings.Replace(ompToolApprovalView,
+			"│ Command: touch /tmp/push-approval-test                                 │",
+			"│ Command: touch /tmp/push-approval-test-with-a-name-so-wide-it-wraps-on │\n│   to-the-next-row                                                      │", 1)
+		got := Classify(wrapped, "omp")
+		if got.Kind != AttentionApproval ||
+			!reflect.DeepEqual(got.Options, []string{"Approve", "Deny"}) {
+			t.Fatalf("classification = %+v, want the two real controls only", got)
+		}
+	})
+	t.Run("status footer below a live dialog", func(t *testing.T) {
+		got := Classify(ompToolApprovalView+"\n J 5h 10% w 42% · omp\n codexS 5h 4% │ cache till 6:27pm\n", "omp")
+		if got.Kind != AttentionApproval {
+			t.Fatalf("classification = %+v, want approval", got)
+		}
+	})
+	t.Run("scrolled-away dialog with trailing content", func(t *testing.T) {
+		stale := ompToolApprovalView + "\n● Ran tool\n  one\n  two\n  three\n  four\n  five\n  six\n"
+		if got := Classify(stale, "omp"); got.Kind == AttentionApproval {
+			t.Fatalf("classification = %+v, want no approval", got)
+		}
+	})
+	t.Run("dismissed dialog with a completed-turn line", func(t *testing.T) {
+		dismissed := ompToolApprovalView + "\n● Ran tool\nWorked for 12s\n"
+		if got := Classify(dismissed, "omp"); got.Kind == AttentionApproval {
+			t.Fatalf("classification = %+v, want no approval", got)
+		}
+	})
+	t.Run("non-control rows under the focus marker", func(t *testing.T) {
+		prose := strings.Replace(ompToolApprovalView, "\uf054 Approve", "\uf054 This tool edits files", 1)
+		prose = strings.Replace(prose, "   Deny", "   outside the workspace", 1)
+		if got := Classify(prose, "omp"); got.Kind == AttentionApproval {
+			t.Fatalf("classification = %+v, want no approval", got)
+		}
+	})
+	t.Run("detail rows flush against the controls", func(t *testing.T) {
+		flush := strings.Replace(ompWriteApprovalView,
+			"│ hello                                                                  │\n│                                                                        │\n",
+			"│ hello                                                                  │\n", 1)
+		if got := Classify(flush, "omp"); got.Kind == AttentionApproval {
+			t.Fatalf("classification = %+v, want refusal of the undelimited menu", got)
+		}
+	})
+	t.Run("write dialog surfaces detail rows as the command", func(t *testing.T) {
+		got := Classify(ompWriteApprovalView, "omp")
+		if got.Kind != AttentionApproval || got.ApprovalFocus != 0 ||
+			!reflect.DeepEqual(got.Options, []string{"Approve", "Deny"}) ||
+			got.Command != "Path: /tmp/variant-check.txt Content: hello" {
+			t.Fatalf("classification = %+v, want the two controls and the detail rows", got)
+		}
+	})
 }
 
 func TestClassifyStructuredQuestionsBeforeApprovalMenus(t *testing.T) {
@@ -334,6 +432,16 @@ func TestClassifyCapturedApprovalLayouts(t *testing.T) {
 				"Modify with external editor",
 				"Reject and type something",
 				"No",
+			},
+			focus: 0,
+		},
+		{
+			name:    "omp tool approval",
+			agent:   "omp",
+			fixture: "omp-tool-approval.ansi",
+			options: []string{
+				"Approve",
+				"Deny",
 			},
 			focus: 0,
 		},

@@ -44,6 +44,7 @@ var (
 			`\b(?:shift\+tab|ctrl\+|cmd\+)|\b\d+\s+agents?\b)`,
 	)
 	ompPlanMenuPattern         = regexp.MustCompile(`(?i)^plan mode\s*[-–—]\s*next step$`)
+	ompToolApprovalPattern     = regexp.MustCompile(`(?i)^╭[─━═\s]*allow tool:\s*\S`)
 	ompPlanFocusPattern        = regexp.MustCompile(`^[❯›>\x{f054}]\s+`)
 	ompInputHeaderPattern      = regexp.MustCompile(`^╭[─━═]{2}.*╮$`)
 	ompInputFooterPattern      = regexp.MustCompile(`^╰[─━═].*[─━═]╯$`)
@@ -73,12 +74,15 @@ func Classify(text, agent string) Classification {
 				QuestionLayout: true,
 			}
 		}
-		if options, focus := liveApprovalDetails(text, agent); len(options) > 0 {
+		if options, focus, command := liveApprovalDetails(text, agent); len(options) > 0 {
 			summaryLines := paneSummaryLines(text)
+			if command == "" {
+				command = approvalCommand(summaryLines)
+			}
 			return Classification{
 				Kind:          AttentionApproval,
 				Prompt:        compact(strings.Join(summaryLines, "\n"), 500),
-				Command:       compact(approvalCommand(summaryLines), 240),
+				Command:       compact(command, 240),
 				Options:       options,
 				ApprovalFocus: focus,
 			}
@@ -100,14 +104,18 @@ func Classify(text, agent string) Classification {
 	}
 }
 
-func liveApprovalDetails(text, agent string) ([]string, int) {
+func liveApprovalDetails(text, agent string) ([]string, int, string) {
 	normalized := strings.ToLower(agent)
 	if strings.Contains(normalized, "opencode") {
-		return nil, 0
+		return nil, 0, ""
 	}
 	lines := cleanLines(text)
 	if ompAskAgent(normalized) {
-		return ompPlanApprovalDetails(lines)
+		if options, focus, command := ompToolApprovalDetails(lines); len(options) > 0 {
+			return options, focus, command
+		}
+		options, focus := ompPlanApprovalDetails(lines)
+		return options, focus, ""
 	}
 	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	menuLines := make([]string, len(rawLines))
@@ -116,12 +124,12 @@ func liveApprovalDetails(text, agent string) ([]string, int) {
 	}
 	rows := latestApprovalMenu(menuLines)
 	if len(rows) < 2 || !approvalLabels(rows) {
-		return nil, 0
+		return nil, 0, ""
 	}
 
 	latestCompleted := latestCompletedTurnLine(lines)
 	if rows[0].line <= latestCompleted {
-		return nil, 0
+		return nil, 0, ""
 	}
 
 	headerStart := latestCompleted + 1
@@ -130,10 +138,10 @@ func liveApprovalDetails(text, agent string) ([]string, int) {
 	}
 	header := strings.Join(lines[headerStart:rows[0].line], "\n")
 	if !approvalHeader(normalized, header) {
-		return nil, 0
+		return nil, 0, ""
 	}
 	if newerOutputAfterMenu(menuLines, rows[len(rows)-1].line, normalized) {
-		return nil, 0
+		return nil, 0, ""
 	}
 
 	options := make([]string, 0, len(rows))
@@ -144,7 +152,121 @@ func liveApprovalDetails(text, agent string) ([]string, int) {
 			focus = index
 		}
 	}
-	return options, focus
+	return options, focus, ""
+}
+
+// The status block under a live dialog is at most this many non-empty lines.
+const maxTrailingStatusLines = 6
+
+func ompDialogContentRow(row string) bool {
+	return row != "" && !ompBorderLine(row) && !approvalFooterPattern.MatchString(row)
+}
+
+func lastLineMatching(lines []string, pattern *regexp.Regexp) int {
+	for index := len(lines) - 1; index >= 0; index-- {
+		if pattern.MatchString(lines[index]) {
+			return index
+		}
+	}
+	return -1
+}
+
+// ompToolApprovalDetails detects the OMP tool-approval dialog ("Allow tool: bash"), which
+// uses a titled border box with unnumbered focus-marker rows. It also returns the
+// dialog's own "Command: ..." value so approvalCommand's prompt-glyph scan is not needed.
+func ompToolApprovalDetails(lines []string) ([]string, int, string) {
+	header := lastLineMatching(lines, ompToolApprovalPattern)
+	if header < 0 {
+		return nil, 0, ""
+	}
+	end := -1
+	for index := header + 1; index < len(lines); index++ {
+		if strings.HasPrefix(lines[index], "╰") {
+			end = index
+			break
+		}
+	}
+	if end < 0 {
+		return nil, 0, ""
+	}
+	// A live dialog sits directly above the status line; a completed-turn
+	// line or more trailing content means the box already scrolled into
+	// history and must not re-approve.
+	if latestCompletedTurnLine(lines) > end {
+		return nil, 0, ""
+	}
+	trailing := 0
+	for _, line := range lines[end+1:] {
+		if line != "" {
+			trailing++
+		}
+	}
+	if trailing > maxTrailingStatusLines {
+		return nil, 0, ""
+	}
+	rows := lines[header+1 : end]
+	command := ""
+	commandEnd := -1
+	for index, row := range rows {
+		if strings.HasPrefix(strings.ToLower(row), "command:") {
+			command = strings.TrimSpace(row[len("command:"):])
+			for commandEnd = index; commandEnd+1 < len(rows); commandEnd++ {
+				next := rows[commandEnd+1]
+				if !ompDialogContentRow(next) || ompPlanFocusPattern.MatchString(next) {
+					break
+				}
+				// continuation row of a command wider than the dialog box
+				command += " " + next
+			}
+			break
+		}
+	}
+	marker := lastLineMatching(rows, ompPlanFocusPattern)
+	if marker < 0 {
+		return nil, 0, ""
+	}
+	// Options are the contiguous run of rows around the focus marker; detail
+	// rows (Command:, Path:, wrapped values) sit in their own blank-delimited
+	// blocks above it.
+	start, stop := marker, marker
+	for start-1 > commandEnd && ompDialogContentRow(rows[start-1]) {
+		start--
+	}
+	for stop+1 < len(rows) && ompDialogContentRow(rows[stop+1]) {
+		stop++
+	}
+	// A run not blank- or border-delimited above means detail rows rendered
+	// flush against the controls; refuse rather than emit a mis-indexed menu.
+	if start > 0 && rows[start-1] != "" && !ompBorderLine(rows[start-1]) {
+		return nil, 0, ""
+	}
+	options := make([]string, 0, stop-start+1)
+	focus := 0
+	for index := start; index <= stop; index++ {
+		row := rows[index]
+		if m := ompPlanFocusPattern.FindString(row); m != "" {
+			focus = len(options)
+			row = strings.TrimSpace(strings.TrimPrefix(row, m))
+		}
+		options = append(options, compact(row, 500))
+	}
+	if len(options) < 2 || !approvalLabels([]approvalMenuRow{
+		{label: options[0]}, {label: options[len(options)-1]},
+	}) {
+		return nil, 0, ""
+	}
+	if command == "" {
+		// No Command: row (write/edit dialogs): the detail rows above the
+		// options describe the action better than any pane-wide fallback.
+		details := make([]string, 0, start)
+		for _, row := range rows[:start] {
+			if ompDialogContentRow(row) {
+				details = append(details, row)
+			}
+		}
+		command = strings.Join(details, " ")
+	}
+	return options, focus, command
 }
 
 // ompPlanApprovalDetails detects the OMP plan-review action menu, which uses

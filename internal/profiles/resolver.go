@@ -37,13 +37,14 @@ var defaultAliases = map[string]string{
 	"pi-coding-agent": "pi",
 }
 
-var defaultSkillDirs = map[string][]string{
-	"pi": {"~/.pi/agent/skills"},
-}
+// defaultSkillDirs and defaultCommandFormats hold no defaults: every provider
+// discovers its own skill directories the way its agent does, and a default
+// format would make CommandConfig report every such profile as explicitly
+// configured, permanently routing it down the INI escape hatch. Both maps stay
+// because the INI [skills] and [commands] sections populate them at runtime.
+var defaultSkillDirs = map[string][]string{}
 
-var defaultCommandFormats = map[string]string{
-	"pi": "skill:{name}",
-}
+var defaultCommandFormats = map[string]string{}
 
 type IntegrationStatuser interface {
 	IntegrationStatus(ctx context.Context) ([]byte, error)
@@ -357,19 +358,26 @@ func (r *Resolver) AgentVersion(profileID string) string {
 }
 
 func (r *Resolver) CommandConfig(profileID string) ([]string, string, bool) {
-	// Profiles() refreshes all INI-derived settings when the cache expired or
-	// Reload cleared it, keeping profiles, aliases, skills, and formats on one
-	// configuration generation.
+	dirs, format, suppressed := r.CommandDiscovery(profileID)
+	return dirs, format, !suppressed && format != ""
+}
+
+// CommandDiscovery preserves an explicit "off" independently from an absent or
+// invalid command format so native provider discovery cannot override opt-out.
+func (r *Resolver) CommandDiscovery(profileID string) (dirs []string, format string, suppressed bool) {
 	_ = r.Profiles()
 	profileID = strings.ToLower(strings.TrimSpace(profileID))
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	format, configured := r.formats[profileID]
 	format = strings.TrimSpace(format)
-	if !configured || format == "" || strings.EqualFold(format, "off") || !validCommandFormat(format) {
+	if configured && strings.EqualFold(format, "off") {
+		return nil, "", true
+	}
+	if !configured || format == "" || !validCommandFormat(format) {
 		return nil, "", false
 	}
-	return expandedPaths(r.skillDirs[profileID]), format, true
+	return expandedPaths(r.skillDirs[profileID]), format, false
 }
 
 func (r *Resolver) warnOnce(key, message string, args ...any) {

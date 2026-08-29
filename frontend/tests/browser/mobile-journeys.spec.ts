@@ -1980,6 +1980,120 @@ test('uses Resize Session as the only terminal layout', async ({ page }) => {
   expect(await page.evaluate(() => localStorage.getItem('herdr_terminal_layout'))).toBeNull();
 });
 
+test('keeps a wide pane readable while its size lease is still pending', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'claude' }],
+  });
+  // The relay advertises the lease capability unconditionally, so the pane is
+  // shown before any width is granted. Leaving the lease unanswered pins that
+  // state: wrapping then had no cap and broke every row mid-word.
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
+  const wideRow = `${'the pane is far wider than the phone viewport '.repeat(3)}and keeps going`;
+  // A box border padded out to the pane's width. Preserved spaces may hang
+  // past the edge instead of wrapping, which WebKit reports as scrollable
+  // width, handing the reader a pane that pans sideways.
+  const paddedRow = `╰─${' '.repeat(150)}─╯`;
+  // A bordered row of cells: box-drawing renders as a fixed-width cell grid
+  // with no wrap opportunity between cells, so past the phone's width it has
+  // to fall back to text that can wrap.
+  const gridRow = `│ ${'aligned cell '.repeat(12)}│`;
+  // Long unbroken tokens are routine in agent output.
+  const tokenRow = `https://example.test/${'x'.repeat(300)}`;
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
+    content: ['first row', wideRow, paddedRow, gridRow, tokenRow, 'last row'].join('\n'),
+  });
+
+  const terminal = page.getByRole('log');
+  const lines = terminal.locator('.ansi-line');
+  await expect(lines).toHaveCount(6);
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBeGreaterThan(0);
+
+  // The pane is wider than the phone and no lease has landed, so alignment is
+  // impossible either way. Wrapping at the container keeps the text readable:
+  // sideways scrolling stranded the reader on line tails after every refresh.
+  const geometry = await terminal.evaluate((element) => {
+    const rows = Array.from(element.querySelectorAll<HTMLElement>('.ansi-line'));
+    const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+    const wide = rows[1];
+    // A word split across lines reports more than one client rect. A word too
+    // long to fit a line has to break; one that would have fit must not.
+    let brokenWords = 0;
+    const walker = document.createTreeWalker(wide, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node.textContent || '';
+      const pattern = /\S+/g;
+      for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+        const range = document.createRange();
+        range.setStart(node, match.index);
+        range.setEnd(node, match.index + match[0].length);
+        const rects = Array.from(range.getClientRects());
+        const advance = rects.reduce((total, rect) => total + rect.width, 0);
+        if (rects.length > 1 && advance <= element.clientWidth) brokenWords += 1;
+      }
+    }
+    return {
+      lineHeight,
+      wideHeight: wide.getBoundingClientRect().height,
+      narrowHeight: rows[0].getBoundingClientRect().height,
+      brokenWords,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    };
+  });
+  expect(geometry.lineHeight).toBeGreaterThan(0);
+  expect(geometry.narrowHeight).toBeLessThan(geometry.lineHeight * 1.5);
+  expect(geometry.wideHeight).toBeGreaterThan(geometry.lineHeight * 1.5);
+  expect(geometry.brokenWords).toBe(0);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+});
+
+test('estimates wrapped row heights while a lease is pending', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Wide pane app', agent: 'omp' }],
+  });
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Wide pane app on Fedora' }).click();
+  // Rows that wrap to several lines each. The virtualizer sizes unmounted rows
+  // from an estimate, so an estimate of one line per row understates the whole
+  // log and the scroll geometry lands the reader in the wrong place.
+  const content = Array.from({ length: 400 }, (_, index) =>
+    `row ${String(index + 1).padStart(4, '0')} ${'wide content '.repeat(14)}`).join('\n');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content });
+
+  const terminal = page.getByRole('log');
+  await expect(terminal.locator('.ansi-line').first()).toBeVisible();
+  const estimated = await terminal.evaluate((element) => element.scrollHeight);
+  // Walking the log mounts and measures every row, so the height afterwards is
+  // the truth the estimate was predicting.
+  const step = await terminal.evaluate((element) => Math.max(1, element.clientHeight - 20));
+  for (let top = 0; top <= estimated; top += step) {
+    await terminal.evaluate((element, offset) => {
+      element.scrollTop = offset;
+      element.dispatchEvent(new Event('scroll'));
+    }, top);
+    await page.waitForTimeout(50);
+  }
+  await expect.poll(async () => {
+    const measured = await terminal.evaluate((element) => element.scrollHeight);
+    return Math.abs(measured - estimated) / measured < 0.1;
+  }).toBe(true);
+});
+
 test('reports unavailable Resize Session without exposing legacy width modes', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -2738,6 +2852,94 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
     .filter((command) => command.type === 'release_pane_size').length).toBe(2);
 });
 
+test('paints again when the relay keeps a pane settling after a resize', async ({ page }) => {
+  // Frames read while the agent repaints are suppressed so a transient screen
+  // never replaces the stable one. That wait must be bounded: a shared session
+  // whose desktop client keeps fighting the leased size re-arms the relay's
+  // settling window on every read, and an unbounded wait freezes the phone on
+  // its last painted frame for as long as that lasts.
+  await page.addInitScript(() => localStorage.setItem('herdr_terminal_height_lease', 'true'));
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'pane_size_lease_rows', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'stable row before resize',
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('stable row before resize');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+
+  // A width change captures the painted frame as the settling baseline.
+  const viewport = page.viewportSize()!;
+  await page.setViewportSize({ width: viewport.width + 120, height: viewport.height });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
+
+  // The relay now reports every frame as settling for longer than the pane
+  // takes to repaint. The newest screen must still reach the phone.
+  for (let index = 1; index <= 12; index += 1) {
+    await server(page, 0, {
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      format: 'ansi',
+      content: `live row ${index}`,
+      resize_settling: true,
+    });
+    await page.waitForTimeout(500);
+  }
+  await expect(terminal).toContainText('live row 12');
+});
+
+test('paints again when a re-entry lease never lands', async ({ page }) => {
+  // The same wait also covers a pane with no lease yet. Reopening a pane asks
+  // for a fresh lease while the cached frame is painted, so a relay that never
+  // answers must not strand the phone on that cached frame.
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'pane_size_lease', 'slash_commands'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Resizable app', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: 'cached row before re-entry',
+  });
+  const terminal = page.getByRole('log');
+  await expect(terminal).toContainText('cached row before re-entry');
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(1);
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'release_pane_size').length).toBe(1);
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Resizable app on Fedora' }).click();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'lease_pane_size').length).toBe(2);
+
+  for (let index = 1; index <= 12; index += 1) {
+    await server(page, 0, {
+      type: 'pane_content',
+      pane_id: 'w1:p1',
+      format: 'ansi',
+      content: `unleased row ${index}`,
+    });
+    await page.waitForTimeout(500);
+  }
+  await expect(terminal).toContainText('unleased row 12');
+});
+
 test('does not lease rows unless the height setting is on', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -3138,8 +3340,10 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await page.getByRole('button', { name: 'Copy History app message as Markdown' }).click();
   await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedConversation')))
     .toBe('# middle retained answer');
+  // Superseded prose collapses out of the compact view; a tool call is a
+  // distinct event and stays, so the Read call is visible in both modes.
   await expect(page.getByText('intermediate progress update')).toBeHidden();
-  await expect(page.getByText('Read', { exact: true })).toBeHidden();
+  await expect(page.getByText('Read', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Full history' }).click();
   await expect(page.getByText('intermediate progress update')).toBeVisible();
   await expect(page.getByText('Read', { exact: true })).toBeVisible();
@@ -3248,6 +3452,85 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('button', { name: 'Open History app on Fedora' })).toBeVisible();
+});
+
+test('keeps tool-only agent turns and decodes their arguments', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: [
+      'attention_classification',
+      'clear_activities',
+      'directory_browser',
+      'self_update',
+      'structured_questions',
+      'slash_commands',
+      'conversation_history',
+    ],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Tool history',
+      agent: 'claude',
+      session: 'Current session',
+      conversation_history_available: true,
+    }],
+  });
+  // Claude Code records one text-less assistant turn per tool call and
+  // serialises the arguments as JSON, which is the shape the compact view used
+  // to discard entirely.
+  const output = Array.from({ length: 200 }, (_, index) => `line-${index}`).join('\n');
+  await setConversationFixture(page, {
+    entries: [
+      { id: 'turn-1', timestamp: '2026-08-12T09:00:00Z', role: 'user', text: 'run the probe' },
+      {
+        id: 'turn-2',
+        timestamp: '2026-08-12T09:00:01Z',
+        role: 'assistant',
+        text: '',
+        tools: [{
+          id: 'tool-1',
+          name: 'Bash',
+          input: JSON.stringify({
+            command: 'python3 /tmp/band-sample.py',
+            description: 'List the band',
+            timeout: 300000,
+          }),
+          output,
+        }],
+      },
+      { id: 'turn-3', timestamp: '2026-08-12T09:00:02Z', role: 'assistant', text: 'Probe finished.' },
+    ],
+    total: 3,
+  });
+
+  await page.getByRole('button', { name: 'Open Tool history on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('Probe finished.')).toBeVisible();
+
+  // The compact view must keep the tool turn: it is the only record of the work.
+  const card = page.getByLabel(/^Conversation with/).locator('details').filter({ hasText: 'Bash' });
+  await expect(card).toBeVisible();
+  const search = page.getByRole('searchbox', { name: 'Search displayed conversation' });
+  await search.fill('Bash');
+  await expect(card).toBeVisible();
+  await search.fill('');
+  await card.locator('summary').click();
+
+  const panels = card.locator('pre');
+  await expect(panels.first()).toContainText('command: python3 /tmp/band-sample.py');
+  await expect(panels.first()).toContainText('timeout: 300000');
+  await expect(panels.first()).not.toContainText('{"command"');
+
+  await expect(panels.nth(1)).not.toContainText('line-199');
+  await card.getByRole('button', { name: 'Show all 200 lines' }).click();
+  await expect(panels.nth(1)).toContainText('line-199');
+  await card.getByRole('button', { name: 'Show less' }).click();
+  await expect(panels.nth(1)).not.toContainText('line-199');
 });
 
 test('opens a long conversation at its newest turn and holds the pin', async ({ page }) => {

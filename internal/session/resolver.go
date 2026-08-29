@@ -5,57 +5,64 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 )
 
 const cacheTTL = 60 * time.Second
 
 type cacheEntry struct {
-	name    string
-	expires time.Time
-	sig     string
+	name     string
+	location conversation.Location
+	expires  time.Time
 }
 
 type Resolver struct {
-	mu    sync.Mutex
-	cache map[string]cacheEntry
-	home  string
+	mu     sync.Mutex
+	cache  map[string]cacheEntry
+	home   string
+	reader *conversation.Reader
 }
 
+// NewResolver creates an independent title and transcript resolver.
 func NewResolver(home string) *Resolver {
-	return &Resolver{
-		cache: make(map[string]cacheEntry),
-		home:  home,
-	}
+	return NewResolverWithReader(home, conversation.NewReader(home))
 }
+
+// NewResolverWithReader shares transcript-location decisions with conversation
+// history consumers.
+func NewResolverWithReader(home string, reader *conversation.Reader) *Resolver {
+	if reader == nil {
+		reader = conversation.NewReader(home)
+	}
+	return &Resolver{cache: make(map[string]cacheEntry), home: home, reader: reader}
+}
+
+// Root accessors remain useful in tests that pin configuration precedence.
+func (r *Resolver) claudeRoots() []string { return agentroots.Claude(r.home) }
+func (r *Resolver) qoderRoots() []string  { return agentroots.Qoder(r.home) }
+func (r *Resolver) codexHomes() []string  { return agentroots.CodexHomes(r.home) }
+func (r *Resolver) piRoots() []string     { return agentroots.Pi(r.home) }
+func (r *Resolver) ompRoots() []string    { return agentroots.OMP(r.home) }
 
 func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
-	agentLower := strings.ToLower(agent)
-	sessionPath := ""
-	if isOMPSessionAgent(agentLower) {
-		sessionPath = r.ompSessionPath(sessionID)
-		if sessionPath == "" {
-			return ""
-		}
-	} else if isPiSessionAgent(agentLower) {
-		sessionPath = r.piSessionPath(sessionID)
-		if sessionPath == "" {
-			return ""
-		}
-	} else if sessionID != "" && !validSessionID(sessionID) {
+	if sessionID == "" {
 		return ""
 	}
-
-	key := agent + "|" + cwd + "|" + sessionID
-	sig := r.sourceSignature(agent, cwd, sessionID)
-
+	agentLower := strings.ToLower(strings.TrimSpace(agent))
+	key := agentLower + "|" + cwd + "|" + sessionID
+	location := r.reader.Locate(agent, cwd, sessionID)
+	if location.Path == "" {
+		return ""
+	}
+	now := time.Now()
 	r.mu.Lock()
-	if entry, ok := r.cache[key]; ok && entry.sig == sig && time.Now().Before(entry.expires) {
+	if entry, ok := r.cache[key]; ok && entry.location == location && now.Before(entry.expires) {
 		r.mu.Unlock()
 		return entry.name
 	}
@@ -64,21 +71,18 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	var name string
 	switch {
 	case isOMPSessionAgent(agentLower):
-		name = extractOMPSessionTitle(sessionPath)
+		name = extractOMPSessionTitle(location.Path)
 	case isPiSessionAgent(agentLower):
-		name = extractPiSessionTitle(sessionPath)
-	case strings.Contains(agentLower, "qoder"):
-		name = r.projectSessionTitle(filepath.Join(r.home, ".qoder", "projects"), cwd, sessionID)
-	case strings.Contains(agentLower, "claude"):
-		name = r.projectSessionTitle(filepath.Join(r.home, ".claude", "projects"), cwd, sessionID)
+		name = extractPiSessionTitle(location.Path)
+	case strings.Contains(agentLower, "qoder"), strings.Contains(agentLower, "claude"):
+		name = extractTitle(location.Path)
 	case strings.Contains(agentLower, "codex"):
-		name = r.codexSessionName(cwd, sessionID)
+		name = codexIndexThreadName(filepath.Join(filepath.Dir(location.Root), "session_index.jsonl"), sessionID)
 	}
 
 	r.mu.Lock()
-	r.cache[key] = cacheEntry{name: name, expires: time.Now().Add(cacheTTL), sig: sig}
+	r.cache[key] = cacheEntry{name: name, location: location, expires: now.Add(cacheTTL)}
 	r.mu.Unlock()
-
 	return name
 }
 
@@ -98,37 +102,6 @@ func isPiSessionAgent(agent string) bool {
 	default:
 		return false
 	}
-}
-
-func (r *Resolver) ompSessionPath(sessionID string) string {
-	if !filepath.IsAbs(sessionID) || filepath.Ext(sessionID) != ".jsonl" {
-		return ""
-	}
-	root, err := filepath.Abs(filepath.Join(r.home, ".omp", "agent", "sessions"))
-	if err != nil {
-		return ""
-	}
-	path, err := filepath.Abs(filepath.Clean(sessionID))
-	if err != nil {
-		return ""
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return ""
-	}
-	path, err = filepath.EvalSymlinks(path)
-	if err != nil {
-		return ""
-	}
-	rel, err := filepath.Rel(root, path)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return ""
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return ""
-	}
-	return path
 }
 
 func extractOMPSessionTitle(path string) string {
@@ -155,8 +128,6 @@ func extractOMPSessionTitle(path string) string {
 		}
 		switch record.Type {
 		case "title":
-			// OMP rewrites the first title record in place. Later
-			// title_change records are history, not the current name.
 			if !hasHeaderTitle {
 				hasHeaderTitle = true
 				headerTitle = strings.TrimSpace(record.Title)
@@ -175,37 +146,6 @@ func extractOMPSessionTitle(path string) string {
 		return latestTitle
 	}
 	return sessionTitle
-}
-
-func (r *Resolver) piSessionPath(sessionID string) string {
-	if !filepath.IsAbs(sessionID) || filepath.Ext(sessionID) != ".jsonl" {
-		return ""
-	}
-	root, err := filepath.Abs(filepath.Join(r.home, ".pi", "agent", "sessions"))
-	if err != nil {
-		return ""
-	}
-	path, err := filepath.Abs(filepath.Clean(sessionID))
-	if err != nil {
-		return ""
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return ""
-	}
-	path, err = filepath.EvalSymlinks(path)
-	if err != nil {
-		return ""
-	}
-	rel, err := filepath.Rel(root, path)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return ""
-	}
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return ""
-	}
-	return path
 }
 
 func extractPiSessionTitle(path string) string {
@@ -233,65 +173,7 @@ func extractPiSessionTitle(path string) string {
 	return name
 }
 
-func (r *Resolver) projectSessionTitle(projectsDir, cwd, sessionID string) string {
-	projectDir := r.findProjectDir(projectsDir, cwd)
-	if projectDir == "" {
-		return ""
-	}
-
-	sessionFile := filepath.Join(projectDir, sessionID+".jsonl")
-	if _, err := os.Stat(sessionFile); err != nil {
-		if sessionID != "" {
-			return ""
-		}
-		entries, err := os.ReadDir(projectDir)
-		if err != nil {
-			return ""
-		}
-		var jsonlFiles []string
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".jsonl") {
-				jsonlFiles = append(jsonlFiles, e.Name())
-			}
-		}
-		if len(jsonlFiles) == 1 {
-			sessionFile = filepath.Join(projectDir, jsonlFiles[0])
-		} else {
-			return ""
-		}
-	}
-
-	return extractTitle(sessionFile)
-}
-
-func (r *Resolver) findProjectDir(projectsDir, cwd string) string {
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return ""
-	}
-
-	encoded := encodePath(cwd)
-	leadingDashEncoded := "-" + encoded
-	for _, e := range entries {
-		if e.IsDir() && (e.Name() == encoded || e.Name() == leadingDashEncoded) {
-			return filepath.Join(projectsDir, e.Name())
-		}
-	}
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		dir := filepath.Join(projectsDir, e.Name())
-		if matchesCwd(dir, cwd) {
-			return dir
-		}
-	}
-	return ""
-}
-
-func (r *Resolver) codexSessionName(cwd, sessionID string) string {
-	indexFile := filepath.Join(r.home, ".codex", "session_index.jsonl")
+func codexIndexThreadName(indexFile, sessionID string) string {
 	f, err := os.Open(indexFile)
 	if err != nil {
 		return ""
@@ -329,101 +211,21 @@ func extractTitle(path string) string {
 		if json.Unmarshal(scanner.Bytes(), &record) != nil {
 			continue
 		}
-		recType, _ := record["type"].(string)
-		if !titleTypes[recType] {
+		recordType, _ := record["type"].(string)
+		if !titleTypes[recordType] {
 			continue
 		}
 		for _, field := range titleFields {
-			if v, ok := record[field].(string); ok && strings.TrimSpace(v) != "" {
-				found[recType] = strings.TrimSpace(v)
+			if value, ok := record[field].(string); ok && strings.TrimSpace(value) != "" {
+				found[recordType] = strings.TrimSpace(value)
 				break
 			}
 		}
 	}
-	for _, recType := range []string{"custom-title", "ai-title", "summary"} {
-		if found[recType] != "" {
-			return found[recType]
+	for _, recordType := range []string{"custom-title", "ai-title", "summary"} {
+		if found[recordType] != "" {
+			return found[recordType]
 		}
 	}
 	return ""
-}
-
-func encodePath(path string) string {
-	return strings.ReplaceAll(strings.TrimPrefix(path, "/"), "/", "-")
-}
-
-func matchesCwd(dir, cwd string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "cwd"))
-	if err == nil {
-		return strings.TrimSpace(string(data)) == cwd
-	}
-	return false
-}
-
-func validSessionID(id string) bool {
-	if len(id) == 0 || len(id) > 128 {
-		return false
-	}
-	for _, c := range id {
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		case c == '-', c == '_', c == '.':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func (r *Resolver) sourceSignature(agent, cwd, sessionID string) string {
-	agentLower := strings.ToLower(agent)
-	if isOMPSessionAgent(agentLower) {
-		if path := r.ompSessionPath(sessionID); path != "" {
-			return pathSignature(path)
-		}
-		return ""
-	}
-	if isPiSessionAgent(agentLower) {
-		if path := r.piSessionPath(sessionID); path != "" {
-			return pathSignature(path)
-		}
-		return ""
-	}
-
-	if strings.Contains(agentLower, "codex") {
-		return pathSignature(filepath.Join(r.home, ".codex", "session_index.jsonl"))
-	}
-	var projectsDir string
-	switch {
-	case strings.Contains(agentLower, "qoder"):
-		projectsDir = filepath.Join(r.home, ".qoder", "projects")
-	case strings.Contains(agentLower, "claude"):
-		projectsDir = filepath.Join(r.home, ".claude", "projects")
-	default:
-		return ""
-	}
-	projectDir := r.findProjectDir(projectsDir, cwd)
-	if projectDir == "" {
-		return pathSignature(projectsDir)
-	}
-	if sessionID != "" {
-		return pathSignature(filepath.Join(projectDir, sessionID+".jsonl"))
-	}
-	entries, _ := os.ReadDir(projectDir)
-	var signatures []string
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
-			signatures = append(signatures, pathSignature(filepath.Join(projectDir, entry.Name())))
-		}
-	}
-	sort.Strings(signatures)
-	return strings.Join(signatures, "|")
-}
-
-func pathSignature(path string) string {
-	info, err := os.Stat(path)
-	if err != nil {
-		return path + "|missing"
-	}
-	return path + "|" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10)
 }
