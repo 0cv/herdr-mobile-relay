@@ -174,3 +174,23 @@ func TestQoderNearProjectSuppressionHidesOuterProjectCommand(t *testing.T) {
 		t.Error("near project suppression did not hide outer project /deploy")
 	}
 }
+
+func TestQoderHomeRootIsNotAlsoProjectScope(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(home, ".qoder", "commands", "deploy.md"), "Deploy")
+
+	catalog := CatalogFor("qoder", cwd, home)
+	count := 0
+	for _, command := range catalog.Commands {
+		if command.Command == "/deploy" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("personal Qoder command listed %d times, want once", count)
+	}
+}

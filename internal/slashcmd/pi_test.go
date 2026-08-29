@@ -2,6 +2,7 @@ package slashcmd
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -336,7 +337,7 @@ func TestPiDiscoversGlobalSettingsSkillArray(t *testing.T) {
 	}
 }
 
-func TestPiTrustedProjectSettingsOverrideGlobalSettings(t *testing.T) {
+func TestPiTrustedProjectSettingsAppendGlobalSettings(t *testing.T) {
 	f := newPiFixture(t)
 	global := filepath.Join(f.home, ".pi", "agent", "global")
 	project := filepath.Join(f.repo, ".pi", "project")
@@ -351,10 +352,10 @@ func TestPiTrustedProjectSettingsOverrideGlobalSettings(t *testing.T) {
 
 	catalog := f.catalog(f.repo)
 	if _, ok := commandByName(catalog, "/skill:project-setting"); !ok {
-		t.Fatal("trusted project Pi settings did not enable and replace skill paths")
+		t.Fatal("trusted project Pi settings did not enable project skill paths")
 	}
-	if _, ok := commandByName(catalog, "/skill:global-setting"); ok {
-		t.Fatal("project Pi settings skills array must replace the global array")
+	if _, ok := commandByName(catalog, "/skill:global-setting"); !ok {
+		t.Fatal("project Pi settings skills must append to the global skills")
 	}
 }
 
@@ -396,5 +397,56 @@ func TestPiDefaultProjectTrustAlwaysEnablesProjectSettings(t *testing.T) {
 
 	if _, ok := commandByName(f.catalog(f.repo), "/skill:default-trusted"); !ok {
 		t.Fatal("defaultProjectTrust=always did not enable project resources")
+	}
+}
+
+func TestPiDiscoversNestedAndFlatSkills(t *testing.T) {
+	f := newPiFixture(t)
+	root := filepath.Join(f.home, ".pi", "agent", "skills")
+	writeSkill(t, filepath.Join(root, "group"), "nested", "Nested skill")
+	writeFile(t, filepath.Join(root, "flat.md"), "---\nname: flat\ndescription: Flat skill\n---\n")
+
+	catalog := f.catalog(f.repo)
+	for _, name := range []string{"/skill:nested", "/skill:flat"} {
+		if _, ok := commandByName(catalog, name); !ok {
+			t.Errorf("%s missing from recursive Pi discovery", name)
+		}
+	}
+}
+
+func TestPiInterpretsSkillIncludeExcludePatterns(t *testing.T) {
+	f := newPiFixture(t)
+	root := filepath.Join(f.home, ".pi", "agent", "configured")
+	writeSkill(t, root, "included", "Included skill")
+	writeSkill(t, root, "excluded", "Excluded skill")
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "settings.json"),
+		`{"skills":["configured","!configured/**","+configured/included/**"]}`)
+
+	catalog := f.catalog(f.repo)
+	if _, ok := commandByName(catalog, "/skill:included"); !ok {
+		t.Fatal("+ pattern did not restore the included Pi skill")
+	}
+	if _, ok := commandByName(catalog, "/skill:excluded"); ok {
+		t.Fatal("! pattern did not exclude the matching Pi skill")
+	}
+}
+
+func TestPiTrustUsesCanonicalUncappedAncestors(t *testing.T) {
+	f := newPiFixture(t)
+	real := filepath.Join(f.repo, "real")
+	deep := real
+	for index := 0; index < 40; index++ {
+		deep = filepath.Join(deep, fmt.Sprintf("d%02d", index))
+	}
+	mkdirAll(t, deep)
+	writeFile(t, filepath.Join(f.home, ".pi", "agent", "trust.json"),
+		fmt.Sprintf("{%q:true}", real))
+	link := filepath.Join(f.repo, "linked")
+	if err := os.Symlink(deep, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if !piProjectTrusted(filepath.Join(f.home, ".pi", "agent"), link, "") {
+		t.Fatal("Pi trust did not canonicalize cwd or search beyond 32 ancestors")
 	}
 }

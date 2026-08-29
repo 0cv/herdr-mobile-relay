@@ -1,6 +1,7 @@
 package slashcmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,6 +103,11 @@ var ompBuiltins = []Command{
 // also spends the shared file budget on them, so exhaustion truncates the least
 // important skills, never the highest-priority ones.
 func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	if ctx.SuppressNative {
+		builtins := make([]Command, len(ompBuiltins))
+		copy(builtins, ompBuiltins)
+		return builtins, false
+	}
 	if ctx.CommandFormat != "" {
 		// The relay's INI configured this profile explicitly, which outranks
 		// discovery.
@@ -149,7 +155,7 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			}
 			options := skillScanOptions{
 				boundary:           boundary,
-				requireDescription: false,
+				requireDescription: true,
 				respectEnabled:     true,
 			}
 			cmds, trunc := scanSkillDirFormatOptions(dir, scope, ompCommandFormat, &budget, options)
@@ -197,13 +203,12 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 
 	// Extension packages register below native skills and above compatibility
-	// providers, matching OMP's built-in omp-plugins provider priority.
-	for _, extension := range ompExtensionSkillDirs(ctx) {
-		skillDir := filepath.Join(extension.path, "skills")
+	for _, extension := range ompExtensionSkillDirs(ctx, settings) {
 		if extension.directSkillDir {
-			skillDir = extension.path
+			scanExtensionSkillPath(extension, &budget, apply, &truncated, settings)
+			continue
 		}
-		scan(extension.source, skillDir)
+		scan(extension.source, filepath.Join(extension.path, "skills"))
 	}
 
 	// 2. claude (80)
@@ -253,6 +258,7 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		if strings.HasPrefix(dir, "~") {
 			continue
 		}
+
 		if !filepath.IsAbs(dir) {
 			if ctx.Cwd == "" {
 				continue
@@ -282,6 +288,18 @@ func (p *ompProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	}
 	return commands, truncated
 }
+func scanExtensionSkillPath(extension ompExtensionDir, budget *int, apply func([]Command), truncated *bool, settings ompSkillSettings) {
+	options := skillScanOptions{requireDescription: true, respectEnabled: true}
+	commands, trunc := scanSkillPathFormatOptions(extension.path, extension.source, ompCommandFormat, budget, options)
+	allowed := commands[:0]
+	for _, command := range commands {
+		if settings.allows(ompSkillName(command.Command)) {
+			allowed = append(allowed, command)
+		}
+	}
+	apply(allowed)
+	*truncated = *truncated || trunc
+}
 
 // ompSkillName recovers the skill name from a rendered /skill:<name> command.
 // A builtin has no such prefix and is returned unchanged, which the ban lists
@@ -297,27 +315,55 @@ func loadOMPSkillSettings(ctx DiscoverContext) ompSkillSettings {
 	dir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
 	if dir != "" {
 		data, found, ok := settingsFileIn(dir, "config.yml", "config.yaml")
-		if found && ok {
-			settings.customDirectoriesSet = false
-			parseOMPSkillSettings(data, &settings)
-			if settings.customDirectoriesSet {
-				settings.customDirectorySource = "personal"
-				settings.customDirectoryBoundary = ""
+		settings.customDirectoriesSet = false
+		settings.extensionDirectoriesSet = false
+		if found {
+			if ok {
+				parseOMPSkillSettings(data, &settings)
 			}
+		} else if legacy, legacyFound, legacyOK := settingsFileIn(dir, "settings.json"); legacyFound && legacyOK {
+			parseOMPLegacyExtensions(legacy, &settings)
+		}
+		if settings.customDirectoriesSet {
+			settings.customDirectorySource = "personal"
+			settings.customDirectoryBoundary = ""
+		}
+		if settings.extensionDirectoriesSet {
+			settings.extensionDirectorySource = "personal"
 		}
 	}
-	if ctx.Cwd != "" {
+	if filepath.IsAbs(ctx.Cwd) {
 		projectDir := filepath.Join(ctx.Cwd, ".omp")
-		if data, ok := readSettingsFile(projectDir, "config.yml", "config.yaml"); ok {
-			settings.customDirectoriesSet = false
-			parseOMPSkillSettings(data, &settings)
-			if settings.customDirectoriesSet {
-				settings.customDirectorySource = "project"
-				settings.customDirectoryBoundary = ctx.Cwd
+		data, found, ok := settingsFileIn(projectDir, "config.yml", "config.yaml")
+		settings.customDirectoriesSet = false
+		settings.extensionDirectoriesSet = false
+		if found {
+			if ok {
+				parseOMPSkillSettings(data, &settings)
 			}
+		} else if legacy, legacyFound, legacyOK := settingsFileIn(projectDir, "settings.json"); legacyFound && legacyOK {
+			parseOMPLegacyExtensions(legacy, &settings)
+		}
+		if settings.customDirectoriesSet {
+			settings.customDirectorySource = "project"
+			settings.customDirectoryBoundary = ctx.Cwd
+		}
+		if settings.extensionDirectoriesSet {
+			settings.extensionDirectorySource = "project"
 		}
 	}
 	return settings
+}
+
+func parseOMPLegacyExtensions(data []byte, settings *ompSkillSettings) {
+	var legacy struct {
+		Extensions []string `json:"extensions"`
+	}
+	if json.Unmarshal(data, &legacy) != nil || legacy.Extensions == nil {
+		return
+	}
+	settings.extensionDirectories = append([]string(nil), legacy.Extensions...)
+	settings.extensionDirectoriesSet = true
 }
 
 // readSettingsFile returns the contents of the first readable name in dir.

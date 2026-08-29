@@ -35,8 +35,12 @@ func (p *qoderProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	var projectScopes []qoderProjectScope
 
 	if ctx.Cwd != "" {
+		personalRoot := filepath.Join(ctx.Home, ".qoder")
 		projectDirs := findProjectDirs(ctx.Cwd, []string{".qoder"})
 		for _, dir := range projectDirs {
+			if pathWithin(dir, personalRoot) && pathWithin(personalRoot, dir) {
+				continue
+			}
 			cmdDir := filepath.Join(dir, "commands")
 			projectCmds, commandSuppressions, trunc := walkCommandDirBudget(cmdDir, "project", &budget)
 			truncated = truncated || trunc

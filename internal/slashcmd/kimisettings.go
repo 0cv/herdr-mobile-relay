@@ -46,7 +46,7 @@ func parseKimiSkillSettings(data []byte, settings *kimiSkillSettings) {
 		}
 		switch key {
 		case "merge_all_available_skills":
-			setScalarBool(&settings.mergeAllAvailableSkills, value)
+			setScalarBool(&settings.mergeAllAvailableSkills, stripKimiComment(value))
 		case "extra_skill_dirs":
 			for kimiArrayEnd(value) < 0 && index+1 < len(lines) {
 				index++
@@ -55,6 +55,35 @@ func parseKimiSkillSettings(data []byte, settings *kimiSkillSettings) {
 			setKimiList(&settings.extraSkillDirs, value)
 		}
 	}
+}
+
+func stripKimiComment(value string) string {
+	quote := byte(0)
+	escaped := false
+	for index := 0; index < len(value); index++ {
+		current := value[index]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' && current == '\\' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if current == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch current {
+		case '\'', '"':
+			quote = current
+		case '#':
+			return strings.TrimSpace(value[:index])
+		}
+	}
+	return strings.TrimSpace(value)
 }
 
 // setKimiList assigns a TOML array. List keys replace rather than append

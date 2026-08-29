@@ -689,12 +689,19 @@ func TestProfileCacheRefreshesDanglingSymlinkAfterExpiry(t *testing.T) {
 	if got := OMP(home); len(got) != 1 {
 		t.Fatalf("initial roots = %v, want only the home default while target is absent", got)
 	}
+	profileCache.Lock()
+	entry := profileCache.entries[profiles]
+	profileCache.Unlock()
+	remaining := time.Until(entry.expires)
+	if remaining <= 0 || remaining > profileDanglingCacheTTL+time.Second {
+		t.Fatalf("dangling profile cache TTL = %s, want no more than %s", remaining, profileDanglingCacheTTL)
+	}
 	if err := os.MkdirAll(filepath.Join(target, "agent"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	profileCache.Lock()
-	entry := profileCache.entries[profiles]
+	entry = profileCache.entries[profiles]
 	entry.expires = time.Time{}
 	profileCache.entries[profiles] = entry
 	profileCache.Unlock()

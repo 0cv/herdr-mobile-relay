@@ -181,17 +181,13 @@ func TestOMPSkillsDisabledYieldsBuiltinsOnly(t *testing.T) {
 	}
 }
 
-func TestOMPListsSkillWithoutDescription(t *testing.T) {
+func TestOMPDropsSkillWithoutDescription(t *testing.T) {
 	f := newOMPFixture(t)
 	f.gitRepo(t)
 	writeSkill(t, filepath.Join(f.repo, ".omp", "skills"), "nodesc", "")
 
-	command, ok := commandByName(f.catalog(f.repo), "/skill:nodesc")
-	if !ok {
-		t.Fatal("OMP compatibility skills do not require a description")
-	}
-	if command.Description != "Nodesc skill" {
-		t.Fatalf("fallback description = %q", command.Description)
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:nodesc"); ok {
+		t.Fatal("OMP listed a skill without a required description")
 	}
 }
 
@@ -569,19 +565,16 @@ func TestOMPCustomDirectoryOverridesDefaultProvider(t *testing.T) {
 	}
 }
 
-func TestOMPDiscoversConfiguredExtensionPackageSkills(t *testing.T) {
+func TestOMPDiscoversConfiguredExtensionPackageSkillsFromYAML(t *testing.T) {
 	f := newOMPFixture(t)
 	extension := filepath.Join(f.home, "extensions", "release-tools")
 	writeSkill(t, filepath.Join(extension, "skills"), "release", "Release from extension")
-	settings, err := json.Marshal(map[string]any{"extensions": []string{extension}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(f.home, ".omp", "agent", "settings.json"), string(settings))
+	writeFile(t, filepath.Join(f.home, ".omp", "agent", "config.yml"),
+		fmt.Sprintf("extensions:\n  - %q\n", extension))
 
 	command, ok := commandByName(f.catalog(f.repo), "/skill:release")
 	if !ok {
-		t.Fatal("an OMP extension package's skills were not discovered")
+		t.Fatal("an OMP config.yml extension package's skills were not discovered")
 	}
 	if command.Description != "Release from extension" {
 		t.Fatalf("command = %+v", command)
@@ -749,5 +742,110 @@ func TestOMPDiscoversProjectPluginRootSkills(t *testing.T) {
 	}
 	if command.Source != "project" {
 		t.Fatalf("source = %q, want project", command.Source)
+	}
+}
+
+func TestOMPManifestPathMayNameSkillDirectory(t *testing.T) {
+	f := newOMPFixture(t)
+	install := filepath.Join(f.home, "marketplace", "direct-skill")
+	writeFile(t, filepath.Join(install, "direct", "SKILL.md"),
+		"---\nname: direct\ndescription: Direct manifest skill\n---\n")
+	writeFile(t, filepath.Join(install, ".claude-plugin", "plugin.json"),
+		`{"skills":["direct"]}`)
+	registry, err := json.Marshal(map[string]any{"plugins": map[string]any{
+		"direct@acme": []any{map[string]any{"installPath": install, "enabled": true, "scope": "user"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(f.home, ".claude", "plugins", "installed_plugins.json"), string(registry))
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:direct"); !ok {
+		t.Fatal("manifest path naming a skill directory was not scanned")
+	}
+}
+
+func TestOMPManifestSkillPathCannotEscapePluginRoot(t *testing.T) {
+	f := newOMPFixture(t)
+	install := filepath.Join(f.home, "marketplace", "contained")
+	external := filepath.Join(f.home, "private")
+	writeSkill(t, external, "leaked", "Must not leak")
+	writeFile(t, filepath.Join(install, ".claude-plugin", "plugin.json"),
+		`{"skills":["../../private"]}`)
+	registry, err := json.Marshal(map[string]any{"plugins": map[string]any{
+		"contained@acme": []any{map[string]any{"installPath": install, "enabled": true, "scope": "user"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(f.home, ".claude", "plugins", "installed_plugins.json"), string(registry))
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:leaked"); ok {
+		t.Fatal("manifest skill path escaped its plugin root")
+	}
+}
+
+func TestOMPLocalMarketplaceInstallIsProjectFiltered(t *testing.T) {
+	f := newOMPFixture(t)
+	install := filepath.Join(f.home, "marketplace", "local")
+	writeSkill(t, filepath.Join(install, "skills"), "local-only", "Local install")
+	registry, err := json.Marshal(map[string]any{"plugins": map[string]any{
+		"local@acme": []any{map[string]any{
+			"installPath": install,
+			"enabled":     true,
+			"scope":       "local",
+			"projectPath": filepath.Join(f.home, "other-project"),
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(f.home, ".claude", "plugins", "installed_plugins.json"), string(registry))
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:local-only"); ok {
+		t.Fatal("local marketplace install from another project was discovered")
+	}
+}
+
+func TestOMPOnlyScansNearestProjectPluginRoot(t *testing.T) {
+	f := newOMPFixture(t)
+	nested := filepath.Join(f.repo, "services", "api")
+	mkdirAll(t, nested)
+	for _, fixture := range []struct {
+		root, plugin, skill string
+	}{
+		{f.repo, "outer-tools", "outer-plugin"},
+		{nested, "inner-tools", "inner-plugin"},
+	} {
+		pluginRoot := filepath.Join(fixture.root, ".omp", "plugins")
+		writeFile(t, filepath.Join(pluginRoot, "package.json"),
+			fmt.Sprintf(`{"dependencies":{%q:"1.0.0"}}`, fixture.plugin))
+		extension := filepath.Join(pluginRoot, "node_modules", fixture.plugin)
+		writeFile(t, filepath.Join(extension, "package.json"), `{"omp":{}}`)
+		writeSkill(t, filepath.Join(extension, "skills"), fixture.skill, fixture.skill)
+	}
+
+	catalog := f.catalog(nested)
+	if _, ok := commandByName(catalog, "/skill:inner-plugin"); !ok {
+		t.Fatal("nearest project plugin root was not scanned")
+	}
+	if _, ok := commandByName(catalog, "/skill:outer-plugin"); ok {
+		t.Fatal("ancestor project plugin root was scanned past the nearest .omp root")
+	}
+}
+
+func TestOMPPluginOverridesDisableInstalledPlugin(t *testing.T) {
+	f := newOMPFixture(t)
+	pluginRoot := filepath.Join(f.home, ".omp", "plugins")
+	writeFile(t, filepath.Join(pluginRoot, "package.json"),
+		`{"dependencies":{"disabled-tools":"1.0.0"}}`)
+	extension := filepath.Join(pluginRoot, "node_modules", "disabled-tools")
+	writeFile(t, filepath.Join(extension, "package.json"), `{"omp":{}}`)
+	writeSkill(t, filepath.Join(extension, "skills"), "must-stay-disabled", "Disabled")
+	writeFile(t, filepath.Join(f.repo, ".omp", "plugin-overrides.json"),
+		`{"disabled":["disabled-tools"]}`)
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:must-stay-disabled"); ok {
+		t.Fatal("plugin-overrides.json disabled plugin was discovered")
 	}
 }

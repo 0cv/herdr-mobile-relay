@@ -214,6 +214,34 @@ func TestCaptureFinishedPaneUsesOriginalConversationCwd(t *testing.T) {
 	}
 }
 
+func TestActivityBackfillKeepsHistoricalSessionCwdEmpty(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174399"
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-old", sessionID+".jsonl"),
+		"Old work", "historical answer")
+
+	s := testServer()
+	s.conversationM = conversation.NewReader(home)
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new",
+	}}, s.state.RevisionCounter())
+	s.activityView = []activity.Entry{{
+		ID:        "historical-finished",
+		Timestamp: activity.MilliTimestamp(time.Date(2026, time.August, 12, 10, 0, 2, 0, time.UTC).UnixMilli()),
+		Kind:      "finished",
+		Status:    "completed",
+		Agent:     "claude",
+		PaneID:    "pane-1",
+		Session:   sessionID,
+	}}
+
+	backfilled := s.recentActivities(1)
+	if len(backfilled) != 1 || backfilled[0].Extract != "historical answer" {
+		t.Fatalf("historical activity = %#v, want response located without current pane cwd", backfilled)
+	}
+}
+
 func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
 	home := t.TempDir()
 	profile := t.TempDir()

@@ -184,7 +184,7 @@ func TestCommandConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	skills := filepath.Join(dir, "skills")
-	ini := "[skills]\npi = " + skills + "\n[commands]\npi = skill:{name}\nbad = {name}:{other}\n"
+	ini := "[skills]\npi = " + skills + "\n[commands]\npi = skill:{name}\noff-profile = off\nbad = {name}:{other}\n"
 	if err := os.WriteFile(filepath.Join(herdrDir, "agent-profiles.ini"), []byte(ini), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +195,13 @@ func TestCommandConfig(t *testing.T) {
 	}
 	if _, _, ok := resolver.CommandConfig("bad"); ok {
 		t.Fatal("invalid command format was accepted")
+	}
+	if _, _, ok := resolver.CommandConfig("off-profile"); ok {
+		t.Fatal("explicit command discovery suppression was reported as configured")
+	}
+	dirs, format, suppressed := resolver.CommandDiscovery("off-profile")
+	if !suppressed || format != "" || len(dirs) != 0 {
+		t.Fatalf("suppressed command discovery = %q, %q, %v", dirs, format, suppressed)
 	}
 }
 

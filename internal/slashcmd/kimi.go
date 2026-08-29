@@ -71,6 +71,11 @@ func (p *kimiProvider) ID() string { return "kimi" }
 // merge_all_available_skills governs the brand group only: the generic group is
 // always mutually exclusive, taking its first existing candidate.
 func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	if ctx.SuppressNative {
+		builtins := make([]Command, len(kimiBuiltins))
+		copy(builtins, kimiBuiltins)
+		return builtins, false
+	}
 	if ctx.CommandFormat != "" {
 		// The relay's INI configured this profile explicitly, which outranks
 		// discovery.
@@ -96,14 +101,17 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	order := make([]string, 0, len(kimiBuiltins))
 	apply := func(commands []Command) {
 		for _, command := range commands {
-			if _, exists := active[command.Command]; exists {
+			key := strings.ToLower(command.Command)
+			if _, exists := active[key]; exists {
 				continue
 			}
-			order = append(order, command.Command)
-			active[command.Command] = command
+			order = append(order, key)
+			active[key] = command
 		}
 	}
 	apply(kimiBuiltins)
+	seenFiles := make(map[string]bool)
+	seenDirs := make(map[string]bool)
 
 	scan := func(scope string, dirs ...string) {
 		for _, dir := range dirs {
@@ -116,7 +124,7 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 				// would scan the headless service's own working directory.
 				continue
 			}
-			cmds, trunc := scanSkillDirFormat(dir, scope, ompCommandFormat, &budget)
+			cmds, trunc := scanPiSkillTree(dir, scope, nil, true, true, &budget, seenFiles, seenDirs)
 			apply(cmds)
 			truncated = truncated || trunc
 		}

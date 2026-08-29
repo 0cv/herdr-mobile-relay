@@ -16,8 +16,9 @@ import (
 const cacheTTL = 60 * time.Second
 
 type cacheEntry struct {
-	name    string
-	expires time.Time
+	name     string
+	location conversation.Location
+	expires  time.Time
 }
 
 type Resolver struct {
@@ -55,23 +56,17 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	}
 	agentLower := strings.ToLower(strings.TrimSpace(agent))
 	key := agentLower + "|" + cwd + "|" + sessionID
+	location := r.reader.Locate(agent, cwd, sessionID)
+	if location.Path == "" {
+		return ""
+	}
 	now := time.Now()
 	r.mu.Lock()
-	if entry, ok := r.cache[key]; ok && now.Before(entry.expires) {
+	if entry, ok := r.cache[key]; ok && entry.location == location && now.Before(entry.expires) {
 		r.mu.Unlock()
 		return entry.name
 	}
 	r.mu.Unlock()
-
-	// Title resolution starts from the exact contained transcript selected by
-	// the shared conversation.Reader.
-	location := r.reader.Locate(agent, cwd, sessionID)
-	if location.Path == "" {
-		r.mu.Lock()
-		r.cache[key] = cacheEntry{expires: now.Add(cacheTTL)}
-		r.mu.Unlock()
-		return ""
-	}
 
 	var name string
 	switch {
@@ -86,7 +81,7 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	}
 
 	r.mu.Lock()
-	r.cache[key] = cacheEntry{name: name, expires: now.Add(cacheTTL)}
+	r.cache[key] = cacheEntry{name: name, location: location, expires: now.Add(cacheTTL)}
 	r.mu.Unlock()
 	return name
 }

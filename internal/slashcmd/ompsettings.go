@@ -10,21 +10,24 @@ import (
 // skills become /skill:<name> commands. Every boolean defaults to true, so an
 // unreadable or unparsable config file yields the agent's own defaults.
 type ompSkillSettings struct {
-	enabled                 bool
-	enableSkillCommands     bool
-	enableCodexUser         bool
-	enableClaudeUser        bool
-	enableClaudeProject     bool
-	enablePiUser            bool
-	enablePiProject         bool
-	enableAgentsUser        bool
-	enableAgentsProject     bool
-	customDirectories       []string
-	customDirectoriesSet    bool
-	customDirectorySource   string
-	customDirectoryBoundary string
-	ignoredSkills           []string
-	includeSkills           []string
+	enabled                  bool
+	enableSkillCommands      bool
+	enableCodexUser          bool
+	enableClaudeUser         bool
+	enableClaudeProject      bool
+	enablePiUser             bool
+	enablePiProject          bool
+	enableAgentsUser         bool
+	enableAgentsProject      bool
+	customDirectories        []string
+	customDirectoriesSet     bool
+	customDirectorySource    string
+	customDirectoryBoundary  string
+	extensionDirectories     []string
+	extensionDirectoriesSet  bool
+	extensionDirectorySource string
+	ignoredSkills            []string
+	includeSkills            []string
 	// disabledSkills holds names from the top-level disabledExtensions list that
 	// carried the "skill:" prefix.
 	disabledSkills map[string]bool
@@ -88,6 +91,7 @@ func parseOMPSkillSettings(data []byte, s *ompSkillSettings) {
 		modeNone = iota
 		modeSkills
 		modeDisabled
+		modeExtensions
 	)
 	mode := modeNone
 	childIndent := -1
@@ -113,9 +117,13 @@ func parseOMPSkillSettings(data []byte, s *ompSkillSettings) {
 			// never needs the same treatment: "skills:" introduces a mapping,
 			// whose children YAML requires to be indented past it, so a
 			// pending skills item is never seen at indent 0.
-			if mode == modeDisabled {
+			if mode == modeDisabled || mode == modeExtensions {
 				if item, ok := ompListItem(trimmed); ok {
-					addDisabledSkill(s, item)
+					if mode == modeDisabled {
+						addDisabledSkill(s, item)
+					} else if item != "" && listTarget != nil {
+						*listTarget = append(*listTarget, item)
+					}
 					continue
 				}
 			}
@@ -130,6 +138,13 @@ func parseOMPSkillSettings(data []byte, s *ompSkillSettings) {
 			case "skills":
 				if value == "" {
 					mode = modeSkills
+				}
+			case "extensions":
+				var applied bool
+				listTarget, applied = setOMPList(&s.extensionDirectories, value)
+				s.extensionDirectoriesSet = s.extensionDirectoriesSet || applied
+				if listTarget != nil {
+					mode = modeExtensions
 				}
 			case "disabledExtensions":
 				items, listed, block := ompListValue(value)
@@ -153,6 +168,10 @@ func parseOMPSkillSettings(data []byte, s *ompSkillSettings) {
 		case modeDisabled:
 			if item, ok := ompListItem(trimmed); ok {
 				addDisabledSkill(s, item)
+			}
+		case modeExtensions:
+			if item, ok := ompListItem(trimmed); ok && item != "" && listTarget != nil {
+				*listTarget = append(*listTarget, item)
 			}
 		case modeSkills:
 			if item, ok := ompListItem(trimmed); ok {

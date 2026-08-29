@@ -187,7 +187,10 @@ func containedPath(path, root string) bool {
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-const profileCacheTTL = 60 * time.Second
+const (
+	profileCacheTTL         = 60 * time.Second
+	profileDanglingCacheTTL = 5 * time.Second
+)
 
 type profileCacheEntry struct {
 	signature string
@@ -249,19 +252,30 @@ func profileAgentDirs(configRoot string) []string {
 		return nil
 	}
 	dirs := make([]string, 0, len(entries))
+	dangling := false
 	for _, entry := range entries {
 		candidate := filepath.Join(profiles, entry.Name())
 		entryInfo, err := os.Stat(candidate)
-		if err != nil || !entryInfo.IsDir() {
+		if err != nil {
+			if entry.Type()&os.ModeSymlink != 0 {
+				dangling = true
+			}
+			continue
+		}
+		if !entryInfo.IsDir() {
 			continue
 		}
 		dirs = append(dirs, filepath.Join(candidate, "agent"))
+	}
+	ttl := profileCacheTTL
+	if dangling {
+		ttl = profileDanglingCacheTTL
 	}
 	profileCache.Lock()
 	profileCache.entries[profiles] = profileCacheEntry{
 		signature: signature,
 		dirs:      append([]string(nil), dirs...),
-		expires:   time.Now().Add(profileCacheTTL),
+		expires:   time.Now().Add(ttl),
 	}
 	profileCache.Unlock()
 	return dirs

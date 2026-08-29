@@ -182,3 +182,30 @@ func TestUnknownProfileHasNoClaudeFallback(t *testing.T) {
 		t.Fatalf("unexpected commands: %+v", catalog.Commands)
 	}
 }
+
+func TestExplicitSuppressionSkipsNativeDiscovery(t *testing.T) {
+	isolateAgentEnv(t)
+	cases := []struct {
+		profile  string
+		builtins int
+	}{
+		{"pi", len(piBuiltins)},
+		{"omp", len(ompBuiltins)},
+		{"kimi", len(kimiBuiltins)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.profile, func(t *testing.T) {
+			catalog := CatalogForProfileWithSuppression(
+				tc.profile, tc.profile, t.TempDir(), t.TempDir(), nil, "", "", "", true,
+			)
+			if len(catalog.Commands) != tc.builtins {
+				t.Fatalf("commands = %d, want %d builtins", len(catalog.Commands), tc.builtins)
+			}
+			for _, command := range catalog.Commands {
+				if command.Source != "builtin" {
+					t.Fatalf("native command discovered despite suppression: %+v", command)
+				}
+			}
+		})
+	}
+}

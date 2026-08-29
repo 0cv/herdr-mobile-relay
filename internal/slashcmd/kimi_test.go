@@ -2,6 +2,7 @@ package slashcmd
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -73,6 +74,11 @@ func TestParseKimiSkillSettings(t *testing.T) {
 		{
 			name:      "trailing comment stripped",
 			data:      "merge_all_available_skills = false # keep the old behaviour\n",
+			wantMerge: false,
+		},
+		{
+			name:      "adjacent trailing comment stripped",
+			data:      "merge_all_available_skills = false#keep the old behaviour\n",
 			wantMerge: false,
 		},
 		{
@@ -573,5 +579,50 @@ func TestKimiRejectsUnsupportedTildeUserSkillPath(t *testing.T) {
 
 	if _, ok := commandByName(f.catalog(f.repo), "/skill:tilde-user"); ok {
 		t.Fatal("unsupported ~user path was treated as project-relative")
+	}
+}
+
+func TestKimiDiscoversFlatSkillFiles(t *testing.T) {
+	f := newKimiFixture(t)
+	writeFile(t, filepath.Join(f.home, ".kimi", "skills", "flat.md"),
+		"---\nname: flat\ndescription: Flat Kimi skill\n---\n")
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:flat"); !ok {
+		t.Fatal("flat Kimi skill file was not discovered")
+	}
+}
+
+func TestKimiCanonicalizesRootsBeforeSpendingBudget(t *testing.T) {
+	f := newKimiFixture(t)
+	brand := filepath.Join(f.home, ".kimi", "skills")
+	for index := 0; index < maxCustomFiles-1; index++ {
+		writeSkill(t, brand, fmt.Sprintf("bulk-%03d", index), "Filler")
+	}
+	duplicate := filepath.Join(f.home, "duplicate-brand")
+	if err := os.Symlink(brand, duplicate); err != nil {
+		t.Fatal(err)
+	}
+	last := filepath.Join(f.home, "last-extra")
+	writeSkill(t, last, "last-extra", "Last available budget slot")
+	f.config(t, fmt.Sprintf("extra_skill_dirs = [%q, %q]\n", duplicate, last))
+
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:last-extra"); !ok {
+		t.Fatal("duplicate canonical Kimi root spent the remaining discovery budget")
+	}
+}
+
+func TestKimiDeduplicatesSkillNamesCaseInsensitively(t *testing.T) {
+	f := newKimiFixture(t)
+	f.gitRepo(t)
+	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "Deploy", "Project copy")
+	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "deploy", "User copy")
+
+	catalog := f.catalog(f.repo)
+	command, ok := commandByName(catalog, "/skill:Deploy")
+	if !ok || command.Description != "Project copy" {
+		t.Fatalf("case-insensitive winner = %+v, present %v", command, ok)
+	}
+	if _, ok := commandByName(catalog, "/skill:deploy"); ok {
+		t.Fatal("case-only duplicate Kimi skill name was listed")
 	}
 }

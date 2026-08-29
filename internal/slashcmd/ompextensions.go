@@ -2,6 +2,7 @@ package slashcmd
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,32 +14,40 @@ type ompExtensionDir struct {
 	directSkillDir bool
 }
 
-type ompExtensionSettings struct {
-	Extensions []string `json:"extensions"`
-}
-
-// ompExtensionSkillDirs resolves the extension roots OMP can load without CLI
-// process state: project and user settings, plus installed package dependencies
-// in the corresponding extension roots. CLI-only --extension flags are not
-// visible to the relay process.
-func ompExtensionSkillDirs(ctx DiscoverContext) []ompExtensionDir {
+// ompExtensionSkillDirs resolves configured extension packages and enabled
+// plugins. Only the nearest project .omp root participates.
+func ompExtensionSkillDirs(ctx DiscoverContext, settings ompSkillSettings) []ompExtensionDir {
 	var roots []ompExtensionDir
-	projectDirs := findProjectDirs(ctx.Cwd, []string{".omp"})
-	for index := len(projectDirs) - 1; index >= 0; index-- {
-		dir := projectDirs[index]
-		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(dir, "plugins", "installed_plugins.json"), "project")...)
-		roots = append(roots, configuredOMPExtensions(ctx, dir, "project")...)
-		roots = append(roots, installedOMPExtensions(filepath.Join(dir, "plugins"), "project")...)
+	configuredSource := settings.extensionDirectorySource
+	if configuredSource == "" {
+		configuredSource = "personal"
+	}
+	for _, extension := range settings.extensionDirectories {
+		extension = expandTilde(strings.TrimSpace(extension), ctx.Home)
+		if extension == "" || strings.HasPrefix(extension, "~") {
+			continue
+		}
+		if !filepath.IsAbs(extension) {
+			if !filepath.IsAbs(ctx.Cwd) {
+				continue
+			}
+			extension = filepath.Join(ctx.Cwd, extension)
+		}
+		roots = append(roots, ompExtensionDir{path: extension, source: configuredSource})
 	}
 
-	agentDir := selectedAgentDir(ctx, ".omp", "HERDR_OMP_CONFIG_DIRS", "PI_CODING_AGENT_DIR")
-	if agentDir != "" {
-		roots = append(roots, configuredOMPExtensions(ctx, agentDir, "personal")...)
+	disabled := ompDisabledPlugins(ctx.Cwd)
+	projectDirs := findProjectDirs(ctx.Cwd, []string{".omp"})
+	if len(projectDirs) > 0 {
+		dir := projectDirs[len(projectDirs)-1]
+		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(dir, "plugins", "installed_plugins.json"), "project")...)
+		roots = append(roots, installedOMPExtensions(filepath.Join(dir, "plugins"), "project", disabled)...)
 	}
+
 	if ctx.Home != "" {
 		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(ctx.Home, ".claude", "plugins", "installed_plugins.json"), "personal")...)
 		roots = append(roots, claudeMarketplaceExtensions(ctx, filepath.Join(ctx.Home, ".omp", "plugins", "installed_plugins.json"), "personal")...)
-		roots = append(roots, installedOMPExtensions(filepath.Join(ctx.Home, ".omp", "plugins"), "personal")...)
+		roots = append(roots, installedOMPExtensions(filepath.Join(ctx.Home, ".omp", "plugins"), "personal", disabled)...)
 	}
 
 	seen := make(map[string]bool, len(roots))
@@ -87,9 +96,14 @@ func claudeMarketplaceExtensions(ctx DiscoverContext, registryPath, source strin
 			if root == "" || !filepath.IsAbs(root) {
 				continue
 			}
-			if install.Scope == "project" && install.ProjectPath != "" &&
-				!pathWithin(ctx.Cwd, expandTilde(install.ProjectPath, ctx.Home)) {
-				continue
+			if install.Scope == "project" || install.Scope == "local" {
+				if install.ProjectPath == "" {
+					if source != "project" {
+						continue
+					}
+				} else if !pathWithin(ctx.Cwd, expandTilde(install.ProjectPath, ctx.Home)) {
+					continue
+				}
 			}
 			roots = append(roots, claudeMarketplaceSkillDirs(root, source)...)
 		}
@@ -126,6 +140,9 @@ func claudeMarketplaceSkillDirs(root, source string) []ompExtensionDir {
 		if !filepath.IsAbs(skillDir) {
 			skillDir = filepath.Join(root, skillDir)
 		}
+		if !pathWithin(skillDir, root) {
+			continue
+		}
 		result = append(result, ompExtensionDir{path: skillDir, source: source, directSkillDir: true})
 	}
 	return result
@@ -147,29 +164,6 @@ func pathWithin(path, root string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-func configuredOMPExtensions(ctx DiscoverContext, settingsDir, source string) []ompExtensionDir {
-	data, found, ok := settingsFileIn(settingsDir, "settings.json")
-	if !found || !ok {
-		return nil
-	}
-	var settings ompExtensionSettings
-	if json.Unmarshal(data, &settings) != nil {
-		return nil
-	}
-	roots := make([]ompExtensionDir, 0, len(settings.Extensions))
-	for _, extension := range settings.Extensions {
-		extension = expandTilde(strings.TrimSpace(extension), ctx.Home)
-		if !filepath.IsAbs(extension) {
-			if ctx.Cwd == "" {
-				continue
-			}
-			extension = filepath.Join(ctx.Cwd, extension)
-		}
-		roots = append(roots, ompExtensionDir{path: extension, source: source})
-	}
-	return roots
-}
-
 type ompPackageManifest struct {
 	Dependencies map[string]string `json:"dependencies"`
 	OMP          json.RawMessage   `json:"omp"`
@@ -182,7 +176,7 @@ type ompPluginLock struct {
 	} `json:"plugins"`
 }
 
-func installedOMPExtensions(root, source string) []ompExtensionDir {
+func installedOMPExtensions(root, source string, disabled map[string]bool) []ompExtensionDir {
 	candidates := make(map[string]bool)
 	if data, found, ok := settingsFileIn(root, "package.json"); found && ok {
 		var manifest ompPackageManifest
@@ -203,7 +197,7 @@ func installedOMPExtensions(root, source string) []ompExtensionDir {
 
 	names := make([]string, 0, len(candidates))
 	for name, enabled := range candidates {
-		if enabled && validPackageName(name) {
+		if enabled && !disabled[name] && validPackageName(name) {
 			names = append(names, name)
 		}
 	}
@@ -222,6 +216,42 @@ func installedOMPExtensions(root, source string) []ompExtensionDir {
 		result = append(result, ompExtensionDir{path: packageRoot, source: source})
 	}
 	return result
+}
+
+type ompProjectPluginOverrides struct {
+	Disabled []string `json:"disabled"`
+}
+
+func ompDisabledPlugins(cwd string) map[string]bool {
+	disabled := make(map[string]bool)
+	if !filepath.IsAbs(cwd) {
+		return disabled
+	}
+	current := filepath.Clean(cwd)
+	for {
+		for _, stem := range []string{".omp", ".pi"} {
+			projectConfig := filepath.Join(current, stem)
+			info, err := os.Stat(projectConfig)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			data, found, ok := settingsFileIn(projectConfig, "plugin-overrides.json")
+			if found && ok {
+				var overrides ompProjectPluginOverrides
+				if json.Unmarshal(data, &overrides) == nil {
+					for _, name := range overrides.Disabled {
+						disabled[name] = true
+					}
+				}
+			}
+			return disabled
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return disabled
+		}
+		current = parent
+	}
 }
 
 func validPackageName(name string) bool {

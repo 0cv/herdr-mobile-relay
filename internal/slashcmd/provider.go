@@ -12,13 +12,14 @@ type Provider interface {
 }
 
 type DiscoverContext struct {
-	ProfileID     string
-	AgentDir      string
-	Cwd           string
-	Home          string
-	SkillDirs     []string
-	CommandFormat string
-	AgentVersion  string
+	ProfileID      string
+	AgentDir       string
+	Cwd            string
+	Home           string
+	SkillDirs      []string
+	CommandFormat  string
+	AgentVersion   string
+	SuppressNative bool
 }
 
 var providers = map[string]Provider{}

@@ -578,11 +578,13 @@ func (s *Server) Run(ctx context.Context) error {
 			agent, cwd := activeAgent.Agent, activeAgent.Cwd
 			home, _ := os.UserHomeDir()
 			profileID := s.profiles.ResolvePane(paneID, agent)
-			skillDirs, commandFormat, _ := s.profiles.CommandConfig(profileID)
+			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
 			agentVersion := s.profiles.AgentVersion(profileID)
 			location := s.conversationM.Locate(agent, cwd, activeAgent.SessionID)
 			agentDir := locatedAgentDir(home, agent, location)
-			catalog := slashcmd.CatalogForProfile(profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir)
+			catalog := slashcmd.CatalogForProfileWithSuppression(
+				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
+			)
 			if s.state.Generation(paneID) != generation {
 				s.sendCommandResult(
 					client,
@@ -2665,12 +2667,12 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		sessionID := strings.TrimSpace(entry.Session)
 		var cwd string
 		if current := agents[entry.PaneID]; current != nil {
-			cwd = current.Cwd
 			if strings.TrimSpace(current.Agent) != "" {
 				agentName = current.Agent
 			}
 			if strings.TrimSpace(current.SessionID) != "" {
 				sessionID = current.SessionID
+				cwd = current.Cwd
 			}
 		}
 		if agentName == "" || sessionID == "" || !conversation.Supported(agentName) {

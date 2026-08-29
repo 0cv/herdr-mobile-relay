@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
+	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 )
 
 // TestMain clears every environment variable agentroots consults before any
@@ -686,6 +687,22 @@ func TestClaudeTitleSelectsCurrentProjectOnDuplicateID(t *testing.T) {
 
 	if got := NewResolver(home).SessionName("claude", "/work", "duplicate"); got != "Current project title" {
 		t.Fatalf("session name = %q, want title from the current project's transcript", got)
+	}
+}
+
+func TestTitleCacheEntryMustMatchLocatedTranscript(t *testing.T) {
+	home := t.TempDir()
+	writeTitleFile(t, filepath.Join(home, ".claude", "projects", "-work", "session.jsonl"), "Current title")
+	resolver := NewResolver(home)
+	key := "claude|/work|session"
+	resolver.cache[key] = cacheEntry{
+		name:     "Stale title from another transcript",
+		location: conversation.Location{Path: filepath.Join(home, "other.jsonl"), Root: filepath.Join(home, "other")},
+		expires:  time.Now().Add(time.Hour),
+	}
+
+	if got := resolver.SessionName("claude", "/work", "session"); got != "Current title" {
+		t.Fatalf("session name = %q, want title bound to the currently located transcript", got)
 	}
 }
 

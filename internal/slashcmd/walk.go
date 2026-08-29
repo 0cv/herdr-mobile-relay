@@ -360,6 +360,82 @@ func scanSkillDirFormatOptions(dir, source, format string, budget *int, options 
 	return commands, truncated
 }
 
+// scanSkillPathFormatOptions accepts either a skill directory containing
+// SKILL.md, a single Markdown skill file, or a directory of skill
+// subdirectories. It is used for explicit manifest paths, where the path itself
+// can name the skill.
+func scanSkillPathFormatOptions(path, source, format string, budget *int, options skillScanOptions) ([]Command, bool) {
+	if strings.Count(format, "{name}") != 1 || *budget <= 0 {
+		return nil, *budget <= 0
+	}
+	if options.boundary != "" && !pathWithin(path, options.boundary) {
+		return nil, false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, false
+	}
+	if info.Mode().IsRegular() {
+		if !strings.EqualFold(filepath.Ext(path), ".md") {
+			return nil, false
+		}
+		command := skillCommandFromFile(path, strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)), source, format, budget, options)
+		if command == nil {
+			return nil, false
+		}
+		return []Command{*command}, false
+	}
+	if !info.IsDir() {
+		return nil, false
+	}
+	skillFile := filepath.Join(path, "SKILL.md")
+	if skillInfo, err := os.Stat(skillFile); err == nil && skillInfo.Mode().IsRegular() {
+		command := skillCommandFromFile(skillFile, filepath.Base(path), source, format, budget, options)
+		if command == nil {
+			return nil, false
+		}
+		return []Command{*command}, false
+	}
+	return scanSkillDirFormatOptions(path, source, format, budget, options)
+}
+
+func skillCommandFromFile(path, fallbackName, source, format string, budget *int, options skillScanOptions) *Command {
+	if *budget <= 0 {
+		return nil
+	}
+	if options.boundary != "" && !pathWithin(path, options.boundary) {
+		return nil
+	}
+	metadata, ok := readSkillMetadata(path)
+	if !ok {
+		return nil
+	}
+	*budget--
+	if options.respectEnabled && strings.EqualFold(strings.TrimSpace(metadata["enabled"]), "false") {
+		return nil
+	}
+	name := metadata["name"]
+	if name == "" {
+		name = fallbackName
+	}
+	if !commandNamePattern.MatchString(name) {
+		return nil
+	}
+	description := metadata["description"]
+	if description == "" {
+		if options.requireDescription {
+			return nil
+		}
+		description = strings.ToUpper(name[:1]) + name[1:] + " skill"
+	}
+	return &Command{
+		Command:      "/" + strings.TrimPrefix(strings.Replace(format, "{name}", name, 1), "/"),
+		Description:  compact(description, 240),
+		Source:       source,
+		ArgumentHint: compact(metadata["argument-hint"], 120),
+	}
+}
+
 func fileFrontmatter(path string) map[string]string {
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) > maxMetadataSize {

@@ -17,11 +17,12 @@ project follows [Semantic Versioning](https://semver.org/).
 - Conversation titles and history now resolve through the same contained
   transcript, so copied session IDs, stale Codex index rows, and project
   symlinks can no longer pair a title with a missing or different conversation.
-- Slash-command discovery now scopes Pi and Oh My Pi skills to the pane's
-  active profile, follows Pi's distinct `.pi`/`.agents` traversal and trusted
-  settings, reads OMP plugin and Claude marketplace skills without allowing
-  project configuration to escape its workspace, and matches Kimi's config
-  directory and TOML path parsing.
+- Slash-command discovery now preserves explicit per-profile opt-outs, follows
+  Pi's recursive/flat skill loading, trusted ancestors, and include/exclude
+  settings, reads OMP `config.yml` extensions plus project plugin scope and
+  overrides without allowing manifest paths to escape their plugin, and
+  matches Kimi's flat skills, canonical roots, case-insensitive names, and TOML
+  comments.
 - A failed app cutover no longer traps the phone in a rapid reload loop. The
   successful deployment announcement persists across page loads, but the old
   client kept its reload guard only in memory; if the old bundle survived the

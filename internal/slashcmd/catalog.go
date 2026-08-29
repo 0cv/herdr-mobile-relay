@@ -59,17 +59,30 @@ func CatalogForProfile(
 	skillDirs []string,
 	commandFormat, agentVersion, agentDir string,
 ) Catalog {
+	return CatalogForProfileWithSuppression(
+		profileID, reportedAgent, cwd, home,
+		skillDirs, commandFormat, agentVersion, agentDir, false,
+	)
+}
+
+func CatalogForProfileWithSuppression(
+	profileID, reportedAgent, cwd, home string,
+	skillDirs []string,
+	commandFormat, agentVersion, agentDir string,
+	suppressNative bool,
+) Catalog {
 	var commands []Command
 	var truncated bool
 
 	ctx := DiscoverContext{
-		ProfileID:     profileID,
-		AgentDir:      agentDir,
-		Cwd:           cwd,
-		Home:          home,
-		SkillDirs:     skillDirs,
-		CommandFormat: commandFormat,
-		AgentVersion:  agentVersion,
+		ProfileID:      profileID,
+		AgentDir:       agentDir,
+		Cwd:            cwd,
+		Home:           home,
+		SkillDirs:      skillDirs,
+		CommandFormat:  commandFormat,
+		AgentVersion:   agentVersion,
+		SuppressNative: suppressNative,
 	}
 
 	p := resolveProvider(profileID)
