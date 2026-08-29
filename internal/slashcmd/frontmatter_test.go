@@ -184,6 +184,7 @@ func TestFrontmatterBlockScalarHeaderVariants(t *testing.T) {
 		{"|-", "alpha\nbeta"},
 		{"|+", "alpha\nbeta"},
 		{"|2-", "alpha\nbeta"},
+		{"|- # explanation", "alpha\nbeta"},
 		{">", "alpha beta"},
 		{">-", "alpha beta"},
 		{">+", "alpha beta"},
@@ -217,6 +218,29 @@ func TestFrontmatterBlockScalarKeepsBlankLines(t *testing.T) {
 	want := "para one\n\npara two"
 	if fm["description"] != want {
 		t.Errorf("description = %q, want %q", fm["description"], want)
+	}
+}
+
+func TestFrontmatterBlockScalarKeepsIndentedFence(t *testing.T) {
+	data := []byte(`---
+description: |
+  first paragraph
+  ---
+  second paragraph
+user-invocable: false
+argument-hint: <path>
+---
+`)
+	fm, _ := parseFrontmatterBytes(data)
+	want := "first paragraph\n---\nsecond paragraph"
+	if fm["description"] != want {
+		t.Errorf("description = %q, want %q", fm["description"], want)
+	}
+	if fm["user-invocable"] != "false" {
+		t.Errorf("user-invocable = %q: key after the block was not parsed", fm["user-invocable"])
+	}
+	if fm["argument-hint"] != "<path>" {
+		t.Errorf("argument-hint = %q: key after the block was not parsed", fm["argument-hint"])
 	}
 }
 

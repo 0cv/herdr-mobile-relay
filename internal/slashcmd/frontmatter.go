@@ -40,8 +40,9 @@ func parseFrontmatterBytes(data []byte) (map[string]string, bool) {
 // blockScalarHeader reports whether value is a YAML block-scalar header such as
 // "|", "|-", ">-" or "|2+", and whether that header selects the folded style.
 // The indentation indicator is accepted but ignored: foldBlockScalar always
-// strips the block's own common indentation instead. Anything else - including a
-// plain scalar that merely starts with a pipe - is not a header.
+// strips the block's own common indentation instead. A whitespace-delimited
+// trailing YAML comment is ignored. Anything else - including a plain scalar
+// that merely starts with a pipe - is not a header.
 func blockScalarHeader(value string) (folded, ok bool) {
 	if value == "" {
 		return false, false
@@ -53,7 +54,14 @@ func blockScalarHeader(value string) (folded, ok bool) {
 	default:
 		return false, false
 	}
-	for _, r := range value[1:] {
+	header := value
+	if comment := strings.IndexByte(value, '#'); comment > 0 {
+		previous := value[comment-1]
+		if previous == ' ' || previous == '\t' {
+			header = strings.TrimSpace(value[:comment])
+		}
+	}
+	for _, r := range header[1:] {
 		if r != '+' && r != '-' && (r < '1' || r > '9') {
 			return false, false
 		}
@@ -65,9 +73,9 @@ func blockScalarHeader(value string) (folded, ok bool) {
 // returns the value plus the number of lines it consumed. The common indentation
 // is stripped, deeper relative indentation is preserved, literal blocks keep
 // their line breaks and folded blocks join lines with a space. The block ends at
-// the first non-empty line that is not indented past the key, at a "---" fence,
-// or at the end of the input; a block with no continuation lines yields "", so a
-// malformed one drops the skill rather than surfacing a bogus description.
+// the first non-empty line that is not indented past the key or at the end of the
+// input; a block with no continuation lines yields "", so a malformed one drops
+// the skill rather than surfacing a bogus description.
 //
 // Chomping indicators are deliberately not honoured: every consumer runs the
 // value through compact, which collapses all whitespace runs anyway.
@@ -77,9 +85,6 @@ func foldBlockScalar(rest []string, folded bool) (string, int) {
 	var parts []string
 	for _, line := range rest {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "---" {
-			break
-		}
 		lineIndent := len(line) - len(strings.TrimLeft(line, " \t"))
 		if trimmed != "" && lineIndent == 0 {
 			break
