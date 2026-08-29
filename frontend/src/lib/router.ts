@@ -1,4 +1,5 @@
 import { get, writable } from 'svelte/store';
+import { shouldRetainSetupFragment } from './config';
 import { parseNotificationTarget } from './protocol';
 import type { NotificationTarget } from './types';
 
@@ -115,8 +116,12 @@ export function closeCurrentView(): void {
 }
 
 export function initializeRouter(): () => void {
+  const setupUrl = shouldRetainSetupFragment(location, navigator.standalone)
+    ? location.pathname + location.search + location.hash
+    : '';
   const initial = stateFromLocation();
   replaceView({ view: 'agents' });
+  if (setupUrl) history.replaceState(history.state, '', setupUrl);
   if (initial.view !== 'agents') navigate(initial);
   const onPopState = (event: PopStateEvent) => {
     const state = event.state as HistoryViewState | null;
