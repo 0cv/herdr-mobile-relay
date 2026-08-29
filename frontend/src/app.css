@@ -660,14 +660,17 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .slash-command-header span { color: var(--muted); font-size: .62rem; }
 .slash-command-menu { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .25rem; scrollbar-width: thin; }
 .slash-command-menu:empty { display: none; }
-.slash-command-menu > button { align-items: start; appearance: none; background: transparent; border: 0; border-radius: .48rem; color: var(--foreground); cursor: pointer; display: grid; gap: .55rem; grid-template-columns: minmax(6.8rem, .9fr) minmax(0, 1.35fr) auto; min-height: 2.45rem; padding: .48rem .5rem; text-align: left; width: 100%; }
+/* Title row (name + hint, source badge right-aligned) with the description
+   wrapping full-width underneath: long /skill: names ellipsize instead of
+   painting into the description, and descriptions get the whole row width. */
+.slash-command-menu > button { appearance: none; background: transparent; border: 0; border-radius: .48rem; color: var(--foreground); cursor: pointer; display: grid; gap: .18rem .5rem; grid-template-columns: minmax(0, 1fr) auto; min-height: 2.45rem; padding: .5rem .55rem; text-align: left; width: 100%; }
 .slash-command-menu > button + button { border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent); }
 .slash-command-menu > button.active { background: var(--secondary); box-shadow: inset 2px 0 var(--primary); }
-.slash-command-name { align-items: baseline; display: flex; gap: .3rem; min-width: 0; }
-.slash-command-name strong { color: var(--primary); flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .74rem; white-space: nowrap; }
+.slash-command-name { align-items: baseline; display: flex; gap: .3rem; grid-column: 1; grid-row: 1; min-width: 0; }
+.slash-command-name strong { color: var(--primary); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .74rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slash-command-name small { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.slash-command-description { color: var(--muted); font-size: .66rem; line-height: 1.35; white-space: normal; }
-.slash-command-source { border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .56rem; font-style: normal; padding: .08rem .28rem; text-transform: capitalize; }
+.slash-command-description { color: var(--muted); font-size: .66rem; grid-column: 1 / -1; grid-row: 2; line-height: 1.35; white-space: normal; }
+.slash-command-source { align-self: center; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: .56rem; font-style: normal; grid-column: 2; grid-row: 1; justify-self: end; padding: .08rem .28rem; text-transform: capitalize; }
 .slash-command-status, .slash-command-limit { color: var(--muted); font-size: .68rem; line-height: 1.4; margin: 0; padding: .7rem; }
 .slash-command-limit { border-top: 1px solid var(--border); font-size: .6rem; padding: .35rem .65rem; }
 /* Keep the version-41 menu safe while an already-open client loads newer CSS. */

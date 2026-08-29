@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.18.4`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.18.4) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.19.0`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.19.0) · [Changelog](CHANGELOG.md)
 
 > [!IMPORTANT]
 > Native Windows is not supported. WSL2 may work but is not tested.
@@ -110,6 +110,14 @@ directly, so those lists do not move command discovery for them.
 Native palette discovery follows the verified loader behavior of specific agent
 versions on a best-effort basis; newer agent releases can change edge-case
 discovery semantics before the relay catches up.
+
+Standalone Kimi Code palettes follow its native roots: project
+`.kimi-code/skills` and `.agents/skills`, user
+`$KIMI_CODE_HOME/skills` (default `~/.kimi-code/skills`) and
+`~/.agents/skills`, then `extra_skill_dirs` from
+`$KIMI_CODE_HOME/config.toml`. `KIMI_CODE_HOME` relocates only Kimi's own
+configuration and skills; the shared `~/.agents/skills` root stays under the
+user home.
 
 Pi and Oh My Pi need no configuration for their named profiles as long as the
 config root stays at its default, `~/.pi` or `~/.omp`: both keep a profile's

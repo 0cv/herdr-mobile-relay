@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// kimiBuiltins mirrors the primary interactive TUI commands in Kimi Code
-// 0.29.2. AgentVersion is available in DiscoverContext for a clean version
-// cutover when the command registry changes.
+// kimiBuiltins mirrors the primary interactive TUI commands in standalone
+// Kimi Code 0.36.1. AgentVersion remains available in DiscoverContext for a
+// clean cutover when the command registry changes.
 var kimiBuiltins = []Command{
 	{"/yolo", "Toggle YOLO mode: auto-approve tool actions, but the agent may still ask questions", "builtin", ""},
 	{"/auto", "Toggle Auto mode: fully autonomous, agent decides everything without asking", "builtin", ""},
@@ -55,21 +55,16 @@ type kimiProvider struct{}
 
 func (p *kimiProvider) ID() string { return "kimi" }
 
-// Discover reproduces Kimi Code's own skill resolution, verified against
-// MoonshotAI/kimi-cli docs/en/customization/skills.md: the brand and generic
-// candidate groups at user and project scope plus the additive
-// extra_skill_dirs, rendered as the /skill:<name> commands Kimi registers. Kimi
-// also accepts a /<name> shorthand for the same skill; only the canonical form
-// is listed.
+// Discover reproduces standalone Kimi Code's native skill roots, verified
+// against MoonshotAI/kimi-code's packages/agent-core/src/skill/scanner.ts:
+// project .kimi-code and .agents roots, the KIMI_CODE_HOME user root, the
+// home .agents root, then additive extra_skill_dirs. Skills are rendered as the
+// canonical /skill:<name> commands Kimi registers.
 //
 // Sources are scanned in descending Kimi precedence - Project > User > Extra -
-// with first-wins dedupe, and within one scope the brand group before the
-// generic group, because a name defined in both groups resolves to the brand
-// copy. Scanning the winners first also spends the shared file budget on them,
-// so exhaustion truncates the least important skills, never the winners.
-//
-// merge_all_available_skills governs the brand group only: the generic group is
-// always mutually exclusive, taking its first existing candidate.
+// with first-wins de-duplication. Scanning the winners first also spends the
+// shared file budget on them, so exhaustion truncates the least important
+// skills, never the winners.
 func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if ctx.SuppressNative {
 		builtins := make([]Command, len(kimiBuiltins))
@@ -83,12 +78,12 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		return builtinsWithCustom(kimiBuiltins, custom), truncated
 	}
 
-	settings := defaultKimiSkillSettings()
-	configDir := filepath.Join(ctx.Home, ".kimi")
-	if configured := expandTilde(strings.TrimSpace(os.Getenv("KIMI_SHARE_DIR")), ctx.Home); configured != "" &&
+	configDir := filepath.Join(ctx.Home, ".kimi-code")
+	if configured := expandTilde(strings.TrimSpace(os.Getenv("KIMI_CODE_HOME")), ctx.Home); configured != "" &&
 		filepath.IsAbs(configured) {
 		configDir = configured
 	}
+	settings := kimiSkillSettings{}
 	if filepath.IsAbs(configDir) {
 		if data, ok := readSettingsFile(configDir, "config.toml"); ok {
 			parseKimiSkillSettings(data, &settings)
@@ -115,13 +110,9 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 
 	scan := func(scope string, dirs ...string) {
 		for _, dir := range dirs {
-			if dir == "" {
-				continue
-			}
 			if !filepath.IsAbs(dir) {
-				// Same guard, and the same reason, as omp.go's scan: an empty
-				// ctx.Home makes filepath.Join yield a relative path, which
-				// would scan the headless service's own working directory.
+				// An empty home makes filepath.Join return a relative path.
+				// Never scan the headless service's unrelated working directory.
 				continue
 			}
 			cmds, trunc := scanPiSkillTree(dir, scope, nil, true, true, &budget, seenFiles, seenDirs)
@@ -129,68 +120,29 @@ func (p *kimiProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 			truncated = truncated || trunc
 		}
 	}
-	// firstExisting applies only the first candidate directory that exists. This
-	// is what a mutually exclusive group does: always for the generic group, and
-	// for the brand group when merge_all_available_skills is false.
-	firstExisting := func(scope string, candidates []string) {
-		for _, dir := range candidates {
-			if info, err := os.Stat(dir); err == nil && info.IsDir() {
-				scan(scope, dir)
-				return
-			}
-		}
-	}
-	// brandGroup applies a candidate group in Kimi's documented priority order,
-	// highest first: under first-wins the highest-priority directory registers
-	// a name first, and the budget is spent there first.
-	brandGroup := func(scope string, candidates []string) {
-		if !settings.mergeAllAvailableSkills {
-			firstExisting(scope, candidates)
-			return
-		}
-		for _, dir := range candidates {
-			scan(scope, dir)
-		}
-	}
 
-	// projectRoot is Kimi's project scope: the nearest .git ancestor of the work
-	// directory, falling back to the work directory itself. Kimi resolves every
-	// project candidate against it, so an intermediate ancestor between the work
-	// directory and the project root contributes nothing.
+	// Kimi resolves project roots from the nearest .git ancestor, falling back
+	// to the working directory itself.
 	projectRoot := findGitRoot(ctx.Cwd)
 	if projectRoot == "" {
 		projectRoot = ctx.Cwd
 	}
-	projectSkillDirs := func(stems ...string) []string {
-		if projectRoot == "" {
-			return nil
-		}
-		dirs := make([]string, 0, len(stems))
-		for _, stem := range stems {
-			dirs = append(dirs, filepath.Join(projectRoot, stem, "skills"))
-		}
-		return dirs
+	if filepath.IsAbs(projectRoot) {
+		scan("project",
+			filepath.Join(projectRoot, ".kimi-code", "skills"),
+			filepath.Join(projectRoot, ".agents", "skills"),
+		)
 	}
 
-	// 1. project brand group (kimi > claude > codex), then 2. project generic
-	// group.
-	brandGroup("project", projectSkillDirs(".kimi", ".claude", ".codex"))
-	firstExisting("project", projectSkillDirs(".agents"))
-
-	// 3. user brand group, then 4. user generic group.
-	brandGroup("personal", []string{
-		filepath.Join(ctx.Home, ".kimi", "skills"),
-		filepath.Join(ctx.Home, ".claude", "skills"),
-		filepath.Join(ctx.Home, ".codex", "skills"),
-	})
-	firstExisting("personal", []string{
-		filepath.Join(ctx.Home, ".config", "agents", "skills"),
+	// KIMI_CODE_HOME relocates only Kimi's brand data. Generic skills remain
+	// under the real user home so they can be shared with other agents.
+	scan("personal",
+		filepath.Join(configDir, "skills"),
 		filepath.Join(ctx.Home, ".agents", "skills"),
-	})
+	)
 
-	// 5. extra_skill_dirs are additive user scope, scanned last: a brand or
-	// generic copy of the same name wins the collision. "~" resolves against
-	// home and a relative entry against the project root, as Kimi documents.
+	// Extra roots are lower precedence than project and user roots. Relative
+	// entries resolve from the project root; "~" resolves from the real home.
 	for _, dir := range settings.extraSkillDirs {
 		dir = expandTilde(dir, ctx.Home)
 		if strings.HasPrefix(dir, "~") {

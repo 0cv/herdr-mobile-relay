@@ -3,6 +3,29 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.19.0] - 2026-08-29
+
+### Added
+
+- Transcript, session-title, and native skill discovery now resolve through
+  profile-aware agent roots. Relay-side path lists cover Claude Code, Qoder,
+  Codex, Pi, and Oh My Pi, while named Pi and Oh My Pi profiles under their
+  default configuration roots are discovered automatically.
+- Slash-command palettes follow the current native skill and extension sources
+  for Pi, Oh My Pi, and standalone Kimi Code, including project scope, trust,
+  configured directories, plugin overrides, and contained manifest paths.
+
+### Fixed
+
+- Conversation titles and history now resolve through the same contained
+  transcript, so copied session IDs, stale Codex index rows, and project
+  symlinks can no longer pair a title with a missing or different conversation.
+- Explicit per-profile command opt-outs are preserved instead of falling
+  through to native skill discovery.
+- Oh My Pi tool-approval dialogs are classified as live approvals.
+- Slash-command names and descriptions use a stacked mobile layout, so long
+  skill names cannot overlap or squeeze their descriptions.
+
 ## [0.18.4] - 2026-08-28
 
 ### Added
@@ -30,15 +53,6 @@ project follows [Semantic Versioning](https://semver.org/).
   cadence even though its geometry had not changed. Renewals now extend only
   the lease TTL; real phone, desktop, and multi-client size changes still
   resize the pane.
-- Conversation titles and history now resolve through the same contained
-  transcript, so copied session IDs, stale Codex index rows, and project
-  symlinks can no longer pair a title with a missing or different conversation.
-- Slash-command discovery now preserves explicit per-profile opt-outs, follows
-  Pi's recursive/flat skill loading, trusted ancestors, and include/exclude
-  settings, reads OMP `config.yml` extensions plus project plugin scope and
-  overrides without allowing manifest paths to escape their plugin, and
-  matches Kimi's flat skills, canonical roots, case-insensitive names, and TOML
-  comments.
 - A failed app cutover no longer traps the phone in a rapid reload loop. The
   successful deployment announcement persists across page loads, but the old
   client kept its reload guard only in memory; if the old bundle survived the
@@ -1229,6 +1243,8 @@ project follows [Semantic Versioning](https://semver.org/).
   distorting their cells.
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
+
+[0.19.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.4...v0.19.0
 
 [0.18.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.3...v0.18.4
 

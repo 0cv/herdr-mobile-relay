@@ -9,7 +9,7 @@ import (
 
 func TestKimiBuiltinCatalog(t *testing.T) {
 	isolateAgentEnv(t)
-	catalog := CatalogForProfile("kimi", "kimi", t.TempDir(), "/nonexistent", nil, "", "0.29.2", "")
+	catalog := CatalogForProfile("kimi", "kimi", t.TempDir(), "/nonexistent", nil, "", "0.36.1", "")
 	if catalog.Truncated {
 		t.Fatal("Kimi builtins should not be truncated")
 	}
@@ -40,137 +40,50 @@ func TestKimiCommandHints(t *testing.T) {
 
 func TestParseKimiSkillSettings(t *testing.T) {
 	cases := []struct {
-		name      string
-		seedDirs  []string
-		data      string
-		wantMerge bool
-		wantDirs  []string
+		name     string
+		seedDirs []string
+		data     string
+		wantDirs []string
 	}{
 		{
-			name:      "bare false",
-			data:      "merge_all_available_skills = false\n",
-			wantMerge: false,
+			name:     "single line array",
+			data:     "extra_skill_dirs = [\"~/a\", '/b/c']\n",
+			wantDirs: []string{"~/a", "/b/c"},
 		},
 		{
-			name:      "bare true",
-			data:      "merge_all_available_skills = true\n",
-			wantMerge: true,
+			name:     "multiline array",
+			seedDirs: []string{"~/keep"},
+			data:     "extra_skill_dirs = [\n  \"~/a\",\n  \"/b#c\", # quoted hash\n]\n",
+			wantDirs: []string{"~/a", "/b#c"},
 		},
 		{
-			name:      "case insensitive",
-			data:      "merge_all_available_skills = FALSE\n",
-			wantMerge: false,
+			name:     "empty array clears existing value",
+			seedDirs: []string{"~/keep"},
+			data:     "extra_skill_dirs = []\n",
 		},
 		{
-			name:      "quoted boolean",
-			data:      "merge_all_available_skills = \"false\"\n",
-			wantMerge: false,
+			name:     "quoted key",
+			data:     `"extra_skill_dirs" = ["~/quoted-key"]` + "\n",
+			wantDirs: []string{"~/quoted-key"},
 		},
 		{
-			name:      "unrecognised scalar leaves default",
-			data:      "merge_all_available_skills = 0\n",
-			wantMerge: true,
+			name:     "nested table key ignored",
+			seedDirs: []string{"~/keep"},
+			data:     "[agent]\nextra_skill_dirs = [\"~/ignored\"]\n",
+			wantDirs: []string{"~/keep"},
 		},
 		{
-			name:      "trailing comment stripped",
-			data:      "merge_all_available_skills = false # keep the old behaviour\n",
-			wantMerge: false,
-		},
-		{
-			name:      "adjacent trailing comment stripped",
-			data:      "merge_all_available_skills = false#keep the old behaviour\n",
-			wantMerge: false,
-		},
-		{
-			name:      "comment line ignored",
-			data:      "# merge_all_available_skills = false\n",
-			wantMerge: true,
-		},
-		{
-			name:      "indented key still parsed",
-			data:      "  merge_all_available_skills = false\n",
-			wantMerge: false,
-		},
-		{
-			name:      "single line array",
-			data:      "extra_skill_dirs = [\"~/a\", '/b/c']\n",
-			wantMerge: true,
-			wantDirs:  []string{"~/a", "/b/c"},
-		},
-		{
-			name:      "array with trailing comment",
-			data:      "extra_skill_dirs = [\"~/a\"] # team shared\n",
-			wantMerge: true,
-			wantDirs:  []string{"~/a"},
-		},
-		{
-			name:      "hash inside a quoted item survives",
-			data:      "extra_skill_dirs = [\"~/a#b\"]\n",
-			wantMerge: true,
-			wantDirs:  []string{"~/a#b"},
-		},
-		{
-			name:      "empty items dropped",
-			data:      "extra_skill_dirs = [\"\", \"~/a\", ]\n",
-			wantMerge: true,
-			wantDirs:  []string{"~/a"},
-		},
-		{
-			name:      "empty array clears the key",
-			seedDirs:  []string{"~/keep"},
-			data:      "extra_skill_dirs = []\n",
-			wantMerge: true,
-			wantDirs:  nil,
-		},
-		{
-			name:      "multi line array is parsed",
-			seedDirs:  []string{"~/keep"},
-			data:      "extra_skill_dirs = [\n  \"~/a\",\n]\n",
-			wantMerge: true,
-			wantDirs:  []string{"~/a"},
-		},
-		{
-			name:      "later file replaces the list",
-			seedDirs:  []string{"~/keep"},
-			data:      "extra_skill_dirs = [\"~/a\"]\n",
-			wantMerge: true,
-			wantDirs:  []string{"~/a"},
-		},
-		{
-			name:      "table header isolates a later key",
-			data:      "extra_skill_dirs = [\"~/a\"]\n\n[agent]\nmerge_all_available_skills = false\n",
-			wantMerge: true,
-			wantDirs:  []string{"~/a"},
-		},
-		{
-			name:      "root keys before a table header are consumed",
-			data:      "merge_all_available_skills = false\n[tui]\ntheme = \"dark\"\n",
-			wantMerge: false,
-		},
-		{
-			name:      "quoted key",
-			data:      `"extra_skill_dirs" = ["~/quoted-key"]` + "\n",
-			wantMerge: true,
-			wantDirs:  []string{"~/quoted-key"},
-		},
-		{
-			name:      "basic string whitespace preserved",
-			data:      `extra_skill_dirs = ["  ~/spaced  "]` + "\n",
-			wantMerge: true,
-			wantDirs:  []string{"  ~/spaced  "},
+			name:     "legacy setting ignored",
+			seedDirs: []string{"~/keep"},
+			data:     "merge_all_available_skills = false\n",
+			wantDirs: []string{"~/keep"},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			settings := defaultKimiSkillSettings()
-			settings.extraSkillDirs = tc.seedDirs
+			settings := kimiSkillSettings{extraSkillDirs: tc.seedDirs}
 			parseKimiSkillSettings([]byte(tc.data), &settings)
-
-			if settings.mergeAllAvailableSkills != tc.wantMerge {
-				t.Errorf("mergeAllAvailableSkills = %v, want %v",
-					settings.mergeAllAvailableSkills, tc.wantMerge)
-			}
 			if len(settings.extraSkillDirs) != len(tc.wantDirs) {
 				t.Fatalf("extraSkillDirs = %q, want %q", settings.extraSkillDirs, tc.wantDirs)
 			}
@@ -209,17 +122,17 @@ func (f kimiFixture) gitRepo(t *testing.T) {
 
 func (f kimiFixture) config(t *testing.T, content string) {
 	t.Helper()
-	writeFile(t, filepath.Join(f.home, ".kimi", "config.toml"), content)
+	writeFile(t, filepath.Join(f.home, ".kimi-code", "config.toml"), content)
 }
 
 func (f kimiFixture) catalog(cwd string) Catalog {
-	return CatalogForProfile("kimi", "kimi", cwd, f.home, nil, "", "0.29.2", "")
+	return CatalogForProfile("kimi", "kimi", cwd, f.home, nil, "", "0.36.1", "")
 }
 
 func TestKimiDiscoversProjectKimiSkills(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "deploy", "Ship the service")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "deploy", "Ship the service")
 
 	catalog := f.catalog(f.repo)
 	command, ok := commandByName(catalog, "/skill:deploy")
@@ -237,26 +150,26 @@ func TestKimiDiscoversProjectKimiSkills(t *testing.T) {
 func TestKimiDiscoversProjectSkillsFromSubdirectory(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "deploy", "Ship the service")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "deploy", "Ship the service")
 	nested := filepath.Join(f.repo, "services", "api")
 	mkdirAll(t, nested)
 
 	if _, ok := commandByName(f.catalog(nested), "/skill:deploy"); !ok {
-		t.Fatal("walk-up from a subdirectory did not reach the project root's .kimi/skills")
+		t.Fatal("walk-up from a subdirectory did not reach the project root's .kimi-code/skills")
 	}
 }
 
-func TestKimiMergesProjectBrandAndGenericGroups(t *testing.T) {
+func TestKimiMergesProjectBrandAndGenericRoots(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
-	writeSkill(t, filepath.Join(f.repo, ".claude", "skills"), "review", "Review a diff")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "review", "Review a diff")
 	writeSkill(t, filepath.Join(f.repo, ".agents", "skills"), "audit", "Audit dependencies")
 
 	catalog := f.catalog(f.repo)
 	for _, name := range []string{"/skill:review", "/skill:audit"} {
 		command, ok := commandByName(catalog, name)
 		if !ok {
-			t.Fatalf("%s missing; merge_all_available_skills defaults to true", name)
+			t.Fatalf("%s missing from standalone Kimi Code project roots", name)
 		}
 		if command.Source != "project" {
 			t.Errorf("%s source = %q, want project", name, command.Source)
@@ -264,49 +177,20 @@ func TestKimiMergesProjectBrandAndGenericGroups(t *testing.T) {
 	}
 }
 
-func TestKimiMergesUserBrandDirsByDefault(t *testing.T) {
+func TestKimiMergesUserBrandAndGenericRoots(t *testing.T) {
 	f := newKimiFixture(t)
-	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "deploy", "Ship the service")
-	writeSkill(t, filepath.Join(f.home, ".claude", "skills"), "review", "Review a diff")
+	writeSkill(t, filepath.Join(f.home, ".kimi-code", "skills"), "deploy", "Ship the service")
+	writeSkill(t, filepath.Join(f.home, ".agents", "skills"), "review", "Review a diff")
 
 	catalog := f.catalog(f.repo)
 	for _, name := range []string{"/skill:deploy", "/skill:review"} {
 		command, ok := commandByName(catalog, name)
 		if !ok {
-			t.Fatalf("%s missing; every existing brand directory is merged by default", name)
+			t.Fatalf("%s missing from standalone Kimi Code user roots", name)
 		}
 		if command.Source != "personal" {
 			t.Errorf("%s source = %q, want personal", name, command.Source)
 		}
-	}
-}
-
-func TestKimiFirstExistingUserBrandDirWinsWhenMergeDisabled(t *testing.T) {
-	f := newKimiFixture(t)
-	f.config(t, "merge_all_available_skills = false\n")
-	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "deploy", "Ship the service")
-	writeSkill(t, filepath.Join(f.home, ".claude", "skills"), "review", "Review a diff")
-
-	catalog := f.catalog(f.repo)
-	command, ok := commandByName(catalog, "/skill:deploy")
-	if !ok {
-		t.Fatal("~/.kimi/skills is the first existing brand directory and must be used")
-	}
-	if command.Source != "personal" {
-		t.Errorf("source = %q, want personal", command.Source)
-	}
-	if _, ok := commandByName(catalog, "/skill:review"); ok {
-		t.Error("merge_all_available_skills = false must use only the first existing brand directory")
-	}
-}
-
-func TestKimiFallsBackToNextUserBrandDirWhenMergeDisabled(t *testing.T) {
-	f := newKimiFixture(t)
-	f.config(t, "merge_all_available_skills = false\n")
-	writeSkill(t, filepath.Join(f.home, ".claude", "skills"), "review", "Review a diff")
-
-	if _, ok := commandByName(f.catalog(f.repo), "/skill:review"); !ok {
-		t.Fatal("~/.claude/skills must be used when ~/.kimi/skills does not exist")
 	}
 }
 
@@ -327,8 +211,8 @@ func TestKimiDiscoversExtraSkillDirs(t *testing.T) {
 func TestKimiProjectSkillBeatsUserSkill(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
-	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "deploy", "User copy")
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "deploy", "Project copy")
+	writeSkill(t, filepath.Join(f.home, ".kimi-code", "skills"), "deploy", "User copy")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "deploy", "Project copy")
 
 	catalog := f.catalog(f.repo)
 	matches := 0
@@ -349,26 +233,35 @@ func TestKimiProjectSkillBeatsUserSkill(t *testing.T) {
 	}
 }
 
-func TestKimiBrandPriorityWithinOneProjectAncestor(t *testing.T) {
+func TestKimiIgnoresLegacyBrandRoots(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "deploy", "Kimi copy")
-	writeSkill(t, filepath.Join(f.repo, ".codex", "skills"), "deploy", "Codex copy")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "deploy", "Current copy")
+	writeSkill(t, filepath.Join(f.repo, ".codex", "skills"), "legacy", "Legacy copy")
+	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "legacy-kimi", "Legacy Kimi copy")
+	writeSkill(t, filepath.Join(f.home, ".claude", "skills"), "legacy-user", "Legacy user copy")
+	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "legacy-kimi-user", "Legacy Kimi user copy")
 
 	command, ok := commandByName(f.catalog(f.repo), "/skill:deploy")
-	if !ok {
-		t.Fatal("/skill:deploy missing")
+	if !ok || command.Description != "Current copy" {
+		t.Fatalf("standalone Kimi Code skill = %+v, present %v", command, ok)
 	}
-	if command.Description != "Kimi copy" {
-		t.Errorf("description = %q, want the .kimi copy: brand priority is kimi > claude > codex",
-			command.Description)
+	for _, name := range []string{
+		"/skill:legacy",
+		"/skill:legacy-user",
+		"/skill:legacy-kimi",
+		"/skill:legacy-kimi-user",
+	} {
+		if _, ok := commandByName(f.catalog(f.repo), name); ok {
+			t.Errorf("legacy brand root exposed %s", name)
+		}
 	}
 }
 
 func TestKimiDropsSkillWithoutDescription(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "deploy", "")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "deploy", "")
 
 	if _, ok := commandByName(f.catalog(f.repo), "/skill:deploy"); ok {
 		t.Error("a skill without a description must not be listed")
@@ -380,7 +273,7 @@ func TestKimiINIConfiguredFormatSkipsNativeDiscovery(t *testing.T) {
 	f.gitRepo(t)
 	explicit := filepath.Join(f.home, "explicit", "skills")
 	writeSkill(t, explicit, "explicit", "Configured by the relay")
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "deploy", "Ship the service")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "deploy", "Ship the service")
 
 	catalog := CatalogForProfile("kimi", "kimi", f.repo, f.home,
 		[]string{explicit}, "skill:{name}", "", "")
@@ -395,36 +288,22 @@ func TestKimiINIConfiguredFormatSkipsNativeDiscovery(t *testing.T) {
 	}
 }
 
-func TestKimiGenericGroupIsMutuallyExclusive(t *testing.T) {
+func TestKimiDiscoversHomeAgentsSkills(t *testing.T) {
 	f := newKimiFixture(t)
-	writeSkill(t, filepath.Join(f.home, ".config", "agents", "skills"), "preferred", "From the recommended dir")
-	writeSkill(t, filepath.Join(f.home, ".agents", "skills"), "secondary", "From the fallback dir")
+	writeSkill(t, filepath.Join(f.home, ".agents", "skills"), "shared", "Shared generic skill")
 
-	catalog := f.catalog(f.repo)
-	if _, ok := commandByName(catalog, "/skill:preferred"); !ok {
-		t.Fatal("~/.config/agents/skills is the first existing generic candidate")
-	}
-	if _, ok := commandByName(catalog, "/skill:secondary"); ok {
-		t.Error("the generic group is mutually exclusive: merge_all_available_skills does not merge it")
+	if _, ok := commandByName(f.catalog(f.repo), "/skill:shared"); !ok {
+		t.Fatal("~/.agents/skills was not scanned")
 	}
 }
 
-func TestKimiGenericGroupFallsBackToAgentsDir(t *testing.T) {
-	f := newKimiFixture(t)
-	writeSkill(t, filepath.Join(f.home, ".agents", "skills"), "secondary", "From the fallback dir")
-
-	if _, ok := commandByName(f.catalog(f.repo), "/skill:secondary"); !ok {
-		t.Fatal("~/.agents/skills must be used when ~/.config/agents/skills does not exist")
-	}
-}
-
-func TestKimiBrandGroupBeatsGenericGroup(t *testing.T) {
+func TestKimiBrandRootBeatsGenericRoot(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
 	writeSkill(t, filepath.Join(f.home, ".agents", "skills"), "shared", "User generic copy")
-	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "shared", "User brand copy")
+	writeSkill(t, filepath.Join(f.home, ".kimi-code", "skills"), "shared", "User brand copy")
 	writeSkill(t, filepath.Join(f.repo, ".agents", "skills"), "review", "Project generic copy")
-	writeSkill(t, filepath.Join(f.repo, ".claude", "skills"), "review", "Project brand copy")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "review", "Project brand copy")
 
 	catalog := f.catalog(f.repo)
 	user, ok := commandByName(catalog, "/skill:shared")
@@ -446,13 +325,13 @@ func TestKimiBrandGroupBeatsGenericGroup(t *testing.T) {
 func TestKimiProjectCandidatesResolveAtProjectRootOnly(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "root-skill", "At the project root")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "root-skill", "At the project root")
 	nested := filepath.Join(f.repo, "services", "api")
-	writeSkill(t, filepath.Join(nested, ".kimi", "skills"), "nested-skill", "In an intermediate dir")
+	writeSkill(t, filepath.Join(nested, ".kimi-code", "skills"), "nested-skill", "In an intermediate dir")
 
 	catalog := f.catalog(nested)
 	if _, ok := commandByName(catalog, "/skill:root-skill"); !ok {
-		t.Fatal("the project root's .kimi/skills must be scanned from a subdirectory")
+		t.Fatal("the project root's .kimi-code/skills must be scanned from a subdirectory")
 	}
 	if _, ok := commandByName(catalog, "/skill:nested-skill"); ok {
 		t.Error("Kimi resolves project candidates against the project root only, not each ancestor")
@@ -461,7 +340,7 @@ func TestKimiProjectCandidatesResolveAtProjectRootOnly(t *testing.T) {
 
 func TestKimiWithoutGitRootUsesWorkDirectory(t *testing.T) {
 	f := newKimiFixture(t)
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "deploy", "Ship the service")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "deploy", "Ship the service")
 
 	if _, ok := commandByName(f.catalog(f.repo), "/skill:deploy"); !ok {
 		t.Fatal("without a .git marker the work directory is the project root")
@@ -489,7 +368,7 @@ func TestKimiExtraSkillDirsLoseNameCollisions(t *testing.T) {
 	f := newKimiFixture(t)
 	f.config(t, "extra_skill_dirs = [\"~/elsewhere/skills\"]\n")
 	writeSkill(t, filepath.Join(f.home, "elsewhere", "skills"), "deploy", "Extra copy")
-	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "deploy", "User copy")
+	writeSkill(t, filepath.Join(f.home, ".kimi-code", "skills"), "deploy", "User copy")
 
 	command, ok := commandByName(f.catalog(f.repo), "/skill:deploy")
 	if !ok {
@@ -500,10 +379,10 @@ func TestKimiExtraSkillDirsLoseNameCollisions(t *testing.T) {
 	}
 }
 
-func TestKimiBudgetFavorsHighestPriorityBrandDir(t *testing.T) {
+func TestKimiBudgetFavorsHighestPriorityRoot(t *testing.T) {
 	f := newKimiFixture(t)
-	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "mine", "The kimi skill")
-	bulk := filepath.Join(f.home, ".codex", "skills")
+	writeSkill(t, filepath.Join(f.home, ".kimi-code", "skills"), "mine", "The Kimi skill")
+	bulk := filepath.Join(f.home, ".agents", "skills")
 	for i := range maxCustomFiles {
 		writeSkill(t, bulk, fmt.Sprintf("bulk-%03d", i), "Filler")
 	}
@@ -513,62 +392,58 @@ func TestKimiBudgetFavorsHighestPriorityBrandDir(t *testing.T) {
 		t.Error("exhausting the file budget must mark the catalog truncated")
 	}
 	if _, ok := commandByName(catalog, "/skill:mine"); !ok {
-		t.Fatal("~/.kimi/skills outranks ~/.codex/skills and must be scanned before the budget is spent")
+		t.Fatal("KIMI_CODE_HOME/skills must be scanned before ~/.agents/skills spends the budget")
 	}
 }
 
 // TestKimiEmptyHomeDoesNotScanServiceWorkingDirectory guards the
-// os.UserHomeDir() failure path in server.go: when ctx.Home is "" every
-// user-scope join (.kimi/skills, .claude/skills, ...) becomes relative, and
-// a relative dir must never resolve against the relay service's own working
-// directory - which is arbitrary and unrelated to any project - instead of
-// simply contributing nothing.
+// os.UserHomeDir failure path: relative user roots must never resolve against
+// the relay service's unrelated working directory.
 func TestKimiEmptyHomeDoesNotScanServiceWorkingDirectory(t *testing.T) {
 	isolateAgentEnv(t)
 	repo := t.TempDir()
 	scratch := t.TempDir()
-	writeSkill(t, filepath.Join(scratch, ".kimi", "skills"), "leak-kimi", "Should never be discovered")
+	writeSkill(t, filepath.Join(scratch, ".kimi-code", "skills"), "leak-kimi", "Should never be discovered")
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.29.2", "")
+	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.36.1", "")
 	if _, ok := commandByName(catalog, "/skill:leak-kimi"); ok {
 		t.Fatal("empty ctx.Home must not make Kimi scan the service's own working directory")
 	}
 }
 
-// TestKimiEmptyHomeDoesNotReadServiceWorkingDirectoryConfig guards
-// kimi.go's own config.toml read against the same failure: with ctx.Home
-// empty, filepath.Join(ctx.Home, ".kimi") is relative, and must not resolve
-// to a stray config.toml sitting in the service's own working directory. An
-// extra_skill_dirs entry in that stray config would otherwise be honoured
-// even though it names an otherwise-legitimate absolute path, because the
-// leak is in reading the file at all, not in resolving the paths inside it.
+// TestKimiEmptyHomeDoesNotReadServiceWorkingDirectoryConfig guards the same
+// failure for .kimi-code/config.toml: a relative default must not be read from
+// the relay service's unrelated working directory.
 func TestKimiEmptyHomeDoesNotReadServiceWorkingDirectoryConfig(t *testing.T) {
 	isolateAgentEnv(t)
 	repo := t.TempDir()
 	scratch := t.TempDir()
 	extra := filepath.Join(scratch, "extra-skills")
 	writeSkill(t, extra, "leak-kimi-config", "Should never be discovered")
-	writeFile(t, filepath.Join(scratch, ".kimi", "config.toml"),
+	writeFile(t, filepath.Join(scratch, ".kimi-code", "config.toml"),
 		fmt.Sprintf("extra_skill_dirs = [%q]\n", extra))
 	t.Chdir(scratch)
 
-	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.29.2", "")
+	catalog := CatalogForProfile("kimi", "kimi", repo, "", nil, "", "0.36.1", "")
 	if _, ok := commandByName(catalog, "/skill:leak-kimi-config"); ok {
 		t.Fatal("empty ctx.Home must not make Kimi read a config.toml from the service's own working directory")
 	}
 }
 
-func TestKimiReadsConfigFromShareDirectory(t *testing.T) {
+func TestKimiReadsRelocatedHomeConfigAndSkills(t *testing.T) {
 	f := newKimiFixture(t)
-	share := filepath.Join(f.home, "kimi-share")
-	t.Setenv("KIMI_SHARE_DIR", share)
-	writeFile(t, filepath.Join(share, "config.toml"),
+	kimiHome := filepath.Join(f.home, "kimi-code-home")
+	t.Setenv("KIMI_CODE_HOME", kimiHome)
+	writeFile(t, filepath.Join(kimiHome, "config.toml"),
 		`"extra_skill_dirs" = ["configured-skills"]`+"\n")
-	writeSkill(t, filepath.Join(f.repo, "configured-skills"), "shared-config", "From share config")
+	writeSkill(t, filepath.Join(kimiHome, "skills"), "relocated", "From relocated Kimi home")
+	writeSkill(t, filepath.Join(f.repo, "configured-skills"), "configured", "From relocated config")
 
-	if _, ok := commandByName(f.catalog(f.repo), "/skill:shared-config"); !ok {
-		t.Fatal("KIMI_SHARE_DIR/config.toml was not read")
+	for _, name := range []string{"/skill:relocated", "/skill:configured"} {
+		if _, ok := commandByName(f.catalog(f.repo), name); !ok {
+			t.Fatalf("KIMI_CODE_HOME did not expose %s", name)
+		}
 	}
 }
 
@@ -584,7 +459,7 @@ func TestKimiRejectsUnsupportedTildeUserSkillPath(t *testing.T) {
 
 func TestKimiDiscoversFlatSkillFiles(t *testing.T) {
 	f := newKimiFixture(t)
-	writeFile(t, filepath.Join(f.home, ".kimi", "skills", "flat.md"),
+	writeFile(t, filepath.Join(f.home, ".kimi-code", "skills", "flat.md"),
 		"---\nname: flat\ndescription: Flat Kimi skill\n---\n")
 
 	if _, ok := commandByName(f.catalog(f.repo), "/skill:flat"); !ok {
@@ -594,7 +469,7 @@ func TestKimiDiscoversFlatSkillFiles(t *testing.T) {
 
 func TestKimiCanonicalizesRootsBeforeSpendingBudget(t *testing.T) {
 	f := newKimiFixture(t)
-	brand := filepath.Join(f.home, ".kimi", "skills")
+	brand := filepath.Join(f.home, ".kimi-code", "skills")
 	for index := 0; index < maxCustomFiles-1; index++ {
 		writeSkill(t, brand, fmt.Sprintf("bulk-%03d", index), "Filler")
 	}
@@ -614,8 +489,8 @@ func TestKimiCanonicalizesRootsBeforeSpendingBudget(t *testing.T) {
 func TestKimiDeduplicatesSkillNamesCaseInsensitively(t *testing.T) {
 	f := newKimiFixture(t)
 	f.gitRepo(t)
-	writeSkill(t, filepath.Join(f.repo, ".kimi", "skills"), "Deploy", "Project copy")
-	writeSkill(t, filepath.Join(f.home, ".kimi", "skills"), "deploy", "User copy")
+	writeSkill(t, filepath.Join(f.repo, ".kimi-code", "skills"), "Deploy", "Project copy")
+	writeSkill(t, filepath.Join(f.home, ".kimi-code", "skills"), "deploy", "User copy")
 
 	catalog := f.catalog(f.repo)
 	command, ok := commandByName(catalog, "/skill:Deploy")

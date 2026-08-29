@@ -5,21 +5,10 @@ import (
 	"strings"
 )
 
-// kimiSkillSettings holds the subset of Kimi Code's config.toml that decides
-// which skill directories become /skill:<name> commands. Kimi 0.29.2 documents
-// no per-skill disable and no switch for the skill commands themselves, so
-// there is no ban list here.
+// kimiSkillSettings holds the standalone Kimi Code config.toml field that
+// changes which directories become /skill:<name> commands.
 type kimiSkillSettings struct {
-	// mergeAllAvailableSkills selects a candidate group's semantics: true uses
-	// every directory in the group, false only the first that exists.
-	mergeAllAvailableSkills bool
-	extraSkillDirs          []string
-}
-
-// defaultKimiSkillSettings returns Kimi's own defaults: merge everything, no
-// extra directories.
-func defaultKimiSkillSettings() kimiSkillSettings {
-	return kimiSkillSettings{mergeAllAvailableSkills: true}
+	extraSkillDirs []string
 }
 
 // parseKimiSkillSettings applies the root-table skill settings from config.toml.
@@ -44,46 +33,15 @@ func parseKimiSkillSettings(data []byte, settings *kimiSkillSettings) {
 		if !ok {
 			continue
 		}
-		switch key {
-		case "merge_all_available_skills":
-			setScalarBool(&settings.mergeAllAvailableSkills, stripKimiComment(value))
-		case "extra_skill_dirs":
-			for kimiArrayEnd(value) < 0 && index+1 < len(lines) {
-				index++
-				value += "\n" + lines[index]
-			}
-			setKimiList(&settings.extraSkillDirs, value)
+		if key != "extra_skill_dirs" {
+			continue
 		}
+		for kimiArrayEnd(value) < 0 && index+1 < len(lines) {
+			index++
+			value += "\n" + lines[index]
+		}
+		setKimiList(&settings.extraSkillDirs, value)
 	}
-}
-
-func stripKimiComment(value string) string {
-	quote := byte(0)
-	escaped := false
-	for index := 0; index < len(value); index++ {
-		current := value[index]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if quote == '"' && current == '\\' {
-			escaped = true
-			continue
-		}
-		if quote != 0 {
-			if current == quote {
-				quote = 0
-			}
-			continue
-		}
-		switch current {
-		case '\'', '"':
-			quote = current
-		case '#':
-			return strings.TrimSpace(value[:index])
-		}
-	}
-	return strings.TrimSpace(value)
 }
 
 // setKimiList assigns a TOML array. List keys replace rather than append
