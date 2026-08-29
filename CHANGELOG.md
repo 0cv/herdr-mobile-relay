@@ -3,6 +3,14 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.19.1] - 2026-08-29
+
+### Fixed
+
+- Conversation now shows only user prompts and the latest agent answer from each
+  exchange. Intermediate agent messages and tool activity remain available in
+  Full history, so the two tabs no longer render effectively the same transcript.
+
 ## [0.19.0] - 2026-08-29
 
 ### Added
@@ -1243,6 +1251,8 @@ project follows [Semantic Versioning](https://semver.org/).
   distorting their cells.
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
+
+[0.19.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.19.0...v0.19.1
 
 [0.19.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.18.4...v0.19.0
 

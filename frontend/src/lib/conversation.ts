@@ -7,51 +7,33 @@ export const maxPayloadChars = 2000;
 
 /**
  * conversationEntries reduces a recorded transcript to the compact view: every
- * user turn, every tool event, and only the latest assistant prose from each
- * exchange.
+ * user turn and only the latest assistant prose from each exchange.
  *
- * Tool activity stays at its recorded position because it is useful even when
- * a later answer supersedes the prose around it. When a tool-bearing entry also
- * carries superseded prose, the compact view projects that entry to tools only;
- * Full history still receives the untouched recorded entry.
+ * Intermediate agent updates and tool activity belong to Full history. When the
+ * retained answer also carries tools, the compact view projects them out
+ * without mutating the recorded entry used by Full history.
  */
 export function conversationEntries(recorded: ConversationEntry[]): ConversationEntry[] {
   const conversation: ConversationEntry[] = [];
-  let assistantExchange: ConversationEntry[] = [];
+  let latestAssistant: ConversationEntry | null = null;
 
-  const flushAssistantExchange = () => {
-    let latestTextIndex = -1;
-    for (let index = 0; index < assistantExchange.length; index += 1) {
-      if (assistantExchange[index].text.trim()) latestTextIndex = index;
-    }
-
-    for (let index = 0; index < assistantExchange.length; index += 1) {
-      const entry = assistantExchange[index];
-      if (index === latestTextIndex) {
-        conversation.push(entry);
-        continue;
-      }
-      if (!entry.tools?.length) continue;
-      if (!entry.text.trim()) {
-        conversation.push(entry);
-        continue;
-      }
-      const toolsOnly = { ...entry, text: '' };
-      delete toolsOnly.truncated;
-      conversation.push(toolsOnly);
-    }
-    assistantExchange = [];
+  const answerOnly = (entry: ConversationEntry): ConversationEntry => {
+    if (!entry.tools?.length) return entry;
+    const answer = { ...entry };
+    delete answer.tools;
+    return answer;
   };
 
   for (const entry of recorded) {
     if (entry.role === 'user') {
-      flushAssistantExchange();
+      if (latestAssistant) conversation.push(answerOnly(latestAssistant));
+      latestAssistant = null;
       conversation.push(entry);
       continue;
     }
-    assistantExchange.push(entry);
+    if (entry.text.trim()) latestAssistant = entry;
   }
-  flushAssistantExchange();
+  if (latestAssistant) conversation.push(answerOnly(latestAssistant));
   return conversation;
 }
 

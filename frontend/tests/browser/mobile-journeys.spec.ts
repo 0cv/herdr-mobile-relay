@@ -3340,15 +3340,16 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await page.getByRole('button', { name: 'Copy History app message as Markdown' }).click();
   await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedConversation')))
     .toBe('# middle retained answer');
-  // Superseded prose collapses out of the compact view; a tool call is a
-  // distinct event and stays, so the Read call is visible in both modes.
+  // The compact view keeps only user prompts and final answers. Full history
+  // owns both superseded prose and the tool activity attached to it.
   await expect(page.getByText('intermediate progress update')).toBeHidden();
-  await expect(page.getByText('Read', { exact: true })).toBeVisible();
+  await expect(page.getByText('Read', { exact: true })).toBeHidden();
   await page.getByRole('button', { name: 'Full history' }).click();
   await expect(page.getByText('intermediate progress update')).toBeVisible();
   await expect(page.getByText('Read', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Conversation', exact: true }).click();
   await expect(page.getByText('intermediate progress update')).toBeHidden();
+  await expect(page.getByText('Read', { exact: true })).toBeHidden();
 
   const composer = page.getByRole('textbox', { name: 'Prompt' });
   await composer.fill('Review the attached screen');
@@ -3454,7 +3455,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Open History app on Fedora' })).toBeVisible();
 });
 
-test('keeps tool-only agent turns and decodes their arguments', async ({ page }) => {
+test('shows tool-only agent turns only in full history and decodes their arguments', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0, {
@@ -3480,8 +3481,8 @@ test('keeps tool-only agent turns and decodes their arguments', async ({ page })
     }],
   });
   // Claude Code records one text-less assistant turn per tool call and
-  // serialises the arguments as JSON, which is the shape the compact view used
-  // to discard entirely.
+  // serialises the arguments as JSON. Conversation omits that activity; Full
+  // history keeps it available for inspection.
   const output = Array.from({ length: 200 }, (_, index) => `line-${index}`).join('\n');
   await setConversationFixture(page, {
     entries: [
@@ -3512,8 +3513,9 @@ test('keeps tool-only agent turns and decodes their arguments', async ({ page })
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('Probe finished.')).toBeVisible();
 
-  // The compact view must keep the tool turn: it is the only record of the work.
   const card = page.getByLabel(/^Conversation with/).locator('details').filter({ hasText: 'Bash' });
+  await expect(card).toBeHidden();
+  await page.getByRole('button', { name: 'Full history' }).click();
   await expect(card).toBeVisible();
   const search = page.getByRole('searchbox', { name: 'Search displayed conversation' });
   await search.fill('Bash');
