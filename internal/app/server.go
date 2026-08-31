@@ -162,7 +162,11 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	var deviceStore *deviceauth.Store
 	var deviceStoreErr error
 	if cfg.Token != "" {
-		store, err := deviceauth.Open(filepath.Join(cfg.RuntimeDir, "device-auth"))
+		var storeOptions []deviceauth.Option
+		if cfg.RearmBootstrap {
+			storeOptions = append(storeOptions, deviceauth.WithBootstrapReenrollment())
+		}
+		store, err := deviceauth.Open(filepath.Join(cfg.RuntimeDir, "device-auth"), storeOptions...)
 		if err != nil {
 			deviceStoreErr = fmt.Errorf("initialize device authentication: %w", err)
 		} else if err := store.EnsureBootstrapInvitation([]byte(cfg.Token), hostname, "en"); err != nil {

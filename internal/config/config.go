@@ -51,6 +51,10 @@ type Config struct {
 	WebRTCUDPPort       int
 	ForceRelayTransport bool
 	PortMappingEnabled  bool
+	// RearmBootstrap mints a fresh one-use bootstrap invitation on every
+	// process start. Only the quick-tunnel flow sets it: its app origin
+	// changes each launch, so a phone can never keep its enrolled credential.
+	RearmBootstrap bool
 
 	CacheDir   string
 	ConfigHome string
@@ -74,6 +78,7 @@ func Load() (*Config, error) {
 		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
 		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
 		PortMappingEnabled:  envBoolOr("HERDR_REACHABILITY_PORT_MAPPING", true),
+		RearmBootstrap:      envBoolOr("HERDR_RELAY_REARM_BOOTSTRAP", false),
 	}
 
 	if origins := os.Getenv("HERDR_ALLOWED_ORIGINS"); origins != "" {

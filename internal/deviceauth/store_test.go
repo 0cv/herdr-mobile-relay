@@ -149,3 +149,80 @@ func TestAuthenticatedLocaleIsNormalizedAndPersisted(t *testing.T) {
 		t.Fatalf("persisted credential = %#v", credentials)
 	}
 }
+
+func TestBootstrapStaysConsumedForStableInstalls(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.state.Credentials = []credentialRecord{testCredential("device-one", "credential-one", RoleController)}
+	if err := store.EnsureBootstrapInvitation(bytes.Repeat([]byte{5}, secretBytes), "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	invitation, err := store.ActiveInvitation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invitation != nil {
+		t.Fatalf("consumed bootstrap re-armed without reenrollment: %#v", invitation)
+	}
+}
+
+func TestRearmedBootstrapEnrollsAReplacementDeviceEachLaunch(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir, WithBootstrapReenrollment())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.state.Credentials = []credentialRecord{testCredential("device-one", "credential-one", RoleController)}
+	secret := bytes.Repeat([]byte{6}, secretBytes)
+	if err := store.EnsureBootstrapInvitation(secret, "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	invitation, err := store.ActiveInvitation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invitation == nil || invitation.InvitationID != bootstrapInvitationID {
+		t.Fatalf("re-armed invitation = %#v", invitation)
+	}
+	result, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1, Locale: "en",
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials := store.ListCredentials(result.Identity.CredentialID)
+	if len(credentials) != 2 {
+		t.Fatalf("credentials after reenrollment = %#v", credentials)
+	}
+	for _, credential := range credentials {
+		if credential.DeviceID == "device-one" && credential.Revoked {
+			t.Fatal("reenrollment revoked the previously paired device")
+		}
+	}
+}
+
+func TestRearmedBootstrapRefreshesExpiryWithEnrolledDevices(t *testing.T) {
+	store, err := Open(t.TempDir(), WithBootstrapReenrollment())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	store.now = func() time.Time { return now }
+	store.state.Credentials = []credentialRecord{testCredential("device-one", "credential-one", RoleController)}
+	secret := bytes.Repeat([]byte{8}, secretBytes)
+	if err := store.EnsureBootstrapInvitation(secret, "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(invitationLifetime)
+	resolved, err := store.ResolveE2EESecret(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(resolved, secret) {
+		t.Fatal("refreshed re-armed bootstrap returned the wrong secret")
+	}
+}

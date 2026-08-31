@@ -22,7 +22,7 @@ func (s *Store) ResolveE2EESecret(_ context.Context, selector transport.E2EEAuth
 			return nil, ErrAuthentication
 		}
 		if !now.Before(record.ExpiresAt) {
-			if record.InvitationID == bootstrapInvitationID && len(s.state.Credentials) == 0 {
+			if record.InvitationID == bootstrapInvitationID && (len(s.state.Credentials) == 0 || s.rearmBootstrap) {
 				previous := record.ExpiresAt
 				record.ExpiresAt = now.Add(invitationLifetime)
 				if err := s.persistLocked(); err != nil {

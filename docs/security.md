@@ -76,6 +76,13 @@ device state but cannot send input, answer approvals, upload, or change relay
 state. Revocation closes the device's live clients, enrollment tickets, and
 push subscriptions.
 
+The bootstrap invitation is one-use on stable installs. The quick tunnel is
+the exception: it serves the app from a hostname that changes on every launch,
+so a phone's enrolled credential is stranded under the previous origin and
+can never be presented again. Each quick-start launch therefore re-arms one
+fresh one-use bootstrap invitation, still bound to the relay key and expiring
+in ten minutes.
+
 Attachment uploads are staged privately, validated by content and container
 format, and represented to the phone by opaque references. A reference is
 bound to the server session, pane, terminal, generation, and agent session, then
