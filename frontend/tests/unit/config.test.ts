@@ -4,6 +4,7 @@ import {
   loadRelayConfigs,
   normalizeRelayConfig,
   quickSetupConfig,
+  quickSetupInvitation,
   shouldRetainSetupFragment,
   saveRelayConfigs,
 } from '$lib/config';
@@ -27,6 +28,34 @@ describe('Home Screen setup handoff', () => {
     }, false)).toBe(false);
   });
 });
+describe('device invitation setup', () => {
+  it('imports a one-use invitation without retaining its secret as a relay token', () => {
+    const secret = 'A'.repeat(43);
+    const locationValue = {
+      hash: `#setup=${secret}&invite=${'B'.repeat(24)}&invite_version=2&invite_expires=2000000000000&label=Phone&relay=wss%3A%2F%2Frelay.example.com`,
+      protocol: 'https:',
+      host: 'app.example.com',
+    };
+    expect(quickSetupInvitation(locationValue)).toEqual({
+      id: 'B'.repeat(24),
+      version: 2,
+      secret,
+      expiresAt: 2_000_000_000_000,
+    });
+    expect(quickSetupConfig(locationValue)).toEqual({
+      label: 'Phone',
+      url: 'wss://relay.example.com',
+      token: '',
+    });
+  });
+
+  it('rejects malformed invitation selectors', () => {
+    expect(quickSetupInvitation({
+      hash: `#setup=${'A'.repeat(43)}&invite=short&invite_version=1&invite_expires=2000000000000`,
+    })).toBeNull();
+  });
+});
+
 
 describe('ordered gateway lists', () => {
   it('reads the whole ordered list out of a setup fragment', () => {

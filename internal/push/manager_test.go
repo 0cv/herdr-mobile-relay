@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testLogger() *slog.Logger {
@@ -83,7 +84,7 @@ func TestNewManagerDerivesMissingPythonPublicKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
-	subscriptions := []byte(`{"subscriptions":[{"subscription":{"endpoint":"https://push.example.test/legacy","keys":{"p256dh":"legacy-key","auth":"legacy-auth"}},"client_id":"phone","notify_finished":true}]}`)
+	subscriptions := []byte(`{"subscriptions":[{"subscription":{"endpoint":"https://fcm.googleapis.com/legacy","keys":{"p256dh":"legacy-key","auth":"legacy-auth"}},"client_id":"phone","notify_finished":true}]}`)
 	if err := os.WriteFile(privatePath, privatePEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +219,7 @@ func TestSubscribeAndUnsubscribe(t *testing.T) {
 	dir := t.TempDir()
 	m, _ := NewManager(dir, testLogger())
 
-	sub := Subscription{Endpoint: "https://push.example.com/ep1"}
+	sub := Subscription{Endpoint: "https://fcm.googleapis.com/ep1"}
 	sub.Keys.P256dh = "key1"
 	sub.Keys.Auth = "auth1"
 	m.Subscribe(sub)
@@ -227,12 +228,12 @@ func TestSubscribeAndUnsubscribe(t *testing.T) {
 	if len(subs) != 1 {
 		t.Fatalf("subs = %d, want 1", len(subs))
 	}
-	if subs[0].Endpoint != "https://push.example.com/ep1" {
+	if subs[0].Endpoint != "https://fcm.googleapis.com/ep1" {
 		t.Errorf("endpoint = %q", subs[0].Endpoint)
 	}
 
 	// Subscribe same endpoint updates
-	sub2 := Subscription{Endpoint: "https://push.example.com/ep1", NotifyFinished: true}
+	sub2 := Subscription{Endpoint: "https://fcm.googleapis.com/ep1", NotifyFinished: true}
 	sub2.Keys.P256dh = "key2"
 	sub2.Keys.Auth = "auth2"
 	m.Subscribe(sub2)
@@ -246,10 +247,30 @@ func TestSubscribeAndUnsubscribe(t *testing.T) {
 	}
 
 	// Unsubscribe
-	m.Unsubscribe([]string{"https://push.example.com/ep1"})
+	m.Unsubscribe([]string{"https://fcm.googleapis.com/ep1"})
 	subs = m.Subscriptions()
 	if len(subs) != 0 {
 		t.Fatalf("after unsubscribe: subs = %d, want 0", len(subs))
+	}
+}
+
+func TestSubscribeRejectsNonPushEndpoints(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{
+		"http://fcm.googleapis.com/send",
+		"https://127.0.0.1/push",
+		"https://internal.example.test/push",
+		"https://fcm.googleapis.com:8443/send",
+	} {
+		subscription := Subscription{Endpoint: endpoint}
+		subscription.Keys.P256dh = "key"
+		subscription.Keys.Auth = "auth"
+		if err := manager.Subscribe(subscription); err == nil {
+			t.Fatalf("Subscribe(%q) succeeded", endpoint)
+		}
 	}
 }
 
@@ -257,15 +278,55 @@ func TestSubscriptionsPersist(t *testing.T) {
 	dir := t.TempDir()
 	m1, _ := NewManager(dir, testLogger())
 
-	sub := Subscription{Endpoint: "https://push.example.com/persist"}
+	sub := Subscription{Endpoint: "https://fcm.googleapis.com/persist"}
 	sub.Keys.P256dh = "k"
 	sub.Keys.Auth = "a"
 	m1.Subscribe(sub)
 
 	m2, _ := NewManager(dir, testLogger())
 	subs := m2.Subscriptions()
-	if len(subs) != 1 || subs[0].Endpoint != "https://push.example.com/persist" {
+	if len(subs) != 1 || subs[0].Endpoint != "https://fcm.googleapis.com/persist" {
 		t.Error("subscriptions should persist across restarts")
+	}
+}
+func TestRemoveDeviceClearsPushState(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := Subscription{Endpoint: "https://fcm.googleapis.com/device", DeviceID: "device-a"}
+	subscription.Keys.P256dh = "key"
+	subscription.Keys.Auth = "auth"
+	if err := manager.Subscribe(subscription); err != nil {
+		t.Fatal(err)
+	}
+	policy := DefaultDevicePolicy("device-a", "en")
+	policy.Categories[CategoryAttention] = false
+	if err := manager.policy.Set(policy); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	key := PushEventKey{DeviceID: "device-a", EventID: "event-a", Category: CategoryTest}
+	event := PushEvent{Key: key, Payload: []byte(`{\"type\":\"test\"}`), CreatedAt: now, ExpiresAt: now.Add(time.Minute)}
+	if _, err := manager.queue.enqueue(event, subscription, now); err != nil {
+		t.Fatal(err)
+	}
+	manager.active[key] = true
+
+	if err := manager.RemoveDevice("device-a"); err != nil {
+		t.Fatal(err)
+	}
+	if subscriptions := manager.Subscriptions(); len(subscriptions) != 0 {
+		t.Fatalf("Subscriptions() = %#v", subscriptions)
+	}
+	if keys := manager.queue.activeKeys(); len(keys) != 0 {
+		t.Fatalf("activeKeys() = %#v", keys)
+	}
+	if !manager.policy.Get("device-a", "en").Categories[CategoryAttention] {
+		t.Fatal("device policy was not removed")
+	}
+	if manager.active[key] {
+		t.Fatal("active push state was not removed")
 	}
 }
 
@@ -350,8 +411,8 @@ func TestSendFinishedHonorsSubscriptionOptIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sub := range []Subscription{
-		{Endpoint: "https://push.example.com/disabled"},
-		{Endpoint: "https://push.example.com/enabled", NotifyFinished: true},
+		{Endpoint: "https://fcm.googleapis.com/disabled"},
+		{Endpoint: "https://fcm.googleapis.com/enabled", NotifyFinished: true},
 	} {
 		sub.Keys.P256dh = "test-p256dh"
 		sub.Keys.Auth = "test-auth"
@@ -367,7 +428,7 @@ func TestSendFinishedHonorsSubscriptionOptIn(t *testing.T) {
 	}
 	manager.Send(t.Context(), BuildFinishedPayload("Codex", "app", "pane-1", "myhost", "evt-finished-1"))
 
-	if !reflect.DeepEqual(sent, []string{"https://push.example.com/enabled"}) {
+	if !reflect.DeepEqual(sent, []string{"https://fcm.googleapis.com/enabled"}) {
 		t.Fatalf("finished push endpoints = %v, want only opted-in subscription", sent)
 	}
 }
@@ -486,5 +547,290 @@ func TestParseVAPIDPrivatePadsScalarTo32Bytes(t *testing.T) {
 	}
 	if len(scalar) != 32 || scalar[31] != 1 {
 		t.Fatalf("scalar = %x", scalar)
+	}
+}
+
+func typedTestSubscription(deviceID, endpoint string) Subscription {
+	var subscription Subscription
+	subscription.DeviceID = deviceID
+	subscription.Endpoint = endpoint
+	subscription.Keys.P256dh = "p256dh"
+	subscription.Keys.Auth = "auth"
+	subscription.Locale = "en"
+	subscription.Platform = PlatformOther
+	return subscription
+}
+
+func typedTestKey(deviceID string) PushEventKey {
+	return PushEventKey{
+		DeviceID:            deviceID,
+		ServerSessionID:     "primary",
+		PaneID:              "pane-1",
+		TerminalID:          "terminal-1",
+		Generation:          0,
+		EventID:             "event-1",
+		InteractionRevision: 1,
+		Category:            CategoryQuestion,
+	}
+}
+
+func TestManagerPublishRetriesGenerationZero(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Subscribe(typedTestSubscription("device-1", "https://fcm.googleapis.com/one")); err != nil {
+		t.Fatal(err)
+	}
+	policy := DefaultDevicePolicy("device-1", "en")
+	policy.Settle = 0
+	policy.Cooldown = 0
+	if err := manager.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	manager.sendPush = func(_ context.Context, _ Subscription, payload []byte) error {
+		attempts++
+		var typed Payload
+		if err := json.Unmarshal(payload, &typed); err != nil || typed.Version != 1 || typed.Key.Generation != 0 {
+			t.Fatalf("typed payload = %#v, error = %v", typed, err)
+		}
+		if attempts == 1 {
+			return &pushError{statusCode: http.StatusServiceUnavailable}
+		}
+		return nil
+	}
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	key := typedTestKey("")
+	published, err := manager.Publish(t.Context(), PublishRequest{
+		Key: key, Preview: PreviewQuestion, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	})
+	if err != nil || published.Queued != 1 {
+		t.Fatalf("Publish() = %#v, %v", published, err)
+	}
+	results, err := manager.RunOnce(t.Context(), now)
+	if err != nil || len(results) != 1 || results[0].Disposition != DeliveryRetrying {
+		t.Fatalf("first RunOnce() = %#v, %v", results, err)
+	}
+	results, err = manager.RunOnce(t.Context(), results[0].NextAttempt)
+	if err != nil || len(results) != 1 || results[0].Disposition != DeliveryAccepted {
+		t.Fatalf("second RunOnce() = %#v, %v", results, err)
+	}
+}
+
+func TestManagerResolveRetractsExactAcceptedEvent(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Subscribe(typedTestSubscription("device-1", "https://fcm.googleapis.com/one")); err != nil {
+		t.Fatal(err)
+	}
+	policy := DefaultDevicePolicy("device-1", "en")
+	policy.Settle = 0
+	if err := manager.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	var sent []Payload
+	manager.sendPush = func(_ context.Context, _ Subscription, payload []byte) error {
+		var typed Payload
+		if err := json.Unmarshal(payload, &typed); err != nil {
+			return err
+		}
+		sent = append(sent, typed)
+		return nil
+	}
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	key := typedTestKey("")
+	if _, err := manager.Publish(t.Context(), PublishRequest{
+		Key: key, Preview: PreviewQuestion, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RunOnce(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	exactKey := typedTestKey("device-1")
+	if err := manager.Resolve(t.Context(), exactKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RunOnce(t.Context(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || sent[0].Key != exactKey || sent[1].Key != exactKey || !sent[1].Retract {
+		t.Fatalf("sent payloads = %#v", sent)
+	}
+}
+
+func TestRecoveredManagerWaitsForAuthoritativeReconcile(t *testing.T) {
+	dir := t.TempDir()
+	first, err := NewManager(dir, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Subscribe(typedTestSubscription("device-1", "https://fcm.googleapis.com/one")); err != nil {
+		t.Fatal(err)
+	}
+	policy := DefaultDevicePolicy("device-1", "en")
+	policy.Settle = 0
+	if err := first.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	if _, err := first.Publish(t.Context(), PublishRequest{
+		Key: typedTestKey(""), Preview: PreviewQuestion, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := NewManager(dir, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sends := 0
+	recovered.sendPush = func(context.Context, Subscription, []byte) error {
+		sends++
+		return nil
+	}
+	if results, err := recovered.RunOnce(t.Context(), now); err != nil || len(results) != 0 || sends != 0 {
+		t.Fatalf("pre-reconcile RunOnce() = %#v, %v, sends %d", results, err, sends)
+	}
+	current := typedTestKey("device-1")
+	if err := recovered.Reconcile(t.Context(), []PushEventKey{current}); err != nil {
+		t.Fatal(err)
+	}
+	if results, err := recovered.RunOnce(t.Context(), now); err != nil || len(results) != 1 || sends != 1 {
+		t.Fatalf("post-reconcile RunOnce() = %#v, %v, sends %d", results, err, sends)
+	}
+}
+
+func TestTimedSnoozeExpiresWithoutClearingTheStoredPreference(t *testing.T) {
+	engine, err := newPolicyEngine(filepath.Join(t.TempDir(), "policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	policy := DefaultDevicePolicy("device-1", "en")
+	policy.Snoozed = true
+	policy.SnoozeUntil = now.Add(time.Minute)
+	if err := engine.Set(policy); err != nil {
+		t.Fatal(err)
+	}
+	key := typedTestKey("device-1")
+	if decision := engine.Decide(key, "en", now); decision.Code != "push_snoozed" {
+		t.Fatalf("active snooze decision = %#v", decision)
+	}
+	if decision := engine.Decide(key, "en", now.Add(time.Minute)); !decision.Deliver {
+		t.Fatalf("expired snooze decision = %#v", decision)
+	}
+}
+
+func TestQueueCancellationWaitsForInFlightDelivery(t *testing.T) {
+	queue, err := newDurableQueue(filepath.Join(t.TempDir(), "queue.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	key := typedTestKey("device-1")
+	event := PushEvent{Key: key, Payload: []byte(`{"type":"question"}`), CreatedAt: now, ExpiresAt: now.Add(time.Minute)}
+	subscription := typedTestSubscription("device-1", "https://fcm.googleapis.com/one")
+	if _, err := queue.enqueue(event, subscription, now); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	processed := make(chan error, 1)
+	go func() {
+		_, processErr := queue.processDue(t.Context(), now, func(PushEventKey) bool { return true }, func(context.Context, Subscription, []byte) error {
+			close(started)
+			<-release
+			return nil
+		}, nil, nil)
+		processed <- processErr
+	}()
+	<-started
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- queue.cancelKey(key) }()
+	select {
+	case err := <-cancelled:
+		t.Fatalf("cancellation returned before delivery completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-processed; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-cancelled; err != nil {
+		t.Fatal(err)
+	}
+	if queue.hasEntriesFor(key) {
+		t.Fatal("cancelled event retained queued deliveries")
+	}
+}
+
+func TestRunOnceRechecksLivePolicyBeforeDelivery(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Subscribe(typedTestSubscription("device-1", "https://fcm.googleapis.com/one")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	policy := DefaultDevicePolicy("device-1", "en")
+	policy.Settle = time.Minute
+	if err := manager.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	key := typedTestKey("")
+	if _, err := manager.Publish(t.Context(), PublishRequest{
+		Key: key, Preview: PreviewQuestion, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	policy.Snoozed = true
+	policy.SnoozeUntil = now.Add(time.Hour)
+	if err := manager.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	sends := 0
+	manager.sendPush = func(context.Context, Subscription, []byte) error {
+		sends++
+		return nil
+	}
+	results, err := manager.RunOnce(t.Context(), now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sends != 0 || len(results) != 1 || results[0].Disposition != DeliveryStale {
+		t.Fatalf("policy-rechecked delivery = %#v, sends %d", results, sends)
+	}
+}
+
+func TestTerminalTestDeliveryRetiresActiveAndDeliveredState(t *testing.T) {
+	manager, err := NewManager(t.TempDir(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Subscribe(typedTestSubscription("device-1", "https://fcm.googleapis.com/one")); err != nil {
+		t.Fatal(err)
+	}
+	policy := DefaultDevicePolicy("device-1", "en")
+	policy.Settle = 0
+	if err := manager.SetPolicy(policy); err != nil {
+		t.Fatal(err)
+	}
+	manager.sendPush = func(context.Context, Subscription, []byte) error { return nil }
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	key := PushEventKey{DeviceID: "device-1", EventID: "test-event", Category: CategoryTest}
+	if _, err := manager.Publish(t.Context(), PublishRequest{
+		Key: key, Preview: PreviewHidden, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.RunOnce(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	if manager.active[key] || len(manager.queue.deliveredFor(key)) != 0 {
+		t.Fatal("terminal test delivery retained active or delivered state")
 	}
 }

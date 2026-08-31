@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -22,36 +23,30 @@ import (
 
 const (
 	e2eeSubprotocol             = relayprotocol.EncryptedWebSocketSubprotocol
-	e2eeVersion                 = 1
+	e2eeVersion                 = 2
 	e2eeHandshakeTimeout        = 10 * time.Second
 	e2eeNonceBytes              = 32
 	e2eePublicKeyBytes          = 65
+	e2eeSecretBytes             = 32
 	maxE2EESequence      uint64 = 1<<53 - 1
 
 	e2eeClientDirection = "c2s"
 	e2eeServerDirection = "s2c"
 )
 
-// FrameCodec selects how an encrypted frame is encoded on a transport.
 type FrameCodec int
 
 const (
-	// CodecJSON wraps the ciphertext in a JSON envelope with a base64url
-	// field. It is the original browser WebSocket encoding.
 	CodecJSON FrameCodec = iota
-	// CodecBinary prefixes raw ciphertext with a fixed header. The gateway
-	// and WebRTC paths use it to drop the base64 (+33 %) expansion and the
-	// JSON envelope of CodecJSON.
 	CodecBinary
 )
 
 const (
-	binaryFrameVersion    = 1
+	binaryFrameVersion    = e2eeVersion
 	binaryFrameKindData   = 0
 	binaryFrameHeaderSize = 1 + 1 + 8
 )
 
-// encodeFrame renders one encrypted frame for the wire.
 func (c FrameCodec) encodeFrame(sequence uint64, ciphertext []byte) ([]byte, error) {
 	if c == CodecBinary {
 		frame := make([]byte, binaryFrameHeaderSize+len(ciphertext))
@@ -69,7 +64,6 @@ func (c FrameCodec) encodeFrame(sequence uint64, ciphertext []byte) ([]byte, err
 	})
 }
 
-// decodeFrame parses one encrypted frame from the wire.
 func (c FrameCodec) decodeFrame(rawFrame []byte) (uint64, []byte, error) {
 	if c == CodecBinary {
 		if len(rawFrame) < binaryFrameHeaderSize {
@@ -95,23 +89,66 @@ func (c FrameCodec) decodeFrame(rawFrame []byte) (uint64, []byte, error) {
 }
 
 var (
-	e2eeClientProofLabel = []byte("herdr-e2ee-v1 client\x00")
-	e2eeServerProofLabel = []byte("herdr-e2ee-v1 server\x00")
-	e2eeKeySaltLabel     = []byte("herdr-e2ee-v1 key\x00")
+	e2eeClientProofLabel = []byte("herdr-e2ee-v2 client\x00")
+	e2eeServerProofLabel = []byte("herdr-e2ee-v2 server\x00")
+	e2eeKeySaltLabel     = []byte("herdr-e2ee-v2 key\x00")
 )
 
+type E2EEAuthKind string
+
+const (
+	E2EEAuthCredential E2EEAuthKind = "credential"
+	E2EEAuthInvitation E2EEAuthKind = "invitation"
+)
+
+type E2EEAuthSelector struct {
+	Kind    E2EEAuthKind
+	ID      string
+	Version uint64
+	Locale  string
+}
+
+type AuthenticatedIdentity struct {
+	DeviceID          string `json:"device_id"`
+	CredentialID      string `json:"credential_id"`
+	Role              string `json:"role"`
+	Locale            string `json:"locale"`
+	CredentialVersion uint64 `json:"credential_version"`
+}
+
+type E2EEAuthResult struct {
+	Identity         AuthenticatedIdentity
+	CredentialSecret []byte
+}
+
+// E2EEAuthResolver is the only authority consulted by the transport. Resolve
+// returns a copy of a 32-byte secret. Complete is called with authenticated=false
+// for a structurally valid hello whose proof failed, allowing invitation attempt
+// limiting. A true completion must revalidate and atomically consume an invite or
+// update an existing credential before returning its runtime identity.
+type E2EEAuthResolver interface {
+	ResolveE2EESecret(context.Context, E2EEAuthSelector) ([]byte, error)
+	CompleteE2EEAuth(context.Context, E2EEAuthSelector, bool) (E2EEAuthResult, error)
+}
+
 type e2eeClientHello struct {
-	Type      string `json:"type"`
-	Version   int    `json:"version"`
-	Nonce     string `json:"nonce"`
-	PublicKey string `json:"public_key"`
-	Proof     string `json:"proof"`
+	Type        string       `json:"type"`
+	Version     int          `json:"version"`
+	AuthKind    E2EEAuthKind `json:"auth_kind"`
+	AuthID      string       `json:"auth_id"`
+	AuthVersion uint64       `json:"auth_version"`
+	Locale      string       `json:"locale"`
+	Nonce       string       `json:"nonce"`
+	PublicKey   string       `json:"public_key"`
+	Proof       string       `json:"proof"`
 }
 
 type parsedE2EEClientHello struct {
+	selector    E2EEAuthSelector
 	nonce       []byte
 	publicBytes []byte
 	publicKey   *ecdh.PublicKey
+	proof       []byte
 }
 
 type e2eeServerHello struct {
@@ -125,6 +162,17 @@ type e2eeServerHello struct {
 type e2eeClientFinish struct {
 	Type    string `json:"type"`
 	Version int    `json:"version"`
+}
+
+type e2eeServerFinish struct {
+	Type              string `json:"type"`
+	Version           int    `json:"version"`
+	DeviceID          string `json:"device_id"`
+	CredentialID      string `json:"credential_id"`
+	Role              string `json:"role"`
+	Locale            string `json:"locale"`
+	CredentialVersion uint64 `json:"credential_version"`
+	CredentialSecret  string `json:"credential_secret,omitempty"`
 }
 
 type e2eeFrame struct {
@@ -144,49 +192,70 @@ type e2eeSession struct {
 	receiveSequence  uint64
 }
 
-func performServerE2EEHandshake(parent context.Context, conn FrameConn, token string) (*e2eeSession, error) {
+func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver E2EEAuthResolver) (*e2eeSession, AuthenticatedIdentity, error) {
 	ctx, cancel := context.WithTimeout(parent, e2eeHandshakeTimeout)
 	defer cancel()
+	if resolver == nil {
+		return nil, AuthenticatedIdentity{}, errors.New("device authentication is unavailable")
+	}
 
 	rawHello, err := conn.ReadFrame(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read client hello: %w", err)
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("read client hello: %w", err)
 	}
-	clientHello, err := parseE2EEClientHello(rawHello, token)
+	clientHello, err := parseE2EEClientHello(rawHello)
 	if err != nil {
-		return nil, err
+		return nil, AuthenticatedIdentity{}, err
 	}
+	secret, err := resolver.ResolveE2EESecret(ctx, clientHello.selector)
+	if err != nil || len(secret) != e2eeSecretBytes {
+		clear(secret)
+		return nil, AuthenticatedIdentity{}, errors.New("client proof did not authenticate")
+	}
+	defer clear(secret)
+
+	binding := e2eeAuthBinding(clientHello.selector)
+	wantClientProof := e2eeAuthTag(secret, e2eeClientProofLabel, binding, clientHello.nonce, clientHello.publicBytes)
+	proofAuthenticated := hmac.Equal(clientHello.proof, wantClientProof)
+	clear(wantClientProof)
+	if !proofAuthenticated {
+		_, _ = resolver.CompleteE2EEAuth(ctx, clientHello.selector, false)
+		return nil, AuthenticatedIdentity{}, errors.New("client proof did not authenticate")
+	}
+
 	serverPrivate, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("generate server key: %w", err)
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("generate server key: %w", err)
 	}
 	serverNonce := make([]byte, e2eeNonceBytes)
 	if _, err := rand.Read(serverNonce); err != nil {
-		return nil, fmt.Errorf("generate server nonce: %w", err)
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("generate server nonce: %w", err)
 	}
 	serverPublicBytes := serverPrivate.PublicKey().Bytes()
 	sharedSecret, err := serverPrivate.ECDH(clientHello.publicKey)
 	if err != nil {
-		return nil, errors.New("derive shared secret")
+		return nil, AuthenticatedIdentity{}, errors.New("derive shared secret")
 	}
 	defer clear(sharedSecret)
 
-	transcript := e2eeTranscript(clientHello.nonce, clientHello.publicBytes, serverNonce, serverPublicBytes)
-	serverProof := e2eeAuthTag(token, e2eeServerProofLabel, transcript)
-	keySalt := e2eeAuthTag(token, e2eeKeySaltLabel, transcript)
-	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v1 c2s", 32)
+	transcript := e2eeTranscript(binding, clientHello.nonce, clientHello.publicBytes, serverNonce, serverPublicBytes)
+	serverProof := e2eeAuthTag(secret, e2eeServerProofLabel, transcript)
+	keySalt := e2eeAuthTag(secret, e2eeKeySaltLabel, transcript)
+	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 c2s", 32)
 	if err != nil {
-		return nil, fmt.Errorf("derive client key: %w", err)
+		clear(keySalt)
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("derive client key: %w", err)
 	}
 	defer clear(clientKey)
-	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v1 s2c", 32)
+	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 s2c", 32)
+	clear(keySalt)
 	if err != nil {
-		return nil, fmt.Errorf("derive server key: %w", err)
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("derive server key: %w", err)
 	}
 	defer clear(serverKey)
 	session, err := newE2EESession(serverKey, clientKey, e2eeServerDirection, e2eeClientDirection)
 	if err != nil {
-		return nil, err
+		return nil, AuthenticatedIdentity{}, err
 	}
 	session.codec = conn.Codec()
 
@@ -197,24 +266,59 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, token st
 		PublicKey: base64.RawURLEncoding.EncodeToString(serverPublicBytes),
 		Proof:     base64.RawURLEncoding.EncodeToString(serverProof),
 	})
+	clear(serverProof)
 	if err != nil {
-		return nil, fmt.Errorf("encode server hello: %w", err)
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("encode server hello: %w", err)
 	}
 	if err := conn.WriteFrame(ctx, response); err != nil {
-		return nil, fmt.Errorf("write server hello: %w", err)
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("write server hello: %w", err)
 	}
 	rawFinish, err := conn.ReadFrame(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read client finish: %w", err)
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("read client finish: %w", err)
 	}
 	plaintextFinish, err := session.open(rawFinish)
 	if err != nil {
-		return nil, errors.New("client finish did not authenticate")
+		return nil, AuthenticatedIdentity{}, errors.New("client finish did not authenticate")
 	}
 	if err := parseE2EEClientFinish(plaintextFinish); err != nil {
-		return nil, err
+		return nil, AuthenticatedIdentity{}, err
 	}
-	return session, nil
+
+	authResult, err := resolver.CompleteE2EEAuth(ctx, clientHello.selector, true)
+	if err != nil || !validAuthenticatedIdentity(authResult.Identity) {
+		clear(authResult.CredentialSecret)
+		return nil, AuthenticatedIdentity{}, errors.New("device authentication is no longer valid")
+	}
+	finish := e2eeServerFinish{
+		Type:              "e2ee_server_finish",
+		Version:           e2eeVersion,
+		DeviceID:          authResult.Identity.DeviceID,
+		CredentialID:      authResult.Identity.CredentialID,
+		Role:              authResult.Identity.Role,
+		Locale:            authResult.Identity.Locale,
+		CredentialVersion: authResult.Identity.CredentialVersion,
+	}
+	if len(authResult.CredentialSecret) > 0 {
+		if len(authResult.CredentialSecret) != e2eeSecretBytes || clientHello.selector.Kind != E2EEAuthInvitation {
+			clear(authResult.CredentialSecret)
+			return nil, AuthenticatedIdentity{}, errors.New("invalid issued device credential")
+		}
+		finish.CredentialSecret = base64.RawURLEncoding.EncodeToString(authResult.CredentialSecret)
+		clear(authResult.CredentialSecret)
+	}
+	encodedFinish, err := json.Marshal(finish)
+	if err != nil {
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("encode server finish: %w", err)
+	}
+	encryptedFinish, err := session.seal(encodedFinish)
+	if err != nil {
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("encrypt server finish: %w", err)
+	}
+	if err := conn.WriteFrame(ctx, encryptedFinish); err != nil {
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("write server finish: %w", err)
+	}
+	return session, authResult.Identity, nil
 }
 
 func parseE2EEClientFinish(plaintext []byte) error {
@@ -222,21 +326,23 @@ func parseE2EEClientFinish(plaintext []byte) error {
 		return errors.New("invalid client finish")
 	}
 	var finish e2eeClientFinish
-	if err := json.Unmarshal(plaintext, &finish); err != nil ||
-		finish.Type != "e2ee_client_finish" ||
-		finish.Version != e2eeVersion {
+	if err := json.Unmarshal(plaintext, &finish); err != nil || finish.Type != "e2ee_client_finish" || finish.Version != e2eeVersion {
 		return errors.New("invalid client finish")
 	}
 	return nil
 }
 
-func parseE2EEClientHello(rawHello []byte, token string) (*parsedE2EEClientHello, error) {
+func parseE2EEClientHello(rawHello []byte) (*parsedE2EEClientHello, error) {
 	var hello e2eeClientHello
 	if err := json.Unmarshal(rawHello, &hello); err != nil {
 		return nil, errors.New("invalid client hello")
 	}
 	if hello.Type != "e2ee_client_hello" || hello.Version != e2eeVersion {
 		return nil, errors.New("unsupported client hello")
+	}
+	if (hello.AuthKind != E2EEAuthCredential && hello.AuthKind != E2EEAuthInvitation) ||
+		hello.AuthID == "" || len(hello.AuthID) > 128 || hello.AuthVersion == 0 || len(hello.Locale) > 32 {
+		return nil, errors.New("invalid client authentication selector")
 	}
 	clientNonce, err := decodeE2EEField(hello.Nonce, e2eeNonceBytes)
 	if err != nil {
@@ -250,24 +356,36 @@ func parseE2EEClientHello(rawHello []byte, token string) (*parsedE2EEClientHello
 	if err != nil {
 		return nil, errors.New("invalid client proof")
 	}
-	wantClientProof := e2eeAuthTag(token, e2eeClientProofLabel, clientNonce, clientPublicBytes)
-	if !hmac.Equal(clientProof, wantClientProof) {
-		return nil, errors.New("client proof did not authenticate")
-	}
 	clientPublic, err := ecdh.P256().NewPublicKey(clientPublicBytes)
 	if err != nil {
 		return nil, errors.New("invalid client public key")
 	}
 	return &parsedE2EEClientHello{
-		nonce:       clientNonce,
-		publicBytes: clientPublicBytes,
-		publicKey:   clientPublic,
+		selector: E2EEAuthSelector{Kind: hello.AuthKind, ID: hello.AuthID, Version: hello.AuthVersion, Locale: hello.Locale},
+		nonce:    clientNonce, publicBytes: clientPublicBytes, publicKey: clientPublic, proof: clientProof,
 	}, nil
 }
 
-// newE2EESession builds a directional AEAD pair. The zero FrameCodec is
-// CodecJSON, the browser WebSocket encoding; transports that carry raw
-// ciphertext set codec after construction.
+func validAuthenticatedIdentity(identity AuthenticatedIdentity) bool {
+	if identity.DeviceID == "" || identity.CredentialID == "" || identity.CredentialVersion == 0 || identity.Locale == "" {
+		return false
+	}
+	return identity.Role == "controller" || identity.Role == "reader"
+}
+
+func e2eeAuthBinding(selector E2EEAuthSelector) []byte {
+	version := strconv.FormatUint(selector.Version, 10)
+	binding := make([]byte, 0, len("herdr-e2ee-v2 auth\x00")+len(selector.Kind)+len(selector.ID)+len(version)+3)
+	binding = append(binding, "herdr-e2ee-v2 auth\x00"...)
+	binding = append(binding, selector.Kind...)
+	binding = append(binding, 0)
+	binding = append(binding, selector.ID...)
+	binding = append(binding, 0)
+	binding = append(binding, version...)
+	binding = append(binding, 0)
+	return binding
+}
+
 func newE2EESession(sendKey, receiveKey []byte, sendDirection, receiveDirection string) (*e2eeSession, error) {
 	send, err := newE2EEAEAD(sendKey)
 	if err != nil {
@@ -277,12 +395,7 @@ func newE2EESession(sendKey, receiveKey []byte, sendDirection, receiveDirection 
 	if err != nil {
 		return nil, fmt.Errorf("create receive cipher: %w", err)
 	}
-	return &e2eeSession{
-		send:             send,
-		receive:          receive,
-		sendDirection:    sendDirection,
-		receiveDirection: receiveDirection,
-	}, nil
+	return &e2eeSession{send: send, receive: receive, sendDirection: sendDirection, receiveDirection: receiveDirection}, nil
 }
 
 func newE2EEAEAD(key []byte) (cipher.AEAD, error) {
@@ -325,16 +438,17 @@ func (s *e2eeSession) open(rawFrame []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-func e2eeAuthTag(token string, parts ...[]byte) []byte {
-	mac := hmac.New(sha256.New, []byte(token))
+func e2eeAuthTag(secret []byte, parts ...[]byte) []byte {
+	mac := hmac.New(sha256.New, secret)
 	for _, part := range parts {
 		_, _ = mac.Write(part)
 	}
 	return mac.Sum(nil)
 }
 
-func e2eeTranscript(clientNonce, clientPublic, serverNonce, serverPublic []byte) []byte {
-	transcript := make([]byte, 0, len(clientNonce)+len(clientPublic)+len(serverNonce)+len(serverPublic))
+func e2eeTranscript(binding, clientNonce, clientPublic, serverNonce, serverPublic []byte) []byte {
+	transcript := make([]byte, 0, len(binding)+len(clientNonce)+len(clientPublic)+len(serverNonce)+len(serverPublic))
+	transcript = append(transcript, binding...)
 	transcript = append(transcript, clientNonce...)
 	transcript = append(transcript, clientPublic...)
 	transcript = append(transcript, serverNonce...)
@@ -357,8 +471,8 @@ func e2eeFrameNonce(sequence uint64) [12]byte {
 }
 
 func e2eeAAD(direction string, sequence uint64) []byte {
-	aad := make([]byte, len("herdr-e2ee-v1 ")+len(direction)+1+8)
-	position := copy(aad, "herdr-e2ee-v1 ")
+	aad := make([]byte, len("herdr-e2ee-v2 ")+len(direction)+1+8)
+	position := copy(aad, "herdr-e2ee-v2 ")
 	position += copy(aad[position:], direction)
 	aad[position] = 0
 	binary.BigEndian.PutUint64(aad[position+1:], sequence)

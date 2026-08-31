@@ -1,6 +1,6 @@
 {
   "type": "agent_restart",
-  "protocol": 2,
+  "protocol": 3,
   "request_id": "req-restart",
   "pane_id": "pane-1"
 }

@@ -1,6 +1,6 @@
 import { E2EE_SUBPROTOCOL, type E2EEWireFrame } from '../e2ee';
 import type { RelayConfig } from '../types';
-import { createEncryptedTransport } from './encrypted';
+import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
 import type {
   FrameChannel,
   FrameChannelHandlers,
@@ -17,19 +17,26 @@ import type {
 export function createWebSocketTransport(
   relay: RelayConfig,
   handlers: TransportHandlers,
+  authentication: TransportAuthentication = {},
 ): RelayTransport {
   return createEncryptedTransport({
     kind: 'websocket',
     token: relay.token,
     codec: 'json',
     handlers,
-    createChannel: (channelHandlers) => createWebSocketChannel(relay, channelHandlers),
+    ...authentication,
+    createChannel: (channelHandlers) => createWebSocketChannel(
+      relay,
+      channelHandlers,
+      Boolean(relay.token || authentication.authentication),
+    ),
   });
 }
 
 function createWebSocketChannel(
   relay: RelayConfig,
   handlers: FrameChannelHandlers,
+  encrypted: boolean,
 ): FrameChannel {
   let socket: WebSocket | null = null;
   let closed = false;
@@ -47,7 +54,7 @@ function createWebSocketChannel(
     open(): void {
       if (closed || socket) return;
       try {
-        socket = relay.token
+        socket = encrypted
           ? new WebSocket(relay.url, E2EE_SUBPROTOCOL)
           : new WebSocket(relay.url);
       } catch {
@@ -58,7 +65,7 @@ function createWebSocketChannel(
         if (closed) return;
         // A relay that ignores the encrypted subprotocol would otherwise get a
         // plaintext hello, so refuse the socket before anything is sent.
-        if (relay.token
+        if (encrypted
           && typeof socket?.protocol === 'string'
           && socket.protocol !== E2EE_SUBPROTOCOL) {
           fail('Relay did not negotiate encrypted transport');

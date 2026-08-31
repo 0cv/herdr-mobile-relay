@@ -1,6 +1,9 @@
 package question
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,6 +26,24 @@ type Classification struct {
 	ApprovalFocus  int
 	Interaction    *Interaction
 	QuestionLayout bool
+}
+
+func ApprovalFingerprint(classification Classification) string {
+	if classification.Kind != AttentionApproval || len(classification.Options) < 2 {
+		return ""
+	}
+	encoded, err := json.Marshal(struct {
+		Prompt  string   `json:"prompt"`
+		Command string   `json:"command"`
+		Options []string `json:"options"`
+	}{
+		Prompt: classification.Prompt, Command: classification.Command, Options: classification.Options,
+	})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
 }
 
 type approvalMenuRow struct {

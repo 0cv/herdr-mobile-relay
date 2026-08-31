@@ -1,6 +1,6 @@
 {
   "type": "text",
-  "protocol": 2,
+  "protocol": 3,
   "request_id": "req-alias-text",
   "pane_id": "pane-1",
   "text": "raw terminal input"

@@ -62,18 +62,18 @@ function attentionFixture(name: string): string {
 }
 
 describe('protocol and setup parsing', () => {
-  it('keeps protocol v2 mutation compatibility explicit', () => {
-    expect(APP_PROTOCOL_VERSION).toBe(2);
-    expect(relayProtocolError({ protocol: 2 } as RelayConnectionView)).toBe('');
+  it('requires the protocol v3 mutation contract explicitly', () => {
+    expect(APP_PROTOCOL_VERSION).toBe(3);
+    expect(relayProtocolError({ protocol: 3 } as RelayConnectionView)).toBe('');
     expect(relayProtocolError({ protocol: 0 } as RelayConnectionView)).toMatch(/Waiting/);
-    expect(relayProtocolError({ protocol: 1 } as RelayConnectionView)).toMatch(/v1/);
-    expect(relayVersionMeta({ status: 'connected', protocol: 3, version: 'future' } as RelayConnectionView)?.label).toMatch(/App outdated/);
+    expect(relayProtocolError({ protocol: 2 } as RelayConnectionView)).toMatch(/v2/);
+    expect(relayVersionMeta({ status: 'connected', protocol: 4, version: 'future' } as RelayConnectionView)?.label).toMatch(/App outdated/);
   });
 
   it('shortens git revisions for a phone row without losing the full hash', () => {
     const revision = 'e3816cb50d9fcc4220558c278be8d31d6d7a12d0';
     const meta = relayVersionMeta({
-      status: 'connected', protocol: 2, version: revision, releaseVersion: '0.17.0', revision,
+      status: 'connected', protocol: 3, version: revision, releaseVersion: '0.17.0', revision,
     } as RelayConnectionView);
     expect(meta?.label).toBe('v0.17.0 · e3816cb');
     // The full hash stays reachable: the row is for scanning, not for copying.

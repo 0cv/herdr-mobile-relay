@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
-import { safeMarkdownHtml } from '$lib/markdown';
+import { fencedCodeText, safeMarkdownHtml } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
@@ -242,6 +242,12 @@ describe('safe rich output', () => {
     expect(safeMarkdownHtml('|---|')).toBe('<p>|---|</p>');
     expect(safeMarkdownHtml('| a | b |\n| --- |\n| 1 | 2 |')).not.toContain('<table>');
     expect(safeMarkdownHtml('---')).toBe('<hr>');
+  });
+
+  it('copies only complete nonempty fenced code blocks', () => {
+    expect(fencedCodeText('before\n```ts\nconst value = 1;\n```\nafter\n```\nsecond()\n```'))
+      .toBe('const value = 1;\n\nsecond()');
+    expect(fencedCodeText('```\n\n```\n```ts\nunfinished')).toBeNull();
   });
 });
 

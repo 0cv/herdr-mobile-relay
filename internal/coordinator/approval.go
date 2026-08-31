@@ -18,9 +18,11 @@ const (
 )
 
 type approvalPayload struct {
-	EventID string
-	Index   int
-	Total   int
+	EventID     string
+	Fingerprint string
+	Choice      string
+	Index       int
+	Total       int
 }
 
 type questionPayload struct {
@@ -34,12 +36,14 @@ type questionPayload struct {
 
 func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
 	payload := approvalPayload{
-		EventID: stringValue(message, "event_id"),
-		Index:   intValue(message["index"], 0),
-		Total:   intValue(message["total"], 2),
+		EventID:     stringValue(message, "event_id"),
+		Fingerprint: stringValue(message, "approval_fingerprint"),
+		Choice:      stringValue(message, "choice"),
+		Index:       intValue(message["index"], 0),
+		Total:       intValue(message["total"], 2),
 	}
-	if paneID == "" || payload.EventID == "" {
-		return d.fail(requestID, "approval", paneID, "Agent and approval event are required")
+	if paneID == "" || payload.EventID == "" || payload.Fingerprint == "" || payload.Choice == "" {
+		return d.fail(requestID, "approval", paneID, "Agent and exact approval identity are required")
 	}
 	if payload.Total < 2 || payload.Total > 20 || payload.Index < 0 || payload.Index >= payload.Total {
 		return d.fail(requestID, "approval", paneID, "Approval choice is no longer available")
@@ -53,7 +57,9 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 	}
 	if ok && agent.Status == "blocked" &&
 		(agent.AttentionKind != question.AttentionApproval ||
-			len(agent.Options) != payload.Total) {
+			len(agent.Options) != payload.Total ||
+			agent.ApprovalFingerprint != payload.Fingerprint ||
+			agent.Options[payload.Index] != payload.Choice) {
 		return d.fail(requestID, "approval", paneID, "Approval choices are no longer available")
 	}
 	if !ok || agent.Status != "blocked" {
@@ -87,7 +93,9 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 		if !ok || current.Status != "blocked" ||
 			current.BlockedEventID == "" || current.BlockedEventID != payload.EventID ||
 			current.AttentionKind != question.AttentionApproval ||
-			len(current.Options) != payload.Total {
+			len(current.Options) != payload.Total ||
+			current.ApprovalFingerprint != payload.Fingerprint ||
+			current.Options[payload.Index] != payload.Choice {
 			return EffectResult{Result: d.fail(requestID, "approval", paneID, "This approval request is no longer current")}
 		}
 		read, err := d.herdr.ReadPane(effectCtx, paneID, 80, "ansi")
@@ -97,7 +105,9 @@ func (d *Dispatcher) handleApproval(ctx context.Context, receivedAt time.Time, r
 		classification := question.Classify(string(read.Content), current.Agent)
 		if classification.Kind != question.AttentionApproval ||
 			len(classification.Options) != payload.Total ||
-			payload.Index >= len(classification.Options) {
+			payload.Index >= len(classification.Options) ||
+			classification.Options[payload.Index] != payload.Choice ||
+			question.ApprovalFingerprint(classification) != payload.Fingerprint {
 			return EffectResult{Result: d.fail(requestID, "approval", paneID, "Approval choices are no longer available")}
 		}
 		if stale := d.paneSessionCurrent(token, requestID, "approval"); stale != nil {

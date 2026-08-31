@@ -2,12 +2,13 @@
   import { tick } from 'svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
-  import { clientPaneId, displayName, hostLabel, sessionName, tabName } from '$lib/agents';
+  import { displayName, hostLabel, sessionName, tabName } from '$lib/agents';
   import { replaceView } from '$lib/router';
+  import { targetRefForAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
   import type { Agent } from '$lib/types';
 
-  let { open = $bindable(false), agent }: { open?: boolean; agent: Agent | null } = $props();
+  let { open = $bindable(false), agent, readOnly = false }: { open?: boolean; agent: Agent | null; readOnly?: boolean } = $props();
   let name = $state('');
   let renameMode = $state<'tab' | 'session' | ''>('');
   let confirming = $state<'clear' | 'stop' | ''>('');
@@ -40,7 +41,7 @@
   });
 
   async function beginRename(mode: 'tab' | 'session') {
-    if (!agent || (mode === 'session' && !sessionRenameAvailable)) return;
+    if (!agent || readOnly || (mode === 'session' && !sessionRenameAvailable)) return;
     confirming = '';
     renameMode = mode;
     name = mode === 'tab'
@@ -63,6 +64,7 @@
   // by muscle memory. Focus lands on Cancel: it is the safe answer, and Enter
   // must never be what clears or stops an agent.
   async function beginConfirm(mode: 'clear' | 'stop') {
+    if (readOnly) return;
     confirming = mode;
     await tick();
     confirmPanel?.querySelector<HTMLButtonElement>('[data-confirm-cancel]')?.focus();
@@ -85,7 +87,7 @@
   }
 
   async function renameTab() {
-    if (!agent) return;
+    if (!agent || readOnly) return;
     const value = nextName();
     if (!value) return;
     busy = true;
@@ -101,7 +103,7 @@
   }
 
   async function renameSession() {
-    if (!agent || !sessionRenameAvailable) return;
+    if (!agent || readOnly || !sessionRenameAvailable) return;
     const value = nextName();
     if (!value) return;
     busy = true;
@@ -117,7 +119,7 @@
   }
 
   async function clearAgent() {
-    if (!agent) return;
+    if (!agent || readOnly) return;
     if (confirming !== 'clear') {
       void beginConfirm('clear');
       return;
@@ -134,8 +136,13 @@
         cwd: String(result.data?.cwd || agent.cwd || ''),
       });
       open = false;
-      const paneId = replacement?.pane_id || (rawPaneId ? clientPaneId(agent.relay_id, rawPaneId) : '');
-      if (paneId) replaceView({ view: 'terminal', paneId });
+      if (replacement) {
+        replaceView({
+          view: 'terminal',
+          paneId: replacement.pane_id,
+          target: targetRefForAgent(replacement) || undefined,
+        });
+      }
     } catch (error) {
       relayStore.showToast((error as Error).message, true);
     } finally {
@@ -144,7 +151,7 @@
   }
 
   async function stopAgent() {
-    if (!agent) return;
+    if (!agent || readOnly) return;
     if (confirming !== 'stop') {
       void beginConfirm('stop');
       return;
@@ -173,7 +180,7 @@
       <label for="manage-name">New {renameMode} name</label>
       <input bind:this={nameInput} id="manage-name" bind:value={name} required autocomplete="off" />
       <div class="dialog-actions">
-        <Button type="submit" disabled={busy}>Rename</Button>
+        <Button type="submit" disabled={busy || readOnly}>Rename</Button>
         <Button variant="ghost" disabled={busy} onclick={cancelRename}>Cancel</Button>
       </div>
     </form>
@@ -187,7 +194,7 @@
       <div class="dialog-actions">
         <Button
           variant={confirming === 'stop' ? 'danger' : 'secondary'}
-          disabled={busy}
+          disabled={busy || readOnly}
           onclick={confirming === 'stop' ? stopAgent : clearAgent}
         >{confirming === 'stop' ? 'Confirm Stop' : 'Confirm Clear'}</Button>
         <Button variant="ghost" data-confirm-cancel="true" disabled={busy} onclick={cancelConfirm}>Cancel</Button>
@@ -196,12 +203,12 @@
   {:else}
     <div bind:this={actionMenu} class="form-stack">
       <div class="dialog-actions">
-        <Button data-rename-action="tab" disabled={busy} onclick={() => beginRename('tab')}>Rename Tab</Button>
+        <Button data-rename-action="tab" disabled={busy || readOnly} onclick={() => beginRename('tab')}>Rename Tab</Button>
         {#if sessionRenameAvailable}
-          <Button data-rename-action="session" variant="secondary" disabled={busy} onclick={() => beginRename('session')}>Rename Session</Button>
+          <Button data-rename-action="session" variant="secondary" disabled={busy || readOnly} onclick={() => beginRename('session')}>Rename Session</Button>
         {/if}
-        <Button data-confirm-action="clear" variant="secondary" disabled={busy} onclick={clearAgent}>Clear Agent</Button>
-        <Button data-confirm-action="stop" variant="danger" disabled={busy} onclick={stopAgent}>Stop Agent</Button>
+        <Button data-confirm-action="clear" variant="secondary" disabled={busy || readOnly} onclick={clearAgent}>Clear Agent</Button>
+        <Button data-confirm-action="stop" variant="danger" disabled={busy || readOnly} onclick={stopAgent}>Stop Agent</Button>
         <Button variant="ghost" disabled={busy} onclick={() => { open = false; }}>Cancel</Button>
       </div>
     </div>

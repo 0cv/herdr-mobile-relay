@@ -1,12 +1,14 @@
 import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { makeRelayId } from '$lib/config';
+import { BrowserDeviceCredentialStore } from '$lib/device-auth';
 import { setTerminalHistoryLines, setTerminalRefreshInterval } from '$lib/preferences';
 import { relayStore, type CommandError } from '$lib/store';
-import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
+import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
 
-type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
+type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
 
 /**
  * Lets one test swap in a transport the store cannot otherwise reach, such as
@@ -19,8 +21,8 @@ vi.mock('$lib/transports', async (importOriginal) => {
   const actual = await importOriginal() as { createRelayTransport: TransportFactory };
   return {
     ...actual,
-    createRelayTransport: (relay: RelayConfig, handlers: TransportHandlers) =>
-      (transportHijack.current ?? actual.createRelayTransport)(relay, handlers),
+    createRelayTransport: (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) =>
+      (transportHijack.current ?? actual.createRelayTransport)(relay, handlers, authentication),
   };
 });
 
@@ -42,11 +44,32 @@ class MockWebSocket {
   message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
   serverClose() { this.readyState = MockWebSocket.CLOSED; this.onclose?.(); }
 }
+function exactAgentFields(paneId = 'w1:p1') {
+  return {
+    server_session_id: 'primary',
+    terminal_id: `terminal-${paneId}`,
+    generation: 1,
+    agent_session_id: '',
+  };
+}
+function exactWireScope(paneId: string, relayId: string) {
+  return {
+    server_session_id: 'primary',
+    target: {
+      pane_id: paneId,
+      relay_id: relayId,
+      server_session_id: 'primary',
+      terminal_id: `terminal-${paneId}`,
+      generation: 1,
+    },
+  };
+}
 
 describe('relay command store', () => {
   beforeEach(() => {
     transportHijack.current = null;
     MockWebSocket.instances = [];
+    localStorage.clear();
     sessionStorage.clear();
     vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
@@ -64,15 +87,15 @@ describe('relay command store', () => {
     vi.unstubAllGlobals();
   });
 
-  it('preserves relay URLs, protocol v2 command shapes, and confirmations', async () => {
+  it('preserves relay URLs, protocol v3 command shapes, and confirmations', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     expect(socket.url).toBe('wss://fedora.example');
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
     const pending = relayStore.sendCommand(relayId, { type: 'agent_rename', pane_id: 'w1:p1', name: '123' });
     const command = JSON.parse(socket.sent.at(-1)!);
-    expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: '123', protocol: 2 });
+    expect(command).toMatchObject({ type: 'agent_rename', pane_id: 'w1:p1', name: '123', protocol: 3 });
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
@@ -83,7 +106,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       version: 'abc123',
       host: 'fedora',
       capabilities: ['workspace_management', 'workspace_reorder_block', 'worktree_management'],
@@ -127,7 +150,7 @@ describe('relay command store', () => {
       type: 'workspace_rename',
       workspace_id: 'w1',
       label: 'Renamed',
-      protocol: 2,
+      protocol: 3,
     });
     socket.message({
       type: 'command_result',
@@ -144,7 +167,7 @@ describe('relay command store', () => {
       type: 'workspace_reorder',
       workspace_ids: ['w1', 'w2'],
       before_workspace_id: 'w5',
-      protocol: 2,
+      protocol: 3,
     });
     socket.message({
       type: 'command_result',
@@ -157,7 +180,7 @@ describe('relay command store', () => {
 
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       version: 'abc123',
       host: 'fedora',
       capabilities: ['workspace_management', 'worktree_management'],
@@ -170,7 +193,7 @@ describe('relay command store', () => {
       type: 'workspace_reorder',
       workspace_id: 'w1',
       insert_index: 2,
-      protocol: 2,
+      protocol: 3,
     });
     expect(legacyCommand).not.toHaveProperty('workspace_ids');
     socket.message({
@@ -184,7 +207,7 @@ describe('relay command store', () => {
 
     const listing = relayStore.listWorktrees(workspace);
     const listCommand = JSON.parse(socket.sent.at(-1)!);
-    expect(listCommand).toMatchObject({ type: 'worktree_list', workspace_id: 'w1', protocol: 2 });
+    expect(listCommand).toMatchObject({ type: 'worktree_list', workspace_id: 'w1', protocol: 3 });
     socket.message({
       type: 'command_result',
       request_id: listCommand.request_id,
@@ -216,23 +239,49 @@ describe('relay command store', () => {
     });
     const socket = MockWebSocket.instances.at(-1)!;
     expect(socket.url).toBe('wss://fedora.example/ws?region=test');
-    expect(socket.protocols).toBe('herdr-e2ee-v1');
+    expect(socket.protocols).toBe('herdr-e2ee-v2');
     socket.open();
     await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
     const hello = JSON.parse(socket.sent[0]);
-    expect(hello).toMatchObject({ type: 'e2ee_client_hello', version: 1 });
+    expect(hello).toMatchObject({
+      type: 'e2ee_client_hello',
+      version: 2,
+      auth_kind: 'invitation',
+      auth_id: 'bootstrap',
+      auth_version: 1,
+    });
     expect(socket.sent[0]).not.toContain('0123456789abcdef0123456789abcdef');
     const relayId = get(relayStore.relayConfigs)[0].id;
     expect(get(relayStore.connections).get(relayId)?.status).toBe('connecting');
     expect(relayStore.sendRaw(relayId, { type: 'refresh_agents' })).toBe(false);
   });
+  it('negotiates encrypted WebSocket transport for a one-use device invitation', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    const relay = {
+      label: 'Invited',
+      url: 'wss://invited.example/ws',
+      token: '',
+    };
+    const relayId = makeRelayId(relay.label, relay.url);
+    new BrowserDeviceCredentialStore(localStorage).saveInvitation(relayId, {
+      id: 'invitation-credential',
+      version: 1,
+      secret: 'A'.repeat(43),
+      expiresAt: Date.now() + 60_000,
+    });
+    relayStore.addRelay(relay);
+    expect(MockWebSocket.instances.at(-1)?.protocols).toBe('herdr-e2ee-v2');
+  });
+
 
   it('acquires and releases validated pane-size leases for capable relays', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       version: 'abc123',
       host: 'fedora',
       capabilities: ['pane_size_lease'],
@@ -240,7 +289,7 @@ describe('relay command store', () => {
     });
     socket.message({
       type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp' }],
+      agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp', ...exactAgentFields() }],
     });
     const agent = get(relayStore.agents)[0];
 
@@ -251,7 +300,7 @@ describe('relay command store', () => {
       type: 'lease_pane_size',
       pane_id: 'w1:p1',
       columns: 83,
-      protocol: 2,
+      protocol: 3,
     });
     expect(acquire.request_id).toBeTruthy();
     expect(acquire).not.toHaveProperty('client_id');
@@ -273,7 +322,7 @@ describe('relay command store', () => {
     expect(releaseCommand).toMatchObject({
       type: 'release_pane_size',
       pane_id: 'w1:p1',
-      protocol: 2,
+      protocol: 3,
     });
     expect(releaseCommand.request_id).toBeTruthy();
     expect(releaseCommand).not.toHaveProperty('client_id');
@@ -292,7 +341,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       version: 'abc123',
       host: 'fedora',
       capabilities: ['pane_size_lease', 'pane_size_lease_rows'],
@@ -300,7 +349,7 @@ describe('relay command store', () => {
     });
     socket.message({
       type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp' }],
+      agents: [{ pane_id: 'w1:p1', status: 'working', agent: 'omp', ...exactAgentFields() }],
     });
     const agent = get(relayStore.agents)[0];
 
@@ -312,7 +361,7 @@ describe('relay command store', () => {
       pane_id: 'w1:p1',
       columns: 83,
       rows: 32,
-      protocol: 2,
+      protocol: 3,
     });
     socket.message({
       type: 'command_result',
@@ -348,14 +397,16 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora',
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
       capabilities: ['attention_classification'], agent_profiles: [],
     });
     socket.message({
       type: 'agents',
       agents: [{
         pane_id: 'w1:p1', status: 'blocked', event_id: 'event-1', agent: 'codex',
+        ...exactAgentFields(),
         attention_kind: 'approval', options: ['Approve once', 'Deny'],
+        approval_fingerprint: 'approval-fingerprint-1',
       }],
     });
     const agent = get(relayStore.agents)[0];
@@ -369,7 +420,14 @@ describe('relay command store', () => {
 
     const approval = relayStore.respond(agent, 0, 2, 'Approve once');
     const command = socket.sent.map((payload) => JSON.parse(payload)).findLast((message) => message.type === 'respond');
-    expect(command).toMatchObject({ pane_id: 'w1:p1', event_id: 'event-1', index: 0, total: 2 });
+    expect(command).toMatchObject({
+      pane_id: 'w1:p1',
+      event_id: 'event-1',
+      approval_fingerprint: 'approval-fingerprint-1',
+      choice: 'Approve once',
+      index: 0,
+      total: 2,
+    });
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(approval).resolves.toBe(true);
   });
@@ -378,7 +436,7 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'old', host: 'fedora',
+      type: 'push_config', protocol: 3, version: 'old', host: 'fedora',
       capabilities: ['structured_questions'], agent_profiles: [],
     });
     socket.message({
@@ -386,6 +444,7 @@ describe('relay command store', () => {
       agents: [{
         pane_id: 'w1:p1', status: 'blocked', event_id: 'event-1', agent: 'codex',
         options: ['Approve once', 'Deny'],
+        ...exactAgentFields(),
         interaction: {
           id: 'old-question', kind: 'single_select', question: 'Trust this?',
           options: [{ index: 0, label: 'Yes' }],
@@ -407,7 +466,7 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, host: 'fedora',
+      type: 'push_config', protocol: 3, host: 'fedora',
       capabilities: ['clear_activities'], agent_profiles: [],
     });
     socket.message({
@@ -418,7 +477,7 @@ describe('relay command store', () => {
 
     const pending = relayStore.clearActivities();
     const command = JSON.parse(socket.sent.at(-1)!);
-    expect(command).toMatchObject({ type: 'clear_activities', protocol: 2 });
+    expect(command).toMatchObject({ type: 'clear_activities', protocol: 3 });
     socket.message({
       type: 'command_result', request_id: command.request_id,
       action: 'clear_activities', ok: true, phase: 'completed',
@@ -441,7 +500,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       host: 'fedora',
       capabilities: [],
       agent_profiles: [],
@@ -449,7 +508,7 @@ describe('relay command store', () => {
     });
     socket.message({
       type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Relay', agent: 'codex' }],
+      agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Relay', agent: 'codex', ...exactAgentFields() }],
     });
     socket.message({
       type: 'inventory_status',
@@ -528,7 +587,7 @@ describe('relay command store', () => {
 
     const checking = relayStore.checkRelayUpdate(relayId);
     const checkCommand = JSON.parse(socket.sent.at(-1)!);
-    expect(checkCommand).toMatchObject({ type: 'check_update', protocol: 2 });
+    expect(checkCommand).toMatchObject({ type: 'check_update', protocol: 3 });
     socket.message({
       type: 'command_result',
       request_id: checkCommand.request_id,
@@ -554,7 +613,7 @@ describe('relay command store', () => {
       expected_version: '0.8.0',
       expected_revision: 'f'.repeat(40),
       expected_origin: location.origin,
-      protocol: 2,
+      protocol: 3,
     });
     socket.message({
       type: 'command_result',
@@ -576,7 +635,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '0.7.0',
       revision: 'abc123',
       capabilities: ['self_update'],
@@ -641,7 +700,7 @@ describe('relay command store', () => {
       {
         type: 'register_app_origin',
         origin: location.origin,
-        protocol: 2,
+        protocol: 3,
       },
       { type: 'refresh_agents' },
     ]);
@@ -655,6 +714,7 @@ describe('relay command store', () => {
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
+      ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
 
@@ -665,6 +725,7 @@ describe('relay command store', () => {
       lines: 1_000,
       format: 'ansi',
       content_fingerprint: '',
+      ...exactWireScope('w1:p1', relayId),
     });
 
     setTerminalHistoryLines(500);
@@ -675,6 +736,7 @@ describe('relay command store', () => {
       lines: 500,
       format: 'ansi',
       content_fingerprint: '',
+      ...exactWireScope('w1:p1', relayId),
     });
     setTerminalHistoryLines(1_000);
   });
@@ -684,7 +746,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       capabilities: ['pane_realtime_delta'],
       inventory: { state: 'ready' },
     });
@@ -693,6 +755,7 @@ describe('relay command store', () => {
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
+      ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
     relayStore.watchPane(agent);
@@ -711,6 +774,7 @@ describe('relay command store', () => {
       interval_ms: 250,
       format: 'ansi',
       content_fingerprint: 'content-1',
+      ...exactWireScope('w1:p1', relayId),
     });
     setTerminalRefreshInterval(100);
     expect(JSON.parse(socket.sent.at(-1)!)).toMatchObject({
@@ -735,6 +799,7 @@ describe('relay command store', () => {
       type: 'pane_applied',
       pane_id: 'w1:p1',
       content_fingerprint: 'content-1',
+      ...exactWireScope('w1:p1', relayId),
     });
 
     socket.message({
@@ -754,6 +819,7 @@ describe('relay command store', () => {
       type: 'pane_applied',
       pane_id: 'w1:p1',
       content_fingerprint: 'content-2',
+      ...exactWireScope('w1:p1', relayId),
     });
 
     socket.message({
@@ -787,10 +853,10 @@ describe('relay command store', () => {
     const [fedora, mac] = MockWebSocket.instances.slice(-2);
     fedora.open();
     mac.open();
-    fedora.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
-    mac.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
-    fedora.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Fedora app' }] });
-    mac.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Mac app' }] });
+    fedora.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    mac.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    fedora.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Fedora app', ...exactAgentFields() }] });
+    mac.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', project: 'Mac app', ...exactAgentFields() }] });
     const agents = get(relayStore.agents);
     expect(agents).toHaveLength(2);
     expect(new Set(agents.map((agent) => agent.pane_id)).size).toBe(2);
@@ -800,10 +866,10 @@ describe('relay command store', () => {
   it('ignores blocked and agent update frames older than the pane revision', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
     socket.message({
       type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'working', pane_revision: 12, project: 'Current' }],
+      agents: [{ pane_id: 'w1:p1', status: 'working', pane_revision: 12, project: 'Current', ...exactAgentFields() }],
     });
 
     socket.message({
@@ -824,19 +890,19 @@ describe('relay command store', () => {
   it('accepts a fresh low pane revision after a relay reconnect', () => {
     const first = MockWebSocket.instances.at(-1)!;
     first.open();
-    first.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
+    first.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
     first.message({
       type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'working', pane_revision: 100 }],
+      agents: [{ pane_id: 'w1:p1', status: 'working', pane_revision: 100, ...exactAgentFields() }],
     });
 
     relayStore.connectAll();
     const replacement = MockWebSocket.instances.at(-1)!;
     replacement.open();
-    replacement.message({ type: 'push_config', protocol: 2, inventory: { state: 'ready' } });
+    replacement.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
     replacement.message({
       type: 'agents',
-      agents: [{ pane_id: 'w1:p1', status: 'blocked', pane_revision: 1, event_id: 'fresh' }],
+      agents: [{ pane_id: 'w1:p1', status: 'blocked', pane_revision: 1, event_id: 'fresh', ...exactAgentFields() }],
     });
 
     expect(get(relayStore.agents)[0]).toMatchObject({
@@ -932,14 +998,15 @@ describe('relay command store', () => {
   it('sends a secret only to a relay that advertises secret input', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
     const agent = {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      ...exactAgentFields(),
     };
     await expect(relayStore.sendSecret(agent, 'hunter2')).rejects.toThrow(/does not support password prompts/);
 
-    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: ['secret_input'], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: ['secret_input'], agent_profiles: [] });
     await expect(relayStore.sendSecret(agent, '')).rejects.toThrow(/Enter the password/);
 
     const pending = relayStore.sendSecret(agent, 'hunter2');
@@ -953,14 +1020,14 @@ describe('relay command store', () => {
   it('ignores late events from a socket that has already been replaced', async () => {
     const oldSocket = MockWebSocket.instances.at(-1)!;
     oldSocket.open();
-    oldSocket.message({ type: 'push_config', protocol: 2, version: 'old', host: 'fedora', capabilities: [], agent_profiles: [] });
+    oldSocket.message({ type: 'push_config', protocol: 3, version: 'old', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
 
     relayStore.connectAll();
     const currentSocket = MockWebSocket.instances.at(-1)!;
     currentSocket.open();
-    currentSocket.message({ type: 'push_config', protocol: 2, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
-    currentSocket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Current agent' }] });
+    currentSocket.message({ type: 'push_config', protocol: 3, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
+    currentSocket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Current agent', ...exactAgentFields() }] });
     const pending = relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' });
     const command = JSON.parse(currentSocket.sent.at(-1)!);
 
@@ -976,8 +1043,8 @@ describe('relay command store', () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, version: 'old', host: 'fedora', capabilities: [], agent_profiles: [] });
-    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume safely' }] });
+    socket.message({ type: 'push_config', protocol: 3, version: 'old', host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Resume safely', ...exactAgentFields() }] });
 
     socket.serverClose();
     expect(get(relayStore.agents).map((agent) => agent.project)).toEqual(['Resume safely']);
@@ -985,7 +1052,7 @@ describe('relay command store', () => {
     await vi.advanceTimersByTimeAsync(3_000);
     const replacement = MockWebSocket.instances.at(-1)!;
     replacement.open();
-    replacement.message({ type: 'push_config', protocol: 2, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
+    replacement.message({ type: 'push_config', protocol: 3, version: 'new', host: 'fedora', capabilities: [], agent_profiles: [] });
     expect(get(relayStore.agents).map((agent) => agent.project)).toEqual(['Resume safely']);
 
     replacement.message({ type: 'agents', agents: [] });
@@ -996,7 +1063,7 @@ describe('relay command store', () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
 
     relayStore.revalidateConnections(25);
     expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
@@ -1010,7 +1077,7 @@ describe('relay command store', () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
 
     relayStore.revalidateConnections();
     expect(JSON.parse(socket.sent.at(-1)!).type).toBe('refresh_agents');
@@ -1027,7 +1094,7 @@ describe('relay command store', () => {
     try {
       const socket = MockWebSocket.instances.at(-1)!;
       socket.open();
-      socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+      socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
 
       relayStore.revalidateConnections();
       await vi.advanceTimersByTimeAsync(9_999);
@@ -1049,7 +1116,7 @@ describe('relay command store', () => {
     MockWebSocket.instances = [connected, dialing];
     expect(dialing.url).toBe('wss://debian.example');
     connected.open();
-    connected.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    connected.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
     const sentOnConnect = connected.sent.length;
 
     await vi.advanceTimersByTimeAsync(119_999);
@@ -1075,7 +1142,7 @@ describe('relay command store', () => {
     try {
       const socket = MockWebSocket.instances.at(-1)!;
       socket.open();
-      socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+      socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
       const relayId = get(relayStore.relayConfigs)[0].id;
 
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
@@ -1110,7 +1177,7 @@ describe('relay command store', () => {
     try {
       const socket = MockWebSocket.instances.at(-1)!;
       socket.open();
-      socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+      socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
       const pings = () => socket.sent.filter((payload) => JSON.parse(payload).type === 'refresh_agents').length;
       const onConnect = pings();
 
@@ -1143,7 +1210,7 @@ describe('relay command store', () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
 
     // Fresh proof of life: keep the session and spend one probe on it, so an
@@ -1184,7 +1251,7 @@ describe('relay command store', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     relayStore.revalidateConnections(2_000);
     expect(relayStore.connection(relayId)?.healthTimer).not.toBeNull();
-    socket.message({ type: 'push_config', protocol: 2, host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, host: 'fedora', capabilities: [], agent_profiles: [] });
     expect(relayStore.connection(relayId)?.lastMessageAt).toBe(Date.now());
     expect(relayStore.connection(relayId)?.healthTimer).toBeNull();
     await vi.advanceTimersByTimeAsync(2_000);
@@ -1197,7 +1264,7 @@ describe('relay command store', () => {
     socket.open();
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '0.7.0',
       revision: 'abc123',
       capabilities: ['self_update'],
@@ -1341,12 +1408,13 @@ describe('relay command store', () => {
     vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, capabilities: ['pane_realtime_delta'], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['pane_realtime_delta'], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
     const agent = {
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
+      ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
     relayStore.watchPane(agent as never);
@@ -1395,13 +1463,14 @@ describe('relay command store', () => {
     const relayId = get(relayStore.relayConfigs)[0].id;
 
     report('connected', { path: 'gateway' });
-    deliver({ type: 'push_config', protocol: 2, capabilities: ['pane_realtime_delta'], agent_profiles: [] });
+    deliver({ type: 'push_config', protocol: 3, capabilities: ['pane_realtime_delta'], agent_profiles: [] });
     expect(get(relayStore.connections).get(relayId)?.path).toBe('gateway');
 
     const agent = {
       relay_id: relayId,
       relay_label: 'Gateway',
       raw_pane_id: 'w1:p1',
+      ...exactAgentFields(),
       pane_id: `${relayId}::w1:p1`,
     };
     relayStore.watchPane(agent as never);
@@ -1465,13 +1534,13 @@ describe('relay command store', () => {
 
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       capabilities: [],
       agent_profiles: [],
       release_version: '0.17.0',
       update: { state: 'current', upstream_version: '0.17.1' },
       hybrid: {
-        transport: 'herdr-hybrid-v1',
+        transport: 'herdr-hybrid-v2',
         gateway_url: 'wss://gw.example',
         gateway_urls: [
           'wss://gw.example',
@@ -1507,11 +1576,11 @@ describe('relay command store', () => {
 
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       capabilities: [],
       agent_profiles: [],
       hybrid: {
-        transport: 'herdr-hybrid-v1',
+        transport: 'herdr-hybrid-v2',
         gateway_url: 'wss://backup.example',
         gateway_urls: ['wss://backup.example', 'wss://gw.example'],
         relay_id: 'Ccy3nT9AULlAceTEnhTvoQ',
@@ -1529,77 +1598,139 @@ describe('relay command store', () => {
     socket.open();
     socket.message({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       capabilities: [],
       agent_profiles: [],
-      hybrid: { transport: 'herdr-hybrid-v1', gateway_url: 'https://gw.example' },
+      hybrid: { transport: 'herdr-hybrid-v2', gateway_url: 'https://gw.example' },
     });
     expect(get(relayStore.relayConfigs)[0].transport).toBeUndefined();
   });
 
-  it('rejects an image upload when its relay disconnects', async () => {
+  it('rejects an attachment batch when its relay disconnects before begin confirmation', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const upload = relayStore.uploadImage({
+    const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
       pane_id: `${relayId}::w1:p1`,
-    }, new File(['png'], 'shot.png', { type: 'image/png' }));
-    await vi.waitFor(() => expect(socket.sent.some((payload) => JSON.parse(payload).type === 'upload_image')).toBe(true));
+      server_session_id: 'session-1',
+      terminal_id: 'terminal-1',
+      generation: 1,
+    }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    await vi.waitFor(() => expect(socket.sent.some((payload) => JSON.parse(payload).type === 'upload_begin')).toBe(true));
 
     socket.serverClose();
-    await expect(upload).rejects.toThrow('Relay disconnected');
+    await expect(upload).rejects.toMatchObject({ code: 'attachment_upload_failed' });
   });
 
-  it('times out image uploads that receive no result', async () => {
+  it('marks an attachment batch failed when begin confirmation times out', async () => {
+    vi.useFakeTimers();
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
-    const upload = relayStore.uploadImage({
+    const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
       pane_id: `${relayId}::w1:p1`,
-    }, new File(['png'], 'shot.png', { type: 'image/png' }), 5);
+      server_session_id: 'session-1',
+      terminal_id: 'terminal-1',
+      generation: 1,
+    }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
 
-    await expect(upload).rejects.toThrow('Image upload did not finish in time');
+    const rejection = expect(upload).rejects.toMatchObject({ code: 'attachment_upload_failed' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await rejection;
   });
 
-  it('accepts an upload result only from the relay that received the image', async () => {
-    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: 'secret' });
+  it('streams an attachment only through its target relay and returns an opaque reference', async () => {
+    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });
     const [fedoraSocket, macSocket] = MockWebSocket.instances.slice(-2);
     fedoraSocket.open();
     macSocket.open();
-    fedoraSocket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
-    macSocket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'mac', capabilities: [], agent_profiles: [] });
+    fedoraSocket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    macSocket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'mac', capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs).find((relay) => relay.label === 'Fedora')!.id;
-    const upload = relayStore.uploadImage({
+    const upload = relayStore.uploadAttachments({
       relay_id: relayId,
       relay_label: 'Fedora',
       raw_pane_id: 'w1:p1',
       pane_id: `${relayId}::w1:p1`,
-    }, new File(['png'], 'shot.png', { type: 'image/png' }));
-    await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_image')).toBe(true));
-    const request = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_image');
-    let settled = false;
-    void upload.then(() => { settled = true; }, () => { settled = true; });
-
-    macSocket.message({ type: 'upload_result', request_id: request.request_id, ok: true, path: '/wrong/shot.png' });
+      server_session_id: 'session-1',
+      terminal_id: 'terminal-1',
+      generation: 1,
+    }, [new File(['png'], 'shot.png', { type: 'image/png' })]);
+    await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_begin')).toBe(true));
+    const begin = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_begin');
+    macSocket.message({
+      type: 'upload_begin_result',
+      request_id: begin.request_id,
+      result: {
+        upload_id: 'wrong',
+        chunk_bytes: 262144,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        limits: { max_files: 8, max_file_bytes: 20971520, max_batch_bytes: 52428800 },
+      },
+    });
     await Promise.resolve();
-    expect(settled).toBe(false);
+    expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_chunk')).toBe(false);
 
-    fedoraSocket.message({ type: 'upload_result', request_id: request.request_id, ok: true, path: '/right/shot.png' });
-    await expect(upload).resolves.toBe('/right/shot.png');
+    fedoraSocket.message({
+      type: 'upload_begin_result',
+      request_id: begin.request_id,
+      result: {
+        upload_id: 'upload-1',
+        chunk_bytes: 262144,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        limits: { max_files: 8, max_file_bytes: 20971520, max_batch_bytes: 52428800 },
+      },
+    });
+    await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_chunk')).toBe(true));
+    const chunk = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_chunk');
+    expect(chunk).toMatchObject({
+      upload_id: 'upload-1',
+      data: 'cG5n',
+      sha256: '8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c',
+      target: {
+        server_session_id: 'session-1',
+        pane_id: 'w1:p1',
+        terminal_id: 'terminal-1',
+        generation: 1,
+      },
+      protocol: 3,
+    });
+    fedoraSocket.message({
+      type: 'upload_chunk_result',
+      request_id: chunk.request_id,
+      result: { file_index: 0, next_sequence: 1, received_bytes: 3 },
+    });
+    await vi.waitFor(() => expect(fedoraSocket.sent.some((payload) => JSON.parse(payload).type === 'upload_finish')).toBe(true));
+    const finish = fedoraSocket.sent.map((payload) => JSON.parse(payload)).find((message) => message.type === 'upload_finish');
+    fedoraSocket.message({
+      type: 'upload_finish_result',
+      request_id: finish.request_id,
+      result: {
+        attachments: [{
+          ref: 'attachment:opaque-1',
+          name: 'shot.png',
+          media_type: 'image/png',
+          bytes: 3,
+          sha256: '8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c',
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        }],
+      },
+    });
+    await expect(upload).resolves.toMatchObject([{ ref: 'attachment:opaque-1', name: 'shot.png' }]);
   });
 
   it('does not apply a directory result to a replacement connection', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: ['directory_browser'], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: ['directory_browser'], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
     const listing = relayStore.listDirectories(relayId, '/home/test');
     const request = JSON.parse(socket.sent.at(-1)!);
@@ -1616,7 +1747,7 @@ describe('relay command store', () => {
   it('keeps the newest directory listing when responses arrive out of order', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: ['directory_browser'], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: ['directory_browser'], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
 
     const older = relayStore.listDirectories(relayId, '/home/test/older');
@@ -1644,7 +1775,7 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready', last_attempt_at: 100, last_success_at: 100 },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
@@ -1664,13 +1795,14 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora',
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
       capabilities: ['slash_commands'], agent_profiles: [],
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
     const agent = {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'codex', cwd: '/home/test/project',
+      ...exactAgentFields(),
     };
 
     const first = relayStore.loadSlashCommands(agent);
@@ -1678,7 +1810,7 @@ describe('relay command store', () => {
     const requests = socket.sent.map((payload) => JSON.parse(payload))
       .filter((message) => message.type === 'list_slash_commands');
     expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({ pane_id: 'w1:p1', protocol: 2 });
+    expect(requests[0]).toMatchObject({ pane_id: 'w1:p1', protocol: 3 });
     socket.message({
       type: 'command_result', request_id: requests[0].request_id, ok: true, phase: 'completed',
       data: {
@@ -1711,15 +1843,16 @@ describe('relay command store', () => {
   it('invalidates slash-command caches on reconnect and rejects unsupported relays', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
-    socket.message({ type: 'push_config', protocol: 2, capabilities: [], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, capabilities: [], agent_profiles: [] });
     const relayId = get(relayStore.relayConfigs)[0].id;
     const agent = {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'claude', cwd: '/home/test/project',
+      ...exactAgentFields(),
     };
     await expect(relayStore.loadSlashCommands(agent)).rejects.toThrow(/does not provide/);
 
-    socket.message({ type: 'push_config', protocol: 2, capabilities: ['slash_commands'], agent_profiles: [] });
+    socket.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
     const pending = relayStore.loadSlashCommands(agent);
     const request = socket.sent.map((payload) => JSON.parse(payload)).at(-1)!;
     socket.message({
@@ -1731,7 +1864,7 @@ describe('relay command store', () => {
     relayStore.connectAll();
     const replacement = MockWebSocket.instances.at(-1)!;
     replacement.open();
-    replacement.message({ type: 'push_config', protocol: 2, capabilities: ['slash_commands'], agent_profiles: [] });
+    replacement.message({ type: 'push_config', protocol: 3, capabilities: ['slash_commands'], agent_profiles: [] });
     const refreshed = relayStore.loadSlashCommands(agent);
     const refreshedRequest = JSON.parse(replacement.sent.at(-1)!);
     expect(refreshedRequest.type).toBe('list_slash_commands');
@@ -1746,13 +1879,14 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora',
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
       capabilities: ['slash_commands'], agent_profiles: [],
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
     const agentOld = {
       relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
       agent: 'codex', cwd: '/home/test/old',
+      ...exactAgentFields(),
     };
     const agentNew = { ...agentOld, cwd: '/home/test/new' };
 
@@ -1798,7 +1932,7 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
@@ -1816,7 +1950,7 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
@@ -1836,7 +1970,7 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;
@@ -1853,7 +1987,7 @@ describe('relay command store', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
     socket.message({
-      type: 'push_config', protocol: 2, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [],
       inventory: { state: 'ready' },
     });
     const relayId = get(relayStore.relayConfigs)[0].id;

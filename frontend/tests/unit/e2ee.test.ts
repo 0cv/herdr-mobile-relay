@@ -1,156 +1,210 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createE2EEClientHandshake, E2EESession } from '$lib/e2ee';
+import { base64UrlDecode, base64UrlEncode } from '$lib/base64url';
+import type { RelayDeviceAuthentication } from '$lib/device-auth';
+import { createE2EEClientHandshake, E2EESession, type E2EEClientHello } from '$lib/e2ee';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 type Bytes = Uint8Array<ArrayBuffer>;
 
-interface VectorPeer {
-  private_key: string;
-  nonce: string;
-  hello: {
-    type: 'e2ee_client_hello' | 'e2ee_server_hello';
-    version: 1;
-    nonce: string;
-    public_key: string;
-    proof: string;
-  };
-}
+const credential: RelayDeviceAuthentication = {
+  kind: 'credential',
+  id: 'credential-7',
+  version: 3,
+  secret: base64UrlEncode(new Uint8Array(new ArrayBuffer(32)).fill(7)),
+};
 
-interface E2EEVector {
-  relay_key: string;
-  client: VectorPeer;
-  server: VectorPeer;
-  records: {
-    client_finish: { plaintext: string; frame: Record<string, unknown> };
-    c2s: { plaintext: string; frame: Record<string, unknown> };
-    s2c: { plaintext: string; frame: Record<string, unknown> };
-  };
-}
+const invitation: RelayDeviceAuthentication = {
+  kind: 'invitation',
+  id: 'invitation-9',
+  version: 1,
+  secret: base64UrlEncode(new Uint8Array(new ArrayBuffer(32)).fill(9)),
+};
 
-const vector = JSON.parse(
-  readFileSync(resolve(process.cwd(), '../contracts/fixtures/e2ee/v1.json'), 'utf8'),
-) as E2EEVector;
-
-describe('relay end-to-end encryption', () => {
-  it('encrypts both directions and rejects replayed frames', async () => {
+describe('relay end-to-end encryption v2', () => {
+  it('encrypts both directions with version two frame binding and rejects replay', async () => {
     const clientKeyBytes = crypto.getRandomValues(new Uint8Array(new ArrayBuffer(32)));
     const serverKeyBytes = crypto.getRandomValues(new Uint8Array(new ArrayBuffer(32)));
-    const clientKey = await crypto.subtle.importKey(
-      'raw', clientKeyBytes, 'AES-GCM', false, ['encrypt', 'decrypt'],
-    );
-    const serverKey = await crypto.subtle.importKey(
-      'raw', serverKeyBytes, 'AES-GCM', false, ['encrypt', 'decrypt'],
-    );
+    const clientKey = await crypto.subtle.importKey('raw', clientKeyBytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
+    const serverKey = await crypto.subtle.importKey('raw', serverKeyBytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
     const session = new E2EESession(clientKey, serverKey);
 
     const plaintext = JSON.stringify({ type: 'submit_prompt', text: 'private prompt' });
-    const encrypted = await session.encrypt(plaintext);
-    expect(encrypted).not.toContain('submit_prompt');
+    const encrypted = String(await session.encrypt(plaintext));
     expect(encrypted).not.toContain('private prompt');
-    const clientFrame = JSON.parse(String(encrypted)) as Record<string, unknown>;
+    expect(JSON.parse(encrypted)).toMatchObject({ type: 'e2ee', version: 2, sequence: 0 });
+    const clientFrame = JSON.parse(encrypted) as Record<string, unknown>;
     const decryptedClient = await crypto.subtle.decrypt({
-      name: 'AES-GCM',
-      iv: frameNonce(0),
-      additionalData: frameAAD('c2s', 0),
-      tagLength: 128,
+      name: 'AES-GCM', iv: frameNonce(0), additionalData: frameAAD('c2s', 0), tagLength: 128,
     }, clientKey, base64UrlDecode(String(clientFrame.ciphertext)));
     expect(decoder.decode(decryptedClient)).toBe(plaintext);
 
     const reply = JSON.stringify({ type: 'pane_content', content: 'private terminal output' });
     const encryptedReply = new Uint8Array(await crypto.subtle.encrypt({
-      name: 'AES-GCM',
-      iv: frameNonce(0),
-      additionalData: frameAAD('s2c', 0),
-      tagLength: 128,
+      name: 'AES-GCM', iv: frameNonce(0), additionalData: frameAAD('s2c', 0), tagLength: 128,
     }, serverKey, encoder.encode(reply)));
     const serverFrame = JSON.stringify({
-      type: 'e2ee',
-      version: 1,
-      sequence: 0,
-      ciphertext: base64UrlEncode(encryptedReply),
+      type: 'e2ee', version: 2, sequence: 0, ciphertext: base64UrlEncode(encryptedReply),
     });
     await expect(session.decrypt(serverFrame)).resolves.toBe(reply);
     await expect(session.decrypt(serverFrame)).rejects.toThrow(/sequence/);
   });
 
-  it('rejects relay keys shorter than 16 UTF-8 bytes', async () => {
-    await expect(createE2EEClientHandshake('predictable')).rejects.toThrow(/16 bytes/);
-  });
-
-  it('keeps the relay key out of the hello and authenticates the server proof', async () => {
-    const token = '0123456789abcdef0123456789abcdef';
-    const handshake = await createE2EEClientHandshake(token);
-    expect(JSON.stringify(handshake.hello)).not.toContain(token);
-    expect(handshake.hello).toMatchObject({ type: 'e2ee_client_hello', version: 1 });
-
-    await expect(handshake.complete({
-      type: 'e2ee_server_hello',
-      version: 1,
-      nonce: base64UrlEncode(new Uint8Array(new ArrayBuffer(32))),
-      public_key: base64UrlEncode(new Uint8Array(new ArrayBuffer(65))),
-      proof: base64UrlEncode(new Uint8Array(new ArrayBuffer(32))),
-    })).rejects.toThrow(/verification failed/);
-  });
-
-  it('matches the shared deterministic version one vector', async () => {
-    const keyPair = await importVectorKeyPair(vector.client);
-    const handshake = await createE2EEClientHandshake(vector.relay_key, {
-      keyPair,
-      nonce: base64UrlDecode(vector.client.nonce),
+  it('binds credential kind, id, and version into the client proof', async () => {
+    const handshake = await createE2EEClientHandshake(credential);
+    expect(handshake.hello).toMatchObject({
+      type: 'e2ee_client_hello',
+      version: 2,
+      auth_kind: 'credential',
+      auth_id: credential.id,
+      auth_version: credential.version,
     });
-    expect(handshake.hello).toEqual(vector.client.hello);
+    expect(JSON.stringify(handshake.hello)).not.toContain(credential.secret);
 
-    const completed = await handshake.complete(vector.server.hello);
-    expect(JSON.parse(String(completed.finish))).toEqual(vector.records.client_finish.frame);
-    const { session } = completed;
-    const frame = await session.encrypt(vector.records.c2s.plaintext);
-    expect(JSON.parse(String(frame))).toEqual(vector.records.c2s.frame);
-    await expect(session.decrypt(JSON.stringify(vector.records.s2c.frame)))
-      .resolves.toBe(vector.records.s2c.plaintext);
+    const key = await crypto.subtle.importKey(
+      'raw', base64UrlDecode(credential.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+    );
+    const expected = await crypto.subtle.sign('HMAC', key, concatenate(
+      encoder.encode('herdr-e2ee-v2 client\0'),
+      authenticationBinding(credential),
+      base64UrlDecode(handshake.hello.nonce),
+      base64UrlDecode(handshake.hello.public_key),
+    ));
+    expect(handshake.hello.proof).toBe(base64UrlEncode(new Uint8Array(expected)));
+
+    const changed = await createE2EEClientHandshake({ ...credential, version: credential.version + 1 }, {
+      keyPair: await importClientKeyPair(handshake.hello),
+      nonce: base64UrlDecode(handshake.hello.nonce),
+    });
+    expect(changed.hello.proof).not.toBe(handshake.hello.proof);
   });
 
-  it('rejects a malformed server-hello mutation corpus', async () => {
-    const valid = vector.server.hello;
-    const mutations: unknown[] = [
-      null,
-      [],
-      {},
-      { ...valid, type: 'e2ee_client_hello' },
-      { ...valid, version: 0 },
-      { ...valid, version: '1' },
-      { ...valid, nonce: '' },
-      { ...valid, public_key: '' },
-      { ...valid, proof: '' },
-    ];
-    for (const field of ['type', 'version', 'nonce', 'public_key', 'proof'] as const) {
-      const missing = { ...valid } as Record<string, unknown>;
-      delete missing[field];
-      mutations.push(missing);
-    }
-    for (const field of ['nonce', 'public_key', 'proof'] as const) {
-      const encoded = valid[field];
-      const replacement = encoded[0] === 'A' ? 'B' : 'A';
-      mutations.push(
-        { ...valid, [field]: `${replacement}${encoded.slice(1)}` },
-        { ...valid, [field]: encoded.slice(0, -1) },
-        { ...valid, [field]: `${encoded}=` },
-        { ...valid, [field]: `${encoded}%` },
-      );
-    }
+  it('authenticates the encrypted server finish before returning a credential identity', async () => {
+    const handshake = await createE2EEClientHandshake(credential);
+    const server = await createServer(handshake.hello, credential);
+    const challenge = await handshake.complete(server.hello);
+    const finish = await encryptServerFinish(server.sendKey, {
+      type: 'e2ee_server_finish',
+      version: 2,
+      device_id: 'device-1',
+      credential_id: credential.id,
+      credential_version: credential.version,
+      role: 'controller',
+      locale: 'en',
+    });
+    const completed = await challenge.complete(finish);
 
-    const keyPair = await importVectorKeyPair(vector.client);
-    for (const serverHello of mutations) {
-      const handshake = await createE2EEClientHandshake(vector.relay_key, {
-        keyPair,
-        nonce: base64UrlDecode(vector.client.nonce),
-      });
-      await expect(handshake.complete(serverHello)).rejects.toThrow();
-    }
+    expect(completed.enrollment).toEqual({
+      deviceId: 'device-1',
+      credentialId: credential.id,
+      credentialVersion: credential.version,
+      role: 'controller',
+      locale: 'en',
+    });
+    await expect(challenge.complete(finish)).rejects.toThrow(/already complete/);
+  });
+
+  it('accepts an issued secret only for invitation redemption', async () => {
+    const handshake = await createE2EEClientHandshake(invitation);
+    const server = await createServer(handshake.hello, invitation);
+    const challenge = await handshake.complete(server.hello);
+    const issuedSecret = base64UrlEncode(new Uint8Array(new ArrayBuffer(32)).fill(4));
+    const completed = await challenge.complete(await encryptServerFinish(server.sendKey, {
+      type: 'e2ee_server_finish',
+      version: 2,
+      device_id: 'device-new',
+      credential_id: 'credential-new',
+      credential_version: 1,
+      credential_secret: issuedSecret,
+      role: 'reader',
+      locale: 'zh-CN',
+    }));
+    expect(completed.enrollment.credentialSecret).toBe(issuedSecret);
+
+    const credentialHandshake = await createE2EEClientHandshake(credential);
+    const credentialServer = await createServer(credentialHandshake.hello, credential);
+    const credentialChallenge = await credentialHandshake.complete(credentialServer.hello);
+    await expect(credentialChallenge.complete(await encryptServerFinish(credentialServer.sendKey, {
+      type: 'e2ee_server_finish',
+      version: 2,
+      device_id: 'device-1',
+      credential_id: credential.id,
+      credential_version: credential.version,
+      credential_secret: issuedSecret,
+      role: 'controller',
+      locale: 'en',
+    }))).rejects.toThrow(/unexpectedly replaced/);
+  });
+
+  it('rejects secrets that are not exactly 32 decoded bytes', async () => {
+    await expect(createE2EEClientHandshake({
+      ...credential,
+      secret: base64UrlEncode(new Uint8Array(new ArrayBuffer(31))),
+    })).rejects.toThrow(/32 bytes/);
   });
 });
+
+async function createServer(hello: E2EEClientHello, authentication: RelayDeviceAuthentication) {
+  const serverPair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'],
+  ) as CryptoKeyPair;
+  const serverNonce = crypto.getRandomValues(new Uint8Array(new ArrayBuffer(32)));
+  const serverPublic = new Uint8Array(await crypto.subtle.exportKey('raw', serverPair.publicKey));
+  const clientPublic = base64UrlDecode(hello.public_key);
+  const importedClientPublic = await crypto.subtle.importKey(
+    'raw', clientPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, [],
+  );
+  const sharedSecret = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: importedClientPublic }, serverPair.privateKey, 256,
+  ));
+  const authKey = await crypto.subtle.importKey(
+    'raw', base64UrlDecode(authentication.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const transcript = concatenate(
+    authenticationBinding(authentication),
+    base64UrlDecode(hello.nonce),
+    clientPublic,
+    serverNonce,
+    serverPublic,
+  );
+  const proof = new Uint8Array(await crypto.subtle.sign(
+    'HMAC', authKey, concatenate(encoder.encode('herdr-e2ee-v2 server\0'), transcript),
+  ));
+  const salt = new Uint8Array(await crypto.subtle.sign(
+    'HMAC', authKey, concatenate(encoder.encode('herdr-e2ee-v2 key\0'), transcript),
+  ));
+  const material = await crypto.subtle.importKey('raw', sharedSecret, 'HKDF', false, ['deriveKey']);
+  const sendKey = await crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt, info: encoder.encode('herdr-e2ee-v2 s2c') },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt'],
+  );
+  return {
+    hello: {
+      type: 'e2ee_server_hello',
+      version: 2,
+      nonce: base64UrlEncode(serverNonce),
+      public_key: base64UrlEncode(serverPublic),
+      proof: base64UrlEncode(proof),
+    },
+    sendKey,
+  };
+}
+
+async function encryptServerFinish(sendKey: CryptoKey, finish: Record<string, unknown>): Promise<string> {
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({
+    name: 'AES-GCM', iv: frameNonce(0), additionalData: frameAAD('s2c', 0), tagLength: 128,
+  }, sendKey, encoder.encode(JSON.stringify(finish))));
+  return JSON.stringify({ type: 'e2ee', version: 2, sequence: 0, ciphertext: base64UrlEncode(ciphertext) });
+}
+
+function authenticationBinding(authentication: RelayDeviceAuthentication): Bytes {
+  return encoder.encode(
+    `herdr-e2ee-v2 auth\0${authentication.kind}\0${authentication.id}\0${authentication.version}\0`,
+  );
+}
 
 function frameNonce(sequence: number): Bytes {
   const nonce = new Uint8Array(new ArrayBuffer(12));
@@ -159,49 +213,30 @@ function frameNonce(sequence: number): Bytes {
 }
 
 function frameAAD(direction: 'c2s' | 's2c', sequence: number): Bytes {
-  const prefix = encoder.encode(`herdr-e2ee-v1 ${direction}`);
+  const prefix = encoder.encode(`herdr-e2ee-v2 ${direction}`);
   const aad = new Uint8Array(new ArrayBuffer(prefix.length + 9));
   aad.set(prefix);
   new DataView(aad.buffer).setBigUint64(prefix.length + 1, BigInt(sequence), false);
   return aad;
 }
 
-function base64UrlEncode(value: Bytes): string {
-  return btoa(String.fromCharCode(...value)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-function base64UrlDecode(value: string): Bytes {
-  const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
-  const binary = atob(padded);
-  const result = new Uint8Array(new ArrayBuffer(binary.length));
-  for (let index = 0; index < binary.length; index += 1) result[index] = binary.charCodeAt(index);
+function concatenate(...parts: Bytes[]): Bytes {
+  const result = new Uint8Array(new ArrayBuffer(parts.reduce((size, part) => size + part.length, 0)));
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.length;
+  }
   return result;
 }
 
-async function importVectorKeyPair(peer: VectorPeer): Promise<CryptoKeyPair> {
-  const rawPublic = base64UrlDecode(peer.hello.public_key);
-  const publicJWK: JsonWebKey = {
-    kty: 'EC',
-    crv: 'P-256',
-    x: base64UrlEncode(rawPublic.slice(1, 33)),
-    y: base64UrlEncode(rawPublic.slice(33, 65)),
-    ext: true,
-  };
-  const [privateKey, publicKey] = await Promise.all([
-    crypto.subtle.importKey(
-      'jwk',
-      { ...publicJWK, d: peer.private_key },
-      { name: 'ECDH', namedCurve: 'P-256' },
-      true,
-      ['deriveBits'],
-    ),
-    crypto.subtle.importKey(
-      'jwk',
-      publicJWK,
-      { name: 'ECDH', namedCurve: 'P-256' },
-      true,
-      [],
-    ),
-  ]);
-  return { privateKey, publicKey };
+async function importClientKeyPair(hello: E2EEClientHello): Promise<CryptoKeyPair> {
+  const rawPublic = base64UrlDecode(hello.public_key);
+  const publicKey = await crypto.subtle.importKey(
+    'raw', rawPublic, { name: 'ECDH', namedCurve: 'P-256' }, true, [],
+  );
+  const generated = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'],
+  ) as CryptoKeyPair;
+  return { privateKey: generated.privateKey, publicKey };
 }

@@ -22,6 +22,8 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
+	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/session"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
@@ -41,6 +43,102 @@ func testServerWithCacheDir(cacheDir string) *Server {
 		CacheDir:   cacheDir,
 	}
 	return New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
+	mutation := protocol.ActionMetadata{Operation: "send_input", Class: protocol.ActionMutating}
+	read := protocol.ActionMetadata{Operation: "read_pane", Class: protocol.ActionReadOnly}
+
+	for _, test := range []struct {
+		name          string
+		identity      transport.AuthenticatedIdentity
+		authenticated bool
+		action        protocol.ActionMetadata
+		deviceID      string
+		wantDenied    bool
+	}{
+		{name: "reader mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: mutation, wantDenied: true},
+		{name: "reader read", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: read},
+		{name: "reader self revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-current"},
+		{name: "reader other revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-other", wantDenied: true},
+		{name: "controller mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleController)}, authenticated: true, action: mutation},
+		{name: "local connection", action: mutation},
+		{name: "unauthenticated push subscribe", action: protocol.ActionMetadata{Operation: "push_subscribe", Class: protocol.ActionMutating}, wantDenied: true},
+		{name: "reader own-device push policy", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "push_policy_set", Class: protocol.ActionMutating}, deviceID: "spoofed-other"},
+		{name: "unauthenticated push open", action: protocol.ActionMetadata{Operation: "push_open_ref", Class: protocol.ActionReadOnly}, wantDenied: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := authorizeAuthenticatedIdentity(test.identity, test.authenticated, test.action, test.deviceID)
+			if (err != nil) != test.wantDenied {
+				t.Fatalf("authorizeAuthenticatedIdentity() error = %#v, want denied %v", err, test.wantDenied)
+			}
+			if err != nil && (err.Code != protocol.ErrorReaderDenied || err.Args["operation"] != test.action.Operation) {
+				t.Fatalf("authorizeAuthenticatedIdentity() error = %#v", err)
+			}
+		})
+	}
+}
+
+func TestValidateExactPaneTargetBindsCurrentTerminalGenerationAndAgentSession(t *testing.T) {
+	server := testServer()
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", ServerSessionID: "primary", TerminalID: "terminal-1",
+		Generation: 4, SessionID: "agent-session-1",
+	}}, server.state.RevisionCounter())
+	current, ok := server.state.Agent("pane-1")
+	if !ok {
+		t.Fatal("committed agent missing")
+	}
+	exact := protocol.TargetRef{
+		ServerSessionID: current.ServerSessionID, PaneID: current.PaneID, TerminalID: current.TerminalID,
+		Generation: current.Generation, AgentSessionID: current.SessionID,
+	}
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1", Target: &exact}, true); err != nil {
+		t.Fatalf("exact target rejected: %#v", err)
+	}
+	for name, mutate := range map[string]func(*protocol.TargetRef){
+		"server session": func(target *protocol.TargetRef) { target.ServerSessionID = "other" },
+		"pane":           func(target *protocol.TargetRef) { target.PaneID = "pane-2" },
+		"terminal":       func(target *protocol.TargetRef) { target.TerminalID = "terminal-2" },
+		"generation":     func(target *protocol.TargetRef) { target.Generation++ },
+		"agent session":  func(target *protocol.TargetRef) { target.AgentSessionID = "agent-session-2" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := exact
+			mutate(&changed)
+			if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1", Target: &changed}, true); err == nil {
+				t.Fatal("stale target was accepted")
+			}
+		})
+	}
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1"}, true); err == nil {
+		t.Fatal("authenticated pane command without a target was accepted")
+	}
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1"}, false); err != nil {
+		t.Fatalf("local pane command without a target was rejected: %#v", err)
+	}
+}
+
+func TestBoundPushPolicyUsesAuthenticatedDevice(t *testing.T) {
+	current := push.DefaultDevicePolicy("old-device", "en")
+	raw := json.RawMessage(`{
+		"device_id":"spoofed-device",
+		"locale":"spoofed-locale",
+		"categories":{"attention":true,"question":false,"brief":true,"finished":false,"update":true,"test":true},
+		"settle_ms":5000,
+		"cooldown_ms":60000,
+		"snoozed":true,
+		"snooze_until":"2026-08-31T13:00:00Z",
+		"update_once":false
+	}`)
+	policy, err := boundPushPolicy(raw, "authenticated-device", "zh-CN", current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.DeviceID != "authenticated-device" || policy.Locale != "zh-CN" ||
+		policy.Settle != 5*time.Second || policy.Cooldown != time.Minute ||
+		!policy.Snoozed || policy.UpdateOnce {
+		t.Fatalf("bound policy = %#v", policy)
+	}
 }
 
 func TestResolveAgentSessionName(t *testing.T) {
@@ -728,8 +826,8 @@ func TestHealthz(t *testing.T) {
 	if resp["revision"] != "abc123" {
 		t.Errorf("revision = %v, want abc123", resp["revision"])
 	}
-	if resp["protocol"] != float64(2) {
-		t.Errorf("protocol = %v, want 2", resp["protocol"])
+	if resp["protocol"] != float64(protocol.Version) {
+		t.Errorf("protocol = %v, want %d", resp["protocol"], protocol.Version)
 	}
 	if resp["gateway_available_version"] != "0.9.0" {
 		t.Errorf("gateway_available_version = %v, want 0.9.0", resp["gateway_available_version"])

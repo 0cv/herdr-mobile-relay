@@ -48,11 +48,13 @@ import (
 // scan one level too high. The service wrapper exports every key of
 // relay.env into the relay process, so these belong in that file.
 const (
-	ClaudeListEnv = "HERDR_CLAUDE_CONFIG_DIRS"
-	QoderListEnv  = "HERDR_QODER_CONFIG_DIRS"
-	CodexListEnv  = "HERDR_CODEX_CONFIG_DIRS"
-	PiListEnv     = "HERDR_PI_CONFIG_DIRS"
-	OMPListEnv    = "HERDR_OMP_CONFIG_DIRS"
+	ClaudeListEnv   = "HERDR_CLAUDE_CONFIG_DIRS"
+	QoderListEnv    = "HERDR_QODER_CONFIG_DIRS"
+	CodexListEnv    = "HERDR_CODEX_CONFIG_DIRS"
+	PiListEnv       = "HERDR_PI_CONFIG_DIRS"
+	OMPListEnv      = "HERDR_OMP_CONFIG_DIRS"
+	OpenCodeListEnv = "HERDR_OPENCODE_DATA_DIRS"
+	OMOListEnv      = "HERDR_OMO_CONFIG_DIRS"
 )
 
 // Claude reports the transcript roots for Claude Code, honouring
@@ -76,6 +78,35 @@ func Codex(home string) []string {
 // that read a file stored beside the sessions tree (session_index.jsonl).
 func CodexHomes(home string) []string {
 	return resolve(home, CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "")
+}
+
+// OpenCodeData reports the only directories in which the relay will accept an
+// OpenCode database. Entries name data directories, not database files.
+func OpenCodeData(home string) []string {
+	xdgData := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+	if xdgData == "" {
+		xdgData = filepath.Join(home, ".local", "share")
+	}
+	return resolve(home, OpenCodeListEnv, "", filepath.Join(xdgData, "opencode"), "")
+}
+
+// OpenCodeDBs reports fixed database filenames under the configured OpenCode
+// data directories. A caller must still re-check containment and regular-file
+// status immediately before opening one.
+func OpenCodeDBs(home string) []string {
+	roots := OpenCodeData(home)
+	paths := make([]string, 0, len(roots))
+	for _, root := range roots {
+		paths = append(paths, filepath.Join(root, "opencode.db"))
+	}
+	return paths
+}
+
+// OMO reports the Pi-compatible transcript roots for Oh My OpenCode. Its
+// OMO_CODING_AGENT_DIR and relay path list are deliberately unrelated to Oh My
+// Pi's PI_CODING_AGENT_DIR and HERDR_OMP_CONFIG_DIRS.
+func OMO(home string) []string {
+	return resolve(home, OMOListEnv, "OMO_CODING_AGENT_DIR", filepath.Join(home, ".omo", "agent"), "sessions")
 }
 
 // Pi reports the session roots for the Pi coding agent, including the agent

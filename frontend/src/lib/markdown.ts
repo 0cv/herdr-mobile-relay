@@ -141,6 +141,25 @@ function renderTableRow(cells: string[], alignments: TableAlignment[], tag: 'th'
 }
 
 
+export function fencedCodeText(value: string): string | null {
+  const blocks: string[] = [];
+  let current: string[] | null = null;
+  for (const line of value.replace(/\r\n?/g, '\n').split('\n')) {
+    if (/^\s*```\s*[A-Za-z0-9_+.-]*\s*$/u.test(line)) {
+      if (current === null) {
+        current = [];
+      } else {
+        const block = current.join('\n');
+        if (block.trim()) blocks.push(block);
+        current = null;
+      }
+      continue;
+    }
+    if (current !== null) current.push(line);
+  }
+  return blocks.length ? blocks.join('\n\n') : null;
+}
+
 export function safeMarkdownHtml(value: string, highlight = ''): string {
   const lines = value.replace(/\r\n?/g, '\n').split('\n');
   const output: string[] = [];

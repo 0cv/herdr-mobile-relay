@@ -30,7 +30,7 @@ func TestSendPromptAndReceiveResult(t *testing.T) {
 		"type":       "command",
 		"action":     "submit_prompt",
 		"request_id": "test-req-1",
-		"protocol":   2,
+		"protocol":   3,
 		"pane_id":    "pane-1",
 		"text":       "Hello world",
 	}
@@ -81,7 +81,7 @@ func TestQoderPromptSendsTextAndEnter(t *testing.T) {
 		"type":       "command",
 		"action":     "submit_prompt",
 		"request_id": "qoder-prompt",
-		"protocol":   2,
+		"protocol":   3,
 		"pane_id":    "pane-1",
 		"text":       "/permissions",
 	})
@@ -119,7 +119,7 @@ func TestSendKeysCommand(t *testing.T) {
 		"type":       "command",
 		"action":     "send_keys",
 		"request_id": "test-req-2",
-		"protocol":   2,
+		"protocol":   3,
 		"pane_id":    "pane-1",
 		"keys":       []string{"Enter"},
 	}
@@ -154,7 +154,7 @@ func TestAcknowledgePane(t *testing.T) {
 		"type":       "command",
 		"action":     "acknowledge_pane",
 		"request_id": "test-req-3",
-		"protocol":   2,
+		"protocol":   3,
 		"pane_id":    "pane-1",
 	}
 	data, _ := json.Marshal(cmd)
@@ -188,20 +188,21 @@ func TestUnknownActionReturnsError(t *testing.T) {
 		"type":       "command",
 		"action":     "nonexistent_action",
 		"request_id": "test-req-4",
-		"protocol":   2,
+		"protocol":   3,
 	}
 	data, _ := json.Marshal(cmd)
 	conn.Write(ctx, websocket.MessageText, data)
 
 	msg := readJSON(t, conn, ctx, 5*time.Second)
-	if msg["type"] != "command_result" {
-		t.Fatalf("expected command_result, got %v", msg["type"])
+	if msg["type"] != "error" {
+		t.Fatalf("expected error, got %v", msg["type"])
 	}
-	if msg["ok"] != false {
-		t.Errorf("ok = %v, want false", msg["ok"])
+	if msg["request_id"] != "test-req-4" {
+		t.Errorf("request_id = %v", msg["request_id"])
 	}
-	if msg["phase"] != "failed" {
-		t.Errorf("phase = %v", msg["phase"])
+	apiError, _ := msg["error"].(map[string]any)
+	if apiError["code"] != "unknown_action" {
+		t.Errorf("error = %v", msg["error"])
 	}
 }
 
@@ -347,7 +348,7 @@ func TestHiddenPromptRouteKeepsTheSecretOutOfTextAndScrollback(t *testing.T) {
 	}
 
 	result := send(map[string]any{
-		"type": "send_secret", "request_id": "secret-1", "protocol": 2,
+		"type": "send_secret", "request_id": "secret-1", "protocol": 3,
 		"pane_id": "pane-1", "text": "hunter2",
 	})
 	if result["ok"] != true {
@@ -426,7 +427,7 @@ func TestReadAndAnswerStructuredQuestion(t *testing.T) {
 	}
 
 	answer, _ := json.Marshal(map[string]any{
-		"type": "answer_question", "protocol": 2, "request_id": "question-1",
+		"type": "answer_question", "protocol": 3, "request_id": "question-1",
 		"pane_id": "pane-1", "interaction_id": interaction["id"],
 		"selected_indices": []int{1}, "other_selected": false, "other_text": "",
 	})
@@ -480,7 +481,7 @@ func TestNavigateStructuredQuestionTwice(t *testing.T) {
 	for cycle := 1; cycle <= 2; cycle++ {
 		requestID := "navigate-" + string(rune('0'+cycle))
 		navigate, _ := json.Marshal(map[string]any{
-			"type": "navigate_question", "protocol": 2, "request_id": requestID,
+			"type": "navigate_question", "protocol": 3, "request_id": requestID,
 			"pane_id": "pane-1", "interaction_id": second["id"], "direction": "previous",
 		})
 		if err := conn.Write(ctx, websocket.MessageText, navigate); err != nil {

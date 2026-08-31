@@ -10,21 +10,28 @@ setup and want to know what every screen and control is for.
   renamed agents, workspaces, and tabs reflected within seconds through a
   live Herdr event stream.
 - Start, rename, clear, and stop agents from relay-provided launch profiles.
-- Send prompts, terminal keys, slash commands, screenshots, and photos; drafts
-  survive locally for 48 hours. Search loaded terminal output and open explicit
-  HTTP(S) links.
-- Answer verified approvals from Codex, Claude Code, Qoder, Oh My Pi, and Pi,
-  plus structured questions from those agents and OpenCode.
-- Inspect the current agent's workspace files, images, Git status, and unified
-  diffs without exposing a write action.
+- Send prompts, atomic terminal text-and-key input, slash commands, and
+  cancellable attachment batches; drafts survive locally for 48 hours. Search
+  loaded terminal output and open explicit HTTP(S) links.
+- Answer approvals bound to the current prompt, command, and ordered choices
+  from Codex, Claude Code, Qoder, Oh My Pi, and Pi, plus structured questions
+  from those agents and OpenCode.
+- Inspect the current agent's workspace files, images, Git status, upstream
+  ahead/behind counts, and unified diffs without exposing a write action.
 - Read searchable native conversations for Claude Code, Codex, Qoder, Pi, and
-  Oh My Pi in focused conversation or full-history form; review a rolling
-  24-hour activity summary and receive blocked or completion notifications.
+  Oh My Pi in focused conversation or full-history form; validated Oh My Pi
+  plans appear with their current task states.
+- Configure durable notification categories, settle delay, cooldown, snooze,
+  and a neutral delivery test separately for each paired relay and device.
+- Pair named controller or reader devices. Reader devices can inspect agents,
+  conversations, and workspaces but cannot mutate them.
 - Optionally require device verification before the app connects at open, and
   again before the interface unlocks on resume. A resume keeps the existing
   encrypted session, so verifying is instant rather than a fresh connection;
   the unlock screen covers the page and the terminal stops streaming until it
   succeeds.
+- Optionally request a screen wake lock only while a terminal is visible, or
+  speak exact response text through an explicitly selected browser-local voice.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |
@@ -130,11 +137,11 @@ mostly drive full-screen TUIs from the phone. While the height is leased, the
 on-screen keyboard never shrinks it — the lease keeps the resting height and
 re-measures when the keyboard closes.
 
-Terminal History keeps 100, 500, or 1,000 lines in the terminal view. 1,000 is
-the default, the largest option, and the ceiling on the gateway-relayed path.
-The "older history" notice reports when rows beyond the served window exist.
-Use **Copy** for the latest response or **Conversation History** for clean,
-searchable earlier turns.
+Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
+1,000 is the default and the ceiling on the gateway-relayed path; direct
+connections can use 10,000. The "older history" notice reports when rows beyond
+the served window exist. Use **Copy** for the latest response or
+**Conversation History** for clean, searchable earlier turns.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. It opens on the newest turn and stays there as
@@ -142,15 +149,19 @@ turns arrive; scrolling up to read holds your position until you return to the
 end. **Conversation** keeps each user prompt and the latest agent answer from
 that exchange. **Full history** shows every recorded message with collapsible
 tool activity. Both use an escaped Markdown subset, search filters the
-currently displayed view, and each message can copy its original Markdown.
+currently displayed view, each fenced code block has its own copy control, and
+each message can copy its original Markdown.
 The composer below the history sends ordinary multiline prompts and accepts
-one or more images from the file picker or clipboard. Images are uploaded to
-the computer and added to the prompt by path; the history does not render them
-inline. Draft persistence, slash-command suggestions, hidden-value entry,
-approvals, structured questions, and terminal menus remain in the terminal
-view. The composer locks when one of those interactions needs attention, and
-the **Terminal** header button switches to the same agent without adding
-repeated view toggles to browser history.
+one or more validated attachments from the file picker or clipboard. Supported
+files are images, UTF-8 text, Markdown, PDF, JSON, CSV, DOCX, XLSX, PPTX, ODT,
+ODS, and ODP. Uploads show per-file progress, can be cancelled, and interrupted
+files restart from the beginning; opaque references are resolved only by the
+relay after confirming the exact terminal generation. The history does not
+render attachments inline. Draft persistence, slash-command suggestions,
+hidden-value entry, approvals, structured questions, and terminal menus remain
+in the terminal view. The composer locks when one of those interactions needs
+attention, and the **Terminal** header button switches to the same agent without
+adding repeated view toggles to browser history.
 
 Hidden reasoning, injected system records, and sidechain turns remain excluded.
 Reads are confined to known session directories and the newest 16 MiB of very

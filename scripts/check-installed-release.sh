@@ -140,8 +140,8 @@ XDG_CONFIG_HOME="$CONFIG_HOME" \
 XDG_CACHE_HOME="$CACHE_HOME" \
 XDG_DATA_HOME="$DATA_HOME" \
 "$RELAY" support >"$WORK_DIR/support.json"
-grep -q '"protocol": 2' "$WORK_DIR/support.json" || {
-    echo "installed relay support output does not report protocol 2" >&2
+grep -q '"protocol": 3' "$WORK_DIR/support.json" || {
+    echo "installed relay support output does not report protocol 3" >&2
     sed -n '1,120p' "$WORK_DIR/support.json" >&2
     exit 1
 }

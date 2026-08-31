@@ -2,6 +2,7 @@ import type { RelayConfig } from '../types';
 import { createGatewayTransport } from './gateway';
 import { createWebSocketTransport } from './websocket';
 import { createWebRTCTransport, type DirectTransportOptions, type SignalingChannel } from './webrtc';
+import type { TransportAuthentication } from './encrypted';
 import type {
   RelayTransport,
   TransportHandlers,
@@ -104,10 +105,14 @@ export function createHybridTransport(
   relay: RelayConfig,
   handlers: TransportHandlers,
   overrides: HybridTransportOverrides = {},
+  authentication: TransportAuthentication = {},
 ): RelayTransport {
-  const makeGateway = overrides.createGateway ?? createGatewayTransport;
-  const makeDirect = overrides.createDirect ?? createWebRTCTransport;
-  const makeLegacy = overrides.createLegacy ?? createWebSocketTransport;
+  const makeGateway = overrides.createGateway
+    ?? ((target, targetHandlers) => createGatewayTransport(target, targetHandlers, authentication));
+  const makeDirect = overrides.createDirect
+    ?? ((target, signal, targetHandlers, options) => createWebRTCTransport(target, signal, targetHandlers, options, authentication));
+  const makeLegacy = overrides.createLegacy
+    ?? ((target, targetHandlers) => createWebSocketTransport(target, targetHandlers, authentication));
   const forceRelay = forcedRelay();
   const signalHandlers = new Set<(message: Record<string, any>) => void>();
 

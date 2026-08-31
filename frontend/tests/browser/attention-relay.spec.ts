@@ -25,7 +25,7 @@ test('drives captured attention panes through the real relay', async ({ page }) 
       id: 'captured-attention',
       label: 'Captured relay',
       url: relayURL,
-      token: 'attention-test-token',
+      token: 'attention-browser-test-key-32byt',
     }]));
   }, { relayURL: wsURL });
   await page.goto('/');

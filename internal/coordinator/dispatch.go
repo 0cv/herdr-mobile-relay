@@ -266,6 +266,8 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 		return d.handleKeys(ctx, receivedAt, requestID, paneID, message)
 	case "send_text", "text":
 		return d.handleText(ctx, receivedAt, requestID, paneID, message)
+	case "send_input":
+		return d.handleInput(ctx, receivedAt, requestID, paneID, message)
 	case "send_secret":
 		return d.handleSecret(ctx, receivedAt, requestID, paneID, message)
 	case "respond":
@@ -433,6 +435,40 @@ func (d *Dispatcher) handleText(ctx context.Context, receivedAt time.Time, reque
 	}))
 	if result.OK {
 		d.recordActivityWithExtract("text", "sent", "Text inserted", text, paneID, requestID)
+		d.wake()
+	}
+	return result
+}
+func (d *Dispatcher) handleInput(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+	var keys []string
+	var err error
+	if rawKeys, present := message["keys"]; present {
+		keys, err = stringSlice(rawKeys)
+	}
+	input, inputErr := herdr.ValidatePaneInput(herdr.PaneInput{
+		Text: stringValue(message, "text"),
+		Keys: keys,
+	})
+	if paneID == "" || err != nil || inputErr != nil {
+		return d.fail(requestID, "send_input", paneID, "Valid text or keys and an agent are required")
+	}
+	result := d.schedule(ctx, ScheduleOptions{
+		Command: d.command(ctx, receivedAt, requestID, CommandInput, paneID, commandDeadline, input),
+	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if stale := d.paneSessionCurrent(token, requestID, "send_input"); stale != nil {
+			return EffectResult{Result: stale}
+		}
+		if err := d.herdr.SendInput(effectCtx, paneID, input); err != nil {
+			return EffectResult{Result: d.failErr(requestID, "send_input", paneID, err)}
+		}
+		return EffectResult{Result: completed(requestID, "send_input", paneID, nil)}
+	}))
+	if result.OK {
+		label := stringValue(message, "activity_label")
+		if label == "" {
+			label = "Terminal input sent"
+		}
+		d.recordActivityWithExtract("input", "sent", label, input.Text, paneID, requestID)
 		d.wake()
 	}
 	return result

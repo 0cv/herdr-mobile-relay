@@ -28,6 +28,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
+	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/fsutil"
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/history"
@@ -94,6 +95,9 @@ type Server struct {
 	updateM          *relayupdate.Manager
 	appDeployM       *appdeploy.Manager
 	hybrid           *hybridTransport
+	uploadM          *upload.Manager
+	deviceAuth       *deviceauth.Store
+	initErr          error
 
 	mu        sync.RWMutex
 	ready     bool
@@ -118,6 +122,8 @@ type Server struct {
 	historyLast       map[string]time.Time
 	historyActive     map[string]bool
 	historyReconciled bool
+	pushReconcileMu   sync.Mutex
+	pushReconciled    bool
 	transitionTasks   *lifecycleTasks
 	historyTasks      *lifecycleTasks
 }
@@ -143,6 +149,30 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	histManager := history.NewManager(cfg.CacheDir)
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", cfg.Port)
 
+	var uploadManager *upload.Manager
+	var uploadErr error
+	if strings.TrimSpace(cfg.CacheDir) == "" {
+		uploadErr = errors.New("cache directory is required")
+	} else {
+		uploadManager, uploadErr = upload.NewManager(upload.Config{Root: filepath.Join(cfg.CacheDir, "uploads")})
+	}
+	if uploadErr != nil {
+		logger.Warn("attachment uploads unavailable", "error", uploadErr)
+	}
+	var deviceStore *deviceauth.Store
+	var deviceStoreErr error
+	if cfg.Token != "" {
+		store, err := deviceauth.Open(filepath.Join(cfg.RuntimeDir, "device-auth"))
+		if err != nil {
+			deviceStoreErr = fmt.Errorf("initialize device authentication: %w", err)
+		} else if err := store.EnsureBootstrapInvitation([]byte(cfg.Token), hostname, "en"); err != nil {
+			deviceStoreErr = fmt.Errorf("initialize device pairing: %w", err)
+		} else {
+			deviceStore = store
+			hub.SetE2EEAuthResolver(store)
+		}
+	}
+
 	return &Server{
 		cfg:                 cfg,
 		version:             version,
@@ -164,6 +194,9 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		conversationM:       conversationReader,
 		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
+		uploadM:             uploadManager,
+		deviceAuth:          deviceStore,
+		initErr:             deviceStoreErr,
 		startedAt:           time.Now(),
 		refreshClients:      make(map[string]bool),
 		paneWatches:         make(map[string]*paneWatch),
@@ -172,6 +205,185 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		historyLast:         make(map[string]time.Time),
 		historyActive:       make(map[string]bool),
 	}
+}
+func (s *Server) authorizeDeviceAction(client *transport.ClientConn, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
+	identity, authenticated := client.Identity()
+	if authenticated && s.deviceAuth != nil {
+		credential, current := s.deviceAuth.AuthorizeCredential(identity.CredentialID, identity.CredentialVersion)
+		if !current || credential.DeviceID != identity.DeviceID {
+			apiErr := protocol.NewApiError(protocol.ErrorReaderDenied, map[string]any{
+				"operation": action.Operation,
+				"reason":    "credential_revoked",
+			})
+			return &apiErr
+		}
+		identity.Role = string(credential.Role)
+		identity.Locale = credential.Locale
+	}
+	return authorizeAuthenticatedIdentity(identity, authenticated, action, deviceID)
+}
+
+func authorizeAuthenticatedIdentity(identity transport.AuthenticatedIdentity, authenticated bool, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
+	deviceBoundPush := false
+	switch action.Operation {
+	case "push_open_ref", "push_policy_get", "push_policy_set", "push_snooze", "push_subscribe",
+		"push_test_device", "push_unsubscribe", "push_viewed_pane":
+		deviceBoundPush = true
+	}
+	if deviceBoundPush {
+		if authenticated && strings.TrimSpace(identity.DeviceID) != "" {
+			return nil
+		}
+		apiErr := protocol.NewApiError(protocol.ErrorReaderDenied, map[string]any{"operation": action.Operation})
+		return &apiErr
+	}
+	if !authenticated || action.Class == protocol.ActionReadOnly || identity.Role == string(protocol.RoleController) {
+		return nil
+	}
+	if action.Operation == "revoke_device" && deviceID != "" && deviceID == identity.DeviceID {
+		return nil
+	}
+	apiErr := protocol.NewApiError(protocol.ErrorReaderDenied, map[string]any{"operation": action.Operation})
+	return &apiErr
+}
+func validateExactPaneTarget(state *coordinator.State, inbound protocol.Inbound, authenticated bool) *protocol.ApiError {
+	target := inbound.Target
+	if inbound.PaneID == "" {
+		return nil
+	}
+	if target == nil {
+		if !authenticated {
+			return nil
+		}
+		apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target"})
+		return &apiErr
+	}
+	if target.PaneID != inbound.PaneID {
+		apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target.pane_id"})
+		return &apiErr
+	}
+	agent, ok := state.Agent(inbound.PaneID)
+	if !ok {
+		apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target"})
+		return &apiErr
+	}
+	serverSessionID := agent.ServerSessionID
+	if serverSessionID == "" {
+		serverSessionID = "primary"
+	}
+	if target.ServerSessionID != serverSessionID ||
+		target.TerminalID == "" || target.TerminalID != agent.TerminalID ||
+		target.Generation != agent.Generation ||
+		target.AgentSessionID != agent.SessionID {
+		apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target"})
+		return &apiErr
+	}
+	return nil
+}
+
+func deviceCredentialID(store *deviceauth.Store, deviceID string) (string, bool) {
+	if store == nil || strings.TrimSpace(deviceID) == "" {
+		return "", false
+	}
+	for _, credential := range store.ListCredentials("") {
+		if credential.DeviceID == deviceID {
+			return credential.CredentialID, true
+		}
+	}
+	return "", false
+}
+
+func activeDeviceCredentials(store *deviceauth.Store, currentCredentialID string) []deviceauth.Credential {
+	credentials := store.ListCredentials(currentCredentialID)
+	active := credentials[:0]
+	for _, credential := range credentials {
+		if !credential.Revoked {
+			active = append(active, credential)
+		}
+	}
+	return active
+}
+
+func (s *Server) disconnectCredentials(credentials []deviceauth.Credential) {
+	for _, credential := range credentials {
+		s.hub.DisconnectCredential(credential.CredentialID, credential.Version)
+	}
+}
+func pushPlatformForUserAgent(userAgent string) push.Platform {
+	lower := strings.ToLower(userAgent)
+	if strings.Contains(lower, "iphone") || strings.Contains(lower, "ipad") || strings.Contains(lower, "ipod") {
+		return push.PlatformIOS
+	}
+	if strings.Contains(lower, "android") && (strings.Contains(lower, "chrome") || strings.Contains(lower, "chromium")) {
+		return push.PlatformAndroidChromium
+	}
+	return push.PlatformOther
+}
+
+type pushPolicyWire struct {
+	Categories  map[push.Category]bool `json:"categories"`
+	SettleMS    int64                  `json:"settle_ms"`
+	CooldownMS  int64                  `json:"cooldown_ms"`
+	SnoozeUntil string                 `json:"snooze_until,omitempty"`
+	Snoozed     bool                   `json:"snoozed"`
+	UpdateOnce  bool                   `json:"update_once"`
+}
+
+func boundPushPolicy(raw json.RawMessage, deviceID, locale string, current push.DevicePolicy) (push.DevicePolicy, error) {
+	var wire pushPolicyWire
+	if len(raw) == 0 || json.Unmarshal(raw, &wire) != nil {
+		return push.DevicePolicy{}, errors.New("push_invalid_policy")
+	}
+	if wire.SettleMS < 0 || wire.CooldownMS < 0 {
+		return push.DevicePolicy{}, errors.New("push_invalid_duration")
+	}
+	current.DeviceID = deviceID
+	current.Locale = locale
+	current.Categories = wire.Categories
+	current.Settle = time.Duration(wire.SettleMS) * time.Millisecond
+	current.Cooldown = time.Duration(wire.CooldownMS) * time.Millisecond
+	current.Snoozed = wire.Snoozed
+	current.UpdateOnce = wire.UpdateOnce
+	current.SnoozeUntil = time.Time{}
+	if wire.SnoozeUntil != "" {
+		until, err := time.Parse(time.RFC3339, wire.SnoozeUntil)
+		if err != nil {
+			return push.DevicePolicy{}, errors.New("push_invalid_snooze")
+		}
+		current.SnoozeUntil = until
+	}
+	return current, nil
+}
+
+func pushPolicyResponse(policy push.DevicePolicy) map[string]any {
+	categories := make(map[push.Category]bool, len(policy.Categories))
+	for category, enabled := range policy.Categories {
+		categories[category] = enabled
+	}
+	result := map[string]any{
+		"device_id":   policy.DeviceID,
+		"locale":      policy.Locale,
+		"categories":  categories,
+		"settle_ms":   policy.Settle.Milliseconds(),
+		"cooldown_ms": policy.Cooldown.Milliseconds(),
+		"snoozed":     policy.Snoozed,
+		"update_once": policy.UpdateOnce,
+	}
+	if !policy.SnoozeUntil.IsZero() {
+		result["snooze_until"] = policy.SnoozeUntil.UTC().Format(time.RFC3339)
+	}
+	return result
+}
+
+func (s *Server) pushTargetCurrent(target protocol.TargetRef) bool {
+	if target.ServerSessionID != "primary" || target.PaneID == "" || target.TerminalID == "" || target.Generation < 0 {
+		return false
+	}
+	agent, ok := s.state.Agent(target.PaneID)
+	return ok &&
+		agent.TerminalID == target.TerminalID &&
+		agent.SessionID == target.AgentSessionID &&
+		agent.Generation == target.Generation
 }
 
 func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
@@ -199,12 +411,18 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	if s.initErr != nil {
+		return s.initErr
+	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	ctx = runCtx
 	s.transitionTasks = newLifecycleTasks(ctx)
 	s.historyTasks = newLifecycleTasks(ctx)
 	defer s.drainLifecycleWork()
+	if s.uploadM != nil {
+		defer s.uploadM.Close()
+	}
 	if err := s.state.EnableTriagePersistence(s.cfg.CacheDir); err != nil {
 		s.recordSafeError("durable agent triage unavailable", err)
 		s.logger.Warn("durable agent triage unavailable", "error", err)
@@ -233,7 +451,6 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("initialize push manager: %w", err)
 	}
 	s.pushM = pm
-	s.transitionPush = pm
 
 	s.state.SetOnTransition(func(paneID, agent, project, status string, revision int64) {
 		transitionAt := time.Now().UnixMilli()
@@ -257,6 +474,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		inventory := s.committedInventoryStatus()
 		capabilities := append([]string(nil), protocol.Capabilities...)
+		if s.pushM != nil {
+			capabilities = append(capabilities, "typed_push", "push_policy")
+		}
 		if s.clipboardRead != nil {
 			capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
 		}
@@ -271,6 +491,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if s.hybrid.directEnabled() {
 			capabilities = append(capabilities, "webrtc_direct")
+		}
+		if s.deviceAuth != nil {
+			capabilities = append(capabilities, "device_management")
 		}
 		s.hub.Send(client, protocol.PushConfig{
 			Type:           "push_config",
@@ -313,6 +536,9 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
 		s.stopPaneWatch(client.ID(), "")
+		if identity, authenticated := client.Identity(); authenticated && s.pushM != nil {
+			s.pushM.SetViewedPane(identity.DeviceID, nil)
+		}
 		if s.hybrid != nil {
 			s.hybrid.forgetClient(client.ID())
 		}
@@ -331,14 +557,56 @@ func (s *Server) Run(ctx context.Context) error {
 			s.hub.Send(client, protocol.DecodeFailureResponse(msg))
 			return
 		}
+		scope, knownAction := protocol.ScopeFor(inbound)
+		if !knownAction {
+			admitted()
+			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+				protocol.ErrorUnknownAction,
+				map[string]any{"operation": inbound.Type},
+			)))
+			return
+		}
 		if !protocol.Compatible(inbound) {
 			admitted()
 			s.hub.Send(client, protocol.IncompatibleResponse(inbound))
 			return
 		}
-		action := inbound.Type
-		coordinated := isCoordinatorMutation(action)
-		auditedWrite := isAuditedWrite(action)
+		requestedSessionID := scope.ServerSessionID
+		if scope.Target != nil {
+			if requestedSessionID != "" && scope.Target.ServerSessionID != "" && requestedSessionID != scope.Target.ServerSessionID {
+				admitted()
+				s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+					protocol.ErrorInvalidRequest,
+					map[string]any{"field": "server_session_id"},
+				)))
+				return
+			}
+			if requestedSessionID == "" {
+				requestedSessionID = scope.Target.ServerSessionID
+			}
+		}
+		if requestedSessionID != "" && requestedSessionID != "primary" {
+			admitted()
+			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+				protocol.ErrorInvalidRequest,
+				map[string]any{"field": "server_session_id"},
+			)))
+			return
+		}
+		if authorizationErr := s.authorizeDeviceAction(client, scope.Action, inbound.DeviceID); authorizationErr != nil {
+			admitted()
+			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *authorizationErr))
+			return
+		}
+		_, authenticated := client.Identity()
+		if targetErr := validateExactPaneTarget(s.state, inbound, authenticated); targetErr != nil {
+			admitted()
+			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, *targetErr))
+			return
+		}
+		action := scope.Action.Operation
+		coordinated := scope.Action.Coordinated
+		auditedWrite := scope.Action.Audited
 		if auditedWrite {
 			s.recordWriteAudit(client, msg, nil)
 		}
@@ -347,7 +615,6 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		commandCtx := ctx
-
 		switch action {
 		case "check_update":
 			s.hub.Broadcast(map[string]any{"type": "update_status", "update": map[string]any{
@@ -447,6 +714,99 @@ func (s *Server) Run(ctx context.Context) error {
 				break
 			}
 			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, page)
+		case "device_list":
+			identity, authenticated := client.Identity()
+			if s.deviceAuth == nil || !authenticated {
+				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				break
+			}
+			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", "", map[string]any{
+				"devices":           activeDeviceCredentials(s.deviceAuth, identity.CredentialID),
+				"current_device_id": identity.DeviceID,
+				"role":              identity.Role,
+			})
+		case "create_device_invitation":
+			identity, authenticated := client.Identity()
+			if s.deviceAuth == nil || !authenticated {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				break
+			}
+			invitation, invitationErr := s.deviceAuth.CreateInvitation(inbound.Name, deviceauth.Role(inbound.Role), identity.Locale)
+			if invitationErr != nil {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", invitationErr.Error(), "", nil)
+				break
+			}
+			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"invitation": invitation})
+		case "rename_device":
+			if s.deviceAuth == nil {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				break
+			}
+			credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
+			if !found {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device credential was not found", "", nil)
+				break
+			}
+			credential, renameErr := s.deviceAuth.RenameCredential(credentialID, inbound.Name)
+			if renameErr != nil {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", renameErr.Error(), "", nil)
+				break
+			}
+			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"device": credential})
+		case "revoke_device":
+			if s.deviceAuth == nil {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				break
+			}
+			credentialID, found := deviceCredentialID(s.deviceAuth, inbound.DeviceID)
+			if !found {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device credential was not found", "", nil)
+				break
+			}
+			credential, revokeErr := s.deviceAuth.RevokeCredential(credentialID)
+			if revokeErr != nil {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", revokeErr.Error(), "", nil)
+				break
+			}
+			var pushCleanupErr error
+			if s.pushM != nil {
+				pushCleanupErr = s.pushM.RemoveDevice(credential.DeviceID)
+			}
+			time.AfterFunc(250*time.Millisecond, func() {
+				s.hub.DisconnectCredential(credential.CredentialID, credential.Version)
+			})
+			if pushCleanupErr != nil {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device revoked, but notification cleanup could not be persisted", "", map[string]any{"device": credential})
+				break
+			}
+			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", map[string]any{"device": credential})
+		case "reset_devices":
+			identity, authenticated := client.Identity()
+			if s.deviceAuth == nil || !authenticated {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Device management is unavailable", "", nil)
+				break
+			}
+			credentials := activeDeviceCredentials(s.deviceAuth, "")
+			if resetErr := s.deviceAuth.ResetWithBootstrap([]byte(s.cfg.Token), s.hostname, identity.Locale); resetErr != nil {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", resetErr.Error(), "", nil)
+				break
+			}
+			var resetPushErr error
+			if s.pushM != nil {
+				for _, credential := range credentials {
+					if pushErr := s.pushM.RemoveDevice(credential.DeviceID); pushErr != nil && resetPushErr == nil {
+						resetPushErr = pushErr
+					}
+				}
+			}
+			time.AfterFunc(250*time.Millisecond, func() {
+				s.disconnectCredentials(credentials)
+			})
+			if resetPushErr != nil {
+				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", "Devices reset, but notification cleanup could not be persisted", "", nil)
+				break
+			}
+			s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, true, "completed", "", "", nil)
 		case "get_activity":
 			limit := messageInt(msg["limit"], 500)
 			if limit < 1 || limit > 500 {
@@ -461,44 +821,14 @@ func (s *Server) Run(ctx context.Context) error {
 			s.dispatcher.HandleClearActivities(requestID, func(result *coordinator.CommandResult) {
 				s.hub.Send(client, commandResultMessage(result))
 			})
-		case "upload_image":
-			requestID, _ := msg["request_id"].(string)
-			paneID, _ := msg["pane_id"].(string)
-			filename, _ := msg["filename"].(string)
-			mime, _ := msg["mime"].(string)
-			data, _ := msg["data"].(string)
-
-			uploadDir := filepath.Join(s.cfg.CacheDir, "uploads")
-			res := upload.Store(uploadDir, filename, mime, data)
-
-			s.hub.Send(client, map[string]any{
-				"type":       "upload_result",
-				"ok":         res.OK,
-				"error":      res.Error,
-				"path":       res.Path,
-				"pane_id":    paneID,
-				"request_id": requestID,
-			})
-
-			if s.dispatcher != nil {
-				status := "completed"
-				summary := "Attached " + filename
-				if !res.OK {
-					status = "failed"
-					summary = "Image upload failed: " + res.Error
-				}
-				s.dispatcher.RecordActivity("upload", status, summary, paneID, requestID)
-			}
-			if auditedWrite {
-				s.recordWriteAudit(client, msg, &coordinator.CommandResult{
-					RequestID: requestID,
-					Action:    "upload_image",
-					OK:        res.OK,
-					Phase:     map[bool]string{true: "completed", false: "failed"}[res.OK],
-					Error:     res.Error,
-					PaneID:    paneID,
-				})
-			}
+		case "upload_begin":
+			s.handleUploadBegin(client, inbound.RequestID, msg)
+		case "upload_chunk":
+			s.handleUploadChunk(client, inbound.RequestID, msg)
+		case "upload_finish":
+			s.handleUploadFinish(client, inbound.RequestID, msg)
+		case "upload_cancel":
+			s.handleUploadCancel(client, inbound.RequestID, msg)
 		case "workspace_create", "workspace_rename", "workspace_reorder", "workspace_close",
 			"worktree_list", "worktree_create", "worktree_open", "worktree_remove":
 			// The dispatcher signals admitted() as soon as it holds the
@@ -640,27 +970,120 @@ func (s *Server) Run(ctx context.Context) error {
 			requestID, _ := msg["request_id"].(string)
 			paneID, _ := msg["pane_id"].(string)
 			s.copyAgentResponse(client, requestID, paneID)
+		case "push_policy_get":
+			identity, _ := client.Identity()
+			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
+			s.hub.Send(client, map[string]any{"type": "push_policy", "policy": pushPolicyResponse(policy)})
+		case "push_policy_set":
+			identity, _ := client.Identity()
+			current := s.pushM.Policy(identity.DeviceID, identity.Locale)
+			policy, policyErr := boundPushPolicy(inbound.Policy, identity.DeviceID, identity.Locale, current)
+			if policyErr != nil || s.pushM.SetPolicy(policy) != nil {
+				s.sendCommandResult(client, inbound.RequestID, "push_policy_set", false, "failed", "Notification policy was rejected", "", nil)
+				s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_policy"})
+				break
+			}
+			data := map[string]any{"policy": pushPolicyResponse(policy)}
+			s.sendCommandResult(client, inbound.RequestID, "push_policy_set", true, "completed", "", "", data)
+			s.hub.Send(client, map[string]any{
+				"type": "push_policy_result", "ok": true, "policy": pushPolicyResponse(policy),
+			})
+		case "push_snooze":
+			identity, _ := client.Identity()
+			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
+			policy.Snoozed = inbound.Snoozed
+			policy.SnoozeUntil = time.Time{}
+			if inbound.SnoozeUntil != "" {
+				until, parseErr := time.Parse(time.RFC3339, inbound.SnoozeUntil)
+				if parseErr != nil {
+					s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_snooze"})
+					break
+				}
+				policy.SnoozeUntil = until
+			}
+			if policyErr := s.pushM.SetPolicy(policy); policyErr != nil {
+				s.hub.Send(client, map[string]any{"type": "push_policy_result", "ok": false, "code": "push_invalid_snooze"})
+				break
+			}
+			s.hub.Send(client, map[string]any{
+				"type": "push_policy_result", "ok": true, "policy": pushPolicyResponse(policy),
+			})
+		case "push_viewed_pane":
+			identity, _ := client.Identity()
+			var target *protocol.TargetRef
+			if inbound.Visible && inbound.Unlocked && inbound.Target != nil && s.pushTargetCurrent(*inbound.Target) {
+				copyTarget := *inbound.Target
+				target = &copyTarget
+			}
+			s.pushM.SetViewedPane(identity.DeviceID, target)
+			s.hub.Send(client, map[string]any{"type": "push_viewed_pane_result", "ok": true})
+		case "push_open_ref":
+			identity, _ := client.Identity()
+			claims, verifyErr := s.pushM.VerifyEventReference(inbound.EventRef, time.Now().UTC())
+			if verifyErr != nil || claims.Key.DeviceID != identity.DeviceID || !s.pushTargetCurrent(claims.Key.Target()) {
+				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Notification target is no longer available", "", nil)
+				break
+			}
+			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", claims.Key.PaneID, map[string]any{
+				"target": claims.Key.Target(), "event_id": claims.Key.EventID, "category": claims.Key.Category,
+			})
+		case "push_test_device":
+			identity, _ := client.Identity()
+			now := time.Now().UTC()
+			eventID := fmt.Sprintf("test-%d", now.UnixNano())
+			key := push.PushEventKey{DeviceID: identity.DeviceID, EventID: eventID, Category: push.CategoryTest}
+			published, publishErr := s.pushM.Publish(ctx, push.PublishRequest{
+				Key: key, Preview: push.PreviewHidden, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+			})
+			stage := "dropped"
+			if publishErr == nil && published.Queued > 0 {
+				stage = "queued"
+				deliveries, runErr := s.pushM.RunOnce(ctx, now)
+				if runErr == nil {
+					for _, delivery := range deliveries {
+						if delivery.Key.DeviceID != identity.DeviceID || delivery.Key.EventID != eventID {
+							continue
+						}
+						switch delivery.Disposition {
+						case push.DeliveryAccepted:
+							stage = "service_accepted"
+						case push.DeliveryRetrying:
+							if stage != "service_accepted" {
+								stage = "retrying"
+							}
+						case push.DeliveryDropped, push.DeliveryPruned, push.DeliveryExpired, push.DeliveryStale:
+							if stage == "queued" {
+								stage = "dropped"
+							}
+						}
+					}
+				}
+			}
+			s.hub.Send(client, map[string]any{"type": "push_test_result", "stage": stage})
 		case "push_subscribe":
 			ok := false
 			if s.pushM != nil {
+				identity, _ := client.Identity()
 				var sub push.Subscription
-				if raw, exists := msg["subscription"]; exists {
-					data, _ := json.Marshal(raw)
-					if json.Unmarshal(data, &sub) == nil {
-						sub.ClientID = inbound.ClientID
-						sub.NotifyFinished = inbound.NotifyFinished
-						if ua, valid := msg["user_agent"].(string); valid {
-							sub.UserAgent = ua
-						}
-						ok = s.pushM.Subscribe(sub, inbound.ReplaceEndpoints) == nil
-					}
+				if json.Unmarshal(inbound.Subscription, &sub) == nil {
+					sub.ClientID = inbound.ClientID
+					sub.NotifyFinished = inbound.NotifyFinished
+					sub.DeviceID = identity.DeviceID
+					sub.Locale = identity.Locale
+					// The authenticated connection does not currently carry a
+					// trusted browser platform. Defaulting to no actions is safe;
+					// never infer an actionable platform from client JSON.
+					sub.Platform = push.PlatformOther
+					sub.UserAgent = ""
+					ok = s.pushM.Subscribe(sub, inbound.ReplaceEndpoints) == nil
 				}
 			}
 			s.hub.Send(client, map[string]any{"type": "push_subscribed", "ok": ok})
 		case "push_unsubscribe":
 			ok := false
 			if s.pushM != nil {
-				ok = s.pushM.Unsubscribe(inbound.Endpoints, inbound.ClientID) == nil
+				identity, _ := client.Identity()
+				ok = s.pushM.UnsubscribeDevice(identity.DeviceID, inbound.Endpoints, inbound.ClientID) == nil
 			}
 			s.hub.Send(client, map[string]any{"type": "push_unsubscribed", "ok": ok})
 		case "register_app_origin":
@@ -688,6 +1111,20 @@ func (s *Server) Run(ctx context.Context) error {
 		case "webrtc_offer", "webrtc_ice", "webrtc_close":
 			s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
 		default:
+			if err := s.expandPromptAttachmentReferences(action, msg, inbound.Target); err != nil {
+				result := &coordinator.CommandResult{
+					RequestID: inbound.RequestID,
+					Action:    action,
+					Phase:     "failed",
+					Error:     "One or more attachments are no longer available for this agent",
+					PaneID:    inbound.PaneID,
+				}
+				if auditedWrite {
+					s.recordWriteAudit(client, msg, result)
+				}
+				s.hub.Send(client, commandResultMessage(result))
+				break
+			}
 			var result *coordinator.CommandResult
 			if coordinated {
 				result = s.dispatcher.HandleAdmitted(commandCtx, msg, admitted)
@@ -743,6 +1180,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	s.poller.SetOnChange(func(agents []*coordinator.AgentState) {
+		s.reconcileRecoveredPush(ctx, agents)
 		s.broadcastCommitted(map[string]any{
 			"type":   "agents",
 			"agents": agents,
@@ -838,6 +1276,7 @@ func (s *Server) Run(ctx context.Context) error {
 			work()
 		}()
 	}
+	startBackground(func() { s.pushM.Run(ctx) })
 	startBackground(func() { s.poller.Run(ctx) })
 	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
 	// Herdr builds without workspace.move_block also reject a
@@ -943,6 +1382,88 @@ func (s *Server) drainLifecycleWork() {
 	s.historyM.SaveAll()
 }
 
+func (s *Server) reconcileRecoveredPush(ctx context.Context, agents []*coordinator.AgentState) {
+	if s.pushM == nil {
+		return
+	}
+	s.pushReconcileMu.Lock()
+	defer s.pushReconcileMu.Unlock()
+	if s.pushReconciled {
+		return
+	}
+	subscriptions := s.pushM.Subscriptions()
+	current := make([]push.PushEventKey, 0)
+	for _, key := range s.pushM.RecoveredKeys() {
+		if key.Category == push.CategoryFinished &&
+			s.pushTargetCurrent(key.Target()) &&
+			s.state.CompletionCurrent(key.PaneID, key.InteractionRevision) {
+			current = append(current, key)
+		}
+	}
+	for _, agent := range agents {
+		if agent == nil || agent.Status != "blocked" || agent.BlockedEventID == "" ||
+			agent.TerminalID == "" || agent.AttentionKind == question.AttentionChat {
+			continue
+		}
+		category := push.CategoryAttention
+		if agent.AttentionKind == question.AttentionQuestion {
+			category = push.CategoryQuestion
+		}
+		for _, subscription := range subscriptions {
+			if subscription.DeviceID == "" {
+				continue
+			}
+			current = append(current, push.PushEventKey{
+				DeviceID:            subscription.DeviceID,
+				ServerSessionID:     "primary",
+				PaneID:              agent.PaneID,
+				TerminalID:          agent.TerminalID,
+				AgentSessionID:      agent.SessionID,
+				Generation:          agent.Generation,
+				EventID:             agent.BlockedEventID,
+				InteractionRevision: s.state.AttentionRevision(agent.PaneID),
+				Category:            category,
+			})
+		}
+	}
+	if err := s.pushM.Reconcile(ctx, current); err != nil {
+		s.logger.Warn("recovered push queue reconciliation failed", "error", err)
+		return
+	}
+	s.pushReconciled = true
+}
+
+func (s *Server) publishAgentPush(
+	ctx context.Context,
+	agent *coordinator.AgentState,
+	eventID string,
+	revision int64,
+	category push.Category,
+	preview push.PreviewMode,
+) {
+	if s.pushM == nil || agent == nil || agent.TerminalID == "" || eventID == "" {
+		return
+	}
+	key := push.PushEventKey{
+		ServerSessionID:     "primary",
+		PaneID:              agent.PaneID,
+		TerminalID:          agent.TerminalID,
+		AgentSessionID:      agent.SessionID,
+		Generation:          agent.Generation,
+		EventID:             eventID,
+		InteractionRevision: revision,
+		Category:            category,
+	}
+	if err := s.pushM.ResolvePaneID(ctx, agent.PaneID, eventID); err != nil {
+		s.logger.Warn("push notification retraction failed", "pane_id", agent.PaneID, "error", err)
+	}
+	if _, err := s.pushM.Publish(ctx, push.PublishRequest{
+		Key: key, Preview: preview, ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
+	}); err != nil {
+		s.logger.Warn("push notification queueing failed", "pane_id", agent.PaneID, "error", err)
+	}
+}
+
 func (s *Server) handleTransition(
 	parent context.Context,
 	paneID, agent, project, status string,
@@ -994,6 +1515,11 @@ func (s *Server) handleTransition(
 	defer cancel()
 
 	if status == "working" {
+		if s.pushM != nil {
+			if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
+				s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
+			}
+		}
 		summary := agent + " started working"
 		if agent == "" {
 			summary = "Agent started working"
@@ -1082,16 +1608,18 @@ func (s *Server) handleTransition(
 		if !classifiedCurrent() {
 			return
 		}
-		if s.transitionPush != nil {
+		category := push.CategoryAttention
+		preview := push.PreviewHidden
+		if agentState.AttentionKind == question.AttentionQuestion {
+			category = push.CategoryQuestion
+			preview = push.PreviewQuestion
+		}
+		if s.pushM != nil {
+			s.publishAgentPush(ctx, agentState, eventID, classifiedAttentionRevision, category, preview)
+		} else if s.transitionPush != nil {
 			payload := push.BuildAttentionPayload(
-				agent,
-				project,
-				command,
-				eventID,
-				paneID,
-				s.hostname,
-				string(agentState.AttentionKind),
-				len(agentState.Options),
+				agent, project, command, eventID, paneID, s.hostname,
+				string(agentState.AttentionKind), len(agentState.Options),
 			)
 			s.sendTransitionPush(ctx, payload, classifiedCurrent)
 		}
@@ -1125,7 +1653,13 @@ func (s *Server) handleTransition(
 	if !transitionCurrent() {
 		return
 	}
-	if s.transitionPush != nil {
+	if s.pushM != nil {
+		if currentAgent != nil {
+			s.publishAgentPush(ctx, currentAgent, eventID, revision, push.CategoryFinished, push.PreviewBrief)
+		} else if err := s.pushM.ResolvePaneID(ctx, paneID, ""); err != nil {
+			s.logger.Warn("push notification retraction failed", "pane_id", paneID, "error", err)
+		}
+	} else if s.transitionPush != nil {
 		payload := push.BuildFinishedPayload(agent, project, paneID, s.hostname, eventID)
 		s.sendTransitionPush(ctx, payload, transitionCurrent)
 	}
@@ -1235,12 +1769,14 @@ func setAgentAttention(
 	agent.Prompt = classification.Prompt
 	agent.Command = classification.Command
 	agent.Options = nil
+	agent.ApprovalFingerprint = ""
 	agent.Interaction = nil
 	agent.QuestionLayout = false
 	agent.InteractionID = ""
 	switch classification.Kind {
 	case question.AttentionApproval:
 		agent.Options = append([]string(nil), classification.Options...)
+		agent.ApprovalFingerprint = question.ApprovalFingerprint(classification)
 	case question.AttentionQuestion:
 		agent.Interaction = classification.Interaction
 		agent.QuestionLayout = classification.QuestionLayout
@@ -1275,32 +1811,36 @@ func (s *Server) broadcastBlockedAttention(agent *coordinator.AgentState) {
 		return
 	}
 	message := map[string]any{
-		"type":            "blocked",
-		"pane_id":         agent.PaneID,
-		"raw_pane_id":     agent.RawPaneID,
-		"terminal_id":     agent.TerminalID,
-		"tab_id":          agent.TabID,
-		"tab_label":       agent.TabLabel,
-		"tab_number":      agent.TabNumber,
-		"workspace_id":    agent.WorkspaceID,
-		"agent":           agent.Agent,
-		"name":            agent.Name,
-		"status":          "blocked",
-		"cwd":             agent.Cwd,
-		"project":         agent.Project,
-		"host":            agent.Host,
-		"session":         agent.Session,
-		"session_name":    agent.SessionName,
-		"updated_at":      agent.UpdatedAt,
-		"event_id":        agent.BlockedEventID,
-		"attention_kind":  agent.AttentionKind,
-		"prompt":          agent.Prompt,
-		"command":         agent.Command,
-		"options":         agent.Options,
-		"interaction":     agent.Interaction,
-		"interaction_id":  agent.InteractionID,
-		"question_layout": agent.QuestionLayout,
-		"pane_revision":   agent.StateRevision,
+		"type":                 "blocked",
+		"pane_id":              agent.PaneID,
+		"raw_pane_id":          agent.RawPaneID,
+		"terminal_id":          agent.TerminalID,
+		"tab_id":               agent.TabID,
+		"tab_label":            agent.TabLabel,
+		"tab_number":           agent.TabNumber,
+		"workspace_id":         agent.WorkspaceID,
+		"agent":                agent.Agent,
+		"name":                 agent.Name,
+		"status":               "blocked",
+		"cwd":                  agent.Cwd,
+		"project":              agent.Project,
+		"host":                 agent.Host,
+		"session":              agent.Session,
+		"session_name":         agent.SessionName,
+		"server_session_id":    "primary",
+		"generation":           s.state.Generation(agent.PaneID),
+		"agent_session_id":     agent.SessionID,
+		"updated_at":           agent.UpdatedAt,
+		"event_id":             agent.BlockedEventID,
+		"attention_kind":       agent.AttentionKind,
+		"prompt":               agent.Prompt,
+		"command":              agent.Command,
+		"options":              agent.Options,
+		"approval_fingerprint": agent.ApprovalFingerprint,
+		"interaction":          agent.Interaction,
+		"interaction_id":       agent.InteractionID,
+		"question_layout":      agent.QuestionLayout,
+		"pane_revision":        agent.StateRevision,
 	}
 	if s.transitionBroadcast == s.hub {
 		s.broadcastCommitted(message)
@@ -1351,7 +1891,9 @@ func (s *Server) handleChatCompletion(
 	if !current() {
 		return
 	}
-	if s.transitionPush != nil {
+	if s.pushM != nil {
+		s.publishAgentPush(ctx, agent, eventID, revision, push.CategoryFinished, push.PreviewBrief)
+	} else if s.transitionPush != nil {
 		payload := push.BuildFinishedPayload(
 			agent.Agent,
 			agent.Project,
@@ -1598,17 +2140,18 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pruneUploads(ctx context.Context) {
-	uploadDir := filepath.Join(s.cfg.CacheDir, "uploads")
-	upload.Prune(uploadDir)
-
-	ticker := time.NewTicker(24 * time.Hour)
+	if s.uploadM == nil {
+		return
+	}
+	s.uploadM.Cleanup()
+	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if n := upload.Prune(uploadDir); n > 0 {
+			if n := s.uploadM.Cleanup(); n > 0 {
 				s.logger.Info("pruned expired uploads", "count", n)
 			}
 		}
@@ -1953,6 +2496,27 @@ func (s *Server) sendCommandResult(
 	}
 	s.hub.Send(client, commandResultMessage(result))
 }
+func (s *Server) sendAuditedCommandResult(
+	client *transport.ClientConn,
+	message map[string]any,
+	requestID, action string,
+	ok bool,
+	phase, publicError string,
+	paneID string,
+	data any,
+) {
+	result := &coordinator.CommandResult{
+		RequestID: requestID,
+		Action:    action,
+		OK:        ok,
+		Phase:     phase,
+		Error:     publicError,
+		PaneID:    paneID,
+		Data:      data,
+	}
+	s.recordWriteAudit(client, message, result)
+	s.hub.Send(client, commandResultMessage(result))
+}
 
 func commandResultMessage(result *coordinator.CommandResult) map[string]any {
 	message := map[string]any{
@@ -2013,19 +2577,9 @@ func serializedState(value any) string {
 	data, _ := json.Marshal(value)
 	return string(data)
 }
-
 func isAuditedWrite(action string) bool {
-	switch action {
-	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
-		"respond", "answer_question", "navigate_question", "clarify_question",
-		"agent_stop", "agent_rename", "tab_reorder", "agent_start", "agent_clear",
-		"agent_restart", "workspace_create", "workspace_rename", "workspace_reorder",
-		"workspace_close", "worktree_create", "worktree_open", "worktree_remove",
-		"upload_image", "send_secret":
-		return true
-	default:
-		return false
-	}
+	metadata, known := protocol.ClassifyAction(action)
+	return known && metadata.Audited
 }
 
 func (s *Server) recordWriteAudit(
@@ -2234,19 +2788,9 @@ func auditInteger(value any) (int64, bool) {
 	}
 	return 0, false
 }
-
 func isCoordinatorMutation(action string) bool {
-	switch action {
-	case "submit_prompt", "prompt", "send_keys", "keys", "send_text", "text",
-		"respond", "answer_question", "navigate_question", "clarify_question",
-		"agent_stop", "agent_rename", "tab_reorder", "acknowledge_pane", "agent_start",
-		"agent_clear", "agent_restart", "workspace_create", "workspace_rename",
-		"workspace_reorder", "workspace_close", "worktree_create", "worktree_open",
-		"worktree_remove", "lease_pane_size", "release_pane_size", "send_secret":
-		return true
-	default:
-		return false
-	}
+	metadata, known := protocol.ClassifyAction(action)
+	return known && metadata.Coordinated
 }
 
 func (s *Server) storePhoneAppOrigin(raw string) error {
@@ -2371,6 +2915,20 @@ func (s *Server) recentSafeErrors() []string {
 	return append([]string(nil), s.errors...)
 }
 
+func (s *Server) projectAgentResource(agent *coordinator.AgentState) {
+	if agent == nil {
+		return
+	}
+	agent.ServerSessionID = "primary"
+	agent.AgentSessionID = agent.SessionID
+}
+
+func (s *Server) projectAgentResources(agents []*coordinator.AgentState) {
+	for _, agent := range agents {
+		s.projectAgentResource(agent)
+	}
+}
+
 func (s *Server) broadcastCommitted(message any) {
 	envelope, ok := message.(map[string]any)
 	if !ok {
@@ -2390,6 +2948,8 @@ func (s *Server) broadcastCommitted(message any) {
 			s.recordSafeError("agent snapshot broadcast was malformed", err)
 			return
 		}
+		s.projectAgentResources(agents)
+		envelope["agents"] = agents
 		s.hub.BroadcastPrepared(message, func() {
 			s.stateViewMu.Lock()
 			s.agentView = mergeAgentSnapshot(s.agentView, agents)
@@ -2400,6 +2960,12 @@ func (s *Server) broadcastCommitted(message any) {
 		if paneID == "" {
 			s.recordSafeError("agent update broadcast was malformed", nil)
 			return
+		}
+		envelope["server_session_id"] = "primary"
+		envelope["generation"] = s.state.Generation(paneID)
+		if current, exists := s.state.Agent(paneID); exists {
+			envelope["terminal_id"] = current.TerminalID
+			envelope["agent_session_id"] = current.SessionID
 		}
 		s.hub.BroadcastPrepared(message, func() {
 			s.stateViewMu.Lock()
@@ -2474,8 +3040,10 @@ func (s *Server) broadcastCommitted(message any) {
 
 func (s *Server) committedAgents() []*coordinator.AgentState {
 	s.stateViewMu.RLock()
-	defer s.stateViewMu.RUnlock()
-	return cloneAgents(s.agentView)
+	agents := cloneAgents(s.agentView)
+	s.stateViewMu.RUnlock()
+	s.projectAgentResources(agents)
+	return agents
 }
 
 func (s *Server) committedInventoryStatus() map[string]any {

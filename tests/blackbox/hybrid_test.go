@@ -84,7 +84,7 @@ func setupHybridEnv(t *testing.T) *hybridEnv {
 	t.Cleanup(func() { stopProcess(gateway) })
 	waitForStatus(t, env.gatewayHTTP, "/healthz", http.StatusOK)
 
-	scenario := `{"panes":[{"pane_id":"pane-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
+	scenario := `{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
 	scenarioPath := filepath.Join(tmpDir, "scenario.json")
 	if err := os.WriteFile(scenarioPath, []byte(scenario), 0o644); err != nil {
 		t.Fatal(err)
@@ -290,13 +290,17 @@ func (p *phone) handshake(ctx context.Context) {
 	}
 	clientPublic := private.PublicKey().Bytes()
 
+	binding := []byte("herdr-e2ee-v2 auth\x00invitation\x00bootstrap\x001\x00")
 	hello, err := json.Marshal(map[string]any{
-		"type":       "e2ee_client_hello",
-		"version":    1,
-		"nonce":      base64.RawURLEncoding.EncodeToString(clientNonce),
-		"public_key": base64.RawURLEncoding.EncodeToString(clientPublic),
+		"type":         "e2ee_client_hello",
+		"version":      2,
+		"auth_kind":    "invitation",
+		"auth_id":      "bootstrap",
+		"auth_version": 1,
+		"nonce":        base64.RawURLEncoding.EncodeToString(clientNonce),
+		"public_key":   base64.RawURLEncoding.EncodeToString(clientPublic),
 		"proof": base64.RawURLEncoding.EncodeToString(
-			authTag([]byte("herdr-e2ee-v1 client\x00"), clientNonce, clientPublic)),
+			authTag([]byte("herdr-e2ee-v2 client\x00"), binding, clientNonce, clientPublic)),
 	})
 	if err != nil {
 		p.t.Fatal(err)
@@ -328,8 +332,8 @@ func (p *phone) handshake(ctx context.Context) {
 		p.t.Fatal(err)
 	}
 
-	transcript := append(append(append(append([]byte{}, clientNonce...), clientPublic...), serverNonce...), serverPublicBytes...)
-	if !hmac.Equal(serverProof, authTag([]byte("herdr-e2ee-v1 server\x00"), transcript)) {
+	transcript := append(append(append(append(append([]byte{}, binding...), clientNonce...), clientPublic...), serverNonce...), serverPublicBytes...)
+	if !hmac.Equal(serverProof, authTag([]byte("herdr-e2ee-v2 server\x00"), transcript)) {
 		p.t.Fatal("relay key verification failed over the gateway path")
 	}
 	serverPublic, err := ecdh.P256().NewPublicKey(serverPublicBytes)
@@ -340,19 +344,19 @@ func (p *phone) handshake(ctx context.Context) {
 	if err != nil {
 		p.t.Fatal(err)
 	}
-	keySalt := authTag([]byte("herdr-e2ee-v1 key\x00"), transcript)
-	clientKey, err := hkdf.Key(sha256.New, shared, keySalt, "herdr-e2ee-v1 c2s", 32)
+	keySalt := authTag([]byte("herdr-e2ee-v2 key\x00"), transcript)
+	clientKey, err := hkdf.Key(sha256.New, shared, keySalt, "herdr-e2ee-v2 c2s", 32)
 	if err != nil {
 		p.t.Fatal(err)
 	}
-	serverKey, err := hkdf.Key(sha256.New, shared, keySalt, "herdr-e2ee-v1 s2c", 32)
+	serverKey, err := hkdf.Key(sha256.New, shared, keySalt, "herdr-e2ee-v2 s2c", 32)
 	if err != nil {
 		p.t.Fatal(err)
 	}
 	p.send = newAEAD(p.t, clientKey)
 	p.receive = newAEAD(p.t, serverKey)
 
-	finish, err := json.Marshal(map[string]any{"type": "e2ee_client_finish", "version": 1})
+	finish, err := json.Marshal(map[string]any{"type": "e2ee_client_finish", "version": 2})
 	if err != nil {
 		p.t.Fatal(err)
 	}
@@ -396,7 +400,7 @@ func (p *phone) seal(plaintext []byte) []byte {
 	p.sendSeq++
 	ciphertext := p.send.Seal(nil, frameNonce(sequence), plaintext, frameAAD("c2s", sequence))
 	frame := make([]byte, 10+len(ciphertext))
-	frame[0] = 1
+	frame[0] = 2
 	frame[1] = 0
 	binary.BigEndian.PutUint64(frame[2:], sequence)
 	copy(frame[10:], ciphertext)
@@ -405,7 +409,7 @@ func (p *phone) seal(plaintext []byte) []byte {
 
 func (p *phone) open(frame []byte) []byte {
 	p.t.Helper()
-	if len(frame) < 10 || frame[0] != 1 || frame[1] != 0 {
+	if len(frame) < 10 || frame[0] != 2 || frame[1] != 0 {
 		p.t.Fatalf("relay sent a malformed binary frame of %d bytes", len(frame))
 	}
 	sequence := binary.BigEndian.Uint64(frame[2:])
@@ -448,7 +452,7 @@ func frameNonce(sequence uint64) []byte {
 }
 
 func frameAAD(direction string, sequence uint64) []byte {
-	prefix := "herdr-e2ee-v1 " + direction
+	prefix := "herdr-e2ee-v2 " + direction
 	aad := make([]byte, len(prefix)+1+8)
 	copy(aad, prefix)
 	binary.BigEndian.PutUint64(aad[len(prefix)+1:], sequence)
@@ -482,7 +486,7 @@ func TestGatewayPathControlsRelay(t *testing.T) {
 	p := dialPhone(t, env)
 
 	config := p.awaitMessage(ctx, "push_config")
-	if config["protocol"] != float64(2) {
+	if config["protocol"] != float64(3) {
 		t.Fatalf("protocol = %v", config["protocol"])
 	}
 	hybrid, _ := config["hybrid"].(map[string]any)
@@ -493,7 +497,7 @@ func TestGatewayPathControlsRelay(t *testing.T) {
 	if len(gatewayURLs) != 1 || gatewayURLs[0] != env.gatewayWS {
 		t.Fatalf("hybrid gateway URLs = %v, want [%s]", gatewayURLs, env.gatewayWS)
 	}
-	if hybrid["transport"] != "herdr-hybrid-v1" {
+	if hybrid["transport"] != "herdr-hybrid-v2" {
 		t.Fatalf("hybrid transport id = %v", hybrid["transport"])
 	}
 	if hybrid["gateway_version"] != "dev" || hybrid["gateway_revision"] != "unknown" {
@@ -514,13 +518,22 @@ func TestGatewayPathControlsRelay(t *testing.T) {
 		if agent["pane_id"] != "pane-1" || agent["agent"] != "claude" {
 			t.Fatalf("unexpected agent snapshot: %v", agent)
 		}
+		target := map[string]any{
+			"server_session_id": agent["server_session_id"],
+			"pane_id":           agent["pane_id"],
+			"terminal_id":       agent["terminal_id"],
+			"generation":        agent["generation"],
+			"agent_session_id":  agent["agent_session_id"],
+		}
 
 		p.sendMessage(ctx, map[string]any{
-			"type":       "send_text",
-			"protocol":   2,
-			"request_id": "gw-1",
-			"pane_id":    "pane-1",
-			"text":       "hello over the gateway",
+			"type":              "send_text",
+			"protocol":          3,
+			"request_id":        "gw-1",
+			"pane_id":           "pane-1",
+			"server_session_id": agent["server_session_id"],
+			"target":            target,
+			"text":              "hello over the gateway",
 		})
 		result := p.awaitMessage(ctx, "command_result")
 		if result["request_id"] != "gw-1" {
@@ -586,14 +599,7 @@ func TestGatewayRejectsUnprovenPhone(t *testing.T) {
 	}
 }
 
-// TestGatewayCarriesOversizedLogicalFrame is the regression guard for the
-// fragmentation the relayed path needs. An image upload is a single logical
-// frame of roughly 13.5 MB — far past the gateway's 1 MiB per-frame cap — so
-// without chunking under the whole connection the upload cannot cross the
-// relayed path at all. It also exercises the real gateway binary's per-phone
-// queue accounting, which the adapter unit tests cannot reach because they
-// speak to a fake gateway.
-func TestGatewayCarriesOversizedLogicalFrame(t *testing.T) {
+func TestGatewayCarriesChunkedAttachmentBatch(t *testing.T) {
 	env := setupHybridEnv(t)
 	waitForRegistration(t, env.relayHTTP)
 
@@ -602,45 +608,80 @@ func TestGatewayCarriesOversizedLogicalFrame(t *testing.T) {
 	p := dialPhone(t, env)
 	p.awaitMessage(ctx, "push_config")
 
-	// A 6 MiB PNG payload: comfortably over the 1 MiB wire cap and over the
-	// gateway's 4 MiB per-phone outbound queue budget, while staying under the
-	// relay's 10 MiB upload limit once base64 is decoded.
 	raw := make([]byte, 6*1024*1024)
-	for i := range raw {
-		raw[i] = byte(i)
+	for index := range raw {
+		raw[index] = byte(index)
 	}
-	dataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(raw)
-
+	copy(raw, []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a})
+	p.sendMessage(ctx, map[string]any{"type": "refresh_agents"})
+	var target map[string]any
+	for range 60 {
+		agentsMessage := p.awaitMessage(ctx, "agents")
+		agents, _ := agentsMessage["agents"].([]any)
+		if len(agents) == 0 {
+			continue
+		}
+		agent, _ := agents[0].(map[string]any)
+		target = map[string]any{
+			"server_session_id": agent["server_session_id"],
+			"pane_id":           agent["pane_id"],
+			"terminal_id":       agent["terminal_id"],
+			"generation":        agent["generation"],
+		}
+		break
+	}
+	if target == nil {
+		t.Fatal("relay never delivered an attachment target")
+	}
 	p.sendMessage(ctx, map[string]any{
-		"type":       "upload_image",
-		"protocol":   2,
-		"request_id": "upload-1",
-		"pane_id":    "pane-1",
-		"filename":   "big.png",
-		"mime":       "image/png",
-		"data":       dataURL,
+		"type": "upload_begin", "protocol": 3, "request_id": "upload-begin-1",
+		"target": target,
+		"files": []map[string]any{{
+			"name": "big.png", "media_type": "image/png", "bytes": len(raw),
+		}},
 	})
-
-	result := p.awaitMessage(ctx, "upload_result")
-	if result["request_id"] != "upload-1" {
-		t.Fatalf("upload_result request_id = %v", result["request_id"])
-	}
-	if result["ok"] != true {
-		t.Fatalf("oversized upload failed over the relayed path: %v", result["error"])
-	}
-	stored, _ := result["path"].(string)
-	if stored == "" {
-		t.Fatal("relay reported success without storing the upload")
-	}
-	info, err := os.Stat(stored)
-	if err != nil {
-		t.Fatalf("stat stored upload: %v", err)
-	}
-	if info.Size() != int64(len(raw)) {
-		t.Fatalf("stored %d bytes, want %d", info.Size(), len(raw))
+	beginMessage := p.awaitMessage(ctx, "upload_begin_result")
+	beginResult, _ := beginMessage["result"].(map[string]any)
+	uploadID, _ := beginResult["upload_id"].(string)
+	chunkBytes := int(beginResult["chunk_bytes"].(float64))
+	if uploadID == "" || chunkBytes <= 0 {
+		t.Fatalf("invalid begin result: %v", beginResult)
 	}
 
-	// The connection must survive: a phone dropped as slow would fail here.
+	for sequence, offset := 0, 0; offset < len(raw); sequence++ {
+		end := min(offset+chunkBytes, len(raw))
+		chunk := raw[offset:end]
+		p.sendMessage(ctx, map[string]any{
+			"type": "upload_chunk", "protocol": 3,
+			"request_id": fmt.Sprintf("upload-chunk-%d", sequence),
+			"target":     target, "upload_id": uploadID, "file_index": 0, "sequence": sequence,
+			"data":   base64.StdEncoding.EncodeToString(chunk),
+			"sha256": fmt.Sprintf("%x", sha256.Sum256(chunk)),
+		})
+		result := p.awaitMessage(ctx, "upload_chunk_result")
+		if result["error"] != nil {
+			t.Fatalf("chunk %d failed: %v", sequence, result["error"])
+		}
+		offset = end
+	}
+
+	digest := fmt.Sprintf("%x", sha256.Sum256(raw))
+	p.sendMessage(ctx, map[string]any{
+		"type": "upload_finish", "protocol": 3, "request_id": "upload-finish-1",
+		"target": target, "upload_id": uploadID,
+		"files": []map[string]any{{"file_index": 0, "sha256": digest}},
+	})
+	finishMessage := p.awaitMessage(ctx, "upload_finish_result")
+	finishResult, _ := finishMessage["result"].(map[string]any)
+	attachments, _ := finishResult["attachments"].([]any)
+	if len(attachments) != 1 {
+		t.Fatalf("finish result = %v", finishMessage)
+	}
+	attachment, _ := attachments[0].(map[string]any)
+	if attachment["ref"] == "" || attachment["bytes"] != float64(len(raw)) {
+		t.Fatalf("attachment = %v", attachment)
+	}
+
 	p.sendMessage(ctx, map[string]any{"type": "refresh_agents"})
 	p.awaitMessage(ctx, "agents")
 }

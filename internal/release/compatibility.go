@@ -4,22 +4,23 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	relayprotocol "github.com/0cv/herdr-mobile-relay/internal/protocol"
 )
 
-const maxTransportCapabilities = 8
+const (
+	maxTransportCapabilities            = 8
+	legacyEncryptedWebSocketSubprotocol = "herdr-e2ee-v1"
+)
 
 // TransportCapabilities returns the transports supported by an installed
 // release. Releases created before this metadata existed spoke E2EE v1 only.
 func TransportCapabilities(manifest Manifest) (app, relay []string) {
 	app = manifest.AppTransports
 	if len(app) == 0 {
-		app = []string{relayprotocol.EncryptedWebSocketSubprotocol}
+		app = []string{legacyEncryptedWebSocketSubprotocol}
 	}
 	relay = manifest.RelayTransports
 	if len(relay) == 0 {
-		relay = []string{relayprotocol.EncryptedWebSocketSubprotocol}
+		relay = []string{legacyEncryptedWebSocketSubprotocol}
 	}
 	return app, relay
 }

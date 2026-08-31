@@ -163,7 +163,7 @@ describe('accessible Svelte interactions', () => {
       responding: new Set<string>(),
     });
     expect(screen.getByPlaceholderText('Needs inspection — use terminal controls')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Attach image' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     choiceView.unmount();
 
     const unknownView = render(TerminalView, {
@@ -178,16 +178,17 @@ describe('accessible Svelte interactions', () => {
     });
     const terminalInput = screen.getByPlaceholderText('Type terminal input…');
     expect(terminalInput).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Attach image' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
     expect(screen.queryByText('must not render')).not.toBeInTheDocument();
     await user.type(terminalInput, 'custom weekend');
     await user.click(screen.getByRole('button', { name: 'Submit terminal text' }));
-    expect(send).toHaveBeenNthCalledWith(1, unknown, {
-      type: 'send_text', text: 'custom weekend',
-    });
-    expect(send).toHaveBeenNthCalledWith(2, unknown, {
-      type: 'send_keys', keys: ['Enter'], activity_label: 'Submitted terminal text',
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(unknown, {
+      type: 'send_input',
+      text: 'custom weekend',
+      keys: ['Enter'],
+      activity_label: 'Submitted terminal text',
     });
     unknownView.unmount();
     vi.restoreAllMocks();

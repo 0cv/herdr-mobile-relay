@@ -1,0 +1,15 @@
+{
+  "type": "upload_finish",
+  "protocol": 3,
+  "request_id": "req-upload-finish",
+  "target": {
+    "server_session_id": "primary",
+    "pane_id": "pane-1",
+    "terminal_id": "terminal-1",
+    "generation": 1
+  },
+  "upload_id": "upload-opaque",
+  "files": [
+    {"file_index": 0, "sha256": "4c4b6a3be1314ab86138bef4314dde022e600960e6e5f0f7133fa7a22c6400c9"}
+  ]
+}

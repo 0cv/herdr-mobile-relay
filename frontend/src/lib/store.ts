@@ -1,6 +1,13 @@
 import { get, writable } from 'svelte/store';
+import { base64UrlEncode } from './base64url';
 import {
-  APP_PROTOCOL_VERSION,
+  AttachmentBatchController,
+  type AttachmentUploadCallbacks,
+  type UploadBeginResult,
+  type UploadChunkResult,
+  type UploadFinishResult,
+} from './attachments';
+import {
   importQuickSetup,
   loadRelayConfigs,
   MAX_PANE_SIZE_COLUMNS,
@@ -8,9 +15,22 @@ import {
   MIN_PANE_SIZE_COLUMNS,
   MIN_PANE_SIZE_ROWS,
   normalizeRelayConfig,
+  quickSetupConfig,
+  quickSetupInvitation,
   saveRelayConfigs,
   shouldRetainSetupFragment,
 } from './config';
+import {
+  BrowserDeviceCredentialStore,
+  commitDeviceEnrollment,
+  type RelayDeviceCredential,
+  type RelayInvitation,
+  type CreateInvitationIntent,
+  type DeviceSummary,
+  type RenameDeviceIntent,
+  type ResetDevicesIntent,
+  type RevokeDeviceIntent,
+} from './device-auth';
 import {
   agentStatusGroup,
   approvalOptions,
@@ -23,7 +43,19 @@ import {
   staleAgentRevision,
   stabilizeBlockedSnapshot,
 } from './agents';
-import { relayProtocolError } from './protocol';
+import {
+  parseActionReceipt,
+  parseApiError,
+  relayProtocolError,
+  RELAY_PROTOCOL_VERSION,
+} from './protocol';
+import { targetRefForAgent } from './resource-id';
+import {
+  PUSH_CATEGORIES,
+  defaultDevicePushPolicy,
+  type DevicePushPolicy,
+  type PushTestState,
+} from './push-policy';
 import { createRelayTransport } from './transports';
 import type {
   RelayTransport,
@@ -45,6 +77,8 @@ import type {
   AgentInventoryStatus,
   CommandResult,
   ConversationPage,
+  FrontendTargetRef,
+  OmoTodoState,
   DirectoryListing,
   QuestionDraft,
   QuestionInteraction,
@@ -54,6 +88,7 @@ import type {
   SlashCommand,
   SlashCommandCatalog,
   TerminalFrame,
+  TargetRef,
   ToastMessage,
   WorkspaceFile,
   WorkspaceGitDiff,
@@ -63,12 +98,13 @@ import type {
 } from './types';
 const COMMAND_TIMEOUT_MS = 15_000;
 const ACCEPTED_COMMAND_TIMEOUT_MS = 10_000;
-const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = 60_000;
 const BACKGROUND_HEALTH_TIMEOUT_MS = 10_000;
 const FOREGROUND_HEALTH_TIMEOUT_MS = 2_000;
 const UPDATE_RESTART_RECONNECT_DELAY_MS = 1_000;
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 60_000;
+const UTF8_ENCODER = new TextEncoder();
 const PANE_READ_RETRY_MS = 35_000;
 // A connect attempt older than this is replaced when a revalidation event
 // (wake, focus, online, network change) arrives. A healthy dial finishes its
@@ -100,7 +136,6 @@ const HIDDEN_KEEPALIVE_MAX_MS = 60 * 60_000;
 // occasionally redial a healthy connection. Four still sits a full minute
 // under the reaper, so nothing a live connection does can reach it.
 const FRESH_PROOF_MS = 240_000;
-const IMAGE_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
 // Gateway-relayed traffic is metered project bandwidth. Cap scrollback while
 // honoring the user's refresh rate; acknowledged deltas keep idle frames off
 // the wire and make the selected cadence affordable during normal output.
@@ -113,6 +148,7 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   submit_prompt: true,
   send_keys: true,
   send_text: true,
+  send_input: true,
   send_secret: true,
   agent_start: true,
   agent_rename: true,
@@ -129,7 +165,6 @@ const INVENTORY_REQUIRED_COMMANDS: Record<string, true> = {
   worktree_open: true,
   worktree_remove: true,
   acknowledge_pane: true,
-  upload_image: true,
   copy_agent_response: true,
 };
 
@@ -160,6 +195,63 @@ function normalizeAgentInventory(
     lastAttemptAt: Number(inventory.last_attempt_at) || 0,
     lastSuccessAt: Number(inventory.last_success_at) || 0,
     stale: inventory.stale === true,
+  };
+}
+function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const state = value as Record<string, unknown>;
+  let remainingTasks = 1_000;
+  const phases = (Array.isArray(state.phases) ? state.phases : [])
+    .slice(0, 128)
+    .flatMap((candidate) => {
+      if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+      const phase = candidate as Record<string, unknown>;
+      const tasks = (Array.isArray(phase.tasks) ? phase.tasks : [])
+        .slice(0, remainingTasks)
+        .flatMap((item) => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+          const task = item as Record<string, unknown>;
+          const status = String(task.status || '');
+          const content = String(task.content || '').slice(0, 4_096);
+          if (!content || !['pending', 'in_progress', 'completed', 'abandoned'].includes(status)) return [];
+          return [{
+            id: String(task.id || '').slice(0, 160) || undefined,
+            content,
+            status: status as OmoTodoState['phases'][number]['tasks'][number]['status'],
+          }];
+        });
+      remainingTasks -= tasks.length;
+      return [{
+        name: String(phase.name || '').slice(0, 4_096) || 'Plan',
+        tasks,
+      }];
+    });
+  return {
+    available: state.available === true,
+    reason_code: String(state.reason_code || '').slice(0, 80) || undefined,
+    session_id: String(state.session_id || '').slice(0, 160) || undefined,
+    version: Number.isSafeInteger(Number(state.version)) ? Number(state.version) : undefined,
+    updated_at: String(state.updated_at || '').slice(0, 80) || undefined,
+    phases,
+    truncated: state.truncated === true,
+  };
+}
+
+
+function normalizeAgentTargetFields(agent: Partial<Agent>): Partial<Agent> {
+  const generation = Number(agent.generation);
+  return {
+    ...agent,
+    server_session_id: typeof agent.server_session_id === 'string' && agent.server_session_id.trim()
+      ? agent.server_session_id.trim()
+      : undefined,
+    terminal_id: typeof agent.terminal_id === 'string' && agent.terminal_id.trim()
+      ? agent.terminal_id.trim()
+      : undefined,
+    generation: Number.isSafeInteger(generation) && generation >= 0 ? generation : undefined,
+    agent_session_id: typeof agent.agent_session_id === 'string' && agent.agent_session_id.trim()
+      ? agent.agent_session_id.trim()
+      : undefined,
   };
 }
 
@@ -215,16 +307,18 @@ interface PendingOperation {
   relayId: string;
   reject: (error: CommandError) => void;
   timer: ReturnType<typeof setTimeout>;
+  cleanup?: () => void;
 }
 
 interface PendingRequest extends PendingOperation {
   action: string;
+  actionId?: string;
   resolve: (result: CommandResult) => void;
 }
 
 interface PendingUpload extends PendingOperation {
-  filename: string;
-  resolve: (path: string) => void;
+  responseType: string;
+  resolve: (result: Record<string, any>) => void;
 }
 
 interface SlashCommandCacheEntry {
@@ -239,6 +333,8 @@ interface PendingSlashCommands {
 
 export class CommandError extends Error {
   data?: Record<string, unknown>;
+  code?: string;
+  args?: Record<string, string | number | boolean>;
 }
 
 /**
@@ -255,6 +351,29 @@ function dispatchedUnknownError(message: string): CommandError {
   return error;
 }
 
+function normalizePushPolicy(value: unknown): DevicePushPolicy | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const deviceId = String(record.device_id || '').trim();
+  if (!deviceId) return null;
+  const policy = defaultDevicePushPolicy(deviceId, String(record.locale || 'en'));
+  const categories = record.categories && typeof record.categories === 'object'
+    ? record.categories as Record<string, unknown>
+    : {};
+  for (const category of PUSH_CATEGORIES) {
+    if (typeof categories[category] === 'boolean') policy.categories[category] = Boolean(categories[category]);
+  }
+  const settle = Number(record.settle_ms);
+  const cooldown = Number(record.cooldown_ms);
+  if (Number.isSafeInteger(settle) && settle >= 0) policy.settle_ms = settle;
+  if (Number.isSafeInteger(cooldown) && cooldown >= 0) policy.cooldown_ms = cooldown;
+  policy.snoozed = record.snoozed === true;
+  policy.update_once = record.update_once !== false;
+  const snoozeUntil = String(record.snooze_until || '');
+  if (snoozeUntil && Number.isFinite(Date.parse(snoozeUntil))) policy.snooze_until = snoozeUntil;
+  return policy;
+}
+
 class RelayStore {
   readonly relayConfigs = writable<RelayConfig[]>([]);
   readonly connections = writable<Map<string, RelayConnection>>(new Map());
@@ -264,7 +383,10 @@ class RelayStore {
   readonly terminalFrames = writable<Map<string, TerminalFrame>>(new Map());
   readonly responding = writable<Set<string>>(new Set());
   readonly toast = writable<ToastMessage | null>(null);
+  readonly devices = writable<Map<string, DeviceSummary[]>>(new Map());
   readonly notificationBusy = writable(false);
+  readonly pushPolicies = writable<Map<string, DevicePushPolicy>>(new Map());
+  readonly pushTests = writable<Map<string, PushTestState>>(new Map());
 
   private connectionsValue = new Map<string, RelayConnection>();
   private agentsValue: Agent[] = [];
@@ -272,6 +394,9 @@ class RelayStore {
   private activitiesValue: Activity[] = [];
   private terminalFramesValue = new Map<string, TerminalFrame>();
   private respondingValue = new Set<string>();
+  private devicesValue = new Map<string, DeviceSummary[]>();
+  private pushPoliciesValue = new Map<string, DevicePushPolicy>();
+  private pushTestsValue = new Map<string, PushTestState>();
   private blockedSnapshotMisses = new Map<string, number>();
   private pendingRequests = new Map<string, PendingRequest>();
   private pendingUploads = new Map<string, PendingUpload>();
@@ -289,6 +414,7 @@ class RelayStore {
   private hiddenSince = 0;
   private toastId = 0;
   private pushConfigHandler: ((relayId: string) => void) | null = null;
+  private readonly deviceCredentials = new BrowserDeviceCredentialStore(localStorage);
 
   constructor() {
     let previousRefreshInterval = get(terminalRefreshInterval);
@@ -301,9 +427,21 @@ class RelayStore {
 
   initialize(connect = true): void {
     let relays = loadRelayConfigs();
+    const setup = quickSetupConfig(location);
+    const invitation = quickSetupInvitation(location);
     const imported = importQuickSetup(relays, location);
     if (imported) {
       relays = imported;
+      if (setup && invitation) {
+        const relay = this.relayForSetup(relays, setup);
+        if (relay) {
+          try {
+            this.deviceCredentials.saveInvitation(relay.id, invitation);
+          } catch {
+            this.deviceCredentials.remove(relay.id);
+          }
+        }
+      }
       saveRelayConfigs(relays);
       if (!shouldRetainSetupFragment(location, navigator.standalone)) {
         history.replaceState(history.state, '', location.pathname + location.search);
@@ -312,17 +450,38 @@ class RelayStore {
     this.relayConfigs.set(relays);
     if (connect) this.connectAll();
   }
+  private relayForSetup(relays: RelayConfig[], setup: Omit<RelayConfig, 'id'>): RelayConfig | undefined {
+    if (setup.transport === 'hybrid') {
+      const gateways = setup.gatewayUrls ?? [setup.gatewayUrl ?? ''];
+      return relays.find((relay) => relay.transport === 'hybrid'
+        && relay.label === setup.label
+        && (relay.gatewayUrls ?? [relay.gatewayUrl ?? '']).some((gateway) => gateways.includes(gateway)));
+    }
+    return relays.find((relay) => relay.url === setup.url);
+  }
+
 
   importSetupLink(locationValue: Pick<Location, 'hash' | 'protocol' | 'host' | 'pathname' | 'search'> = location, connect = true): boolean {
+    const setup = quickSetupConfig(locationValue);
+    const invitation = quickSetupInvitation(locationValue);
     const imported = importQuickSetup(get(this.relayConfigs), locationValue);
-    if (!imported) return false;
+    if (!imported || !setup) return false;
+    if (invitation) {
+      const relay = this.relayForSetup(imported, setup);
+      if (!relay) return false;
+      try {
+        this.deviceCredentials.saveInvitation(relay.id, invitation);
+      } catch {
+        return false;
+      }
+    }
     this.relayConfigs.set(imported);
     saveRelayConfigs(imported);
     if (!shouldRetainSetupFragment(locationValue, navigator.standalone)) {
       history.replaceState(history.state, '', locationValue.pathname + locationValue.search);
     }
     if (connect) this.connectAll(true);
-    this.showToast('Relay added from the setup link.');
+    this.showToast(invitation ? 'Device invitation imported.' : 'Relay added from the setup link.');
     return true;
   }
 
@@ -366,6 +525,13 @@ class RelayStore {
   removeRelay(id: string): void {
     this.disconnectRelay(id);
     this.reconnectAttempts.delete(id);
+    this.deviceCredentials.remove(id);
+    this.devicesValue.delete(id);
+    this.devices.set(new Map(this.devicesValue));
+    this.pushPoliciesValue.delete(id);
+    this.pushPolicies.set(new Map(this.pushPoliciesValue));
+    this.pushTestsValue.delete(id);
+    this.pushTests.set(new Map(this.pushTestsValue));
     const relays = get(this.relayConfigs).filter((relay) => relay.id !== id);
     this.relayConfigs.set(relays);
     saveRelayConfigs(relays);
@@ -389,6 +555,19 @@ class RelayStore {
     }
     this.blockedSnapshotMisses.clear();
     for (const relay of get(this.relayConfigs)) this.connectRelay(relay);
+  }
+
+  private relayAuthentication(relay: RelayConfig): RelayInvitation | RelayDeviceCredential | undefined {
+    const stored = this.deviceCredentials.get(relay.id);
+    if (stored) return stored;
+    const secret = UTF8_ENCODER.encode(relay.token);
+    if (secret.byteLength !== 32) return undefined;
+    return this.deviceCredentials.saveInvitation(relay.id, {
+      id: 'bootstrap',
+      version: 1,
+      secret: base64UrlEncode(secret),
+      expiresAt: Date.now() + 10 * 60_000,
+    });
   }
 
   connectRelay(relay: RelayConfig): void {
@@ -424,10 +603,10 @@ class RelayStore {
     };
     this.connectionsValue.set(relay.id, connection);
     this.emitConnections();
+    const authentication = this.relayAuthentication(relay);
     connection.transport = createRelayTransport(relay, {
       onMessage: (message) => {
         if (!this.isCurrentConnection(relay.id, connection)) return;
-        // Inbound traffic proves the path is alive, whatever the message says.
         connection.lastMessageAt = Date.now();
         this.clearHealthTimer(connection);
         this.reconnectAttempts.delete(relay.id);
@@ -436,7 +615,12 @@ class RelayStore {
       onStatus: (status, detail) => {
         this.applyTransportStatus(relay, connection, status, detail);
       },
-    });
+    }, authentication ? {
+      authentication,
+      onAuthenticated: (presented, enrollment) => {
+        commitDeviceEnrollment(this.deviceCredentials, relay.id, presented, enrollment);
+      },
+    } : {});
     connection.transport.connect();
   }
 
@@ -496,7 +680,7 @@ class RelayStore {
       this.sendRaw(relayId, {
         type: 'register_app_origin',
         origin: location.origin,
-        protocol: APP_PROTOCOL_VERSION,
+        protocol: RELAY_PROTOCOL_VERSION,
       });
     }
     this.sendRaw(relayId, { type: 'refresh_agents' });
@@ -817,6 +1001,12 @@ class RelayStore {
         : [];
       this.emitConnections();
       this.pushConfigHandler?.(relayId);
+      if (connection.capabilities.includes('push_policy')) {
+        this.sendRaw(relayId, { type: 'push_policy_get', protocol: RELAY_PROTOCOL_VERSION });
+      }
+      if (connection.capabilities.includes('device_management')) {
+        void this.refreshDevices(relayId);
+      }
       return;
     }
     if (message.type === 'inventory_status' && connection) {
@@ -846,6 +1036,25 @@ class RelayStore {
       this.emitConnections();
       return;
     }
+    if ((message.type === 'push_policy' || message.type === 'push_policy_result') && message.ok !== false) {
+      const policy = normalizePushPolicy(message.policy);
+      if (policy) {
+        this.pushPoliciesValue.set(relayId, policy);
+        this.pushPolicies.set(new Map(this.pushPoliciesValue));
+      }
+      return;
+    }
+    if (message.type === 'push_test_result') {
+      const stage = String(message.stage || 'dropped');
+      const state: PushTestState = stage === 'service_accepted'
+        ? { status: 'accepted', result: 'accepted' }
+        : stage === 'queued' || stage === 'retrying'
+          ? { status: 'accepted', result: 'queued' }
+          : { status: 'rejected', code: stage };
+      this.pushTestsValue.set(relayId, state);
+      this.pushTests.set(new Map(this.pushTestsValue));
+      return;
+    }
     if (message.type === 'push_subscribed' && connection) {
       connection.pushStatus = message.ok ? 'subscribed' : 'failed';
       this.emitConnections();
@@ -856,11 +1065,24 @@ class RelayStore {
       this.emitConnections();
       return;
     }
+    if (message.type === 'action_receipt') {
+      this.handleActionReceipt(relayId, message);
+      return;
+    }
+    if (message.type === 'error') {
+      this.handleApiError(relayId, message);
+      return;
+    }
     if (message.type === 'command_result') {
       this.handleCommandResult(relayId, message as CommandResult);
       return;
     }
-    if (message.type === 'upload_result') {
+    if ([
+      'upload_begin_result',
+      'upload_chunk_result',
+      'upload_finish_result',
+      'upload_cancel_result',
+    ].includes(String(message.type))) {
       this.handleUploadResult(relayId, message);
       return;
     }
@@ -905,7 +1127,12 @@ class RelayStore {
       const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
       const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
       const incoming = (Array.isArray(message.agents) ? message.agents : [])
-        .map((agent: Partial<Agent>) => normalizeAgent(relayId, label, agent, attentionCapable));
+        .map((agent: Partial<Agent>) => normalizeAgent(
+          relayId,
+          label,
+          normalizeAgentTargetFields(agent),
+          attentionCapable,
+        ));
       this.agentsValue = mergeAgentList(
         this.agentsValue,
         relayId,
@@ -920,7 +1147,12 @@ class RelayStore {
     if (message.type === 'blocked') {
       const label = get(this.relayConfigs).find((relay) => relay.id === relayId)?.label || 'relay';
       const attentionCapable = Boolean(connection?.capabilities.includes('attention_classification'));
-      const next = normalizeAgent(relayId, label, { ...message, status: 'blocked' }, attentionCapable);
+      const next = normalizeAgent(
+        relayId,
+        label,
+        normalizeAgentTargetFields({ ...message, status: 'blocked' }),
+        attentionCapable,
+      );
       const index = this.agentsValue.findIndex((agent) => agent.pane_id === next.pane_id);
       const before = index >= 0 ? this.agentsValue[index] : undefined;
       if (staleAgentRevision(before, next)) return;
@@ -945,7 +1177,7 @@ class RelayStore {
         && !Object.prototype.hasOwnProperty.call(message, 'attention_kind')
         ? { ...before, ...message }
         : message;
-      const next = normalizeAgent(relayId, label, source, attentionCapable);
+      const next = normalizeAgent(relayId, label, normalizeAgentTargetFields(source), attentionCapable);
       if (staleAgentRevision(before, next)) return;
       const stabilized = stabilizeBlockedSnapshot(before, next, this.blockedSnapshotMisses, this.respondingValue);
       if (index >= 0) {
@@ -1044,10 +1276,13 @@ class RelayStore {
   }
 
   private acknowledgePaneFrame(agent: Agent, contentFingerprint: string): void {
+    const identity = this.agentTargetPayload(agent);
+    if (!identity) return;
     this.sendRaw(agent.relay_id, {
       type: 'pane_applied',
       pane_id: agent.raw_pane_id,
       content_fingerprint: contentFingerprint,
+      ...identity,
     });
   }
 
@@ -1129,6 +1364,16 @@ class RelayStore {
     this.responding.set(new Set(this.respondingValue));
   }
 
+  beginPushTest(relayId: string): void {
+    this.pushTestsValue.set(relayId, { status: 'sending' });
+    this.pushTests.set(new Map(this.pushTestsValue));
+  }
+
+  rejectPushTest(relayId: string, code: string): void {
+    this.pushTestsValue.set(relayId, { status: 'rejected', code });
+    this.pushTests.set(new Map(this.pushTestsValue));
+  }
+
   sendRaw(relayId: string, payload: Record<string, unknown>): boolean {
     const connection = this.connectionsValue.get(relayId);
     if (!connection || connection.status !== 'connected') return false;
@@ -1158,11 +1403,21 @@ class RelayStore {
         this.pendingRequests.delete(requestId);
         reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, timeoutMs);
-      this.pendingRequests.set(requestId, { relayId, action: payload.type, resolve, reject, timer });
+      const actionId = payload.intent && typeof payload.intent === 'object'
+        ? String(payload.intent.action_id || '')
+        : '';
+      this.pendingRequests.set(requestId, {
+        relayId,
+        action: String(payload.action || payload.type),
+        actionId: actionId || undefined,
+        resolve,
+        reject,
+        timer,
+      });
       const command: Record<string, unknown> = {
         ...payload,
         request_id: requestId,
-        protocol: APP_PROTOCOL_VERSION,
+        protocol: RELAY_PROTOCOL_VERSION,
       };
       if (payload.type !== 'lease_pane_size' && payload.type !== 'release_pane_size') {
         command.client_id = pushClientId();
@@ -1174,9 +1429,127 @@ class RelayStore {
       }
     });
   }
+  deviceCredential(relayId: string): RelayDeviceCredential | null {
+    const authentication = this.deviceCredentials.get(relayId);
+    return authentication?.kind === 'credential' ? authentication : null;
+  }
+
+  async refreshDevices(relayId: string): Promise<DeviceSummary[]> {
+    try {
+      const result = await this.sendCommand(relayId, { type: 'device_list' });
+      const values = Array.isArray(result.data?.devices) ? result.data.devices : [];
+      const devices = values.flatMap((value: unknown): DeviceSummary[] => {
+        if (!value || typeof value !== 'object') return [];
+        const record = value as Record<string, unknown>;
+        const deviceId = String(record.device_id || '');
+        const credentialId = String(record.credential_id || '');
+        const role = record.role;
+        const pairedAt = Date.parse(String(record.paired_at || ''));
+        const lastSeenAt = Date.parse(String(record.last_seen_at || ''));
+        if (!deviceId || !credentialId || (role !== 'reader' && role !== 'controller') || !Number.isFinite(pairedAt)) {
+          return [];
+        }
+        return [{
+          deviceId,
+          credentialId,
+          name: String(record.name || 'Device').slice(0, 80),
+          role,
+          pairedAt,
+          ...(Number.isFinite(lastSeenAt) ? { lastSeenAt } : {}),
+          current: record.current === true,
+        }];
+      });
+      this.devicesValue.set(relayId, devices);
+      this.devices.set(new Map(this.devicesValue));
+      return devices;
+    } catch (error) {
+      if (this.connectionsValue.get(relayId)?.status === 'connected') throw error;
+      return this.devicesValue.get(relayId) || [];
+    }
+  }
+
+  async renameDevice(intent: RenameDeviceIntent): Promise<void> {
+    await this.sendCommand(intent.relayId, {
+      type: 'rename_device',
+      device_id: intent.deviceId,
+      name: intent.name,
+    });
+    await this.refreshDevices(intent.relayId);
+  }
+
+  async createDeviceInvitation(intent: CreateInvitationIntent): Promise<string> {
+    const relay = get(this.relayConfigs).find((entry) => entry.id === intent.relayId);
+    if (!relay) throw new CommandError('Relay configuration is unavailable');
+    if (!relay.url) {
+      throw new CommandError('Device invitation links require a direct encrypted WebSocket endpoint');
+    }
+    const result = await this.sendCommand(intent.relayId, {
+      type: 'create_device_invitation',
+      name: intent.name,
+      role: intent.role,
+    });
+    const invitation = result.data?.invitation as Record<string, unknown> | undefined;
+    const id = String(invitation?.invitation_id || '');
+    const version = Number(invitation?.version);
+    const secret = String(invitation?.secret || '');
+    const expiresAt = Date.parse(String(invitation?.expires_at || ''));
+    if (!/^[A-Za-z0-9_-]{16,128}$/.test(id)
+      || !Number.isSafeInteger(version)
+      || version < 1
+      || !/^[A-Za-z0-9_-]{43}$/.test(secret)
+      || !Number.isFinite(expiresAt)) {
+      throw new CommandError('Relay returned an invalid device invitation');
+    }
+    const params = new URLSearchParams({
+      setup: secret,
+      invite: id,
+      invite_version: String(version),
+      invite_expires: String(expiresAt),
+      label: relay.label,
+      relay: relay.url,
+    });
+    const link = new URL(location.href);
+    link.hash = params.toString();
+    return link.toString();
+  }
+
+  async revokeDevice(intent: RevokeDeviceIntent): Promise<void> {
+    await this.sendCommand(intent.relayId, {
+      type: 'revoke_device',
+      device_id: intent.deviceId,
+    });
+    const current = this.deviceCredential(intent.relayId);
+    if (current?.deviceId === intent.deviceId) this.deviceCredentials.remove(intent.relayId);
+    await this.refreshDevices(intent.relayId);
+  }
+
+  async resetDevices(intent: ResetDevicesIntent): Promise<void> {
+    await this.sendCommand(intent.relayId, { type: 'reset_devices' });
+    this.deviceCredentials.remove(intent.relayId);
+    this.devicesValue.delete(intent.relayId);
+    this.devices.set(new Map(this.devicesValue));
+  }
+
+  async forgetCurrentDevice(relayId: string): Promise<void> {
+    const current = this.deviceCredential(relayId);
+    if (!current) throw new CommandError('No enrolled device credential is stored for this relay');
+    await this.revokeDevice({ relayId, deviceId: current.deviceId });
+  }
+
+
+  private agentTargetPayload(agent: Agent): { target: FrontendTargetRef; server_session_id: string } | null {
+    const target = targetRefForAgent(agent);
+    return target ? { target, server_session_id: target.server_session_id } : null;
+  }
 
   sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number): Promise<CommandResult> {
-    return this.sendCommand(agent.relay_id, { ...payload, pane_id: agent.raw_pane_id }, timeoutMs);
+    const identity = this.agentTargetPayload(agent);
+    if (!identity) return Promise.reject(new CommandError('This agent no longer has an exact terminal identity'));
+    return this.sendCommand(agent.relay_id, {
+      ...payload,
+      pane_id: agent.raw_pane_id,
+      ...identity,
+    }, timeoutMs);
   }
 
   /**
@@ -1407,6 +1780,69 @@ class RelayStore {
     }
   }
 
+  private handleActionReceipt(relayId: string, message: Record<string, unknown>): void {
+    const receipt = parseActionReceipt(message);
+    if (!receipt) return;
+    let requestId = typeof message.request_id === 'string' ? message.request_id : '';
+    let pending = requestId ? this.pendingRequests.get(requestId) : undefined;
+    if (!pending) {
+      for (const [candidateRequestId, candidate] of this.pendingRequests) {
+        if (candidate.relayId === relayId && candidate.actionId === receipt.action_id) {
+          requestId = candidateRequestId;
+          pending = candidate;
+          break;
+        }
+      }
+    }
+    if (!pending || pending.relayId !== relayId) return;
+    if (receipt.phase === 'prepared' || receipt.phase === 'awaiting_evidence') {
+      clearTimeout(pending.timer);
+      pending.timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        pending?.reject(dispatchedUnknownError('Relay confirmation timed out'));
+      }, ACCEPTED_COMMAND_TIMEOUT_MS);
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(requestId);
+    if (receipt.phase === 'confirmed') {
+      pending.resolve({
+        type: 'command_result',
+        request_id: requestId,
+        action: pending.action,
+        ok: true,
+        phase: receipt.phase,
+        data: { receipt },
+      });
+      return;
+    }
+    const detail = typeof message.detail === 'string' && UTF8_ENCODER.encode(message.detail).byteLength <= 512
+      ? message.detail
+      : '';
+    const error = new CommandError(detail || receipt.error?.code || 'Command failed');
+    error.data = {
+      phase: receipt.phase,
+      ...(receipt.error ? { api_error: receipt.error } : {}),
+      ...(receipt.phase === 'dispatched_unknown' ? { dispatched_unknown: true } : {}),
+    };
+    pending.reject(error);
+  }
+
+  private handleApiError(relayId: string, message: Record<string, unknown>): void {
+    const requestId = typeof message.request_id === 'string' ? message.request_id : '';
+    const pending = requestId ? this.pendingRequests.get(requestId) : undefined;
+    const apiError = parseApiError(message.error);
+    if (!pending || pending.relayId !== relayId || !apiError) return;
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(requestId);
+    const detail = typeof message.detail === 'string' && UTF8_ENCODER.encode(message.detail).byteLength <= 512
+      ? message.detail
+      : '';
+    const error = new CommandError(detail || apiError.code);
+    error.data = { phase: 'failed_before_dispatch', api_error: apiError };
+    pending.reject(error);
+  }
+
   private handleCommandResult(relayId: string, result: CommandResult): void {
     const pending = this.pendingRequests.get(result.request_id);
     if (!pending || pending.relayId !== relayId) return;
@@ -1442,6 +1878,7 @@ class RelayStore {
     for (const [requestId, pending] of operations) {
       if (pending.relayId !== relayId) continue;
       clearTimeout(pending.timer);
+      pending.cleanup?.();
       operations.delete(requestId);
       // Every entry here survived its write, so the frame is already on the
       // wire and the relay may act on it after this rejection.
@@ -1552,6 +1989,7 @@ class RelayStore {
       hasMore: data.has_more === true,
       total: Math.max(0, Number(data.total) || 0),
       fileTruncated: data.file_truncated === true,
+      omoPlan: normalizeOmoTodoState(data.omo_plan),
     };
   }
 
@@ -1570,6 +2008,8 @@ class RelayStore {
   readPane(agent: Agent, force = false): void {
     const requestedAt = this.pendingPaneReads.get(agent.pane_id);
     if (!force && requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
+    const identity = this.agentTargetPayload(agent);
+    if (!identity) return;
     this.paneWatchesStarted.delete(agent.pane_id);
     const sent = this.sendRaw(agent.relay_id, {
       type: 'read_pane',
@@ -1577,6 +2017,7 @@ class RelayStore {
       lines: this.paneBudget(agent.relay_id).lines,
       format: 'ansi',
       content_fingerprint: force ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
+      ...identity,
     });
     if (sent) this.pendingPaneReads.set(agent.pane_id, Date.now());
   }
@@ -1590,10 +2031,12 @@ class RelayStore {
     this.watchedPanes.delete(agent.pane_id);
     this.paneWatchesStarted.delete(agent.pane_id);
     const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection?.capabilities.includes('pane_realtime_delta')) return;
+    const identity = this.agentTargetPayload(agent);
+    if (!connection?.capabilities.includes('pane_realtime_delta') || !identity) return;
     this.sendRaw(agent.relay_id, {
       type: 'unwatch_pane',
       pane_id: agent.raw_pane_id,
+      ...identity,
     });
   }
 
@@ -1610,7 +2053,8 @@ class RelayStore {
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('pane_realtime_delta')) return;
     const contentFingerprint = this.paneContentFingerprints.get(paneId);
-    if (!contentFingerprint) return;
+    const identity = this.agentTargetPayload(agent);
+    if (!contentFingerprint || !identity) return;
     const budget = this.paneBudget(agent.relay_id);
     const sent = this.sendRaw(agent.relay_id, {
       type: 'watch_pane',
@@ -1619,6 +2063,7 @@ class RelayStore {
       interval_ms: budget.intervalMs,
       format: 'ansi',
       content_fingerprint: contentFingerprint,
+      ...identity,
     });
     if (sent) this.paneWatchesStarted.add(paneId);
   }
@@ -1678,11 +2123,21 @@ class RelayStore {
 
   async respond(agent: Agent, index: number, total: number, choice?: string, source = 'App'): Promise<boolean> {
     if (index < 0) return false;
-    const label = choice || approvalOptions(agent)[index] || `option ${index + 1}`;
+    const label = choice || approvalOptions(agent)[index] || '';
+    if (!label || !agent.approval_fingerprint) {
+      this.showToast('This approval no longer has an exact verified identity.', true);
+      return false;
+    }
     this.markResponding(agent.pane_id);
     try {
       const result = await this.sendToAgent(agent, {
-        type: 'respond', index, total, choice: label, source, event_id: agent.event_id || '',
+        type: 'respond',
+        index,
+        total,
+        choice: label,
+        source,
+        event_id: agent.event_id || '',
+        approval_fingerprint: agent.approval_fingerprint,
       }, 12_000);
       this.showToast(result.phase === 'unconfirmed'
         ? 'Accepted; agent still appears blocked.'
@@ -1941,54 +2396,127 @@ class RelayStore {
     }
   }
 
-  async uploadImage(agent: Agent, file: File, timeoutMs = IMAGE_UPLOAD_TIMEOUT_MS): Promise<string> {
-    if (file.size > IMAGE_UPLOAD_MAX_BYTES) throw new CommandError('Image is larger than 10 MB.');
-    const connection = this.connectionsValue.get(agent.relay_id);
-    if (!connection || connection.status !== 'connected') throw new CommandError('Relay is not connected.');
-    const protocolError = relayProtocolError(connection);
-    if (protocolError) throw new CommandError(protocolError);
-    const requestId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const data = await readFileAsDataUrl(file);
-    if (!this.isCurrentConnection(agent.relay_id, connection)
-      || connection.status !== 'connected') {
-      throw new CommandError('Relay disconnected before the image could be uploaded.');
+  attachmentController(agent: Agent): AttachmentBatchController {
+    const target = targetRefForAgent(agent);
+    if (!target) throw new CommandError('This terminal does not have a stable attachment target.');
+    const backendTarget: TargetRef = {
+      server_session_id: target.server_session_id,
+      pane_id: target.pane_id,
+      terminal_id: target.terminal_id,
+      generation: target.generation,
+      ...(target.agent_session_id ? { agent_session_id: target.agent_session_id } : {}),
+    };
+    return new AttachmentBatchController(backendTarget, this.attachmentUploadCallbacks(agent.relay_id), {
+      maxFiles: 8,
+      maxFileBytes: 20 * 1024 * 1024,
+      maxBatchBytes: 50 * 1024 * 1024,
+      maxChunkBytes: 256 * 1024,
+    });
+  }
+
+  async uploadAttachments(agent: Agent, files: FileList | readonly File[]) {
+    const controller = this.attachmentController(agent);
+    controller.select(files);
+    return controller.upload();
+  }
+
+  private attachmentUploadCallbacks(relayId: string): AttachmentUploadCallbacks {
+    return {
+      begin: (request, signal) => this.sendUploadRequest<UploadBeginResult>(
+        relayId, 'upload_begin', 'upload_begin_result', request, signal,
+      ),
+      chunk: (request, signal) => this.sendUploadRequest<UploadChunkResult>(
+        relayId,
+        'upload_chunk',
+        'upload_chunk_result',
+        { ...request, data: standardBase64Encode(request.data) },
+        signal,
+      ),
+      finish: (request, signal) => this.sendUploadRequest<UploadFinishResult>(
+        relayId, 'upload_finish', 'upload_finish_result', request, signal,
+      ),
+      cancel: (request) => this.sendUploadRequest<Record<string, any>>(
+        relayId, 'upload_cancel', 'upload_cancel_result', request,
+      ).then(() => undefined),
+    };
+  }
+
+  private sendUploadRequest<TResult extends Record<string, any>>(
+    relayId: string,
+    type: string,
+    responseType: string,
+    request: unknown,
+    signal?: AbortSignal,
+  ): Promise<TResult> {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection || connection.status !== 'connected') {
+      return Promise.reject(new CommandError('Relay is not connected.'));
     }
-    return new Promise((resolve, reject) => {
+    const protocolError = relayProtocolError(connection);
+    if (protocolError) return Promise.reject(new CommandError(protocolError));
+    if (signal?.aborted) return Promise.reject(new CommandError('Attachment upload was cancelled.'));
+    const requestId = commandRequestId();
+    return new Promise<TResult>((resolve, reject) => {
+      const cleanup = () => signal?.removeEventListener('abort', abort);
       const timer = setTimeout(() => {
+        cleanup();
         this.pendingUploads.delete(requestId);
-        reject(dispatchedUnknownError('Image upload did not finish in time.'));
-      }, timeoutMs);
-      this.pendingUploads.set(requestId, {
-        relayId: agent.relay_id,
-        filename: file.name || 'image',
-        resolve,
-        reject,
-        timer,
-      });
-      if (!this.sendRaw(agent.relay_id, {
-        type: 'upload_image',
-        protocol: APP_PROTOCOL_VERSION,
-        request_id: requestId,
-        client_id: pushClientId(),
-        pane_id: agent.raw_pane_id,
-        filename: file.name || 'image',
-        mime: file.type || 'application/octet-stream',
-        data,
-      })) {
+        reject(dispatchedUnknownError('Attachment upload did not finish in time.'));
+      }, ATTACHMENT_UPLOAD_TIMEOUT_MS);
+      const abort = () => {
         clearTimeout(timer);
         this.pendingUploads.delete(requestId);
-        reject(new CommandError('Could not send image to relay.'));
+        cleanup();
+        const error = new CommandError('Attachment upload was interrupted.');
+        error.code = 'attachment_upload_interrupted';
+        reject(error);
+      };
+      signal?.addEventListener('abort', abort, { once: true });
+      this.pendingUploads.set(requestId, {
+        relayId,
+        responseType,
+        resolve: (result) => resolve(result as TResult),
+        reject,
+        timer,
+        cleanup,
+      });
+      if (!this.sendRaw(relayId, {
+        type,
+        protocol: RELAY_PROTOCOL_VERSION,
+        request_id: requestId,
+        client_id: pushClientId(),
+        ...(request as Record<string, unknown>),
+      })) {
+        clearTimeout(timer);
+        cleanup();
+        this.pendingUploads.delete(requestId);
+        reject(new CommandError('Could not send attachment upload request.'));
       }
     });
   }
 
   private handleUploadResult(relayId: string, message: Record<string, any>): void {
-    const pending = this.pendingUploads.get(String(message.request_id || ''));
-    if (!pending || pending.relayId !== relayId) return;
+    const requestId = String(message.request_id || '');
+    const pending = this.pendingUploads.get(requestId);
+    if (!pending || pending.relayId !== relayId || pending.responseType !== message.type) return;
     clearTimeout(pending.timer);
-    this.pendingUploads.delete(String(message.request_id));
-    if (!message.ok) pending.reject(new CommandError(message.error || 'Image upload failed.'));
-    else pending.resolve(String(message.path || pending.filename));
+    pending.cleanup?.();
+    this.pendingUploads.delete(requestId);
+    const apiError = parseApiError(message.error);
+    if (message.error !== undefined) {
+      const error = new CommandError(apiError?.code || 'Attachment upload failed.');
+      error.code = apiError?.code;
+      error.args = apiError?.args;
+      pending.reject(error);
+      return;
+    }
+    if (!message.result || typeof message.result !== 'object' || Array.isArray(message.result)) {
+      const error = new CommandError('Relay returned an invalid attachment upload result.');
+      error.code = 'attachment_invalid_response';
+      pending.reject(error);
+      return;
+    }
+    pending.resolve(message.result);
   }
 
   setPushStatus(relayId: string, status: string): void {
@@ -2045,6 +2573,7 @@ function applyPaneDelta(previous: string, value: unknown): string | null {
   return chunks.join('');
 }
 
+
 function commandRequestId(): string {
   if (crypto.randomUUID) return crypto.randomUUID();
   const bytes = new Uint8Array(16);
@@ -2067,13 +2596,12 @@ export function pushClientId(): string {
   return value;
 }
 
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('Image upload failed.'));
-    reader.readAsDataURL(file);
-  });
+function standardBase64Encode(bytes: Uint8Array): string {
+  let binary = '';
+  for (let offset = 0; offset < bytes.byteLength; offset += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+  }
+  return btoa(binary);
 }
 
 export const relayStore = new RelayStore();

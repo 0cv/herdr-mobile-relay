@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
@@ -11,6 +12,7 @@
   const connections = relayStore.connections;
   const workspaces = relayStore.workspaces;
   const agents = relayStore.agents;
+  let { readOnlyRelayIds = new Set<string>() }: { readOnlyRelayIds?: Set<string> } = $props();
 
   let relayId = $state('');
   let loadedRelay = '';
@@ -23,6 +25,8 @@
   let error = $state(false);
   let renamingId = $state('');
   let renameLabel = $state('');
+  let renameInput = $state<HTMLInputElement | null>(null);
+  let renameInvoker: HTMLElement | null = null;
   let worktreeWorkspaceId = $state('');
   let worktreeOpen = $state(false);
   let worktreeListing = $state<WorktreeListing | null>(null);
@@ -123,6 +127,9 @@
     }
   });
 
+  function isReadOnly(relay: string): boolean {
+    return readOnlyRelayIds.has(relay);
+  }
   function pathBase(path: string): string {
     return path.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).at(-1) || 'workspace';
   }
@@ -161,6 +168,7 @@
   }
 
   function openCreateWorkspace() {
+    if (isReadOnly(relayId)) return;
     label ||= pathBase(cwd);
     directoryOpen = false;
     createOpen = true;
@@ -173,7 +181,7 @@
 
   async function createWorkspace(event: SubmitEvent) {
     event.preventDefault();
-    if (!relayId || !cwd || !label.trim()) return;
+    if (!relayId || isReadOnly(relayId) || !cwd || !label.trim()) return;
     busy = true;
     try {
       await relayStore.createWorkspace(relayId, cwd, label.trim());
@@ -193,19 +201,31 @@
       busy = false;
     }
   }
-  function beginRename(workspace: RelayWorkspace) {
+  async function beginRename(workspace: RelayWorkspace, invoker: HTMLElement) {
+    renameInvoker = invoker;
     renamingId = workspace.workspace_id;
     renameLabel = workspace.label;
+    await tick();
+    renameInput?.focus();
+    renameInput?.select();
+  }
+
+  async function finishRename() {
+    const invoker = renameInvoker;
+    renamingId = '';
+    renameInvoker = null;
+    await tick();
+    invoker?.focus();
   }
 
   async function renameWorkspace(event: SubmitEvent, workspace: RelayWorkspace) {
     event.preventDefault();
-    if (!renameLabel.trim()) return;
+    if (isReadOnly(workspace.relay_id) || !renameLabel.trim()) return;
     busy = true;
     try {
       await relayStore.renameWorkspace(workspace, renameLabel.trim());
       setStatus(`Renamed workspace to ${renameLabel.trim()}.`);
-      renamingId = '';
+      await finishRename();
     } catch (caught) {
       setStatus((caught as Error).message, true);
     } finally {
@@ -232,7 +252,7 @@
     }
 
     function onPointerDown(event: PointerEvent) {
-      if (!event.isPrimary || event.button !== 0 || movingWorkspace) return;
+      if (!event.isPrimary || event.button !== 0 || movingWorkspace || isReadOnly(current.tree.workspace.relay_id)) return;
       if (event.target instanceof Element && event.target.closest('button, input, select, textarea, a') && !event.target.closest('.workspace-drag-handle')) return;
       pointerId = event.pointerId;
       startX = event.clientX;
@@ -365,7 +385,7 @@
   }
 
   function handleWorkspaceOrderKey(event: KeyboardEvent, tree: RelayWorkspaceTree) {
-    if (event.target !== event.currentTarget || !event.altKey || movingWorkspace) return;
+    if (event.target !== event.currentTarget || !event.altKey || movingWorkspace || isReadOnly(tree.workspace.relay_id)) return;
     const delta = event.key === 'ArrowUp' || event.key === 'ArrowLeft'
       ? -1
       : event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : 0;
@@ -377,6 +397,7 @@
   }
 
   async function commitWorkspaceReorder(tree: RelayWorkspaceTree, insertIdx: number) {
+    if (isReadOnly(tree.workspace.relay_id)) return;
     const sourceID = tree.workspace.workspace_id;
     const others = displayWorkspaceTrees.filter((item) => item.workspace.workspace_id !== sourceID);
     const beforeWorkspaceID = others[insertIdx]?.workspace.workspace_id || '';
@@ -407,6 +428,7 @@
   }
 
   function beginConfirm(kind: 'close' | 'remove', workspace: RelayWorkspace, force = false) {
+    if (isReadOnly(workspace.relay_id)) return;
     confirming = { kind, workspace, force };
     confirmOpen = true;
   }
@@ -417,7 +439,7 @@
   }
 
   async function confirmAction() {
-    if (!confirming) return;
+    if (!confirming || isReadOnly(confirming.workspace.relay_id)) return;
     const action = confirming;
     busy = true;
     try {
@@ -443,6 +465,7 @@
   }
 
   function startAgent(workspace: RelayWorkspace) {
+    if (isReadOnly(workspace.relay_id)) return;
     navigate({
       view: 'launch',
       relayId: workspace.relay_id,
@@ -496,7 +519,7 @@
   async function createWorktree(event: SubmitEvent) {
     event.preventDefault();
     const workspace = worktreeWorkspace;
-    if (!workspace || !branch.trim()) return;
+    if (!workspace || isReadOnly(workspace.relay_id) || !branch.trim()) return;
     busy = true;
     try {
       await relayStore.createWorktree(workspace, {
@@ -525,7 +548,7 @@
 
   async function openWorktree(path: string, labelValue: string) {
     const workspace = worktreeWorkspace;
-    if (!workspace) return;
+    if (!workspace || isReadOnly(workspace.relay_id)) return;
     busy = true;
     try {
       await relayStore.openWorktree(workspace, { path });
@@ -554,10 +577,10 @@
     {#if renamingId === workspace.workspace_id}
       <form class="form-stack" onsubmit={(event) => renameWorkspace(event, workspace)}>
         <label for={`workspace-rename-${workspace.workspace_id}`}>Workspace label</label>
-        <input id={`workspace-rename-${workspace.workspace_id}`} bind:value={renameLabel} maxlength="128" required autocomplete="off" />
+        <input bind:this={renameInput} id={`workspace-rename-${workspace.workspace_id}`} bind:value={renameLabel} maxlength="128" required autocomplete="off" />
         <div class="button-row">
-          <Button type="submit" disabled={busy || !renameLabel.trim()}>Save</Button>
-          <Button variant="ghost" disabled={busy} onclick={() => { renamingId = ''; }}>Cancel</Button>
+          <Button type="submit" disabled={busy || isReadOnly(workspace.relay_id) || !renameLabel.trim()}>Save</Button>
+          <Button variant="ghost" disabled={busy} onclick={finishRename}>Cancel</Button>
         </div>
       </form>
     {:else}
@@ -573,6 +596,7 @@
           <button
             class="workspace-drag-handle"
             type="button"
+            disabled={isReadOnly(workspace.relay_id)}
             aria-label={`Reorder ${workspace.label}`}
             aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
             title="Hold and drag to reorder; Alt+arrow keys also work."
@@ -589,8 +613,8 @@
         <p class="workspace-management-meta">{provenance}</p>
       {/if}
       <div class="workspace-management-actions">
-        <Button size="sm" disabled={busy || !(workspace.cwd || workspace.worktree?.checkout_path)} onclick={() => startAgent(workspace)}>Start Agent</Button>
-        <Button size="sm" variant="secondary" disabled={busy} onclick={() => beginRename(workspace)}>Rename</Button>
+        <Button size="sm" disabled={busy || isReadOnly(workspace.relay_id) || !(workspace.cwd || workspace.worktree?.checkout_path)} onclick={() => startAgent(workspace)}>Start Agent</Button>
+        <Button size="sm" variant="secondary" disabled={busy || isReadOnly(workspace.relay_id)} onclick={(event) => beginRename(workspace, event.currentTarget)}>Rename</Button>
         {#if !workspace.worktree?.is_linked_worktree}
           <Button
             size="sm"
@@ -600,12 +624,12 @@
             onclick={() => showWorktrees(workspace)}
           >Worktrees</Button>
         {/if}
-        <Button size="sm" variant="danger" disabled={busy} onclick={() => beginConfirm('close', workspace)}>Close</Button>
+        <Button size="sm" variant="danger" disabled={busy || isReadOnly(workspace.relay_id)} onclick={() => beginConfirm('close', workspace)}>Close</Button>
         {#if workspace.worktree?.is_linked_worktree}
           <Button
             size="sm"
             variant="danger"
-            disabled={busy || !worktreeManagementAvailable}
+            disabled={busy || isReadOnly(workspace.relay_id) || !worktreeManagementAvailable}
             title={worktreeManagementAvailable ? undefined : 'This relay does not support worktree management'}
             onclick={() => beginConfirm('remove', workspace)}
           >Remove Worktree</Button>
@@ -636,7 +660,7 @@
   <Card>
     <Button
       class="workspace-create-button"
-      disabled={!relayId || busy}
+      disabled={!relayId || isReadOnly(relayId) || busy}
       onclick={openCreateWorkspace}
     >Create Workspace</Button>
   </Card>
@@ -721,7 +745,7 @@
     <input id="workspace-label" bind:value={label} maxlength="128" required autocomplete="off" />
     <div class="button-row">
       <Button variant="ghost" disabled={busy} onclick={closeCreateWorkspace}>Cancel</Button>
-      <Button type="submit" disabled={busy || !relayId || !cwd || !label.trim()}>Confirm</Button>
+      <Button type="submit" disabled={busy || !relayId || isReadOnly(relayId) || !cwd || !label.trim()}>Confirm</Button>
     </div>
   </form>
 </AppDialog>
@@ -749,7 +773,7 @@
           {:else if worktree.is_bare || worktree.is_prunable}
             <span class="worktree-state">Unavailable</span>
           {:else}
-            <Button size="sm" variant="secondary" disabled={busy} onclick={() => openWorktree(worktree.path, worktree.branch || worktree.label)}>Open</Button>
+            <Button size="sm" variant="secondary" disabled={busy || isReadOnly(worktreeWorkspace.relay_id)} onclick={() => openWorktree(worktree.path, worktree.branch || worktree.label)}>Open</Button>
           {/if}
         </article>
       {/each}
@@ -764,7 +788,7 @@
       <input id="worktree-label" bind:value={worktreeLabel} maxlength="128" autocomplete="off" />
       <div class="button-row">
         <Button variant="ghost" disabled={busy} onclick={closeWorktrees}>Cancel</Button>
-        <Button type="submit" disabled={busy || !branch.trim()}>Confirm</Button>
+        <Button type="submit" disabled={busy || !worktreeWorkspace || isReadOnly(worktreeWorkspace.relay_id) || !branch.trim()}>Confirm</Button>
       </div>
     </form>
   {/if}
@@ -783,7 +807,7 @@
     : 'Every pane in this workspace will close. Git checkouts are not removed.'}
 >
   <div class="button-row">
-    <Button variant="danger" disabled={busy} onclick={confirmAction}>
+    <Button variant="danger" disabled={busy || !confirming || isReadOnly(confirming.workspace.relay_id)} onclick={confirmAction}>
       {confirming?.kind === 'remove' ? confirming.force ? 'Force Remove' : 'Remove Worktree' : 'Close Workspace'}
     </Button>
     <Button variant="ghost" disabled={busy} onclick={cancelConfirm}>Cancel</Button>

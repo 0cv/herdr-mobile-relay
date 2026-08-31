@@ -134,3 +134,28 @@ func TestGitInspectionHandlesUntrackedAndDeletedFiles(t *testing.T) {
 		t.Fatal("diff for a path outside Git status unexpectedly succeeded")
 	}
 }
+
+func TestGitStatusReportsConfiguredUpstreamDistance(t *testing.T) {
+	remote := t.TempDir()
+	runTestGit(t, remote, "init", "--quiet", "--bare")
+	root := t.TempDir()
+	runTestGit(t, root, "init", "--quiet")
+	writeTestFile(t, filepath.Join(root, "tracked.txt"), "first\n")
+	runTestGit(t, root, "add", "tracked.txt")
+	runTestGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "initial")
+	runTestGit(t, root, "remote", "add", "origin", remote)
+	runTestGit(t, root, "push", "--quiet", "--set-upstream", "origin", "HEAD")
+
+	status, err := GitStatusFor(context.Background(), root)
+	if err != nil || status.Ahead == nil || status.Behind == nil || *status.Ahead != 0 || *status.Behind != 0 {
+		t.Fatalf("initial upstream status = %#v, %v", status, err)
+	}
+
+	writeTestFile(t, filepath.Join(root, "tracked.txt"), "second\n")
+	runTestGit(t, root, "add", "tracked.txt")
+	runTestGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "ahead")
+	status, err = GitStatusFor(context.Background(), root)
+	if err != nil || status.Ahead == nil || status.Behind == nil || *status.Ahead != 1 || *status.Behind != 0 {
+		t.Fatalf("ahead upstream status = %#v, %v", status, err)
+	}
+}

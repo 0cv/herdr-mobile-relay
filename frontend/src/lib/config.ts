@@ -9,6 +9,7 @@ export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
 export const TERMINAL_HEIGHT_LEASE_KEY = 'herdr_terminal_height_lease';
+export const TERMINAL_WAKE_LOCK_KEY = 'herdr_terminal_wake_lock';
 export const HOME_LAYOUT_KEY = 'herdr_home_workspace_layout';
 export const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
 export const DEVICE_CREDENTIAL_KEY = 'herdr_device_unlock_credential';
@@ -38,7 +39,7 @@ export const THEME_TERMINAL_SCHEMES: Record<Theme, TerminalScheme> = {
 };
 export const INTERFACE_SIZES = ['compact', 'regular', 'large'] as const;
 export type InterfaceSize = (typeof INTERFACE_SIZES)[number];
-export const TERMINAL_HISTORY_OPTIONS = [100, 500, 1_000] as const;
+export const TERMINAL_HISTORY_OPTIONS = [100, 500, 1_000, 10_000] as const;
 export type TerminalHistoryLines = (typeof TERMINAL_HISTORY_OPTIONS)[number];
 export const TERMINAL_REFRESH_OPTIONS = [100, 250, 500, 1_000] as const;
 export type TerminalRefreshInterval = (typeof TERMINAL_REFRESH_OPTIONS)[number];
@@ -196,9 +197,35 @@ export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[]
 export function saveRelayConfigs(relays: RelayConfig[], storage: Storage = localStorage): void {
   storage.setItem(RELAYS_KEY, JSON.stringify(relays));
 }
+export interface QuickSetupInvitation {
+  id: string;
+  version: number;
+  secret: string;
+  expiresAt: number;
+}
+
+export function quickSetupInvitation(locationValue: Pick<Location, 'hash'>): QuickSetupInvitation | null {
+  const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
+  const id = params.get('invite') || '';
+  if (!id) return null;
+  const secret = params.get('setup') || '';
+  const version = Number(params.get('invite_version'));
+  const expiresAt = Number(params.get('invite_expires'));
+  if (
+    !/^[A-Za-z0-9_-]{16,128}$/.test(id)
+    || !/^[A-Za-z0-9_-]{43}$/.test(secret)
+    || !Number.isSafeInteger(version)
+    || version < 1
+    || !Number.isSafeInteger(expiresAt)
+    || expiresAt < 1
+  ) return null;
+  return { id, version, secret, expiresAt };
+}
+
 
 export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>): Omit<RelayConfig, 'id'> | null {
   const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
+  const invitation = quickSetupInvitation(locationValue);
   const token = params.get('setup') || '';
   if (token.length < 16 || token.length > 512) return null;
   if (!['http:', 'https:'].includes(locationValue.protocol)) return null;
@@ -212,7 +239,7 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
     // The separator stays literal; each entry is percent-encoded on its own.
     const gatewayUrls = gatewayOrigins(configuredGateways.split(','), locationValue.protocol);
     if (!gatewayUrls.length) return null;
-    return { label, url: '', token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls };
+    return { label, url: '', token: invitation ? '' : token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls };
   }
   const configuredRelay = params.get('relay');
   let url = `${locationValue.protocol === 'https:' ? 'wss:' : 'ws:'}//${locationValue.host}`;
@@ -221,7 +248,7 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
     if (!origin) return null;
     url = origin;
   }
-  return { label, url, token };
+  return { label, url, token: invitation ? '' : token };
 }
 
 export function shouldRetainSetupFragment(

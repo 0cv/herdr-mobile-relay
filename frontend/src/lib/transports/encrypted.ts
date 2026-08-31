@@ -2,9 +2,15 @@ import {
   createE2EEClientHandshake,
   type E2EECodec,
   type E2EEClientHandshake,
+  type E2EEClientHandshakeChallenge,
   type E2EESession,
   type E2EEWireFrame,
 } from '../e2ee';
+import type {
+  DeviceEnrollmentResult,
+  RelayDeviceCredential,
+  RelayInvitation,
+} from '../device-auth';
 import type {
   FrameChannel,
   FrameChannelFactory,
@@ -18,13 +24,29 @@ export const E2EE_HANDSHAKE_TIMEOUT_MS = 10_000;
 
 export interface EncryptedTransportOptions {
   kind: TransportKind;
-  /** Relay key. Empty enables the tokenless loopback development mode. */
+  /** Relay bootstrap/rendezvous key. Empty enables tokenless loopback development. */
   token: string;
+  /** Per-relay browser credential or one-use invitation used by E2EE v2. */
+  authentication?: RelayDeviceCredential | RelayInvitation;
+  /**
+   * Persists authenticated identity before the connection becomes visible.
+   * Invitation handlers must atomically replace the invitation with the issued
+   * credential here.
+   */
+  onAuthenticated?: (
+    authentication: RelayDeviceCredential | RelayInvitation,
+    enrollment: DeviceEnrollmentResult,
+  ) => void | Promise<void>;
   codec: E2EECodec;
   createChannel: FrameChannelFactory;
   handlers: TransportHandlers;
   handshakeTimeoutMs?: number;
 }
+
+export type TransportAuthentication = Pick<
+  EncryptedTransportOptions,
+  'authentication' | 'onAuthenticated'
+>;
 
 /**
  * Wraps a raw frame channel in the Herdr E2EE session and the JSON message
@@ -33,11 +55,19 @@ export interface EncryptedTransportOptions {
  * authorization model and replay protection are identical on all of them.
  */
 export function createEncryptedTransport(options: EncryptedTransportOptions): RelayTransport {
-  const { kind, token, codec, handlers } = options;
+  const {
+    kind,
+    token,
+    authentication,
+    codec,
+    handlers,
+  } = options;
+  const encrypted = Boolean(token || authentication);
   const handshakeTimeoutMs = options.handshakeTimeoutMs ?? E2EE_HANDSHAKE_TIMEOUT_MS;
 
   let channel: FrameChannel | null = null;
   let handshake: E2EEClientHandshake | null = null;
+  let challenge: E2EEClientHandshakeChallenge | null = null;
   let session: E2EESession | null = null;
   let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   let sendQueue: Promise<void> = Promise.resolve();
@@ -56,6 +86,7 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
     finished = true;
     ready = false;
     handshake = null;
+    challenge = null;
     session = null;
     clearHandshakeTimer();
     channel?.close();
@@ -72,7 +103,7 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
   function deliver(frame: E2EEWireFrame): void {
     // The tokenless loopback path runs no crypto, so it must stay synchronous:
     // the promise hop would only defer plaintext delivery by a microtask.
-    if (!token) {
+    if (!encrypted) {
       if (finished) return;
       let message: Record<string, any>;
       try {
@@ -86,13 +117,22 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
     receiveQueue = receiveQueue.then(async () => {
       if (finished) return;
       if (!session) {
+        if (challenge) {
+          if (!authentication) throw new Error('No device authentication is available for this relay.');
+          const completed = await challenge.complete(frame);
+          if (finished) return;
+          await options.onAuthenticated?.(authentication, completed.enrollment);
+          if (finished) return;
+          session = completed.session;
+          challenge = null;
+          markReady();
+          return;
+        }
         if (!handshake) throw new Error('Encrypted server hello arrived before the client hello.');
-        const completed = await handshake.complete(JSON.parse(String(frame)));
+        challenge = await handshake.complete(JSON.parse(String(frame)));
         if (finished) return;
-        session = completed.session;
         handshake = null;
-        channel?.sendFrame(completed.finish);
-        markReady();
+        channel?.sendFrame(challenge.finish);
         return;
       }
       const plaintext = await session.decrypt(frame);
@@ -114,14 +154,18 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
       channel = options.createChannel({
         onOpen(): void {
           if (finished) return;
-          if (!token) {
+          if (!encrypted) {
             markReady();
+            return;
+          }
+          if (!authentication) {
+            finish({ reason: 'Pair this browser before connecting to the relay' });
             return;
           }
           handshakeTimer = setTimeout(() => {
             finish({ reason: 'Encrypted relay handshake timed out' });
           }, handshakeTimeoutMs);
-          void createE2EEClientHandshake(token, undefined, codec).then((created) => {
+          void createE2EEClientHandshake(authentication, undefined, codec).then((created) => {
             if (finished) return;
             handshake = created;
             channel?.sendFrame(JSON.stringify(created.hello));
@@ -139,7 +183,7 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
     send(payload: Record<string, unknown>): boolean {
       if (!ready || finished || !channel) return false;
       const plaintext = JSON.stringify(payload);
-      if (!token) {
+      if (!encrypted) {
         channel.sendFrame(plaintext);
         return true;
       }
@@ -163,6 +207,7 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
       finished = true;
       ready = false;
       handshake = null;
+      challenge = null;
       session = null;
       clearHandshakeTimer();
       channel?.close();

@@ -1,5 +1,6 @@
 import type { RelayConfig } from '../types';
 import { createHybridTransport } from './path-manager';
+import type { TransportAuthentication } from './encrypted';
 import type { RelayTransport, TransportHandlers } from './types';
 import { createWebSocketTransport } from './websocket';
 
@@ -13,7 +14,7 @@ export type {
   TransportStatus,
   TransportStatusDetail,
 } from './types';
-export { createEncryptedTransport } from './encrypted';
+export { createEncryptedTransport, type TransportAuthentication } from './encrypted';
 export { createWebSocketTransport } from './websocket';
 export { createHybridTransport } from './path-manager';
 
@@ -26,7 +27,8 @@ export { createHybridTransport } from './path-manager';
 export function createRelayTransport(
   relay: RelayConfig,
   handlers: TransportHandlers,
+  authentication: TransportAuthentication = {},
 ): RelayTransport {
-  if (relay.transport === 'hybrid') return createHybridTransport(relay, handlers);
-  return createWebSocketTransport(relay, handlers);
+  if (relay.transport === 'hybrid') return createHybridTransport(relay, handlers, {}, authentication);
+  return createWebSocketTransport(relay, handlers, authentication);
 }

@@ -25,17 +25,16 @@
     agentStatusGroup,
     agentStatusTone,
     attentionKind,
-    approvalOptions,
     approvalPromptPreview,
     displayName,
     hostLabel,
   } from '$lib/agents';
-  import {
-    APP_VERSION,
-    HANDLED_NOTIFICATION_ACTIONS_KEY,
-  } from '$lib/config';
+  import { APP_VERSION } from '$lib/config';
   import { initializePreferences } from '$lib/preferences';
+  import { initializeLocalSpeech, stopLocalSpeech } from '$lib/local-speech';
   import { initializePush, notificationsEnabled, pushOptedIn, showPageNotification } from '$lib/push';
+  import { parsePushOpenTarget, RELAY_PROTOCOL_VERSION } from '$lib/protocol';
+  import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
   import {
     closeCurrentView,
     currentView,
@@ -75,14 +74,29 @@
   let lastBlocked = new Set<string>();
   let previousView = '';
   let terminalUnavailable = $state(false);
-  const handlingNotifications = new Set<string>();
+  const typedPushOpens = new Set<string>();
+  const typedPushTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
   const automaticUpdateChecks = new Set<string>();
   const awaitedDeployments = new Set<string>();
+  let visibilityRevision = $state(0);
+  let viewedRelayId = '';
+  let viewedTargetSignature = '';
 
   const activeAgent = $derived.by(() => {
     const view = $currentView;
     if (view.view !== 'terminal' && view.view !== 'history') return null;
-    return $agents.find((agent) => agent.pane_id === view.paneId) || null;
+    const agent = $agents.find((candidate) => candidate.pane_id === view.paneId) || null;
+    if (!agent || !view.target) return agent;
+    return targetRefMatchesAgent(view.target, agent) ? agent : null;
+  });
+  const activeReadOnly = $derived(Boolean(
+    activeAgent && relayStore.deviceCredential(activeAgent.relay_id)?.role === 'reader',
+  ));
+  const readOnlyRelayIds = $derived.by(() => {
+    void $connections;
+    return new Set($relays
+      .filter((relay) => relayStore.deviceCredential(relay.id)?.role === 'reader')
+      .map((relay) => relay.id));
   });
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
   const conversationHistoryAvailable = $derived(Boolean(
@@ -123,6 +137,7 @@
         : 'Settings');
   const headerTitle = $derived.by(() => {
     if ($currentView.view === 'settings') return 'Settings';
+    if ($currentView.view === 'push' || $currentView.view === 'push_unavailable') return 'Notification';
     if ($currentView.view === 'workspaces') return 'Workspaces';
     if ($currentView.view === 'launch') return 'Start Agent';
     if ($currentView.view === 'activity') return 'Activity';
@@ -160,6 +175,10 @@
             ? activeAgent.status || 'unknown'
             : group}`,
     };
+  });
+
+  $effect(() => {
+    if ($securityState.locked) stopLocalSpeech();
   });
 
   $effect(() => {
@@ -201,13 +220,13 @@
     if ($currentView.view !== 'notification') { clearNotificationFallback(); return; }
     const target = $currentView.target;
     const agent = resolveNotificationTarget(target, $agents);
-    // An action notification (the "Approve once" button) acts immediately and
-    // lands on the live thread — it is not a "review what happened" open.
+    // Legacy notifications never carry an immutable backend-verifiable action
+    // reference. Open their current thread read-only; never execute the action.
     if (target.action) {
-      if (!agent || !agent.event_id) return;
+      if (!agent) return;
       clearNotificationFallback();
-      replaceView({ view: 'terminal', paneId: agent.pane_id });
-      void executeNotificationAction(agent, target);
+      relayStore.showToast('Open the app to review this request. No notification action was taken.');
+      replaceView({ view: 'terminal', paneId: agent.pane_id, target: targetRefForAgent(agent) || undefined });
       return;
     }
     // A plain open shows the stored excerpt card. Activity history streams in on
@@ -227,14 +246,93 @@
     if (!notificationFallback) {
       notificationFallbackKey = key;
       const paneId = agent.pane_id;
+      const agentTarget = targetRefForAgent(agent) || undefined;
       notificationFallback = setTimeout(() => {
         notificationFallback = null;
         notificationFallbackKey = '';
-        if (get(currentView).view === 'notification') replaceView({ view: 'terminal', paneId });
+        if (get(currentView).view === 'notification') replaceView({ view: 'terminal', paneId, target: agentTarget });
       }, 1500);
     }
   });
 
+  $effect(() => {
+    if ($currentView.view !== 'push' || $securityState.locked) return;
+    const { eventRef, deviceId } = $currentView;
+    const matchingRelays = $relays.filter((relay) =>
+      relayStore.deviceCredential(relay.id)?.deviceId === deviceId,
+    );
+    if (matchingRelays.length !== 1) {
+      replaceView({ view: 'push_unavailable' });
+      return;
+    }
+    const relayId = matchingRelays[0].id;
+    const connection = $connections.get(relayId);
+    if (connection?.status !== 'connected' || connection.inventory.state !== 'ready') {
+      if (!typedPushTimeouts.has(eventRef)) {
+        typedPushTimeouts.set(eventRef, setTimeout(() => {
+          typedPushTimeouts.delete(eventRef);
+          const current = get(currentView);
+          if (current.view === 'push' && current.eventRef === eventRef) {
+            replaceView({ view: 'push_unavailable' });
+          }
+        }, 15_000));
+      }
+      return;
+    }
+    const timeout = typedPushTimeouts.get(eventRef);
+    if (timeout) clearTimeout(timeout);
+    typedPushTimeouts.delete(eventRef);
+    if (!connection.capabilities.includes('typed_push')) {
+      replaceView({ view: 'push_unavailable' });
+      return;
+    }
+    if (typedPushOpens.has(eventRef)) return;
+    typedPushOpens.add(eventRef);
+    void resolveTypedPushOpen(eventRef, relayId)
+      .finally(() => typedPushOpens.delete(eventRef));
+  });
+
+
+  $effect(() => {
+    void visibilityRevision;
+    const visible = document.visibilityState === 'visible' && document.hasFocus();
+    const target = $currentView.view === 'terminal' && activeAgent && !$securityState.locked
+      && activeAgent.server_session_id === 'primary'
+      && activeAgent.terminal_id
+      && Number.isSafeInteger(activeAgent.generation)
+      ? {
+          server_session_id: 'primary',
+          pane_id: activeAgent.raw_pane_id,
+          terminal_id: activeAgent.terminal_id,
+          generation: activeAgent.generation,
+        }
+      : null;
+    const relayId = visible && target && activeAgent
+      && $connections.get(activeAgent.relay_id)?.status === 'connected'
+      ? activeAgent.relay_id
+      : '';
+    const signature = relayId && target ? `${relayId}:${target.pane_id}:${target.terminal_id}:${target.generation}` : '';
+    if (signature === viewedTargetSignature) return;
+    if (viewedRelayId) {
+      relayStore.sendRaw(viewedRelayId, {
+        type: 'push_viewed_pane',
+        protocol: RELAY_PROTOCOL_VERSION,
+        visible: false,
+        unlocked: !$securityState.locked,
+      });
+    }
+    viewedRelayId = relayId;
+    viewedTargetSignature = signature;
+    if (relayId && target) {
+      relayStore.sendRaw(relayId, {
+        type: 'push_viewed_pane',
+        protocol: RELAY_PROTOCOL_VERSION,
+        visible: true,
+        unlocked: true,
+        target,
+      });
+    }
+  });
   $effect(() => {
     for (const [relayId, connection] of $connections) {
       if (connection.status !== 'connected' || !connection.capabilities.includes('self_update')) continue;
@@ -283,6 +381,7 @@
 
   onMount(() => {
     initializePreferences();
+    const stopSpeech = initializeLocalSpeech();
     initializePush();
     const stopUpdates = initializeAppUpdates();
     const stopSecurity = initializeDeviceSecurity();
@@ -291,23 +390,36 @@
       relayStore.importSetupLink(location, !$securityState.locked);
     };
     const serviceWorkerMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'herdr_notification_click' && event.data.url) routeNotificationUrl(event.data.url);
+      if ((event.data?.type === 'herdr_notification_click' || event.data?.type === 'herdr_push_open')
+        && event.data.url) routeNotificationUrl(event.data.url);
     };
+    const visibilityChanged = () => { visibilityRevision += 1; };
+    document.addEventListener('visibilitychange', visibilityChanged);
+    window.addEventListener('focus', visibilityChanged);
+    window.addEventListener('blur', visibilityChanged);
     window.addEventListener('hashchange', setupLinkNavigation);
     navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
     return () => {
       stopRouter();
+      stopSpeech();
       stopSecurity();
       stopUpdates();
       window.removeEventListener('hashchange', setupLinkNavigation);
       navigator.serviceWorker?.removeEventListener('message', serviceWorkerMessage);
+      document.removeEventListener('visibilitychange', visibilityChanged);
+      window.removeEventListener('focus', visibilityChanged);
+      window.removeEventListener('blur', visibilityChanged);
+      for (const timeout of typedPushTimeouts.values()) clearTimeout(timeout);
+      typedPushTimeouts.clear();
       relayStore.destroy();
     };
   });
 
   function openAgent(agent: Agent) {
-    void relayStore.acknowledgePane(agent);
-    navigate({ view: 'terminal', paneId: agent.pane_id });
+    if (relayStore.deviceCredential(agent.relay_id)?.role !== 'reader') {
+      void relayStore.acknowledgePane(agent);
+    }
+    navigate({ view: 'terminal', paneId: agent.pane_id, target: targetRefForAgent(agent) || undefined });
   }
 
   function toggle(view: 'settings' | 'launch' | 'activity' | 'workspaces') {
@@ -341,84 +453,48 @@
     return matches.length === 1 ? matches[0] : null;
   }
 
-  function handledNotificationActions(): string[] {
+  async function resolveTypedPushOpen(eventRef: string, relayId: string): Promise<void> {
     try {
-      const parsed = JSON.parse(localStorage.getItem(HANDLED_NOTIFICATION_ACTIONS_KEY) || '[]');
-      return Array.isArray(parsed) ? parsed.filter(Boolean).slice(-50) : [];
+      const result = await relayStore.sendCommand(relayId, { type: 'push_open_ref', event_ref: eventRef });
+      const target = parsePushOpenTarget(result.data?.target, relayId);
+      if (!target) throw new Error('Invalid notification target');
+      const findAgent = () => get(relayStore.agents).find(agent =>
+        agent.relay_id === relayId && targetRefMatchesAgent(target, agent),
+      );
+      let agent = findAgent();
+      const deadline = Date.now() + 5_000;
+      while (!agent && Date.now() < deadline) {
+        relayStore.requestAgents();
+        await new Promise(resolve => setTimeout(resolve, 100));
+        agent = findAgent();
+      }
+      const current = get(currentView);
+      if (current.view !== 'push' || current.eventRef !== eventRef) return;
+      if (!agent) {
+        replaceView({ view: 'push_unavailable' });
+        return;
+      }
+      replaceView({ view: 'terminal', paneId: agent.pane_id, target });
     } catch {
-      return [];
+      const current = get(currentView);
+      if (current.view === 'push' && current.eventRef === eventRef) {
+        replaceView({ view: 'push_unavailable' });
+      }
     }
   }
 
-  function notificationActionKey(target: NotificationTarget): string {
-    return `${target.notification_id || `${target.host}:${target.pane_id}`}:${target.action}`;
-  }
-
-  function rememberNotificationAction(target: NotificationTarget) {
-    const key = notificationActionKey(target);
-    const handled = handledNotificationActions().filter((value) => value !== key);
-    handled.push(key);
-    localStorage.setItem(HANDLED_NOTIFICATION_ACTIONS_KEY, JSON.stringify(handled.slice(-50)));
-  }
-
-  async function executeNotificationAction(agent: Agent, target: NotificationTarget) {
-    const key = notificationActionKey(target);
-    if (handlingNotifications.has(key)) return;
-    handlingNotifications.add(key);
-    try {
-      if (handledNotificationActions().includes(key)) {
-        relayStore.showToast('This notification action was already handled.');
-        return;
-      }
-      if (!agentNeedsResponse(agent)) {
-        rememberNotificationAction(target);
-        relayStore.showToast('The agent is no longer waiting for a response.');
-        return;
-      }
-      if (attentionKind(agent) !== 'approval') {
-        rememberNotificationAction(target);
-        relayStore.showToast('This request must be answered in the app.', true);
-        return;
-      }
-      if (!target.notification_id || target.notification_id !== agent.event_id) {
-        rememberNotificationAction(target);
-        relayStore.showToast('This notification belongs to an older approval request.', true);
-        return;
-      }
-      const options = approvalOptions(agent);
-      if (options.length < 2) {
-        rememberNotificationAction(target);
-        relayStore.showToast('Approval choices are no longer available.', true);
-        return;
-      }
-      const index = target.index ?? 0;
-      const total = target.total ?? options.length;
-      if (total !== options.length || index < 0 || index >= options.length) {
-        rememberNotificationAction(target);
-        relayStore.showToast('This notification belongs to an older approval request.', true);
-        return;
-      }
-      const approved = await relayStore.respond(agent, index, total, options[index], `Notification: ${target.action}`);
-      if (approved) rememberNotificationAction(target);
-    } finally {
-      handlingNotifications.delete(key);
-    }
-  }
 
   async function notifyBlockedAgent(agent: Agent) {
     if (!notificationsEnabled()) return;
     if (document.visibilityState === 'visible' && document.hasFocus()) return;
     const connection = $connections.get(agent.relay_id);
     if (pushOptedIn() && connection && ['sent', 'subscribed'].includes(connection.pushStatus)) return;
-    const options = approvalOptions(agent);
     const kind = attentionKind(agent);
-    const total = options.length;
     const target = {
       host: String(agent.host || hostLabel(agent)),
       pane_id: agent.raw_pane_id,
       notification_id: String(agent.event_id || `herdr-${hostLabel(agent)}-${agent.raw_pane_id}`),
     };
-    const approve = { ...target, action: 'approve', index: 0, total } as NotificationTarget;
     const open = { ...target, action: '', index: null, total: null } as NotificationTarget;
     const title = kind === 'approval'
       ? `${displayName(agent)} blocked`
@@ -436,12 +512,10 @@
       renotify: true,
       icon: 'icons/icon-192.png',
       badge: 'icons/notification-badge.png',
-      actions: kind === 'approval' && total >= 2 ? [{ action: 'approve', title: 'Approve once' }] : [],
+      actions: [],
       data: {
         url: viewUrl({ view: 'notification', target: open }),
-        action_urls: kind === 'approval' && total >= 2
-          ? { approve: viewUrl({ view: 'notification', target: approve }) }
-          : {},
+        action_urls: {},
       },
     });
   }
@@ -492,7 +566,7 @@
           aria-label="Conversation history"
           disabled={!conversationHistoryAvailable || !activeAgent}
           title={conversationHistoryAvailable ? 'Conversation history' : 'Conversation history is unavailable for this agent'}
-          onclick={() => { if (activeAgent) replaceView({ view: 'history', paneId: activeAgent.pane_id }); }}
+          onclick={() => { if (activeAgent) replaceView({ view: 'history', paneId: activeAgent.pane_id, target: targetRefForAgent(activeAgent) || undefined }); }}
         >
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
             <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"></path>
@@ -511,7 +585,7 @@
             <path d="M3 5.5h7l2 2h9v11H3z"></path>
           </svg>
         </Button>
-        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
+        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent || activeReadOnly} onclick={() => { manageOpen = true; }}>•••</Button>
       {:else if $currentView.view === 'history'}
         <Button
           variant="ghost"
@@ -519,7 +593,7 @@
           aria-label="Terminal view"
           title="Terminal view"
           disabled={!activeAgent}
-          onclick={() => { if (activeAgent) replaceView({ view: 'terminal', paneId: activeAgent.pane_id }); }}
+          onclick={() => { if (activeAgent) replaceView({ view: 'terminal', paneId: activeAgent.pane_id, target: targetRefForAgent(activeAgent) || undefined }); }}
         >
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
             <rect x="3" y="4" width="18" height="16" rx="2"></rect>
@@ -554,14 +628,15 @@
   </header>
 
   {#if $currentView.view === 'settings'}
-    <SettingsView />
+    <SettingsView {readOnlyRelayIds} />
   {:else if $currentView.view === 'workspaces'}
-    <WorkspaceManager />
+    <WorkspaceManager {readOnlyRelayIds} />
   {:else if $currentView.view === 'launch'}
     <LaunchView
       relayId={$currentView.relayId}
       workspaceId={$currentView.workspaceId}
       cwd={$currentView.cwd}
+      {readOnlyRelayIds}
     />
   {:else if $currentView.view === 'activity'}
     <ActivityView />
@@ -572,7 +647,7 @@
          the view: the reply draft, transcript, and scroll pin are all per-pane
          state and must never carry over to a different agent. -->
     {#key activeAgent.pane_id}
-      <ConversationHistory agent={activeAgent} />
+      <ConversationHistory agent={activeAgent} readOnly={activeReadOnly} />
     {/key}
   {:else if $currentView.view === 'history'}
     <main class="page terminal-loading" aria-label="Conversation history unavailable">
@@ -588,7 +663,7 @@
     {#key activeAgent.pane_id}
       <div class="terminal-layout">
         <AgentRail agents={$agents} active={activeAgent} onopen={openAgent} onjump={() => { jumpOpen = true; }} />
-        <TerminalView bind:this={terminalView} agent={activeAgent} allAgents={$agents} frame={$frames.get(activeAgent.pane_id)} responding={$responding} />
+        <TerminalView bind:this={terminalView} agent={activeAgent} allAgents={$agents} frame={$frames.get(activeAgent.pane_id)} responding={$responding} readOnly={activeReadOnly} />
       </div>
     {/key}
   {:else if $currentView.view === 'terminal'}
@@ -600,13 +675,22 @@
         <p role="status">Opening agent…</p>
       {/if}
     </main>
+  {:else if $currentView.view === 'push_unavailable'}
+    <main class="page terminal-loading" aria-label="Notification unavailable">
+      <p role="alert">This notification is stale, ambiguous, or no longer available. No action was taken.</p>
+      <Button onclick={() => replaceView({ view: 'agents' })}>Back to agents</Button>
+    </main>
+  {:else if $currentView.view === 'push'}
+    <main class="page terminal-loading" aria-label="Opening notification">
+      <p role="status">Unlocking and validating the exact notification target…</p>
+    </main>
   {:else}
     <AgentList bind:workspaceDisclosure agents={$agents} workspaces={$workspaces} relays={$relays} connections={$connections} responding={$responding} onopen={openAgent} />
   {/if}
 </div>
 
-<UpdateProgressDialog />
-<ManageDialog bind:open={manageOpen} agent={activeAgent} />
+<UpdateProgressDialog {readOnlyRelayIds} />
+<ManageDialog bind:open={manageOpen} agent={activeAgent} readOnly={activeReadOnly} />
 <GlobalJump bind:open={jumpOpen} agents={$agents} onselect={openAgent} />
 <WorkspaceInspector bind:open={workspaceOpen} agent={activeAgent} />
 <LockScreen />

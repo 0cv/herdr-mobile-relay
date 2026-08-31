@@ -292,6 +292,7 @@ func TestApprovalRetryAfterStatusChangeReturnsStoredPhase(t *testing.T) {
 	commitApproval(state, "pane-1")
 	eventID := blockedEventID(t, &Dispatcher{state: state}, "pane-1")
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 	updates := make(chan map[string]any, 1)
 	d.SetBroadcast(func(message any) {
 		if update, ok := message.(map[string]any); ok {
@@ -300,7 +301,8 @@ func TestApprovalRetryAfterStatusChangeReturnsStoredPhase(t *testing.T) {
 	})
 	message := map[string]any{
 		"action": "respond", "request_id": "approval-1", "pane_id": "pane-1",
-		"event_id": eventID, "index": float64(0), "total": float64(2),
+		"event_id": eventID, "approval_fingerprint": fingerprint, "choice": choice,
+		"index": float64(0), "total": float64(2),
 	}
 	first := d.Handle(context.Background(), message)
 	if !first.OK || first.Phase != "accepted" {

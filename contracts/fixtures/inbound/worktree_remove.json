@@ -1,7 +1,7 @@
 {
   "type": "worktree_remove",
   "request_id": "req-worktree-remove",
-  "protocol": 2,
+  "protocol": 3,
   "workspace_id": "w2",
   "force": false
 }

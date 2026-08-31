@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -133,8 +134,8 @@ func (c *Config) validate() error {
 	if c.Token == "" && c.Host != "127.0.0.1" && c.Host != "::1" && c.Host != "localhost" {
 		return fmt.Errorf("refusing to bind tokenless relay to non-loopback address %s", c.Host)
 	}
-	if c.Token != "" && len(c.Token) < 16 {
-		return fmt.Errorf("relay key must be at least 16 bytes")
+	if c.Token != "" && len(c.Token) != 32 {
+		return errors.New("relay key must be exactly 32 bytes")
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("invalid port %d", c.Port)

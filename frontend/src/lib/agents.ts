@@ -195,6 +195,7 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
       attention_capable: capable,
       attention_kind: undefined,
       options: undefined,
+      approval_fingerprint: undefined,
       interaction: null,
       question_layout: false,
     };
@@ -205,7 +206,10 @@ export function normalizeAgentAttention(agent: Agent, capable: boolean): Agent {
     attention_capable: capable,
     attention_kind: kind,
   };
-  if (kind !== 'approval') next.options = undefined;
+  if (kind !== 'approval') {
+    next.options = undefined;
+    next.approval_fingerprint = undefined;
+  }
   if (kind !== 'question') {
     next.interaction = null;
     next.question_layout = false;
@@ -222,6 +226,7 @@ function retainBlockedDetails(previous: Agent, next: Agent): Agent {
     prompt: previous.prompt,
     command: previous.command,
     options: previous.options,
+    approval_fingerprint: previous.approval_fingerprint,
     interaction: previous.interaction,
     question_layout: previous.question_layout,
   };

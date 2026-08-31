@@ -2,6 +2,6 @@
   "type": "command",
   "action": "acknowledge_pane",
   "request_id": "req-006",
-  "protocol": 2,
+  "protocol": 3,
   "pane_id": "pane-1"
 }

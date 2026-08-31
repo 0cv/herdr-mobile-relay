@@ -157,7 +157,7 @@ describe('settings relay status', () => {
     // The configured head was skipped, so the list order is not the answer to
     // "which gateway am I on": the live session names itself.
     report('connected', { path: 'gateway', gatewayUrl: 'wss://community-a.example.test' });
-    deliver({ type: 'push_config', protocol: 2, capabilities: [], agent_profiles: [] });
+    deliver({ type: 'push_config', protocol: 3, capabilities: [], agent_profiles: [] });
 
     expect(await screen.findByText('Connection: gateway community-a.example.test')).toBeInTheDocument();
 
@@ -179,7 +179,7 @@ describe('settings relay status', () => {
     socket.open();
     socket.server({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '0.15.0',
       capabilities: [],
       agent_profiles: [],
@@ -201,7 +201,7 @@ describe('settings relay status', () => {
     expect(await screen.findByText('Gateway: 0.15.0 · Latest: 0.16.0')).toBeInTheDocument();
     socket.server({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '0.17.0',
       capabilities: [],
       agent_profiles: [],
@@ -223,7 +223,7 @@ describe('settings relay status', () => {
     socket.open();
     socket.server({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '0.6.0',
       capabilities: [],
       agent_profiles: [],
@@ -247,7 +247,7 @@ describe('settings relay status', () => {
     socket.open();
     socket.server({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '0.13.2',
       capabilities: ['self_update', 'app_deploy'],
       agent_profiles: [],
@@ -345,21 +345,18 @@ describe('settings relay status', () => {
     expect(screen.getByText(/Resize Session automatically leases/)).toBeInTheDocument();
   });
 
-  it('enables the finished-agent switch immediately after push is enabled', async () => {
+  it('updates push delivery controls immediately after enabling notifications', async () => {
     const user = userEvent.setup();
     localStorage.setItem(PUSH_ENABLED_KEY, 'false');
     render(SettingsView);
     const socket = MockWebSocket.instances[0];
     socket.open();
     await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
-    socket.server({ type: 'push_config', protocol: 2, version: 'abc1234', vapid_public_key: 'test-key' });
-    const finished = screen.getByRole('switch', { name: 'Notify When Agents Finish' });
+    socket.server({ type: 'push_config', protocol: 3, version: 'abc1234', vapid_public_key: 'test-key' });
 
-    expect(finished).toHaveAttribute('type', 'checkbox');
-    expect(finished).toBeDisabled();
     await user.click(await screen.findByRole('button', { name: 'Enable Push Notifications' }));
 
-    await waitFor(() => expect(finished).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop Push Notifications' })).toBeEnabled());
   });
 
   it('confirms an available relay update before sending the exact target', async () => {
@@ -369,7 +366,7 @@ describe('settings relay status', () => {
     socket.open();
     socket.server({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '0.7.0',
       revision: 'abc123',
       capabilities: ['self_update'],
@@ -424,7 +421,7 @@ describe('settings relay status', () => {
     socket.open();
     socket.server({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '9.0.0',
       revision: 'abc123',
       capabilities: ['self_update', 'app_deploy'],
@@ -503,7 +500,7 @@ describe('settings relay status', () => {
     socket.open();
     socket.server({
       type: 'push_config',
-      protocol: 2,
+      protocol: 3,
       release_version: '8.0.0',
       revision: 'abc123',
       capabilities: ['self_update', 'app_deploy'],

@@ -741,7 +741,7 @@ describe('hybrid path manager', () => {
     expect(transport.send({ type: 'refresh_agents' })).toBe(true);
     expect(gateways[0].sent.at(-1)).toMatchObject({ type: 'refresh_agents' });
 
-    directs[0].handlers.onMessage({ type: 'push_config', protocol: 2 });
+    directs[0].handlers.onMessage({ type: 'push_config', protocol: 3 });
     expect(statuses.filter((event) => event.status === 'connected')).toHaveLength(2);
     // The direct path keeps naming the gateway that signalled it: the phone
     // still depends on that candidate to rebuild the session.
@@ -769,7 +769,7 @@ describe('hybrid path manager', () => {
     transport.connect();
     gateways[0].handlers.onStatus('connected');
     directs[0].handlers.onStatus('connected');
-    directs[0].handlers.onMessage({ type: 'push_config', protocol: 2 });
+    directs[0].handlers.onMessage({ type: 'push_config', protocol: 3 });
     vi.advanceTimersByTime(DIRECT_STABILITY_MS);
     expect(gateways[0].closed).toBe(true);
 
@@ -813,7 +813,7 @@ describe('hybrid path manager', () => {
     transport.connect();
     gateways[0].handlers.onStatus('connected');
     directs[0].handlers.onStatus('connected');
-    directs[0].handlers.onMessage({ type: 'push_config', protocol: 2 });
+    directs[0].handlers.onMessage({ type: 'push_config', protocol: 3 });
     vi.advanceTimersByTime(DIRECT_STABILITY_MS);
     directs[0].handlers.onStatus('closed', { reason: 'The direct connection closed.' });
 

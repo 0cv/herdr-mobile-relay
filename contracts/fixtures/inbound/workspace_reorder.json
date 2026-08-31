@@ -1,7 +1,7 @@
 {
   "type": "workspace_reorder",
   "request_id": "req-workspace-reorder",
-  "protocol": 2,
+  "protocol": 3,
   "workspace_ids": ["w1", "w2"],
   "before_workspace_id": "w5"
 }

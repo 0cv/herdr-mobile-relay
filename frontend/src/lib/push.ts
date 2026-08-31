@@ -9,6 +9,7 @@ import {
 } from './config';
 import { relayProtocolError } from './protocol';
 import { pushClientId, relayStore } from './store';
+import type { DevicePushPolicy, PushTestRequest } from './push-policy';
 
 let rootRegistration: ServiceWorkerRegistration | null = null;
 const relayRegistrations = new Map<string, ServiceWorkerRegistration>();
@@ -17,6 +18,53 @@ export interface PushPreferences {
   notificationsEnabled: boolean;
   optedIn: boolean;
   finished: boolean;
+}
+
+export interface PushSubscribePayload extends Record<string, unknown> {
+  type: 'push_subscribe';
+  protocol: number;
+  subscription: PushSubscriptionJSON;
+  client_id: string;
+  replace_endpoints: string[];
+  notify_finished: boolean;
+  user_agent: string;
+}
+
+export interface PushUnsubscribePayload extends Record<string, unknown> {
+  type: 'push_unsubscribe';
+  protocol: number;
+  client_id: string;
+  endpoints: string[];
+}
+
+export interface PushPolicyPayload extends Record<string, unknown> {
+  type: 'push_policy_set';
+  protocol: number;
+  policy: Pick<DevicePushPolicy,
+    'categories' | 'settle_ms' | 'cooldown_ms' | 'snooze_until' | 'snoozed' | 'update_once'>;
+}
+
+export interface PushTargetedTestPayload extends Record<string, unknown> {
+  type: 'push_test_device';
+  protocol: number;
+}
+
+export type PushOutboundPayload =
+  | PushSubscribePayload
+  | PushUnsubscribePayload
+  | PushPolicyPayload
+  | PushTargetedTestPayload;
+
+export interface PushMessageCallbacks {
+  send(relayId: string, payload: PushOutboundPayload): boolean;
+}
+
+let messageCallbacks: PushMessageCallbacks = {
+  send: (relayId, payload) => relayStore.sendRaw(relayId, payload),
+};
+
+export function setPushMessageCallbacks(callbacks: PushMessageCallbacks): void {
+  messageCallbacks = callbacks;
 }
 
 export function notificationsSupported(): boolean {
@@ -164,7 +212,7 @@ export async function registerPushSubscription(relayId: string): Promise<boolean
     const legacy = await legacyPushEndpoint();
     if (legacy) replaced.push(legacy);
     localStorage.setItem(relayVapidStorageKey(relayId), connection.vapidPublicKey);
-    if (!relayStore.sendRaw(relayId, {
+    const payload: PushSubscribePayload = {
       type: 'push_subscribe',
       protocol: APP_PROTOCOL_VERSION,
       subscription: subscription.toJSON(),
@@ -172,7 +220,10 @@ export async function registerPushSubscription(relayId: string): Promise<boolean
       replace_endpoints: [...new Set(replaced)],
       notify_finished: finishedNotificationsEnabled(),
       user_agent: navigator.userAgent,
-    })) throw new Error('Relay disconnected before push subscription sync');
+    };
+    if (!messageCallbacks.send(relayId, payload)) {
+      throw new Error('Relay disconnected before push subscription sync');
+    }
     relayStore.setPushStatus(relayId, 'sent');
     return true;
   } catch {
@@ -222,12 +273,13 @@ async function unsubscribePushSubscription(relayId: string): Promise<boolean> {
     // Relay-side cleanup still proceeds for any endpoint we could collect.
   }
   if (connection?.status === 'connected' && !relayProtocolError(connection)) {
-    relayStore.sendRaw(relayId, {
+    const payload: PushUnsubscribePayload = {
       type: 'push_unsubscribe',
       protocol: APP_PROTOCOL_VERSION,
       client_id: `${pushClientId()}:${relayId}`,
       endpoints: [...new Set(endpoints)],
-    });
+    };
+    messageCallbacks.send(relayId, payload);
   }
   localStorage.removeItem(relayVapidStorageKey(relayId));
   relayStore.setPushStatus(relayId, '');
@@ -280,9 +332,7 @@ export async function stopPushNotifications(): Promise<void> {
 }
 
 export async function toggleNotifications(): Promise<void> {
-  const connected = [...get(relayStore.connections).values()].filter((connection) => connection.status === 'connected');
-  const allSynced = connected.length > 0 && connected.every((connection) => connection.pushStatus === 'subscribed');
-  if (allSynced) await stopPushNotifications();
+  if (pushOptedIn()) await stopPushNotifications();
   else await enableNotifications();
 }
 
@@ -296,6 +346,40 @@ export async function setFinishedNotifications(enabled: boolean): Promise<void> 
   } finally {
     relayStore.notificationBusy.set(false);
   }
+}
+
+export async function sendPushPolicy(relayId: string, policy: DevicePushPolicy): Promise<void> {
+  if (!relayId || !policy.device_id) throw new Error('A connected device is required');
+  const {
+    categories,
+    settle_ms,
+    cooldown_ms,
+    snooze_until,
+    snoozed,
+    update_once,
+  } = policy;
+  await relayStore.sendCommand(relayId, {
+    type: 'push_policy_set',
+    policy: {
+      categories,
+      settle_ms,
+      cooldown_ms,
+      snoozed,
+      update_once,
+      ...(snooze_until ? { snooze_until } : {}),
+    },
+  });
+}
+
+export function sendTargetedPushTest(request: PushTestRequest): boolean {
+  if (!request.relay_id) return false;
+  relayStore.beginPushTest(request.relay_id);
+  const sent = messageCallbacks.send(request.relay_id, {
+    type: 'push_test_device',
+    protocol: APP_PROTOCOL_VERSION,
+  });
+  if (!sent) relayStore.rejectPushTest(request.relay_id, 'disconnected');
+  return sent;
 }
 
 export function initializePush(): void {

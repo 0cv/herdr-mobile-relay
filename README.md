@@ -60,12 +60,16 @@ paths.
 - Create, rename, reorder, and close workspaces; create, open, and safely remove
   Git worktrees without stealing desktop focus.
 - Start, rename, clear, and stop agents; send prompts, terminal keys, slash
-  commands, screenshots, and photos.
-- Answer verified approvals and structured plan questions from Codex, Claude
-  Code, Qoder, OpenCode, Oh My Pi, and Pi.
-- Read and reply from searchable native conversation history, and inspect
-  workspace files, images, and Git diffs read-only.
-- Receive blocked-agent notifications, with completion notifications optional.
+  commands, screenshots, photos, text, Markdown, PDF, JSON, CSV, and common
+  office documents in cancellable batches.
+- Answer content-bound approvals and structured plan questions from Codex,
+  Claude Code, Qoder, OpenCode, Oh My Pi, and Pi.
+- Read and reply from searchable native conversation history, inspect validated
+  Oh My Pi plans, and inspect workspace files, images, and Git diffs read-only.
+- Pair named controller or reader devices, and configure durable notification
+  categories, settle delay, cooldown, snooze, and tests per relay and device.
+- Optionally keep the screen awake in a visible terminal or read responses
+  through an explicitly selected browser-local speech voice.
 
 **[Full feature tour →](docs/mobile-app.md)**
 
@@ -203,8 +207,10 @@ Prompts, terminal output, uploads, and push details are encrypted end to end
 between the phone and the relay. Whatever carries the traffic — a Cloudflare
 tunnel or a gateway — observes connection metadata only, never plaintext; on the
 direct path no application data reaches it at all, though a gateway still
-answers address discovery. The relay exposes no write action to the workspace
-inspector, and the app can require device verification before it reconnects.
+answers address discovery. Paired credentials distinguish controller and
+reader devices, mutations default to controller-only, attachment references
+are bound to an exact terminal generation, and the app can require device
+verification before it reconnects.
 [Details →](docs/security.md)
 
 ## License

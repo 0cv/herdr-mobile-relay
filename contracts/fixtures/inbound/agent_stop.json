@@ -1,6 +1,6 @@
 {
   "type": "agent_stop",
-  "protocol": 2,
+  "protocol": 3,
   "request_id": "req-stop",
   "pane_id": "pane-1"
 }

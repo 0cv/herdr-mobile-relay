@@ -105,7 +105,7 @@ export default defineConfig({
     target: 'es2022',
   },
   define: {
-    __APP_PROTOCOL_VERSION__: '2',
+    __APP_PROTOCOL_VERSION__: '3',
     __APP_VERSION__: JSON.stringify(productVersion),
     __APP_ASSET_VERSION__: JSON.stringify(versions.assets),
     __SERVICE_WORKER_URL__: JSON.stringify(`sw.js?v=${versions.serviceWorker}`),

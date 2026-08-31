@@ -264,6 +264,7 @@ func newGatewayHarnessWithBackoff(t *testing.T, maxClients int, backoffBase time
 	}
 
 	hub := NewHub(&config.Config{Token: gatewayTestRelayKey}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hub.SetE2EEAuthResolver(fixedE2EEAuthResolver{secret: []byte(gatewayTestRelayKey)})
 	harness := &gatewayHarness{
 		hub:           hub,
 		relayID:       relayID,
@@ -412,14 +413,19 @@ func (p *gatewayTestPhone) handshake(t *testing.T, token string) {
 	if _, err := rand.Read(clientNonce); err != nil {
 		t.Fatal(err)
 	}
+	selector := E2EEAuthSelector{Kind: E2EEAuthCredential, ID: "credential-test", Version: 7}
+	binding := e2eeAuthBinding(selector)
 	clientPublic := privateKey.PublicKey().Bytes()
 	hello, err := json.Marshal(e2eeClientHello{
-		Type:      "e2ee_client_hello",
-		Version:   e2eeVersion,
-		Nonce:     base64.RawURLEncoding.EncodeToString(clientNonce),
-		PublicKey: base64.RawURLEncoding.EncodeToString(clientPublic),
+		Type:        "e2ee_client_hello",
+		Version:     e2eeVersion,
+		AuthKind:    selector.Kind,
+		AuthID:      selector.ID,
+		AuthVersion: selector.Version,
+		Nonce:       base64.RawURLEncoding.EncodeToString(clientNonce),
+		PublicKey:   base64.RawURLEncoding.EncodeToString(clientPublic),
 		Proof: base64.RawURLEncoding.EncodeToString(
-			e2eeAuthTag(token, e2eeClientProofLabel, clientNonce, clientPublic)),
+			e2eeAuthTag([]byte(token), e2eeClientProofLabel, binding, clientNonce, clientPublic)),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -443,8 +449,8 @@ func (p *gatewayTestPhone) handshake(t *testing.T, token string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transcript := e2eeTranscript(clientNonce, clientPublic, serverNonce, serverPublicBytes)
-	if !hmac.Equal(serverProof, e2eeAuthTag(token, e2eeServerProofLabel, transcript)) {
+	transcript := e2eeTranscript(binding, clientNonce, clientPublic, serverNonce, serverPublicBytes)
+	if !hmac.Equal(serverProof, e2eeAuthTag([]byte(token), e2eeServerProofLabel, transcript)) {
 		t.Fatal("server proof did not authenticate over the gateway path")
 	}
 	serverPublic, err := curve.NewPublicKey(serverPublicBytes)
@@ -455,12 +461,12 @@ func (p *gatewayTestPhone) handshake(t *testing.T, token string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	keySalt := e2eeAuthTag(token, e2eeKeySaltLabel, transcript)
-	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v1 c2s", 32)
+	keySalt := e2eeAuthTag([]byte(token), e2eeKeySaltLabel, transcript)
+	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 c2s", 32)
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v1 s2c", 32)
+	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 s2c", 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,6 +486,17 @@ func (p *gatewayTestPhone) handshake(t *testing.T, token string) {
 		t.Fatal(err)
 	}
 	p.send(t, sealed)
+	serverFinish, err := session.open(p.readFrame(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var identity e2eeServerFinish
+	if err := json.Unmarshal(serverFinish, &identity); err != nil {
+		t.Fatal(err)
+	}
+	if identity.DeviceID != "device-test" || identity.CredentialID != selector.ID {
+		t.Fatalf("server finish = %#v", identity)
+	}
 }
 
 func (p *gatewayTestPhone) sendMessage(t *testing.T, plaintext string) {

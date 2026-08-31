@@ -1,14 +1,26 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import AttachmentProgress from '$components/AttachmentProgress.svelte';
   import ConversationMessage from '$components/ConversationMessage.svelte';
+  import OmoPlan from '$components/OmoPlan.svelte';
   import Button from '$components/ui/Button.svelte';
   import { agentNeedsInspection, agentNeedsResponse, displayName } from '$lib/agents';
   import { conversationEntries } from '$lib/conversation';
+  import {
+    localSpeechEnabled,
+    localSpeechState,
+    selectedLocalVoice,
+    speakLocal,
+    stopLocalSpeech,
+  } from '$lib/local-speech';
+  import { fencedCodeText } from '$lib/markdown';
+  import { securityState } from '$lib/security';
   import { clearPromptDraft, loadPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
   import { relayStore } from '$lib/store';
-  import type { Agent, ConversationEntry } from '$lib/types';
+  import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
+  import type { Agent, ConversationEntry, OmoTodoState } from '$lib/types';
 
-  let { agent }: { agent: Agent } = $props();
+  let { agent, readOnly = false }: { agent: Agent; readOnly?: boolean } = $props();
 
   let entries = $state<ConversationEntry[]>([]);
   let available = $state(true);
@@ -16,6 +28,7 @@
   let hasMore = $state(false);
   let total = $state(0);
   let fileTruncated = $state(false);
+  let omoPlan = $state<OmoTodoState | null>(null);
   let loading = $state(true);
   let loadingOlder = $state(false);
   let error = $state('');
@@ -27,9 +40,13 @@
   let fileInput = $state<HTMLInputElement>(null!);
   let composer = $state(untrack(() => loadPromptDraft(agent)));
   let sendingPrompt = $state(false);
-  let uploadingImage = $state(false);
+  let uploadingAttachment = $state(false);
   let uploadStatus = $state('');
   let uploadError = $state(false);
+  let attachmentController = $state<AttachmentBatchController | null>(null);
+  let attachmentSnapshot = $state<AttachmentBatchSnapshot | null>(null);
+  let attachmentUnsubscribe: (() => void) | null = null;
+  let attachmentCancelRequested = false;
   /**
    * Whether the view follows the end of the transcript. It starts pinned so
    * opening a session lands on the newest turn, and only the reader scrolling
@@ -39,12 +56,14 @@
   let mounted = false;
 
   const modeEntries = $derived(mode === 'conversation' ? conversationEntries(entries) : entries);
-  const inputLocked = $derived(agentNeedsResponse(agent) || agentNeedsInspection(agent));
-  const inputPlaceholder = $derived(agentNeedsResponse(agent)
-    ? 'Needs response — switch to Terminal'
-    : agentNeedsInspection(agent)
-      ? 'Needs inspection — switch to Terminal'
-      : 'Type a reply…');
+  const inputLocked = $derived(readOnly || agentNeedsResponse(agent) || agentNeedsInspection(agent));
+  const inputPlaceholder = $derived(readOnly
+    ? 'Reader access is read only'
+    : agentNeedsResponse(agent)
+      ? 'Needs response — switch to Terminal'
+      : agentNeedsInspection(agent)
+        ? 'Needs inspection — switch to Terminal'
+        : 'Type a reply…');
   const visibleEntries = $derived.by(() => {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return modeEntries;
@@ -121,6 +140,7 @@
       hasMore = entries.length ? hasMore : page.hasMore;
       total = page.total;
       fileTruncated = page.fileTruncated;
+      omoPlan = page.omoPlan || null;
       error = '';
       if (page.available) entries = mergeEntries(entries, page.entries);
     } catch (failure) {
@@ -142,16 +162,23 @@
       hasMore = page.hasMore;
       total = page.total;
       fileTruncated = page.fileTruncated;
+      if (page.omoPlan) omoPlan = page.omoPlan;
       error = '';
       entries = mergeEntries(page.entries, entries);
       await tick();
       if (listElement) listElement.scrollTop = previousTop + listElement.scrollHeight - previousHeight;
     } catch (failure) {
+
       if (mounted) error = failure instanceof Error ? failure.message : 'Older turns could not be loaded.';
     } finally {
       if (mounted) loadingOlder = false;
     }
   }
+  function toggleSpeech(text: string): void {
+    if ($localSpeechState === 'speaking') stopLocalSpeech();
+    else speakLocal(text);
+  }
+
 
   function mergeEntries(first: ConversationEntry[], second: ConversationEntry[]): ConversationEntry[] {
     const merged: ConversationEntry[] = [];
@@ -191,6 +218,19 @@
       relayStore.showToast('Could not copy. Select it manually.', true);
     }
   }
+  async function copyCode(code: string) {
+    if ($securityState.locked || !navigator.clipboard?.writeText) {
+      relayStore.showToast('Clipboard access is unavailable while the app is locked.', true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(code);
+      relayStore.showToast('Code copied.');
+    } catch {
+      relayStore.showToast('Could not copy. Select it manually.', true);
+    }
+  }
+
 
   function resizeComposer() {
     if (!composerElement) return;
@@ -223,7 +263,7 @@
   async function sendPrompt() {
     const submittedDraft = composer;
     const text = submittedDraft.replace(/[\r\n]+$/g, '');
-    if (!text || inputLocked || sendingPrompt || uploadingImage) return;
+    if (!text || inputLocked || sendingPrompt || uploadingAttachment) return;
     sendingPrompt = true;
     composer = '';
     clearPromptDraft(agent);
@@ -252,28 +292,101 @@
     }
   }
 
+  function appendUploadedAttachments(attachments: AttachmentRef[]): void {
+    const rejected = attachmentSnapshot?.items.filter((item) => item.state === 'rejected') || [];
+    if (!attachments.length) {
+      uploadStatus = attachmentCancelRequested
+        ? 'Attachment upload canceled.'
+        : rejected.length
+          ? 'No selected attachments passed validation.'
+          : 'No attachments were uploaded.';
+      uploadError = !attachmentCancelRequested;
+      return;
+    }
+    const prefix = composer && !composer.endsWith('\n') ? '\n' : '';
+    composer += `${prefix}${attachments.map((attachment) => `Attachment: ${attachment.ref}`).join('\n')}\n`;
+    uploadStatus = `Attached ${attachments.map((attachment) => attachment.name).join(', ')}${rejected.length ? `; ${rejected.length} rejected` : ''}`;
+    uploadError = rejected.length > 0;
+    if (!rejected.length) attachmentSnapshot = null;
+  }
+
+  function releaseAttachmentController(controller: AttachmentBatchController, force = false): void {
+    if (!force && attachmentSnapshot?.items.some((item) => item.state === 'interrupted')) return;
+    attachmentUnsubscribe?.();
+    attachmentUnsubscribe = null;
+    if (attachmentController === controller) attachmentController = null;
+  }
+
   async function filesSelected(files: FileList | File[]) {
-    const images = [...files].filter((item) => item.type.startsWith('image/'));
-    if (!images.length || inputLocked || sendingPrompt || uploadingImage) return;
-    uploadingImage = true;
+    const selected = [...files];
+    if (!selected.length || inputLocked || sendingPrompt || uploadingAttachment) return;
+    uploadingAttachment = true;
+    uploadStatus = `Uploading ${selected.length} attachment${selected.length === 1 ? '' : 's'}…`;
+    uploadError = false;
+    attachmentCancelRequested = false;
+    let controller: AttachmentBatchController | null = null;
     try {
-      for (const file of images) {
-        uploadStatus = `Uploading ${file.name || 'image'}…`;
-        uploadError = false;
-        try {
-          const path = await relayStore.uploadImage(agent, file);
-          const prefix = composer && !composer.endsWith('\n') ? '\n' : '';
-          composer += `${prefix}Image: ${path}\n`;
-          uploadStatus = `Image attached: ${path.split(/[\\/]/).pop() || 'image'}`;
-        } catch (failure) {
-          uploadStatus = failure instanceof Error ? failure.message : 'Image could not be uploaded.';
-          uploadError = true;
-        }
-      }
+      controller = relayStore.attachmentController(agent);
+      attachmentController = controller;
+      attachmentUnsubscribe?.();
+      attachmentUnsubscribe = controller.subscribe((snapshot) => {
+        attachmentSnapshot = snapshot;
+      });
+      controller.select(selected);
+      const attachments = await controller.upload();
+      appendUploadedAttachments(attachments);
+    } catch (failure) {
+      uploadStatus = attachmentCancelRequested
+        ? 'Attachment upload canceled.'
+        : failure instanceof Error && failure.message
+          ? failure.message
+          : 'Attachments could not be uploaded.';
+      uploadError = !attachmentCancelRequested;
     } finally {
-      uploadingImage = false;
+      uploadingAttachment = false;
+      if (controller) releaseAttachmentController(controller);
     }
   }
+  async function restartAttachmentUpload(): Promise<void> {
+    const controller = attachmentController;
+    if (!controller || uploadingAttachment) return;
+    uploadingAttachment = true;
+    uploadStatus = 'Restarting interrupted files from the beginning…';
+    uploadError = false;
+    attachmentCancelRequested = false;
+    try {
+      appendUploadedAttachments(await controller.restart());
+    } catch (failure) {
+      uploadStatus = failure instanceof Error && failure.message
+        ? failure.message
+        : 'Attachments could not be restarted.';
+      uploadError = true;
+    } finally {
+      uploadingAttachment = false;
+      releaseAttachmentController(controller);
+    }
+  }
+
+
+  async function cancelAttachmentUpload(): Promise<void> {
+    const controller = attachmentController;
+    if (!controller) return;
+    attachmentCancelRequested = true;
+    try {
+      await controller.cancel();
+      attachmentSnapshot = null;
+    } catch {
+      uploadStatus = 'The relay could not confirm attachment cancellation.';
+      uploadError = true;
+    } finally {
+      releaseAttachmentController(controller, true);
+    }
+  }
+
+  onDestroy(() => {
+    attachmentUnsubscribe?.();
+    void attachmentController?.cancel();
+  });
 
   function paste(event: ClipboardEvent) {
     const files = [...(event.clipboardData?.items || [])]
@@ -305,6 +418,9 @@
       {/if}
     </div>
   </header>
+  {#if readOnly}
+    <p class="conversation-warning" role="status">Reader access is read only. Use a controller device to reply.</p>
+  {/if}
 
   {#if loading}
     <div class="empty-state" role="status">Loading conversation…</div>
@@ -324,6 +440,7 @@
       <p class="conversation-warning" role="status">This session log is larger than 16 MB. The relay loads its newest 16 MB to bound memory use; older turns remain on this computer and are not removed by a relay restart.</p>
     {/if}
     {#if error}<p class="conversation-warning error" role="alert">{error}</p>{/if}
+    {#if omoPlan}<OmoPlan plan={omoPlan} />{/if}
     {#if !entries.length}
       <div class="empty-state" role="status">No user or assistant turns are recorded for this session.</div>
     {/if}
@@ -342,11 +459,21 @@
     >
       <div class="conversation-stream" bind:this={streamElement}>
         {#each visibleEntries as entry (entry.id)}
+          {@const code = fencedCodeText(entry.text)}
           <article class:conversation-user={entry.role === 'user'} class="conversation-entry">
             <header>
               <strong>{entry.role === 'user' ? 'You' : displayName(agent)}</strong>
               <span class="conversation-entry-actions">
                 {#if formatTimestamp(entry.timestamp)}<time datetime={entry.timestamp}>{formatTimestamp(entry.timestamp)}</time>{/if}
+                {#if entry.role === 'assistant' && entry.text && $localSpeechEnabled && $selectedLocalVoice}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label={$localSpeechState === 'speaking' ? 'Stop reading response' : 'Read response aloud'}
+                    title={$localSpeechState === 'speaking' ? 'Stop reading' : 'Read aloud with selected local voice'}
+                    onclick={() => toggleSpeech(entry.text)}
+                  >{$localSpeechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
+                {/if}
                 {#if entry.text}
                   <Button
                     class="copy-conversation-markdown"
@@ -362,9 +489,20 @@
                     </svg>
                   </Button>
                 {/if}
+                {#if code}
+                  <Button
+                    class="copy-conversation-code"
+                    variant="ghost"
+                    size="icon"
+                    disabled={$securityState.locked}
+                    aria-label={`Copy code from ${entry.role === 'user' ? 'your' : displayName(agent)} message`}
+                    title="Copy code"
+                    onclick={() => copyCode(code)}
+                  >&lt;/&gt;</Button>
+                {/if}
               </span>
             </header>
-            <ConversationMessage text={entry.text} tools={entry.tools} highlight={query.trim()} />
+            <ConversationMessage messageId={entry.id} text={entry.text} tools={entry.tools} highlight={query.trim()} />
             {#if entry.truncated}<small>Long turn truncated by the relay.</small>{/if}
           </article>
         {/each}
@@ -376,14 +514,14 @@
     <form
       class="conversation-composer"
       aria-label="Send a prompt"
-      aria-busy={sendingPrompt || uploadingImage}
+      aria-busy={sendingPrompt || uploadingAttachment}
       onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}
     >
       <Button
         variant="ghost"
         size="icon"
-        disabled={inputLocked || uploadingImage || sendingPrompt}
-        aria-label="Attach image"
+        disabled={inputLocked || uploadingAttachment || sendingPrompt}
+        aria-label="Attach files"
         onclick={() => fileInput.click()}
       >
         <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -413,18 +551,21 @@
       <Button
         type="submit"
         size="icon"
-        disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked || sendingPrompt || uploadingImage}
+        disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked || sendingPrompt || uploadingAttachment}
         aria-label={sendingPrompt ? 'Submitting input' : 'Send prompt'}
       >{sendingPrompt ? '…' : '➤'}</Button>
       <input
         bind:this={fileInput}
         type="file"
-        accept="image/*"
+        accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp"
         multiple
         hidden
         onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }}
       />
     </form>
+    {#if attachmentSnapshot?.items.length}
+      <AttachmentProgress snapshot={attachmentSnapshot} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
+    {/if}
     {#if inputLocked}
       <p class="conversation-composer-status" role="status">Switch to Terminal to handle the pending agent interaction.</p>
     {:else if uploadStatus}

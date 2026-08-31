@@ -13,8 +13,8 @@ func TestValidateUpgradeCompatibilityTreatsLegacyReleaseAsE2EEV1(t *testing.T) {
 		AppTransports:   []string{relayprotocol.EncryptedWebSocketSubprotocol},
 		RelayTransports: []string{relayprotocol.EncryptedWebSocketSubprotocol},
 	}
-	if err := ValidateUpgradeCompatibility(legacy, target); err != nil {
-		t.Fatal(err)
+	if err := ValidateUpgradeCompatibility(legacy, target); err == nil || !strings.Contains(err.Error(), "bridge release") {
+		t.Fatalf("compatibility error = %v", err)
 	}
 }
 

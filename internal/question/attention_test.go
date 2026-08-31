@@ -1190,3 +1190,23 @@ func attentionFixture(t *testing.T, name string) string {
 	}
 	return string(content)
 }
+
+func TestApprovalFingerprintBindsPromptCommandAndOrderedOptions(t *testing.T) {
+	base := Classification{
+		Kind: AttentionApproval, Prompt: "Allow command?", Command: "make check",
+		Options: []string{"Approve", "Reject"},
+	}
+	fingerprint := ApprovalFingerprint(base)
+	if len(fingerprint) != 64 {
+		t.Fatalf("fingerprint length = %d", len(fingerprint))
+	}
+	for _, changed := range []Classification{
+		{Kind: AttentionApproval, Prompt: "Allow another command?", Command: base.Command, Options: base.Options},
+		{Kind: AttentionApproval, Prompt: base.Prompt, Command: "make deploy", Options: base.Options},
+		{Kind: AttentionApproval, Prompt: base.Prompt, Command: base.Command, Options: []string{"Reject", "Approve"}},
+	} {
+		if ApprovalFingerprint(changed) == fingerprint {
+			t.Fatalf("changed approval retained fingerprint: %+v", changed)
+		}
+	}
+}

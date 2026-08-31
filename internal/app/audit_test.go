@@ -77,7 +77,8 @@ func TestAuditedWriteSetCoversRemoteAgentMutations(t *testing.T) {
 		"navigate_question", "clarify_question", "agent_stop", "agent_rename",
 		"tab_reorder", "agent_start", "agent_clear", "agent_restart", "workspace_create",
 		"workspace_rename", "workspace_reorder", "workspace_close", "worktree_create",
-		"worktree_open", "worktree_remove", "upload_image", "send_secret",
+		"worktree_open", "worktree_remove", "upload_begin", "upload_chunk",
+		"upload_finish", "upload_cancel", "send_secret",
 	} {
 		if !isAuditedWrite(action) {
 			t.Fatalf("%s is not audited", action)

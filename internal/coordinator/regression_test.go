@@ -92,6 +92,7 @@ func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
+	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
 	approve := func() *CommandResult {
 		// A short parent deadline wins over the handler's approval deadline, so
@@ -99,12 +100,14 @@ func TestRetryAfterDispatchedUnknownDoesNotRedispatch(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 		defer cancel()
 		return d.Handle(ctx, map[string]any{
-			"action":     "respond",
-			"request_id": "r1",
-			"pane_id":    "pane-1",
-			"event_id":   eventID,
-			"index":      float64(0),
-			"total":      float64(2),
+			"action":               "respond",
+			"request_id":           "r1",
+			"pane_id":              "pane-1",
+			"event_id":             eventID,
+			"approval_fingerprint": fingerprint,
+			"choice":               choice,
+			"index":                float64(0),
+			"total":                float64(2),
 		})
 	}
 

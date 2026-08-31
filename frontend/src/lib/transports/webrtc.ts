@@ -2,7 +2,7 @@ import { base64UrlEncode } from '../base64url';
 import type { E2EEWireFrame } from '../e2ee';
 import type { RelayConfig } from '../types';
 import { chunk, decodeWireFrame, encodeWireFrame, Reassembler } from './chunking';
-import { createEncryptedTransport } from './encrypted';
+import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
 import type {
   FrameChannel,
   FrameChannelHandlers,
@@ -253,11 +253,13 @@ export function createWebRTCTransport(
   signal: SignalingChannel,
   handlers: TransportHandlers,
   options: DirectTransportOptions = { iceServers: [] },
+  authentication: TransportAuthentication = {},
 ): RelayTransport {
   return createEncryptedTransport({
     kind: 'webrtc',
     token: relay.token,
     codec: 'binary',
+    ...authentication,
     handlers,
     createChannel: (channelHandlers) => createWebRTCChannel(signal, channelHandlers, options.iceServers),
   });

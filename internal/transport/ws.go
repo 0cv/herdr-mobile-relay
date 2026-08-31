@@ -31,11 +31,19 @@ type ClientConn struct {
 	transport string
 	buf       *sendBuffer
 	secure    *e2eeSession
+	identity  AuthenticatedIdentity
 	logger    *slog.Logger
 	ctx       context.Context
 	cancel    context.CancelFunc
 	done      chan struct{}
 	closeOne  sync.Once
+}
+
+func (c *ClientConn) Identity() (AuthenticatedIdentity, bool) {
+	if c.secure == nil || !validAuthenticatedIdentity(c.identity) {
+		return AuthenticatedIdentity{}, false
+	}
+	return c.identity, true
 }
 
 func (c *ClientConn) ID() string               { return c.id }
@@ -65,19 +73,26 @@ type Metrics struct {
 	ConnectedByTransport  map[string]int `json:"connected_by_transport,omitempty"`
 }
 
-type Hub struct {
-	cfg          *config.Config
-	logger       *slog.Logger
-	register     sync.Mutex
-	mu           sync.RWMutex
-	clients      map[string]*ClientConn
-	pending      map[FrameConn]struct{}
-	nextID       int
-	handler      MessageHandler
-	onConnect    ConnectHandler
-	onDisconnect DisconnectHandler
-	closing      bool
+type ConnectedIdentity struct {
+	ClientID  string `json:"client_id"`
+	Transport string `json:"transport"`
+	AuthenticatedIdentity
+}
 
+type Hub struct {
+	cfg             *config.Config
+	logger          *slog.Logger
+	register        sync.Mutex
+	mu              sync.RWMutex
+	clients         map[string]*ClientConn
+	pending         map[FrameConn]struct{}
+	blocked         map[string]uint64
+	authResolver    E2EEAuthResolver
+	nextID          int
+	handler         MessageHandler
+	onConnect       ConnectHandler
+	onDisconnect    DisconnectHandler
+	closing         bool
 	receiptSequence atomic.Uint64
 	receiptMu       sync.Mutex
 	orderedIngress  chan inboundMessage
@@ -101,6 +116,7 @@ func NewHub(cfg *config.Config, logger *slog.Logger) *Hub {
 		logger:         logger,
 		clients:        make(map[string]*ClientConn),
 		pending:        make(map[FrameConn]struct{}),
+		blocked:        make(map[string]uint64),
 		orderedIngress: make(chan inboundMessage, orderedIngressCapacity),
 		handlerSlots:   make(chan struct{}, handlerCapacity),
 		ingressDone:    make(chan struct{}),
@@ -166,9 +182,13 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 	defer h.connectionWG.Done()
 
 	var secure *e2eeSession
+	var identity AuthenticatedIdentity
 	if h.cfg.Token != "" {
+		h.mu.RLock()
+		resolver := h.authResolver
+		h.mu.RUnlock()
 		var err error
-		secure, err = performServerE2EEHandshake(parent, conn, h.cfg.Token)
+		secure, identity, err = performServerE2EEHandshake(parent, conn, resolver)
 		if err != nil {
 			h.mu.Lock()
 			delete(h.pending, conn)
@@ -184,7 +204,8 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 	h.register.Lock()
 	h.mu.Lock()
 	delete(h.pending, conn)
-	if h.closing {
+	blockedVersion := h.blocked[identity.CredentialID]
+	if h.closing || (identity.CredentialID != "" && identity.CredentialVersion <= blockedVersion) {
 		h.mu.Unlock()
 		h.register.Unlock()
 		cancel()
@@ -198,6 +219,7 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 		conn:      conn,
 		transport: conn.TransportName(),
 		secure:    secure,
+		identity:  identity,
 		buf:       newSendBuffer(clientOutboundMaxItems, clientOutboundMaxBytes),
 		logger:    h.logger.With("client_id", clientID),
 		ctx:       ctx,
@@ -446,6 +468,50 @@ func (h *Hub) ClientCount() int {
 	return len(h.clients)
 }
 
+func (h *Hub) ConnectedIdentities() []ConnectedIdentity {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	identities := make([]ConnectedIdentity, 0, len(h.clients))
+	for _, client := range h.clients {
+		identity, authenticated := client.Identity()
+		if !authenticated {
+			continue
+		}
+		identities = append(identities, ConnectedIdentity{
+			ClientID: client.id, Transport: client.transport, AuthenticatedIdentity: identity,
+		})
+	}
+	return identities
+}
+
+// DisconnectCredential closes every connection authenticated with the
+// credential at or below throughVersion. The version fence also closes the
+// completion-to-registration race; a later reset may reconnect at a higher
+// version.
+func (h *Hub) DisconnectCredential(credentialID string, throughVersion uint64) int {
+	if credentialID == "" || throughVersion == 0 {
+		return 0
+	}
+	h.register.Lock()
+	h.mu.Lock()
+	if throughVersion > h.blocked[credentialID] {
+		h.blocked[credentialID] = throughVersion
+	}
+	clients := make([]*ClientConn, 0)
+	for _, client := range h.clients {
+		if client.identity.CredentialID == credentialID && client.identity.CredentialVersion <= throughVersion {
+			clients = append(clients, client)
+		}
+	}
+	h.mu.Unlock()
+	h.register.Unlock()
+	for _, client := range clients {
+		client.conn.Close(CloseGoingAway, "device credential revoked")
+		h.removeClient(client)
+	}
+	return len(clients)
+}
+
 func (h *Hub) Metrics() Metrics {
 	h.mu.RLock()
 	byTransport := make(map[string]int, 3)
@@ -492,6 +558,11 @@ func (h *Hub) removeClient(client *ClientConn) {
 func (h *Hub) SetHandler(fn MessageHandler)         { h.handler = fn }
 func (h *Hub) SetOnConnect(fn ConnectHandler)       { h.onConnect = fn }
 func (h *Hub) SetOnDisconnect(fn DisconnectHandler) { h.onDisconnect = fn }
+func (h *Hub) SetE2EEAuthResolver(resolver E2EEAuthResolver) {
+	h.mu.Lock()
+	h.authResolver = resolver
+	h.mu.Unlock()
+}
 
 func (h *Hub) CloseAll() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

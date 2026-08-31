@@ -3,6 +3,69 @@ import type { TransportKind } from './transports/types';
 export type RelayStatus = 'connecting' | 'connected' | 'disconnected';
 export type AttentionKind = 'approval' | 'question' | 'chat' | 'unknown';
 
+export interface TargetRef {
+  server_session_id: string;
+  pane_id: string;
+  terminal_id: string;
+  generation: number;
+  agent_session_id?: string;
+}
+
+export interface FrontendTargetRef extends TargetRef {
+  relay_id: string;
+}
+
+
+export type ActionReceiptPhase =
+  | 'prepared'
+  | 'failed_before_dispatch'
+  | 'awaiting_evidence'
+  | 'confirmed'
+  | 'dispatched_unknown';
+
+export type ApiErrorArg = string | number | boolean;
+
+export interface ApiError {
+  code: string;
+  args?: Record<string, ApiErrorArg>;
+}
+
+export interface ActionReceipt {
+  action_id: string;
+  phase: ActionReceiptPhase;
+  error?: ApiError;
+}
+
+
+export interface DeviceContext {
+  device_id: string;
+  credential_id: string;
+  role: 'reader' | 'controller' | 'bootstrap';
+  locale: string;
+  credential_version: number;
+}
+
+export interface OpaquePage<T> {
+  items: T[];
+  next_cursor?: string;
+  truncated: boolean;
+  generated_at: string;
+}
+
+export interface ActionReceiptMessage {
+  type: 'action_receipt';
+  request_id?: string;
+  receipt: ActionReceipt;
+  detail?: string;
+}
+
+export interface ApiErrorMessage {
+  type: 'error';
+  request_id?: string;
+  error: ApiError;
+  detail?: string;
+}
+
 export type AgentInventoryState = 'starting' | 'ready' | 'error';
 
 export interface AgentInventoryStatus {
@@ -142,6 +205,8 @@ export interface WorkspaceGitFile {
 export interface WorkspaceGitStatus {
   available: boolean;
   branch?: string;
+  ahead?: number;
+  behind?: number;
   files: WorkspaceGitFile[];
   truncated?: boolean;
 }
@@ -201,13 +266,17 @@ export interface Agent {
   pane_revision?: number;
   prompt?: string;
   command?: string;
+  approval_fingerprint?: string;
   options?: string[];
   interaction?: QuestionInteraction | null;
   question_layout?: boolean;
   event_id?: string;
   attention_kind?: AttentionKind;
   attention_capable?: boolean;
+  server_session_id?: string;
   terminal_id?: string;
+  generation?: number;
+  agent_session_id?: string;
   conversation_history_available?: boolean;
   tab_id?: string;
   tab_label?: string;
@@ -255,6 +324,27 @@ export interface ConversationEntry {
   tools?: ConversationTool[];
 }
 
+export interface OmoTodoTask {
+  id?: string;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'abandoned';
+}
+
+export interface OmoTodoPhase {
+  name: string;
+  tasks: OmoTodoTask[];
+}
+
+export interface OmoTodoState {
+  available: boolean;
+  reason_code?: string;
+  session_id?: string;
+  version?: number;
+  updated_at?: string;
+  phases: OmoTodoPhase[];
+  truncated: boolean;
+}
+
 export interface ConversationPage {
   available: boolean;
   reason: string;
@@ -262,6 +352,7 @@ export interface ConversationPage {
   hasMore: boolean;
   total: number;
   fileTruncated: boolean;
+  omoPlan?: OmoTodoState;
 }
 
 export interface RelayConnectionView {

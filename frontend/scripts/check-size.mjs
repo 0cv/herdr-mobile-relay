@@ -37,7 +37,10 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 127 KiB for compact conversation tool cards and pending-lease
 // terminal recovery: payload formatting/clamping and bounded resize handling
 // both ship in the single bootstrap bundle.
-const limitKiB = 128;
+// Raised from 128 KiB for paired-device administration, durable notification
+// policy, validated attachment batches, exact target routing, local speech,
+// wake lock, and OMO plan UI added to the required single application bundle.
+const limitKiB = 150;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

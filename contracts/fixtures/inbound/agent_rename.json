@@ -1,6 +1,6 @@
 {
   "type": "agent_rename",
-  "protocol": 2,
+  "protocol": 3,
   "request_id": "req-rename",
   "pane_id": "pane-1",
   "name": "123"
