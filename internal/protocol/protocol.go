@@ -450,6 +450,8 @@ type PushConfig struct {
 
 const AgentResponseCopyCapability = "agent_response_copy"
 
+const SpeechSynthesisCapability = "speech_synthesis"
+
 var Capabilities = []string{
 	"attention_classification",
 	"clear_activities",

@@ -13,6 +13,13 @@ const VOICE_KEY = 'herdr_local_speech_voice';
  * only voices the browser marks local are ever candidates.
  */
 export const AUTO_VOICE = 'auto';
+
+/**
+ * Reads aloud with a TTS engine on the relay computer instead of the phone:
+ * the audio arrives as ordinary media over the encrypted channel, which keeps
+ * playing with the screen off where Android kills the browser speech API.
+ */
+export const RELAY_VOICE = 'relay';
 export interface LocalSpeechVoice {
   uri: string;
   name: string;
@@ -28,10 +35,18 @@ export const localSpeechState = writable<LocalSpeechState>('off');
 
 let localVoices: SpeechSynthesisVoice[] = [];
 
+// The relay voice needs no phone-side voice or speech API at all, so it
+// keeps speech usable where the device offers neither.
+function restingState(): LocalSpeechState {
+  if (!get(localSpeechEnabled)) return 'off';
+  if (localVoices.length || get(selectedLocalVoice) === RELAY_VOICE) return 'idle';
+  return 'unavailable';
+}
+
 function refreshVoices(): void {
   if (!window.speechSynthesis) {
     localSpeechVoices.set([]);
-    localSpeechState.set(get(localSpeechEnabled) ? 'unavailable' : 'off');
+    localSpeechState.set(restingState());
     return;
   }
   // Android's system TTS reports variants of one voice under a single
@@ -50,7 +65,7 @@ function refreshVoices(): void {
     name: voice.name,
     language: voice.lang,
   })));
-  localSpeechState.set(get(localSpeechEnabled) ? localVoices.length ? 'idle' : 'unavailable' : 'off');
+  localSpeechState.set(restingState());
 }
 
 export function setLocalSpeechEnabled(enabled: boolean): void {
@@ -67,6 +82,7 @@ export function setLocalSpeechEnabled(enabled: boolean): void {
 export function setSelectedLocalVoice(uri: string): void {
   const valid = uri === ''
     || uri === AUTO_VOICE
+    || uri === RELAY_VOICE
     || localVoices.some((voice) => voice.localService && voice.voiceURI === uri);
   if (!valid) return;
   if (uri) localStorage.setItem(VOICE_KEY, uri);
@@ -139,15 +155,50 @@ function ensureKeepalive(onBlocked?: () => void): void {
   if (keepaliveContext.state !== 'running') {
     keepaliveContext.resume().catch(() => onBlocked?.());
   }
-  if ('mediaSession' in navigator) {
-    navigator.mediaSession.metadata = new MediaMetadata({ title: 'Reading response', artist: 'Herdr Mobile Relay' });
-    navigator.mediaSession.playbackState = 'playing';
-    for (const action of ['pause', 'stop'] as MediaSessionAction[]) {
-      try {
-        navigator.mediaSession.setActionHandler(action, () => stopLocalSpeech());
-      } catch { /* action unsupported */ }
-    }
+  mediaSessionPlaying();
+}
+
+function mediaSessionPlaying(): void {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({ title: 'Reading response', artist: 'Herdr Mobile Relay' });
+  navigator.mediaSession.playbackState = 'playing';
+  for (const action of ['pause', 'stop'] as MediaSessionAction[]) {
+    try {
+      navigator.mediaSession.setActionHandler(action, () => stopLocalSpeech());
+    } catch { /* action unsupported */ }
   }
+}
+
+// Relay-synthesized speech plays through a persistent media element: real
+// media playback is what survives a locked screen, and reusing one element
+// keeps the unlock earned by the arming tap.
+let relayAudio: HTMLAudioElement | null = null;
+let relayObjectURL = '';
+
+function relayElement(): HTMLAudioElement {
+  if (!relayAudio) relayAudio = new Audio();
+  return relayAudio;
+}
+
+function setRelaySource(blob: Blob): void {
+  if (relayObjectURL) URL.revokeObjectURL(relayObjectURL);
+  relayObjectURL = URL.createObjectURL(blob);
+  relayElement().src = relayObjectURL;
+}
+
+function silentWAV(): Blob {
+  const samples = 400;
+  const data = new Uint8Array(44 + samples * 2);
+  const view = new DataView(data.buffer);
+  const ascii = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i++) data[offset + i] = value.charCodeAt(i);
+  };
+  ascii(0, 'RIFF'); view.setUint32(4, 36 + samples * 2, true); ascii(8, 'WAVEfmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true); view.setUint32(28, 16000, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  ascii(36, 'data'); view.setUint32(40, samples * 2, true);
+  return new Blob([data], { type: 'audio/wav' });
 }
 
 /**
@@ -158,7 +209,15 @@ function ensureKeepalive(onBlocked?: () => void): void {
  */
 export function armSpeechKeepalive(onIssue?: (message: string) => void): void {
   if (get(securityState).locked || !get(localSpeechEnabled)) return;
-  ensureKeepalive(() => onIssue?.('The browser blocked background audio; reading may stop when the screen locks.'));
+  const onBlocked = () => onIssue?.('The browser blocked background audio; reading may stop when the screen locks.');
+  if (get(selectedLocalVoice) === RELAY_VOICE) {
+    // A moment of silence unlocks the element for every later programmatic
+    // play(); the fetched chunks arrive long after the activation window.
+    setRelaySource(silentWAV());
+    relayElement().play()?.catch(onBlocked);
+    return;
+  }
+  ensureKeepalive(onBlocked);
 }
 
 export function releaseSpeechKeepalive(): void {
@@ -167,6 +226,7 @@ export function releaseSpeechKeepalive(): void {
 
 function stopKeepalive(): void {
   void keepaliveContext?.suspend();
+  relayAudio?.pause();
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
 }
 
@@ -187,6 +247,9 @@ export function initializeLocalSpeech(): () => void {
     stopKeepalive();
     void keepaliveContext?.close();
     keepaliveContext = null;
+    relayAudio = null;
+    if (relayObjectURL) URL.revokeObjectURL(relayObjectURL);
+    relayObjectURL = '';
   };
 }
 
@@ -239,9 +302,69 @@ export function speakLocal(text: string, onIssue?: (message: string) => void): b
   return true;
 }
 
+export type SpeechSender = (text: string) => Promise<{ data?: Record<string, unknown> }>;
+
+/**
+ * Reads text with the relay's TTS engine: sentence-sized fragments are
+ * synthesized on the computer and played here as ordinary media, prefetching
+ * the next fragment while the current one speaks.
+ */
+export function speakViaRelay(text: string, send: SpeechSender, onIssue?: (message: string) => void): boolean {
+  if (get(securityState).locked || !get(localSpeechEnabled) || !text.trim()) return false;
+  const generation = ++speakGeneration;
+  window.speechSynthesis?.cancel();
+  const chunks = speechChunks(speakableText(text) || text, 240);
+  localSpeechState.set('speaking');
+  mediaSessionPlaying();
+  void playRelayChunks(chunks, send, generation, onIssue);
+  return true;
+}
+
+async function playRelayChunks(
+  chunks: string[],
+  send: SpeechSender,
+  generation: number,
+  onIssue?: (message: string) => void,
+): Promise<void> {
+  let pending = send(chunks[0]);
+  try {
+    for (let index = 0; index < chunks.length; index++) {
+      const result = await pending;
+      if (generation !== speakGeneration) return;
+      if (index + 1 < chunks.length) pending = send(chunks[index + 1]);
+      const audio = String(result.data?.audio || '');
+      if (!audio) throw new Error('The relay returned no audio.');
+      const bytes = Uint8Array.from(atob(audio), (char) => char.charCodeAt(0));
+      await playRelayBlob(new Blob([bytes], { type: 'audio/wav' }));
+      if (generation !== speakGeneration) return;
+    }
+    localSpeechState.set('idle');
+    stopKeepalive();
+  } catch (error) {
+    if (generation !== speakGeneration) return;
+    speakGeneration++;
+    localSpeechState.set('error');
+    stopKeepalive();
+    onIssue?.(error instanceof Error && error.message ? error.message : 'The relay could not read this aloud.');
+  }
+}
+
+function playRelayBlob(blob: Blob): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const element = relayElement();
+    setRelaySource(blob);
+    // A stop pauses the element instead of ending it; resolving on pause too
+    // lets the loop observe the bumped generation and exit.
+    element.onended = () => resolve();
+    element.onpause = () => resolve();
+    element.onerror = () => reject(new Error('This phone could not play the relay audio.'));
+    element.play()?.catch(reject);
+  });
+}
+
 export function stopLocalSpeech(): void {
   speakGeneration++;
   window.speechSynthesis?.cancel();
   stopKeepalive();
-  localSpeechState.set(get(localSpeechEnabled) ? localVoices.length ? 'idle' : 'unavailable' : 'off');
+  localSpeechState.set(restingState());
 }

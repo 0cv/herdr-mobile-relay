@@ -5,11 +5,13 @@ import {
   initializeLocalSpeech,
   localSpeechState,
   localSpeechVoices,
+  RELAY_VOICE,
   releaseSpeechKeepalive,
   selectedLocalVoice,
   setLocalSpeechEnabled,
   setSelectedLocalVoice,
   speakLocal,
+  speakViaRelay,
   speechChunks,
   stopLocalSpeech,
 } from '$lib/local-speech';
@@ -249,6 +251,77 @@ describe('local speech', () => {
     localSpeechState.set('idle');
     releaseSpeechKeepalive();
     expect(contexts[0].state).toBe('suspended');
+    stop();
+  });
+
+  it('streams relay-synthesized audio through one unlocked media element', async () => {
+    const elements: FakeMediaElement[] = [];
+    class FakeMediaElement {
+      src = '';
+      paused = true;
+      plays = 0;
+      onended: (() => void) | null = null;
+      onpause: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor() {
+        elements.push(this);
+      }
+
+      play() {
+        this.paused = false;
+        this.plays++;
+        return Promise.resolve();
+      }
+
+      pause() {
+        this.paused = true;
+        this.onpause?.();
+      }
+    }
+    vi.stubGlobal('Audio', FakeMediaElement);
+    let urls = 0;
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = () => `blob:fake-${++urls}`;
+      static revokeObjectURL = vi.fn();
+    });
+
+    const stop = initializeLocalSpeech();
+    setLocalSpeechEnabled(true);
+    setSelectedLocalVoice(RELAY_VOICE);
+    expect(get(selectedLocalVoice)).toBe(RELAY_VOICE);
+    expect(get(localSpeechState)).toBe('idle');
+
+    // The tap unlocks the persistent element with a silent moment before any
+    // network round trip; later programmatic plays reuse that unlock.
+    armSpeechKeepalive();
+    expect(elements).toHaveLength(1);
+    const element = elements[0];
+    expect(element.plays).toBe(1);
+
+    const sent: string[] = [];
+    const send = vi.fn((text: string) => {
+      sent.push(text);
+      return Promise.resolve({ data: { audio: btoa(`RIFF-${sent.length}`) } });
+    });
+    const sentence = 'The relay confirmed every change landed as expected.';
+    expect(speakViaRelay(Array.from({ length: 12 }, () => sentence).join(' '), send)).toBe(true);
+    expect(get(localSpeechState)).toBe('speaking');
+
+    await vi.waitFor(() => expect(element.plays).toBe(2));
+    // The next fragment is prefetched while the first one is still playing.
+    expect(sent.length).toBe(2);
+    element.onended?.();
+    await vi.waitFor(() => expect(element.plays).toBe(3));
+    expect(elements).toHaveLength(1);
+
+    // Stopping mid-fragment pauses the element and ends the run.
+    stopLocalSpeech();
+    expect(element.paused).toBe(true);
+    expect(get(localSpeechState)).toBe('idle');
+    element.onended?.();
+    await Promise.resolve();
+    expect(get(localSpeechState)).toBe('idle');
     stop();
   });
 

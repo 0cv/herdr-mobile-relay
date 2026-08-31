@@ -31,9 +31,11 @@
     armSpeechKeepalive,
     localSpeechEnabled,
     localSpeechState,
+    RELAY_VOICE,
     releaseSpeechKeepalive,
     selectedLocalVoice,
     speakLocal,
+    speakViaRelay,
     stopLocalSpeech,
   } from '$lib/local-speech';
   import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
@@ -308,6 +310,9 @@
       && responseCopyProfileSupported(agent.agent),
     );
   });
+  const relaySpeechSupported = $derived(
+    Boolean($connections.get(agent.relay_id)?.capabilities.includes('speech_synthesis')),
+  );
   const terminalCopyText = $derived(latestCompletedResponse(frame?.content || ''));
   const terminalContentStyle = $derived.by(() => {
     // Every width is emitted in px of the measured probe cell, never in ch:
@@ -1369,13 +1374,23 @@
         }
       }
       if (!text.trim()) text = terminalCopyText;
-      if (!text.trim() || !speakLocal(text, (message) => relayStore.showToast(message, true))) {
+      if (!text.trim() || !startSpeech(text)) {
         releaseSpeechKeepalive();
         if (!text.trim()) relayStore.showToast('No completed agent response is available to read aloud.', true);
       }
     } finally {
       fetchingSpeechText = false;
     }
+  }
+
+  function startSpeech(text: string): boolean {
+    const toast = (message: string) => relayStore.showToast(message, true);
+    if ($selectedLocalVoice !== RELAY_VOICE) return speakLocal(text, toast);
+    if (!relaySpeechSupported) {
+      toast('This relay has no speech engine; install espeak-ng there or choose a local voice.');
+      return false;
+    }
+    return speakViaRelay(text, (chunk) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk }, 20_000), toast);
   }
 
   async function copyTerminalOutput() {

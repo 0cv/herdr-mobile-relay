@@ -51,7 +51,10 @@ import { constants, gzipSync } from 'node:zlib';
 // keeps the tab audible so reading aloud survives the phone sleeping, with
 // lock-screen Stop controls and sentence-chunked utterances under the
 // Android TTS input limit.
-const limitKiB = 153;
+// Raised from 153 KiB for the relay computer voice: sentence fragments are
+// synthesized on the relay and streamed here encrypted, then played as real
+// media - the only speech path Android keeps alive with the screen off.
+const limitKiB = 154;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

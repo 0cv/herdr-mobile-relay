@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -720,6 +721,83 @@ func sendCopyRequest(t *testing.T, conn *websocket.Conn, requestID, paneID strin
 		t.Fatalf("decode copy result: %v", err)
 	}
 	return result
+}
+
+func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
+	s := testServer()
+	synthesized := ""
+	s.speechSynth = func(_ context.Context, text string) ([]byte, error) {
+		synthesized = text
+		if strings.Contains(text, "fail") {
+			return nil, errors.New("engine detail stays server-side")
+		}
+		return []byte("RIFFfakewav"), nil
+	}
+	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		defer admitted()
+		if message["type"] != "speak_text" {
+			return
+		}
+		requestID, _ := message["request_id"].(string)
+		text, _ := message["text"].(string)
+		s.speakText(client, requestID, text)
+	})
+	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		server.Close()
+		t.Fatalf("dial speak test client: %v", err)
+	}
+	t.Cleanup(func() {
+		conn.CloseNow()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.hub.Shutdown(shutdownCtx)
+		server.Close()
+	})
+	request := func(text string) map[string]any {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{"type": "speak_text", "request_id": "req-1", "text": text})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+			t.Fatalf("write speak request: %v", err)
+		}
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read speak result: %v", err)
+		}
+		var result map[string]any
+		if err := json.Unmarshal(data, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	result := request("hello phone")
+	data, _ := result["data"].(map[string]any)
+	if result["ok"] != true || data["format"] != "wav" ||
+		data["audio"] != base64.StdEncoding.EncodeToString([]byte("RIFFfakewav")) {
+		t.Fatalf("speak result = %+v, want base64 wav payload", result)
+	}
+	if synthesized != "hello phone" {
+		t.Fatalf("synthesized text = %q, want the request text", synthesized)
+	}
+
+	// Engine details never reach the phone; the toast stays generic.
+	failed := request("please fail")
+	if failed["ok"] != false || failed["error"] != "Speech synthesis failed on this computer" {
+		t.Fatalf("failed result = %+v, want generic synthesis failure", failed)
+	}
+
+	s.speechSynth = nil
+	missing := request("hello")
+	if missing["ok"] != false || missing["error"] != "No speech engine is installed on this computer" {
+		t.Fatalf("missing engine result = %+v", missing)
+	}
 }
 
 func TestCopyAgentResponseValidatesPaneState(t *testing.T) {

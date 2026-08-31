@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/session"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
+	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/support"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
@@ -89,6 +91,7 @@ type Server struct {
 	clipboardRead    func(context.Context) ([]byte, error)
 	clipboardWrite   func(context.Context, []byte) error
 	copyRunner       copyResponseRunner
+	speechSynth      func(context.Context, string) ([]byte, error)
 	copyMu           sync.Mutex
 	paneSizeM        *panesize.Manager
 	dispatcher       *coordinator.Dispatcher
@@ -190,6 +193,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		clipboardRead:       clipboardRead,
 		clipboardWrite:      clipboard.Write,
 		copyRunner:          copyresponse.Run,
+		speechSynth:         discoverSpeechSynth(logger),
 		herdrC:              herdrClient,
 		paneSizeM:           panesize.NewManager(herdrClient, logger),
 		profiles:            profResolver,
@@ -488,6 +492,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if s.clipboardRead != nil {
 			capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
+		}
+		if s.speechSynth != nil {
+			capabilities = append(capabilities, protocol.SpeechSynthesisCapability)
 		}
 		if s.herdrC.SupportsRealtimePane(client.Context()) {
 			capabilities = append(capabilities, "pane_realtime_delta", "tab_reorder")
@@ -979,6 +986,10 @@ func (s *Server) Run(ctx context.Context) error {
 			requestID, _ := msg["request_id"].(string)
 			paneID, _ := msg["pane_id"].(string)
 			s.copyAgentResponse(client, requestID, paneID)
+		case "speak_text":
+			requestID, _ := msg["request_id"].(string)
+			text, _ := msg["text"].(string)
+			s.speakText(client, requestID, text)
 		case "push_policy_get":
 			identity, _ := client.Identity()
 			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
@@ -2230,6 +2241,37 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 		"chars":  result.Chars,
 		"lines":  result.Lines,
 	})
+}
+
+// speakText synthesizes one sentence-sized fragment with the host's TTS
+// engine and returns the WAV inline. The phone plays it as ordinary media,
+// which keeps working with the screen off where the browser speech API dies.
+func (s *Server) speakText(client *transport.ClientConn, requestID, text string) {
+	if s.speechSynth == nil {
+		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "No speech engine is installed on this computer", "", nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(client.Context(), 15*time.Second)
+	defer cancel()
+	wav, err := s.speechSynth(ctx, text)
+	if err != nil {
+		s.logger.Warn("speech synthesis failed", "error", err)
+		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "Speech synthesis failed on this computer", "", nil)
+		return
+	}
+	s.sendCommandResult(client, requestID, "speak_text", true, "completed", "", "", map[string]any{
+		"format": "wav",
+		"audio":  base64.StdEncoding.EncodeToString(wav),
+	})
+}
+
+func discoverSpeechSynth(logger *slog.Logger) func(context.Context, string) ([]byte, error) {
+	engine, ok := speech.Discover()
+	if !ok {
+		return nil
+	}
+	logger.Info("speech synthesis available", "engine", engine)
+	return speech.Synthesize
 }
 
 func copyBlockedMessage(agent *coordinator.AgentState) string {

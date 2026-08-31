@@ -168,6 +168,9 @@
   const degradedCount = $derived([...$connections.values()].filter(
     (connection) => connection.status === 'connected' && connection.inventory.state !== 'ready',
   ).length);
+  const relaySpeechAvailable = $derived(
+    [...$connections.values()].some((connection) => connection.capabilities.includes('speech_synthesis')),
+  );
   const manualRow = $derived(relayRows.find(({ relay }) => relay.id === manualRelayId));
   const removalRow = $derived(relayRows.find(({ relay }) => relay.id === removalRelayId));
   const appDeploymentOwner = $derived(relayRows.find(({ relay, connection }) => (
@@ -687,15 +690,18 @@
       descriptionId="local-speech-hint"
       onchange={(value) => setLocalSpeechEnabled(value)}
     />
-    <p class="hint" id="local-speech-hint">Off by default. Enabling adds Speak buttons beside responses in the Terminal and Conversation History views. Automatic picks the local voice matching this phone’s language; choose a specific voice to override. Response text is never sent to a speech server.</p>
+    <p class="hint" id="local-speech-hint">Off by default. Enabling adds Speak buttons beside responses in the Terminal and Conversation History views. Automatic picks the local voice matching this phone’s language; the computer voice synthesizes on a relay and streams here encrypted, which keeps reading aloud alive while the screen is off. Response text never reaches a third-party speech server.</p>
     <label>
-      Local voice
+      Voice
       <select
-        disabled={!$localSpeechEnabled || !$localSpeechVoices.length}
+        disabled={!$localSpeechEnabled || (!$localSpeechVoices.length && !relaySpeechAvailable)}
         value={$selectedLocalVoice}
         onchange={(event) => setSelectedLocalVoice(event.currentTarget.value)}
       >
         <option value="auto">Automatic — match this phone’s language</option>
+        {#if relaySpeechAvailable}
+          <option value="relay">Computer voice — synthesized on the relay</option>
+        {/if}
         <option value="">Choose a local voice</option>
         {#each $localSpeechVoices as voice (voice.uri)}
           <option value={voice.uri}>{voice.name} · {voice.language}</option>

@@ -7,10 +7,14 @@
   import { agentNeedsInspection, agentNeedsResponse, displayName } from '$lib/agents';
   import { conversationEntries } from '$lib/conversation';
   import {
+    armSpeechKeepalive,
     localSpeechEnabled,
     localSpeechState,
+    RELAY_VOICE,
+    releaseSpeechKeepalive,
     selectedLocalVoice,
     speakLocal,
+    speakViaRelay,
     stopLocalSpeech,
   } from '$lib/local-speech';
   import { fencedCodeText } from '$lib/markdown';
@@ -21,6 +25,8 @@
   import type { Agent, ConversationEntry, OmoTodoState } from '$lib/types';
 
   let { agent, readOnly = false }: { agent: Agent; readOnly?: boolean } = $props();
+
+  const connections = relayStore.connections;
 
   let entries = $state<ConversationEntry[]>([]);
   let available = $state(true);
@@ -176,8 +182,23 @@
     }
   }
   function toggleSpeech(text: string): void {
-    if ($localSpeechState === 'speaking') stopLocalSpeech();
-    else speakLocal(text, (message) => relayStore.showToast(message, true));
+    if ($localSpeechState === 'speaking') {
+      stopLocalSpeech();
+      return;
+    }
+    const toast = (message: string) => relayStore.showToast(message, true);
+    // Armed inside the tap: the relay voice fetches audio before playing,
+    // and a play() after that round trip is autoplay-blocked.
+    armSpeechKeepalive(toast);
+    let spoke = false;
+    if ($selectedLocalVoice === RELAY_VOICE) {
+      const supported = Boolean($connections.get(agent.relay_id)?.capabilities.includes('speech_synthesis'));
+      if (!supported) toast('This relay has no speech engine; install espeak-ng there or choose a local voice.');
+      else spoke = speakViaRelay(text, (chunk) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk }, 20_000), toast);
+    } else {
+      spoke = speakLocal(text, toast);
+    }
+    if (!spoke) releaseSpeechKeepalive();
   }
 
 

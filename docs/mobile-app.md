@@ -31,7 +31,11 @@ setup and want to know what every screen and control is for.
   the unlock screen covers the page and the terminal stops streaming until it
   succeeds.
 - Optionally request a screen wake lock only while a terminal is visible, or
-  speak exact response text through an explicitly selected browser-local voice.
+  read responses aloud: through a browser-local voice on the phone, or with a
+  computer voice synthesized by a TTS engine on the relay (espeak-ng, espeak,
+  flite, or macOS say) and streamed to the phone encrypted - real media
+  playback that keeps reading with the screen off. Response text never
+  reaches a third-party speech server on either path.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |
