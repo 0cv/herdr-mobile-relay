@@ -193,7 +193,7 @@
     let spoke = false;
     if ($selectedLocalVoice === RELAY_VOICE) {
       const supported = Boolean($connections.get(agent.relay_id)?.capabilities.includes('speech_synthesis'));
-      if (!supported) toast('This relay has no speech engine; install espeak-ng there or choose a local voice.');
+      if (!supported) toast('This relay has no speech engine; install Piper with a voice model or espeak-ng there, or choose a local voice.');
       else spoke = speakViaRelay(text, (chunk) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk }, 20_000), toast);
     } else {
       spoke = speakLocal(text, toast);

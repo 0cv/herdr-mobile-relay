@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -29,6 +30,9 @@ const maxWAVBytes = 900 << 10
 
 type engine struct {
 	binary string
+	// fallback paths are tried when PATH misses the binary: the relay often
+	// runs as a service with a minimal PATH that excludes user installs.
+	fallback []string
 	// args builds the argv writing a WAV to outPath; text arrives on stdin
 	// unless textArg is true.
 	args    func(outPath string) []string
@@ -36,36 +40,86 @@ type engine struct {
 }
 
 func engines() []engine {
-	candidates := []engine{
-		{
-			binary: "espeak-ng",
-			args:   func(out string) []string { return []string{"-s", "175", "-w", out, "--stdin"} },
-		},
-		{
-			binary: "espeak",
-			args:   func(out string) []string { return []string{"-s", "175", "-w", out, "--stdin"} },
-		},
-		{
-			binary:  "flite",
-			args:    func(out string) []string { return []string{"-o", out} },
-			textArg: true,
-		},
+	var candidates []engine
+	// Piper's neural voices sound close to cloud TTS and synthesize many
+	// times faster than realtime on a CPU; every other engine is a fallback.
+	home, _ := os.UserHomeDir()
+	if voice, ok := piperVoice(home); ok {
+		candidates = append(candidates, engine{
+			binary: "piper",
+			fallback: []string{
+				filepath.Join(home, ".local", "bin", "piper"),
+				"/usr/local/bin/piper",
+				"/opt/piper/piper",
+			},
+			args: func(out string) []string { return []string{"--model", voice, "--output_file", out} },
+		})
 	}
 	if runtime.GOOS == "darwin" {
-		candidates = append([]engine{{
+		candidates = append(candidates, engine{
 			binary: "say",
 			args: func(out string) []string {
 				return []string{"-o", out, "--file-format=WAVE", "--data-format=LEI16@22050"}
 			},
-		}}, candidates...)
+		})
 	}
-	return candidates
+	return append(candidates,
+		engine{
+			binary: "espeak-ng",
+			args:   func(out string) []string { return []string{"-s", "175", "-w", out, "--stdin"} },
+		},
+		engine{
+			binary: "espeak",
+			args:   func(out string) []string { return []string{"-s", "175", "-w", out, "--stdin"} },
+		},
+		engine{
+			binary:  "flite",
+			args:    func(out string) []string { return []string{"-o", out} },
+			textArg: true,
+		},
+	)
+}
+
+// piperVoice finds a voice model: an explicit HERDR_PIPER_VOICE path wins,
+// otherwise the alphabetically first *.onnx in the conventional voice
+// directories.
+func piperVoice(home string) (string, bool) {
+	if path := os.Getenv("HERDR_PIPER_VOICE"); path != "" {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, true
+		}
+		return "", false
+	}
+	for _, dir := range []string{
+		filepath.Join(home, ".local", "share", "piper-voices"),
+		"/usr/local/share/piper-voices",
+		"/usr/share/piper-voices",
+	} {
+		matches, _ := filepath.Glob(filepath.Join(dir, "*.onnx"))
+		if len(matches) > 0 {
+			sort.Strings(matches)
+			return matches[0], true
+		}
+	}
+	return "", false
+}
+
+func lookup(candidate engine) (string, bool) {
+	if path, err := exec.LookPath(candidate.binary); err == nil {
+		return path, true
+	}
+	for _, fallback := range candidate.fallback {
+		if info, err := os.Stat(fallback); err == nil && !info.IsDir() {
+			return fallback, true
+		}
+	}
+	return "", false
 }
 
 // Discover reports the first available engine's binary name.
 func Discover() (string, bool) {
 	for _, candidate := range engines() {
-		if _, err := exec.LookPath(candidate.binary); err == nil {
+		if _, ok := lookup(candidate); ok {
 			return candidate.binary, true
 		}
 	}
@@ -83,9 +137,11 @@ func Synthesize(ctx context.Context, text string) ([]byte, error) {
 		return nil, fmt.Errorf("text exceeds %d characters", MaxTextRunes)
 	}
 	var selected *engine
+	binary := ""
 	for _, candidate := range engines() {
-		if _, err := exec.LookPath(candidate.binary); err == nil {
+		if path, ok := lookup(candidate); ok {
 			selected = &candidate
+			binary = path
 			break
 		}
 	}
@@ -102,7 +158,7 @@ func Synthesize(ctx context.Context, text string) ([]byte, error) {
 	if selected.textArg {
 		args = append(args, "-t", trimmed)
 	}
-	cmd := exec.CommandContext(ctx, selected.binary, args...)
+	cmd := exec.CommandContext(ctx, binary, args...)
 	if !selected.textArg {
 		cmd.Stdin = strings.NewReader(trimmed)
 	}

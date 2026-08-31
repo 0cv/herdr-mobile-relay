@@ -1387,7 +1387,7 @@
     const toast = (message: string) => relayStore.showToast(message, true);
     if ($selectedLocalVoice !== RELAY_VOICE) return speakLocal(text, toast);
     if (!relaySpeechSupported) {
-      toast('This relay has no speech engine; install espeak-ng there or choose a local voice.');
+      toast('This relay has no speech engine; install Piper with a voice model or espeak-ng there, or choose a local voice.');
       return false;
     }
     return speakViaRelay(text, (chunk) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk }, 20_000), toast);

@@ -690,7 +690,7 @@
       descriptionId="local-speech-hint"
       onchange={(value) => setLocalSpeechEnabled(value)}
     />
-    <p class="hint" id="local-speech-hint">Off by default. Enabling adds Speak buttons beside responses in the Terminal and Conversation History views. Automatic picks the local voice matching this phone’s language; the computer voice synthesizes on a relay and streams here encrypted, which keeps reading aloud alive while the screen is off. Response text never reaches a third-party speech server.</p>
+    <p class="hint" id="local-speech-hint">Off by default. Enabling adds Speak buttons beside responses in the Terminal and Conversation History views. Automatic picks the local voice matching this phone’s language; the computer voice synthesizes on a relay and streams here encrypted, which keeps reading aloud alive while the screen is off. The relay prefers a Piper neural voice and falls back to its system speech engine. Response text never reaches a third-party speech server.</p>
     <label>
       Voice
       <select

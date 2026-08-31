@@ -32,10 +32,12 @@ setup and want to know what every screen and control is for.
   succeeds.
 - Optionally request a screen wake lock only while a terminal is visible, or
   read responses aloud: through a browser-local voice on the phone, or with a
-  computer voice synthesized by a TTS engine on the relay (espeak-ng, espeak,
-  flite, or macOS say) and streamed to the phone encrypted - real media
-  playback that keeps reading with the screen off. Response text never
-  reaches a third-party speech server on either path.
+  computer voice synthesized on the relay and streamed to the phone encrypted -
+  real media playback that keeps reading with the screen off. The relay prefers
+  a local Piper neural voice, then falls back to espeak-ng, espeak, flite, or
+  macOS say. Put a Piper `.onnx` model and its `.onnx.json` beside each other in
+  `~/.local/share/piper-voices`, or set `HERDR_PIPER_VOICE` to the model path.
+  Response text never reaches a third-party speech server on either path.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |
