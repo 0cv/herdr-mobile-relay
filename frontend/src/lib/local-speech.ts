@@ -68,12 +68,15 @@ export function initializeLocalSpeech(): () => void {
   };
 }
 
-export function speakLocal(text: string): boolean {
+export function speakLocal(text: string, onIssue?: (message: string) => void): boolean {
   if (get(securityState).locked || !get(localSpeechEnabled) || !window.speechSynthesis || !text.trim()) return false;
   const selected = get(selectedLocalVoice);
   const voice = localVoices.find((candidate) => candidate.localService && candidate.voiceURI === selected);
   if (!voice) {
     localSpeechState.set(localVoices.length ? 'error' : 'unavailable');
+    onIssue?.(localVoices.length
+      ? 'Choose a local voice in Settings before reading responses aloud.'
+      : 'No local voice is available on this device.');
     return false;
   }
   window.speechSynthesis.cancel();
@@ -82,7 +85,10 @@ export function speakLocal(text: string): boolean {
   utterance.lang = voice.lang;
   utterance.onstart = () => localSpeechState.set('speaking');
   utterance.onend = () => localSpeechState.set('idle');
-  utterance.onerror = () => localSpeechState.set('error');
+  utterance.onerror = () => {
+    localSpeechState.set('error');
+    onIssue?.('The selected voice could not speak on this device.');
+  };
   window.speechSynthesis.speak(utterance);
   return true;
 }

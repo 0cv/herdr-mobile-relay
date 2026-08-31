@@ -129,13 +129,15 @@
       failed: 'Request failed',
     }[$wakeLockState];
   });
-  const localSpeechStatus = $derived({
-    off: 'Off',
-    idle: 'Ready',
-    speaking: 'Speaking exact response text',
-    error: 'Speech failed',
-    unavailable: 'No local browser voice is available',
-  }[$localSpeechState]);
+  const localSpeechStatus = $derived($localSpeechState === 'idle' && !$selectedLocalVoice
+    ? 'Choose a local voice below to show the Speak buttons'
+    : {
+      off: 'Off',
+      idle: 'Ready — Speak buttons are shown beside responses',
+      speaking: 'Speaking exact response text',
+      error: 'Speech failed',
+      unavailable: 'No local browser voice is available',
+    }[$localSpeechState]);
 
   $effect(() => {
     if (!appUpdateChecking) previousAppUpdate = $appUpdate;
@@ -685,7 +687,7 @@
       descriptionId="local-speech-hint"
       onchange={(value) => setLocalSpeechEnabled(value)}
     />
-    <p class="hint" id="local-speech-hint">Off by default. Only voices the browser marks local are offered; response text is never sent to a speech server.</p>
+    <p class="hint" id="local-speech-hint">Off by default. Choosing a voice adds Speak buttons beside responses in the Terminal and Conversation History views. Only voices the browser marks local are offered; response text is never sent to a speech server.</p>
     <label>
       Local voice
       <select

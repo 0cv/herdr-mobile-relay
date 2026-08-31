@@ -128,6 +128,51 @@ describe('local speech', () => {
     expect(voices[0]).toMatchObject({ uri: 'Bosnian Bosnia & Herzegovina', name: 'Bosnian I' });
     stop();
   });
+
+  it('reports why a speak tap produced no audio', () => {
+    const local = {
+      voiceURI: 'local',
+      name: 'Local',
+      lang: 'en-US',
+      localService: true,
+      default: true,
+    } as SpeechSynthesisVoice;
+    const speak = vi.fn();
+    vi.stubGlobal('speechSynthesis', {
+      getVoices: () => [local],
+      speak,
+      cancel: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    class FakeUtterance {
+      voice: SpeechSynthesisVoice | null = null;
+      lang = '';
+      onstart: (() => void) | null = null;
+      onend: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor(public text: string) {}
+    }
+    vi.stubGlobal('SpeechSynthesisUtterance', FakeUtterance);
+
+    const stop = initializeLocalSpeech();
+    setLocalSpeechEnabled(true);
+
+    // Enabled but no voice chosen: the tap must explain itself instead of
+    // silently doing nothing.
+    const issues: string[] = [];
+    expect(speakLocal('response', (message) => issues.push(message))).toBe(false);
+    expect(issues).toEqual(['Choose a local voice in Settings before reading responses aloud.']);
+
+    // A device-side TTS failure after a successful start reports too.
+    setSelectedLocalVoice('local');
+    expect(speakLocal('response', (message) => issues.push(message))).toBe(true);
+    (speak.mock.calls[0][0] as FakeUtterance).onerror?.();
+    expect(issues).toHaveLength(2);
+    expect(issues[1]).toContain('could not speak');
+    stop();
+  });
 });
 
 describe('terminal wake lock', () => {

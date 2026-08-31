@@ -176,7 +176,7 @@
   }
   function toggleSpeech(text: string): void {
     if ($localSpeechState === 'speaking') stopLocalSpeech();
-    else speakLocal(text);
+    else speakLocal(text, (message) => relayStore.showToast(message, true));
   }
 
 

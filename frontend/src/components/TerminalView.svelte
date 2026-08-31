@@ -2102,7 +2102,7 @@
         title={$localSpeechState === 'speaking' ? 'Stop reading' : 'Read latest response with selected local voice'}
         onclick={() => {
           if ($localSpeechState === 'speaking') stopLocalSpeech();
-          else speakLocal(terminalCopyText);
+          else speakLocal(terminalCopyText, (message) => relayStore.showToast(message, true));
         }}
       >{$localSpeechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
     {/if}
