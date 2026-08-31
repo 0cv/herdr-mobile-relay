@@ -143,6 +143,8 @@
   let virtualRowObserver: ResizeObserver | undefined;
   let virtualHeightCache = new Map<string, number>();
   const virtualIndex = new VirtualTerminalIndex();
+  const wideGridOffsets = new Map<number, number>();
+  let wideGridOffsetsPane = '';
   let lastFormat = '';
   let lastContent = '';
   let lastPreserveLayout = false;
@@ -855,8 +857,8 @@
       // (the leased width, fixed grids excepted) and pending (the container).
       // A relay that cannot lease keeps every row on one line.
       const wraps = (!lastPreserveLayout
-        || resizeLayoutPending
-        || (resizeLayoutActive && !row.fixedGrid))
+        || (resizeLayoutPending && !row.wideGrid)
+        || (resizeLayoutActive && !row.fixedGrid && !row.wideGrid))
         ? Math.max(1, Math.ceil(row.columns / wrappingColumns))
         : 1;
       return lineHeight * wraps;
@@ -887,12 +889,55 @@
   function mountedVirtualHtml(start: number, end: number): string {
     let html = '';
     for (let index = start; index < end; index += 1) {
-      html += renderedRows[index].html.replace(
-        '<span ',
-        `<span data-terminal-row="${index}" `,
-      );
+      const attributes = renderedRows[index].wideGrid && wideGridBlocks[index] >= 0
+        ? `<span data-terminal-row="${index}" data-terminal-wide-block="${wideGridBlocks[index]}" `
+        : `<span data-terminal-row="${index}" `;
+      html += renderedRows[index].html.replace('<span ', attributes);
     }
     return html;
+  }
+
+  // Contiguous wide box-drawn rows form one logical table. Their borders were
+  // collapsed to separators, so a separator between two wide rows continues
+  // the block instead of splitting the table into per-row scroll islands.
+  const wideGridBlocks = $derived.by(() => {
+    const blocks = new Array<number>(renderedRows.length).fill(-1);
+    let block = -1;
+    let open = false;
+    for (let index = 0; index < renderedRows.length; index += 1) {
+      if (renderedRows[index].wideGrid) {
+        if (!open) {
+          block += 1;
+          open = true;
+        }
+        blocks[index] = block;
+      } else if (!renderedRows[index].separator) {
+        open = false;
+      }
+    }
+    return blocks;
+  });
+
+  function syncWideGridScroll(event: Event) {
+    const row = event.target;
+    if (!(row instanceof HTMLElement) || row.dataset.terminalWideBlock === undefined || !terminalElement) return;
+    const block = Number(row.dataset.terminalWideBlock);
+    if (wideGridOffsetsPane !== agent.pane_id) {
+      wideGridOffsets.clear();
+      wideGridOffsetsPane = agent.pane_id;
+    }
+    wideGridOffsets.set(block, row.scrollLeft);
+    for (const sibling of terminalElement.querySelectorAll<HTMLElement>(`[data-terminal-wide-block="${block}"]`)) {
+      if (sibling !== row && sibling.scrollLeft !== row.scrollLeft) sibling.scrollLeft = row.scrollLeft;
+    }
+  }
+
+  function restoreWideGridScroll() {
+    if (!terminalElement || wideGridOffsetsPane !== agent.pane_id) return;
+    for (const row of terminalElement.querySelectorAll<HTMLElement>('[data-terminal-wide-block]')) {
+      const offset = wideGridOffsets.get(Number(row.dataset.terminalWideBlock));
+      if (offset && row.scrollLeft !== offset) row.scrollLeft = offset;
+    }
   }
 
   function renderVirtualWindow(scrollTop: number, force = false) {
@@ -917,7 +962,9 @@
   }
 
   function observeVirtualRows() {
-    if (!terminalElement || typeof ResizeObserver === 'undefined') return;
+    if (!terminalElement) return;
+    restoreWideGridScroll();
+    if (typeof ResizeObserver === 'undefined') return;
     virtualRowObserver ||= new ResizeObserver(measureVirtualRows);
     virtualRowObserver.disconnect();
     for (const row of terminalElement.querySelectorAll<HTMLElement>('[data-terminal-row]')) {
@@ -1979,6 +2026,7 @@
     role="log"
     aria-label="Agent terminal output"
     onscroll={handleScroll}
+    onscrollcapture={syncWideGridScroll}
   >
     <span
       bind:this={cellMeasureElement}

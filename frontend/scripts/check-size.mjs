@@ -40,7 +40,10 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 128 KiB for paired-device administration, durable notification
 // policy, validated attachment batches, exact target routing, local speech,
 // wake lock, and OMO plan UI added to the required single application bundle.
-const limitKiB = 150;
+// Raised from 150 KiB for stale-width terminal tables: rows wider than the
+// leased pane keep their cell grid inside per-row lockstep scrollers instead
+// of wrapping into misaligned fragments.
+const limitKiB = 151;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

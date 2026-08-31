@@ -3214,10 +3214,11 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
-test('wraps stale wide grids but preserves current grids in Resize Session', async ({ page }) => {
+test('scrolls stale wide grids in place and preserves current grids in Resize Session', async ({ page }) => {
   const staleTable = [
     `┌${'─'.repeat(180)}┐`,
     `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(178)}│`,
+    `│ ${'12m      | 1.31   | -9.4%  | 1.02'.padEnd(178)}│`,
     `└${'─'.repeat(180)}┘`,
   ];
   const desktopHistory = Array.from({ length: 46 }, (_, index) => `desktop history row ${index + 1}`);
@@ -3264,17 +3265,39 @@ test('wraps stale wide grids but preserves current grids in Resize Session', asy
   });
   expect(Math.max(...lineHeights.heights)).toBeLessThan(lineHeights.lineHeight * 1.2);
   // The desktop-width rows sit above the screen; the stale grid enters the
-  // DOM once it is scrolled into view and wraps instead of overflowing.
+  // DOM once it is scrolled into view and pans inside its own rows instead of
+  // wrapping or panning the pane.
   await terminal.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
   });
   await expect(terminal).toContainText('Lookback | Sharpe | Max DD | 2x-cost Sharpe');
-  const wrappedGeometry = await terminal.evaluate((element) => ({
-    clientWidth: element.clientWidth,
-    scrollWidth: element.scrollWidth,
-  }));
-  expect(wrappedGeometry.scrollWidth).toBeLessThanOrEqual(wrappedGeometry.clientWidth);
+  await expect(terminal.locator('.terminal-wide-grid')).toHaveCount(2);
+  const wideGeometry = await terminal.evaluate((element) => {
+    const rows = [...element.querySelectorAll<HTMLElement>('.terminal-wide-grid')];
+    const lineHeight = Number.parseFloat(getComputedStyle(rows[0]).lineHeight);
+    return {
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      lineHeight,
+      rowHeights: rows.map((row) => row.getBoundingClientRect().height),
+      rowScrollable: rows.map((row) => row.scrollWidth > row.clientWidth),
+    };
+  });
+  // The pane itself never pans sideways; each wide row is its own scroller
+  // and stays a single unwrapped line.
+  expect(wideGeometry.scrollWidth).toBeLessThanOrEqual(wideGeometry.clientWidth);
+  expect(wideGeometry.rowScrollable).toEqual([true, true]);
+  expect(Math.max(...wideGeometry.rowHeights)).toBeLessThan(wideGeometry.lineHeight * 1.2);
+
+  // Panning one row of the table pans its whole block in lockstep.
+  await terminal.evaluate((element) => {
+    const row = element.querySelector<HTMLElement>('.terminal-wide-grid')!;
+    row.scrollLeft = 60;
+    row.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(() => terminal.evaluate((element) => [...element.querySelectorAll<HTMLElement>('.terminal-wide-grid')]
+    .map((row) => row.scrollLeft))).toEqual([60, 60]);
 });
 
 test('surfaces one explicit error when a pane-size lease fails', async ({ page }) => {

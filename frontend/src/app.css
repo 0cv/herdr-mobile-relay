@@ -524,12 +524,27 @@ textarea { min-height: 6.5rem; resize: vertical; }
 }
 .term-content.preserve-layout.resize-layout .terminal-grid-line .terminal-cell-run { display: inline-block; }
 .term-content.preserve-layout.resize-layout .terminal-cell-run { display: inline; }
+/* A box-drawn row wider than the pane cannot reflow, but wrapping it destroys
+   its column alignment. It keeps its cell grid inside a per-row horizontal
+   scroller clipped at the pane width; TerminalView keeps a contiguous block's
+   rows scrolling in lockstep so the table pans as one unit. Only this row
+   scrolls - the pane itself never pans sideways. */
+.term-content.preserve-layout:is(.resize-layout, .resize-pending) > .term-screen > .ansi-line.terminal-wide-grid {
+  display: block;
+  max-width: var(--terminal-width, 100%);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  overflow-wrap: normal;
+  white-space: pre;
+  scrollbar-width: none;
+}
+.term-content.preserve-layout .terminal-wide-grid .terminal-cell-run { display: inline-block; }
 /* No lease has landed: the pane's width is not the phone's, so column
    alignment is already lost. Wrap at the container rather than scrolling
    sideways - a pan survives every refresh, stranding the reader on the tails
    of the newest lines. A leased pane keeps the rules above, where the pane
-   really is this wide. Box-drawing rows are handled in TerminalView, which
-   renders them as wrappable text past this width instead of a cell grid. */
+   really is this wide. Box-drawing rows past this width are classified in
+   terminal.ts and scroll inside their own row instead of wrapping. */
 .term-content.preserve-layout.resize-pending > .term-screen > .ansi-line {
   /* `anywhere`, not `break-word`: only `anywhere` also shrinks a row's
      min-content, which keeps one long token from holding a run wider than the

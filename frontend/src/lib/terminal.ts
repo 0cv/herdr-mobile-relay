@@ -778,6 +778,7 @@ export interface RenderedTerminalRow {
   text: string;
   columns: number;
   fixedGrid: boolean;
+  wideGrid: boolean;
   separator: boolean;
 }
 
@@ -887,7 +888,10 @@ function responsiveTerminalGridLine(line: string, maxColumns: number): string {
     || !hasTerminalBoxCell(line)
     || terminalTextColumns(stripAnsi(line)) <= maxColumns) return line;
   if (isSeparatorOnlyLine(line) || isHorizontalBorderLine(line)) return TERMINAL_SEPARATOR_TOKEN;
-  return trimTerminalChrome(line, true);
+  // A stale-width content row keeps its cells: it renders as a fixed grid
+  // inside its own horizontal scroller instead of wrapping into misaligned
+  // fragments. Only borders degrade, because a scrolling rule shows nothing.
+  return line;
 }
 
 export function terminalHtmlRows(
@@ -905,6 +909,7 @@ export function terminalHtmlRows(
         text: '',
         columns: 0,
         fixedGrid: false,
+        wideGrid: false,
         separator: true,
       };
     }
@@ -917,21 +922,28 @@ export function terminalHtmlRows(
     const background = normalizedAnsiBackground(sourceBackground, normalizeRow);
     const renderedText = stripAnsi(renderedLine);
     const columns = terminalTextColumns(renderedText);
+    const boxCell = hasTerminalBoxCell(renderedLine);
     const fixedGrid = preserveLineEnds
-      && hasTerminalBoxCell(renderedLine)
+      && boxCell
       && (maxFixedGridColumns < 1 || columns <= maxFixedGridColumns);
+    const wideGrid = preserveLineEnds
+      && boxCell
+      && maxFixedGridColumns >= 1
+      && columns > maxFixedGridColumns;
     const classes = [
       'ansi-line',
       background ? 'ansi-line-background' : '',
       fixedGrid ? 'terminal-grid-line' : '',
+      wideGrid ? 'terminal-wide-grid' : '',
     ].filter(Boolean).join(' ');
     const style = background ? ` style="${ansiLineBackgroundStyle(renderedLine, background)}"` : '';
     // ansiToHtml escapes every text segment before it emits controlled span markup.
     return {
-      html: `<span class="${classes}"${style}>${ansiToHtml(renderedLine, normalizeRow, normalizeDarkText, fixedGrid)}</span>`,
+      html: `<span class="${classes}"${style}>${ansiToHtml(renderedLine, normalizeRow, normalizeDarkText, fixedGrid || wideGrid)}</span>`,
       text: renderedText,
       columns,
       fixedGrid,
+      wideGrid,
       separator: false,
     };
   });
@@ -999,15 +1011,21 @@ export function renderTerminalContent(
       html: linkifyTerminalText(plainDisplay),
       rows: plainDisplay.split('\n').map((line) => {
         const columns = terminalTextColumns(line);
+        const boxCell = hasTerminalBoxCell(line);
         const fixedGrid = preserveLayout
-          && hasTerminalBoxCell(line)
+          && boxCell
           && (maxFixedGridColumns < 1 || columns <= maxFixedGridColumns);
-        const classes = `ansi-line${fixedGrid ? ' terminal-grid-line' : ''}`;
+        const wideGrid = preserveLayout
+          && boxCell
+          && maxFixedGridColumns >= 1
+          && columns > maxFixedGridColumns;
+        const classes = `ansi-line${fixedGrid ? ' terminal-grid-line' : ''}${wideGrid ? ' terminal-wide-grid' : ''}`;
         return {
           html: `<span class="${classes}">${linkifyTerminalText(line)}</span>`,
           text: line,
           columns,
           fixedGrid,
+          wideGrid,
           separator: false,
         };
       }),

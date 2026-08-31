@@ -303,7 +303,7 @@ describe('terminal rendering', () => {
     expect(mixedBorders.html).not.toContain('<span class="terminal-cell">');
   });
 
-  it('keeps current-width grids aligned and wraps stale wider grids in Resize Session', () => {
+  it('keeps stale wider grids as cell rows in their own scroller in Resize Session', () => {
     const desktopTable = [
       `┌${'─'.repeat(80)}┐`,
       `│ ${'Metric'.padEnd(78)}│`,
@@ -312,20 +312,26 @@ describe('terminal rendering', () => {
     const preserved = renderTerminalContent(desktopTable, 'ansi', true);
     expect(preserved.rows.every((row) => row.fixedGrid)).toBe(true);
 
+    // The stale-width content row keeps its full cells and is marked for the
+    // per-row horizontal scroller; only the borders collapse to separators.
     const resizedHistory = renderTerminalContent(desktopTable, 'ansi', true, false, 40);
-    expect(resizedHistory.rows.every((row) => row.fixedGrid)).toBe(false);
-    expect(resizedHistory.html).not.toContain('terminal-grid-line');
-    expect(resizedHistory.html).not.toContain('terminal-cell-box');
+    expect(resizedHistory.rows.every((row) => !row.fixedGrid)).toBe(true);
     expect(resizedHistory.rows.filter((row) => row.separator)).toHaveLength(2);
-    expect(Math.max(...resizedHistory.rows.map((row) => row.columns))).toBeLessThanOrEqual(40);
+    const wideRow = resizedHistory.rows.find((row) => row.wideGrid)!;
+    expect(wideRow.text).toContain('Metric');
+    expect(wideRow.columns).toBe(81);
+    expect(wideRow.html).toContain('terminal-wide-grid');
+    expect(wideRow.html).toContain('terminal-cell-box');
+    expect(resizedHistory.html).not.toContain('terminal-grid-line');
 
     const currentTable = renderTerminalContent([
       `┌${'─'.repeat(38)}┐`,
       `│ ${'Metric'.padEnd(36)}│`,
       `└${'─'.repeat(38)}┘`,
     ].join('\n'), 'ansi', true, false, 40);
-    expect(currentTable.rows.every((row) => row.fixedGrid)).toBe(true);
+    expect(currentTable.rows.every((row) => row.fixedGrid && !row.wideGrid)).toBe(true);
     expect(currentTable.html.match(/terminal-grid-line/g)).toHaveLength(3);
+    expect(currentTable.html).not.toContain('terminal-wide-grid');
   });
 
   it('collapses stale-width junctioned table borders to rules instead of wrapping them', () => {
@@ -338,6 +344,7 @@ describe('terminal rendering', () => {
     ].join('\n');
     const resized = renderTerminalContent(table, 'ansi', true, false, 40);
     expect(resized.rows.filter((row) => row.separator)).toHaveLength(3);
+    expect(resized.rows.filter((row) => row.wideGrid)).toHaveLength(2);
     expect(resized.display).not.toContain('┬');
     expect(resized.display).not.toContain('┼');
     expect(resized.display).toContain('Period');
@@ -435,7 +442,7 @@ describe('terminal rendering', () => {
   });
 
   it('detects rows cropped from the front of a growing log', () => {
-    const row = (text: string) => ({ html: '', text, columns: text.length, fixedGrid: false, separator: false });
+    const row = (text: string) => ({ html: '', text, columns: text.length, fixedGrid: false, wideGrid: false, separator: false });
     const rows = (start: number, length: number) =>
       Array.from({ length }, (_, index) => row(`log line ${start + index}`));
     expect(renderedRowShift(rows(0, 100), rows(10, 100))).toBe(10);
