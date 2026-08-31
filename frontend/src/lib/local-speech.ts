@@ -140,12 +140,11 @@ function quietToneURI(): string {
   return `data:audio/wav;base64,${btoa(binary)}`;
 }
 
-function startKeepalive(): void {
-  if (!keepalive) {
-    keepalive = new Audio(quietToneURI());
-    keepalive.loop = true;
-  }
-  keepalive.play()?.catch(() => {});
+function startKeepalive(onBlocked?: () => void): void {
+  keepalive?.pause();
+  keepalive = new Audio(quietToneURI());
+  keepalive.loop = true;
+  keepalive.play()?.catch(() => onBlocked?.());
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({ title: 'Reading response', artist: 'Herdr Mobile Relay' });
     navigator.mediaSession.playbackState = 'playing';
@@ -162,11 +161,19 @@ function stopKeepalive(): void {
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
 }
 
+// Chrome on Android is known to leave the synthesis queue paused after the
+// renderer thaws; resuming on return is harmless everywhere else.
+function resumeOnReturn(): void {
+  if (!document.hidden && get(localSpeechState) === 'speaking') window.speechSynthesis?.resume();
+}
+
 export function initializeLocalSpeech(): () => void {
   refreshVoices();
   window.speechSynthesis?.addEventListener('voiceschanged', refreshVoices);
+  document.addEventListener('visibilitychange', resumeOnReturn);
   return () => {
     window.speechSynthesis?.removeEventListener('voiceschanged', refreshVoices);
+    document.removeEventListener('visibilitychange', resumeOnReturn);
     window.speechSynthesis?.cancel();
     stopKeepalive();
   };
@@ -188,6 +195,10 @@ export function speakLocal(text: string, onIssue?: (message: string) => void): b
   }
   const generation = ++speakGeneration;
   window.speechSynthesis.cancel();
+  // The keepalive must start inside the tap's activation window: play() from
+  // a later TTS callback is autoplay-blocked, silently losing the audible-tab
+  // exemption that keeps speech alive with the screen off.
+  startKeepalive(() => onIssue?.('The browser blocked background audio; reading may stop when the screen locks.'));
   const chunks = speechChunks(speakableText(text) || text);
   chunks.forEach((chunk, index) => {
     const utterance = new SpeechSynthesisUtterance(chunk);
@@ -197,7 +208,6 @@ export function speakLocal(text: string, onIssue?: (message: string) => void): b
       utterance.onstart = () => {
         if (generation !== speakGeneration) return;
         localSpeechState.set('speaking');
-        startKeepalive();
       };
     }
     if (index === chunks.length - 1) {

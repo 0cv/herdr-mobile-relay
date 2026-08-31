@@ -180,15 +180,16 @@ describe('local speech', () => {
     const utterances = speak.mock.calls.map((call) => call[0] as FakeUtterance);
     expect(utterances.length).toBeGreaterThan(1);
 
-    // The whole queue is enqueued up front so a frozen tab cannot starve it,
-    // and only the boundary utterances carry state transitions.
-    expect(utterances.slice(0, -1).every((utterance) => utterance.onend === null)).toBe(true);
-    utterances[0].onstart?.();
-    expect(get(localSpeechState)).toBe('speaking');
+    // The keepalive starts inside the tap's activation window - play() from a
+    // later TTS callback is autoplay-blocked - and the whole queue is
+    // enqueued up front so a frozen tab cannot starve it.
     expect(audios).toHaveLength(1);
     expect(audios[0].loop).toBe(true);
     expect(audios[0].paused).toBe(false);
     expect(audios[0].src.startsWith('data:audio/wav;base64,')).toBe(true);
+    expect(utterances.slice(0, -1).every((utterance) => utterance.onend === null)).toBe(true);
+    utterances[0].onstart?.();
+    expect(get(localSpeechState)).toBe('speaking');
 
     utterances[utterances.length - 1].onend?.();
     expect(get(localSpeechState)).toBe('idle');
@@ -196,10 +197,9 @@ describe('local speech', () => {
 
     // Stopping mid-speech releases the stream too.
     expect(speakLocal(sentence)).toBe(true);
-    (speak.mock.calls.at(-1)![0] as FakeUtterance).onstart?.();
-    expect(audios[0].paused).toBe(false);
+    expect(audios.at(-1)!.paused).toBe(false);
     stopLocalSpeech();
-    expect(audios[0].paused).toBe(true);
+    expect(audios.at(-1)!.paused).toBe(true);
     stop();
   });
 
