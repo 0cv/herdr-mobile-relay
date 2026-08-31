@@ -155,27 +155,54 @@ describe('local speech', () => {
       constructor(public text: string) {}
     }
     vi.stubGlobal('SpeechSynthesisUtterance', FakeUtterance);
-    const audios: FakeAudio[] = [];
-    class FakeAudio {
-      loop = false;
-      paused = true;
-      plays = 0;
+    const contexts: FakeAudioContext[] = [];
+    class FakeAudioContext {
+      state = 'running';
+      resumes = 0;
+      oscillator: { frequency: { value: number }; started: boolean } | null = null;
+      gainValue = 0;
+      destination = {};
 
-      constructor(public src: string) {
-        audios.push(this);
+      constructor() {
+        contexts.push(this);
       }
 
-      play() {
-        this.paused = false;
-        this.plays++;
+      createOscillator() {
+        this.oscillator = { frequency: { value: 0 }, started: false };
+        return {
+          frequency: this.oscillator.frequency,
+          connect: (node: unknown) => node,
+          start: () => { this.oscillator!.started = true; },
+        };
+      }
+
+      createGain() {
+        return {
+          gain: {
+            get value() { return 0; },
+            set value(v: number) { contexts.at(-1)!.gainValue = v; },
+          },
+          connect: (node: unknown) => node,
+        };
+      }
+
+      resume() {
+        this.state = 'running';
+        this.resumes++;
         return Promise.resolve();
       }
 
-      pause() {
-        this.paused = true;
+      suspend() {
+        this.state = 'suspended';
+        return Promise.resolve();
+      }
+
+      close() {
+        this.state = 'closed';
+        return Promise.resolve();
       }
     }
-    vi.stubGlobal('Audio', FakeAudio);
+    vi.stubGlobal('AudioContext', FakeAudioContext);
 
     const stop = initializeLocalSpeech();
     setLocalSpeechEnabled(true);
@@ -184,42 +211,44 @@ describe('local speech', () => {
     const utterances = speak.mock.calls.map((call) => call[0] as FakeUtterance);
     expect(utterances.length).toBeGreaterThan(1);
 
-    // The keepalive starts inside the tap's activation window - play() from a
-    // later TTS callback is autoplay-blocked - and the whole queue is
-    // enqueued up front so a frozen tab cannot starve it.
-    expect(audios).toHaveLength(1);
-    expect(audios[0].loop).toBe(true);
-    expect(audios[0].paused).toBe(false);
-    expect(audios[0].src.startsWith('data:audio/wav;base64,')).toBe(true);
+    // The keepalive starts inside the tap's activation window and needs no
+    // URL: the CSP has no media-src, so element-based audio is refused. The
+    // whole queue is enqueued up front so a frozen tab cannot starve it.
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0].oscillator?.started).toBe(true);
+    expect(contexts[0].oscillator?.frequency.value).toBe(50);
+    expect(contexts[0].gainValue).toBeGreaterThan(0);
+    expect(contexts[0].gainValue).toBeLessThan(0.01);
+    expect(contexts[0].state).toBe('running');
     expect(utterances.slice(0, -1).every((utterance) => utterance.onend === null)).toBe(true);
     utterances[0].onstart?.();
     expect(get(localSpeechState)).toBe('speaking');
 
     utterances[utterances.length - 1].onend?.();
     expect(get(localSpeechState)).toBe('idle');
-    expect(audios[0].paused).toBe(true);
+    expect(contexts[0].state).toBe('suspended');
 
     // Stopping mid-speech releases the stream too.
     expect(speakLocal(sentence)).toBe(true);
-    expect(audios.at(-1)!.paused).toBe(false);
+    expect(contexts[0].state).toBe('running');
     stopLocalSpeech();
-    expect(audios.at(-1)!.paused).toBe(true);
+    expect(contexts[0].state).toBe('suspended');
 
     // A tap that must fetch its text first arms the stream inside the
-    // activation window; speakLocal then reuses it without a fresh play(),
+    // activation window; speakLocal then reuses it without a fresh resume,
     // and an abandoned arm releases unless speech is already running.
     armSpeechKeepalive();
-    const armed = audios.at(-1)!;
-    expect(armed.paused).toBe(false);
-    const playsBefore = armed.plays;
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0].state).toBe('running');
+    const resumesBefore = contexts[0].resumes;
     expect(speakLocal(sentence)).toBe(true);
-    expect(armed.plays).toBe(playsBefore);
+    expect(contexts[0].resumes).toBe(resumesBefore);
     localSpeechState.set('speaking');
     releaseSpeechKeepalive();
-    expect(armed.paused).toBe(false);
+    expect(contexts[0].state).toBe('running');
     localSpeechState.set('idle');
     releaseSpeechKeepalive();
-    expect(armed.paused).toBe(true);
+    expect(contexts[0].state).toBe('suspended');
     stop();
   });
 

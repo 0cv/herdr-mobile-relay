@@ -114,38 +114,31 @@ export function speechChunks(text: string, limit = 1500): string[] {
 }
 
 // Speech renders in the system TTS service, not the tab, so Chrome freezes
-// the page on screen-off and the utterance queue dies with it. A looping
-// near-silent tone keeps the tab audible - the same exemption music apps
-// lean on - which also holds the Bluetooth audio link open. MediaSession
-// adds lock-screen and headset Stop controls.
-let keepalive: HTMLAudioElement | null = null;
-
-function quietToneURI(): string {
-  const samples = 8000;
-  const data = new Uint8Array(44 + samples * 2);
-  const view = new DataView(data.buffer);
-  const write = (offset: number, value: string) => {
-    for (let i = 0; i < value.length; i++) data[offset + i] = value.charCodeAt(i);
-  };
-  write(0, 'RIFF'); view.setUint32(4, 36 + samples * 2, true); write(8, 'WAVEfmt ');
-  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-  view.setUint32(24, 8000, true); view.setUint32(28, 16000, true);
-  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-  write(36, 'data'); view.setUint32(40, samples * 2, true);
-  for (let i = 0; i < samples; i++) {
-    view.setInt16(44 + i * 2, Math.round(Math.sin((i * 2 * Math.PI * 50) / 8000) * 48), true);
-  }
-  let binary = '';
-  for (const byte of data) binary += String.fromCharCode(byte);
-  return `data:audio/wav;base64,${btoa(binary)}`;
-}
+// the page on screen-off and the utterance queue dies with it. A quiet
+// Web Audio tone keeps the tab audible - the same exemption music apps lean
+// on - which also holds the Bluetooth audio link open. An oscillator rather
+// than an audio element because the CSP has no media-src: a data: or blob:
+// source is refused, and Web Audio needs no URL at all. MediaSession adds
+// lock-screen and headset Stop controls.
+let keepaliveContext: AudioContext | null = null;
 
 function ensureKeepalive(onBlocked?: () => void): void {
-  if (!keepalive) {
-    keepalive = new Audio(quietToneURI());
-    keepalive.loop = true;
+  if (!window.AudioContext) return;
+  if (!keepaliveContext) {
+    const context = new AudioContext();
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.frequency.value = 50;
+    // About -54 dBFS: inaudible in practice, comfortably above Chromium's
+    // -72 dBFS silence threshold so the tab counts as playing audio.
+    gain.gain.value = 0.002;
+    oscillator.connect(gain).connect(context.destination);
+    oscillator.start();
+    keepaliveContext = context;
   }
-  if (keepalive.paused) keepalive.play()?.catch(() => onBlocked?.());
+  if (keepaliveContext.state !== 'running') {
+    keepaliveContext.resume().catch(() => onBlocked?.());
+  }
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({ title: 'Reading response', artist: 'Herdr Mobile Relay' });
     navigator.mediaSession.playbackState = 'playing';
@@ -173,7 +166,7 @@ export function releaseSpeechKeepalive(): void {
 }
 
 function stopKeepalive(): void {
-  keepalive?.pause();
+  void keepaliveContext?.suspend();
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
 }
 
@@ -192,7 +185,8 @@ export function initializeLocalSpeech(): () => void {
     document.removeEventListener('visibilitychange', resumeOnReturn);
     window.speechSynthesis?.cancel();
     stopKeepalive();
-    keepalive = null;
+    void keepaliveContext?.close();
+    keepaliveContext = null;
   };
 }
 
