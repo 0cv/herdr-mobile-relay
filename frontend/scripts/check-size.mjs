@@ -47,7 +47,11 @@ import { constants, gzipSync } from 'node:zlib';
 // uncaught errors and store invariant violations report on a raw-DOM banner
 // (phones have no console), and reading responses aloud gained sanitized
 // speech text, an automatic phone-language voice, and failure toasts.
-const limitKiB = 152;
+// Raised from 152 KiB for screen-off speech: a near-silent keepalive stream
+// keeps the tab audible so reading aloud survives the phone sleeping, with
+// lock-screen Stop controls and sentence-chunked utterances under the
+// Android TTS input limit.
+const limitKiB = 153;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import {
   initializeLocalSpeech,
+  localSpeechState,
   localSpeechVoices,
   selectedLocalVoice,
   setLocalSpeechEnabled,
   setSelectedLocalVoice,
   speakLocal,
+  speechChunks,
+  stopLocalSpeech,
 } from '$lib/local-speech';
 import { terminalWakeLock } from '$lib/preferences';
 import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
@@ -106,6 +109,97 @@ describe('local speech', () => {
     expect(speakLocal('private response')).toBe(true);
     const utterance = speak.mock.calls[1][0] as FakeUtterance;
     expect(utterance.voice).toBe(local);
+    stop();
+  });
+
+  it('splits long responses at sentence boundaries under the TTS limit', () => {
+    const sentence = 'This is one of the sentences the agent wrote.';
+    const long = Array.from({ length: 60 }, () => sentence).join(' ');
+    const chunks = speechChunks(long);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.length).toBeLessThanOrEqual(1500);
+      expect(chunk.endsWith('.')).toBe(true);
+    }
+    expect(chunks.join(' ')).toBe(long);
+    // A single overlong token still hard-cuts rather than erroring.
+    expect(speechChunks('x'.repeat(3200)).every((chunk) => chunk.length <= 1500)).toBe(true);
+    expect(speechChunks('short text')).toEqual(['short text']);
+  });
+
+  it('queues every chunk and holds a keepalive stream while speaking', () => {
+    const local = {
+      voiceURI: 'local',
+      name: 'Local',
+      lang: 'en-US',
+      localService: true,
+      default: true,
+    } as SpeechSynthesisVoice;
+    const speak = vi.fn();
+    vi.stubGlobal('speechSynthesis', {
+      getVoices: () => [local],
+      speak,
+      cancel: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    class FakeUtterance {
+      voice: SpeechSynthesisVoice | null = null;
+      lang = '';
+      onstart: (() => void) | null = null;
+      onend: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor(public text: string) {}
+    }
+    vi.stubGlobal('SpeechSynthesisUtterance', FakeUtterance);
+    const audios: FakeAudio[] = [];
+    class FakeAudio {
+      loop = false;
+      paused = true;
+
+      constructor(public src: string) {
+        audios.push(this);
+      }
+
+      play() {
+        this.paused = false;
+        return Promise.resolve();
+      }
+
+      pause() {
+        this.paused = true;
+      }
+    }
+    vi.stubGlobal('Audio', FakeAudio);
+
+    const stop = initializeLocalSpeech();
+    setLocalSpeechEnabled(true);
+    const sentence = 'The relay confirmed every change landed as expected.';
+    expect(speakLocal(Array.from({ length: 60 }, () => sentence).join(' '))).toBe(true);
+    const utterances = speak.mock.calls.map((call) => call[0] as FakeUtterance);
+    expect(utterances.length).toBeGreaterThan(1);
+
+    // The whole queue is enqueued up front so a frozen tab cannot starve it,
+    // and only the boundary utterances carry state transitions.
+    expect(utterances.slice(0, -1).every((utterance) => utterance.onend === null)).toBe(true);
+    utterances[0].onstart?.();
+    expect(get(localSpeechState)).toBe('speaking');
+    expect(audios).toHaveLength(1);
+    expect(audios[0].loop).toBe(true);
+    expect(audios[0].paused).toBe(false);
+    expect(audios[0].src.startsWith('data:audio/wav;base64,')).toBe(true);
+
+    utterances[utterances.length - 1].onend?.();
+    expect(get(localSpeechState)).toBe('idle');
+    expect(audios[0].paused).toBe(true);
+
+    // Stopping mid-speech releases the stream too.
+    expect(speakLocal(sentence)).toBe(true);
+    (speak.mock.calls.at(-1)![0] as FakeUtterance).onstart?.();
+    expect(audios[0].paused).toBe(false);
+    stopLocalSpeech();
+    expect(audios[0].paused).toBe(true);
     stop();
   });
 

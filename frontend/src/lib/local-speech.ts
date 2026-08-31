@@ -56,7 +56,10 @@ function refreshVoices(): void {
 export function setLocalSpeechEnabled(enabled: boolean): void {
   localStorage.setItem(ENABLED_KEY, String(enabled));
   localSpeechEnabled.set(enabled);
-  if (!enabled) window.speechSynthesis?.cancel();
+  if (!enabled) {
+    window.speechSynthesis?.cancel();
+    stopKeepalive();
+  }
   if (enabled && !get(selectedLocalVoice)) setSelectedLocalVoice(AUTO_VOICE);
   refreshVoices();
 }
@@ -83,14 +86,95 @@ function resolveVoice(selected: string): SpeechSynthesisVoice | undefined {
     ?? localVoices[0];
 }
 
+/**
+ * Android's TTS rejects utterances past a few thousand characters, and each
+ * boundary is a point where a frozen tab loses the queue. Sentence-sized
+ * chunks keep every utterance well under the limit.
+ */
+export function speechChunks(text: string, limit = 1500): string[] {
+  const chunks: string[] = [];
+  let current = '';
+  for (const sentence of text.split(/(?<=[.!?:;\n])\s+/u)) {
+    for (let piece = sentence; ;) {
+      if (current && current.length + piece.length + 1 > limit) {
+        chunks.push(current);
+        current = '';
+      }
+      if (piece.length <= limit) {
+        current = current ? `${current} ${piece}` : piece;
+        break;
+      }
+      const cut = piece.lastIndexOf(' ', limit);
+      chunks.push(piece.slice(0, cut > 0 ? cut : limit));
+      piece = piece.slice(cut > 0 ? cut + 1 : limit);
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+// Speech renders in the system TTS service, not the tab, so Chrome freezes
+// the page on screen-off and the utterance queue dies with it. A looping
+// near-silent tone keeps the tab audible - the same exemption music apps
+// lean on - which also holds the Bluetooth audio link open. MediaSession
+// adds lock-screen and headset Stop controls.
+let keepalive: HTMLAudioElement | null = null;
+
+function quietToneURI(): string {
+  const samples = 8000;
+  const data = new Uint8Array(44 + samples * 2);
+  const view = new DataView(data.buffer);
+  const write = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i++) data[offset + i] = value.charCodeAt(i);
+  };
+  write(0, 'RIFF'); view.setUint32(4, 36 + samples * 2, true); write(8, 'WAVEfmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true); view.setUint32(28, 16000, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  write(36, 'data'); view.setUint32(40, samples * 2, true);
+  for (let i = 0; i < samples; i++) {
+    view.setInt16(44 + i * 2, Math.round(Math.sin((i * 2 * Math.PI * 50) / 8000) * 48), true);
+  }
+  let binary = '';
+  for (const byte of data) binary += String.fromCharCode(byte);
+  return `data:audio/wav;base64,${btoa(binary)}`;
+}
+
+function startKeepalive(): void {
+  if (!keepalive) {
+    keepalive = new Audio(quietToneURI());
+    keepalive.loop = true;
+  }
+  keepalive.play()?.catch(() => {});
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: 'Reading response', artist: 'Herdr Mobile Relay' });
+    navigator.mediaSession.playbackState = 'playing';
+    for (const action of ['pause', 'stop'] as MediaSessionAction[]) {
+      try {
+        navigator.mediaSession.setActionHandler(action, () => stopLocalSpeech());
+      } catch { /* action unsupported */ }
+    }
+  }
+}
+
+function stopKeepalive(): void {
+  keepalive?.pause();
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
+}
+
 export function initializeLocalSpeech(): () => void {
   refreshVoices();
   window.speechSynthesis?.addEventListener('voiceschanged', refreshVoices);
   return () => {
     window.speechSynthesis?.removeEventListener('voiceschanged', refreshVoices);
     window.speechSynthesis?.cancel();
+    stopKeepalive();
   };
 }
+
+// Cancelling fires interrupted end/error events on every queued utterance;
+// the generation guard keeps them from clobbering the replacing speech.
+let speakGeneration = 0;
 
 export function speakLocal(text: string, onIssue?: (message: string) => void): boolean {
   if (get(securityState).locked || !get(localSpeechEnabled) || !window.speechSynthesis || !text.trim()) return false;
@@ -102,21 +186,42 @@ export function speakLocal(text: string, onIssue?: (message: string) => void): b
       : 'No local voice is available on this device.');
     return false;
   }
+  const generation = ++speakGeneration;
   window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(speakableText(text) || text);
-  utterance.voice = voice;
-  utterance.lang = voice.lang;
-  utterance.onstart = () => localSpeechState.set('speaking');
-  utterance.onend = () => localSpeechState.set('idle');
-  utterance.onerror = () => {
-    localSpeechState.set('error');
-    onIssue?.('The selected voice could not speak on this device.');
-  };
-  window.speechSynthesis.speak(utterance);
+  const chunks = speechChunks(speakableText(text) || text);
+  chunks.forEach((chunk, index) => {
+    const utterance = new SpeechSynthesisUtterance(chunk);
+    utterance.voice = voice;
+    utterance.lang = voice.lang;
+    if (index === 0) {
+      utterance.onstart = () => {
+        if (generation !== speakGeneration) return;
+        localSpeechState.set('speaking');
+        startKeepalive();
+      };
+    }
+    if (index === chunks.length - 1) {
+      utterance.onend = () => {
+        if (generation !== speakGeneration) return;
+        localSpeechState.set('idle');
+        stopKeepalive();
+      };
+    }
+    utterance.onerror = () => {
+      if (generation !== speakGeneration) return;
+      speakGeneration++;
+      localSpeechState.set('error');
+      stopKeepalive();
+      onIssue?.('The selected voice could not speak on this device.');
+    };
+    window.speechSynthesis.speak(utterance);
+  });
   return true;
 }
 
 export function stopLocalSpeech(): void {
+  speakGeneration++;
   window.speechSynthesis?.cancel();
+  stopKeepalive();
   localSpeechState.set(get(localSpeechEnabled) ? localVoices.length ? 'idle' : 'unavailable' : 'off');
 }
