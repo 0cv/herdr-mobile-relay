@@ -101,6 +101,33 @@ describe('local speech', () => {
     expect(utterance.voice).toBe(local);
     stop();
   });
+
+  it('collapses Android voice variants that share one voiceURI', () => {
+    // Google TTS on Android lists variants of a voice under a single
+    // voiceURI. The settings voice list is keyed by URI, and the repeat
+    // crashed the mounting settings view on a real phone (each_key_duplicate
+    // on `Bosnian Bosnia & Herzegovina`), wedging every control in the app.
+    const variant = (name: string): SpeechSynthesisVoice => ({
+      voiceURI: 'Bosnian Bosnia & Herzegovina',
+      name,
+      lang: 'bs-BA',
+      localService: true,
+      default: false,
+    } as SpeechSynthesisVoice);
+    vi.stubGlobal('speechSynthesis', {
+      getVoices: () => [variant('Bosnian I'), variant('Bosnian II')],
+      speak: vi.fn(),
+      cancel: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+
+    const stop = initializeLocalSpeech();
+    const voices = get(localSpeechVoices);
+    expect(voices).toHaveLength(1);
+    expect(voices[0]).toMatchObject({ uri: 'Bosnian Bosnia & Herzegovina', name: 'Bosnian I' });
+    stop();
+  });
 });
 
 describe('terminal wake lock', () => {

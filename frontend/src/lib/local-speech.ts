@@ -25,7 +25,17 @@ function refreshVoices(): void {
     localSpeechState.set(get(localSpeechEnabled) ? 'unavailable' : 'off');
     return;
   }
-  localVoices = window.speechSynthesis.getVoices().filter((voice) => voice.localService);
+  // Android's system TTS reports variants of one voice under a single
+  // voiceURI. The app selects and speaks by URI, so the duplicates are
+  // indistinguishable here - and the voice list renders keyed by URI, where
+  // a repeat crashes the mounting settings view. First occurrence wins,
+  // matching how speakLocal resolves the stored selection.
+  const seenURIs = new Set<string>();
+  localVoices = window.speechSynthesis.getVoices().filter((voice) => {
+    if (!voice.localService || seenURIs.has(voice.voiceURI)) return false;
+    seenURIs.add(voice.voiceURI);
+    return true;
+  });
   localSpeechVoices.set(localVoices.map((voice) => ({
     uri: voice.voiceURI,
     name: voice.name,
