@@ -31,12 +31,14 @@ var copyProfiles = map[string]CopyProfile{
 		Confirmation: regexp.MustCompile(`(?im)copied\s+(?:to\s+clipboard\s*\(|via\s+terminal\s+escape\s+sequence\s+\(unverified,\s*)(?P<chars>[0-9]+)\s+characters?\)?\.?`),
 		Composer:     regexp.MustCompile(`(?m)^\s*│\s*>\s*(?P<text>.*?)\s*│\s*$`),
 	},
+	// omp draws its composer as a bare line between two full-width rules; the
+	// slash palette opens under the lower rule while /copy sits in the composer.
 	"omp": {
-		PreSubmission:  regexp.MustCompile(`(?ims)^\s*╰─\s*/copy\b[^\r\n╯]*─╯\s*\r?\n(?:.*\r?\n){0,2}\s*[^\r\n]*\bcopy\s+Pick\s+text\s+or\s+code\b`),
+		PreSubmission:  regexp.MustCompile(`(?ims)^[ \t]*/copy[ \t]*\r?\n[ \t]*─{20,}[ \t]*\r?\n(?:.*\r?\n){0,2}[^\r\n]*\bcopy\s+Pick\s+text\s+or\s+code\b`),
 		PostSubmission: regexp.MustCompile(`(?m)^\s*╭─\s+Copy to clipboard\b.*$`),
 		Confirmation:   regexp.MustCompile(`(?im)copied\s+last\s+message\s+to\s+clipboard`),
 		Composer: regexp.MustCompile(
-			`(?m)^\s*╰─\s*(?P<text>(?:/[^\r\n╯]*?)?)\s*─╯\s*$`,
+			`(?m)^[ \t]*─{20,}[ \t]*\r?\n[ \t]*(?P<text>(?:/[^\r\n]*?)?)[ \t]*\r?\n[ \t]*─{20,}[ \t]*$`,
 		),
 	},
 	"pi": {

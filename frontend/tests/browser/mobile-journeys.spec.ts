@@ -3449,7 +3449,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
 
   const composer = page.getByRole('textbox', { name: 'Prompt' });
   await composer.fill('Review the attached screen');
-  const imageInput = page.locator('.conversation-composer input[type=file]');
+  const imageInput = page.locator('.conversation-composer input[type=file][accept="image/*"]');
   await imageInput.setInputFiles({
     name: 'history-shot.png',
     mimeType: 'image/png',
@@ -4945,7 +4945,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect.poll(() => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
 
-  await page.locator('input[type=file]').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from('png') });
+  await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from('png') });
   await expect(composer).toHaveValue(/Attachment: attachment:test-1/);
   expect((await commands(page)).find((command) => command.type === 'upload_begin')).toMatchObject({
     files: [{ name: 'shot.png', media_type: 'image/png', bytes: 3 }],

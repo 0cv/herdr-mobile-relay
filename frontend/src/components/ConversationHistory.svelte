@@ -38,6 +38,7 @@
   let streamElement = $state<HTMLElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
+  let imageInput = $state<HTMLInputElement>(null!);
   let composer = $state(untrack(() => loadPromptDraft(agent)));
   let sendingPrompt = $state(false);
   let uploadingAttachment = $state(false);
@@ -517,6 +518,22 @@
       aria-busy={sendingPrompt || uploadingAttachment}
       onsubmit={(event) => { event.preventDefault(); void sendPrompt(); }}
     >
+      <!-- Images get their own input: a mixed accept list makes Android offer
+           the generic file picker instead of the photo picker, hiding
+           screenshots behind a Files detour. -->
+      <Button
+        variant="ghost"
+        size="icon"
+        disabled={inputLocked || uploadingAttachment || sendingPrompt}
+        aria-label="Attach photos"
+        onclick={() => imageInput.click()}
+      >
+        <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+          <circle cx="8.5" cy="9" r="1.5"></circle>
+          <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
+        </svg>
+      </Button>
       <Button
         variant="ghost"
         size="icon"
@@ -525,9 +542,7 @@
         onclick={() => fileInput.click()}
       >
         <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-          <rect x="3" y="4" width="18" height="16" rx="2"></rect>
-          <circle cx="8.5" cy="9" r="1.5"></circle>
-          <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
+          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
         </svg>
       </Button>
       <div class:has-text={Boolean(composer)} class="composer-field">
@@ -554,6 +569,14 @@
         disabled={!composer.replace(/[\r\n]+$/g, '') || inputLocked || sendingPrompt || uploadingAttachment}
         aria-label={sendingPrompt ? 'Submitting input' : 'Send prompt'}
       >{sendingPrompt ? '…' : '➤'}</Button>
+      <input
+        bind:this={imageInput}
+        type="file"
+        accept="image/*"
+        multiple
+        hidden
+        onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }}
+      />
       <input
         bind:this={fileInput}
         type="file"

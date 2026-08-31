@@ -871,10 +871,10 @@ func TestRunUsesRecordedOmpPicker(t *testing.T) {
 func TestRunAcceptsOmpPickerBeforeConfirmation(t *testing.T) {
 	response := []byte("OMP response")
 	pane := &fakePane{snapshots: []string{
-		"╰─   ─╯",
-		"╰─ /copy ─╯\n copy Pick text or code from the conversation to copy",
+		"────────────────────\n\n────────────────────",
+		"────────────────────\n /copy\n────────────────────\n  copy        Pick text or code from the conversation to copy",
 		"╭─ Copy to clipboard ─╮\n│ ❯ response text │\n╰─ ↑↓ move · Enter copy · Esc/Ctrl+C quit ─╯",
-		"Copied last message to clipboard\n╰─   ─╯",
+		"Copied last message to clipboard\n────────────────────\n\n────────────────────",
 	}}
 	profile, ok := slashcmd.CopyProfileFor("omp", "")
 	if !ok {

@@ -255,7 +255,7 @@ func TestClassifyIdleInputAfterProviderErrorAsChat(t *testing.T) {
 	}{
 		{agent: "claude", tail: "❯\nOpus 5 | ctx: 31% | main"},
 		{agent: "codex", tail: "› Use /skills to list available skills\ngpt-5.6-sol · Context 27% used"},
-		{agent: "omp", tail: "╭── GPT-5.6-Luna · xhi · ~/project · main ╮\n╰─                                      ─╯"},
+		{agent: "omp", tail: "────────────────────\n\n────────────────────\n 󰵗  ·  cv · GPT-5.6-Sol · xhi · 6.4%/272K · 17:32"},
 		{agent: "pi", tail: "────────────────\n\n────────────────\n~/project (main)\n$0.000 (sub) 0.0%/272k (auto) · gpt-5.6-luna"},
 		{agent: "opencode", tail: "┃ Ask anything... \"Fix broken tests\" ┃\n┃ Build · Qwen3.6-27B ┃"},
 		{agent: "kimi", tail: "╭────────────────╮\n│ >              │\n╰────────────────╯\n~/project main\ncontext: 0%"},

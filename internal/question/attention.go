@@ -70,7 +70,7 @@ var (
 	ompInputHeaderPattern      = regexp.MustCompile(`^╭[─━═]{2}.*╮$`)
 	ompInputFooterPattern      = regexp.MustCompile(`^╰[─━═].*[─━═]╯$`)
 	openCodeInputPromptPattern = regexp.MustCompile(`(?i)\bask anything\.\.\.`)
-	piInputStatusPattern       = regexp.MustCompile(`(?i)\d+(?:\.\d+)?%/\d+[km]\b`)
+	contextUsageStatusPattern  = regexp.MustCompile(`(?i)\d+(?:\.\d+)?%/\d+[km]\b`)
 	terminalRulePattern        = regexp.MustCompile(`^[─━═_—]{8,}$`)
 )
 
@@ -522,22 +522,13 @@ func normalInputPrompt(text, agent string) bool {
 	return false
 }
 
+// ompInputFramePrompt detects omp's idle composer: a bare input line between
+// two full-width rules, with the context-usage status line at the bottom.
 func ompInputFramePrompt(lines []string, agent string) bool {
 	if !ompAskAgent(agent) {
 		return false
 	}
-	last := len(lines) - 1
-	for last >= 0 && lines[last] == "" {
-		last--
-	}
-	if last < 1 || !ompInputFooterPattern.MatchString(lines[last]) {
-		return false
-	}
-	previous := last - 1
-	for previous >= 0 && lines[previous] == "" {
-		previous--
-	}
-	return previous >= 0 && ompInputHeaderPattern.MatchString(lines[previous])
+	return ruleFramedStatusPrompt(lines)
 }
 
 func piInputFramePrompt(lines []string, agent string) bool {
@@ -545,11 +536,15 @@ func piInputFramePrompt(lines []string, agent string) bool {
 	if agent != "pi" && !strings.HasPrefix(agent, "pi-") {
 		return false
 	}
+	return ruleFramedStatusPrompt(lines)
+}
+
+func ruleFramedStatusPrompt(lines []string) bool {
 	last := len(lines) - 1
 	for last >= 0 && lines[last] == "" {
 		last--
 	}
-	if last < 1 || !piInputStatusPattern.MatchString(lines[last]) {
+	if last < 1 || !contextUsageStatusPattern.MatchString(lines[last]) {
 		return false
 	}
 	rules := 0

@@ -91,6 +91,7 @@
   let terminalElement = $state<HTMLDivElement>(null!);
   let cellMeasureElement = $state<HTMLSpanElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
+  let imageInput = $state<HTMLInputElement>(null!);
   let modifierInputElement = $state<HTMLInputElement>(null!);
   let findInputElement = $state<HTMLInputElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
@@ -2224,11 +2225,19 @@
       </section>
     {/if}
     <div class="term-input">
-      <Button variant="ghost" size="icon" disabled={inputLocked || uploadingAttachment} aria-label="Attach files" onclick={() => fileInput.click()}>
+      <!-- Images get their own input: a mixed accept list makes Android offer
+           the generic file picker instead of the photo picker, hiding
+           screenshots behind a Files detour. -->
+      <Button variant="ghost" size="icon" disabled={inputLocked || uploadingAttachment} aria-label="Attach photos" onclick={() => imageInput.click()}>
         <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
           <rect x="3" y="4" width="18" height="16" rx="2"></rect>
           <circle cx="8.5" cy="9" r="1.5"></circle>
           <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
+        </svg>
+      </Button>
+      <Button variant="ghost" size="icon" disabled={inputLocked || uploadingAttachment} aria-label="Attach files" onclick={() => fileInput.click()}>
+        <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
         </svg>
       </Button>
       <div class:awaiting-approval={approvalMode && !composerFocused} class:has-text={Boolean(composer)} class="composer-field">
@@ -2263,6 +2272,7 @@
         {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
       <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || sendingPrompt || uploadingAttachment} aria-label={sendingPrompt ? 'Submitting input' : inspectionMode ? 'Submit terminal text' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
+      <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
       <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>
     {#if attachmentSnapshot?.items.length}
