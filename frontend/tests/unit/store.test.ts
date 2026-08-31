@@ -863,6 +863,29 @@ describe('relay command store', () => {
     expect(agents.map((agent) => agent.project).sort()).toEqual(['Fedora app', 'Mac app']);
   });
 
+  it('survives a corrupted snapshot that repeats a pane and reports it', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, inventory: { state: 'ready' } });
+    // The home view keys agent cards by pane_id: a duplicate from a corrupted
+    // relay snapshot previously crashed Svelte's flush and every control in
+    // the app silently died. The newest copy wins and the anomaly is visible.
+    socket.message({
+      type: 'agents',
+      agents: [
+        { pane_id: 'w1:p1', status: 'working', project: 'First copy', ...exactAgentFields() },
+        { pane_id: 'w1:p1', status: 'blocked', project: 'Second copy', ...exactAgentFields() },
+      ],
+    });
+    const agents = get(relayStore.agents);
+    expect(agents).toHaveLength(1);
+    expect(agents[0].project).toBe('Second copy');
+    const banner = document.querySelector('[role=alert]');
+    expect(banner?.textContent).toContain('Duplicate agent identity');
+    expect(banner?.textContent).toContain('w1:p1');
+    banner?.remove();
+  });
+
   it('ignores blocked and agent update frames older than the pane revision', () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();

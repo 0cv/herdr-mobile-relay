@@ -1526,6 +1526,9 @@
   }
 
   function handleScroll() {
+    // A scroll event queued during teardown can fire after Svelte has already
+    // cleared the bind:this reference; there is nothing left to measure.
+    if (!terminalElement) return;
     if (virtualScrollResetPending) {
       rememberVirtualScrollGeometry(terminalElement);
       return;

@@ -16,9 +16,11 @@ function show(message: string): void {
     if (!banner) {
       banner = document.createElement('div');
       banner.setAttribute('role', 'alert');
-      banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;'
+      // Bottom-anchored so the header controls stay reachable while the
+      // report is visible; the report itself dismisses on tap.
+      banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483647;'
         + 'background:#7f1d1d;color:#fff;font:12px/1.4 monospace;padding:.5rem .75rem;'
-        + 'white-space:pre-wrap;word-break:break-word;';
+        + 'white-space:pre-wrap;word-break:break-word;max-height:40vh;overflow-y:auto;';
       banner.addEventListener('click', () => banner?.remove());
       document.body.append(banner);
     }
@@ -26,6 +28,15 @@ function show(message: string): void {
   } catch {
     // Reporting must never take the app down further.
   }
+}
+
+/**
+ * Reports an invariant violation the app survived. It rides the same banner
+ * as a crash because both mean the same thing to a phone with no console:
+ * something is wrong and this text is the only evidence that will exist.
+ */
+export function reportAppAnomaly(message: string): void {
+  show(message);
 }
 
 export function reportUncaughtErrors(): void {

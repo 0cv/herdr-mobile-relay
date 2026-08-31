@@ -43,6 +43,7 @@ import {
   staleAgentRevision,
   stabilizeBlockedSnapshot,
 } from './agents';
+import { reportAppAnomaly } from './crash-banner';
 import {
   parseActionReceipt,
   parseApiError,
@@ -982,7 +983,7 @@ class RelayStore {
       this.agentsValue = this.agentsValue.map((agent) =>
         agent.relay_id === relayId ? normalizeAgentAttention(agent, attentionCapable) : agent,
       );
-      this.agents.set(this.agentsValue);
+      this.publishAgents('push_config');
       connection.agentProfiles = Array.isArray(message.agent_profiles)
         ? message.agent_profiles
           .filter((profile: unknown): profile is AgentProfile => {
@@ -1141,7 +1142,7 @@ class RelayStore {
         this.respondingValue,
       );
       this.reconcileResponding();
-      this.agents.set(this.agentsValue);
+      this.publishAgents('agents snapshot');
       return;
     }
     if (message.type === 'blocked') {
@@ -1164,7 +1165,7 @@ class RelayStore {
       } else this.agentsValue = [...this.agentsValue, next];
       this.respondingValue.delete(next.pane_id);
       this.responding.set(new Set(this.respondingValue));
-      this.agents.set(this.agentsValue);
+      this.publishAgents('blocked event');
       return;
     }
     if (message.type === 'agent_update' && message.pane_id) {
@@ -1186,7 +1187,7 @@ class RelayStore {
         this.agentsValue = copy;
       } else this.agentsValue = [...this.agentsValue, stabilized];
       this.reconcileResponding();
-      this.agents.set(this.agentsValue);
+      this.publishAgents('agent update');
       return;
     }
     if (message.type === 'pane_unchanged') {
@@ -1286,6 +1287,26 @@ class RelayStore {
     });
   }
 
+
+  /**
+   * Every agents publish flows through here because the home view keys its
+   * cards by pane_id: one duplicate anywhere wedges Svelte's flush and every
+   * control silently dies. A duplicate is upstream data corruption, so it is
+   * reported loudly, and the newest copy wins so the app stays alive.
+   */
+  private publishAgents(source: string): void {
+    const byPane = new Map<string, Agent>();
+    let duplicate = '';
+    for (const agent of this.agentsValue) {
+      if (byPane.has(agent.pane_id)) duplicate = agent.pane_id;
+      byPane.set(agent.pane_id, agent);
+    }
+    if (duplicate) {
+      reportAppAnomaly(`Duplicate agent identity from ${source}: ${duplicate}`);
+      this.agentsValue = [...byPane.values()];
+    }
+    this.agents.set(this.agentsValue);
+  }
   private mergePaneInteraction(paneId: string, message: Record<string, any>): void {
     const index = this.agentsValue.findIndex((agent) => agent.pane_id === paneId);
     if (index < 0) return;
@@ -1298,7 +1319,7 @@ class RelayStore {
       interaction: message.interaction as QuestionInteraction,
     };
     this.blockedSnapshotMisses.delete(paneId);
-    this.agents.set(this.agentsValue);
+    this.publishAgents('pane interaction');
   }
 
   private removeAgentsForRelay(relayId: string): void {
@@ -1309,7 +1330,7 @@ class RelayStore {
     for (const paneId of this.pendingPaneReads.keys()) {
       if (paneId.startsWith(`${relayId}::`)) this.pendingPaneReads.delete(paneId);
     }
-    this.agents.set(this.agentsValue);
+    this.publishAgents('relay removal');
   }
 
   private removeWorkspacesForRelay(relayId: string): void {
@@ -2116,7 +2137,7 @@ class RelayStore {
   async acknowledgePane(agent: Agent): Promise<void> {
     if (agentStatusGroup(agent) === 'done') {
       this.agentsValue = this.agentsValue.map((item) => item.pane_id === agent.pane_id ? { ...item, status: 'idle' } : item);
-      this.agents.set(this.agentsValue);
+      this.publishAgents('pane acknowledgement');
     }
     await this.sendToAgent(agent, { type: 'acknowledge_pane' }).catch((error) => this.showToast(error.message, true));
   }
@@ -2208,7 +2229,7 @@ class RelayStore {
           question_layout: Boolean(interaction),
         }
       : item);
-    this.agents.set(this.agentsValue);
+    this.publishAgents('pane content interaction');
   }
 
   requestActivities(): void {
