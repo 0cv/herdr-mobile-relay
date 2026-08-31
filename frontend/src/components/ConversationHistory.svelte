@@ -521,6 +521,7 @@
       <!-- Images get their own input: a mixed accept list makes Android offer
            the generic file picker instead of the photo picker, hiding
            screenshots behind a Files detour. -->
+      <div class="attach-stack">
       <Button
         variant="ghost"
         size="icon"
@@ -545,6 +546,7 @@
           <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
         </svg>
       </Button>
+      </div>
       <div class:has-text={Boolean(composer)} class="composer-field">
         <textarea
           bind:this={composerElement}

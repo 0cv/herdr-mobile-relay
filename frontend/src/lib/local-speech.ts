@@ -140,11 +140,12 @@ function quietToneURI(): string {
   return `data:audio/wav;base64,${btoa(binary)}`;
 }
 
-function startKeepalive(onBlocked?: () => void): void {
-  keepalive?.pause();
-  keepalive = new Audio(quietToneURI());
-  keepalive.loop = true;
-  keepalive.play()?.catch(() => onBlocked?.());
+function ensureKeepalive(onBlocked?: () => void): void {
+  if (!keepalive) {
+    keepalive = new Audio(quietToneURI());
+    keepalive.loop = true;
+  }
+  if (keepalive.paused) keepalive.play()?.catch(() => onBlocked?.());
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({ title: 'Reading response', artist: 'Herdr Mobile Relay' });
     navigator.mediaSession.playbackState = 'playing';
@@ -154,6 +155,21 @@ function startKeepalive(onBlocked?: () => void): void {
       } catch { /* action unsupported */ }
     }
   }
+}
+
+/**
+ * Speak taps that fetch their text first must arm the keepalive before the
+ * await: transient activation does not survive the round trip, and a play()
+ * outside it is autoplay-blocked, losing the audible-tab exemption that
+ * keeps speech alive with the screen off.
+ */
+export function armSpeechKeepalive(onIssue?: (message: string) => void): void {
+  if (get(securityState).locked || !get(localSpeechEnabled)) return;
+  ensureKeepalive(() => onIssue?.('The browser blocked background audio; reading may stop when the screen locks.'));
+}
+
+export function releaseSpeechKeepalive(): void {
+  if (get(localSpeechState) !== 'speaking') stopKeepalive();
 }
 
 function stopKeepalive(): void {
@@ -176,6 +192,7 @@ export function initializeLocalSpeech(): () => void {
     document.removeEventListener('visibilitychange', resumeOnReturn);
     window.speechSynthesis?.cancel();
     stopKeepalive();
+    keepalive = null;
   };
 }
 
@@ -195,10 +212,9 @@ export function speakLocal(text: string, onIssue?: (message: string) => void): b
   }
   const generation = ++speakGeneration;
   window.speechSynthesis.cancel();
-  // The keepalive must start inside the tap's activation window: play() from
-  // a later TTS callback is autoplay-blocked, silently losing the audible-tab
-  // exemption that keeps speech alive with the screen off.
-  startKeepalive(() => onIssue?.('The browser blocked background audio; reading may stop when the screen locks.'));
+  // Reuses the stream a tap-time armSpeechKeepalive already started; a fresh
+  // play() here would run outside the activation window and be blocked.
+  ensureKeepalive(() => onIssue?.('The browser blocked background audio; reading may stop when the screen locks.'));
   const chunks = speechChunks(speakableText(text) || text);
   chunks.forEach((chunk, index) => {
     const utterance = new SpeechSynthesisUtterance(chunk);

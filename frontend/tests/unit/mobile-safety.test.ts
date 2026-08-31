@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import {
+  armSpeechKeepalive,
   initializeLocalSpeech,
   localSpeechState,
   localSpeechVoices,
+  releaseSpeechKeepalive,
   selectedLocalVoice,
   setLocalSpeechEnabled,
   setSelectedLocalVoice,
@@ -157,6 +159,7 @@ describe('local speech', () => {
     class FakeAudio {
       loop = false;
       paused = true;
+      plays = 0;
 
       constructor(public src: string) {
         audios.push(this);
@@ -164,6 +167,7 @@ describe('local speech', () => {
 
       play() {
         this.paused = false;
+        this.plays++;
         return Promise.resolve();
       }
 
@@ -200,6 +204,22 @@ describe('local speech', () => {
     expect(audios.at(-1)!.paused).toBe(false);
     stopLocalSpeech();
     expect(audios.at(-1)!.paused).toBe(true);
+
+    // A tap that must fetch its text first arms the stream inside the
+    // activation window; speakLocal then reuses it without a fresh play(),
+    // and an abandoned arm releases unless speech is already running.
+    armSpeechKeepalive();
+    const armed = audios.at(-1)!;
+    expect(armed.paused).toBe(false);
+    const playsBefore = armed.plays;
+    expect(speakLocal(sentence)).toBe(true);
+    expect(armed.plays).toBe(playsBefore);
+    localSpeechState.set('speaking');
+    releaseSpeechKeepalive();
+    expect(armed.paused).toBe(false);
+    localSpeechState.set('idle');
+    releaseSpeechKeepalive();
+    expect(armed.paused).toBe(true);
     stop();
   });
 

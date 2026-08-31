@@ -393,6 +393,11 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .1rem .05rem .6rem; }
 .conversation-input-area { flex: 0 0 auto; margin-top: auto; min-width: 0; }
 .conversation-composer { align-items: flex-end; display: flex; gap: .45rem; }
+/* Attach controls stack vertically beside the composer so two targets cost
+   one narrow column instead of two full icon widths of typing space. */
+.attach-stack { display: flex; flex-direction: column; gap: .18rem; }
+.attach-stack .button-icon { height: 1.3rem; min-height: 1.3rem; width: 2.2rem; }
+.attach-stack .button-symbol { height: 1.05rem; width: 1.05rem; }
 .conversation-composer-status { color: var(--muted); font-size: .68rem; margin: .35rem .2rem 0; }
 .conversation-composer-status.error { color: var(--danger); }
 /* The turns live in their own box so a ResizeObserver can watch the height of

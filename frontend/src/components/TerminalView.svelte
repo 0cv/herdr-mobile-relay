@@ -28,8 +28,10 @@
     terminalSearchText,
   } from '$lib/terminal-find';
   import {
+    armSpeechKeepalive,
     localSpeechEnabled,
     localSpeechState,
+    releaseSpeechKeepalive,
     selectedLocalVoice,
     speakLocal,
     stopLocalSpeech,
@@ -1352,6 +1354,9 @@
       return;
     }
     if (fetchingSpeechText) return;
+    // Armed before the relay round trip: the tap's activation window does not
+    // survive the await, and audio started after it is autoplay-blocked.
+    armSpeechKeepalive((message) => relayStore.showToast(message, true));
     fetchingSpeechText = true;
     try {
       let text = '';
@@ -1364,11 +1369,10 @@
         }
       }
       if (!text.trim()) text = terminalCopyText;
-      if (!text.trim()) {
-        relayStore.showToast('No completed agent response is available to read aloud.', true);
-        return;
+      if (!text.trim() || !speakLocal(text, (message) => relayStore.showToast(message, true))) {
+        releaseSpeechKeepalive();
+        if (!text.trim()) relayStore.showToast('No completed agent response is available to read aloud.', true);
       }
-      speakLocal(text, (message) => relayStore.showToast(message, true));
     } finally {
       fetchingSpeechText = false;
     }
@@ -2228,6 +2232,7 @@
       <!-- Images get their own input: a mixed accept list makes Android offer
            the generic file picker instead of the photo picker, hiding
            screenshots behind a Files detour. -->
+      <div class="attach-stack">
       <Button variant="ghost" size="icon" disabled={inputLocked || uploadingAttachment} aria-label="Attach photos" onclick={() => imageInput.click()}>
         <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
           <rect x="3" y="4" width="18" height="16" rx="2"></rect>
@@ -2240,6 +2245,7 @@
           <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
         </svg>
       </Button>
+      </div>
       <div class:awaiting-approval={approvalMode && !composerFocused} class:has-text={Boolean(composer)} class="composer-field">
         <textarea
           bind:this={composerElement}
