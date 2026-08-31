@@ -147,6 +147,7 @@ var actionCatalog = map[string]ActionMetadata{
 	"reset_devices":            mutateAction("reset_devices", false, true),
 	"revoke_device":            mutateAction("revoke_device", false, true),
 	"send_text":                mutateAction("send_text", true, true),
+	"speak_text":               readAction("speak_text"),
 	"submit_prompt":            mutateAction("submit_prompt", true, true),
 	"tab_reorder":              mutateAction("tab_reorder", true, true),
 	"text":                     mutateAction("text", true, true),

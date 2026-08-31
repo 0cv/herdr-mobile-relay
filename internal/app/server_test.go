@@ -733,9 +733,20 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		}
 		return []byte("RIFFfakewav"), nil
 	}
+	// Mirrors the production gate: an action missing from the protocol
+	// catalog is rejected as unknown_action before any dispatch case runs.
 	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
 		defer admitted()
 		if message["type"] != "speak_text" {
+			return
+		}
+		inbound, err := protocol.DecodeMap(message)
+		if err != nil {
+			t.Errorf("decode speak_text: %v", err)
+			return
+		}
+		if _, known := protocol.ScopeFor(inbound); !known {
+			t.Error("speak_text is not a registered protocol action")
 			return
 		}
 		requestID, _ := message["request_id"].(string)
