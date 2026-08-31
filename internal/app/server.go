@@ -398,6 +398,11 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	// that Reader.Read reports as unavailable.
 	sessionID := strings.TrimSpace(agent.Session)
 	agent.SessionID = sessionID
+	// AgentSessionID is the wire copy of SessionID. SessionID itself is
+	// json:"-", and the agents broadcast deep-copies snapshots through JSON,
+	// so only a field set before that round trip reaches the phone - and the
+	// phone must echo it back for exact-target validation to ever pass.
+	agent.AgentSessionID = sessionID
 	agent.ConversationHistoryAvailable = sessionID != "" && conversation.Supported(agent.Agent)
 	if sessionID == "" {
 		return
@@ -2920,7 +2925,6 @@ func (s *Server) projectAgentResource(agent *coordinator.AgentState) {
 		return
 	}
 	agent.ServerSessionID = "primary"
-	agent.AgentSessionID = agent.SessionID
 }
 
 func (s *Server) projectAgentResources(agents []*coordinator.AgentState) {

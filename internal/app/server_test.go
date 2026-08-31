@@ -118,6 +118,48 @@ func TestValidateExactPaneTargetBindsCurrentTerminalGenerationAndAgentSession(t 
 	}
 }
 
+// The agents broadcast deep-copies snapshots through JSON before projecting
+// wire identity, and the phone can only echo what that copy advertises. The
+// identity that survives the round trip must satisfy validateExactPaneTarget,
+// or every command against an agent with a resolved session is rejected -
+// exactly the shape of the field failure this test was written after: the
+// internal SessionID is json:"-", so it silently vanished from the broadcast
+// and phones echoed an empty agent_session_id forever.
+func TestBroadcastAgentIdentitySatisfiesExactTargetValidation(t *testing.T) {
+	server := testServer()
+	agent := &coordinator.AgentState{
+		PaneID: "pane-1", RawPaneID: "pane-1", TerminalID: "terminal-1",
+		Agent: "omp", Status: "working",
+		Session: "/home/user/.omp/agent/sessions/-work/2026-08-30T19-57-25-194Z_x.jsonl",
+	}
+	server.resolveAgentSessionName(agent)
+	server.state.CommitInventory([]*coordinator.AgentState{agent}, server.state.RevisionCounter())
+
+	data, err := json.Marshal(server.state.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire []*coordinator.AgentState
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	server.projectAgentResources(wire)
+	advertised := wire[0]
+	if advertised.AgentSessionID == "" {
+		t.Fatal("agents broadcast lost the agent session identity")
+	}
+	echoed := protocol.TargetRef{
+		ServerSessionID: advertised.ServerSessionID,
+		PaneID:          advertised.RawPaneID,
+		TerminalID:      advertised.TerminalID,
+		Generation:      advertised.Generation,
+		AgentSessionID:  advertised.AgentSessionID,
+	}
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1", Target: &echoed}, true); err != nil {
+		t.Fatalf("broadcast identity rejected by exact-target validation: %#v", err)
+	}
+}
+
 func TestBoundPushPolicyUsesAuthenticatedDevice(t *testing.T) {
 	current := push.DefaultDevicePolicy("old-device", "en")
 	raw := json.RawMessage(`{
