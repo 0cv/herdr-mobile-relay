@@ -79,14 +79,20 @@ function stableReleaseAssets(): Plugin {
   };
 }
 
+// HERDR_DEV_RUNTIME=1 builds the bundle with Svelte's dev runtime, whose
+// errors carry the failing data - a keyed each names its duplicate key and
+// indexes. It exists for on-device debugging through `make dev-tunnel`;
+// phones have no console, so a production error is otherwise an opaque code.
+const devRuntime = process.env.HERDR_DEV_RUNTIME === '1';
+
 export default defineConfig({
-  plugins: [svelte(), stableReleaseAssets()],
+  plugins: [svelte(devRuntime ? { compilerOptions: { dev: true } } : {}), stableReleaseAssets()],
   resolve: {
     alias: {
       $lib: fileURLToPath(new URL('./src/lib', import.meta.url)),
       $components: fileURLToPath(new URL('./src/components', import.meta.url)),
     },
-    conditions: ['browser'],
+    conditions: devRuntime ? ['browser', 'development'] : ['browser'],
   },
   build: {
     cssCodeSplit: false,
