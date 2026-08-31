@@ -19,6 +19,8 @@ import (
 var allowedAssets = map[string]bool{
 	"index.html":            true,
 	"manifest.webmanifest":  true,
+	"manifest-loader.js":    true,
+	"setup.webmanifest":     true,
 	"notification-icons.js": true,
 	"sw.js":                 true,
 	"version.json":          true,
@@ -91,6 +93,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	contentType := mime.TypeByExtension(extension)
 	if extension == ".woff2" {
 		contentType = "font/woff2"
+	}
+	if extension == ".webmanifest" {
+		contentType = "application/manifest+json"
 	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
