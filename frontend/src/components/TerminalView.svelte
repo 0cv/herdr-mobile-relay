@@ -1340,6 +1340,39 @@
     }, 2_000);
   }
 
+  let fetchingSpeechText = $state(false);
+
+  // The Speak button mirrors Copy's sources: the relay's exact response when
+  // the relay supports it, then the client-side parse. Gating on the parse
+  // alone hid the button entirely for agents whose frames it cannot read.
+  async function speakTerminalResponse() {
+    if ($localSpeechState === 'speaking') {
+      stopLocalSpeech();
+      return;
+    }
+    if (fetchingSpeechText) return;
+    fetchingSpeechText = true;
+    try {
+      let text = '';
+      if (agentResponseCopySupported) {
+        try {
+          const result = await relayStore.sendToAgent(agent, { type: 'copy_agent_response' }, 15_000);
+          text = String(result.data?.text || '');
+        } catch {
+          // The local parse below remains the fallback.
+        }
+      }
+      if (!text.trim()) text = terminalCopyText;
+      if (!text.trim()) {
+        relayStore.showToast('No completed agent response is available to read aloud.', true);
+        return;
+      }
+      speakLocal(text, (message) => relayStore.showToast(message, true));
+    } finally {
+      fetchingSpeechText = false;
+    }
+  }
+
   async function copyTerminalOutput() {
     copiedAgentResponseText = '';
     let text = '';
@@ -2094,16 +2127,15 @@
       disabled={copyingAgentResponse || responding.has(agent.pane_id)}
       onclick={copyTerminalOutput}
     >{@render copyIcon()}</Button>
-    {#if terminalCopyText && $localSpeechEnabled && $selectedLocalVoice}
+    {#if $localSpeechEnabled && $selectedLocalVoice}
       <Button
         variant="secondary"
         size="sm"
         aria-label={$localSpeechState === 'speaking' ? 'Stop reading response' : 'Read latest response aloud'}
         title={$localSpeechState === 'speaking' ? 'Stop reading' : 'Read latest response with selected local voice'}
-        onclick={() => {
-          if ($localSpeechState === 'speaking') stopLocalSpeech();
-          else speakLocal(terminalCopyText, (message) => relayStore.showToast(message, true));
-        }}
+        aria-busy={fetchingSpeechText}
+        disabled={fetchingSpeechText}
+        onclick={() => { void speakTerminalResponse(); }}
       >{$localSpeechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
     {/if}
   </div>

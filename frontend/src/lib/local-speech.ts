@@ -1,9 +1,18 @@
 import { get, writable } from 'svelte/store';
 
+import { speakableText } from './markdown';
 import { securityState } from './security';
 const ENABLED_KEY = 'herdr_local_speech_enabled';
 const VOICE_KEY = 'herdr_local_speech_voice';
 
+
+/**
+ * The default once speech is enabled: pick the local voice matching the
+ * phone's language instead of making the user choose between regional
+ * variants of it. Explicit selection remains available as an override, and
+ * only voices the browser marks local are ever candidates.
+ */
+export const AUTO_VOICE = 'auto';
 export interface LocalSpeechVoice {
   uri: string;
   name: string;
@@ -48,15 +57,30 @@ export function setLocalSpeechEnabled(enabled: boolean): void {
   localStorage.setItem(ENABLED_KEY, String(enabled));
   localSpeechEnabled.set(enabled);
   if (!enabled) window.speechSynthesis?.cancel();
+  if (enabled && !get(selectedLocalVoice)) setSelectedLocalVoice(AUTO_VOICE);
   refreshVoices();
 }
 
 export function setSelectedLocalVoice(uri: string): void {
-  const valid = uri === '' || localVoices.some((voice) => voice.localService && voice.voiceURI === uri);
+  const valid = uri === ''
+    || uri === AUTO_VOICE
+    || localVoices.some((voice) => voice.localService && voice.voiceURI === uri);
   if (!valid) return;
   if (uri) localStorage.setItem(VOICE_KEY, uri);
   else localStorage.removeItem(VOICE_KEY);
   selectedLocalVoice.set(uri);
+}
+
+function resolveVoice(selected: string): SpeechSynthesisVoice | undefined {
+  if (selected !== AUTO_VOICE) {
+    return localVoices.find((voice) => voice.localService && voice.voiceURI === selected);
+  }
+  const language = String(navigator.language || 'en');
+  const prefix = language.split('-')[0].toLowerCase();
+  return localVoices.find((voice) => voice.lang.toLowerCase() === language.toLowerCase())
+    ?? localVoices.find((voice) => voice.lang.toLowerCase().startsWith(`${prefix}-`) || voice.lang.toLowerCase() === prefix)
+    ?? localVoices.find((voice) => voice.lang.toLowerCase().startsWith('en'))
+    ?? localVoices[0];
 }
 
 export function initializeLocalSpeech(): () => void {
@@ -70,8 +94,7 @@ export function initializeLocalSpeech(): () => void {
 
 export function speakLocal(text: string, onIssue?: (message: string) => void): boolean {
   if (get(securityState).locked || !get(localSpeechEnabled) || !window.speechSynthesis || !text.trim()) return false;
-  const selected = get(selectedLocalVoice);
-  const voice = localVoices.find((candidate) => candidate.localService && candidate.voiceURI === selected);
+  const voice = resolveVoice(get(selectedLocalVoice));
   if (!voice) {
     localSpeechState.set(localVoices.length ? 'error' : 'unavailable');
     onIssue?.(localVoices.length
@@ -80,7 +103,7 @@ export function speakLocal(text: string, onIssue?: (message: string) => void): b
     return false;
   }
   window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
+  const utterance = new SpeechSynthesisUtterance(speakableText(text) || text);
   utterance.voice = voice;
   utterance.lang = voice.lang;
   utterance.onstart = () => localSpeechState.set('speaking');

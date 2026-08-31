@@ -687,7 +687,7 @@
       descriptionId="local-speech-hint"
       onchange={(value) => setLocalSpeechEnabled(value)}
     />
-    <p class="hint" id="local-speech-hint">Off by default. Choosing a voice adds Speak buttons beside responses in the Terminal and Conversation History views. Only voices the browser marks local are offered; response text is never sent to a speech server.</p>
+    <p class="hint" id="local-speech-hint">Off by default. Enabling adds Speak buttons beside responses in the Terminal and Conversation History views. Automatic picks the local voice matching this phone’s language; choose a specific voice to override. Response text is never sent to a speech server.</p>
     <label>
       Local voice
       <select
@@ -695,6 +695,7 @@
         value={$selectedLocalVoice}
         onchange={(event) => setSelectedLocalVoice(event.currentTarget.value)}
       >
+        <option value="auto">Automatic — match this phone’s language</option>
         <option value="">Choose a local voice</option>
         {#each $localSpeechVoices as voice (voice.uri)}
           <option value={voice.uri}>{voice.name} · {voice.language}</option>

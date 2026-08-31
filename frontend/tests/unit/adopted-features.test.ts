@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
-import { fencedCodeText, safeMarkdownHtml } from '$lib/markdown';
+import { fencedCodeText, safeMarkdownHtml, speakableText } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
@@ -248,6 +248,18 @@ describe('safe rich output', () => {
     expect(fencedCodeText('before\n```ts\nconst value = 1;\n```\nafter\n```\nsecond()\n```'))
       .toBe('const value = 1;\n\nsecond()');
     expect(fencedCodeText('```\n\n```\n```ts\nunfinished')).toBeNull();
+  });
+
+  it('reduces markdown to prose worth hearing', () => {
+    // A speech engine reads formatting characters aloud - backticks were
+    // literally spoken on a phone - and a fenced block read character by
+    // character is noise.
+    expect(speakableText('Committed as `2c0060d`, gate **green**.'))
+      .toBe('Committed as 2c0060d, gate green.');
+    expect(speakableText('# Done\n\n- first *step*\n- see [the docs](https://example.com/x)\n\n```ts\nconst noise = 1;\n```\n\n---\n\nAfter.'))
+      .toBe('Done\nfirst step\nsee the docs\nCode block omitted.\nAfter.');
+    expect(speakableText('| Name | Value |\n| --- | --- |\n| a | 1 |'))
+      .toBe('Name, Value\na, 1');
   });
 });
 

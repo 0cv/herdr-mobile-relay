@@ -90,14 +90,21 @@ describe('local speech', () => {
     const stop = initializeLocalSpeech();
     setLocalSpeechEnabled(true);
     expect(get(localSpeechVoices).map((voice) => voice.uri)).toEqual(['local']);
+    // Enabling defaults to Automatic, and a remote voice is never selectable.
+    expect(get(selectedLocalVoice)).toBe('auto');
     setSelectedLocalVoice('remote');
-    expect(get(selectedLocalVoice)).toBe('');
-    expect(speakLocal('private response')).toBe(false);
+    expect(get(selectedLocalVoice)).toBe('auto');
+
+    // Automatic resolves to the LOCAL voice even though the remote one is
+    // the browser default, and formatting is stripped before speaking.
+    expect(speakLocal('private `response`')).toBe(true);
+    const automatic = speak.mock.calls[0][0] as FakeUtterance;
+    expect(automatic.text).toBe('private response');
+    expect(automatic.voice).toBe(local);
 
     setSelectedLocalVoice('local');
     expect(speakLocal('private response')).toBe(true);
-    const utterance = speak.mock.calls[0][0] as FakeUtterance;
-    expect(utterance.text).toBe('private response');
+    const utterance = speak.mock.calls[1][0] as FakeUtterance;
     expect(utterance.voice).toBe(local);
     stop();
   });
@@ -159,8 +166,9 @@ describe('local speech', () => {
     const stop = initializeLocalSpeech();
     setLocalSpeechEnabled(true);
 
-    // Enabled but no voice chosen: the tap must explain itself instead of
+    // Selection explicitly cleared: the tap must explain itself instead of
     // silently doing nothing.
+    setSelectedLocalVoice('');
     const issues: string[] = [];
     expect(speakLocal('response', (message) => issues.push(message))).toBe(false);
     expect(issues).toEqual(['Choose a local voice in Settings before reading responses aloud.']);

@@ -43,7 +43,11 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 150 KiB for stale-width terminal tables: rows wider than the
 // leased pane keep their cell grid inside per-row lockstep scrollers instead
 // of wrapping into misaligned fragments.
-const limitKiB = 151;
+// Raised from 151 KiB for on-device diagnosability and the speak flow:
+// uncaught errors and store invariant violations report on a raw-DOM banner
+// (phones have no console), and reading responses aloud gained sanitized
+// speech text, an automatic phone-language voice, and failure toasts.
+const limitKiB = 152;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

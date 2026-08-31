@@ -160,6 +160,41 @@ export function fencedCodeText(value: string): string | null {
   return blocks.length ? blocks.join('\n\n') : null;
 }
 
+/**
+ * Reduces markdown to prose worth hearing. A speech engine reads formatting
+ * characters out loud - backticks became "backtick" on a real phone - and a
+ * fenced code block spoken character by character is noise, so structure is
+ * dropped and only human-directed text survives.
+ */
+export function speakableText(value: string): string {
+  const lines: string[] = [];
+  let inCode = false;
+  for (const line of value.replace(/\r\n?/g, '\n').split('\n')) {
+    if (/^\s*```/u.test(line)) {
+      if (!inCode) lines.push('Code block omitted.');
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) continue;
+    if (/^\s*(?:---+|___+|\*\*\*+)\s*$/u.test(line)) continue;
+    // A table's alignment row is pure formatting; content rows read as
+    // comma-separated cells.
+    if (/^\s*\|?[\s:|-]+\|?\s*$/u.test(line) && line.includes('-') && line.includes('|')) continue;
+    lines.push(line
+      .replace(/^\s*#{1,6}\s+/u, '')
+      .replace(/^\s*>\s?/u, '')
+      .replace(/^\s*(?:[-*+]|\d{1,3}[.)])\s+/u, '')
+      .replace(/\[([^\]]+)\]\(([^)]*)\)/gu, '$1')
+      .replace(/https?:\/\/\S+/gu, '')
+      .replace(/`([^`]*)`/gu, '$1')
+      .replace(/(\*\*|__|~~)(.+?)\1/gu, '$2')
+      .replace(/(^|\s)[*_](\S(?:[^*_]*\S)?)[*_](?=\s|$|[.,;:!?])/gu, '$1$2')
+      .replace(/\s*\|\s*/gu, ', ')
+      .replace(/^[,\s]+|[,\s]+$/gu, ''));
+  }
+  return lines.filter(Boolean).join('\n').replace(/[ \t]+/gu, ' ').trim();
+}
+
 export function safeMarkdownHtml(value: string, highlight = ''): string {
   const lines = value.replace(/\r\n?/g, '\n').split('\n');
   const output: string[] = [];
