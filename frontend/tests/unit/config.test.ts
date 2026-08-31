@@ -163,6 +163,28 @@ describe('ordered gateway lists', () => {
     expect(repaired?.[0].gatewayUrl).toBe('wss://b.example');
   });
 
+  it('follows a restarted quick tunnel to its new hostname by relay key', () => {
+    const paired = importQuickSetup([], setupLink('label=cv&relay=wss%3A%2F%2Fold-tunnel.trycloudflare.com'));
+    expect(paired).toHaveLength(1);
+
+    // The relay restarted: same persistent key, brand-new tunnel hostname.
+    // The stored entry follows the relay so the device credential enrolled
+    // under its id keeps authenticating - the one-use bootstrap invitation is
+    // consumed and could never enroll this phone a second time.
+    const moved = importQuickSetup(paired!, setupLink('label=cv&relay=wss%3A%2F%2Fnew-tunnel.trycloudflare.com'));
+    expect(moved).toHaveLength(1);
+    expect(moved?.[0].id).toBe(paired?.[0].id);
+    expect(moved?.[0].url).toBe('wss://new-tunnel.trycloudflare.com');
+
+    // A different computer's link carries a different key and pairs separately.
+    const other = importQuickSetup(moved!, {
+      hash: `#setup=${'f'.repeat(32)}&label=mac&relay=wss%3A%2F%2Fmac-tunnel.trycloudflare.com`,
+      protocol: 'https:',
+      host: 'app.example.com',
+    });
+    expect(other).toHaveLength(2);
+  });
+
   // The producer of this string is shell, not TypeScript: it is the verbatim
   // output of build_transport_setup_fragment (relay/common.sh) for
   // HERDR_GATEWAY_URL="wss://primary.example, wss://backup.example/". The two

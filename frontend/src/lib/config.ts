@@ -272,7 +272,13 @@ export function importQuickSetup(
     ? relays.find((relay) => relay.transport === 'hybrid'
       && (relay.gatewayUrls ?? [relay.gatewayUrl ?? '']).some((entry) => setup.gatewayUrls?.includes(entry))
       && (relay.token === setup.token || relay.label === setup.label))
-    : relays.find((relay) => relay.url === setup.url);
+    // A quick tunnel mints a new hostname on every relay restart, but the
+    // relay's key persists. The same key is the same relay, so the stored
+    // entry - and the device credential enrolled under its id - follows the
+    // relay to its new address instead of pairing a second time and being
+    // refused: the relay's one-use bootstrap invitation is already consumed.
+    : relays.find((relay) => relay.url === setup.url)
+      ?? relays.find((relay) => Boolean(setup.token) && relay.token === setup.token);
   const next = normalizeRelayConfig({
     id: existing?.id,
     label: existing?.label || setup.label,
