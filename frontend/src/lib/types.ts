@@ -355,6 +355,17 @@ export interface ConversationPage {
   omoPlan?: OmoTodoState;
 }
 
+/** One language of the relay's voice cache, as the relay reports it. */
+export interface RelaySpeechVoice {
+  language: string;
+  name: string;
+  installed: boolean;
+  /** Cached size when installed, otherwise the download size. */
+  bytes: number;
+  /** Engine that would speak this language now, empty when none can. */
+  engine: string;
+}
+
 export interface RelayConnectionView {
   relay: RelayConfig;
   status: RelayStatus;
@@ -383,6 +394,10 @@ export interface RelayConnectionView {
   capabilities: string[];
   /** Languages this relay has a voice for, empty when it cannot read aloud. */
   speechLanguages: string[];
+  /** Voice cache state per language, empty until the relay reports it. */
+  speechVoices: RelaySpeechVoice[];
+  speechCacheDir: string;
+  speechEngineInstalled: boolean;
   agentProfiles: AgentProfile[];
   directoryBrowser: DirectoryListing | null;
   directoryLoading: boolean;

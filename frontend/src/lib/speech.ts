@@ -26,11 +26,15 @@ export function speechLanguageLabel(code: string): string {
   return SPEECH_LANGUAGES.find((language) => language.code === code)?.label || code;
 }
 
+export function isSpeechLanguage(code: unknown): code is string {
+  return typeof code === 'string' && SPEECH_LANGUAGES.some((language) => language.code === code);
+}
+
 function storedLanguage(): string {
   const stored = localStorage.getItem(LANGUAGE_KEY) || '';
-  if (SPEECH_LANGUAGES.some((language) => language.code === stored)) return stored;
+  if (isSpeechLanguage(stored)) return stored;
   const phone = String(navigator.language || 'en').split('-')[0].toLowerCase();
-  return SPEECH_LANGUAGES.some((language) => language.code === phone) ? phone : 'en';
+  return isSpeechLanguage(phone) ? phone : 'en';
 }
 
 export const speechEnabled = writable(localStorage.getItem(ENABLED_KEY) === 'true');
@@ -45,7 +49,7 @@ export function setSpeechEnabled(enabled: boolean): void {
 }
 
 export function setSpeechLanguage(code: string): void {
-  if (!SPEECH_LANGUAGES.some((language) => language.code === code)) return;
+  if (!isSpeechLanguage(code)) return;
   localStorage.setItem(LANGUAGE_KEY, code);
   speechLanguage.set(code);
   stopSpeech();

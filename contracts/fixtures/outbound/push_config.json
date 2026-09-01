@@ -22,8 +22,10 @@
     "pane_size_lease_rows",
     "workspace_inspection",
     "semantic_input",
-    "secret_input"
+    "secret_input",
+    "speech_voice_management"
   ],
+  "speech_languages": ["en", "fr"],
   "inventory": {"state": "ready"},
   "agent_profiles": [
     {"id": "claude", "label": "Claude"},

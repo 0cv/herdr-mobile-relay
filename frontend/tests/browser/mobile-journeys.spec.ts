@@ -51,6 +51,23 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     let autoCommands = true;
     const uploadFiles = new Map<string, Array<{ name: string; media_type: string; bytes: number }>>();
     const uploadReceived = new Map<string, number>();
+    const installedVoices = new Set(['en']);
+    const voiceNames: Record<string, string> = {
+      en: 'en_US-lessac-medium', fr: 'fr_FR-siwis-medium', de: 'de_DE-thorsten-medium',
+      es: 'es_ES-davefx-medium', zh: 'zh_CN-huayan-medium',
+    };
+    const speechVoicePayload = () => ({
+      cache_dir: '/home/test/.cache/herdr-mobile-relay/speech',
+      engine_installed: true,
+      languages: ['en', 'fr', 'de', 'es', 'zh'].filter((code) => installedVoices.has(code)),
+      voices: ['en', 'fr', 'de', 'es', 'zh'].map((code) => ({
+        language: code,
+        name: voiceNames[code],
+        installed: installedVoices.has(code),
+        bytes: 63206179,
+        engine: installedVoices.has(code) ? 'piper' : 'espeak-ng',
+      })),
+    });
 
     class MockSocket {
       static OPEN = 1;
@@ -326,6 +343,15 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
             ok: true,
             phase: 'completed',
             data: { format: 'wav', audio: btoa(String.fromCharCode(...wav)) },
+          }));
+          return;
+        }
+        if (['speech_voices_list', 'speech_voice_install', 'speech_voice_remove'].includes(String(message.type))) {
+          if (message.type === 'speech_voice_install') installedVoices.add(String(message.language));
+          if (message.type === 'speech_voice_remove') installedVoices.delete(String(message.language));
+          queueMicrotask(() => this.server({
+            type: 'command_result', action: message.type, request_id: message.request_id,
+            ok: true, phase: 'completed', data: speechVoicePayload(),
           }));
           return;
         }
@@ -2597,6 +2623,51 @@ test('reads a response aloud in the language the relay has a voice for', async (
     .filter((command) => command.type === 'speak_text').length).toBe(1);
   expect((await commandsForSocket(page, 0)).find((command) => command.type === 'speak_text'))
     .toMatchObject({ language: 'fr', text: 'Remote markdown response\nExact copied output' });
+});
+
+test('downloads a missing relay speech voice from Settings', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'speech_voice_management'],
+    speech_languages: ['en'],
+  });
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('switch', { name: 'Read Responses Aloud' }).click();
+  await page.getByLabel('Language').selectOption('fr');
+  await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toBeVisible();
+
+  const englishRow = page.getByLabel('English voice on Fedora', { exact: true });
+  const frenchRow = page.getByLabel('French voice on Fedora', { exact: true });
+  await expect(englishRow).toContainText('Neural voice cached, 63 MB');
+  await expect(frenchRow).toContainText('Not downloaded - 63 MB download');
+
+  // A download in flight parks only its own row.
+  await setAutoCommands(page, false);
+  const germanDownload = page.getByLabel('German voice on Fedora', { exact: true })
+    .getByRole('button', { name: 'Download the German voice on Fedora' });
+  await germanDownload.click();
+  await expect(germanDownload).toBeDisabled();
+  await expect(germanDownload).toHaveText('Downloading…');
+  await expect(germanDownload).toHaveAttribute('aria-busy', 'true');
+  await setAutoCommands(page, true);
+
+  await frenchRow.getByRole('button', { name: 'Download the French voice on Fedora' }).click();
+  await expect(frenchRow).toContainText('Neural voice cached, 63 MB');
+  await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toHaveCount(0);
+
+  // The language being read aloud is never blocked from removal; the relay
+  // falls back to its own system engine.
+  await frenchRow.getByRole('button', { name: 'Remove the French voice on Fedora' }).click();
+  await expect(frenchRow).toContainText('Not downloaded - 63 MB download');
+  await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toBeVisible();
+  const sent = await commandsForSocket(page, 0);
+  expect(sent.filter((command) => command.type === 'speech_voices_list')).toHaveLength(1);
+  expect(sent.filter((command) => command.type === 'speech_voice_install'))
+    .toMatchObject([{ language: 'de' }, { language: 'fr' }]);
+  expect(sent.filter((command) => command.type === 'speech_voice_remove'))
+    .toMatchObject([{ language: 'fr' }]);
 });
 
 test('virtualizes large ANSI grids when Resize Session is unavailable', async ({ page }) => {

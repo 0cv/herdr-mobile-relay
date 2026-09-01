@@ -28,6 +28,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/session"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
+	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
 )
@@ -819,10 +820,189 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		t.Fatalf("unsupported language result = %+v", unsupported)
 	}
 
-	s.speechSynth = nil
+	s.speechLanguages = nil
 	missing := request("hello", "en")
 	if missing["ok"] != false || missing["error"] != "No speech engine is installed on this computer" {
 		t.Fatalf("missing engine result = %+v", missing)
+	}
+}
+
+func TestSpeechVoiceManagementOverTheWire(t *testing.T) {
+	s := testServer()
+	installed := map[string]bool{"en": true}
+	s.speechStatus = func() speech.Catalog {
+		status := speech.Catalog{CacheDir: "/cache/speech", EngineInstalled: true}
+		for _, language := range speech.Offered {
+			engine := "espeak-ng"
+			if installed[language] {
+				engine = "piper"
+				status.Languages = append(status.Languages, language)
+			}
+			status.Voices = append(status.Voices, speech.VoiceStatus{
+				Language:  language,
+				Name:      language + "-voice",
+				Installed: installed[language],
+				Bytes:     63 << 20,
+				Engine:    engine,
+			})
+		}
+		return status
+	}
+	requested := ""
+	s.speechInstall = func(_ context.Context, language string) error {
+		requested = language
+		if language == "zh" {
+			return errors.New("engine detail stays server-side")
+		}
+		installed[language] = true
+		return nil
+	}
+	s.speechRemove = func(language string) error {
+		delete(installed, language)
+		return nil
+	}
+	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		defer admitted()
+		action, _ := message["type"].(string)
+		requestID, _ := message["request_id"].(string)
+		language, _ := message["language"].(string)
+		inbound, err := protocol.DecodeMap(message)
+		if err != nil {
+			t.Errorf("decode %s: %v", action, err)
+			return
+		}
+		scope, known := protocol.ScopeFor(inbound)
+		if !known {
+			t.Errorf("%s is not a registered protocol action", action)
+			return
+		}
+		switch action {
+		case "speech_voices_list":
+			if scope.Action.Class != protocol.ActionReadOnly {
+				t.Error("listing voices must stay a read-only action")
+			}
+			s.sendCommandResult(client, requestID, action, true, "completed", "", "", s.speechVoicePayload(nil))
+		case "speech_voice_install", "speech_voice_remove":
+			if scope.Action.Class != protocol.ActionMutating {
+				t.Errorf("%s must be a mutating action so readers cannot run it", action)
+			}
+			s.changeSpeechVoice(client, requestID, action, language)
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		server.Close()
+		t.Fatalf("dial voice test client: %v", err)
+	}
+	t.Cleanup(func() {
+		conn.CloseNow()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.hub.Shutdown(shutdownCtx)
+		server.Close()
+	})
+	exchange := func(request map[string]any) []map[string]any {
+		t.Helper()
+		payload, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+			t.Fatalf("write %v: %v", request["type"], err)
+		}
+		var messages []map[string]any
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				t.Fatalf("read %v result: %v", request["type"], err)
+			}
+			var message map[string]any
+			if err := json.Unmarshal(data, &message); err != nil {
+				t.Fatal(err)
+			}
+			messages = append(messages, message)
+			if message["type"] == "command_result" {
+				return messages
+			}
+		}
+	}
+	voiceState := func(message map[string]any) map[string]bool {
+		t.Helper()
+		payload, _ := message["data"].(map[string]any)
+		if payload == nil {
+			payload = message
+		}
+		voices, _ := payload["voices"].([]any)
+		if len(voices) != len(speech.Offered) {
+			t.Fatalf("payload lists %d voices, want %d", len(voices), len(speech.Offered))
+		}
+		state := map[string]bool{}
+		for _, entry := range voices {
+			voice, _ := entry.(map[string]any)
+			language, _ := voice["language"].(string)
+			state[language], _ = voice["installed"].(bool)
+		}
+		return state
+	}
+
+	listed := exchange(map[string]any{"type": "speech_voices_list", "request_id": "list-1"})
+	result := listed[len(listed)-1]
+	data, _ := result["data"].(map[string]any)
+	if result["ok"] != true || data["cache_dir"] != "/cache/speech" || data["engine_installed"] != true {
+		t.Fatalf("list result = %+v", result)
+	}
+	if state := voiceState(result); !state["en"] || state["fr"] {
+		t.Fatalf("listed voices = %+v, want English only", state)
+	}
+
+	// Installing answers the caller and tells every phone what the computer
+	// can speak now, so a second device is never left with a stale list.
+	messages := exchange(map[string]any{"type": "speech_voice_install", "request_id": "install-1", "language": "fr", "protocol": protocol.Version})
+	if requested != "fr" {
+		t.Fatalf("installed language = %q, want fr", requested)
+	}
+	broadcast := map[string]any{}
+	for _, message := range messages {
+		if message["type"] == "speech_voices" {
+			broadcast = message
+		}
+	}
+	if len(broadcast) == 0 {
+		t.Fatalf("install sent no speech_voices broadcast: %+v", messages)
+	}
+	if state := voiceState(broadcast); !state["fr"] {
+		t.Fatalf("broadcast voices = %+v, want French installed", state)
+	}
+	if languages, _ := broadcast["languages"].([]any); len(languages) != 2 {
+		t.Fatalf("broadcast languages = %+v, want English and French", broadcast["languages"])
+	}
+	if s.speakableLanguages()[1] != "fr" {
+		t.Fatalf("relay speakable languages = %v, want French included", s.speakableLanguages())
+	}
+
+	removed := exchange(map[string]any{"type": "speech_voice_remove", "request_id": "remove-1", "language": "fr", "protocol": protocol.Version})
+	if state := voiceState(removed[len(removed)-1]); state["fr"] {
+		t.Fatalf("remove result = %+v, want French gone", removed[len(removed)-1])
+	}
+
+	// A failed download keeps engine details server-side and still reports the
+	// unchanged catalog.
+	failed := exchange(map[string]any{"type": "speech_voice_install", "request_id": "install-2", "language": "zh", "protocol": protocol.Version})
+	result = failed[len(failed)-1]
+	if result["ok"] != false || result["error"] != "Downloading the Chinese voice failed on this computer" {
+		t.Fatalf("failed install result = %+v", result)
+	}
+	if state := voiceState(result); state["zh"] {
+		t.Fatalf("failed install reported Chinese as installed: %+v", result)
+	}
+
+	unsupported := exchange(map[string]any{"type": "speech_voice_install", "request_id": "install-3", "language": "ja", "protocol": protocol.Version})
+	result = unsupported[len(unsupported)-1]
+	if result["ok"] != false || result["error"] != "That language is not one this app reads aloud" {
+		t.Fatalf("unsupported language result = %+v", result)
 	}
 }
 

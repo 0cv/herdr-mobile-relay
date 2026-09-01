@@ -39,9 +39,10 @@ setup and want to know what every screen and control is for.
   `~/.cache/herdr-mobile-relay/speech`, which relay updates never touch, so
   the download happens once per computer; `make speech-voices` does the same
   later, and re-running it only fetches what is missing. Without those voices
-  the relay falls back to espeak-ng, espeak, flite, or macOS say. Languages
-  the relay has no voice for are reported in Settings instead of failing at
-  the Speak button.
+  the relay falls back to espeak-ng, espeak, flite, or macOS say, and a
+  language it cannot speak at all is reported in Settings instead of failing
+  at the Speak button. Settings also lists which voices a relay has cached and
+  downloads or removes them one language at a time.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |

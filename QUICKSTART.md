@@ -50,7 +50,8 @@ agent lifecycle.
 
 Setup offers to download the voices that read responses aloud in English,
 French, German, Spanish, and Chinese. They are cached outside the release, so
-updates never fetch them again; `make speech-voices` adds them later.
+updates never fetch them again; `make speech-voices` adds them later, and the
+phone's Settings downloads or removes a relay's voices.
 
 ## Skip Cloudflare
 

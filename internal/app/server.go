@@ -93,6 +93,10 @@ type Server struct {
 	clipboardWrite   func(context.Context, []byte) error
 	copyRunner       copyResponseRunner
 	speechSynth      func(context.Context, string, string) ([]byte, error)
+	speechStatus     func() speech.Catalog
+	speechInstall    func(context.Context, string) error
+	speechRemove     func(string) error
+	speechMu         sync.Mutex
 	speechLanguages  []string
 	copyMu           sync.Mutex
 	paneSizeM        *panesize.Manager
@@ -182,7 +186,8 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		}
 	}
 
-	speechLanguages, speechSynth := discoverSpeechSynth(logger)
+	speechLanguages := speech.Languages()
+	logger.Info("speech synthesis available", "languages", strings.Join(speechLanguages, ","))
 
 	return &Server{
 		cfg:                 cfg,
@@ -197,7 +202,10 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		clipboardRead:       clipboardRead,
 		clipboardWrite:      clipboard.Write,
 		copyRunner:          copyresponse.Run,
-		speechSynth:         speechSynth,
+		speechSynth:         speech.Synthesize,
+		speechStatus:        speech.Status,
+		speechInstall:       speech.Install,
+		speechRemove:        speech.Remove,
 		speechLanguages:     speechLanguages,
 		herdrC:              herdrClient,
 		paneSizeM:           panesize.NewManager(herdrClient, logger),
@@ -498,7 +506,8 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.clipboardRead != nil {
 			capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
 		}
-		if s.speechSynth != nil {
+		speechLanguages := s.speakableLanguages()
+		if len(speechLanguages) > 0 {
 			capabilities = append(capabilities, protocol.SpeechSynthesisCapability)
 		}
 		if s.herdrC.SupportsRealtimePane(client.Context()) {
@@ -527,7 +536,7 @@ func (s *Server) Run(ctx context.Context) error {
 			Update:          s.updateM.State(),
 			AppDeploy:       s.appDeployM.State(),
 			Capabilities:    capabilities,
-			SpeechLanguages: s.speechLanguages,
+			SpeechLanguages: speechLanguages,
 			Inventory:       inventory,
 			AgentProfiles:   s.profiles.Profiles(),
 			Hybrid:          s.hybridDescriptor(),
@@ -997,6 +1006,13 @@ func (s *Server) Run(ctx context.Context) error {
 			text, _ := msg["text"].(string)
 			language, _ := msg["language"].(string)
 			s.speakText(client, requestID, text, language)
+		case "speech_voices_list":
+			requestID, _ := msg["request_id"].(string)
+			s.sendCommandResult(client, requestID, action, true, "completed", "", "", s.speechVoicePayload(nil))
+		case "speech_voice_install", "speech_voice_remove":
+			requestID, _ := msg["request_id"].(string)
+			language, _ := msg["language"].(string)
+			s.changeSpeechVoice(client, requestID, action, language)
 		case "push_policy_get":
 			identity, _ := client.Identity()
 			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
@@ -2254,11 +2270,12 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 // engine and returns the WAV inline. The phone plays it as ordinary media,
 // which keeps working with the screen off where the browser speech API dies.
 func (s *Server) speakText(client *transport.ClientConn, requestID, text, language string) {
-	if s.speechSynth == nil {
+	speakable := s.speakableLanguages()
+	if len(speakable) == 0 {
 		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "No speech engine is installed on this computer", "", nil)
 		return
 	}
-	if !slices.Contains(s.speechLanguages, language) {
+	if !slices.Contains(speakable, language) {
 		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "This computer has no voice for that language", "", nil)
 		return
 	}
@@ -2276,13 +2293,69 @@ func (s *Server) speakText(client *transport.ClientConn, requestID, text, langua
 	})
 }
 
-func discoverSpeechSynth(logger *slog.Logger) ([]string, func(context.Context, string, string) ([]byte, error)) {
-	languages := speech.Languages()
-	if len(languages) == 0 {
-		return nil, nil
+func (s *Server) speakableLanguages() []string {
+	s.speechMu.Lock()
+	defer s.speechMu.Unlock()
+	return append([]string(nil), s.speechLanguages...)
+}
+
+// changeSpeechVoice downloads or deletes one cached voice, then tells every
+// connected phone what this computer can speak now.
+func (s *Server) changeSpeechVoice(client *transport.ClientConn, requestID, action, language string) {
+	if !slices.Contains(speech.Offered, language) {
+		s.sendCommandResult(client, requestID, action, false, "failed", "That language is not one this app reads aloud", "", nil)
+		return
 	}
-	logger.Info("speech synthesis available", "languages", strings.Join(languages, ","))
-	return languages, speech.Synthesize
+	label := speech.LanguageLabel(language)
+	var err error
+	if action == "speech_voice_remove" {
+		err = s.speechRemove(language)
+	} else {
+		ctx, cancel := context.WithTimeout(client.Context(), speech.InstallTimeout)
+		defer cancel()
+		err = s.speechInstall(ctx, language)
+	}
+	status := s.speechVoicePayload(nil)
+	if err != nil {
+		s.logger.Warn("speech voice change failed", "error", err, "language", language, "action", action)
+		message := fmt.Sprintf("Downloading the %s voice failed on this computer", label)
+		if action == "speech_voice_remove" {
+			message = fmt.Sprintf("Removing the %s voice failed on this computer", label)
+		}
+		s.sendCommandResult(client, requestID, action, false, "failed", message, "", status)
+		return
+	}
+	s.hub.Broadcast(s.speechVoicePayload(map[string]any{"type": "speech_voices"}))
+	s.sendCommandResult(client, requestID, action, true, "completed", "", "", status)
+}
+
+// speechVoicePayload reads the cache and republishes what this computer can
+// speak, so the answer and the broadcast can never disagree.
+func (s *Server) speechVoicePayload(envelope map[string]any) map[string]any {
+	status := s.speechStatus()
+	s.speechMu.Lock()
+	s.speechLanguages = append([]string(nil), status.Languages...)
+	s.speechMu.Unlock()
+	voices := make([]map[string]any, 0, len(status.Voices))
+	for _, voice := range status.Voices {
+		voices = append(voices, map[string]any{
+			"language":  voice.Language,
+			"name":      voice.Name,
+			"installed": voice.Installed,
+			"bytes":     voice.Bytes,
+			"engine":    voice.Engine,
+		})
+	}
+	payload := map[string]any{
+		"cache_dir":        status.CacheDir,
+		"engine_installed": status.EngineInstalled,
+		"languages":        status.Languages,
+		"voices":           voices,
+	}
+	for key, value := range envelope {
+		payload[key] = value
+	}
+	return payload
 }
 
 func copyBlockedMessage(agent *coordinator.AgentState) string {

@@ -84,7 +84,7 @@
     reloadApp,
     setUpdateProgressError,
   } from '$lib/updates';
-  import type { AppUpdateStatus, RelayConfig, RelayConnectionView } from '$lib/types';
+  import type { AppUpdateStatus, RelayConfig, RelayConnectionView, RelaySpeechVoice } from '$lib/types';
 
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
@@ -154,6 +154,8 @@
   let removalRelayId = $state('');
   let removalOpen = $state(false);
   let busyRelayId = $state('');
+  let speechVoiceBusy = $state<string[]>([]);
+  const speechVoiceRequested = new Set<string>();
   function isReadOnlyRelay(relayId: string): boolean {
     return readOnlyRelayIds.has(relayId);
   }
@@ -170,6 +172,8 @@
     .filter(({ connection }) => connection?.status === 'connected'
       && !connection.speechLanguages.includes($speechLanguage))
     .map(({ relay }) => relay.label || relay.id));
+  const speechVoiceRelays = $derived(relayRows.filter(({ connection }) => connection?.status === 'connected'
+    && connection.capabilities.includes('speech_voice_management')));
   const manualRow = $derived(relayRows.find(({ relay }) => relay.id === manualRelayId));
   const removalRow = $derived(relayRows.find(({ relay }) => relay.id === removalRelayId));
   const appDeploymentOwner = $derived(relayRows.find(({ relay, connection }) => (
@@ -483,6 +487,57 @@
     }
   }
 
+  function speechVoiceKey(relayId: string, language: string): string {
+    return `${relayId}:${language}`;
+  }
+
+  function speechVoiceFor(connection: RelayConnectionView | undefined, language: string): RelaySpeechVoice | undefined {
+    return connection?.speechVoices.find((voice) => voice.language === language);
+  }
+
+  /** A 63,206,179-byte voice reads as "63 MB": a phone row has no room for more. */
+  function speechVoiceSize(bytes: number): string {
+    return `${Math.max(1, Math.round(bytes / 1_000_000))} MB`;
+  }
+
+  function speechVoiceState(voice: RelaySpeechVoice | undefined): string {
+    if (voice?.installed) return `Neural voice cached, ${speechVoiceSize(voice.bytes)}`;
+    if (voice?.bytes) return `Not downloaded - ${speechVoiceSize(voice.bytes)} download`;
+    return 'No voice on this computer';
+  }
+
+  async function changeSpeechVoice(relayId: string, language: string, install: boolean) {
+    const key = speechVoiceKey(relayId, language);
+    if (speechVoiceBusy.includes(key)) return;
+    speechVoiceBusy = [...speechVoiceBusy, key];
+    try {
+      if (install) await relayStore.installSpeechVoice(relayId, language);
+      else await relayStore.removeSpeechVoice(relayId, language);
+      relayStore.showToast(`${speechLanguageLabel(language)} voice ${install ? 'downloaded' : 'removed'}.`);
+    } catch (error) {
+      relayStore.showToast((error as Error).message, true);
+    } finally {
+      speechVoiceBusy = speechVoiceBusy.filter((entry) => entry !== key);
+    }
+  }
+
+  // One list per connected relay: every later install or remove is broadcast
+  // by the relay itself, and a relay that drops is asked again on reconnect.
+  $effect(() => {
+    for (const { relay, connection } of relayRows) {
+      const capable = connection?.status === 'connected'
+        && connection.capabilities.includes('speech_voice_management');
+      if (!capable) {
+        speechVoiceRequested.delete(relay.id);
+        continue;
+      }
+      if (!$speechEnabled || speechVoiceRequested.has(relay.id)) continue;
+      speechVoiceRequested.add(relay.id);
+      void relayStore.listSpeechVoices(relay.id).catch((error: Error) => {
+        relayStore.showToast(error.message, true);
+      });
+    }
+  });
 
   function pushStatusLabel(connection?: RelayConnectionView): string {
     if (!connection) return 'not connected';
@@ -704,10 +759,51 @@
     </label>
     <p class="hint" role="status">Speech: {speechStatus}.</p>
     {#if $speechEnabled && relaysWithoutVoice.length}
-      <p class="hint" role="status">No {speechLanguageLabel($speechLanguage)} voice on {relaysWithoutVoice.join(', ')}. Install a Piper {speechLanguageLabel($speechLanguage)} voice on that computer.</p>
+      <p class="hint" role="status">No {speechLanguageLabel($speechLanguage)} voice on {relaysWithoutVoice.join(', ')}. Download it below, or install a system speech engine on that computer.</p>
     {/if}
     {#if $speechState === 'speaking'}
       <Button variant="secondary" size="sm" onclick={stopSpeech}>Stop reading</Button>
+    {/if}
+    {#if $speechEnabled}
+      {#each speechVoiceRelays as { relay, connection } (relay.id)}
+        <div class="relay-list">
+          <p class="hint">Voices on {relay.label}{connection?.speechCacheDir ? `, cached in ${connection.speechCacheDir}` : ''}</p>
+          {#if connection && !connection.speechEngineInstalled}
+            <p class="hint" role="status">The neural speech engine is not installed on {relay.label} yet. The first download installs it too.</p>
+          {/if}
+          {#each SPEECH_LANGUAGES as language (language.code)}
+            {@const voice = speechVoiceFor(connection, language.code)}
+            {@const busy = speechVoiceBusy.includes(speechVoiceKey(relay.id, language.code))}
+            <article class="relay-row" aria-label={`${language.label} voice on ${relay.label}`}>
+              <div class="relay-info">
+                <strong>{language.label}</strong>
+                <small>{speechVoiceState(voice)}</small>
+              </div>
+              <div class="relay-actions">
+                {#if voice?.installed}
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    aria-busy={busy}
+                    disabled={busy}
+                    aria-label={`Remove the ${language.label} voice on ${relay.label}`}
+                    onclick={() => changeSpeechVoice(relay.id, language.code, false)}
+                  >{busy ? 'Removing…' : 'Remove'}</Button>
+                {:else}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    aria-busy={busy}
+                    disabled={busy}
+                    aria-label={`Download the ${language.label} voice on ${relay.label}`}
+                    onclick={() => changeSpeechVoice(relay.id, language.code, true)}
+                  >{busy ? 'Downloading…' : 'Download'}</Button>
+                {/if}
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/each}
     {/if}
   </Card>
 

@@ -51,6 +51,7 @@ import {
   RELAY_PROTOCOL_VERSION,
 } from './protocol';
 import { targetRefForAgent } from './resource-id';
+import { isSpeechLanguage } from './speech';
 import {
   PUSH_CATEGORIES,
   defaultDevicePushPolicy,
@@ -85,6 +86,7 @@ import type {
   QuestionInteraction,
   RelayConfig,
   RelayConnectionView,
+  RelaySpeechVoice,
   RelayWorkspace,
   SlashCommand,
   SlashCommandCatalog,
@@ -588,6 +590,9 @@ class RelayStore {
       agentProfiles: [],
       capabilities: [],
       speechLanguages: [],
+      speechVoices: [],
+      speechCacheDir: '',
+      speechEngineInstalled: false,
       directoryBrowser: null,
       directoryLoading: false,
       directoryError: '',
@@ -1038,6 +1043,11 @@ class RelayStore {
     }
     if (message.type === 'app_deploy_status' && connection) {
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
+      this.emitConnections();
+      return;
+    }
+    if (message.type === 'speech_voices' && connection) {
+      this.adoptSpeechVoices(connection, message);
       this.emitConnections();
       return;
     }
@@ -2323,6 +2333,69 @@ class RelayStore {
         this.emitConnections();
       }
     }
+  }
+
+  private adoptSpeechVoices(connection: RelayConnection, payload: Record<string, unknown>): void {
+    connection.speechCacheDir = String(payload.cache_dir || '');
+    connection.speechEngineInstalled = payload.engine_installed === true;
+    connection.speechLanguages = (Array.isArray(payload.languages) ? payload.languages : [])
+      .filter(isSpeechLanguage);
+    connection.speechVoices = (Array.isArray(payload.voices) ? payload.voices : [])
+      .flatMap((value: unknown): RelaySpeechVoice[] => {
+        if (!value || typeof value !== 'object') return [];
+        const record = value as Record<string, unknown>;
+        const language = record.language;
+        if (!isSpeechLanguage(language)) return [];
+        const bytes = Number(record.bytes);
+        return [{
+          language,
+          name: String(record.name || ''),
+          installed: record.installed === true,
+          bytes: Number.isFinite(bytes) && bytes > 0 ? bytes : 0,
+          engine: String(record.engine || ''),
+        }];
+      });
+  }
+
+  private applySpeechVoices(
+    relayId: string,
+    connection: RelayConnection,
+    payload: Record<string, unknown> | undefined,
+  ): RelaySpeechVoice[] {
+    if (!this.isCurrentConnection(relayId, connection)) {
+      throw new CommandError('Relay reconnected while managing its speech voices');
+    }
+    this.adoptSpeechVoices(connection, payload || {});
+    this.emitConnections();
+    return connection.speechVoices;
+  }
+
+  private speechVoiceConnection(relayId: string): RelayConnection {
+    const connection = this.connectionsValue.get(relayId);
+    if (!connection?.capabilities.includes('speech_voice_management')) {
+      throw new CommandError('This relay does not support phone-managed speech voices yet');
+    }
+    return connection;
+  }
+
+  async listSpeechVoices(relayId: string): Promise<RelaySpeechVoice[]> {
+    const connection = this.speechVoiceConnection(relayId);
+    const result = await this.sendCommand(relayId, { type: 'speech_voices_list' });
+    return this.applySpeechVoices(relayId, connection, result.data);
+  }
+
+  // A voice is tens of megabytes and the first one installs the speech engine
+  // too, so this waits far longer than an ordinary command.
+  async installSpeechVoice(relayId: string, language: string): Promise<RelaySpeechVoice[]> {
+    const connection = this.speechVoiceConnection(relayId);
+    const result = await this.sendCommand(relayId, { type: 'speech_voice_install', language }, 300_000);
+    return this.applySpeechVoices(relayId, connection, result.data);
+  }
+
+  async removeSpeechVoice(relayId: string, language: string): Promise<RelaySpeechVoice[]> {
+    const connection = this.speechVoiceConnection(relayId);
+    const result = await this.sendCommand(relayId, { type: 'speech_voice_remove', language });
+    return this.applySpeechVoices(relayId, connection, result.data);
   }
 
   private workspaceInspectionAvailable(agent: Agent): void {

@@ -163,10 +163,11 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
 fi
 
 # Voices are cached outside the release, so this download happens once per
-# computer rather than once per update.
+# computer rather than once per update. The relay binary owns the catalog and
+# does the downloading, which the prerequisite check above already required.
 speech_missing="$("$SCRIPT_DIR/speech-voices.sh" --missing)"
 if [ -n "$speech_missing" ]; then
-    if [ "$INSTALL_MISSING" -eq 1 ] && command -v curl >/dev/null 2>&1; then
+    if [ "$INSTALL_MISSING" -eq 1 ]; then
         answer="${HERDR_SETUP_YES:-}"
         if [ "$answer" != "1" ] && [ -t 0 ]; then
             printf 'Download the voices that read responses aloud in English, French, German, Spanish, and Chinese (about 340 MB, cached across updates)? [Y/n] '

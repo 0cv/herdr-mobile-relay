@@ -29,12 +29,28 @@ const MaxTextRunes = 400
 // Output past the cap is decimated to a lower sample rate instead of failing.
 const maxWAVBytes = 900 << 10
 
-// offered lists the languages the phone can ask for, in the order they appear
+// Offered lists the languages the phone can ask for, in the order they appear
 // in its settings.
-var offered = []string{"en", "fr", "de", "es", "zh"}
+var Offered = []string{"en", "fr", "de", "es", "zh"}
+
+var labels = map[string]string{
+	"en": "English",
+	"fr": "French",
+	"de": "German",
+	"es": "Spanish",
+	"zh": "Chinese",
+}
+
+// LanguageLabel names a language for the messages the phone shows.
+func LanguageLabel(language string) string {
+	if label, known := labels[language]; known {
+		return label
+	}
+	return language
+}
 
 func offers(language string) bool {
-	for _, candidate := range offered {
+	for _, candidate := range Offered {
 		if candidate == language {
 			return true
 		}
@@ -236,11 +252,11 @@ func selectEngine(candidates []engine, language string) (selection, bool) {
 	return selection{}, false
 }
 
-// Languages reports which offered languages this host can synthesize.
+// Languages reports which Offered languages this host can synthesize.
 func Languages() []string {
 	candidates := engines()
 	var available []string
-	for _, language := range offered {
+	for _, language := range Offered {
 		if _, ok := selectEngine(candidates, language); ok {
 			available = append(available, language)
 		}

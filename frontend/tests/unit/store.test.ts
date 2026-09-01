@@ -2037,4 +2037,63 @@ describe('relay command store', () => {
     expect(offlineError?.message).toBe('Relay is not connected');
     expect(offlineError?.data?.dispatched_unknown).toBeUndefined();
   });
+
+  it('adopts relay speech voice cache state and gates management on the capability', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
+      capabilities: ['speech_voice_management'], agent_profiles: [],
+      inventory: { state: 'ready' }, speech_languages: ['en'],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+
+    socket.message({
+      type: 'speech_voices',
+      cache_dir: '/home/user/.cache/herdr-mobile-relay/speech',
+      engine_installed: true,
+      languages: ['en', 'fr', 'ja', 7],
+      voices: [
+        { language: 'en', name: 'en_US-lessac-medium', installed: true, bytes: 63206179, engine: 'piper' },
+        { language: 'fr', name: 'fr_FR-siwis-medium', installed: false, bytes: '63206169', engine: 'espeak-ng' },
+        { language: 'ja', name: 'ja_JP-unknown-medium', installed: true, bytes: 41000000, engine: 'piper' },
+        'not a voice',
+      ],
+    });
+    const connection = get(relayStore.connections).get(relayId)!;
+    expect(connection.speechCacheDir).toBe('/home/user/.cache/herdr-mobile-relay/speech');
+    expect(connection.speechEngineInstalled).toBe(true);
+    // A language the app cannot offer is dropped from both views of the cache.
+    expect(connection.speechLanguages).toEqual(['en', 'fr']);
+    expect(connection.speechVoices).toEqual([
+      { language: 'en', name: 'en_US-lessac-medium', installed: true, bytes: 63206179, engine: 'piper' },
+      { language: 'fr', name: 'fr_FR-siwis-medium', installed: false, bytes: 63206169, engine: 'espeak-ng' },
+    ]);
+
+    const install = relayStore.installSpeechVoice(relayId, 'fr');
+    const command = JSON.parse(socket.sent.at(-1)!);
+    expect(command).toMatchObject({ type: 'speech_voice_install', language: 'fr', protocol: 3 });
+    socket.message({
+      type: 'command_result', action: 'speech_voice_install', request_id: command.request_id,
+      ok: true, phase: 'completed',
+      data: {
+        cache_dir: '/home/user/.cache/herdr-mobile-relay/speech',
+        engine_installed: true,
+        languages: ['en', 'fr'],
+        voices: [{ language: 'fr', name: 'fr_FR-siwis-medium', installed: true, bytes: 63206169, engine: 'piper' }],
+      },
+    });
+    await expect(install).resolves.toEqual([
+      { language: 'fr', name: 'fr_FR-siwis-medium', installed: true, bytes: 63206169, engine: 'piper' },
+    ]);
+    expect(get(relayStore.connections).get(relayId)!.speechLanguages).toEqual(['en', 'fr']);
+
+    socket.message({
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
+      capabilities: [], agent_profiles: [], inventory: { state: 'ready' },
+    });
+    const error = await relayStore.installSpeechVoice(relayId, 'fr')
+      .then(() => null, (caught) => caught as CommandError);
+    expect(error?.message).toBe('This relay does not support phone-managed speech voices yet');
+  });
 });

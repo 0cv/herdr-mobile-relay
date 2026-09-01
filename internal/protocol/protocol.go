@@ -148,6 +148,9 @@ var actionCatalog = map[string]ActionMetadata{
 	"revoke_device":            mutateAction("revoke_device", false, true),
 	"send_text":                mutateAction("send_text", true, true),
 	"speak_text":               readAction("speak_text"),
+	"speech_voice_install":     mutateAction("speech_voice_install", false, true),
+	"speech_voice_remove":      mutateAction("speech_voice_remove", false, true),
+	"speech_voices_list":       readAction("speech_voices_list"),
 	"submit_prompt":            mutateAction("submit_prompt", true, true),
 	"tab_reorder":              mutateAction("tab_reorder", true, true),
 	"text":                     mutateAction("text", true, true),
@@ -471,4 +474,5 @@ var Capabilities = []string{
 	"workspace_inspection",
 	"semantic_input",
 	"secret_input",
+	"speech_voice_management",
 }
