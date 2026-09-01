@@ -31,6 +31,7 @@
     testState = { status: 'idle' },
     testStates = {},
     busy = false,
+    deliveryEnabled = false,
     onpolicychange,
     onrequestpermission,
     ontest,
@@ -40,6 +41,9 @@
     testState?: PushTestState;
     testStates?: Record<string, PushTestState>;
     busy?: boolean;
+    // Categories, delays, and tests only mean something once this browser
+    // subscribes, so they stay hidden until push delivery is on.
+    deliveryEnabled?: boolean;
     onpolicychange?: (change: PushPolicyChange) => void | Promise<void>;
     onrequestpermission?: () => void | Promise<void>;
     ontest?: (request: PushTestRequest) => void | Promise<void>;
@@ -133,83 +137,85 @@
 </script>
 
 <div class="notification-settings">
-  <Card aria-labelledby="notification-settings-title">
-    <h2 id="notification-settings-title">Notifications</h2>
-    <p class="intro">Set notifications per relay and device.</p>
-    {#if scopes.length > 0 && selectedScope && selectedPolicy}
-      <label class="field-label" for="notification-scope">Relay and device</label>
-      <select id="notification-scope" value={effectiveSelectedKey} onchange={chooseScope} disabled={busy || saving}>
-        {#each scopes as scope (pushPolicyScopeKey(scope.relay_id, scope.device_id))}
-          <option value={pushPolicyScopeKey(scope.relay_id, scope.device_id)}>
-            {scope.relay_label} — {scope.device_label}{scope.current_device ? ' (this device)' : ''}
-          </option>
-        {/each}
-      </select>
+  {#if deliveryEnabled}
+    <Card aria-labelledby="notification-settings-title">
+      <h2 id="notification-settings-title">Notifications</h2>
+      <p class="intro">Set notifications per relay and device.</p>
+      {#if scopes.length > 0 && selectedScope && selectedPolicy}
+        <label class="field-label" for="notification-scope">Relay and device</label>
+        <select id="notification-scope" value={effectiveSelectedKey} onchange={chooseScope} disabled={busy || saving}>
+          {#each scopes as scope (pushPolicyScopeKey(scope.relay_id, scope.device_id))}
+            <option value={pushPolicyScopeKey(scope.relay_id, scope.device_id)}>
+              {scope.relay_label} — {scope.device_label}{scope.current_device ? ' (this device)' : ''}
+            </option>
+          {/each}
+        </select>
 
-      <fieldset disabled={busy || saving}>
-        <legend>Categories</legend>
-        {#each CONFIGURABLE_CATEGORIES as category (category)}
-          <div class="setting-row">
-            <AppSwitch
-              checked={selectedPolicy.categories[category]}
-              label={CATEGORY_LABELS[category].label}
-              descriptionId={`push-category-${category}`}
-              onchange={checked => changeCategory(category, checked)}
-            />
-            <p id={`push-category-${category}`} class="detail">{CATEGORY_LABELS[category].detail}</p>
-          </div>
-        {/each}
-      </fieldset>
+        <fieldset disabled={busy || saving}>
+          <legend>Categories</legend>
+          {#each CONFIGURABLE_CATEGORIES as category (category)}
+            <div class="setting-row">
+              <AppSwitch
+                checked={selectedPolicy.categories[category]}
+                label={CATEGORY_LABELS[category].label}
+                descriptionId={`push-category-${category}`}
+                onchange={checked => changeCategory(category, checked)}
+              />
+              <p id={`push-category-${category}`} class="detail">{CATEGORY_LABELS[category].detail}</p>
+            </div>
+          {/each}
+        </fieldset>
 
-      <div class="grid">
-        <label>
-          <span>Settle delay</span>
-          <select value={String(selectedPolicy.settle_ms)} onchange={event => changeMilliseconds('settle_ms', event)} disabled={busy || saving}>
-            <option value="0">Immediately</option>
-            <option value="2000">2 seconds</option>
-            <option value="5000">5 seconds</option>
-            <option value="15000">15 seconds</option>
-          </select>
-        </label>
-        <label>
-          <span>Cooldown</span>
-          <select value={String(selectedPolicy.cooldown_ms)} onchange={event => changeMilliseconds('cooldown_ms', event)} disabled={busy || saving}>
-            <option value="0">None</option>
-            <option value="30000">30 seconds</option>
-            <option value="60000">1 minute</option>
-            <option value="300000">5 minutes</option>
-          </select>
-        </label>
-        <label>
-          <span>Snooze</span>
-          <select value={snoozeSelection(selectedPolicy)} onchange={changeSnooze} disabled={busy || saving}>
-            <option value="off">Not snoozed</option>
-            {#if selectedPolicy.snoozed && selectedPolicy.snooze_until}<option value="timed">Until {new Date(selectedPolicy.snooze_until).toLocaleString()}</option>{/if}
-            <option value="3600000">For 1 hour</option>
-            <option value="28800000">For 8 hours</option>
-            <option value="86400000">For 24 hours</option>
-            <option value="global">Until I turn it back on</option>
-          </select>
-        </label>
-      </div>
+        <div class="grid">
+          <label>
+            <span>Settle delay</span>
+            <select value={String(selectedPolicy.settle_ms)} onchange={event => changeMilliseconds('settle_ms', event)} disabled={busy || saving}>
+              <option value="0">Immediately</option>
+              <option value="2000">2 seconds</option>
+              <option value="5000">5 seconds</option>
+              <option value="15000">15 seconds</option>
+            </select>
+          </label>
+          <label>
+            <span>Cooldown</span>
+            <select value={String(selectedPolicy.cooldown_ms)} onchange={event => changeMilliseconds('cooldown_ms', event)} disabled={busy || saving}>
+              <option value="0">None</option>
+              <option value="30000">30 seconds</option>
+              <option value="60000">1 minute</option>
+              <option value="300000">5 minutes</option>
+            </select>
+          </label>
+          <label>
+            <span>Snooze</span>
+            <select value={snoozeSelection(selectedPolicy)} onchange={changeSnooze} disabled={busy || saving}>
+              <option value="off">Not snoozed</option>
+              {#if selectedPolicy.snoozed && selectedPolicy.snooze_until}<option value="timed">Until {new Date(selectedPolicy.snooze_until).toLocaleString()}</option>{/if}
+              <option value="3600000">For 1 hour</option>
+              <option value="28800000">For 8 hours</option>
+              <option value="86400000">For 24 hours</option>
+              <option value="global">Until I turn it back on</option>
+            </select>
+          </label>
+        </div>
 
-      {#if policyError}<p class="policy-error" role="alert">{policyError}</p>{/if}
+        {#if policyError}<p class="policy-error" role="alert">{policyError}</p>{/if}
 
-      <div class="test-row">
-        <Button
-          variant="secondary"
-          disabled={busy || saving || selectedTestState.status === 'sending' || !selectedScope.current_device}
-          onclick={sendTest}
-        >Send neutral test</Button>
-        {#if !selectedScope.current_device}
-          <p class="detail">Test notifications from that device.</p>
-        {/if}
-      </div>
-      <p class="test-result" aria-live="polite">{testMessage}</p>
-    {:else}
-      <p class="empty">No paired notification device is available.</p>
-    {/if}
-  </Card>
+        <div class="test-row">
+          <Button
+            variant="secondary"
+            disabled={busy || saving || selectedTestState.status === 'sending' || !selectedScope.current_device}
+            onclick={sendTest}
+          >Send neutral test</Button>
+          {#if !selectedScope.current_device}
+            <p class="detail">Test notifications from that device.</p>
+          {/if}
+        </div>
+        <p class="test-result" aria-live="polite">{testMessage}</p>
+      {:else}
+        <p class="empty">No paired notification device is available.</p>
+      {/if}
+    </Card>
+  {/if}
 
   <Card aria-labelledby="notification-help-title">
     <h2 id="notification-help-title">Permission and installation</h2>

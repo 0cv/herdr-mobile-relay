@@ -825,6 +825,7 @@
     platform={notificationPlatform}
     testStates={notificationTestStates}
     busy={$notificationBusy}
+    deliveryEnabled={$pushPreferences.optedIn}
     onpolicychange={({ relay_id, policy }) => sendPushPolicy(relay_id, policy)}
     onrequestpermission={enableNotifications}
     ontest={(request) => { sendTargetedPushTest(request); }}
