@@ -31,13 +31,17 @@ setup and want to know what every screen and control is for.
   the unlock screen covers the page and the terminal stops streaming until it
   succeeds.
 - Optionally request a screen wake lock only while a terminal is visible, or
-  read responses aloud: through a browser-local voice on the phone, or with a
-  computer voice synthesized on the relay and streamed to the phone encrypted -
-  real media playback that keeps reading with the screen off. The relay prefers
-  a local Piper neural voice, then falls back to espeak-ng, espeak, flite, or
-  macOS say. Put a Piper `.onnx` model and its `.onnx.json` beside each other in
-  `~/.local/share/piper-voices`, or set `HERDR_PIPER_VOICE` to the model path.
-  Response text never reaches a third-party speech server on either path.
+  read responses aloud in English, French, German, Spanish, or Chinese. The
+  relay synthesizes the audio and streams it to the phone encrypted - real
+  media playback that keeps reading with the screen off, and response text
+  never reaches a third-party speech server. Setup offers to download the
+  neural engine and one voice per language into
+  `~/.cache/herdr-mobile-relay/speech`, which relay updates never touch, so
+  the download happens once per computer; `make speech-voices` does the same
+  later, and re-running it only fetches what is missing. Without those voices
+  the relay falls back to espeak-ng, espeak, flite, or macOS say. Languages
+  the relay has no voice for are reported in Settings instead of failing at
+  the Speak button.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |

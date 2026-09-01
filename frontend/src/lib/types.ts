@@ -381,6 +381,8 @@ export interface RelayConnectionView {
   appDeploy: AppDeploymentStatus;
   inventory: AgentInventoryStatus;
   capabilities: string[];
+  /** Languages this relay has a voice for, empty when it cannot read aloud. */
+  speechLanguages: string[];
   agentProfiles: AgentProfile[];
   directoryBrowser: DirectoryListing | null;
   directoryLoading: boolean;

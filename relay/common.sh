@@ -4,6 +4,12 @@ relay_release_root() {
     printf '%s\n' "${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}"
 }
 
+# Speech voices are large downloads that no release owns, so they live in the
+# cache directory an update never rewrites. The relay resolves the same path.
+relay_speech_dir() {
+    printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay/speech"
+}
+
 relay_binary() {
     local binary
     local common_dir

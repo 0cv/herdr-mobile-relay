@@ -726,8 +726,11 @@ func sendCopyRequest(t *testing.T, conn *websocket.Conn, requestID, paneID strin
 func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 	s := testServer()
 	synthesized := ""
-	s.speechSynth = func(_ context.Context, text string) ([]byte, error) {
+	spokenLanguage := ""
+	s.speechLanguages = []string{"en", "fr"}
+	s.speechSynth = func(_ context.Context, text, language string) ([]byte, error) {
 		synthesized = text
+		spokenLanguage = language
 		if strings.Contains(text, "fail") {
 			return nil, errors.New("engine detail stays server-side")
 		}
@@ -751,7 +754,8 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		}
 		requestID, _ := message["request_id"].(string)
 		text, _ := message["text"].(string)
-		s.speakText(client, requestID, text)
+		language, _ := message["language"].(string)
+		s.speakText(client, requestID, text, language)
 	})
 	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
@@ -766,9 +770,14 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		_ = s.hub.Shutdown(shutdownCtx)
 		server.Close()
 	})
-	request := func(text string) map[string]any {
+	request := func(text, language string) map[string]any {
 		t.Helper()
-		payload, err := json.Marshal(map[string]any{"type": "speak_text", "request_id": "req-1", "text": text})
+		payload, err := json.Marshal(map[string]any{
+			"type":       "speak_text",
+			"request_id": "req-1",
+			"text":       text,
+			"language":   language,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -788,24 +797,30 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		return result
 	}
 
-	result := request("hello phone")
+	result := request("hello phone", "fr")
 	data, _ := result["data"].(map[string]any)
 	if result["ok"] != true || data["format"] != "wav" ||
 		data["audio"] != base64.StdEncoding.EncodeToString([]byte("RIFFfakewav")) {
 		t.Fatalf("speak result = %+v, want base64 wav payload", result)
 	}
-	if synthesized != "hello phone" {
-		t.Fatalf("synthesized text = %q, want the request text", synthesized)
+	if synthesized != "hello phone" || spokenLanguage != "fr" {
+		t.Fatalf("synthesized %q in %q, want the requested text and language", synthesized, spokenLanguage)
 	}
 
 	// Engine details never reach the phone; the toast stays generic.
-	failed := request("please fail")
+	failed := request("please fail", "en")
 	if failed["ok"] != false || failed["error"] != "Speech synthesis failed on this computer" {
 		t.Fatalf("failed result = %+v, want generic synthesis failure", failed)
 	}
 
+	// A language this host has no voice for is refused before synthesis.
+	unsupported := request("hallo", "de")
+	if unsupported["ok"] != false || unsupported["error"] != "This computer has no voice for that language" {
+		t.Fatalf("unsupported language result = %+v", unsupported)
+	}
+
 	s.speechSynth = nil
-	missing := request("hello")
+	missing := request("hello", "en")
 	if missing["ok"] != false || missing["error"] != "No speech engine is installed on this computer" {
 		t.Fatalf("missing engine result = %+v", missing)
 	}

@@ -2,19 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import {
   armSpeechKeepalive,
-  initializeLocalSpeech,
-  localSpeechState,
-  localSpeechVoices,
-  RELAY_VOICE,
+  initializeSpeech,
   releaseSpeechKeepalive,
-  selectedLocalVoice,
-  setLocalSpeechEnabled,
-  setSelectedLocalVoice,
-  speakLocal,
+  setSpeechEnabled,
+  setSpeechLanguage,
   speakViaRelay,
   speechChunks,
-  stopLocalSpeech,
-} from '$lib/local-speech';
+  speechLanguage,
+  speechState,
+  stopSpeech,
+} from '$lib/speech';
 import { terminalWakeLock } from '$lib/preferences';
 import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
 import { securityState } from '$lib/security';
@@ -38,8 +35,8 @@ function exactAgent(overrides: Partial<Agent> = {}): Agent {
 
 afterEach(() => {
   terminalWakeLock.set(false);
-  setLocalSpeechEnabled(false);
-  setSelectedLocalVoice('');
+  setSpeechEnabled(false);
+  setSpeechLanguage('en');
   securityState.update((state) => ({ ...state, locked: false }));
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -58,65 +55,25 @@ describe('exact route identity', () => {
   });
 });
 
-describe('local speech', () => {
-  it('lists and speaks through explicitly selected local voices only', () => {
-    const remote = {
-      voiceURI: 'remote',
-      name: 'Remote',
-      lang: 'en-US',
-      localService: false,
-      default: false,
-    } as SpeechSynthesisVoice;
-    const local = {
-      voiceURI: 'local',
-      name: 'Local',
-      lang: 'en-US',
-      localService: true,
-      default: true,
-    } as SpeechSynthesisVoice;
-    const speak = vi.fn();
-    const cancel = vi.fn();
-    vi.stubGlobal('speechSynthesis', {
-      getVoices: () => [remote, local],
-      speak,
-      cancel,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    });
-    class FakeUtterance {
-      voice: SpeechSynthesisVoice | null = null;
-      lang = '';
-      onstart: ((event: SpeechSynthesisEvent) => void) | null = null;
-      onend: ((event: SpeechSynthesisEvent) => void) | null = null;
-      onerror: ((event: SpeechSynthesisErrorEvent) => void) | null = null;
+describe('relay speech', () => {
+  it('offers only the languages the app supports and remembers the choice', () => {
+    setSpeechEnabled(true);
+    expect(get(speechState)).toBe('idle');
+    expect(get(speechLanguage)).toBe('en');
 
-      constructor(public text: string) {}
-    }
-    vi.stubGlobal('SpeechSynthesisUtterance', FakeUtterance);
+    setSpeechLanguage('zh');
+    expect(get(speechLanguage)).toBe('zh');
+    expect(localStorage.getItem('herdr_speech_language')).toBe('zh');
 
-    const stop = initializeLocalSpeech();
-    setLocalSpeechEnabled(true);
-    expect(get(localSpeechVoices).map((voice) => voice.uri)).toEqual(['local']);
-    // Enabling defaults to Automatic, and a remote voice is never selectable.
-    expect(get(selectedLocalVoice)).toBe('auto');
-    setSelectedLocalVoice('remote');
-    expect(get(selectedLocalVoice)).toBe('auto');
+    // A language with no relay voice behind it is never selectable.
+    setSpeechLanguage('ja');
+    expect(get(speechLanguage)).toBe('zh');
 
-    // Automatic resolves to the LOCAL voice even though the remote one is
-    // the browser default, and formatting is stripped before speaking.
-    expect(speakLocal('private `response`')).toBe(true);
-    const automatic = speak.mock.calls[0][0] as FakeUtterance;
-    expect(automatic.text).toBe('private response');
-    expect(automatic.voice).toBe(local);
-
-    setSelectedLocalVoice('local');
-    expect(speakLocal('private response')).toBe(true);
-    const utterance = speak.mock.calls[1][0] as FakeUtterance;
-    expect(utterance.voice).toBe(local);
-    stop();
+    setSpeechEnabled(false);
+    expect(get(speechState)).toBe('off');
   });
 
-  it('splits long responses at sentence boundaries under the TTS limit', () => {
+  it('splits long responses at sentence boundaries, including Chinese', () => {
     const sentence = 'This is one of the sentences the agent wrote.';
     const long = Array.from({ length: 60 }, () => sentence).join(' ');
     const chunks = speechChunks(long);
@@ -129,129 +86,8 @@ describe('local speech', () => {
     // A single overlong token still hard-cuts rather than erroring.
     expect(speechChunks('x'.repeat(3200)).every((chunk) => chunk.length <= 1500)).toBe(true);
     expect(speechChunks('short text')).toEqual(['short text']);
-  });
-
-  it('queues every chunk and holds a keepalive stream while speaking', () => {
-    const local = {
-      voiceURI: 'local',
-      name: 'Local',
-      lang: 'en-US',
-      localService: true,
-      default: true,
-    } as SpeechSynthesisVoice;
-    const speak = vi.fn();
-    vi.stubGlobal('speechSynthesis', {
-      getVoices: () => [local],
-      speak,
-      cancel: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    });
-    class FakeUtterance {
-      voice: SpeechSynthesisVoice | null = null;
-      lang = '';
-      onstart: (() => void) | null = null;
-      onend: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-
-      constructor(public text: string) {}
-    }
-    vi.stubGlobal('SpeechSynthesisUtterance', FakeUtterance);
-    const contexts: FakeAudioContext[] = [];
-    class FakeAudioContext {
-      state = 'running';
-      resumes = 0;
-      oscillator: { frequency: { value: number }; started: boolean } | null = null;
-      gainValue = 0;
-      destination = {};
-
-      constructor() {
-        contexts.push(this);
-      }
-
-      createOscillator() {
-        this.oscillator = { frequency: { value: 0 }, started: false };
-        return {
-          frequency: this.oscillator.frequency,
-          connect: (node: unknown) => node,
-          start: () => { this.oscillator!.started = true; },
-        };
-      }
-
-      createGain() {
-        return {
-          gain: {
-            get value() { return 0; },
-            set value(v: number) { contexts.at(-1)!.gainValue = v; },
-          },
-          connect: (node: unknown) => node,
-        };
-      }
-
-      resume() {
-        this.state = 'running';
-        this.resumes++;
-        return Promise.resolve();
-      }
-
-      suspend() {
-        this.state = 'suspended';
-        return Promise.resolve();
-      }
-
-      close() {
-        this.state = 'closed';
-        return Promise.resolve();
-      }
-    }
-    vi.stubGlobal('AudioContext', FakeAudioContext);
-
-    const stop = initializeLocalSpeech();
-    setLocalSpeechEnabled(true);
-    const sentence = 'The relay confirmed every change landed as expected.';
-    expect(speakLocal(Array.from({ length: 60 }, () => sentence).join(' '))).toBe(true);
-    const utterances = speak.mock.calls.map((call) => call[0] as FakeUtterance);
-    expect(utterances.length).toBeGreaterThan(1);
-
-    // The keepalive starts inside the tap's activation window and needs no
-    // URL: the CSP has no media-src, so element-based audio is refused. The
-    // whole queue is enqueued up front so a frozen tab cannot starve it.
-    expect(contexts).toHaveLength(1);
-    expect(contexts[0].oscillator?.started).toBe(true);
-    expect(contexts[0].oscillator?.frequency.value).toBe(50);
-    expect(contexts[0].gainValue).toBeGreaterThan(0);
-    expect(contexts[0].gainValue).toBeLessThan(0.01);
-    expect(contexts[0].state).toBe('running');
-    expect(utterances.slice(0, -1).every((utterance) => utterance.onend === null)).toBe(true);
-    utterances[0].onstart?.();
-    expect(get(localSpeechState)).toBe('speaking');
-
-    utterances[utterances.length - 1].onend?.();
-    expect(get(localSpeechState)).toBe('idle');
-    expect(contexts[0].state).toBe('suspended');
-
-    // Stopping mid-speech releases the stream too.
-    expect(speakLocal(sentence)).toBe(true);
-    expect(contexts[0].state).toBe('running');
-    stopLocalSpeech();
-    expect(contexts[0].state).toBe('suspended');
-
-    // A tap that must fetch its text first arms the stream inside the
-    // activation window; speakLocal then reuses it without a fresh resume,
-    // and an abandoned arm releases unless speech is already running.
-    armSpeechKeepalive();
-    expect(contexts).toHaveLength(1);
-    expect(contexts[0].state).toBe('running');
-    const resumesBefore = contexts[0].resumes;
-    expect(speakLocal(sentence)).toBe(true);
-    expect(contexts[0].resumes).toBe(resumesBefore);
-    localSpeechState.set('speaking');
-    releaseSpeechKeepalive();
-    expect(contexts[0].state).toBe('running');
-    localSpeechState.set('idle');
-    releaseSpeechKeepalive();
-    expect(contexts[0].state).toBe('suspended');
-    stop();
+    // Chinese sentences carry no spaces, so their punctuation has to split.
+    expect(speechChunks('中继已确认。每一项更改。', 12)).toEqual(['中继已确认。', '每一项更改。']);
   });
 
   it('streams relay-synthesized audio through one unlocked media element', async () => {
@@ -286,11 +122,9 @@ describe('local speech', () => {
       static revokeObjectURL = vi.fn();
     });
 
-    const stop = initializeLocalSpeech();
-    setLocalSpeechEnabled(true);
-    setSelectedLocalVoice(RELAY_VOICE);
-    expect(get(selectedLocalVoice)).toBe(RELAY_VOICE);
-    expect(get(localSpeechState)).toBe('idle');
+    const stop = initializeSpeech();
+    setSpeechEnabled(true);
+    setSpeechLanguage('fr');
 
     // The tap unlocks the persistent element with a silent moment before any
     // network round trip; later programmatic plays reuse that unlock.
@@ -299,103 +133,85 @@ describe('local speech', () => {
     const element = elements[0];
     expect(element.plays).toBe(1);
 
-    const sent: string[] = [];
-    const send = vi.fn((text: string) => {
-      sent.push(text);
+    const sent: { text: string; language: string }[] = [];
+    const send = vi.fn((text: string, language: string) => {
+      sent.push({ text, language });
       return Promise.resolve({ data: { audio: btoa(`RIFF-${sent.length}`) } });
     });
     const sentence = 'The relay confirmed every change landed as expected.';
     expect(speakViaRelay(Array.from({ length: 12 }, () => sentence).join(' '), send)).toBe(true);
-    expect(get(localSpeechState)).toBe('speaking');
+    expect(get(speechState)).toBe('speaking');
 
     await vi.waitFor(() => expect(element.plays).toBe(2));
-    // The next fragment is prefetched while the first one is still playing.
+    // The next fragment is prefetched while the first one is still playing,
+    // and every fragment carries the language the relay must speak.
     expect(sent.length).toBe(2);
+    expect(sent.every((fragment) => fragment.language === 'fr')).toBe(true);
     element.onended?.();
     await vi.waitFor(() => expect(element.plays).toBe(3));
     expect(elements).toHaveLength(1);
 
     // Stopping mid-fragment pauses the element and ends the run.
-    stopLocalSpeech();
+    stopSpeech();
     expect(element.paused).toBe(true);
-    expect(get(localSpeechState)).toBe('idle');
+    expect(get(speechState)).toBe('idle');
     element.onended?.();
     await Promise.resolve();
-    expect(get(localSpeechState)).toBe('idle');
+    expect(get(speechState)).toBe('idle');
     stop();
   });
 
-  it('collapses Android voice variants that share one voiceURI', () => {
-    // Google TTS on Android lists variants of a voice under a single
-    // voiceURI. The settings voice list is keyed by URI, and the repeat
-    // crashed the mounting settings view on a real phone (each_key_duplicate
-    // on `Bosnian Bosnia & Herzegovina`), wedging every control in the app.
-    const variant = (name: string): SpeechSynthesisVoice => ({
-      voiceURI: 'Bosnian Bosnia & Herzegovina',
-      name,
-      lang: 'bs-BA',
-      localService: true,
-      default: false,
-    } as SpeechSynthesisVoice);
-    vi.stubGlobal('speechSynthesis', {
-      getVoices: () => [variant('Bosnian I'), variant('Bosnian II')],
-      speak: vi.fn(),
-      cancel: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    });
-
-    const stop = initializeLocalSpeech();
-    const voices = get(localSpeechVoices);
-    expect(voices).toHaveLength(1);
-    expect(voices[0]).toMatchObject({ uri: 'Bosnian Bosnia & Herzegovina', name: 'Bosnian I' });
-    stop();
-  });
-
-  it('reports why a speak tap produced no audio', () => {
-    const local = {
-      voiceURI: 'local',
-      name: 'Local',
-      lang: 'en-US',
-      localService: true,
-      default: true,
-    } as SpeechSynthesisVoice;
-    const speak = vi.fn();
-    vi.stubGlobal('speechSynthesis', {
-      getVoices: () => [local],
-      speak,
-      cancel: vi.fn(),
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-    });
-    class FakeUtterance {
-      voice: SpeechSynthesisVoice | null = null;
-      lang = '';
-      onstart: (() => void) | null = null;
-      onend: (() => void) | null = null;
+  it('reports a relay that answers without audio and releases an abandoned tap', async () => {
+    const elements: FakeMediaElement[] = [];
+    class FakeMediaElement {
+      src = '';
+      paused = true;
+      onended: (() => void) | null = null;
+      onpause: (() => void) | null = null;
       onerror: (() => void) | null = null;
 
-      constructor(public text: string) {}
+      constructor() {
+        elements.push(this);
+      }
+
+      play() {
+        this.paused = false;
+        return Promise.resolve();
+      }
+
+      pause() {
+        this.paused = true;
+        this.onpause?.();
+      }
     }
-    vi.stubGlobal('SpeechSynthesisUtterance', FakeUtterance);
+    vi.stubGlobal('Audio', FakeMediaElement);
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = () => 'blob:fake';
+      static revokeObjectURL = vi.fn();
+    });
 
-    const stop = initializeLocalSpeech();
-    setLocalSpeechEnabled(true);
+    const stop = initializeSpeech();
+    setSpeechEnabled(true);
 
-    // Selection explicitly cleared: the tap must explain itself instead of
-    // silently doing nothing.
-    setSelectedLocalVoice('');
+    // A tap that fetches its text first arms playback inside the activation
+    // window; abandoning it releases the element again.
+    armSpeechKeepalive();
+    expect(elements[0].paused).toBe(false);
+    releaseSpeechKeepalive();
+    expect(elements[0].paused).toBe(true);
+
     const issues: string[] = [];
-    expect(speakLocal('response', (message) => issues.push(message))).toBe(false);
-    expect(issues).toEqual(['Choose a local voice in Settings before reading responses aloud.']);
-
-    // A device-side TTS failure after a successful start reports too.
-    setSelectedLocalVoice('local');
-    expect(speakLocal('response', (message) => issues.push(message))).toBe(true);
-    (speak.mock.calls[0][0] as FakeUtterance).onerror?.();
-    expect(issues).toHaveLength(2);
-    expect(issues[1]).toContain('could not speak');
+    expect(speakViaRelay('response', () => Promise.resolve({ data: {} }), (message) => issues.push(message))).toBe(true);
+    await vi.waitFor(() => expect(issues).toHaveLength(1));
+    expect(issues[0]).toContain('no audio');
+    expect(get(speechState)).toBe('error');
     stop();
+  });
+
+  it('refuses to speak while the app is locked', () => {
+    setSpeechEnabled(true);
+    securityState.update((state) => ({ ...state, locked: true }));
+    expect(speakViaRelay('response', () => Promise.resolve({ data: {} }))).toBe(false);
   });
 });
 

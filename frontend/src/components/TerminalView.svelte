@@ -29,15 +29,14 @@
   } from '$lib/terminal-find';
   import {
     armSpeechKeepalive,
-    localSpeechEnabled,
-    localSpeechState,
-    RELAY_VOICE,
     releaseSpeechKeepalive,
-    selectedLocalVoice,
-    speakLocal,
     speakViaRelay,
-    stopLocalSpeech,
-  } from '$lib/local-speech';
+    speechEnabled,
+    speechLanguage,
+    speechLanguageLabel,
+    speechState,
+    stopSpeech,
+  } from '$lib/speech';
   import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
   import { targetRefForAgent } from '$lib/resource-id';
@@ -310,9 +309,7 @@
       && responseCopyProfileSupported(agent.agent),
     );
   });
-  const relaySpeechSupported = $derived(
-    Boolean($connections.get(agent.relay_id)?.capabilities.includes('speech_synthesis')),
-  );
+  const relaySpeechLanguages = $derived($connections.get(agent.relay_id)?.speechLanguages ?? []);
   const terminalCopyText = $derived(latestCompletedResponse(frame?.content || ''));
   const terminalContentStyle = $derived.by(() => {
     // Every width is emitted in px of the measured probe cell, never in ch:
@@ -1354,14 +1351,21 @@
   // the relay supports it, then the client-side parse. Gating on the parse
   // alone hid the button entirely for agents whose frames it cannot read.
   async function speakTerminalResponse() {
-    if ($localSpeechState === 'speaking') {
-      stopLocalSpeech();
+    if ($speechState === 'speaking') {
+      stopSpeech();
       return;
     }
     if (fetchingSpeechText) return;
+    const toast = (message: string) => relayStore.showToast(message, true);
+    // Checked before anything plays: unlocking audio for a language the relay
+    // cannot speak leaves the phone with a silent stream and no explanation.
+    if (!relaySpeechLanguages.includes($speechLanguage)) {
+      toast(`This relay has no ${speechLanguageLabel($speechLanguage)} voice; install a Piper voice for it on that computer.`);
+      return;
+    }
     // Armed before the relay round trip: the tap's activation window does not
     // survive the await, and audio started after it is autoplay-blocked.
-    armSpeechKeepalive((message) => relayStore.showToast(message, true));
+    armSpeechKeepalive(toast);
     fetchingSpeechText = true;
     try {
       let text = '';
@@ -1374,23 +1378,18 @@
         }
       }
       if (!text.trim()) text = terminalCopyText;
-      if (!text.trim() || !startSpeech(text)) {
+      const spoke = text.trim() && speakViaRelay(
+        text,
+        (chunk, language) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk, language }, 20_000),
+        toast,
+      );
+      if (!spoke) {
         releaseSpeechKeepalive();
-        if (!text.trim()) relayStore.showToast('No completed agent response is available to read aloud.', true);
+        if (!text.trim()) toast('No completed agent response is available to read aloud.');
       }
     } finally {
       fetchingSpeechText = false;
     }
-  }
-
-  function startSpeech(text: string): boolean {
-    const toast = (message: string) => relayStore.showToast(message, true);
-    if ($selectedLocalVoice !== RELAY_VOICE) return speakLocal(text, toast);
-    if (!relaySpeechSupported) {
-      toast('This relay has no speech engine; install Piper with a voice model or espeak-ng there, or choose a local voice.');
-      return false;
-    }
-    return speakViaRelay(text, (chunk) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk }, 20_000), toast);
   }
 
   async function copyTerminalOutput() {
@@ -2147,16 +2146,16 @@
       disabled={copyingAgentResponse || responding.has(agent.pane_id)}
       onclick={copyTerminalOutput}
     >{@render copyIcon()}</Button>
-    {#if $localSpeechEnabled && $selectedLocalVoice}
+    {#if $speechEnabled}
       <Button
         variant="secondary"
         size="sm"
-        aria-label={$localSpeechState === 'speaking' ? 'Stop reading response' : 'Read latest response aloud'}
-        title={$localSpeechState === 'speaking' ? 'Stop reading' : 'Read latest response with selected local voice'}
+        aria-label={$speechState === 'speaking' ? 'Stop reading response' : 'Read latest response aloud'}
+        title={$speechState === 'speaking' ? 'Stop reading' : `Read latest response in ${speechLanguageLabel($speechLanguage)}`}
         aria-busy={fetchingSpeechText}
         disabled={fetchingSpeechText}
         onclick={() => { void speakTerminalResponse(); }}
-      >{$localSpeechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
+      >{$speechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
     {/if}
   </div>
 

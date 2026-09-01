@@ -307,6 +307,28 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           }));
           return;
         }
+        if (message.type === 'speak_text') {
+          const samples = 800;
+          const wav = new Uint8Array(44 + samples * 2);
+          const view = new DataView(wav.buffer);
+          const ascii = (offset: number, value: string) => {
+            for (let i = 0; i < value.length; i++) wav[offset + i] = value.charCodeAt(i);
+          };
+          ascii(0, 'RIFF'); view.setUint32(4, 36 + samples * 2, true); ascii(8, 'WAVEfmt ');
+          view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+          view.setUint32(24, 8000, true); view.setUint32(28, 16000, true);
+          view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+          ascii(36, 'data'); view.setUint32(40, samples * 2, true);
+          queueMicrotask(() => this.server({
+            type: 'command_result',
+            action: message.type,
+            request_id: message.request_id,
+            ok: true,
+            phase: 'completed',
+            data: { format: 'wav', audio: btoa(String.fromCharCode(...wav)) },
+          }));
+          return;
+        }
         if (message.type === 'push_subscribe' || message.type === 'push_unsubscribe') return;
         const phase = message.type === 'answer_question' && nextInteraction
           ? 'advanced'
@@ -2533,6 +2555,48 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
   await expect(page.getByRole('textbox', { name: 'Copied agent response markdown' }))
     .toHaveValue('# Remote markdown response\n\n- Exact copied output');
   await expect(page.getByRole('status').filter({ hasText: 'Agent response copied.' })).toBeVisible();
+});
+
+test('reads a response aloud in the language the relay has a voice for', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
+    speech_languages: ['en'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Spoken output', agent: 'codex' }],
+  });
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('switch', { name: 'Read Responses Aloud' }).click();
+  await page.getByLabel('Language').selectOption('fr');
+  await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: 'Open Spoken output on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: '     Parsed terminal response.',
+  });
+  const speakButton = page.getByRole('button', { name: 'Read latest response aloud' });
+  await speakButton.click();
+  await expect(page.getByRole('status').filter({ hasText: 'This relay has no French voice' })).toBeVisible();
+  expect((await commandsForSocket(page, 0)).filter((command) => command.type === 'speak_text')).toHaveLength(0);
+
+  // The relay gains a French voice; the same button now streams audio for it.
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
+    speech_languages: ['en', 'fr'],
+  });
+  await speakButton.click();
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'speak_text').length).toBe(1);
+  expect((await commandsForSocket(page, 0)).find((command) => command.type === 'speak_text'))
+    .toMatchObject({ language: 'fr', text: 'Remote markdown response\nExact copied output' });
 });
 
 test('virtualizes large ANSI grids when Resize Session is unavailable', async ({ page }) => {

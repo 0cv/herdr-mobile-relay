@@ -48,6 +48,10 @@ Run an agent in Herdr or tap **＋** in the phone app. You can inspect output,
 send prompts, answer approvals and plan questions, upload images, and manage the
 agent lifecycle.
 
+Setup offers to download the voices that read responses aloud in English,
+French, German, Spanish, and Chinese. They are cached outside the release, so
+updates never fetch them again; `make speech-voices` adds them later.
+
 ## Skip Cloudflare
 
 Choose **Community WebRTC Gateway** in the setup menu. It checks the project's

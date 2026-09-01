@@ -8,15 +8,14 @@
   import { conversationEntries } from '$lib/conversation';
   import {
     armSpeechKeepalive,
-    localSpeechEnabled,
-    localSpeechState,
-    RELAY_VOICE,
     releaseSpeechKeepalive,
-    selectedLocalVoice,
-    speakLocal,
     speakViaRelay,
-    stopLocalSpeech,
-  } from '$lib/local-speech';
+    speechEnabled,
+    speechLanguage,
+    speechLanguageLabel,
+    speechState,
+    stopSpeech,
+  } from '$lib/speech';
   import { fencedCodeText } from '$lib/markdown';
   import { securityState } from '$lib/security';
   import { clearPromptDraft, loadPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
@@ -182,22 +181,26 @@
     }
   }
   function toggleSpeech(text: string): void {
-    if ($localSpeechState === 'speaking') {
-      stopLocalSpeech();
+    if ($speechState === 'speaking') {
+      stopSpeech();
       return;
     }
     const toast = (message: string) => relayStore.showToast(message, true);
-    // Armed inside the tap: the relay voice fetches audio before playing,
-    // and a play() after that round trip is autoplay-blocked.
-    armSpeechKeepalive(toast);
-    let spoke = false;
-    if ($selectedLocalVoice === RELAY_VOICE) {
-      const supported = Boolean($connections.get(agent.relay_id)?.capabilities.includes('speech_synthesis'));
-      if (!supported) toast('This relay has no speech engine; install Piper with a voice model or espeak-ng there, or choose a local voice.');
-      else spoke = speakViaRelay(text, (chunk) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk }, 20_000), toast);
-    } else {
-      spoke = speakLocal(text, toast);
+    // Checked before anything plays: unlocking audio for a language the relay
+    // cannot speak leaves the phone with a silent stream and no explanation.
+    const languages = $connections.get(agent.relay_id)?.speechLanguages ?? [];
+    if (!languages.includes($speechLanguage)) {
+      toast(`This relay has no ${speechLanguageLabel($speechLanguage)} voice; install a Piper voice for it on that computer.`);
+      return;
     }
+    // Armed inside the tap: the relay fetches audio before playing, and a
+    // play() after that round trip is autoplay-blocked.
+    armSpeechKeepalive(toast);
+    const spoke = speakViaRelay(
+      text,
+      (chunk, language) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk, language }, 20_000),
+      toast,
+    );
     if (!spoke) releaseSpeechKeepalive();
   }
 
@@ -487,14 +490,14 @@
               <strong>{entry.role === 'user' ? 'You' : displayName(agent)}</strong>
               <span class="conversation-entry-actions">
                 {#if formatTimestamp(entry.timestamp)}<time datetime={entry.timestamp}>{formatTimestamp(entry.timestamp)}</time>{/if}
-                {#if entry.role === 'assistant' && entry.text && $localSpeechEnabled && $selectedLocalVoice}
+                {#if entry.role === 'assistant' && entry.text && $speechEnabled}
                   <Button
                     variant="ghost"
                     size="sm"
-                    aria-label={$localSpeechState === 'speaking' ? 'Stop reading response' : 'Read response aloud'}
-                    title={$localSpeechState === 'speaking' ? 'Stop reading' : 'Read aloud with selected local voice'}
+                    aria-label={$speechState === 'speaking' ? 'Stop reading response' : 'Read response aloud'}
+                    title={$speechState === 'speaking' ? 'Stop reading' : `Read aloud in ${speechLanguageLabel($speechLanguage)}`}
                     onclick={() => toggleSpeech(entry.text)}
-                  >{$localSpeechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
+                  >{$speechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
                 {/if}
                 {#if entry.text}
                   <Button

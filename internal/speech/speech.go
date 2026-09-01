@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -28,80 +29,180 @@ const MaxTextRunes = 400
 // Output past the cap is decimated to a lower sample rate instead of failing.
 const maxWAVBytes = 900 << 10
 
+// offered lists the languages the phone can ask for, in the order they appear
+// in its settings.
+var offered = []string{"en", "fr", "de", "es", "zh"}
+
+func offers(language string) bool {
+	for _, candidate := range offered {
+		if candidate == language {
+			return true
+		}
+	}
+	return false
+}
+
 type engine struct {
 	binary string
 	// fallback paths are tried when PATH misses the binary: the relay often
 	// runs as a service with a minimal PATH that excludes user installs.
 	fallback []string
-	// args builds the argv writing a WAV to outPath; text arrives on stdin
-	// unless textArg is true.
-	args    func(outPath string) []string
+	// voice names the engine's voice for one language, reporting false when
+	// the engine cannot speak it.
+	voice func(language string) (string, bool)
+	// argv builds the command line writing a WAV to outPath; text arrives on
+	// stdin unless textArg is true.
+	argv    func(voice, outPath string) []string
 	textArg bool
 }
 
 func engines() []engine {
-	var candidates []engine
 	// Piper's neural voices sound close to cloud TTS and synthesize many
 	// times faster than realtime on a CPU; every other engine is a fallback.
 	home, _ := os.UserHomeDir()
-	if voice, ok := piperVoice(home); ok {
-		candidates = append(candidates, engine{
-			binary: "piper",
-			fallback: []string{
-				filepath.Join(home, ".local", "bin", "piper"),
-				"/usr/local/bin/piper",
-				"/opt/piper/piper",
-			},
-			args: func(out string) []string { return []string{"--model", voice, "--output_file", out} },
-		})
-	}
+	cache := speechCache(home)
+	models := piperVoices(home, cache)
+	candidates := []engine{{
+		binary: "piper",
+		fallback: []string{
+			filepath.Join(cache, "runtime", "piper", "piper"),
+			filepath.Join(home, ".local", "bin", "piper"),
+			"/usr/local/bin/piper",
+			"/opt/piper/piper",
+		},
+		voice: func(language string) (string, bool) {
+			model, ok := models[language]
+			return model, ok
+		},
+		argv: func(voice, out string) []string {
+			return []string{"--model", voice, "--output_file", out}
+		},
+	}}
 	if runtime.GOOS == "darwin" {
 		candidates = append(candidates, engine{
 			binary: "say",
-			args: func(out string) []string {
-				return []string{"-o", out, "--file-format=WAVE", "--data-format=LEI16@22050"}
+			voice: func(language string) (string, bool) {
+				name, ok := sayVoices()[language]
+				return name, ok
+			},
+			argv: func(voice, out string) []string {
+				return []string{"-v", voice, "-o", out, "--file-format=WAVE", "--data-format=LEI16@22050"}
 			},
 		})
 	}
 	return append(candidates,
-		engine{
-			binary: "espeak-ng",
-			args:   func(out string) []string { return []string{"-s", "175", "-w", out, "--stdin"} },
-		},
-		engine{
-			binary: "espeak",
-			args:   func(out string) []string { return []string{"-s", "175", "-w", out, "--stdin"} },
-		},
+		engine{binary: "espeak-ng", voice: espeakVoice, argv: espeakArgv},
+		engine{binary: "espeak", voice: espeakVoice, argv: espeakArgv},
 		engine{
 			binary:  "flite",
-			args:    func(out string) []string { return []string{"-o", out} },
+			voice:   func(language string) (string, bool) { return "", language == "en" },
+			argv:    func(_, out string) []string { return []string{"-o", out} },
 			textArg: true,
 		},
 	)
 }
 
-// piperVoice finds a voice model: an explicit HERDR_PIPER_VOICE path wins,
-// otherwise the alphabetically first *.onnx in the conventional voice
-// directories.
-func piperVoice(home string) (string, bool) {
-	if path := os.Getenv("HERDR_PIPER_VOICE"); path != "" {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			return path, true
-		}
+// espeakVoice maps a language to an espeak voice. Mandarin is named after the
+// dialect rather than the language.
+func espeakVoice(language string) (string, bool) {
+	if !offers(language) {
 		return "", false
 	}
-	for _, dir := range []string{
+	if language == "zh" {
+		return "cmn", true
+	}
+	return language, true
+}
+
+func espeakArgv(voice, out string) []string {
+	return []string{"-v", voice, "-s", "175", "-w", out, "--stdin"}
+}
+
+// speechCache is where relay setup downloads the engine and its voices: a
+// directory outside any release, so an update never re-downloads them. The
+// setup scripts resolve the same path.
+func speechCache(home string) string {
+	if dir := os.Getenv("XDG_CACHE_HOME"); dir != "" {
+		return filepath.Join(dir, "herdr-mobile-relay", "speech")
+	}
+	return filepath.Join(home, ".cache", "herdr-mobile-relay", "speech")
+}
+
+// piperVoices maps each language to its installed model. Voice files keep
+// their published names, so es_ES-davefx-medium.onnx is the Spanish voice,
+// and the model's sidecar config has to sit beside it.
+func piperVoices(home, cache string) map[string]string {
+	dirs := []string{}
+	if configured := os.Getenv("HERDR_PIPER_VOICES"); configured != "" {
+		dirs = append(dirs, configured)
+	}
+	dirs = append(dirs,
+		filepath.Join(cache, "voices"),
 		filepath.Join(home, ".local", "share", "piper-voices"),
 		"/usr/local/share/piper-voices",
 		"/usr/share/piper-voices",
-	} {
+	)
+	found := map[string]string{}
+	for _, dir := range dirs {
 		matches, _ := filepath.Glob(filepath.Join(dir, "*.onnx"))
-		if len(matches) > 0 {
-			sort.Strings(matches)
-			return matches[0], true
+		sort.Strings(matches)
+		for _, model := range matches {
+			language, _, _ := strings.Cut(filepath.Base(model), "_")
+			if !offers(language) {
+				continue
+			}
+			if _, taken := found[language]; taken {
+				continue
+			}
+			if info, err := os.Stat(model + ".json"); err != nil || info.IsDir() {
+				continue
+			}
+			found[language] = model
 		}
 	}
-	return "", false
+	return found
+}
+
+var (
+	sayVoiceOnce  sync.Once
+	sayVoiceNames map[string]string
+)
+
+func sayVoices() map[string]string {
+	sayVoiceOnce.Do(func() {
+		listing, err := exec.Command("say", "-v", "?").Output()
+		if err != nil {
+			sayVoiceNames = map[string]string{}
+			return
+		}
+		sayVoiceNames = parseSayVoices(string(listing))
+	})
+	return sayVoiceNames
+}
+
+// parseSayVoices reads macOS voice listings, where a voice name is followed by
+// at least two spaces, its locale, then a sample sentence.
+func parseSayVoices(listing string) map[string]string {
+	found := map[string]string{}
+	for _, line := range strings.Split(listing, "\n") {
+		name, rest, split := strings.Cut(line, "  ")
+		if !split {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		locale := strings.Fields(rest)
+		if name == "" || len(locale) == 0 {
+			continue
+		}
+		language, _, _ := strings.Cut(locale[0], "_")
+		if !offers(language) {
+			continue
+		}
+		if _, taken := found[language]; !taken {
+			found[language] = name
+		}
+	}
+	return found
 }
 
 func lookup(candidate engine) (string, bool) {
@@ -116,19 +217,40 @@ func lookup(candidate engine) (string, bool) {
 	return "", false
 }
 
-// Discover reports the first available engine's binary name.
-func Discover() (string, bool) {
-	for _, candidate := range engines() {
-		if _, ok := lookup(candidate); ok {
-			return candidate.binary, true
-		}
-	}
-	return "", false
+type selection struct {
+	engine engine
+	binary string
+	voice  string
 }
 
-// Synthesize renders text with the first available engine and returns a
-// canonical PCM16 WAV small enough for one transport frame.
-func Synthesize(ctx context.Context, text string) ([]byte, error) {
+func selectEngine(candidates []engine, language string) (selection, bool) {
+	for _, candidate := range candidates {
+		voice, speaks := candidate.voice(language)
+		if !speaks {
+			continue
+		}
+		if path, installed := lookup(candidate); installed {
+			return selection{engine: candidate, binary: path, voice: voice}, true
+		}
+	}
+	return selection{}, false
+}
+
+// Languages reports which offered languages this host can synthesize.
+func Languages() []string {
+	candidates := engines()
+	var available []string
+	for _, language := range offered {
+		if _, ok := selectEngine(candidates, language); ok {
+			available = append(available, language)
+		}
+	}
+	return available
+}
+
+// Synthesize renders text in one language with the best engine installed and
+// returns a canonical PCM16 WAV small enough for one transport frame.
+func Synthesize(ctx context.Context, text, language string) ([]byte, error) {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return nil, errors.New("text is required")
@@ -136,17 +258,9 @@ func Synthesize(ctx context.Context, text string) ([]byte, error) {
 	if utf8.RuneCountInString(trimmed) > MaxTextRunes {
 		return nil, fmt.Errorf("text exceeds %d characters", MaxTextRunes)
 	}
-	var selected *engine
-	binary := ""
-	for _, candidate := range engines() {
-		if path, ok := lookup(candidate); ok {
-			selected = &candidate
-			binary = path
-			break
-		}
-	}
-	if selected == nil {
-		return nil, errors.New("no speech engine is available")
+	selected, ok := selectEngine(engines(), language)
+	if !ok {
+		return nil, fmt.Errorf("no installed engine speaks %s", language)
 	}
 	dir, err := os.MkdirTemp("", "herdr-speech-")
 	if err != nil {
@@ -154,12 +268,12 @@ func Synthesize(ctx context.Context, text string) ([]byte, error) {
 	}
 	defer os.RemoveAll(dir)
 	outPath := filepath.Join(dir, "speech.wav")
-	args := selected.args(outPath)
-	if selected.textArg {
+	args := selected.engine.argv(selected.voice, outPath)
+	if selected.engine.textArg {
 		args = append(args, "-t", trimmed)
 	}
-	cmd := exec.CommandContext(ctx, binary, args...)
-	if !selected.textArg {
+	cmd := exec.CommandContext(ctx, selected.binary, args...)
+	if !selected.engine.textArg {
 		cmd.Stdin = strings.NewReader(trimmed)
 	}
 	var stderr bytes.Buffer
@@ -167,9 +281,9 @@ func Synthesize(ctx context.Context, text string) ([]byte, error) {
 	if err := cmd.Run(); err != nil {
 		detail := strings.TrimSpace(stderr.String())
 		if detail != "" {
-			return nil, fmt.Errorf("%s: %s", selected.binary, detail)
+			return nil, fmt.Errorf("%s: %s", selected.engine.binary, detail)
 		}
-		return nil, fmt.Errorf("%s: %w", selected.binary, err)
+		return nil, fmt.Errorf("%s: %w", selected.engine.binary, err)
 	}
 	raw, err := os.ReadFile(outPath)
 	if err != nil {
@@ -177,7 +291,7 @@ func Synthesize(ctx context.Context, text string) ([]byte, error) {
 	}
 	sampleRate, samples, err := parsePCM16Mono(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s output: %w", selected.binary, err)
+		return nil, fmt.Errorf("%s output: %w", selected.engine.binary, err)
 	}
 	for 44+len(samples)*2 > maxWAVBytes && sampleRate > 8000 {
 		samples = decimate(samples)

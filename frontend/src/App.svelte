@@ -31,7 +31,7 @@
   } from '$lib/agents';
   import { APP_VERSION } from '$lib/config';
   import { initializePreferences } from '$lib/preferences';
-  import { initializeLocalSpeech, stopLocalSpeech } from '$lib/local-speech';
+  import { initializeSpeech, stopSpeech } from '$lib/speech';
   import { initializePush, notificationsEnabled, pushOptedIn, showPageNotification } from '$lib/push';
   import { parsePushOpenTarget, RELAY_PROTOCOL_VERSION } from '$lib/protocol';
   import { targetRefForAgent, targetRefMatchesAgent } from '$lib/resource-id';
@@ -178,7 +178,7 @@
   });
 
   $effect(() => {
-    if ($securityState.locked) stopLocalSpeech();
+    if ($securityState.locked) stopSpeech();
   });
 
   $effect(() => {
@@ -381,7 +381,7 @@
 
   onMount(() => {
     initializePreferences();
-    const stopSpeech = initializeLocalSpeech();
+    const releaseSpeech = initializeSpeech();
     initializePush();
     const stopUpdates = initializeAppUpdates();
     const stopSecurity = initializeDeviceSecurity();
@@ -401,7 +401,7 @@
     navigator.serviceWorker?.addEventListener('message', serviceWorkerMessage);
     return () => {
       stopRouter();
-      stopSpeech();
+      releaseSpeech();
       stopSecurity();
       stopUpdates();
       window.removeEventListener('hashchange', setupLinkNavigation);

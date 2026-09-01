@@ -441,8 +441,11 @@ type PushConfig struct {
 	Update         any      `json:"update"`
 	AppDeploy      any      `json:"app_deploy"`
 	Capabilities   []string `json:"capabilities"`
-	Inventory      any      `json:"inventory"`
-	AgentProfiles  any      `json:"agent_profiles"`
+	// SpeechLanguages lists the languages this host has a voice for, so the
+	// phone offers only what the relay can actually read aloud.
+	SpeechLanguages []string `json:"speech_languages,omitempty"`
+	Inventory       any      `json:"inventory"`
+	AgentProfiles   any      `json:"agent_profiles"`
 	// Hybrid advertises the gateway + direct WebRTC descriptor to an app that
 	// connected over the legacy WSS URL, so the bridge window needs no QR
 	// re-scan. Omitted entirely when the relay has no gateway configured.

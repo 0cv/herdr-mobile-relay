@@ -162,6 +162,28 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
     exit 1
 fi
 
+# Voices are cached outside the release, so this download happens once per
+# computer rather than once per update.
+speech_missing="$("$SCRIPT_DIR/speech-voices.sh" --missing)"
+if [ -n "$speech_missing" ]; then
+    if [ "$INSTALL_MISSING" -eq 1 ] && command -v curl >/dev/null 2>&1; then
+        answer="${HERDR_SETUP_YES:-}"
+        if [ "$answer" != "1" ] && [ -t 0 ]; then
+            printf 'Download the voices that read responses aloud in English, French, German, Spanish, and Chinese (about 340 MB, cached across updates)? [Y/n] '
+            read -r answer
+        fi
+        case "$answer" in
+            ""|1|y|Y|yes|YES)
+                "$SCRIPT_DIR/speech-voices.sh" ||
+                    echo "Speech voices were not installed; reading aloud falls back to the system speech engine."
+                ;;
+            *) echo "Skipped speech voices. Run relay/speech-voices.sh later to cache them." ;;
+        esac
+    else
+        echo "Optional: run relay/speech-voices.sh to cache the voices that read responses aloud."
+    fi
+fi
+
 if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ ! -f "$WEB_ENV_FILE" ]; then
     install -m 0600 "$REPO_DIR/.env.example" "$WEB_ENV_FILE"
     echo "Created $WEB_ENV_FILE"

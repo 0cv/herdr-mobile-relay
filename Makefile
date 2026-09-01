@@ -9,7 +9,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs web-bundle-check web-release web-release-check web-deploy web-preview
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview
 
 help:
 	@echo "Common targets:"
@@ -28,6 +28,7 @@ help:
 	@echo "  make service-status             Show relay service status"
 	@echo "  make service-logs               Tail relay service logs"
 	@echo "  make service-uninstall          Stop/remove the relay service"
+	@echo "  make speech-voices              Cache the neural voices that read responses aloud"
 	@echo "  make gateway                    Build the self-hostable blind gateway binary"
 	@echo "  make check                      Run backend and frontend checks"
 
@@ -49,6 +50,9 @@ quick-start:
 
 dev-tunnel:
 	relay/dev-tunnel.sh
+
+speech-voices:
+	relay/speech-voices.sh
 
 stable-setup:
 	relay/stable-setup.sh
@@ -95,6 +99,7 @@ shell-check:
 	bash tests/test_plugin_build.sh
 	sh tests/test_release_scripts.sh
 	bash tests/test_uninstall.sh
+	bash tests/test_speech_voices.sh
 	tests/test_stable_setup.sh
 
 production-path-audit:

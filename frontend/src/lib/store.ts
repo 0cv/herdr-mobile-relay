@@ -587,6 +587,7 @@ class RelayStore {
       lastMessageAt: 0,
       agentProfiles: [],
       capabilities: [],
+      speechLanguages: [],
       directoryBrowser: null,
       directoryLoading: false,
       directoryError: '',
@@ -978,6 +979,9 @@ class RelayStore {
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
+      connection.speechLanguages = Array.isArray(message.speech_languages)
+        ? message.speech_languages.filter((language: unknown) => typeof language === 'string' && language)
+        : [];
       this.adoptHybridDescriptor(connection, message.hybrid);
       const attentionCapable = connection.capabilities.includes('attention_classification');
       this.agentsValue = this.agentsValue.map((agent) =>

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,7 +92,8 @@ type Server struct {
 	clipboardRead    func(context.Context) ([]byte, error)
 	clipboardWrite   func(context.Context, []byte) error
 	copyRunner       copyResponseRunner
-	speechSynth      func(context.Context, string) ([]byte, error)
+	speechSynth      func(context.Context, string, string) ([]byte, error)
+	speechLanguages  []string
 	copyMu           sync.Mutex
 	paneSizeM        *panesize.Manager
 	dispatcher       *coordinator.Dispatcher
@@ -180,6 +182,8 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		}
 	}
 
+	speechLanguages, speechSynth := discoverSpeechSynth(logger)
+
 	return &Server{
 		cfg:                 cfg,
 		version:             version,
@@ -193,7 +197,8 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		clipboardRead:       clipboardRead,
 		clipboardWrite:      clipboard.Write,
 		copyRunner:          copyresponse.Run,
-		speechSynth:         discoverSpeechSynth(logger),
+		speechSynth:         speechSynth,
+		speechLanguages:     speechLanguages,
 		herdrC:              herdrClient,
 		paneSizeM:           panesize.NewManager(herdrClient, logger),
 		profiles:            profResolver,
@@ -512,19 +517,20 @@ func (s *Server) Run(ctx context.Context) error {
 			capabilities = append(capabilities, "device_management")
 		}
 		s.hub.Send(client, protocol.PushConfig{
-			Type:           "push_config",
-			VAPIDPublicKey: vapidPublicKey,
-			Host:           s.hostname,
-			Protocol:       protocol.Version,
-			Version:        s.version,
-			ReleaseVersion: s.version,
-			Revision:       s.revision,
-			Update:         s.updateM.State(),
-			AppDeploy:      s.appDeployM.State(),
-			Capabilities:   capabilities,
-			Inventory:      inventory,
-			AgentProfiles:  s.profiles.Profiles(),
-			Hybrid:         s.hybridDescriptor(),
+			Type:            "push_config",
+			VAPIDPublicKey:  vapidPublicKey,
+			Host:            s.hostname,
+			Protocol:        protocol.Version,
+			Version:         s.version,
+			ReleaseVersion:  s.version,
+			Revision:        s.revision,
+			Update:          s.updateM.State(),
+			AppDeploy:       s.appDeployM.State(),
+			Capabilities:    capabilities,
+			SpeechLanguages: s.speechLanguages,
+			Inventory:       inventory,
+			AgentProfiles:   s.profiles.Profiles(),
+			Hybrid:          s.hybridDescriptor(),
 		})
 		s.hub.Send(client, map[string]any{
 			"type":   "agents",
@@ -989,7 +995,8 @@ func (s *Server) Run(ctx context.Context) error {
 		case "speak_text":
 			requestID, _ := msg["request_id"].(string)
 			text, _ := msg["text"].(string)
-			s.speakText(client, requestID, text)
+			language, _ := msg["language"].(string)
+			s.speakText(client, requestID, text, language)
 		case "push_policy_get":
 			identity, _ := client.Identity()
 			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)
@@ -2246,16 +2253,20 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 // speakText synthesizes one sentence-sized fragment with the host's TTS
 // engine and returns the WAV inline. The phone plays it as ordinary media,
 // which keeps working with the screen off where the browser speech API dies.
-func (s *Server) speakText(client *transport.ClientConn, requestID, text string) {
+func (s *Server) speakText(client *transport.ClientConn, requestID, text, language string) {
 	if s.speechSynth == nil {
 		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "No speech engine is installed on this computer", "", nil)
 		return
 	}
+	if !slices.Contains(s.speechLanguages, language) {
+		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "This computer has no voice for that language", "", nil)
+		return
+	}
 	ctx, cancel := context.WithTimeout(client.Context(), 15*time.Second)
 	defer cancel()
-	wav, err := s.speechSynth(ctx, text)
+	wav, err := s.speechSynth(ctx, text, language)
 	if err != nil {
-		s.logger.Warn("speech synthesis failed", "error", err)
+		s.logger.Warn("speech synthesis failed", "error", err, "language", language)
 		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "Speech synthesis failed on this computer", "", nil)
 		return
 	}
@@ -2265,13 +2276,13 @@ func (s *Server) speakText(client *transport.ClientConn, requestID, text string)
 	})
 }
 
-func discoverSpeechSynth(logger *slog.Logger) func(context.Context, string) ([]byte, error) {
-	engine, ok := speech.Discover()
-	if !ok {
-		return nil
+func discoverSpeechSynth(logger *slog.Logger) ([]string, func(context.Context, string, string) ([]byte, error)) {
+	languages := speech.Languages()
+	if len(languages) == 0 {
+		return nil, nil
 	}
-	logger.Info("speech synthesis available", "engine", engine)
-	return speech.Synthesize
+	logger.Info("speech synthesis available", "languages", strings.Join(languages, ","))
+	return languages, speech.Synthesize
 }
 
 func copyBlockedMessage(agent *coordinator.AgentState) string {

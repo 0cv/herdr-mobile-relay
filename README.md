@@ -68,8 +68,8 @@ paths.
   Oh My Pi plans, and inspect workspace files, images, and Git diffs read-only.
 - Pair named controller or reader devices, and configure durable notification
   categories, settle delay, cooldown, snooze, and tests per relay and device.
-- Optionally keep the screen awake in a visible terminal or read responses
-  through an explicitly selected browser-local speech voice.
+- Optionally keep the screen awake in a visible terminal, or have the relay read
+  responses aloud in English, French, German, Spanish, or Chinese.
 
 **[Full feature tour →](docs/mobile-app.md)**
 

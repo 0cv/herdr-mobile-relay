@@ -22,14 +22,15 @@
     type Theme,
   } from '$lib/config';
   import {
-    localSpeechEnabled,
-    localSpeechState,
-    localSpeechVoices,
-    selectedLocalVoice,
-    setLocalSpeechEnabled,
-    setSelectedLocalVoice,
-    stopLocalSpeech,
-  } from '$lib/local-speech';
+    setSpeechEnabled,
+    setSpeechLanguage,
+    SPEECH_LANGUAGES,
+    speechEnabled,
+    speechLanguage,
+    speechLanguageLabel,
+    speechState,
+    stopSpeech,
+  } from '$lib/speech';
   import {
     homeLayout,
     interfaceSize,
@@ -129,15 +130,12 @@
       failed: 'Request failed',
     }[$wakeLockState];
   });
-  const localSpeechStatus = $derived($localSpeechState === 'idle' && !$selectedLocalVoice
-    ? 'Choose a local voice below to show the Speak buttons'
-    : {
-      off: 'Off',
-      idle: 'Ready — Speak buttons are shown beside responses',
-      speaking: 'Speaking exact response text',
-      error: 'Speech failed',
-      unavailable: 'No local browser voice is available',
-    }[$localSpeechState]);
+  const speechStatus = $derived({
+    off: 'Off',
+    idle: 'Ready — Speak buttons are shown beside responses',
+    speaking: 'Reading the exact response text',
+    error: 'Speech failed',
+  }[$speechState]);
 
   $effect(() => {
     if (!appUpdateChecking) previousAppUpdate = $appUpdate;
@@ -168,9 +166,10 @@
   const degradedCount = $derived([...$connections.values()].filter(
     (connection) => connection.status === 'connected' && connection.inventory.state !== 'ready',
   ).length);
-  const relaySpeechAvailable = $derived(
-    [...$connections.values()].some((connection) => connection.capabilities.includes('speech_synthesis')),
-  );
+  const relaysWithoutVoice = $derived(relayRows
+    .filter(({ connection }) => connection?.status === 'connected'
+      && !connection.speechLanguages.includes($speechLanguage))
+    .map(({ relay }) => relay.label || relay.id));
   const manualRow = $derived(relayRows.find(({ relay }) => relay.id === manualRelayId));
   const removalRow = $derived(relayRows.find(({ relay }) => relay.id === removalRelayId));
   const appDeploymentOwner = $derived(relayRows.find(({ relay, connection }) => (
@@ -685,32 +684,30 @@
     />
     <p class="hint" id="wake-lock-hint">Off by default. When enabled, requests the browser screen wake lock only while a Terminal is mounted and visible. Status: {wakeLockStatus}.</p>
     <AppSwitch
-      checked={$localSpeechEnabled}
+      checked={$speechEnabled}
       label="Read Responses Aloud"
-      descriptionId="local-speech-hint"
-      onchange={(value) => setLocalSpeechEnabled(value)}
+      descriptionId="speech-hint"
+      onchange={(value) => setSpeechEnabled(value)}
     />
-    <p class="hint" id="local-speech-hint">Off by default. Enabling adds Speak buttons beside responses in the Terminal and Conversation History views. Automatic picks the local voice matching this phone’s language; the computer voice synthesizes on a relay and streams here encrypted, which keeps reading aloud alive while the screen is off. The relay prefers a Piper neural voice and falls back to its system speech engine. Response text never reaches a third-party speech server.</p>
+    <p class="hint" id="speech-hint">Off by default. Enabling adds Speak buttons beside responses in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, which keeps reading aloud alive while the screen is off. Response text never reaches a third-party speech server.</p>
     <label>
-      Voice
+      Language
       <select
-        disabled={!$localSpeechEnabled || (!$localSpeechVoices.length && !relaySpeechAvailable)}
-        value={$selectedLocalVoice}
-        onchange={(event) => setSelectedLocalVoice(event.currentTarget.value)}
+        disabled={!$speechEnabled}
+        value={$speechLanguage}
+        onchange={(event) => setSpeechLanguage(event.currentTarget.value)}
       >
-        <option value="auto">Automatic — match this phone’s language</option>
-        {#if relaySpeechAvailable}
-          <option value="relay">Computer voice — synthesized on the relay</option>
-        {/if}
-        <option value="">Choose a local voice</option>
-        {#each $localSpeechVoices as voice (voice.uri)}
-          <option value={voice.uri}>{voice.name} · {voice.language}</option>
+        {#each SPEECH_LANGUAGES as language (language.code)}
+          <option value={language.code}>{language.label}</option>
         {/each}
       </select>
     </label>
-    <p class="hint" role="status">Speech: {localSpeechStatus}.</p>
-    {#if $localSpeechState === 'speaking'}
-      <Button variant="secondary" size="sm" onclick={stopLocalSpeech}>Stop reading</Button>
+    <p class="hint" role="status">Speech: {speechStatus}.</p>
+    {#if $speechEnabled && relaysWithoutVoice.length}
+      <p class="hint" role="status">No {speechLanguageLabel($speechLanguage)} voice on {relaysWithoutVoice.join(', ')}. Install a Piper {speechLanguageLabel($speechLanguage)} voice on that computer.</p>
+    {/if}
+    {#if $speechState === 'speaking'}
+      <Button variant="secondary" size="sm" onclick={stopSpeech}>Stop reading</Button>
     {/if}
   </Card>
 
