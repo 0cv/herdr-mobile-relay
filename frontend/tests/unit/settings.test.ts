@@ -345,7 +345,7 @@ describe('settings relay status', () => {
     expect(screen.getByText(/Resize Session automatically leases/)).toBeInTheDocument();
   });
 
-  it('shows notification settings only once push delivery is enabled', async () => {
+  it('keeps notification controls out of the way until push delivery is enabled', async () => {
     const user = userEvent.setup();
     localStorage.setItem(PUSH_ENABLED_KEY, 'false');
     render(SettingsView);
@@ -354,14 +354,17 @@ describe('settings relay status', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: 'Fedora relay connected' })).toBeInTheDocument());
     socket.server({ type: 'push_config', protocol: 3, version: 'abc1234', vapid_public_key: 'test-key' });
 
-    // Categories, delays, and delivery tests do nothing without a
-    // subscription, so they stay out of the way until there is one.
-    expect(screen.queryByRole('heading', { name: 'Notifications' })).not.toBeInTheDocument();
+    // One Notifications section owns the switch; categories, delays, and
+    // delivery tests do nothing without a subscription, so they stay hidden.
+    expect(screen.getByRole('heading', { name: 'Notifications' })).toBeInTheDocument();
+    expect(screen.queryByText('No paired notification device is available.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Push delivery' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Permission and installation' })).not.toBeInTheDocument();
 
     await user.click(await screen.findByRole('button', { name: 'Enable Push Notifications' }));
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Stop Push Notifications' })).toBeEnabled());
-    expect(screen.getByRole('heading', { name: 'Notifications' })).toBeInTheDocument();
+    expect(screen.getByText('No paired notification device is available.')).toBeInTheDocument();
   });
 
   it('confirms an available relay update before sending the exact target', async () => {

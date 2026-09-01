@@ -49,7 +49,6 @@
   } from '$lib/preferences';
   import { relayVersionMeta, shortRevision } from '$lib/protocol';
   import {
-    enableNotifications,
     notificationsSupported,
     pushPreferences,
     pushSupported,
@@ -130,13 +129,6 @@
       failed: 'Request failed',
     }[$wakeLockState];
   });
-  const speechStatus = $derived({
-    off: 'Off',
-    idle: 'Ready — Speak buttons are shown beside responses',
-    speaking: 'Reading the exact response text',
-    error: 'Speech failed',
-  }[$speechState]);
-
   $effect(() => {
     if (!appUpdateChecking) previousAppUpdate = $appUpdate;
   });
@@ -744,7 +736,7 @@
       descriptionId="speech-hint"
       onchange={(value) => setSpeechEnabled(value)}
     />
-    <p class="hint" id="speech-hint">Off by default. Enabling adds Speak buttons beside responses in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, which keeps reading aloud alive while the screen is off. Response text never reaches a third-party speech server.</p>
+    <p class="hint" id="speech-hint">Off by default. Enabling adds a Speak button next to Copy in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, which keeps reading aloud alive while the screen is off. Response text never reaches a third-party speech server.</p>
     <label>
       Language
       <select
@@ -757,7 +749,9 @@
         {/each}
       </select>
     </label>
-    <p class="hint" role="status">Speech: {speechStatus}.</p>
+    {#if $speechState === 'error'}
+      <p class="hint error" role="alert">Reading aloud failed. Check the relay's voice below, then try again.</p>
+    {/if}
     {#if $speechEnabled && relaysWithoutVoice.length}
       <p class="hint" role="status">No {speechLanguageLabel($speechLanguage)} voice on {relaysWithoutVoice.join(', ')}. Download it below, or install a system speech engine on that computer.</p>
     {/if}
@@ -807,19 +801,6 @@
     {/if}
   </Card>
 
-  <Card>
-    <h3>Push delivery</h3>
-    <Button
-      disabled={$notificationBusy || !notificationsSupported()}
-      onclick={() => toggleNotifications()}
-    >{$pushPreferences.optedIn ? 'Stop Push Notifications' : 'Enable Push Notifications'}</Button>
-    <p class="hint" role="status">
-      {$pushPreferences.optedIn
-        ? 'This browser will keep per-relay subscriptions synchronized.'
-        : 'Enable delivery before testing or receiving background notifications.'}
-    </p>
-  </Card>
-
   <NotificationSettings
     scopes={notificationScopes}
     platform={notificationPlatform}
@@ -827,7 +808,7 @@
     busy={$notificationBusy}
     deliveryEnabled={$pushPreferences.optedIn}
     onpolicychange={({ relay_id, policy }) => sendPushPolicy(relay_id, policy)}
-    onrequestpermission={enableNotifications}
+    ontoggle={() => toggleNotifications()}
     ontest={(request) => { sendTargetedPushTest(request); }}
   />
 

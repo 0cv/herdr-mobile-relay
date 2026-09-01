@@ -33,7 +33,7 @@
     busy = false,
     deliveryEnabled = false,
     onpolicychange,
-    onrequestpermission,
+    ontoggle,
     ontest,
   }: {
     scopes?: NotificationPolicyScope[];
@@ -45,7 +45,7 @@
     // subscribes, so they stay hidden until push delivery is on.
     deliveryEnabled?: boolean;
     onpolicychange?: (change: PushPolicyChange) => void | Promise<void>;
-    onrequestpermission?: () => void | Promise<void>;
+    ontoggle?: () => void | Promise<void>;
     ontest?: (request: PushTestRequest) => void | Promise<void>;
   } = $props();
 
@@ -67,6 +67,13 @@
   const selectedTestState = $derived(selectedScope
     ? testStates[selectedScope.relay_id] || testState
     : testState);
+  const blocked = $derived(!platform.supports_push || platform.permission === 'denied');
+  const deliveryHint = $derived.by(() => {
+    if (!platform.supports_push) return 'This browser cannot receive push notifications.';
+    if (platform.permission === 'denied') return 'Notifications are blocked for this site. Allow them below, then enable delivery again.';
+    if (deliveryEnabled) return 'This browser keeps per-relay subscriptions synchronized.';
+    return 'Enable delivery before testing or receiving background notifications.';
+  });
 
   function chooseScope(event: Event): void {
     selectedKey = (event.currentTarget as HTMLSelectElement).value;
@@ -136,143 +143,127 @@
   });
 </script>
 
-<div class="notification-settings">
+<Card aria-labelledby="notification-settings-title">
+  <h3 id="notification-settings-title">Notifications</h3>
+  <Button
+    disabled={busy || !platform.supports_push}
+    onclick={() => void ontoggle?.()}
+  >{deliveryEnabled ? 'Stop Push Notifications' : 'Enable Push Notifications'}</Button>
+  <p class="hint" role="status">{deliveryHint}</p>
+
   {#if deliveryEnabled}
-    <Card aria-labelledby="notification-settings-title">
-      <h2 id="notification-settings-title">Notifications</h2>
-      <p class="intro">Set notifications per relay and device.</p>
-      {#if scopes.length > 0 && selectedScope && selectedPolicy}
-        <label class="field-label" for="notification-scope">Relay and device</label>
-        <select id="notification-scope" value={effectiveSelectedKey} onchange={chooseScope} disabled={busy || saving}>
-          {#each scopes as scope (pushPolicyScopeKey(scope.relay_id, scope.device_id))}
-            <option value={pushPolicyScopeKey(scope.relay_id, scope.device_id)}>
-              {scope.relay_label} — {scope.device_label}{scope.current_device ? ' (this device)' : ''}
-            </option>
-          {/each}
-        </select>
+    {#if scopes.length > 0 && selectedScope && selectedPolicy}
+      <label class="field-label scope-label" for="notification-scope">Relay and device</label>
+      <select id="notification-scope" value={effectiveSelectedKey} onchange={chooseScope} disabled={busy || saving}>
+        {#each scopes as scope (pushPolicyScopeKey(scope.relay_id, scope.device_id))}
+          <option value={pushPolicyScopeKey(scope.relay_id, scope.device_id)}>
+            {scope.relay_label} — {scope.device_label}{scope.current_device ? ' (this device)' : ''}
+          </option>
+        {/each}
+      </select>
 
-        <fieldset disabled={busy || saving}>
-          <legend>Categories</legend>
-          {#each CONFIGURABLE_CATEGORIES as category (category)}
-            <div class="setting-row">
-              <AppSwitch
-                checked={selectedPolicy.categories[category]}
-                label={CATEGORY_LABELS[category].label}
-                descriptionId={`push-category-${category}`}
-                onchange={checked => changeCategory(category, checked)}
-              />
-              <p id={`push-category-${category}`} class="detail">{CATEGORY_LABELS[category].detail}</p>
-            </div>
-          {/each}
-        </fieldset>
+      <fieldset aria-label="Notification categories" disabled={busy || saving}>
+        {#each CONFIGURABLE_CATEGORIES as category (category)}
+          <div class="setting-row">
+            <AppSwitch
+              checked={selectedPolicy.categories[category]}
+              label={CATEGORY_LABELS[category].label}
+              descriptionId={`push-category-${category}`}
+              onchange={checked => changeCategory(category, checked)}
+            />
+            <p id={`push-category-${category}`} class="hint">{CATEGORY_LABELS[category].detail}</p>
+          </div>
+        {/each}
+      </fieldset>
 
-        <div class="grid">
-          <label>
-            <span>Settle delay</span>
-            <select value={String(selectedPolicy.settle_ms)} onchange={event => changeMilliseconds('settle_ms', event)} disabled={busy || saving}>
-              <option value="0">Immediately</option>
-              <option value="2000">2 seconds</option>
-              <option value="5000">5 seconds</option>
-              <option value="15000">15 seconds</option>
-            </select>
-          </label>
-          <label>
-            <span>Cooldown</span>
-            <select value={String(selectedPolicy.cooldown_ms)} onchange={event => changeMilliseconds('cooldown_ms', event)} disabled={busy || saving}>
-              <option value="0">None</option>
-              <option value="30000">30 seconds</option>
-              <option value="60000">1 minute</option>
-              <option value="300000">5 minutes</option>
-            </select>
-          </label>
-          <label>
-            <span>Snooze</span>
-            <select value={snoozeSelection(selectedPolicy)} onchange={changeSnooze} disabled={busy || saving}>
-              <option value="off">Not snoozed</option>
-              {#if selectedPolicy.snoozed && selectedPolicy.snooze_until}<option value="timed">Until {new Date(selectedPolicy.snooze_until).toLocaleString()}</option>{/if}
-              <option value="3600000">For 1 hour</option>
-              <option value="28800000">For 8 hours</option>
-              <option value="86400000">For 24 hours</option>
-              <option value="global">Until I turn it back on</option>
-            </select>
-          </label>
-        </div>
+      <div class="grid">
+        <label>
+          Settle delay
+          <select value={String(selectedPolicy.settle_ms)} onchange={event => changeMilliseconds('settle_ms', event)} disabled={busy || saving}>
+            <option value="0">Immediately</option>
+            <option value="2000">2 seconds</option>
+            <option value="5000">5 seconds</option>
+            <option value="15000">15 seconds</option>
+          </select>
+        </label>
+        <label>
+          Cooldown
+          <select value={String(selectedPolicy.cooldown_ms)} onchange={event => changeMilliseconds('cooldown_ms', event)} disabled={busy || saving}>
+            <option value="0">None</option>
+            <option value="30000">30 seconds</option>
+            <option value="60000">1 minute</option>
+            <option value="300000">5 minutes</option>
+          </select>
+        </label>
+        <label>
+          Snooze
+          <select value={snoozeSelection(selectedPolicy)} onchange={changeSnooze} disabled={busy || saving}>
+            <option value="off">Not snoozed</option>
+            {#if selectedPolicy.snoozed && selectedPolicy.snooze_until}<option value="timed">Until {new Date(selectedPolicy.snooze_until).toLocaleString()}</option>{/if}
+            <option value="3600000">For 1 hour</option>
+            <option value="28800000">For 8 hours</option>
+            <option value="86400000">For 24 hours</option>
+            <option value="global">Until I turn it back on</option>
+          </select>
+        </label>
+      </div>
 
-        {#if policyError}<p class="policy-error" role="alert">{policyError}</p>{/if}
+      {#if policyError}<p class="hint error" role="alert">{policyError}</p>{/if}
 
-        <div class="test-row">
-          <Button
-            variant="secondary"
-            disabled={busy || saving || selectedTestState.status === 'sending' || !selectedScope.current_device}
-            onclick={sendTest}
-          >Send neutral test</Button>
-          {#if !selectedScope.current_device}
-            <p class="detail">Test notifications from that device.</p>
-          {/if}
-        </div>
-        <p class="test-result" aria-live="polite">{testMessage}</p>
-      {:else}
-        <p class="empty">No paired notification device is available.</p>
-      {/if}
-    </Card>
+      <div class="test-row">
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={busy || saving || selectedTestState.status === 'sending' || !selectedScope.current_device}
+          onclick={sendTest}
+        >Send neutral test</Button>
+        {#if !selectedScope.current_device}
+          <p class="hint">Test notifications from that device.</p>
+        {/if}
+      </div>
+      <p class="hint" aria-live="polite">{testMessage}</p>
+    {:else}
+      <p class="hint">No paired notification device is available.</p>
+    {/if}
   {/if}
 
-  <Card aria-labelledby="notification-help-title">
-    <h2 id="notification-help-title">Permission and installation</h2>
-    {#if !platform.supports_push}
-      <p role="status">Push is unavailable here.</p>
-    {:else if platform.permission === 'granted'}
-      <p class="success" role="status">Notifications are allowed.</p>
-    {:else if platform.permission === 'denied'}
-      <p role="status">Notifications are blocked. Enable them in system settings below.</p>
-    {:else}
-      <Button disabled={busy} onclick={() => void onrequestpermission?.()}>Allow notifications</Button>
-      <p class="detail">Your browser asks after you press the button.</p>
-    {/if}
+  {#if platform.platform === 'ios' && !platform.installed}
+    <section class="guidance" aria-labelledby="ios-install-title">
+      <h4 id="ios-install-title">Install on iPhone or iPad first</h4>
+      <ol>
+        <li>Open this site in Safari on iOS or iPadOS 16.4+.</li>
+        <li>Tap Share, Add to Home Screen, then Add.</li>
+        <li>Open Herdr from the Home Screen and return here.</li>
+      </ol>
+      <p class="hint">iOS allows Web Push only from an installed Home Screen app after a tap.</p>
+    </section>
+  {/if}
 
-    {#if platform.platform === 'ios' && !platform.installed}
-      <section class="guidance" aria-labelledby="ios-install-title">
-        <h3 id="ios-install-title">Install on iPhone or iPad first</h3>
-        <ol>
-          <li>Open this site in Safari on iOS or iPadOS 16.4+.</li>
-          <li>Tap Share, Add to Home Screen, then Add.</li>
-          <li>Open Herdr from the Home Screen and return here.</li>
-        </ol>
-        <p>iOS allows Web Push only from an installed Home Screen app after a tap.</p>
-      </section>
-    {/if}
-
+  {#if blocked}
     <section class="guidance" aria-labelledby="manual-settings-title">
-      <h3 id="manual-settings-title">Manual notification settings</h3>
+      <h4 id="manual-settings-title">Allow notifications for this app</h4>
       {#if platform.platform === 'ios'}
-        <p><strong>iPhone or iPad:</strong> In Settings, open Notifications, choose Herdr, and enable Allow Notifications.</p>
+        <p class="hint"><strong>iPhone or iPad:</strong> In Settings, open Notifications, choose Herdr, and enable Allow Notifications.</p>
       {:else if platform.platform === 'android'}
-        <p><strong>Android:</strong> Long-press Herdr, open App info, then Notifications. For a browser tab, use its site settings.</p>
+        <p class="hint"><strong>Android:</strong> Long-press Herdr, open App info, then Notifications. For a browser tab, use its site settings.</p>
       {:else}
-        <p>Use your browser’s site permissions and your system’s notification settings.</p>
+        <p class="hint">Use your browser's site permissions and your system's notification settings.</p>
       {/if}
     </section>
-  </Card>
-</div>
+  {/if}
+</Card>
 
 <style>
-  .notification-settings { display: grid; gap: 1rem; }
-  h2, h3, p { margin-top: 0; }
-  h2 { font-size: 1rem; margin-bottom: .35rem; }
-  h3 { font-size: .92rem; margin-bottom: .4rem; }
-  .intro, .detail, .empty { color: var(--muted); font-size: .82rem; }
-  .field-label, label > span { display: block; font-size: .78rem; font-weight: 650; margin-bottom: .3rem; }
-  select { width: 100%; min-height: 2.4rem; border: 1px solid var(--border); border-radius: .5rem; background: var(--input); color: var(--foreground); padding: .45rem .6rem; }
-  fieldset { border: 0; margin: 1rem 0; padding: 0; }
-  legend { font-size: .82rem; font-weight: 700; margin-bottom: .5rem; }
+  h4 { font-size: .82rem; margin: 0 0 .35rem; }
+  .scope-label { display: block; margin: .9rem 0 .3rem; }
+  fieldset { border: 0; margin: 1rem 0 0; padding: 0; }
   .setting-row { border-top: 1px solid var(--border); padding: .7rem 0 .45rem; }
-  .setting-row .detail { margin: .25rem 0 0; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .7rem; }
+  .setting-row .hint { margin: .25rem 0 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .7rem; margin-top: 1rem; }
+  .grid label { display: block; font-size: .78rem; font-weight: 650; }
+  .grid select { margin-top: .3rem; }
   .test-row { display: flex; align-items: center; gap: .7rem; margin-top: .9rem; }
-  .test-row .detail { margin: 0; }
-  .test-result { min-height: 2.5em; margin: .5rem 0 0; color: var(--muted); font-size: .8rem; }
-  .success { color: var(--success); }
+  .test-row .hint { margin: 0; }
   .guidance { border-top: 1px solid var(--border); margin-top: .9rem; padding-top: .9rem; }
-  .guidance p, .guidance li { font-size: .84rem; line-height: 1.45; }
-  .guidance ol { margin: .35rem 0 .65rem; padding-left: 1.35rem; }
+  .guidance ol { font-size: .8rem; line-height: 1.5; margin: .35rem 0 .5rem; padding-left: 1.35rem; }
 </style>
