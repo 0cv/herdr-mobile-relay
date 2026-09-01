@@ -34,7 +34,7 @@ class MockWebSocket {
   readyState = MockWebSocket.CONNECTING;
   sent: string[] = [];
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event?: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   constructor(readonly url: string, readonly protocols?: string | string[]) { MockWebSocket.instances.push(this); }
@@ -42,7 +42,10 @@ class MockWebSocket {
   close() { this.readyState = MockWebSocket.CLOSED; }
   open() { this.readyState = MockWebSocket.OPEN; this.onopen?.(); }
   message(payload: unknown) { this.onmessage?.({ data: JSON.stringify(payload) }); }
-  serverClose() { this.readyState = MockWebSocket.CLOSED; this.onclose?.(); }
+  serverClose(code?: number) {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.(code === undefined ? undefined : { code });
+  }
 }
 function exactAgentFields(paneId = 'w1:p1') {
   return {
@@ -1340,6 +1343,33 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(MockWebSocket.instances).toHaveLength(3);
+  });
+
+  it('stops reconnecting when the relay refuses this device', async () => {
+    vi.useFakeTimers();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc1234' });
+
+    // 4401 says the credential is dead: retrying replays the same rejected
+    // material, which is what left a phone hammering the relay forever.
+    socket.serverClose(4401);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(MockWebSocket.instances).toHaveLength(1);
+
+    const connection = get(relayStore.connections).values().next().value;
+    expect(connection?.authRejected).toBe(true);
+    expect(connection?.status).toBe('disconnected');
+    expect(get(relayStore.toast)?.message).toContain('no longer accepts this device');
+
+    // An ordinary close still reconnects.
+    relayStore.connectAll(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const replacement = MockWebSocket.instances.at(-1)!;
+    replacement.open();
+    replacement.serverClose();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(MockWebSocket.instances.length).toBeGreaterThan(2);
   });
 
   it('drops the reconnect backoff so a resumed page retries at once', async () => {

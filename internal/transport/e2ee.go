@@ -34,6 +34,12 @@ const (
 	e2eeServerDirection = "s2c"
 )
 
+// ErrDeviceAuthRejected marks a handshake this relay will keep refusing: the
+// credential is unknown, revoked, superseded, or the invitation is spent.
+// Reconnecting with the same material cannot help, so the phone is told to
+// stop and pair again.
+var ErrDeviceAuthRejected = errors.New("device authentication rejected")
+
 type FrameCodec int
 
 const (
@@ -210,7 +216,7 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 	secret, err := resolver.ResolveE2EESecret(ctx, clientHello.selector)
 	if err != nil || len(secret) != e2eeSecretBytes {
 		clear(secret)
-		return nil, AuthenticatedIdentity{}, errors.New("client proof did not authenticate")
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: client proof did not authenticate", ErrDeviceAuthRejected)
 	}
 	defer clear(secret)
 
@@ -220,7 +226,7 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 	clear(wantClientProof)
 	if !proofAuthenticated {
 		_, _ = resolver.CompleteE2EEAuth(ctx, clientHello.selector, false)
-		return nil, AuthenticatedIdentity{}, errors.New("client proof did not authenticate")
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: client proof did not authenticate", ErrDeviceAuthRejected)
 	}
 
 	serverPrivate, err := ecdh.P256().GenerateKey(rand.Reader)
@@ -288,7 +294,7 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 	authResult, err := resolver.CompleteE2EEAuth(ctx, clientHello.selector, true)
 	if err != nil || !validAuthenticatedIdentity(authResult.Identity) {
 		clear(authResult.CredentialSecret)
-		return nil, AuthenticatedIdentity{}, errors.New("device authentication is no longer valid")
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: device authentication is no longer valid", ErrDeviceAuthRejected)
 	}
 	finish := e2eeServerFinish{
 		Type:              "e2ee_server_finish",

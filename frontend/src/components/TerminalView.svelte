@@ -409,8 +409,9 @@
     // Keyed to the session, not to resizeLayoutActive, on purpose: a relay that
     // can lease will repaint this pane at the phone's width, so trailing padding
     // measured at the desktop width is stale whether or not the width has landed
-    // yet. Only a relay that cannot lease keeps its line ends.
-    const preserveLineEnds = !resizeSessionActive;
+    // yet. A reader cannot lease at all, so its rows wrap at the phone instead
+    // of trailing off the side of a desktop-width grid.
+    const preserveLineEnds = !resizeSessionActive && !readOnly;
     // A frame read while the agent repaints at a new width is transient. Keep
     // the phone's last stable frame painted until the new stable frame lands,
     // but never past the deadline: a relay that keeps flagging frames would
@@ -682,7 +683,7 @@
   async function applyFrame(
     next: TerminalFrame,
     preserve = true,
-    preserveLineEnds = preserve && !resizeSessionActive,
+    preserveLineEnds = preserve && !resizeSessionActive && !readOnly,
   ) {
     const layoutChanged = preserve !== lastPreserveLayout
       || preserveLineEnds !== lastPreserveLineEnds;

@@ -609,6 +609,11 @@
               <span>{currentRelay.url}</span>
             {/if}
             <small>Push: {pushStatusLabel(connection)}</small>
+            {#if connection?.authRejected}
+              <small class="error" role="alert">
+                This computer refused this device. Import a new invitation link from it, or remove and add the relay again.
+              </small>
+            {/if}
             {#if connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
               <small class="warning" role="status">
                 {connection?.inventory.state === 'error'

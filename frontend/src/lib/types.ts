@@ -392,6 +392,8 @@ export interface RelayConnectionView {
   appDeploy: AppDeploymentStatus;
   inventory: AgentInventoryStatus;
   capabilities: string[];
+  /** The relay refused this device's credential; pairing again is the only fix. */
+  authRejected: boolean;
   /** Languages this relay has a voice for, empty when it cannot read aloud. */
   speechLanguages: string[];
   /** Voice cache state per language, empty until the relay reports it. */

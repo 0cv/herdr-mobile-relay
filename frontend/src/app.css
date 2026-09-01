@@ -318,6 +318,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .relay-row { align-items: center; border-bottom: 1px solid var(--border); display: flex; gap: .65rem; padding: .75rem 0; }
 .relay-info { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .relay-info span, .relay-info small { color: var(--muted); font-size: .74rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.relay-info small.error { color: var(--danger); white-space: normal; }
 .relay-info ol { font-size: .74rem; margin: .15rem 0 .35rem 1rem; overflow-wrap: anywhere; padding: 0; }
 .relay-actions { display: flex; flex: 0 0 auto; flex-direction: column; gap: .3rem; }
 .update-command { background: var(--input); border: 1px solid var(--border); border-radius: .55rem; font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; padding: .7rem; user-select: text; white-space: pre-wrap; }

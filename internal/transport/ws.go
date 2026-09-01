@@ -195,6 +195,12 @@ func (h *Hub) Serve(parent context.Context, conn FrameConn) {
 			h.mu.Unlock()
 			h.logger.Debug("encrypted handshake failed",
 				"transport", conn.TransportName(), "error", err)
+			// A refused credential is permanent: say so, or the phone
+			// reconnects with the same dead material forever.
+			if errors.Is(err, ErrDeviceAuthRejected) {
+				conn.Close(CloseUnauthorized, "device authentication rejected")
+				return
+			}
 			conn.CloseNow()
 			return
 		}

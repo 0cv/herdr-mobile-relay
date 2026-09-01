@@ -9,6 +9,12 @@ import type {
 } from './types';
 
 /**
+ * The relay closes with this application code when it refuses a device's
+ * credential. It matches `transport.UnauthorizedCloseCode` on the relay.
+ */
+export const UNAUTHORIZED_CLOSE_CODE = 4401;
+
+/**
  * The original direct browser WebSocket path: the phone reaches the relay over
  * whatever URL the relay published (a Cloudflare tunnel, a LAN address). The
  * encrypted session rides the legacy JSON text envelope so relays that predate
@@ -80,9 +86,19 @@ function createWebSocketChannel(
       socket.onerror = () => {
         fail('Relay connection failed');
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (closed) return;
         closed = true;
+        // 4401: the relay refuses this device's credential. Retrying replays
+        // the same rejected material, so the path manager must not.
+        if (event?.code === UNAUTHORIZED_CLOSE_CODE) {
+          handlers.onClose({
+            reason: 'This relay no longer accepts this device',
+            fatal: true,
+            code: 'device_unauthorized',
+          });
+          return;
+        }
         handlers.onClose({ reason: 'Relay disconnected' });
       };
     },

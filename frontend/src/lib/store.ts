@@ -599,6 +599,7 @@ class RelayStore {
       directoryGeneration: 0,
       host: '',
       protocol: 0,
+      authRejected: false,
       version: '',
       releaseVersion: '',
       revision: '',
@@ -668,6 +669,17 @@ class RelayStore {
     this.clearHealthTimer(connection);
     connection.status = 'disconnected';
     this.rejectPendingOperations(relay.id, detail?.reason || 'Relay disconnected');
+    // The relay refuses this device's credential. Reconnecting replays the
+    // same rejected material, so the phone stops and says how to recover.
+    if (detail?.code === 'device_unauthorized') {
+      connection.authRejected = true;
+      connection.closed = true;
+      clearTimeout(connection.reconnectTimer ?? undefined);
+      connection.reconnectTimer = null;
+      this.emitConnections();
+      this.showToast(`${relay.label} no longer accepts this device. Import a new invitation link to pair again.`, true);
+      return;
+    }
     this.emitConnections();
     // A fatal close would previously never retry, which stranded phones until
     // a manual reload. `unknown_relay` is a restarting relay nine times out of

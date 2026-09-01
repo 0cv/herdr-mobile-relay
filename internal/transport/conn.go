@@ -21,7 +21,15 @@ const (
 	CloseNormal CloseStatus = iota
 	// CloseGoingAway ends a connection because the relay is shutting down.
 	CloseGoingAway
+	// CloseUnauthorized ends a connection whose device authentication this
+	// relay refuses. Retrying with the same credential cannot succeed, so the
+	// phone stops reconnecting and asks to be paired again.
+	CloseUnauthorized
 )
+
+// UnauthorizedCloseCode is the WebSocket close code for CloseUnauthorized. It
+// sits in the application range so no proxy rewrites it.
+const UnauthorizedCloseCode = 4401
 
 // Transport names reported by FrameConn implementations. They are surfaced in
 // logs, metrics, and the signaling gate that only accepts WebRTC negotiation
@@ -85,8 +93,11 @@ func (c *webSocketConn) WriteFrame(ctx context.Context, frame []byte) error {
 
 func (c *webSocketConn) Close(status CloseStatus, reason string) {
 	code := websocket.StatusNormalClosure
-	if status == CloseGoingAway {
+	switch status {
+	case CloseGoingAway:
 		code = websocket.StatusGoingAway
+	case CloseUnauthorized:
+		code = websocket.StatusCode(UnauthorizedCloseCode)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), wsCloseTimeout)
 	defer cancel()
