@@ -34,15 +34,16 @@ setup and want to know what every screen and control is for.
   read responses aloud in English, French, German, Spanish, or Chinese. The
   relay synthesizes the audio and streams it to the phone encrypted - real
   media playback that keeps reading with the screen off, and response text
-  never reaches a third-party speech server. Setup offers to download the
-  neural engine and one voice per language into
-  `~/.cache/herdr-mobile-relay/speech`, which relay updates never touch, so
-  the download happens once per computer; `make speech-voices` does the same
-  later, and re-running it only fetches what is missing. Without those voices
-  the relay falls back to espeak-ng, espeak, flite, or macOS say, and a
-  language it cannot speak at all is reported in Settings instead of failing
-  at the Speak button. Settings also lists which voices a relay has cached and
-  downloads or removes them one language at a time.
+  never reaches a third-party speech server. Setup downloads the neural engine
+  and the English voice into `~/.cache/herdr-mobile-relay/speech`, which relay
+  updates never touch, so the download happens once per computer. Reading
+  aloud switches itself on the first time a relay reports a voice; after that
+  the setting decides. Every other language is downloaded on demand, from
+  Settings on the phone or with `relay/speech-voices.sh --languages fr`, and
+  Settings lists what a relay has cached and removes voices one language at a
+  time. Without a neural voice the relay falls back to espeak-ng, espeak,
+  flite, or macOS say, and a language it cannot speak at all is reported in
+  Settings instead of failing at the Speak button.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |

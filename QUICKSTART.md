@@ -48,10 +48,11 @@ Run an agent in Herdr or tap **＋** in the phone app. You can inspect output,
 send prompts, answer approvals and plan questions, upload images, and manage the
 agent lifecycle.
 
-Setup offers to download the voices that read responses aloud in English,
-French, German, Spanish, and Chinese. They are cached outside the release, so
-updates never fetch them again; `make speech-voices` adds them later, and the
-phone's Settings downloads or removes a relay's voices.
+Setup downloads the engine and the English voice that reads responses aloud,
+cached outside the release so updates never fetch them again. Reading aloud
+turns itself on the first time; French, German, Spanish, and Chinese are
+downloaded on demand from the phone's Settings or with
+`relay/speech-voices.sh --languages fr`.
 
 ## Skip Cloudflare
 

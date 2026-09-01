@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import {
+  adoptRelaySpeech,
   armSpeechKeepalive,
   initializeSpeech,
   releaseSpeechKeepalive,
@@ -8,6 +9,7 @@ import {
   setSpeechLanguage,
   speakViaRelay,
   speechChunks,
+  speechEnabled,
   speechLanguage,
   speechState,
   stopSpeech,
@@ -71,6 +73,37 @@ describe('relay speech', () => {
 
     setSpeechEnabled(false);
     expect(get(speechState)).toBe('off');
+  });
+
+  it('reads aloud by default once a relay reports a voice, then obeys the setting', () => {
+    localStorage.removeItem('herdr_speech_enabled');
+    localStorage.removeItem('herdr_speech_language');
+    adoptRelaySpeech(['en']);
+    expect(get(speechEnabled)).toBe(true);
+    expect(get(speechLanguage)).toBe('en');
+
+    // Turning it off is a decision, so no later relay may undo it.
+    setSpeechEnabled(false);
+    adoptRelaySpeech(['en', 'fr']);
+    expect(get(speechEnabled)).toBe(false);
+
+    // A relay with no voice at all leaves a fresh phone untouched.
+    localStorage.removeItem('herdr_speech_enabled');
+    adoptRelaySpeech([]);
+    expect(get(speechEnabled)).toBe(false);
+    expect(localStorage.getItem('herdr_speech_enabled')).toBeNull();
+
+    // The first language is one the relay can actually speak: English is only
+    // downloaded by default, so a phone set to German still hears something.
+    localStorage.removeItem('herdr_speech_language');
+    speechLanguage.set('de');
+    adoptRelaySpeech(['en']);
+    expect(get(speechLanguage)).toBe('en');
+
+    localStorage.removeItem('herdr_speech_language');
+    speechLanguage.set('de');
+    adoptRelaySpeech(['fr', 'zh']);
+    expect(get(speechLanguage)).toBe('fr');
   });
 
   it('splits long responses at sentence boundaries, including Chinese', () => {

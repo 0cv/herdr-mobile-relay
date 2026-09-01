@@ -56,6 +56,22 @@ export function setSpeechLanguage(code: string): void {
 }
 
 /**
+ * Turns reading aloud on the first time a relay says it has a voice, and
+ * picks a language that relay can actually speak. Both choices are written to
+ * settings straight away, so from then on the settings decide and a relay
+ * never flips them back.
+ */
+export function adoptRelaySpeech(languages: string[]): void {
+  const speakable = languages.filter(isSpeechLanguage);
+  if (!speakable.length) return;
+  if (!localStorage.getItem(LANGUAGE_KEY)) {
+    const preferred = [get(speechLanguage), 'en'].find((code) => speakable.includes(code));
+    setSpeechLanguage(preferred || speakable[0]);
+  }
+  if (localStorage.getItem(ENABLED_KEY) === null) setSpeechEnabled(true);
+}
+
+/**
  * Fragments keep each round trip short, so reading starts almost immediately
  * and one lost fragment costs a sentence rather than the whole response.
  * Chinese sentences end without a space, so their punctuation splits too.

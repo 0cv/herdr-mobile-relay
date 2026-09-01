@@ -170,7 +170,7 @@ if [ -n "$speech_missing" ]; then
     if [ "$INSTALL_MISSING" -eq 1 ]; then
         answer="${HERDR_SETUP_YES:-}"
         if [ "$answer" != "1" ] && [ -t 0 ]; then
-            printf 'Download the voices that read responses aloud in English, French, German, Spanish, and Chinese (about 340 MB, cached across updates)? [Y/n] '
+            printf 'Download the English voice that reads responses aloud (about 115 MB with the engine, cached across updates)? [Y/n] '
             read -r answer
         fi
         case "$answer" in
@@ -178,10 +178,10 @@ if [ -n "$speech_missing" ]; then
                 "$SCRIPT_DIR/speech-voices.sh" ||
                     echo "Speech voices were not installed; reading aloud falls back to the system speech engine."
                 ;;
-            *) echo "Skipped speech voices. Run relay/speech-voices.sh later to cache them." ;;
+            *) echo "Skipped the speech voice. Run relay/speech-voices.sh later, or download it from the phone's Settings." ;;
         esac
     else
-        echo "Optional: run relay/speech-voices.sh to cache the voices that read responses aloud."
+        echo "Optional: run relay/speech-voices.sh to cache the English voice that reads responses aloud."
     fi
 fi
 

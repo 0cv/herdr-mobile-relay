@@ -70,7 +70,7 @@ paths.
   categories, settle delay, cooldown, snooze, and tests per relay and device.
 - Optionally keep the screen awake in a visible terminal, or have the relay read
   responses aloud in English, French, German, Spanish, or Chinese, with the
-  voices cached outside the release and managed from Settings.
+  English voice installed by setup and the rest downloaded from Settings.
 
 **[Full feature tour →](docs/mobile-app.md)**
 

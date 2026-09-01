@@ -51,7 +51,7 @@ import {
   RELAY_PROTOCOL_VERSION,
 } from './protocol';
 import { targetRefForAgent } from './resource-id';
-import { isSpeechLanguage } from './speech';
+import { adoptRelaySpeech, isSpeechLanguage } from './speech';
 import {
   PUSH_CATEGORIES,
   defaultDevicePushPolicy,
@@ -984,9 +984,9 @@ class RelayStore {
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
-      connection.speechLanguages = Array.isArray(message.speech_languages)
-        ? message.speech_languages.filter((language: unknown) => typeof language === 'string' && language)
-        : [];
+      connection.speechLanguages = (Array.isArray(message.speech_languages) ? message.speech_languages : [])
+        .filter(isSpeechLanguage);
+      adoptRelaySpeech(connection.speechLanguages);
       this.adoptHybridDescriptor(connection, message.hybrid);
       const attentionCapable = connection.capabilities.includes('attention_classification');
       this.agentsValue = this.agentsValue.map((agent) =>
@@ -2355,6 +2355,7 @@ class RelayStore {
           engine: String(record.engine || ''),
         }];
       });
+    adoptRelaySpeech(connection.speechLanguages);
   }
 
   private applySpeechVoices(

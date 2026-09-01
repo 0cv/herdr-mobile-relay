@@ -335,12 +335,20 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	operation, args := args[0], args[1:]
 	flags := flag.NewFlagSet("speech-voices", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	requested := flags.String("languages", strings.Join(Offered, ","), "comma-separated languages")
+	requested := flags.String("languages", "", "comma-separated languages")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("%w: %s", ErrUsage, err)
 	}
 	if flags.NArg() != 0 {
 		return fmt.Errorf("%w: unexpected argument %q", ErrUsage, flags.Arg(0))
+	}
+	if *requested == "" && operation == "remove" {
+		return fmt.Errorf("%w: remove needs --languages", ErrUsage)
+	}
+	// English is what a computer downloads on its own; every other language is
+	// asked for, from the phone or with this flag.
+	if *requested == "" {
+		*requested = DefaultLanguage
 	}
 	languages := strings.Split(*requested, ",")
 	for _, language := range languages {

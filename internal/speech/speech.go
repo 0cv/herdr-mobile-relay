@@ -33,6 +33,10 @@ const maxWAVBytes = 900 << 10
 // in its settings.
 var Offered = []string{"en", "fr", "de", "es", "zh"}
 
+// DefaultLanguage is the one voice a computer downloads on its own; the phone
+// asks for any other language it wants.
+const DefaultLanguage = "en"
+
 var labels = map[string]string{
 	"en": "English",
 	"fr": "French",

@@ -2596,7 +2596,9 @@ test('reads a response aloud in the language the relay has a voice for', async (
   });
 
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('switch', { name: 'Read Responses Aloud' }).click();
+  // A relay that can already read aloud turns the setting on by itself the
+  // first time; the phone never has to find it.
+  await expect(page.getByRole('switch', { name: 'Read Responses Aloud' })).toBeChecked();
   await page.getByLabel('Language').selectOption('fr');
   await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
@@ -2634,7 +2636,7 @@ test('downloads a missing relay speech voice from Settings', async ({ page }) =>
   });
 
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('switch', { name: 'Read Responses Aloud' }).click();
+  await expect(page.getByRole('switch', { name: 'Read Responses Aloud' })).toBeChecked();
   await page.getByLabel('Language').selectOption('fr');
   await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toBeVisible();
 

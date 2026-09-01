@@ -227,10 +227,27 @@ func TestRunReportsAndInstallsFromTheCommandLine(t *testing.T) {
 	publishedRuntime(t)
 
 	var out, errOut bytes.Buffer
+	if err := Run(context.Background(), []string{"missing"}, &out, &errOut); err != nil {
+		t.Fatalf("missing error = %v", err)
+	}
+	// English is the only voice a computer downloads on its own.
+	if got := out.String(); got != "runtime\nen\n" {
+		t.Fatalf("default missing output = %q, want the engine and English", got)
+	}
+
+	out.Reset()
+	if err := Run(context.Background(), []string{"install"}, &out, &errOut); err != nil {
+		t.Fatalf("default install error = %v", err)
+	}
+	if !strings.Contains(out.String(), "Downloading the en voice") || strings.Contains(out.String(), "Downloading the fr voice") {
+		t.Fatalf("default install output = %q, want English alone", out.String())
+	}
+
+	out.Reset()
 	if err := Run(context.Background(), []string{"missing", "--languages", "es,zh"}, &out, &errOut); err != nil {
 		t.Fatalf("missing error = %v", err)
 	}
-	if got := out.String(); got != "runtime\nes\nzh\n" {
+	if got := out.String(); got != "es\nzh\n" {
 		t.Fatalf("missing output = %q", got)
 	}
 
