@@ -611,7 +611,7 @@
             <small>Push: {pushStatusLabel(connection)}</small>
             {#if connection?.authRejected}
               <small class="error" role="alert">
-                This computer refused this device. Import a new invitation link from it, or remove and add the relay again.
+                This computer refused this device. Import a new invitation link, or remove and add the relay.
               </small>
             {/if}
             {#if connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
@@ -744,7 +744,7 @@
       descriptionId="speech-hint"
       onchange={(value) => setSpeechEnabled(value)}
     />
-    <p class="hint" id="speech-hint">Off by default. Enabling adds a Speak button next to Copy in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, which keeps reading aloud alive while the screen is off. Response text never reaches a third-party speech server.</p>
+    <p class="hint" id="speech-hint">Off by default. Adds a Speak button next to Copy in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, so reading continues while the screen is off. Response text never reaches a third-party speech server.</p>
     <label class="field-label settings-field" for="speech-language">Language</label>
     <select
       id="speech-language"

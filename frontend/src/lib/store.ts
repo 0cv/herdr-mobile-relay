@@ -437,7 +437,7 @@ class RelayStore {
       relays = imported;
       if (setup && invitation) {
         const relay = this.relayForSetup(relays, setup);
-        if (relay) {
+        if (relay && !this.hasDeviceCredential(relay.id)) {
           try {
             this.deviceCredentials.saveInvitation(relay.id, invitation);
           } catch {
@@ -462,6 +462,10 @@ class RelayStore {
     }
     return relays.find((relay) => relay.url === setup.url);
   }
+  private hasDeviceCredential(relayId: string): boolean {
+    return this.deviceCredentials.get(relayId)?.kind === 'credential';
+  }
+
 
 
   importSetupLink(locationValue: Pick<Location, 'hash' | 'protocol' | 'host' | 'pathname' | 'search'> = location, connect = true): boolean {
@@ -472,10 +476,15 @@ class RelayStore {
     if (invitation) {
       const relay = this.relayForSetup(imported, setup);
       if (!relay) return false;
-      try {
-        this.deviceCredentials.saveInvitation(relay.id, invitation);
-      } catch {
-        return false;
+      // An invitation is spent the moment it pairs. Walking back to the
+      // setup link — the browser keeps that entry in history — must not
+      // replace the credential it produced, or the relay refuses the phone.
+      if (!this.hasDeviceCredential(relay.id)) {
+        try {
+          this.deviceCredentials.saveInvitation(relay.id, invitation);
+        } catch {
+          return false;
+        }
       }
     }
     this.relayConfigs.set(imported);
@@ -676,8 +685,11 @@ class RelayStore {
       connection.closed = true;
       clearTimeout(connection.reconnectTimer ?? undefined);
       connection.reconnectTimer = null;
+      // The stored material is what the relay refuses, so drop it: the next
+      // invitation link then pairs this phone instead of being ignored.
+      this.deviceCredentials.remove(relay.id);
       this.emitConnections();
-      this.showToast(`${relay.label} no longer accepts this device. Import a new invitation link to pair again.`, true);
+      this.showToast(`${relay.label} refused this device. Import a new invitation link.`, true);
       return;
     }
     this.emitConnections();

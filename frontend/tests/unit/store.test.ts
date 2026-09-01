@@ -278,6 +278,55 @@ describe('relay command store', () => {
     expect(MockWebSocket.instances.at(-1)?.protocols).toBe('herdr-e2ee-v2');
   });
 
+  it('keeps an enrolled credential when the setup link is imported again', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    MockWebSocket.instances = [];
+    const relay = { label: 'Paired', url: 'ws://paired.example:8810', token: '' };
+    const relayId = makeRelayId(relay.label, relay.url);
+    const store = new BrowserDeviceCredentialStore(localStorage);
+    store.remove(relayId);
+    relayStore.addRelay(relay);
+    store.saveInvitation(relayId, {
+      id: 'invitation-spent',
+      version: 1,
+      secret: 'B'.repeat(43),
+      expiresAt: Date.now() + 60_000,
+    });
+    // Pairing turns the one-use invitation into a credential.
+    const credential = {
+      version: 1,
+      relays: {
+        [relayId]: {
+          kind: 'credential',
+          id: 'credential-issued',
+          version: 1,
+          secret: 'C'.repeat(43),
+          deviceId: 'device-issued',
+          role: 'reader',
+          locale: 'en',
+          issuedAt: Date.now(),
+        },
+      },
+    };
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify(credential));
+
+    // Safari tabs keep the setup fragment so an installed copy can reuse it, so
+    // a reload or a back step re-imports it. Restoring the spent invitation
+    // here is what made the relay refuse the phone for good.
+    const hash = `#setup=${'B'.repeat(43)}&invite=invitation-spent&invite_version=1`
+      + `&invite_expires=${Date.now() + 60_000}&label=${relay.label}&relay=${encodeURIComponent(relay.url)}`;
+    relayStore.importSetupLink({
+      hash,
+      protocol: 'http:',
+      host: 'paired.example:8810',
+      pathname: '/',
+      search: '',
+    }, false);
+
+    expect(store.get(relayId)).toMatchObject({ kind: 'credential', id: 'credential-issued' });
+  });
+
 
   it('acquires and releases validated pane-size leases for capable relays', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
@@ -1360,7 +1409,7 @@ describe('relay command store', () => {
     const connection = get(relayStore.connections).values().next().value;
     expect(connection?.authRejected).toBe(true);
     expect(connection?.status).toBe('disconnected');
-    expect(get(relayStore.toast)?.message).toContain('no longer accepts this device');
+    expect(get(relayStore.toast)?.message).toContain('refused this device');
 
     // An ordinary close still reconnects.
     relayStore.connectAll(true);

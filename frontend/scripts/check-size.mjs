@@ -55,7 +55,9 @@ import { constants, gzipSync } from 'node:zlib';
 // synthesized on the relay and streamed here encrypted, then played as real
 // media - the only speech path Android keeps alive with the screen off.
 // The pairing QR is encoded by the relay, so the app only unpacks a bitmap.
-const limitKiB = 154;
+// Raised from 154 KiB for phone-managed speech voices and for the recovery
+// path that stops a refused pairing from reconnecting forever.
+const limitKiB = 155;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];
