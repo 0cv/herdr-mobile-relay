@@ -660,6 +660,9 @@
         onRevoke={(intent) => relayStore.revokeDevice(intent)}
         onReset={(intent) => relayStore.resetDevices(intent)}
         onForgetCurrent={() => relayStore.forgetCurrentDevice(relay.id)}
+        onQrCode={connection?.capabilities.includes('invitation_qr')
+          ? ((text) => relayStore.qrCode(relay.id, text))
+          : undefined}
       />
     {/if}
   {/each}
@@ -737,18 +740,17 @@
       onchange={(value) => setSpeechEnabled(value)}
     />
     <p class="hint" id="speech-hint">Off by default. Enabling adds a Speak button next to Copy in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, which keeps reading aloud alive while the screen is off. Response text never reaches a third-party speech server.</p>
-    <label>
-      Language
-      <select
-        disabled={!$speechEnabled}
-        value={$speechLanguage}
-        onchange={(event) => setSpeechLanguage(event.currentTarget.value)}
-      >
-        {#each SPEECH_LANGUAGES as language (language.code)}
-          <option value={language.code}>{language.label}</option>
-        {/each}
-      </select>
-    </label>
+    <label class="field-label settings-field" for="speech-language">Language</label>
+    <select
+      id="speech-language"
+      disabled={!$speechEnabled}
+      value={$speechLanguage}
+      onchange={(event) => setSpeechLanguage(event.currentTarget.value)}
+    >
+      {#each SPEECH_LANGUAGES as language (language.code)}
+        <option value={language.code}>{language.label}</option>
+      {/each}
+    </select>
     {#if $speechState === 'error'}
       <p class="hint error" role="alert">Reading aloud failed. Check the relay's voice below, then try again.</p>
     {/if}

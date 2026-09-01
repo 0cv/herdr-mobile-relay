@@ -54,6 +54,7 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 153 KiB for the relay computer voice: sentence fragments are
 // synthesized on the relay and streamed here encrypted, then played as real
 // media - the only speech path Android keeps alive with the screen off.
+// The pairing QR is encoded by the relay, so the app only unpacks a bitmap.
 const limitKiB = 154;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');

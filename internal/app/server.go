@@ -41,6 +41,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/session"
+	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/support"
@@ -1013,6 +1014,19 @@ func (s *Server) Run(ctx context.Context) error {
 			requestID, _ := msg["request_id"].(string)
 			language, _ := msg["language"].(string)
 			s.changeSpeechVoice(client, requestID, action, language)
+		case "qr_code":
+			requestID, _ := msg["request_id"].(string)
+			value, _ := msg["text"].(string)
+			size, packed, qrErr := setuphelper.PackedQR(value)
+			if qrErr != nil {
+				s.logger.Warn("qr encoding failed", "error", qrErr)
+				s.sendCommandResult(client, requestID, action, false, "failed", "This computer could not encode that QR code", "", nil)
+				break
+			}
+			s.sendCommandResult(client, requestID, action, true, "completed", "", "", map[string]any{
+				"size":    size,
+				"modules": base64.StdEncoding.EncodeToString(packed),
+			})
 		case "push_policy_get":
 			identity, _ := client.Identity()
 			policy := s.pushM.Policy(identity.DeviceID, identity.Locale)

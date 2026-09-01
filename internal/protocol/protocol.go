@@ -135,6 +135,7 @@ var actionCatalog = map[string]ActionMetadata{
 	"push_test_device":         mutateAction("push_test_device", false, false),
 	"push_unsubscribe":         mutateAction("push_unsubscribe", false, false),
 	"push_viewed_pane":         mutateAction("push_viewed_pane", false, false),
+	"qr_code":                  readAction("qr_code"),
 	"read_pane":                readAction("read_pane"),
 	"refresh_agents":           readAction("refresh_agents"),
 	"register_app_origin":      mutateAction("register_app_origin", false, false),
@@ -475,4 +476,5 @@ var Capabilities = []string{
 	"semantic_input",
 	"secret_input",
 	"speech_voice_management",
+	"invitation_qr",
 }

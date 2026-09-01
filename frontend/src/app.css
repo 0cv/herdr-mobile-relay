@@ -246,6 +246,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .card h3 { font-size: .95rem; margin: 0 0 .8rem; }
 .form-stack { display: flex; flex-direction: column; gap: .5rem; }
 .form-stack label, .field-label { font-size: .78rem; font-weight: 650; }
+/* A control that sits directly in a card, without the form stack's own gap. */
+.settings-field { display: block; margin: .9rem 0 .3rem; }
 input, select, textarea {
   background: var(--input);
   border: 1px solid var(--border);

@@ -1548,6 +1548,13 @@ class RelayStore {
     return link.toString();
   }
 
+  // The relay owns the QR encoder, so the app asks it to draw the pairing
+  // link it just built.
+  async qrCode(relayId: string, text: string): Promise<{ size: unknown; modules: unknown }> {
+    const result = await this.sendCommand(relayId, { type: 'qr_code', text });
+    return { size: result.data?.size, modules: result.data?.modules };
+  }
+
   async revokeDevice(intent: RevokeDeviceIntent): Promise<void> {
     await this.sendCommand(intent.relayId, {
       type: 'revoke_device',

@@ -3,6 +3,7 @@
   import AppDialog from '$components/ui/AppDialog.svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
+  import { qrBitmap, type QrBitmap } from '$lib/qr';
   import {
     createDeviceInvitation,
     renameDevice,
@@ -31,6 +32,7 @@
     onRevoke,
     onReset,
     onForgetCurrent,
+    onQrCode,
   }: {
     relayId: string;
     relayLabel: string;
@@ -45,6 +47,8 @@
     onRevoke: DeviceIntentHandler<RevokeDeviceIntent>;
     onReset: DeviceIntentHandler<ResetDevicesIntent>;
     onForgetCurrent: () => Promise<void>;
+    // The relay encodes the pairing QR; without one the link stands alone.
+    onQrCode?: (text: string) => Promise<{ size: unknown; modules: unknown }>;
   } = $props();
 
   let renameTarget = $state<DeviceSummary | null>(null);
@@ -64,6 +68,18 @@
   let invitationLink = $state('');
   let safeButton = $state<HTMLButtonElement | null>(null);
   let nameInput = $state<HTMLInputElement | null>(null);
+  let invitationQr = $state<QrBitmap | null>(null);
+
+  $effect(() => {
+    const link = invitationLink;
+    invitationQr = null;
+    if (!link || !onQrCode) return;
+    let current = true;
+    void onQrCode(link).then((result) => {
+      if (current) invitationQr = qrBitmap(result.size, result.modules);
+    }).catch(() => { /* The link itself is still shown and copyable. */ });
+    return () => { current = false; };
+  });
 
   const disabled = $derived(busy || actionBusy);
   const currentDevice = $derived(devices.find((device) => device.deviceId === currentDeviceId));
@@ -235,9 +251,21 @@
     {/if}
     {#if invitationLink}
       <div class="invitation-link">
-        <label for={`device-invitation-${relayId}`}>One-use invitation link</label>
+        <label class="field-label" for={`device-invitation-${relayId}`}>One-use invitation link</label>
         <input id={`device-invitation-${relayId}`} readonly value={invitationLink} />
-        <Button variant="secondary" size="sm" onclick={copyInvitationLink}>Copy link</Button>
+        {#if invitationQr}
+          <svg
+            class="invitation-qr"
+            viewBox={`-2 -2 ${invitationQr.size + 4} ${invitationQr.size + 4}`}
+            role="img"
+            aria-label="Scan this invitation with the other device"
+          >
+            <rect x={-2} y={-2} width={invitationQr.size + 4} height={invitationQr.size + 4} fill="#fff" />
+            <path d={invitationQr.path} fill="#000" />
+          </svg>
+          <p class="hint">Scan it with the other device, or copy the link.</p>
+        {/if}
+        <Button variant="secondary" onclick={copyInvitationLink}>Copy link</Button>
       </div>
     {/if}
 
@@ -367,7 +395,7 @@
 
 <style>
   .device-settings { display: grid; gap: 1rem; }
-  .device-heading, .device-list-heading, .device-name-line, .device-actions, .danger-actions { display: flex; align-items: center; gap: .65rem; }
+  .device-heading, .device-list-heading, .device-name-line { display: flex; align-items: center; gap: .65rem; }
   .device-heading, .device-list-heading { justify-content: space-between; }
   .device-heading h3, .device-list-heading h4, .device-heading p { margin: 0; }
   .device-heading p, .hint { color: var(--muted); }
@@ -386,14 +414,16 @@
   dl div { display: flex; gap: .3rem; font-size: .8rem; }
   dt { color: var(--muted); }
   dd { margin: 0; }
-  .device-actions, .danger-actions { flex-wrap: wrap; }
-  .danger-actions { justify-content: flex-end; padding-top: .25rem; }
+  /* Actions span the card so a thumb has the whole row to aim at. */
+  .device-actions, .danger-actions { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: .5rem; }
+  .danger-actions { padding-top: .25rem; }
+  .invitation-link { display: grid; gap: .5rem; justify-items: stretch; }
+  .invitation-qr { width: min(14rem, 100%); height: auto; justify-self: center; border-radius: .5rem; }
   .error, .warning { color: var(--danger); }
   .safe-cancel { min-height: 2.5rem; padding: 0 1rem; border: 0; border-radius: .5rem; background: transparent; color: inherit; font: inherit; cursor: pointer; }
   .safe-cancel:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
   .safe-cancel:disabled { cursor: default; opacity: .5; }
   @media (max-width: 36rem) {
     .device-row { display: grid; }
-    .device-actions { justify-content: flex-start; }
   }
 </style>

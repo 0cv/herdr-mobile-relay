@@ -23,7 +23,8 @@
     "workspace_inspection",
     "semantic_input",
     "secret_input",
-    "speech_voice_management"
+    "speech_voice_management",
+    "invitation_qr"
   ],
   "speech_languages": ["en", "fr"],
   "inventory": {"state": "ready"},

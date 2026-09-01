@@ -101,3 +101,39 @@ func TerminalQR(value string, maxColumns int) (string, error) {
 	}
 	return output.String(), nil
 }
+
+// MaxQRBytes bounds what the phone may ask this computer to encode. A pairing
+// link is a couple of hundred characters; anything larger is not a link.
+const MaxQRBytes = 512
+
+// PackedQR renders value as QR modules without a quiet zone, packed row-major
+// into bits so the phone can draw them without its own encoder.
+func PackedQR(value string) (int, []byte, error) {
+	if strings.TrimSpace(value) == "" {
+		return 0, nil, errors.New("QR value is required")
+	}
+	if len(value) > MaxQRBytes {
+		return 0, nil, fmt.Errorf("QR value exceeds %d bytes", MaxQRBytes)
+	}
+	code, err := qrcode.New(value, qrcode.Medium)
+	if err != nil {
+		return 0, nil, err
+	}
+	code.DisableBorder = true
+	bitmap := code.Bitmap()
+	size := len(bitmap)
+	if size == 0 {
+		return 0, nil, errors.New("QR encoder returned an empty bitmap")
+	}
+	packed := make([]byte, (size*size+7)/8)
+	for row := range bitmap {
+		for column, dark := range bitmap[row] {
+			if !dark {
+				continue
+			}
+			index := row*size + column
+			packed[index/8] |= 1 << (7 - index%8)
+		}
+	}
+	return size, packed, nil
+}
