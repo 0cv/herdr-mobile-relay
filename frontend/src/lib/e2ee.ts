@@ -132,6 +132,17 @@ interface ParsedFrame {
   ciphertext: Bytes;
 }
 
+/**
+ * Whether bytes begin with the sealed-frame header. Binary-codec transports
+ * carry the JSON handshake and sealed frames on the same channel and use this
+ * to tell them apart, so it must track exactly what encodeBinaryFrame writes.
+ */
+export function hasBinaryFrameHeader(payload: Uint8Array): boolean {
+  return payload.length >= 2
+    && payload[0] === BINARY_FRAME_VERSION
+    && payload[1] === BINARY_FRAME_KIND_DATA;
+}
+
 function encodeBinaryFrame(sequence: number, ciphertext: Bytes): Bytes {
   const frame = new Uint8Array(new ArrayBuffer(BINARY_FRAME_HEADER_BYTES + ciphertext.length));
   frame[0] = BINARY_FRAME_VERSION;
@@ -144,7 +155,7 @@ function encodeBinaryFrame(sequence: number, ciphertext: Bytes): Bytes {
 function decodeBinaryFrame(rawFrame: E2EEWireFrame): ParsedFrame {
   if (typeof rawFrame === 'string') throw new Error('Relay sent a text frame on a binary transport.');
   if (rawFrame.length < BINARY_FRAME_HEADER_BYTES) throw new Error('Relay sent a truncated encrypted frame.');
-  if (rawFrame[0] !== BINARY_FRAME_VERSION || rawFrame[1] !== BINARY_FRAME_KIND_DATA) {
+  if (!hasBinaryFrameHeader(rawFrame)) {
     throw new Error('Relay sent an unsupported encrypted frame.');
   }
   const sequence = Number(new DataView(rawFrame.buffer, rawFrame.byteOffset).getBigUint64(2, false));

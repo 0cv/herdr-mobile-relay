@@ -56,12 +56,13 @@ type e2eeVector struct {
 }
 
 type e2eeVectorRecord struct {
-	Sequence   uint64    `json:"sequence"`
-	Plaintext  string    `json:"plaintext"`
-	Nonce      string    `json:"nonce"`
-	AAD        string    `json:"aad"`
-	Ciphertext string    `json:"ciphertext"`
-	Frame      e2eeFrame `json:"frame"`
+	Sequence    uint64    `json:"sequence"`
+	Plaintext   string    `json:"plaintext"`
+	Nonce       string    `json:"nonce"`
+	AAD         string    `json:"aad"`
+	Ciphertext  string    `json:"ciphertext"`
+	Frame       e2eeFrame `json:"frame"`
+	BinaryFrame string    `json:"binary_frame"`
 }
 type fixedE2EEAuthResolver struct {
 	secret []byte
@@ -222,6 +223,16 @@ func assertVectorRecord(t *testing.T, sender, receiver *e2eeSession, record e2ee
 	}
 	if string(opened) != record.Plaintext {
 		t.Fatalf("opened plaintext = %q, want %q", opened, record.Plaintext)
+	}
+	// The binary codec is what the gateway and WebRTC paths carry; the phone
+	// sniffs its header to tell sealed frames from the JSON handshake, so the
+	// exact bytes are a cross-language contract.
+	binaryFrame, err := CodecBinary.encodeFrame(record.Sequence, decodeVectorField(t, record.Ciphertext))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(binaryFrame, decodeVectorField(t, record.BinaryFrame)) {
+		t.Fatalf("binary frame = %x, want %x", binaryFrame, decodeVectorField(t, record.BinaryFrame))
 	}
 }
 

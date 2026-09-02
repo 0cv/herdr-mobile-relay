@@ -48,7 +48,8 @@
         "version": 2,
         "sequence": 0,
         "ciphertext": "tKPZ4C3GswvZTmdZij_CwIuThIM3yIgC0tlz0YT-OQID3VroE3niSlUQEvicjunvalQNcm7SOiGb"
-      }
+      },
+      "binary_frame": "AgAAAAAAAAAAALSj2eAtxrML2U5nWYo_wsCLk4SDN8iIAtLZc9GE_jkCA91a6BN54kpVEBL4nI7p72pUDXJu0johmw"
     },
     "c2s": {
       "sequence": 1,
@@ -61,7 +62,8 @@
         "version": 2,
         "sequence": 1,
         "ciphertext": "CVyv1c0X1E8kRGI9wytp4SwJihnhVa402RnicYI8Iw_Ii9geZbr4H2hXEqZk3pg7n-DEnJccTWwuC5Fm1N7DBRClwkcxotaLgJ3-YWY"
-      }
+      },
+      "binary_frame": "AgAAAAAAAAAAAQlcr9XNF9RPJERiPcMraeEsCYoZ4VWuNNkZ4nGCPCMPyIvYHmW6-B9oVxKmZN6YO5_gxJyXHE1sLguRZtTewwUQpcJHMaLWi4Cd_mFm"
     },
     "s2c": {
       "sequence": 0,
@@ -74,7 +76,8 @@
         "version": 2,
         "sequence": 0,
         "ciphertext": "yYVepikJJhSgqdNPdMERNVBFTer1fD24LfvjwRve7fRJkxsEW2OfAzPcu19_P3SvZSpV1HXleOU9ti7G43IU1aD6MuQATfKITr91H9pBdUb2q19xra-1sI2JSSMp4p9osg"
-      }
+      },
+      "binary_frame": "AgAAAAAAAAAAAMmFXqYpCSYUoKnTT3TBETVQRU3q9Xw9uC3748Eb3u30SZMbBFtjnwMz3Ltffz90r2UqVdR15XjlPbYuxuNyFNWg-jLkAE3yiE6_dR_aQXVG9qtfca2vtbCNiUkjKeKfaLI"
     }
   }
 }
