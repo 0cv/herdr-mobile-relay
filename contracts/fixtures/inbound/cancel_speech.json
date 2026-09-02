@@ -1,0 +1,13 @@
+{
+  "type": "cancel_speech",
+  "protocol": 3,
+  "pane_id": "pane-1",
+  "speech_request_id": "speech-1",
+  "target": {
+    "server_session_id": "primary",
+    "pane_id": "pane-1",
+    "terminal_id": "terminal-1",
+    "generation": 4,
+    "agent_session_id": "agent-session-1"
+  }
+}

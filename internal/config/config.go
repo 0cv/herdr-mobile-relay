@@ -51,9 +51,9 @@ type Config struct {
 	WebRTCUDPPort       int
 	ForceRelayTransport bool
 	PortMappingEnabled  bool
-	// RearmBootstrap mints a fresh one-use bootstrap invitation on every
-	// process start. Only the quick-tunnel flow sets it: its app origin
-	// changes each launch, so a phone can never keep its enrolled credential.
+	// RearmBootstrap starts every process with an empty device list and a fresh
+	// one-use bootstrap invitation. Only the quick-tunnel flow sets it: its app
+	// origin changes each launch, so no enrolled credential can be presented again.
 	RearmBootstrap bool
 
 	CacheDir   string

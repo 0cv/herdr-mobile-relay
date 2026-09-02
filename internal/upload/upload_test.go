@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -246,6 +247,23 @@ func TestChunkFailuresDiscardPartialSession(t *testing.T) {
 	}
 }
 
+func TestChunkAfterFinalDeclaredFileIsRejected(t *testing.T) {
+	now := time.Now()
+	manager := newTestManager(t, &now)
+	target := uploadTarget(20)
+	begin := beginOne(t, manager, target, "note.txt", "text/plain", 1)
+	sendChunk(t, manager, target, begin.UploadID, 0, 0, []byte("x"))
+
+	data := []byte("y")
+	_, err := manager.Chunk(ChunkRequest{
+		Target: target, UploadID: begin.UploadID, FileIndex: 1, Sequence: 1,
+		Data: data, SHA256: digestFor(data),
+	})
+	if code := errorCode(t, err); code != "upload_chunk_out_of_order" {
+		t.Fatalf("code = %q", code)
+	}
+}
+
 func TestFinishRejectsFinalDigestAndMagicSpoofThenCleans(t *testing.T) {
 	now := time.Now()
 	target := uploadTarget(3)
@@ -353,7 +371,7 @@ func TestTextValidationHandlesUTF8AcrossChunksAndRejectsInvalidBytes(t *testing.
 	}
 }
 
-func TestFinishedAttachmentsSurviveManagerRestartWithExactScope(t *testing.T) {
+func TestFinishedAttachmentsSurviveManagerRestartWithStableScope(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	root := t.TempDir()
 	config := Config{
@@ -385,14 +403,274 @@ func TestFinishedAttachmentsSurviveManagerRestartWithExactScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	resolved, err := restarted.Resolve(target, finished.Attachments[0].Ref)
+	resolved, err := restarted.Resolve(uploadTarget(10), finished.Attachments[0].Ref)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resolved.Name != "note.txt" || resolved.SHA256 != digestFor(data) {
 		t.Fatalf("restarted attachment = %#v", resolved)
 	}
-	if _, err := restarted.Resolve(uploadTarget(10), finished.Attachments[0].Ref); errorCode(t, err) != "attachment_scope_mismatch" {
+	otherTarget := uploadTarget(10)
+	otherTarget.TerminalID = "other-terminal"
+	if _, err := restarted.Resolve(otherTarget, finished.Attachments[0].Ref); errorCode(t, err) != "attachment_scope_mismatch" {
 		t.Fatalf("cross-target resolve error = %v", err)
+	}
+}
+
+func TestInvalidAttachmentIndexIsQuarantinedWithoutDisablingUploads(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	root := t.TempDir()
+	legacy := []byte(`{"schema_version":1,"attachments":[{"attachment":{},"target":{"server_session_id":"session","pane_id":"pane","terminal_id":"terminal","generation":7},"rel_path":"objects/stale"}]}`)
+	if err := os.WriteFile(filepath.Join(root, attachmentIndexFilename), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Config{
+		Root: root, ChunkBytes: 1024, MaxFiles: 1, MaxFileBytes: 4096,
+		MaxBatchBytes: 4096, SessionTTL: time.Minute, AttachmentTTL: time.Hour,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewManager() with invalid index: %v", err)
+	}
+	defer manager.Close()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var quarantined string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "attachments.invalid-") {
+			quarantined = entry.Name()
+			break
+		}
+	}
+	if quarantined == "" {
+		t.Fatal("invalid attachment index was not quarantined")
+	}
+	if got, err := os.ReadFile(filepath.Join(root, quarantined)); err != nil || !bytes.Equal(got, legacy) {
+		t.Fatalf("quarantined index = %q, %v", got, err)
+	}
+	if _, err := manager.Begin(BeginRequest{
+		Target: uploadTarget(8),
+		Files:  []FileSpec{{Name: "after-recovery.txt", MediaType: "text/plain", Bytes: 1}},
+	}); err != nil {
+		t.Fatalf("upload after index quarantine: %v", err)
+	}
+}
+
+func TestOneUnusableAttachmentRecordKeepsTheRest(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	root := t.TempDir()
+	config := Config{
+		Root: root, ChunkBytes: 1024, MaxFiles: 3, MaxFileBytes: 4096,
+		MaxBatchBytes: 8192, SessionTTL: time.Minute, AttachmentTTL: time.Hour,
+		Now: func() time.Time { return now },
+	}
+	manager, err := NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := uploadTarget(9)
+	refs := make([]string, 0, 2)
+	for _, name := range []string{"kept.txt", "broken.txt"} {
+		data := []byte("attachment " + name)
+		begin := beginOne(t, manager, target, name, "text/plain", int64(len(data)))
+		sendChunk(t, manager, target, begin.UploadID, 0, 0, data)
+		finished, finishErr := manager.Finish(FinishRequest{
+			Target: target, UploadID: begin.UploadID,
+			Files: []FileDigest{{FileIndex: 0, SHA256: digestFor(data)}},
+		})
+		if finishErr != nil {
+			t.Fatal(finishErr)
+		}
+		refs = append(refs, finished.Attachments[0].Ref)
+	}
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt exactly one record's digest. The file still parses and carries
+	// the current schema, so only that row is unusable.
+	indexPath := filepath.Join(root, attachmentIndexFilename)
+	raw, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index attachmentIndex
+	if err := json.Unmarshal(raw, &index); err != nil {
+		t.Fatal(err)
+	}
+	broken := 0
+	for position, record := range index.Attachments {
+		if record.Attachment.Ref == refs[1] {
+			index.Attachments[position].Attachment.SHA256 = "not-a-digest"
+			broken++
+		}
+	}
+	if broken != 1 {
+		t.Fatalf("corrupted %d records, want 1", broken)
+	}
+	rewritten, err := json.Marshal(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(indexPath, rewritten, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if _, err := restarted.Resolve(target, refs[0]); err != nil {
+		t.Fatalf("valid attachment lost to a broken sibling: %v", err)
+	}
+	if _, err := restarted.Resolve(target, refs[1]); errorCode(t, err) != "attachment_not_found" {
+		t.Fatalf("broken attachment resolve error = %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "attachments.invalid-") {
+			t.Fatal("one bad record quarantined the whole index")
+		}
+	}
+}
+
+func TestBeginCapsSessionsPerOwnerAndGlobally(t *testing.T) {
+	now := time.Now()
+	manager, err := NewManager(Config{
+		Root: t.TempDir(), ChunkBytes: 1024, MaxFiles: 1, MaxFileBytes: 4096,
+		MaxBatchBytes: 4096, MaxSessions: 2, MaxSessionsPerOwner: 1,
+		SessionTTL: time.Minute, AttachmentTTL: time.Hour, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	request := func(owner string, generation int64) BeginRequest {
+		return BeginRequest{
+			Target: uploadTarget(generation),
+			Files:  []FileSpec{{Name: "note.txt", MediaType: "text/plain", Bytes: 1}},
+			Owner:  owner,
+		}
+	}
+	if _, err := manager.Begin(request("device-a", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Begin(request("device-a", 2)); errorCode(t, err) != "upload_session_limit" {
+		t.Fatalf("same-owner cap error = %v", err)
+	}
+	if _, err := manager.Begin(request("device-b", 2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Begin(request("device-c", 3)); errorCode(t, err) != "upload_session_limit" {
+		t.Fatalf("global cap error = %v", err)
+	}
+}
+
+func TestFinishRollbackDoesNotPublishPartialRecords(t *testing.T) {
+	now := time.Now()
+	manager, err := NewManager(Config{
+		Root: t.TempDir(), ChunkBytes: 1024, MaxFiles: 2, MaxFileBytes: 4096,
+		MaxBatchBytes: 8192, SessionTTL: time.Minute, AttachmentTTL: time.Hour,
+		Now: func() time.Time { return now }, Random: bytes.NewReader(make([]byte, 48)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	target := uploadTarget(1)
+	data := []byte("x")
+	begin, err := manager.Begin(BeginRequest{Target: target, Files: []FileSpec{
+		{Name: "a.txt", MediaType: "text/plain", Bytes: 1},
+		{Name: "b.txt", MediaType: "text/plain", Bytes: 1},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendChunk(t, manager, target, begin.UploadID, 0, 0, data)
+	sendChunk(t, manager, target, begin.UploadID, 1, 1, data)
+	_, err = manager.Finish(FinishRequest{Target: target, UploadID: begin.UploadID, Files: []FileDigest{
+		{FileIndex: 0, SHA256: digestFor(data)},
+		{FileIndex: 1, SHA256: digestFor(data)},
+	}})
+	if errorCode(t, err) != "upload_random_unavailable" {
+		t.Fatalf("finish error = %v", err)
+	}
+	if len(manager.attachments) != 0 {
+		t.Fatalf("published attachments after rollback = %d", len(manager.attachments))
+	}
+	objects, err := os.ReadDir(filepath.Join(manager.rootPath, "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 0 {
+		t.Fatalf("objects after rollback = %v", objects)
+	}
+}
+
+func TestExactFilenameAndIndexedExpirySurviveCleanup(t *testing.T) {
+	now := time.Now()
+	manager := newTestManager(t, &now)
+	target := uploadTarget(2)
+	data := []byte("report")
+	begin := beginOne(t, manager, target, " report.txt", "text/plain", int64(len(data)))
+	sendChunk(t, manager, target, begin.UploadID, 0, 0, data)
+	finished, err := manager.Finish(FinishRequest{
+		Target: target, UploadID: begin.UploadID,
+		Files: []FileDigest{{FileIndex: 0, SHA256: digestFor(data)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Attachments[0].Name != " report.txt" {
+		t.Fatalf("name = %q", finished.Attachments[0].Name)
+	}
+	path := finished.Attachments[0].Path
+	old := now.Add(-2 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	manager.Cleanup()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unexpired indexed object was pruned: %v", err)
+	}
+}
+
+func TestStartupRemovesNonResumableSessionsAndPrunesLegacyUploads(t *testing.T) {
+	now := time.Now()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sessions", "stale-session"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sessions", "stale-session", "0000.part"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(root, "20260902-123456-deadbeef-photo.jpg")
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-2 * time.Hour)
+	if err := os.Chtimes(legacy, old, old); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(Config{
+		Root: root, ChunkBytes: 1024, MaxFiles: 1, MaxFileBytes: 4096,
+		MaxBatchBytes: 4096, SessionTTL: time.Minute, AttachmentTTL: time.Hour,
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := os.Stat(filepath.Join(root, "sessions", "stale-session")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale session still exists: %v", err)
+	}
+	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy upload still exists: %v", err)
 	}
 }

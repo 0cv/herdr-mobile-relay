@@ -868,6 +868,65 @@ func TestRunUsesRecordedOmpPicker(t *testing.T) {
 	}
 }
 
+func TestRunUsesRecordedOmp020PickerAndConfirmation(t *testing.T) {
+	readCapture := func(name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	idle := readCapture("omp-idle-0.20.ansi")
+	// The palette replaces the empty composer line the moment /copy is typed.
+	palette := strings.Replace(
+		idle,
+		"\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n                                                                                                                                                       \n",
+		"\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n /copy\n",
+		1,
+	) + "\n  copy        Pick text or code from the conversation to copy"
+	if palette == idle+"\n  copy        Pick text or code from the conversation to copy" {
+		t.Fatal("idle capture no longer contains the empty composer between two rules")
+	}
+	pane := &fakePane{snapshots: []string{
+		idle,
+		palette,
+		readCapture("omp-picker-0.20.ansi"),
+		readCapture("omp-confirmation-0.20.ansi"),
+	}}
+	profile, ok := slashcmd.CopyProfileFor("omp", "")
+	if !ok {
+		t.Fatal("missing OMP copy profile")
+	}
+	response := []byte("OMP 0.20 markdown response")
+	reads := 0
+	result, err := Run(
+		context.Background(),
+		"pane-omp",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) {
+			reads++
+			if reads == 1 {
+				return []byte("before"), nil
+			}
+			return response, nil
+		},
+		func(context.Context, []byte) error { return nil },
+		1,
+		func(context.Context, string) (int64, error) { return 1, nil },
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result != (Result{Text: string(response), Source: "clipboard", Chars: len(response), Lines: 1}) {
+		t.Fatalf("Run() result = %+v, want recorded OMP 0.20 orchestration result", result)
+	}
+	if !reflect.DeepEqual(pane.keys, [][]string{{"Enter"}, {"Enter"}}) {
+		t.Fatalf("keys = %v, want palette then picker acceptance", pane.keys)
+	}
+}
+
 func TestRunAcceptsOmpPickerBeforeConfirmation(t *testing.T) {
 	response := []byte("OMP response")
 	pane := &fakePane{snapshots: []string{

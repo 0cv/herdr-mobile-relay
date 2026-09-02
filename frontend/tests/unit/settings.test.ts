@@ -109,7 +109,7 @@ describe('settings relay status', () => {
     relayStore.addRelay({
       label: 'Fedora',
       url: '',
-      token: 'relay-secret',
+      token: '0123456789abcdef0123456789abcdef',
       transport: 'hybrid',
       gatewayUrl: 'wss://own.example.test',
       gatewayUrls: [
@@ -147,7 +147,7 @@ describe('settings relay status', () => {
     relayStore.addRelay({
       label: 'Fedora',
       url: '',
-      token: 'relay-secret',
+      token: '0123456789abcdef0123456789abcdef',
       transport: 'hybrid',
       gatewayUrl: 'wss://own.example.test',
       gatewayUrls: ['wss://own.example.test', 'wss://community-a.example.test'],

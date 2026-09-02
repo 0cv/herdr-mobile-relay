@@ -153,6 +153,7 @@
   let lastContent = '';
   let lastPreserveLayout = false;
   let lastPreserveLineEnds = false;
+  let lastRenderColumnCap = 0;
   let jumpVisible = $state(false);
   let arrowsOpen = $state(false);
   let fkeysOpen = $state(false);
@@ -249,8 +250,9 @@
   // scrolling sideways. A relay that can lease but has not granted a width yet
   // is showing a pane whose width is nobody's: alignment is already lost, so
   // those rows wrap at the container instead of stranding the reader on line
-  // tails after every refresh.
-  const resizeLayoutPending = $derived(resizeSessionActive && !resizeLayoutActive);
+  // tails after every refresh. Readers use the same wrapping regime because
+  // their role can never obtain a size lease.
+  const resizeLayoutPending = $derived(readOnly || (resizeSessionActive && !resizeLayoutActive));
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -685,8 +687,12 @@
     preserve = true,
     preserveLineEnds = preserve && !resizeSessionActive && !readOnly,
   ) {
+    const renderColumnCap = resizeLayoutActive
+      ? lastLeasedColumns
+      : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0);
     const layoutChanged = preserve !== lastPreserveLayout
-      || preserveLineEnds !== lastPreserveLineEnds;
+      || preserveLineEnds !== lastPreserveLineEnds
+      || renderColumnCap !== lastRenderColumnCap;
     if (next.content === lastContent && next.format === lastFormat && !layoutChanged) return;
     const rendered = renderTerminalContent(
       next.content,
@@ -697,7 +703,7 @@
       // of fixed-width cells with no wrap opportunity between them, so past
       // the cap it must render as plain text that can wrap instead. Zero means
       // "no cap", which only a relay that cannot lease is entitled to.
-      resizeLayoutActive ? lastLeasedColumns : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0),
+      renderColumnCap,
     );
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
@@ -715,9 +721,8 @@
       : pendingResizeAnchor || currentVirtualAnchor(previousTop);
     // Rows cropped from the front shift every index; keep the anchor on the
     // same row.
-    const rowShift = previousAnchor
-      ? renderedRowShift(renderedRows, rendered.rows)
-      : 0;
+    const rowShift = renderedRowShift(renderedRows, rendered.rows);
+    if (rowShift) wideGridOffsets.clear();
     if (previousAnchor && rowShift) {
       previousAnchor = { ...previousAnchor, index: Math.max(0, previousAnchor.index - rowShift) };
     }
@@ -732,6 +737,7 @@
     lastFormat = next.format;
     lastPreserveLayout = preserve;
     lastPreserveLineEnds = preserveLineEnds;
+    lastRenderColumnCap = renderColumnCap;
     const nextTop = resetVirtualRows(
       stick ? Number.POSITIVE_INFINITY : previousTop,
       previousAnchor,
@@ -932,6 +938,7 @@
       wideGridOffsets.clear();
       wideGridOffsetsPane = agent.pane_id;
     }
+    if (wideGridOffsets.get(block) === row.scrollLeft) return;
     wideGridOffsets.set(block, row.scrollLeft);
     for (const sibling of terminalElement.querySelectorAll<HTMLElement>(`[data-terminal-wide-block="${block}"]`)) {
       if (sibling !== row && sibling.scrollLeft !== row.scrollLeft) sibling.scrollLeft = row.scrollLeft;
@@ -1348,9 +1355,44 @@
 
   let fetchingSpeechText = $state(false);
 
-  // The Speak button mirrors Copy's sources: the relay's exact response when
-  // the relay supports it, then the client-side parse. Gating on the parse
-  // alone hid the button entirely for agents whose frames it cannot read.
+  interface AgentResponseSource {
+    text: string;
+    /** The agent's own text (relay copy or its transcript), not a terminal parse. */
+    exact: boolean;
+    failure: string;
+  }
+
+  /**
+   * The agent's latest complete response, from the most exact source this
+   * device may use. A controller runs the relay's copy transaction, which types
+   * into the agent's terminal; a reader may not, so it reads the agent's own
+   * transcript instead. The terminal parse is the last resort for both.
+   * `haltOnCopyFailure` returns the relay's failure without a fallback.
+   */
+  async function latestAgentResponse(haltOnCopyFailure = false): Promise<AgentResponseSource> {
+    let failure = '';
+    if (!readOnly && agentResponseCopySupported) {
+      try {
+        const result = await relayStore.sendToAgent(agent, { type: 'copy_agent_response' }, 15_000);
+        const text = String(result.data?.text || '');
+        if (text.trim()) return { text, exact: true, failure: '' };
+      } catch (error) {
+        failure = error instanceof Error && error.message ? error.message : 'Could not copy the agent response.';
+        if (haltOnCopyFailure) return { text: '', exact: false, failure };
+      }
+    }
+    if (agent.conversation_history_available) {
+      try {
+        const page = await relayStore.getConversationHistory(agent, '', 8);
+        const latest = page.entries.findLast((entry) => entry.role === 'assistant' && entry.text.trim());
+        if (latest) return { text: latest.text, exact: true, failure: '' };
+      } catch (error) {
+        failure ||= error instanceof Error && error.message ? error.message : 'Could not read the conversation.';
+      }
+    }
+    return { text: terminalCopyText, exact: false, failure };
+  }
+
   async function speakTerminalResponse() {
     if ($speechState === 'speaking') {
       stopSpeech();
@@ -1369,24 +1411,15 @@
     armSpeechKeepalive(toast);
     fetchingSpeechText = true;
     try {
-      let text = '';
-      if (agentResponseCopySupported) {
-        try {
-          const result = await relayStore.sendToAgent(agent, { type: 'copy_agent_response' }, 15_000);
-          text = String(result.data?.text || '');
-        } catch {
-          // The local parse below remains the fallback.
-        }
-      }
-      if (!text.trim()) text = terminalCopyText;
+      const { text, failure } = await latestAgentResponse();
       const spoke = text.trim() && speakViaRelay(
         text,
-        (chunk, language) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk, language }, 20_000),
+        (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
         toast,
       );
       if (!spoke) {
         releaseSpeechKeepalive();
-        if (!text.trim()) toast('No completed agent response is available to read aloud.');
+        if (!text.trim()) toast(failure || 'No completed agent response is available to read aloud.');
       }
     } finally {
       fetchingSpeechText = false;
@@ -1397,27 +1430,20 @@
     copiedAgentResponseText = '';
     let text = '';
     let copiedAgentResponse = false;
-    if (agentResponseCopySupported) {
-      copyingAgentResponse = true;
-      try {
-        const result = await relayStore.sendToAgent(agent, { type: 'copy_agent_response' }, 15_000);
-        const remoteText = String(result.data?.text || '');
-        if (!remoteText.trim()) {
-          relayStore.showToast('The agent returned no response to copy.', true);
-          return;
-        }
-        text = remoteText;
-        copiedAgentResponse = true;
-        copiedAgentResponseText = remoteText;
-      } catch (error) {
-        const message = error instanceof Error && error.message
-          ? error.message
-          : 'Could not copy the agent response.';
-        relayStore.showToast(message, true);
+    copyingAgentResponse = true;
+    try {
+      const response = await latestAgentResponse(true);
+      if (response.failure && !response.text.trim()) {
+        relayStore.showToast(response.failure, true);
         return;
-      } finally {
-        copyingAgentResponse = false;
       }
+      if (response.exact) {
+        text = response.text;
+        copiedAgentResponse = true;
+        copiedAgentResponseText = response.text;
+      }
+    } finally {
+      copyingAgentResponse = false;
     }
     if (!text) text = terminalCopyText || terminalPlainText;
     if (!text.trim()) {
@@ -1839,6 +1865,14 @@
     attachmentCancelRequested = false;
     let controller: AttachmentBatchController | null = null;
     try {
+      const previous = attachmentController;
+      if (previous) {
+        try {
+          await previous.cancel();
+        } finally {
+          releaseAttachmentController(previous, true);
+        }
+      }
       controller = relayStore.attachmentController(agent);
       attachmentController = controller;
       attachmentUnsubscribe?.();

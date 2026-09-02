@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,14 +51,16 @@ var catalog = map[string]voice{
 		"d521dc45504a8ccc99e325822b35946dd701840bfb07e3dbb31a40929ed6a82b", 63206116},
 }
 
-// Apple publishes no arm64 build of the standalone engine, so Apple Silicon
-// runs the Intel one through Rosetta.
+// The pinned Piper release publishes native Linux builds and Intel macOS only.
+// Installing the Intel binary as native on Apple Silicon leaves every synthesis
+// failing when Rosetta is absent, so darwin/arm64 uses the system voice instead.
 var runtimeAssets = map[string]struct{ name, digest string }{
 	"linux/amd64":  {"piper_linux_x86_64.tar.gz", "a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992"},
 	"linux/arm64":  {"piper_linux_aarch64.tar.gz", "fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb"},
 	"darwin/amd64": {"piper_macos_x64.tar.gz", "ced85c0a3df13945b1e623b878a48fdc2854d5c485b4b67f62857cf551deaf8b"},
-	"darwin/arm64": {"piper_macos_x64.tar.gz", "ced85c0a3df13945b1e623b878a48fdc2854d5c485b4b67f62857cf551deaf8b"},
 }
+
+var installMu sync.Mutex
 
 // VoiceStatus is what one language looks like on this computer.
 type VoiceStatus struct {
@@ -71,10 +74,11 @@ type VoiceStatus struct {
 }
 
 type Catalog struct {
-	CacheDir        string
-	EngineInstalled bool
-	Languages       []string
-	Voices          []VoiceStatus
+	CacheDir            string
+	EngineInstalled     bool
+	ManagementSupported bool
+	Languages           []string
+	Voices              []VoiceStatus
 }
 
 func cacheDir() string {
@@ -108,10 +112,13 @@ func runtimeBaseURL() string {
 // much its voice costs to download or already occupies.
 func Status() Catalog {
 	installed := engines()
+	engineInstalled := piperInstalled(installed)
+	managementSupported := voiceManagementSupported(engineInstalled, runtime.GOOS, runtime.GOARCH)
 	status := Catalog{
-		CacheDir:        cacheDir(),
-		Languages:       Languages(),
-		EngineInstalled: piperInstalled(installed),
+		CacheDir:            cacheDir(),
+		Languages:           Languages(),
+		EngineInstalled:     engineInstalled,
+		ManagementSupported: managementSupported,
 	}
 	for _, language := range Offered {
 		entry := catalog[language]
@@ -141,9 +148,19 @@ func piperInstalled(candidates []engine) bool {
 	return false
 }
 
+func voiceManagementSupported(engineInstalled bool, goos, goarch string) bool {
+	if engineInstalled {
+		return true
+	}
+	_, runtimePublished := runtimeAssets[goos+"/"+goarch]
+	return runtimePublished
+}
+
 // Install downloads one language's neural voice, and the engine itself when
 // this computer does not have it yet.
 func Install(ctx context.Context, language string) error {
+	installMu.Lock()
+	defer installMu.Unlock()
 	entry, known := catalog[language]
 	if !known {
 		return fmt.Errorf("%w: unknown speech language %q", ErrUsage, language)
@@ -167,6 +184,8 @@ func Install(ctx context.Context, language string) error {
 // Remove deletes a cached voice. The language keeps working wherever a system
 // engine can still speak it.
 func Remove(language string) error {
+	installMu.Lock()
+	defer installMu.Unlock()
 	entry, known := catalog[language]
 	if !known {
 		return fmt.Errorf("%w: unknown speech language %q", ErrUsage, language)
@@ -185,7 +204,11 @@ func installRuntime(ctx context.Context) error {
 	if !published {
 		return fmt.Errorf("no speech engine is published for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
-	work, err := os.MkdirTemp("", "herdr-speech-runtime-")
+	engineDir := filepath.Dir(filepath.Dir(runtimeBinary()))
+	if err := os.MkdirAll(engineDir, 0o755); err != nil {
+		return fmt.Errorf("create engine cache: %w", err)
+	}
+	work, err := os.MkdirTemp(engineDir, ".install-")
 	if err != nil {
 		return fmt.Errorf("create download workspace: %w", err)
 	}
@@ -196,10 +219,6 @@ func installRuntime(ctx context.Context) error {
 	}
 	if err := extractTarGz(archive, work); err != nil {
 		return err
-	}
-	engineDir := filepath.Dir(filepath.Dir(runtimeBinary()))
-	if err := os.MkdirAll(engineDir, 0o755); err != nil {
-		return fmt.Errorf("create engine cache: %w", err)
 	}
 	replaced := filepath.Join(engineDir, "piper.replaced")
 	os.RemoveAll(replaced)
@@ -288,7 +307,6 @@ func download(ctx context.Context, url, destination, digest string) error {
 	if fileDigest(destination) == digest {
 		return nil
 	}
-	partial := destination + ".part"
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("request %s: %w", filepath.Base(destination), err)
@@ -301,10 +319,11 @@ func download(ctx context.Context, url, destination, digest string) error {
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: %s", filepath.Base(destination), response.Status)
 	}
-	out, err := os.Create(partial)
+	out, err := os.CreateTemp(filepath.Dir(destination), "."+filepath.Base(destination)+".part-")
 	if err != nil {
 		return fmt.Errorf("write %s: %w", filepath.Base(destination), err)
 	}
+	partial := out.Name()
 	sum := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(out, sum), response.Body); err != nil {
 		out.Close()
@@ -379,6 +398,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		return nil
 	case "install":
+		if !Status().ManagementSupported {
+			return fmt.Errorf("speech voice downloads are not supported on %s/%s", runtime.GOOS, runtime.GOARCH)
+		}
 		items := missing(languages)
 		if len(items) == 0 {
 			fmt.Fprintf(stdout, "Speech voices are already cached in %s\n", cacheDir())
@@ -416,6 +438,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 // voice without it cannot be spoken.
 func missing(languages []string) []string {
 	status := Status()
+	if !status.ManagementSupported {
+		return nil
+	}
 	installed := map[string]bool{}
 	for _, current := range status.Voices {
 		installed[current.Language] = current.Installed

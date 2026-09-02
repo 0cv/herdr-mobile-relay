@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -131,6 +132,7 @@ func TestInstallCachesTheEngineAndVoiceOnce(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cache)
 	publishedVoices(t, nil)
 	publishedRuntime(t)
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "unavailable"))
 
 	if got := strings.Join(missing([]string{"fr"}), ","); got != "runtime,fr" {
 		t.Fatalf("missing() = %q, want \"runtime,fr\"", got)
@@ -186,6 +188,48 @@ func TestInstallCachesTheEngineAndVoiceOnce(t *testing.T) {
 	}
 	if err := Remove("fr"); err != nil {
 		t.Fatalf("Remove() on an absent voice error = %v", err)
+	}
+}
+
+func TestConcurrentVoiceInstallsUseIndependentStaging(t *testing.T) {
+	restoreCatalog(t)
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "piper", ":")
+	hermeticEnv(t, binDir)
+	t.Setenv("PATH", binDir)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	publishedVoices(t, nil)
+
+	var wait sync.WaitGroup
+	errorsSeen := make(chan error, 2)
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errorsSeen <- Install(context.Background(), "fr")
+		}()
+	}
+	wait.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatalf("concurrent Install(fr) error = %v", err)
+		}
+	}
+}
+
+func TestRuntimeCatalogDoesNotTreatIntelPiperAsAppleSiliconNative(t *testing.T) {
+	if _, published := runtimeAssets["darwin/arm64"]; published {
+		t.Fatal("darwin/arm64 must not install the Intel-only Piper runtime")
+	}
+	if voiceManagementSupported(false, "darwin", "arm64") {
+		t.Fatal("darwin/arm64 must not advertise unavailable voice downloads")
+	}
+	if !voiceManagementSupported(true, "darwin", "arm64") {
+		t.Fatal("an installed native Piper must keep voice management available")
+	}
+	if !voiceManagementSupported(false, "darwin", "amd64") {
+		t.Fatal("darwin/amd64 should advertise its published Piper runtime")
 	}
 }
 

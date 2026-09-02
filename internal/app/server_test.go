@@ -22,6 +22,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
+	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
@@ -67,6 +68,9 @@ func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 		{name: "unauthenticated push subscribe", action: protocol.ActionMetadata{Operation: "push_subscribe", Class: protocol.ActionMutating}, wantDenied: true},
 		{name: "reader own-device push policy", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "push_policy_set", Class: protocol.ActionMutating}, deviceID: "spoofed-other"},
 		{name: "unauthenticated push open", action: protocol.ActionMetadata{Operation: "push_open_ref", Class: protocol.ActionReadOnly}, wantDenied: true},
+		{name: "reader push test", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "push_test_device", Class: protocol.ActionMutating}},
+		{name: "unauthenticated push test", action: protocol.ActionMetadata{Operation: "push_test_device", Class: protocol.ActionMutating}, wantDenied: true},
+		{name: "controller push test", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleController)}, authenticated: true, action: protocol.ActionMetadata{Operation: "push_test_device", Class: protocol.ActionMutating}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := authorizeAuthenticatedIdentity(test.identity, test.authenticated, test.action, test.deviceID)
@@ -77,6 +81,37 @@ func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
 				t.Fatalf("authorizeAuthenticatedIdentity() error = %#v", err)
 			}
 		})
+	}
+}
+
+func TestReservePushTestThrottlesPerDevice(t *testing.T) {
+	server := testServer()
+	now := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	if !server.reservePushTest("device-1", now) {
+		t.Fatal("first push test was throttled")
+	}
+	if server.reservePushTest("device-1", now.Add(pushTestInterval-time.Millisecond)) {
+		t.Fatal("repeated push test inside interval was accepted")
+	}
+	if !server.reservePushTest("device-2", now.Add(time.Second)) {
+		t.Fatal("one device throttled another device")
+	}
+	if !server.reservePushTest("device-1", now.Add(pushTestInterval)) {
+		t.Fatal("push test remained throttled after interval")
+	}
+	// Nothing older than one interval can throttle anything, so stale rows are
+	// dropped rather than accumulating one timestamp per device that ever asked
+	// for a test.
+	if !server.reservePushTest("device-3", now.Add(time.Hour)) {
+		t.Fatal("later push test was throttled")
+	}
+	if len(server.pushTestLast) != 1 {
+		t.Fatalf("push test throttle retained %d devices, want 1", len(server.pushTestLast))
+	}
+	// A revoked device leaves no throttle behind for the next enrolment.
+	server.forgetPushTest("device-3")
+	if !server.reservePushTest("device-3", now.Add(time.Hour)) {
+		t.Fatal("re-enrolled device inherited the revoked device's throttle")
 	}
 }
 
@@ -117,6 +152,31 @@ func TestValidateExactPaneTargetBindsCurrentTerminalGenerationAndAgentSession(t 
 	}
 	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1"}, false); err != nil {
 		t.Fatalf("local pane command without a target was rejected: %#v", err)
+	}
+}
+
+func TestValidateExactPaneTargetAllowsStaleOwnerCleanup(t *testing.T) {
+	server := testServer()
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", ServerSessionID: "primary", TerminalID: "terminal-new",
+		Generation: 5, SessionID: "agent-session-new",
+	}}, server.state.RevisionCounter())
+	stale := protocol.TargetRef{
+		ServerSessionID: "primary", PaneID: "pane-1", TerminalID: "terminal-old",
+		Generation: 4, AgentSessionID: "agent-session-old",
+	}
+	for _, action := range []string{"unwatch_pane", "release_pane_size", "cancel_speech"} {
+		if err := validateExactPaneTarget(server.state, protocol.Inbound{
+			Type: action, PaneID: "pane-1", Target: &stale,
+		}, true); err != nil {
+			t.Fatalf("%s rejected stale cleanup target: %#v", action, err)
+		}
+	}
+	stale.PaneID = "pane-2"
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{
+		Type: "unwatch_pane", PaneID: "pane-1", Target: &stale,
+	}, true); err == nil {
+		t.Fatal("cleanup accepted a different pane")
 	}
 }
 
@@ -728,7 +788,10 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 	s := testServer()
 	synthesized := ""
 	spokenLanguage := ""
-	s.speechLanguages = []string{"en", "fr"}
+	availableLanguages := []string{"en", "fr"}
+	s.speechStatus = func() speech.Catalog {
+		return speech.Catalog{Languages: append([]string(nil), availableLanguages...)}
+	}
 	s.speechSynth = func(_ context.Context, text, language string) ([]byte, error) {
 		synthesized = text
 		spokenLanguage = language
@@ -754,9 +817,10 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 			return
 		}
 		requestID, _ := message["request_id"].(string)
+		speechRequestID, _ := message["speech_request_id"].(string)
 		text, _ := message["text"].(string)
 		language, _ := message["language"].(string)
-		s.speakText(client, requestID, text, language)
+		s.speakText(client, requestID, speechRequestID, text, language)
 	})
 	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
@@ -820,10 +884,76 @@ func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
 		t.Fatalf("unsupported language result = %+v", unsupported)
 	}
 
-	s.speechLanguages = nil
+	availableLanguages = nil
 	missing := request("hello", "en")
 	if missing["ok"] != false || missing["error"] != "No speech engine is installed on this computer" {
 		t.Fatalf("missing engine result = %+v", missing)
+	}
+}
+
+func TestCancelSpeechStopsRelaySynthesis(t *testing.T) {
+	s := testServer()
+	s.speechStatus = func() speech.Catalog {
+		return speech.Catalog{Languages: []string{"en"}}
+	}
+	started := make(chan struct{})
+	s.speechSynth = func(ctx context.Context, _, _ string) ([]byte, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		admitted()
+		action, _ := message["type"].(string)
+		speechRequestID, _ := message["speech_request_id"].(string)
+		switch action {
+		case "speak_text":
+			requestID, _ := message["request_id"].(string)
+			s.speakText(client, requestID, speechRequestID, "stop this", "en")
+		case "cancel_speech":
+			s.cancelSpeech(client.ID(), speechRequestID)
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		server.Close()
+		t.Fatalf("dial speech cancellation client: %v", err)
+	}
+	t.Cleanup(func() {
+		conn.CloseNow()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.hub.Shutdown(shutdownCtx)
+		server.Close()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, []byte(
+		`{"type":"speak_text","request_id":"speak-1","speech_request_id":"speech-1"}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("speech synthesis did not start")
+	}
+	if err := conn.Write(ctx, websocket.MessageText, []byte(
+		`{"type":"cancel_speech","speech_request_id":"speech-1"}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read cancelled speech result: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["request_id"] != "speak-1" || result["ok"] != false {
+		t.Fatalf("cancelled speech result = %#v", result)
 	}
 }
 
@@ -831,7 +961,7 @@ func TestSpeechVoiceManagementOverTheWire(t *testing.T) {
 	s := testServer()
 	installed := map[string]bool{"en": true}
 	s.speechStatus = func() speech.Catalog {
-		status := speech.Catalog{CacheDir: "/cache/speech", EngineInstalled: true}
+		status := speech.Catalog{CacheDir: "/cache/speech", EngineInstalled: true, ManagementSupported: true}
 		for _, language := range speech.Offered {
 			engine := "espeak-ng"
 			if installed[language] {
@@ -1179,6 +1309,53 @@ func TestReadyzNotReady(t *testing.T) {
 	}
 }
 
+func enrollBootstrapDevice(t *testing.T, runtimeDir, token string) {
+	t.Helper()
+	store, err := deviceauth.Open(filepath.Join(runtimeDir, "device-auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureBootstrapInvitation([]byte(token), "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: "bootstrap", Version: 1,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRearmedLaunchStartsWithoutStrandedDevices(t *testing.T) {
+	token := strings.Repeat("k", 32)
+	for _, test := range []struct {
+		name    string
+		rearm   bool
+		devices int
+	}{
+		{name: "quick tunnel forgets devices stranded under the previous hostname", rearm: true, devices: 0},
+		{name: "stable install keeps its paired devices", rearm: false, devices: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			runtimeDir := filepath.Join(root, "runtime")
+			enrollBootstrapDevice(t, runtimeDir, token)
+			cfg := &config.Config{
+				Token:          token,
+				RearmBootstrap: test.rearm,
+				RuntimeDir:     runtimeDir,
+				CacheDir:       filepath.Join(root, "cache"),
+			}
+			s := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if s.deviceAuth == nil {
+				t.Fatal("device store was not initialized")
+			}
+			if got := len(s.deviceAuth.ListCredentials("")); got != test.devices {
+				t.Fatalf("paired devices after launch = %d, want %d", got, test.devices)
+			}
+		})
+	}
+}
+
 func TestServerRunAndShutdown(t *testing.T) {
 	root := t.TempDir()
 	webRoot := filepath.Join(root, "web")
@@ -1301,14 +1478,18 @@ func TestCommittedStateViewTracksSnapshotsAndDeltas(t *testing.T) {
 	s.broadcastCommitted(map[string]any{
 		"type": "agents",
 		"agents": []*coordinator.AgentState{{
-			PaneID: "pane-1", Status: "working", Project: "project",
+			PaneID: "pane-1", Status: "blocked", Project: "project",
+			BlockedEventID: "event-1", AttentionKind: question.AttentionApproval,
+			Options: []string{"Approve", "Deny"}, ApprovalFingerprint: "approval-fingerprint-1",
 		}},
 	})
 	s.broadcastCommitted(map[string]any{
-		"type": "agent_update", "pane_id": "pane-1", "status": "blocked", "event_id": "event-1",
+		"type": "agent_update", "pane_id": "pane-1", "status": "blocked", "project": "renamed",
 	})
 	agents := s.committedAgents()
-	if len(agents) != 1 || agents[0].Status != "blocked" || agents[0].BlockedEventID != "event-1" {
+	if len(agents) != 1 || agents[0].Status != "blocked" ||
+		agents[0].BlockedEventID != "event-1" ||
+		agents[0].ApprovalFingerprint != "approval-fingerprint-1" {
 		t.Fatalf("committed agents = %+v", agents)
 	}
 	s.broadcastCommitted(map[string]any{
@@ -1737,6 +1918,12 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 		"pane_id": "w1:p1",
 		"content": "unchanged output",
 		"format":  "ansi",
+		"target": protocol.TargetRef{
+			ServerSessionID: "primary",
+			PaneID:          "w1:p1",
+			TerminalID:      "terminal-w1:p1",
+			Generation:      4,
+		},
 	}
 	fingerprint := paneFingerprint("unchanged output")
 	unchanged := unchangedPaneResponse(
@@ -1748,6 +1935,9 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	}
 	if unchanged["type"] != "pane_unchanged" || unchanged["pane_id"] != "w1:p1" {
 		t.Fatalf("unexpected unchanged response: %#v", unchanged)
+	}
+	if unchanged["target"] != response["target"] {
+		t.Fatalf("unchanged response lost exact target: %#v", unchanged)
 	}
 	if _, included := unchanged["content"]; included {
 		t.Fatalf("unchanged response included terminal content: %#v", unchanged)

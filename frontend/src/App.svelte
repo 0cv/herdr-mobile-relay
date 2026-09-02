@@ -300,18 +300,15 @@
       && activeAgent.server_session_id === 'primary'
       && activeAgent.terminal_id
       && Number.isSafeInteger(activeAgent.generation)
-      ? {
-          server_session_id: 'primary',
-          pane_id: activeAgent.raw_pane_id,
-          terminal_id: activeAgent.terminal_id,
-          generation: activeAgent.generation,
-        }
+      ? targetRefForAgent(activeAgent)
       : null;
     const relayId = visible && target && activeAgent
       && $connections.get(activeAgent.relay_id)?.status === 'connected'
       ? activeAgent.relay_id
       : '';
-    const signature = relayId && target ? `${relayId}:${target.pane_id}:${target.terminal_id}:${target.generation}` : '';
+    const signature = relayId && target
+      ? `${relayId}:${target.pane_id}:${target.terminal_id}:${target.agent_session_id || ''}:${target.generation}`
+      : '';
     if (signature === viewedTargetSignature) return;
     if (viewedRelayId) {
       relayStore.sendRaw(viewedRelayId, {
@@ -390,8 +387,9 @@
       relayStore.importSetupLink(location, !$securityState.locked);
     };
     const serviceWorkerMessage = (event: MessageEvent) => {
-      if ((event.data?.type === 'herdr_notification_click' || event.data?.type === 'herdr_push_open')
-        && event.data.url) routeNotificationUrl(event.data.url);
+      if (event.data?.type === 'herdr_notification_click' && event.data.url) {
+        routeNotificationUrl(event.data.url);
+      }
     };
     const visibilityChanged = () => { visibilityRevision += 1; };
     document.addEventListener('visibilitychange', visibilityChanged);

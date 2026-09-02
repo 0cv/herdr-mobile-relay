@@ -52,6 +52,8 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/workspace"
 )
 
+const pushTestInterval = 10 * time.Second
+
 type copyResponseRunner func(
 	context.Context,
 	string,
@@ -62,6 +64,11 @@ type copyResponseRunner func(
 	int64,
 	copyresponse.RevisionReader,
 ) (copyresponse.Result, error)
+
+type speechRequest struct {
+	cancelled bool
+	cancel    context.CancelFunc
+}
 
 type Server struct {
 	cfg      *config.Config
@@ -99,6 +106,7 @@ type Server struct {
 	speechRemove     func(string) error
 	speechMu         sync.Mutex
 	speechLanguages  []string
+	speechRequests   map[string]*speechRequest
 	copyMu           sync.Mutex
 	paneSizeM        *panesize.Manager
 	dispatcher       *coordinator.Dispatcher
@@ -134,6 +142,8 @@ type Server struct {
 	historyReconciled bool
 	pushReconcileMu   sync.Mutex
 	pushReconciled    bool
+	pushTestMu        sync.Mutex
+	pushTestLast      map[string]time.Time
 	transitionTasks   *lifecycleTasks
 	historyTasks      *lifecycleTasks
 }
@@ -164,7 +174,9 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	if strings.TrimSpace(cfg.CacheDir) == "" {
 		uploadErr = errors.New("cache directory is required")
 	} else {
-		uploadManager, uploadErr = upload.NewManager(upload.Config{Root: filepath.Join(cfg.CacheDir, "uploads")})
+		uploadManager, uploadErr = upload.NewManager(upload.Config{
+			Root: filepath.Join(cfg.CacheDir, "uploads"), Logger: logger,
+		})
 	}
 	if uploadErr != nil {
 		logger.Warn("attachment uploads unavailable", "error", uploadErr)
@@ -179,7 +191,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		store, err := deviceauth.Open(filepath.Join(cfg.RuntimeDir, "device-auth"), storeOptions...)
 		if err != nil {
 			deviceStoreErr = fmt.Errorf("initialize device authentication: %w", err)
-		} else if err := store.EnsureBootstrapInvitation([]byte(cfg.Token), hostname, "en"); err != nil {
+		} else if err := armBootstrap(store, cfg, hostname); err != nil {
 			deviceStoreErr = fmt.Errorf("initialize device pairing: %w", err)
 		} else {
 			deviceStore = store
@@ -226,8 +238,21 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		historyInflight:     make(map[string]bool),
 		historyLast:         make(map[string]time.Time),
 		historyActive:       make(map[string]bool),
+		pushTestLast:        make(map[string]time.Time),
 	}
 }
+
+// armBootstrap prepares the relay's one-use pairing invitation. A re-armed
+// launch serves the app from a new hostname, so every device enrolled under
+// the previous one is stranded; starting from an empty device list keeps those
+// dead entries out of Settings instead of accumulating one per launch.
+func armBootstrap(store *deviceauth.Store, cfg *config.Config, hostname string) error {
+	if cfg.RearmBootstrap {
+		return store.ResetWithBootstrap([]byte(cfg.Token), hostname, "en")
+	}
+	return store.EnsureBootstrapInvitation([]byte(cfg.Token), hostname, "en")
+}
+
 func (s *Server) authorizeDeviceAction(client *transport.ClientConn, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
 	identity, authenticated := client.Identity()
 	if authenticated && s.deviceAuth != nil {
@@ -253,6 +278,10 @@ func authorizeAuthenticatedIdentity(identity transport.AuthenticatedIdentity, au
 		deviceBoundPush = true
 	}
 	if deviceBoundPush {
+		// Every device-bound push operation acts on the caller's own
+		// subscription and policy, so a reader is as entitled to it as a
+		// controller. Delivery tests are rate limited per device instead of
+		// gated by role.
 		if authenticated && strings.TrimSpace(identity.DeviceID) != "" {
 			return nil
 		}
@@ -268,9 +297,46 @@ func authorizeAuthenticatedIdentity(identity transport.AuthenticatedIdentity, au
 	apiErr := protocol.NewApiError(protocol.ErrorReaderDenied, map[string]any{"operation": action.Operation})
 	return &apiErr
 }
+
+// reservePushTest rate limits delivery tests per device. Entries older than one
+// interval carry no decision, so they are dropped on the way past: a relay that
+// enrols and revokes devices for months must not accumulate one timestamp per
+// device that ever asked for a test.
+func (s *Server) reservePushTest(deviceID string, now time.Time) bool {
+	s.pushTestMu.Lock()
+	defer s.pushTestMu.Unlock()
+	for device, last := range s.pushTestLast {
+		if now.Sub(last) >= pushTestInterval {
+			delete(s.pushTestLast, device)
+		}
+	}
+	if last, exists := s.pushTestLast[deviceID]; exists && now.Sub(last) < pushTestInterval {
+		return false
+	}
+	s.pushTestLast[deviceID] = now
+	return true
+}
+
+func (s *Server) forgetPushTest(deviceID string) {
+	s.pushTestMu.Lock()
+	defer s.pushTestMu.Unlock()
+	delete(s.pushTestLast, deviceID)
+}
+
 func validateExactPaneTarget(state *coordinator.State, inbound protocol.Inbound, authenticated bool) *protocol.ApiError {
 	target := inbound.Target
 	if inbound.PaneID == "" {
+		return nil
+	}
+	if inbound.Type == "unwatch_pane" || inbound.Type == "release_pane_size" || inbound.Type == "cancel_speech" {
+		if target != nil && target.PaneID != inbound.PaneID {
+			apiErr := protocol.NewApiError(protocol.ErrorInvalidRequest, map[string]any{"field": "target.pane_id"})
+			return &apiErr
+		}
+		// These operations clean up owner-scoped state already recorded by
+		// client id and pane id or speech request id. A replaced pane must not
+		// strand the old watch, size lease, or synthesis merely because its
+		// exact target is now stale.
 		return nil
 	}
 	if target == nil {
@@ -507,9 +573,13 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.clipboardRead != nil {
 			capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
 		}
-		speechLanguages := s.speakableLanguages()
+		speechStatus := s.speechStatus()
+		speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
 		if len(speechLanguages) > 0 {
 			capabilities = append(capabilities, protocol.SpeechSynthesisCapability)
+		}
+		if speechStatus.ManagementSupported {
+			capabilities = append(capabilities, protocol.SpeechVoiceManagementCapability)
 		}
 		if s.herdrC.SupportsRealtimePane(client.Context()) {
 			capabilities = append(capabilities, "pane_realtime_delta", "tab_reorder")
@@ -715,6 +785,9 @@ func (s *Server) Run(ctx context.Context) error {
 			s.applyPaneReadLease(msg)
 			s.stopPaneWatch(client.ID(), inbound.PaneID)
 			resp := s.preparePaneResponse(msg, s.dispatcher.HandleReadPane(ctx, msg))
+			if inbound.Target != nil {
+				resp["target"] = *inbound.Target
+			}
 			if unchanged := unchangedPaneResponse(msg, resp); unchanged != nil {
 				s.hub.Send(client, unchanged)
 				break
@@ -800,6 +873,7 @@ func (s *Server) Run(ctx context.Context) error {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", revokeErr.Error(), "", nil)
 				break
 			}
+			s.forgetPushTest(credential.DeviceID)
 			var pushCleanupErr error
 			if s.pushM != nil {
 				pushCleanupErr = s.pushM.RemoveDevice(credential.DeviceID)
@@ -822,6 +896,9 @@ func (s *Server) Run(ctx context.Context) error {
 			if resetErr := s.deviceAuth.ResetWithBootstrap([]byte(s.cfg.Token), s.hostname, identity.Locale); resetErr != nil {
 				s.sendAuditedCommandResult(client, msg, inbound.RequestID, action, false, "failed", resetErr.Error(), "", nil)
 				break
+			}
+			for _, credential := range credentials {
+				s.forgetPushTest(credential.DeviceID)
 			}
 			var resetPushErr error
 			if s.pushM != nil {
@@ -1002,11 +1079,15 @@ func (s *Server) Run(ctx context.Context) error {
 			requestID, _ := msg["request_id"].(string)
 			paneID, _ := msg["pane_id"].(string)
 			s.copyAgentResponse(client, requestID, paneID)
+		case "cancel_speech":
+			speechRequestID, _ := msg["speech_request_id"].(string)
+			s.cancelSpeech(client.ID(), speechRequestID)
 		case "speak_text":
 			requestID, _ := msg["request_id"].(string)
+			speechRequestID, _ := msg["speech_request_id"].(string)
 			text, _ := msg["text"].(string)
 			language, _ := msg["language"].(string)
-			s.speakText(client, requestID, text, language)
+			s.speakText(client, requestID, speechRequestID, text, language)
 		case "speech_voices_list":
 			requestID, _ := msg["request_id"].(string)
 			s.sendCommandResult(client, requestID, action, true, "completed", "", "", s.speechVoicePayload(nil))
@@ -1087,34 +1168,21 @@ func (s *Server) Run(ctx context.Context) error {
 		case "push_test_device":
 			identity, _ := client.Identity()
 			now := time.Now().UTC()
-			eventID := fmt.Sprintf("test-%d", now.UnixNano())
+			if !s.reservePushTest(identity.DeviceID, now) {
+				s.hub.Send(client, map[string]any{"type": "push_test_result", "stage": "rate_limited"})
+				break
+			}
+			eventID := "test"
 			key := push.PushEventKey{DeviceID: identity.DeviceID, EventID: eventID, Category: push.CategoryTest}
 			published, publishErr := s.pushM.Publish(ctx, push.PublishRequest{
 				Key: key, Preview: push.PreviewHidden, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
 			})
 			stage := "dropped"
 			if publishErr == nil && published.Queued > 0 {
+				// The manager's worker performs the network send. Keeping it out
+				// of this command path avoids holding the global queue processor
+				// while one client waits for a push service.
 				stage = "queued"
-				deliveries, runErr := s.pushM.RunOnce(ctx, now)
-				if runErr == nil {
-					for _, delivery := range deliveries {
-						if delivery.Key.DeviceID != identity.DeviceID || delivery.Key.EventID != eventID {
-							continue
-						}
-						switch delivery.Disposition {
-						case push.DeliveryAccepted:
-							stage = "service_accepted"
-						case push.DeliveryRetrying:
-							if stage != "service_accepted" {
-								stage = "retrying"
-							}
-						case push.DeliveryDropped, push.DeliveryPruned, push.DeliveryExpired, push.DeliveryStale:
-							if stage == "queued" {
-								stage = "dropped"
-							}
-						}
-					}
-				}
 			}
 			s.hub.Send(client, map[string]any{"type": "push_test_result", "stage": stage})
 		case "push_subscribe":
@@ -1854,12 +1922,13 @@ func classificationFromAgent(agent *coordinator.AgentState) question.Classificat
 		return question.Classification{Kind: question.AttentionUnknown}
 	}
 	return question.Classification{
-		Kind:           agent.AttentionKind,
-		Prompt:         agent.Prompt,
-		Command:        agent.Command,
-		Options:        append([]string(nil), agent.Options...),
-		Interaction:    agent.Interaction,
-		QuestionLayout: agent.QuestionLayout,
+		Kind:             agent.AttentionKind,
+		Prompt:           agent.Prompt,
+		Command:          agent.Command,
+		Options:          append([]string(nil), agent.Options...),
+		ApprovalIdentity: agent.ApprovalFingerprint,
+		Interaction:      agent.Interaction,
+		QuestionLayout:   agent.QuestionLayout,
 	}
 }
 
@@ -2283,7 +2352,7 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 // speakText synthesizes one sentence-sized fragment with the host's TTS
 // engine and returns the WAV inline. The phone plays it as ordinary media,
 // which keeps working with the screen off where the browser speech API dies.
-func (s *Server) speakText(client *transport.ClientConn, requestID, text, language string) {
+func (s *Server) speakText(client *transport.ClientConn, requestID, speechRequestID, text, language string) {
 	speakable := s.speakableLanguages()
 	if len(speakable) == 0 {
 		s.sendCommandResult(client, requestID, "speak_text", false, "failed", "No speech engine is installed on this computer", "", nil)
@@ -2294,7 +2363,32 @@ func (s *Server) speakText(client *transport.ClientConn, requestID, text, langua
 		return
 	}
 	ctx, cancel := context.WithTimeout(client.Context(), 15*time.Second)
-	defer cancel()
+	requestKey := client.ID() + "\x00" + speechRequestID
+	request := &speechRequest{cancel: cancel}
+	s.speechMu.Lock()
+	if s.speechRequests == nil {
+		s.speechRequests = make(map[string]*speechRequest)
+	}
+	if previous := s.speechRequests[requestKey]; previous != nil {
+		if previous.cancelled {
+			request.cancelled = true
+		} else if previous.cancel != nil {
+			previous.cancel()
+		}
+	}
+	s.speechRequests[requestKey] = request
+	s.speechMu.Unlock()
+	if request.cancelled {
+		cancel()
+	}
+	defer func() {
+		cancel()
+		s.speechMu.Lock()
+		if s.speechRequests[requestKey] == request {
+			delete(s.speechRequests, requestKey)
+		}
+		s.speechMu.Unlock()
+	}()
 	wav, err := s.speechSynth(ctx, text, language)
 	if err != nil {
 		s.logger.Warn("speech synthesis failed", "error", err, "language", language)
@@ -2307,9 +2401,44 @@ func (s *Server) speakText(client *transport.ClientConn, requestID, text, langua
 	})
 }
 
-func (s *Server) speakableLanguages() []string {
+func (s *Server) cancelSpeech(clientID, speechRequestID string) {
+	if clientID == "" || speechRequestID == "" {
+		return
+	}
+	key := clientID + "\x00" + speechRequestID
 	s.speechMu.Lock()
 	defer s.speechMu.Unlock()
+	if request := s.speechRequests[key]; request != nil {
+		request.cancelled = true
+		if request.cancel != nil {
+			request.cancel()
+		}
+		return
+	}
+	if s.speechRequests == nil {
+		s.speechRequests = make(map[string]*speechRequest)
+	}
+	if len(s.speechRequests) >= 128 {
+		for requestKey, request := range s.speechRequests {
+			if request.cancelled && request.cancel == nil {
+				delete(s.speechRequests, requestKey)
+			}
+		}
+		if len(s.speechRequests) >= 128 {
+			return
+		}
+	}
+	s.speechRequests[key] = &speechRequest{cancelled: true}
+}
+
+func (s *Server) speakableLanguages() []string {
+	return s.rememberSpeechLanguages(s.speechStatus().Languages)
+}
+
+func (s *Server) rememberSpeechLanguages(languages []string) []string {
+	s.speechMu.Lock()
+	defer s.speechMu.Unlock()
+	s.speechLanguages = append(s.speechLanguages[:0], languages...)
 	return append([]string(nil), s.speechLanguages...)
 }
 
@@ -2318,6 +2447,10 @@ func (s *Server) speakableLanguages() []string {
 func (s *Server) changeSpeechVoice(client *transport.ClientConn, requestID, action, language string) {
 	if !slices.Contains(speech.Offered, language) {
 		s.sendCommandResult(client, requestID, action, false, "failed", "That language is not one this app reads aloud", "", nil)
+		return
+	}
+	if action != "speech_voice_remove" && !s.speechStatus().ManagementSupported {
+		s.sendCommandResult(client, requestID, action, false, "failed", "Voice downloads are not supported on this computer", "", s.speechVoicePayload(nil))
 		return
 	}
 	label := speech.LanguageLabel(language)
@@ -2361,10 +2494,11 @@ func (s *Server) speechVoicePayload(envelope map[string]any) map[string]any {
 		})
 	}
 	payload := map[string]any{
-		"cache_dir":        status.CacheDir,
-		"engine_installed": status.EngineInstalled,
-		"languages":        status.Languages,
-		"voices":           voices,
+		"cache_dir":            status.CacheDir,
+		"engine_installed":     status.EngineInstalled,
+		"management_supported": status.ManagementSupported,
+		"languages":            status.Languages,
+		"voices":               voices,
 	}
 	for key, value := range envelope {
 		payload[key] = value
@@ -2623,6 +2757,7 @@ func unchangedPaneResponse(message, response map[string]any) map[string]any {
 		"type":                "pane_unchanged",
 		"pane_id":             paneID,
 		"content_fingerprint": fingerprint,
+		"target":              response["target"],
 	}
 }
 
@@ -2742,6 +2877,14 @@ func (s *Server) recordWriteAudit(
 	action := auditAction(message)
 	requestID, _ := message["request_id"].(string)
 	paneID, _ := message["pane_id"].(string)
+	if paneID == "" {
+		switch target := message["target"].(type) {
+		case map[string]any:
+			paneID, _ = target["pane_id"].(string)
+		case protocol.TargetRef:
+			paneID = target.PaneID
+		}
+	}
 	clientID, _ := message["client_id"].(string)
 	if clientID == "" {
 		clientID = "connection:" + client.ID()
@@ -3301,6 +3444,9 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 			}
 		}
 	}
+	if value, exists := delta["approval_fingerprint"]; exists {
+		agent.ApprovalFingerprint, _ = value.(string)
+	}
 	if value, exists := delta["interaction"]; exists {
 		agent.Interaction = nil
 		if value != nil {
@@ -3320,11 +3466,13 @@ func applyAgentDelta(agent *coordinator.AgentState, delta map[string]any) {
 		agent.Prompt = ""
 		agent.Command = ""
 		agent.Options = nil
+		agent.ApprovalFingerprint = ""
 		agent.Interaction = nil
 		agent.QuestionLayout = false
 	} else {
 		if agent.AttentionKind != question.AttentionApproval {
 			agent.Options = nil
+			agent.ApprovalFingerprint = ""
 		}
 		if agent.AttentionKind != question.AttentionQuestion {
 			agent.Interaction = nil

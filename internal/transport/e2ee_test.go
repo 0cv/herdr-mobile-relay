@@ -86,6 +86,8 @@ func (r fixedE2EEAuthResolver) CompleteE2EEAuth(_ context.Context, selector E2EE
 	}}, nil
 }
 
+func (fixedE2EEAuthResolver) IsE2EEAuthRejected(error) bool { return true }
+
 func TestE2EEVersionTwoVector(t *testing.T) {
 	rawVector, err := os.ReadFile("../../contracts/fixtures/e2ee/v2.json")
 	if err != nil {

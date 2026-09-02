@@ -21,7 +21,11 @@ function show(message: string): void {
       banner.style.cssText = 'position:fixed;bottom:0;left:0;right:0;z-index:2147483647;'
         + 'background:#7f1d1d;color:#fff;font:12px/1.4 monospace;padding:.5rem .75rem;'
         + 'white-space:pre-wrap;word-break:break-word;max-height:40vh;overflow-y:auto;';
-      banner.addEventListener('click', () => banner?.remove());
+      banner.addEventListener('click', () => {
+        banner?.remove();
+        banner = null;
+        seen.clear();
+      });
       document.body.append(banner);
     }
     banner.textContent = `${banner.textContent ? `${banner.textContent}\n` : 'App error (tap to dismiss)\n'}${text}`;
@@ -39,8 +43,15 @@ export function reportAppAnomaly(message: string): void {
   show(message);
 }
 
+let handlersInstalled = false;
 export function reportUncaughtErrors(): void {
+  if (handlersInstalled) return;
+  handlersInstalled = true;
   window.addEventListener('error', (event) => {
+    // Browsers hide everything but "Script error." for scripts from another
+    // origin, which on a phone means a Safari extension or content blocker,
+    // never the app's own same-origin module. There is nothing to show.
+    if (event.message === 'Script error.' && !event.filename) return;
     show(String(event.error?.stack || event.message || event.error || 'Unknown error'));
   });
   window.addEventListener('unhandledrejection', (event) => {

@@ -52,6 +52,14 @@ type omoIdentity struct {
 	CWD string
 }
 
+type omoCacheEntry struct {
+	size    int64
+	modTime int64
+	entries []Entry
+	plan    OMOTodoState
+	clipped bool
+}
+
 func (r *Reader) omoRoots() []string { return agentroots.OMO(r.home) }
 
 func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error) {
@@ -59,14 +67,14 @@ func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error)
 	if code != "" {
 		return unavailableCode(code, "OMO conversation history is unavailable."), nil
 	}
-	text, clipped, err := loadTail(location.Path, maxConversationBytes)
-	if err != nil {
-		return unavailableCode("source_unavailable", "OMO conversation history is unavailable."), nil
+	entries, plan, clipped, code := r.loadOMO(location.Path, identity, cwd)
+	if code != "" {
+		reason := "OMO conversation history is unavailable."
+		if code == "invalid_session" {
+			reason = "OMO session identity does not match the requested session."
+		}
+		return unavailableCode(code, reason), nil
 	}
-	if !verifyOMOIdentity(location.Path, identity, cwd) {
-		return unavailableCode("invalid_session", "OMO session identity does not match the requested session."), nil
-	}
-	entries := parseTranscript("pi", text)
 	if limit < 1 {
 		limit = defaultPageSize
 	}
@@ -91,12 +99,6 @@ func (r *Reader) readOMO(cwd, sessionID, before string, limit int) (Page, error)
 	if start < 0 {
 		start = 0
 	}
-	plan := OMOTodoState{ReasonCode: "source_corrupt", SessionID: identity.ID, Phases: []OMOTodoPhase{}, Truncated: clipped}
-	if state, found := latestValidOMOTodo(text, identity.ID); found {
-		state.Available = true
-		state.Truncated = state.Truncated || clipped
-		plan = state
-	}
 	return Page{
 		Available: true, Entries: append([]Entry(nil), entries[start:end]...),
 		HasMore: start > 0, Total: len(entries), FileTruncated: clipped, OMOPlan: &plan,
@@ -110,20 +112,59 @@ func (r *Reader) ReadOMOTodoState(cwd, sessionID string) OMOTodoState {
 	if code != "" {
 		return OMOTodoState{ReasonCode: code, Phases: []OMOTodoPhase{}}
 	}
-	text, clipped, err := loadTail(location.Path, maxConversationBytes)
+	_, plan, _, code := r.loadOMO(location.Path, identity, cwd)
+	if code != "" {
+		return OMOTodoState{ReasonCode: code, Phases: []OMOTodoPhase{}}
+	}
+	return plan
+}
+
+func (r *Reader) loadOMO(path string, identity omoIdentity, cwd string) ([]Entry, OMOTodoState, bool, string) {
+	info, err := os.Stat(path)
 	if err != nil {
-		return OMOTodoState{ReasonCode: "source_unavailable", Phases: []OMOTodoPhase{}}
+		return nil, OMOTodoState{}, false, "source_unavailable"
 	}
-	if !verifyOMOIdentity(location.Path, identity, cwd) {
-		return OMOTodoState{ReasonCode: "invalid_session", Phases: []OMOTodoPhase{}}
+	key := path + "\x00" + identity.ID + "\x00" + cwd
+	r.mu.Lock()
+	cached, ok := r.omoCache[key]
+	r.mu.Unlock()
+	if ok && cached.size == info.Size() && cached.modTime == info.ModTime().UnixNano() {
+		return append([]Entry(nil), cached.entries...), cached.plan, cached.clipped, ""
 	}
-	state, found := latestValidOMOTodo(text, identity.ID)
-	if !found {
-		return OMOTodoState{ReasonCode: "source_corrupt", SessionID: identity.ID, Phases: []OMOTodoPhase{}, Truncated: clipped}
+	if !verifyOMOIdentity(path, identity, cwd) {
+		return nil, OMOTodoState{}, false, "invalid_session"
 	}
-	state.Available = true
-	state.Truncated = state.Truncated || clipped
-	return state
+	text, clipped, err := loadTail(path, maxConversationBytes)
+	if err != nil {
+		return nil, OMOTodoState{}, false, "source_unavailable"
+	}
+	entries := parseTranscript("pi", text)
+	plan := OMOTodoState{
+		Available: true, SessionID: identity.ID, Phases: []OMOTodoPhase{}, Truncated: clipped,
+	}
+	state, found, invalidOnly := latestValidOMOTodo(text, identity.ID)
+	if invalidOnly {
+		return nil, OMOTodoState{}, false, "source_corrupt"
+	}
+	if found {
+		state.Available = true
+		state.Truncated = state.Truncated || clipped
+		plan = state
+	}
+	current, statErr := os.Stat(path)
+	if statErr == nil && current.Size() == info.Size() && current.ModTime() == info.ModTime() {
+		entry := omoCacheEntry{
+			size: info.Size(), modTime: info.ModTime().UnixNano(),
+			entries: append([]Entry(nil), entries...), plan: plan, clipped: clipped,
+		}
+		r.mu.Lock()
+		if len(r.omoCache) >= maxOMOCacheEntries {
+			clear(r.omoCache)
+		}
+		r.omoCache[key] = entry
+		r.mu.Unlock()
+	}
+	return entries, plan, clipped, ""
 }
 
 func (r *Reader) locateOMO(cwd, sessionID string) (Location, omoIdentity, string) {
@@ -262,28 +303,38 @@ func verifyOMOIdentity(path string, expected omoIdentity, requestedCWD string) b
 	return false
 }
 
-func latestValidOMOTodo(text, sessionID string) (OMOTodoState, bool) {
+func latestValidOMOTodo(text, sessionID string) (OMOTodoState, bool, bool) {
 	var latest OMOTodoState
 	found := false
-	scanner := bufio.NewScanner(strings.NewReader(text))
-	scanner.Buffer(make([]byte, 0, 64*1024), maxOMOTodoBytes)
-	for scanner.Scan() {
+	sawTodo := false
+	for len(text) > 0 {
+		line := text
+		if newline := strings.IndexByte(text, '\n'); newline >= 0 {
+			line = text[:newline]
+			text = text[newline+1:]
+		} else {
+			text = ""
+		}
+		if len(line) > maxOMOTodoBytes {
+			continue
+		}
 		var record struct {
 			Type       string          `json:"type"`
 			CustomType string          `json:"customType"`
 			Timestamp  string          `json:"timestamp"`
 			Data       json.RawMessage `json:"data"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &record) != nil || record.Type != "custom" || record.CustomType != "senpi.todo-state" {
+		if json.Unmarshal([]byte(line), &record) != nil || record.Type != "custom" || record.CustomType != "senpi.todo-state" {
 			continue
 		}
+		sawTodo = true
 		state, ok := decodeOMOTodo(record.Data, sessionID, record.Timestamp)
 		if ok {
 			latest = state
 			found = true
 		}
 	}
-	return latest, found
+	return latest, found, sawTodo && !found
 }
 
 func decodeOMOTodo(data json.RawMessage, sessionID, timestamp string) (OMOTodoState, bool) {

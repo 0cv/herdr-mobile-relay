@@ -3,10 +3,11 @@ import { createGatewayTransport } from './gateway';
 import { createWebSocketTransport } from './websocket';
 import { createWebRTCTransport, type DirectTransportOptions, type SignalingChannel } from './webrtc';
 import type { TransportAuthentication } from './encrypted';
-import type {
-  RelayTransport,
-  TransportHandlers,
-  TransportStatusDetail,
+import {
+  DEVICE_UNAUTHORIZED_CODE,
+  type RelayTransport,
+  type TransportHandlers,
+  type TransportStatusDetail,
 } from './types';
 
 /** How long the direct path must hold before the relayed one is released. */
@@ -29,6 +30,19 @@ const SIGNALING_TYPES: Record<string, true> = {
   webrtc_answer: true,
   webrtc_ice: true,
   webrtc_closed: true,
+};
+
+// A request sent on the gateway immediately before direct promotion can still
+// complete on that gateway during the stability window. Only correlated
+// settlement messages cross from the draining path; stale state frames do not.
+const SETTLEMENT_TYPES: Record<string, true> = {
+  action_receipt: true,
+  command_result: true,
+  error: true,
+  upload_begin_result: true,
+  upload_cancel_result: true,
+  upload_chunk_result: true,
+  upload_finish_result: true,
 };
 
 /**
@@ -270,7 +284,10 @@ export function createHybridTransport(
         if (closed) return;
         for (const handler of [...signalHandlers]) handler(message);
         if (SIGNALING_TYPES[String(message.type)]) return;
-        if (active !== 'gateway') return;
+        if (active !== 'gateway') {
+          if (message.request_id && SETTLEMENT_TYPES[String(message.type)]) handlers.onMessage(message);
+          return;
+        }
         handlers.onMessage(message);
       },
       onStatus(status, detail): void {
@@ -278,6 +295,12 @@ export function createHybridTransport(
         if (status === 'closed') {
           gatewayReady = false;
           gateway = null;
+          if (detail?.code === DEVICE_UNAUTHORIZED_CODE) {
+            closed = true;
+            stop();
+            handlers.onStatus('closed', detail);
+            return;
+          }
           // The entry that just died never gets the next attempt: the list is
           // walked in order and wraps, so one unreachable gateway — or one that
           // does not know this relay — cannot strand a phone that has others.

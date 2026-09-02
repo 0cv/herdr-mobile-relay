@@ -33,6 +33,7 @@
   let hasMore = $state(false);
   let total = $state(0);
   let fileTruncated = $state(false);
+  let sourceCorrupt = $state(false);
   let omoPlan = $state<OmoTodoState | null>(null);
   let loading = $state(true);
   let loadingOlder = $state(false);
@@ -146,6 +147,7 @@
       hasMore = entries.length ? hasMore : page.hasMore;
       total = page.total;
       fileTruncated = page.fileTruncated;
+      sourceCorrupt ||= page.sourceCorrupt;
       omoPlan = page.omoPlan || null;
       error = '';
       if (page.available) entries = mergeEntries(entries, page.entries);
@@ -168,6 +170,7 @@
       hasMore = page.hasMore;
       total = page.total;
       fileTruncated = page.fileTruncated;
+      sourceCorrupt ||= page.sourceCorrupt;
       if (page.omoPlan) omoPlan = page.omoPlan;
       error = '';
       entries = mergeEntries(page.entries, entries);
@@ -198,7 +201,7 @@
     armSpeechKeepalive(toast);
     const spoke = speakViaRelay(
       text,
-      (chunk, language) => relayStore.sendToAgent(agent, { type: 'speak_text', text: chunk, language }, 20_000),
+      (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
       toast,
     );
     if (!spoke) releaseSpeechKeepalive();
@@ -351,6 +354,14 @@
     attachmentCancelRequested = false;
     let controller: AttachmentBatchController | null = null;
     try {
+      const previous = attachmentController;
+      if (previous) {
+        try {
+          await previous.cancel();
+        } finally {
+          releaseAttachmentController(previous, true);
+        }
+      }
       controller = relayStore.attachmentController(agent);
       attachmentController = controller;
       attachmentUnsubscribe?.();
@@ -463,6 +474,9 @@
     {/if}
     {#if fileTruncated}
       <p class="conversation-warning" role="status">This session log is larger than 16 MB. The relay loads its newest 16 MB to bound memory use; older turns remain on this computer and are not removed by a relay restart.</p>
+    {/if}
+    {#if sourceCorrupt}
+      <p class="conversation-warning error" role="status">Some OpenCode records could not be decoded. Valid turns are shown, but the conversation source may be damaged.</p>
     {/if}
     {#if error}<p class="conversation-warning error" role="alert">{error}</p>{/if}
     {#if omoPlan}<OmoPlan plan={omoPlan} />{/if}

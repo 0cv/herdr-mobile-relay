@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -423,6 +424,8 @@ func (m *Manager) Subscribe(sub Subscription, replacementSets ...[]string) error
 	if !validPushEndpoint(sub.Endpoint) {
 		return errors.New("push_subscription_endpoint_not_allowed")
 	}
+	m.queue.process.Lock()
+	defer m.queue.process.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -444,20 +447,30 @@ func (m *Manager) Subscribe(sub Subscription, replacementSets ...[]string) error
 		filtered = append(filtered, existing)
 	}
 	for i, existing := range filtered {
-		if existing.Endpoint == sub.Endpoint {
-			if existing.DeviceID != sub.DeviceID {
-				return errors.New("push_subscription_device_mismatch")
-			}
-			filtered[i] = sub
-			if err := m.persist(filtered); err != nil {
-				return err
-			}
-			m.subscriptions = filtered
-			return nil
+		if existing.Endpoint != sub.Endpoint {
+			continue
 		}
+		if existing.DeviceID != sub.DeviceID {
+			return errors.New("push_subscription_device_mismatch")
+		}
+		filtered[i] = sub
+		if err := m.persist(filtered); err != nil {
+			return err
+		}
+		replacements := append(append([]string(nil), replaceEndpoints...), sub.Endpoint)
+		if err := m.queue.replaceSubscriptionsWhileProcessing(sub.DeviceID, replacements, sub); err != nil {
+			_ = m.persist(m.subscriptions)
+			return err
+		}
+		m.subscriptions = filtered
+		return nil
 	}
 	filtered = append(filtered, sub)
 	if err := m.persist(filtered); err != nil {
+		return err
+	}
+	if err := m.queue.replaceSubscriptionsWhileProcessing(sub.DeviceID, replaceEndpoints, sub); err != nil {
+		_ = m.persist(m.subscriptions)
 		return err
 	}
 	m.subscriptions = filtered
@@ -519,12 +532,14 @@ func (m *Manager) UnsubscribeDevice(deviceID string, endpoints []string, clientI
 	}
 	m.subscriptions = filtered
 	m.mu.Unlock()
-	for _, subscription := range removed {
-		if err := m.queue.removeSubscription(deviceID, subscription.Endpoint); err != nil {
-			return err
-		}
+	if len(removed) == 0 {
+		return nil
 	}
-	return nil
+	removedEndpoints := make([]string, 0, len(removed))
+	for _, subscription := range removed {
+		removedEndpoints = append(removedEndpoints, subscription.Endpoint)
+	}
+	return m.queue.removeSubscriptions(deviceID, removedEndpoints)
 }
 func (m *Manager) RemoveDevice(deviceID string) error {
 	if strings.TrimSpace(deviceID) == "" {
@@ -536,6 +551,10 @@ func (m *Manager) RemoveDevice(deviceID string) error {
 		if subscription.DeviceID != deviceID {
 			filtered = append(filtered, subscription)
 		}
+	}
+	if err := m.persist(filtered); err != nil {
+		m.mu.Unlock()
+		return err
 	}
 	m.subscriptions = filtered
 	for key := range m.active {
@@ -549,9 +568,6 @@ func (m *Manager) RemoveDevice(deviceID string) error {
 		}
 	}
 	m.mu.Unlock()
-	if err := m.persist(filtered); err != nil {
-		return err
-	}
 	if err := m.queue.removeDevice(deviceID); err != nil {
 		return err
 	}
@@ -595,10 +611,21 @@ func (m *Manager) Publish(ctx context.Context, request PublishRequest) (PublishR
 	if expiresAt.IsZero() {
 		expiresAt = now.Add(5 * time.Minute)
 	}
-	for _, subscription := range m.Subscriptions() {
-		if subscription.DeviceID == "" || (request.Key.DeviceID != "" && request.Key.DeviceID != subscription.DeviceID) {
+	m.queue.process.Lock()
+	defer m.queue.process.Unlock()
+	subscriptions := m.Subscriptions()
+	selected := make([]Subscription, 0, len(subscriptions))
+	seenDevices := make(map[string]bool, len(subscriptions))
+	for index := len(subscriptions) - 1; index >= 0; index-- {
+		subscription := subscriptions[index]
+		if subscription.DeviceID == "" || seenDevices[subscription.DeviceID] ||
+			(request.Key.DeviceID != "" && request.Key.DeviceID != subscription.DeviceID) {
 			continue
 		}
+		seenDevices[subscription.DeviceID] = true
+		selected = append(selected, subscription)
+	}
+	for _, subscription := range selected {
 		key := request.Key
 		key.DeviceID = subscription.DeviceID
 		event := PushEvent{Key: key, CreatedAt: now, ExpiresAt: expiresAt}
@@ -767,7 +794,7 @@ func (m *Manager) RunOnce(ctx context.Context, now time.Time) ([]DeliveryResult,
 	if !reconciled {
 		return nil, nil
 	}
-	results, err := m.queue.processDue(
+	results, err := m.queue.processDueWithRecovery(
 		ctx,
 		now,
 		func(key PushEventKey) bool {
@@ -787,7 +814,9 @@ func (m *Manager) RunOnce(ctx context.Context, now time.Time) ([]DeliveryResult,
 			}
 			return m.policy.MarkAccepted(key, acceptedAt)
 		},
-		m.removeSubscription,
+		func(pruned []DeliveryResult) (bool, error) {
+			return m.recoverPrunedSubscriptionsWhileProcessing(pruned, now)
+		},
 	)
 	if err != nil {
 		return results, err
@@ -824,6 +853,78 @@ func (m *Manager) RunOnce(ctx context.Context, now time.Time) ([]DeliveryResult,
 		}
 	}
 	return results, nil
+}
+func (m *Manager) recoverPrunedSubscriptionsWhileProcessing(results []DeliveryResult, now time.Time) (bool, error) {
+	type prunedDevice struct {
+		endpoints map[string]bool
+		results   []DeliveryResult
+	}
+	pruned := make(map[string]*prunedDevice)
+	for _, result := range results {
+		if result.Disposition != DeliveryPruned {
+			continue
+		}
+		deviceID := result.Subscription.DeviceID
+		device := pruned[deviceID]
+		if device == nil {
+			device = &prunedDevice{endpoints: make(map[string]bool)}
+			pruned[deviceID] = device
+		}
+		device.endpoints[result.Subscription.Endpoint] = true
+		device.results = append(device.results, result)
+	}
+	if len(pruned) == 0 {
+		return false, nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	deviceIDs := make([]string, 0, len(pruned))
+	for deviceID := range pruned {
+		deviceIDs = append(deviceIDs, deviceID)
+	}
+	sort.Strings(deviceIDs)
+	recoveries := make([]prunedRecovery, 0, len(deviceIDs))
+	requeued := false
+	for _, deviceID := range deviceIDs {
+		device := pruned[deviceID]
+		endpoints := make([]string, 0, len(device.endpoints))
+		for endpoint := range device.endpoints {
+			endpoints = append(endpoints, endpoint)
+		}
+		sort.Strings(endpoints)
+		var fallback *Subscription
+		for index := len(m.subscriptions) - 1; index >= 0; index-- {
+			candidate := m.subscriptions[index]
+			if candidate.DeviceID == deviceID && !device.endpoints[candidate.Endpoint] {
+				copy := candidate
+				fallback = &copy
+				break
+			}
+		}
+		recoveries = append(recoveries, prunedRecovery{
+			deviceID: deviceID, endpoints: endpoints, fallback: fallback, results: device.results,
+		})
+		requeued = requeued || fallback != nil && len(device.results) > 0
+	}
+
+	filtered := make([]Subscription, 0, len(m.subscriptions))
+	for _, subscription := range m.subscriptions {
+		device := pruned[subscription.DeviceID]
+		if device != nil && device.endpoints[subscription.Endpoint] {
+			continue
+		}
+		filtered = append(filtered, subscription)
+	}
+	if err := m.persist(filtered); err != nil {
+		return false, err
+	}
+	dirty := m.queue.recoverPrunedWhileProcessing(recoveries, now)
+	m.subscriptions = filtered
+	if requeued {
+		m.signal()
+	}
+	return dirty, nil
 }
 
 func (m *Manager) Policy(deviceID, locale string) DevicePolicy {
@@ -866,23 +967,6 @@ func (m *Manager) signal() {
 	case m.wake <- struct{}{}:
 	default:
 	}
-}
-
-func (m *Manager) removeSubscription(subscription Subscription) error {
-	m.mu.Lock()
-	filtered := make([]Subscription, 0, len(m.subscriptions))
-	for _, existing := range m.subscriptions {
-		if existing.DeviceID != subscription.DeviceID || existing.Endpoint != subscription.Endpoint {
-			filtered = append(filtered, existing)
-		}
-	}
-	if err := m.persist(filtered); err != nil {
-		m.mu.Unlock()
-		return err
-	}
-	m.subscriptions = filtered
-	m.mu.Unlock()
-	return m.queue.removeSubscription(subscription.DeviceID, subscription.Endpoint)
 }
 
 func (m *Manager) Send(ctx context.Context, payload []byte) {

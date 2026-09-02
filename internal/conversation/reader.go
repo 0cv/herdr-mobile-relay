@@ -28,6 +28,7 @@ const (
 	locationCacheTTL        = 60 * time.Second
 	locationMissTTL         = 5 * time.Second
 	maxLocationCacheEntries = 2048
+	maxOMOCacheEntries      = 8
 )
 
 var canonicalSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -58,6 +59,7 @@ type Page struct {
 	HasMore       bool          `json:"has_more"`
 	Total         int           `json:"total"`
 	FileTruncated bool          `json:"file_truncated,omitempty"`
+	SourceCorrupt bool          `json:"source_corrupt,omitempty"`
 	OMOPlan       *OMOTodoState `json:"omo_plan,omitempty"`
 }
 type Reader struct {
@@ -65,6 +67,7 @@ type Reader struct {
 	mu        sync.Mutex
 	locations map[string]locationCacheEntry
 	locating  map[string]chan struct{}
+	omoCache  map[string]omoCacheEntry
 	openCode  *openCodeReader
 }
 
@@ -85,7 +88,8 @@ type Location struct {
 func NewReader(home string) *Reader {
 	return &Reader{
 		home: home, locations: make(map[string]locationCacheEntry),
-		locating: make(map[string]chan struct{}), openCode: newOpenCodeReader(home),
+		locating: make(map[string]chan struct{}), omoCache: make(map[string]omoCacheEntry),
+		openCode: newOpenCodeReader(home),
 	}
 }
 

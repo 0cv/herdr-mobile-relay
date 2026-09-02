@@ -18,13 +18,15 @@ setup and want to know what every screen and control is for.
   from those agents and OpenCode.
 - Inspect the current agent's workspace files, images, Git status, upstream
   ahead/behind counts, and unified diffs without exposing a write action.
-- Read searchable native conversations for Claude Code, Codex, Qoder, Pi, and
-  Oh My Pi in focused conversation or full-history form; validated Oh My Pi
-  plans appear with their current task states.
+- Read searchable native conversations for Claude Code, Codex, OpenCode,
+  Qoder, Pi, Oh My Pi, and Oh My OpenCode in focused conversation or
+  full-history form; validated Oh My OpenCode plans appear with their current
+  task states.
 - Configure durable notification categories, settle delay, cooldown, snooze,
   and a neutral delivery test separately for each paired relay and device.
 - Pair named controller or reader devices. Reader devices can inspect agents,
-  conversations, and workspaces but cannot mutate them.
+  conversations, and workspaces; manage their own notifications; and revoke
+  themselves, but cannot control agents or administer other devices.
 - Optionally require device verification before the app connects at open, and
   again before the interface unlocks on resume. A resume keeps the existing
   encrypted session, so verifying is instant rather than a fresh connection;
@@ -34,16 +36,19 @@ setup and want to know what every screen and control is for.
   read responses aloud in English, French, German, Spanish, or Chinese. The
   relay synthesizes the audio and streams it to the phone encrypted - real
   media playback that keeps reading with the screen off, and response text
-  never reaches a third-party speech server. Setup downloads the neural engine
-  and the English voice into `~/.cache/herdr-mobile-relay/speech`, which relay
-  updates never touch, so the download happens once per computer. Reading
-  aloud switches itself on the first time a relay reports a voice; after that
-  the setting decides. Every other language is downloaded on demand, from
-  Settings on the phone or with `relay/speech-voices.sh --languages fr`, and
-  Settings lists what a relay has cached and removes voices one language at a
-  time. Without a neural voice the relay falls back to espeak-ng, espeak,
-  flite, or macOS say, and a language it cannot speak at all is reported in
-  Settings instead of failing at the Speak button.
+  never reaches a third-party speech server. On hosts with a published Piper
+  runtime, setup downloads the neural engine and English voice into
+  `$XDG_CACHE_HOME/herdr-mobile-relay/speech` when `XDG_CACHE_HOME` is set, or
+  `~/.cache/herdr-mobile-relay/speech` otherwise. Relay updates never touch the
+  cache. Reading aloud switches itself on the first time a relay reports a
+  voice; after that the setting decides. Every other language is downloaded on
+  demand, from Settings on the phone or with
+  `relay/speech-voices.sh --languages fr`, and Settings lists what a relay has
+  cached and removes voices one language at a time. Stock Apple Silicon uses
+  macOS `say` and does not offer neural downloads unless Piper is already
+  installed. Without a neural voice the relay falls back to espeak-ng, espeak,
+  flite, or macOS `say`; a language it cannot speak is reported in Settings
+  instead of failing at the Speak button.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |
@@ -57,6 +62,27 @@ setup and want to know what every screen and control is for.
 | Git Inspection | Native Conversations |
 | --- | --- |
 | <img src="../images/git-history.jpeg" alt="Read-only mobile Git diff with diff-aware colors and zoom controls" width="392"> | <img src="../images/conversations.jpeg" alt="Mobile native conversation history rendered from the agent transcript" width="392"> |
+
+| Terminal | Read Aloud |
+| --- | --- |
+| <img src="../images/terminal.jpeg" alt="Mobile terminal with Copy, Speak, attachments, and terminal keys" width="392"> | <img src="../images/speech.jpeg" alt="Speech settings with the language choice and the relay's cached voices" width="392"> |
+
+## Paired devices
+
+A controller opens **Settings → Devices → Invite Device** to create a ten-minute,
+one-use invitation. The relay draws both a complete setup link and its QR code;
+share either privately. The first browser that completes the encrypted
+handshake consumes the invitation. Create a separate invitation for every
+additional controller or reader.
+
+| Invite a device | Paired devices |
+| --- | --- |
+| <img src="../images/devices-invite.jpeg" alt="Invite Device dialog choosing a name and the reader role" width="392"> | <img src="../images/devices.jpeg" alt="Paired devices with rename, revoke, forget, and reset controls" width="392"> |
+
+An uncaught phone-side error appears in a bottom **App error** banner because
+mobile browsers often provide no useful console. Copy or photograph its text
+for a bug report, then tap the banner to dismiss it; a later independent error
+will display a new banner.
 
 ## Workspace navigation and inspection
 
@@ -127,16 +153,18 @@ controls to resize it without changing the rest of the app.
 
 ## Mobile terminal
 
-The mobile terminal always uses **Resize Session**. While a terminal is open
-and the app is visible, the relay leases the live PTY at the measured phone
-width. Closing the terminal restores the previous width about ten seconds
-later, so stepping back into the same agent resumes instantly instead of
-resizing the pane twice. A hidden page keeps renewing its lease for five
-minutes — desktop Safari reports an occluded window as hidden, so brief
-switches to another app must not resize the shared pane — after which the
-desktop size returns within about two minutes. A sleeping phone freezes
-sooner than that, a disconnecting phone and relay shutdown restore the size
-immediately, and returning to the terminal takes the phone size again.
+Controller terminals use **Resize Session** whenever the relay advertises size
+leases. While a terminal is open and the app is visible, the relay leases the
+live PTY at the measured phone width. Reader terminals never change the shared
+PTY; they wrap desktop-width rows to the phone viewport instead. Closing a
+controller terminal restores the previous width about ten seconds later, so
+stepping back into the same agent resumes instantly instead of resizing the
+pane twice. A hidden controller page keeps renewing its lease for five minutes
+— desktop Safari reports an occluded window as hidden, so brief switches to
+another app must not resize the shared pane — after which the desktop size
+returns within about two minutes. A sleeping phone freezes sooner than that, a
+disconnecting phone and relay shutdown restore the size immediately, and
+returning to the terminal takes the phone size again.
 
 **Lease Terminal Height** (Settings → Terminal, off by default) additionally
 leases the phone's measured height, so full-screen agents redraw to fit the
@@ -167,8 +195,11 @@ The composer below the history sends ordinary multiline prompts and accepts
 one or more validated attachments from the file picker or clipboard. Supported
 files are images, UTF-8 text, Markdown, PDF, JSON, CSV, DOCX, XLSX, PPTX, ODT,
 ODS, and ODP. Uploads show per-file progress, can be cancelled, and interrupted
-files restart from the beginning; opaque references are resolved only by the
-relay after confirming the exact terminal generation. The history does not
+files restart from the beginning. Live uploads are bound to the exact target
+generation; after restart, opaque references remain bound to the server
+session, pane, terminal, and agent session that created them. The relay
+revalidates the current exact target before resolving a reference. The history
+does not
 render attachments inline. Draft persistence, slash-command suggestions,
 hidden-value entry, approvals, structured questions, and terminal menus remain
 in the terminal view. The composer locks when one of those interactions needs

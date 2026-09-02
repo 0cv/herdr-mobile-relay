@@ -2,8 +2,8 @@
   import { untrack } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
-  import { clientPaneId } from '$lib/agents';
   import { suggestedLaunchName } from '$lib/launch';
+  import { targetRefForAgent } from '$lib/resource-id';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
 
@@ -135,9 +135,9 @@
         name: launchName,
         cwd: launchCwd,
       });
-      const paneId = launchedAgent?.pane_id || (rawPaneId ? clientPaneId(relayId, rawPaneId) : '');
-      replaceView(paneId
-        ? { view: 'terminal', paneId }
+      const target = launchedAgent ? targetRefForAgent(launchedAgent) : null;
+      replaceView(launchedAgent && target
+        ? { view: 'terminal', paneId: launchedAgent.pane_id, target }
         : { view: 'agents' });
     } catch (caught) {
       status = (caught as Error).message;

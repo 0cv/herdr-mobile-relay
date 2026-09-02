@@ -164,7 +164,10 @@ function notificationOpenRequest(data, action) {
     url.searchParams.set('push_action_ref', actionRef);
   }
   return {
-    type: 'herdr_push_open',
+    // 0.19.1 only recognizes this name. Newer clients accept both this legacy
+    // envelope and the typed fields below, so a just-activated worker cannot
+    // lose a click while an older page is still controlled.
+    type: 'herdr_notification_click',
     mode: safeAction ? 'revalidate_action' : 'thread',
     key: data.key,
     event_ref: eventRef,
@@ -177,13 +180,15 @@ async function openOrFocusApp(request) {
   const windows = await self.clients.matchAll({type: 'window', includeUncontrolled: true});
   const appWindow = windows.find(client => client.url.startsWith(self.location.origin));
   if (appWindow) {
+    let posted = false;
     try {
       appWindow.postMessage(request);
+      posted = true;
     } catch (_err) {}
     try {
-      await appWindow.focus();
+      const focused = await appWindow.focus();
+      if (posted && focused) return;
     } catch (_err) {}
-    return;
   }
   await self.clients.openWindow(request.url);
 }

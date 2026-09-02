@@ -614,6 +614,16 @@
                 This computer refused this device. Import a new invitation link, or remove and add the relay.
               </small>
             {/if}
+            {#if connection?.pairingRequired}
+              <small class="error" role="alert">
+                This computer needs pairing. Import a device invitation link, or remove and add the relay.
+              </small>
+            {/if}
+            {#if connection?.pairingDeferred}
+              <small class="warning" role="status">
+                Waiting for the Home Screen app: add Herdr to the Home Screen and open it there to pair this computer.
+              </small>
+            {/if}
             {#if connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
               <small class="warning" role="status">
                 {connection?.inventory.state === 'error'
@@ -744,7 +754,7 @@
       descriptionId="speech-hint"
       onchange={(value) => setSpeechEnabled(value)}
     />
-    <p class="hint" id="speech-hint">Off by default. Adds a Speak button next to Copy in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, so reading continues while the screen is off. Response text never reaches a third-party speech server.</p>
+    <p class="hint" id="speech-hint">Enabled automatically the first time a connected relay offers a compatible voice; after that, this setting remains under your control. Adds a Speak button next to Copy in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, so reading continues while the screen is off. Response text never reaches a third-party speech server.</p>
     <label class="field-label settings-field" for="speech-language">Language</label>
     <select
       id="speech-language"

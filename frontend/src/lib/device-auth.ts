@@ -23,6 +23,7 @@ export interface RelayDeviceCredential extends RelayDeviceAuthentication {
   role: DeviceRole;
   locale: string;
   issuedAt: number;
+  invitationId?: string;
 }
 
 export interface DeviceEnrollmentResult {
@@ -126,7 +127,7 @@ export class BrowserDeviceCredentialStore {
     if (current?.kind !== 'invitation' || current.id !== expectedInvitationId) {
       throw new Error('The redeemed device invitation is no longer available.');
     }
-    const credential = credentialFromEnrollment(enrollment, this.now());
+    const credential = credentialFromEnrollment(enrollment, this.now(), expectedInvitationId);
     state.relays[id] = credential;
     this.write(state);
     return cloneAuthentication(credential);
@@ -140,7 +141,11 @@ export class BrowserDeviceCredentialStore {
     if (current.id !== enrollment.credentialId || current.deviceId !== enrollment.deviceId) {
       throw new Error('The relay authenticated a different device credential.');
     }
-    const next = credentialFromEnrollment({ ...enrollment, credentialSecret: current.secret }, current.issuedAt);
+    const next = credentialFromEnrollment(
+      { ...enrollment, credentialSecret: current.secret },
+      current.issuedAt,
+      current.invitationId,
+    );
     state.relays[id] = next;
     this.write(state);
     return cloneAuthentication(next);
@@ -154,6 +159,7 @@ export class BrowserDeviceCredentialStore {
     this.write(state);
     return true;
   }
+
 
   private read(): PersistedDeviceAuthState {
     const raw = this.storage.getItem(DEVICE_AUTH_STORAGE_KEY);
@@ -230,19 +236,6 @@ export function resetDevices<TResult>(
   return send({ relayId: validIdentifier(intent.relayId, 'relay id') });
 }
 
-/** Erases local material only after the relay confirms revocation. */
-export async function forgetDeviceAfterRevocation(
-  store: BrowserDeviceCredentialStore,
-  relayId: string,
-  revoke: DeviceIntentHandler<RevokeDeviceIntent>,
-): Promise<void> {
-  const authentication = store.get(relayId);
-  if (!authentication || authentication.kind !== 'credential') {
-    throw new Error('No enrolled device credential is stored for this relay.');
-  }
-  await revokeDevice({ relayId, deviceId: authentication.deviceId }, revoke);
-  store.remove(relayId);
-}
 
 /**
  * Commits a validated encrypted server finish. Invitation material disappears
@@ -270,6 +263,7 @@ export function commitDeviceEnrollment(
 function credentialFromEnrollment(
   enrollment: DeviceEnrollmentResult & { credentialSecret: string },
   issuedAt: number,
+  invitationId?: string,
 ): RelayDeviceCredential {
   return {
     kind: 'credential',
@@ -280,6 +274,7 @@ function credentialFromEnrollment(
     role: validRole(enrollment.role),
     locale: validLocale(enrollment.locale),
     issuedAt: validTimestamp(issuedAt, 'credential issue time'),
+    invitationId,
   };
 }
 
@@ -301,6 +296,9 @@ function parseStoredAuthentication(value: unknown): RelayInvitation | RelayDevic
       role: validRole(value.role),
       locale: validLocale(value.locale),
       issuedAt: validTimestamp(value.issuedAt, 'credential issue time'),
+      invitationId: value.invitationId === undefined
+        ? undefined
+        : validIdentifier(value.invitationId, 'invitation id'),
     };
   }
   return null;

@@ -3,6 +3,8 @@ import type { E2EECodec, E2EEWireFrame } from '../e2ee';
 /** Which physical path a transport uses to reach the relay. */
 export type TransportKind = 'websocket' | 'gateway' | 'webrtc';
 
+/** Stable close reason used by transports that cannot carry WebSocket code 4401. */
+export const DEVICE_UNAUTHORIZED_CODE = 'device_unauthorized';
 /** Lifecycle of one transport attempt. */
 export type TransportStatus = 'connecting' | 'connected' | 'closed';
 
@@ -83,4 +85,4 @@ export interface FrameChannelHandlers {
 }
 
 /** Factory shape used by the path manager to build a channel on demand. */
-export type FrameChannelFactory = (handlers: FrameChannelHandlers) => FrameChannel;
+export type FrameChannelFactory = (handlers: FrameChannelHandlers, encrypted: boolean) => FrameChannel;

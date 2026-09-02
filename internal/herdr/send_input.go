@@ -138,10 +138,6 @@ func (c *Client) SendInput(ctx context.Context, paneID string, input PaneInput) 
 	response, wrote, err := api.requestConnected(ctx, "pane.send_input", params)
 	_ = api.closeLocked()
 	if err != nil {
-		var cliErr *CLIError
-		if errors.As(err, &cliErr) {
-			return err
-		}
 		if wrote {
 			return errors.Join(ErrDispatchedUnknown, err)
 		}

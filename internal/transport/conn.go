@@ -31,6 +31,10 @@ const (
 // sits in the application range so no proxy rewrites it.
 const UnauthorizedCloseCode = 4401
 
+// DeviceUnauthorizedReason carries CloseUnauthorized across gateway
+// multiplexing, which has no native close code.
+const DeviceUnauthorizedReason = "device_unauthorized"
+
 // Transport names reported by FrameConn implementations. They are surfaced in
 // logs, metrics, and the signaling gate that only accepts WebRTC negotiation
 // from a relayed connection.

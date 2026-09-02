@@ -11,6 +11,16 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
+// IsE2EEAuthRejected reports whether retrying the same selector can ever
+// succeed. Store and rate-limit failures remain transient so a phone keeps its
+// valid credential.
+func (s *Store) IsE2EEAuthRejected(err error) bool {
+	return errors.Is(err, ErrAuthentication) ||
+		errors.Is(err, ErrRevoked) ||
+		errors.Is(err, ErrInvitationExpired) ||
+		errors.Is(err, ErrInvitationBurned)
+}
+
 func (s *Store) ResolveE2EESecret(_ context.Context, selector transport.E2EEAuthSelector) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -85,6 +95,11 @@ func (s *Store) CompleteE2EEAuth(_ context.Context, selector transport.E2EEAuthS
 func (s *Store) recordFailedInvitationLocked(selector transport.E2EEAuthSelector) error {
 	record := s.state.Invitation
 	if record == nil || record.InvitationID != selector.ID || record.Version != selector.Version {
+		return ErrAuthentication
+	}
+	if record.InvitationID == bootstrapInvitationID {
+		// Bootstrap invitations carry a full-entropy secret. Counting unauthenticated
+		// guesses only lets remote clients deny service to the legitimate first device.
 		return ErrAuthentication
 	}
 	now := s.now().UTC()

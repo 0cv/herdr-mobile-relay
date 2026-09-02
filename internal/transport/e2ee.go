@@ -135,6 +135,11 @@ type E2EEAuthResult struct {
 type E2EEAuthResolver interface {
 	ResolveE2EESecret(context.Context, E2EEAuthSelector) ([]byte, error)
 	CompleteE2EEAuth(context.Context, E2EEAuthSelector, bool) (E2EEAuthResult, error)
+	IsE2EEAuthRejected(error) bool
+}
+
+func isE2EEAuthRejected(resolver E2EEAuthResolver, err error) bool {
+	return resolver.IsE2EEAuthRejected(err)
 }
 
 type e2eeClientHello struct {
@@ -214,9 +219,16 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 		return nil, AuthenticatedIdentity{}, err
 	}
 	secret, err := resolver.ResolveE2EESecret(ctx, clientHello.selector)
-	if err != nil || len(secret) != e2eeSecretBytes {
+	if err != nil {
 		clear(secret)
-		return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: client proof did not authenticate", ErrDeviceAuthRejected)
+		if isE2EEAuthRejected(resolver, err) {
+			return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: client proof did not authenticate", ErrDeviceAuthRejected)
+		}
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("resolve device authentication: %w", err)
+	}
+	if len(secret) != e2eeSecretBytes {
+		clear(secret)
+		return nil, AuthenticatedIdentity{}, errors.New("device authentication returned an invalid secret")
 	}
 	defer clear(secret)
 
@@ -225,7 +237,10 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 	proofAuthenticated := hmac.Equal(clientHello.proof, wantClientProof)
 	clear(wantClientProof)
 	if !proofAuthenticated {
-		_, _ = resolver.CompleteE2EEAuth(ctx, clientHello.selector, false)
+		_, completeErr := resolver.CompleteE2EEAuth(ctx, clientHello.selector, false)
+		if completeErr != nil && !isE2EEAuthRejected(resolver, completeErr) {
+			return nil, AuthenticatedIdentity{}, fmt.Errorf("record rejected device authentication: %w", completeErr)
+		}
 		return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: client proof did not authenticate", ErrDeviceAuthRejected)
 	}
 
@@ -292,9 +307,16 @@ func performServerE2EEHandshake(parent context.Context, conn FrameConn, resolver
 	}
 
 	authResult, err := resolver.CompleteE2EEAuth(ctx, clientHello.selector, true)
-	if err != nil || !validAuthenticatedIdentity(authResult.Identity) {
+	if err != nil {
 		clear(authResult.CredentialSecret)
-		return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: device authentication is no longer valid", ErrDeviceAuthRejected)
+		if isE2EEAuthRejected(resolver, err) {
+			return nil, AuthenticatedIdentity{}, fmt.Errorf("%w: device authentication is no longer valid", ErrDeviceAuthRejected)
+		}
+		return nil, AuthenticatedIdentity{}, fmt.Errorf("complete device authentication: %w", err)
+	}
+	if !validAuthenticatedIdentity(authResult.Identity) {
+		clear(authResult.CredentialSecret)
+		return nil, AuthenticatedIdentity{}, errors.New("device authentication returned an invalid identity")
 	}
 	finish := e2eeServerFinish{
 		Type:              "e2ee_server_finish",

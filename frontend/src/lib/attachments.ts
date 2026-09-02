@@ -11,6 +11,8 @@ export const DEFAULT_ATTACHMENT_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'image/gif',
   'image/jpeg',
+  'image/heic',
+  'image/heif',
   'image/png',
   'image/webp',
   'text/csv',
@@ -37,6 +39,7 @@ export interface AttachmentIssue {
     | 'attachment_unknown_mime'
     | 'attachment_upload_expired'
     | 'attachment_upload_failed'
+    | 'attachment_upload_busy'
     | 'attachment_upload_state_unknown';
   args?: Record<string, string | number | boolean>;
 }
@@ -119,6 +122,67 @@ export interface AttachmentBatchSnapshot {
 
 type InternalItem = AttachmentItem & { file?: File; digest?: string };
 type Listener = (snapshot: AttachmentBatchSnapshot) => void;
+interface HashWorkerResponse {
+  id: string;
+  digest?: string;
+  error?: string;
+}
+
+class BackgroundFileHasher {
+  private worker?: Worker;
+  private readonly pending = new Map<string, (digest?: string) => void>();
+
+  constructor() {
+    if (typeof Worker === 'undefined') return;
+    try {
+      this.worker = new Worker(new URL('./attachment-hash.worker.ts', import.meta.url), { type: 'module' });
+    } catch {
+      return;
+    }
+    this.worker.addEventListener('message', (event: MessageEvent<HashWorkerResponse>) => {
+      const settle = this.pending.get(event.data.id);
+      if (!settle) return;
+      this.pending.delete(event.data.id);
+      settle(event.data.digest);
+    });
+    this.worker.addEventListener('error', () => this.cancel());
+  }
+
+  digest(file: File): Promise<string | undefined> | undefined {
+    if (!this.worker) return undefined;
+    const id = crypto.randomUUID();
+    return new Promise((resolve) => {
+      this.pending.set(id, resolve);
+      try {
+        this.worker!.postMessage({ id, file });
+      } catch {
+        this.pending.delete(id);
+        resolve(undefined);
+      }
+    });
+  }
+
+  cancel(): void {
+    this.worker?.terminate();
+    this.worker = undefined;
+    for (const settle of this.pending.values()) settle(undefined);
+    this.pending.clear();
+  }
+}
+
+async function incrementalFileDigest(
+  file: File,
+  chunkBytes: number,
+  cancelled: () => boolean,
+): Promise<string | undefined> {
+  const digest = new IncrementalSha256();
+  for (let offset = 0; offset < file.size; offset += chunkBytes) {
+    if (cancelled()) return undefined;
+    digest.update(new Uint8Array(await file.slice(offset, offset + chunkBytes).arrayBuffer()));
+  }
+  return cancelled() ? undefined : digest.digestHex();
+}
+
 
 function normalizedMime(value: string): string {
   return value.split(';', 1)[0].trim().toLowerCase();
@@ -258,7 +322,8 @@ export class AttachmentBatchController {
   private items: InternalItem[] = [];
   private listeners = new Set<Listener>();
   private batchIssue?: AttachmentIssue;
-  private active?: { uploadId: string; expiresAt: number; abort: AbortController };
+  private active?: { uploadId: string; expiresAt: number; abort: AbortController; cancelHashing?: () => void };
+  private pendingBegin?: Promise<UploadBeginResult>;
   private epoch = 0;
   private uploading = false;
 
@@ -286,7 +351,7 @@ export class AttachmentBatchController {
       issue: this.batchIssue ? { ...this.batchIssue, args: this.batchIssue.args ? { ...this.batchIssue.args } : undefined } : undefined,
       uploading: this.uploading,
       canUpload: !this.uploading && !this.active && selected.length > 0,
-      canRestart: !this.uploading && Boolean(this.active) && this.items.some((item) => item.state === 'interrupted' && item.file),
+      canRestart: !this.uploading && this.items.some((item) => item.state === 'interrupted' && item.file),
     };
   }
 
@@ -299,11 +364,12 @@ export class AttachmentBatchController {
       this.batchIssue = { code: 'attachment_batch_limit', args: { selected: selected.length, max: this.limits.maxFiles } };
     }
     let batchBytes = 0;
-    for (let order = 0; order < Math.min(selected.length, this.limits.maxFiles); order += 1) {
+    for (let order = 0; order < selected.length; order += 1) {
       const file = selected[order];
       const mediaType = normalizedMime(file.type);
       let issue: AttachmentIssue | undefined;
-      if (!validFilename(file.name)) issue = { code: 'attachment_invalid_name' };
+      if (order >= this.limits.maxFiles) issue = { code: 'attachment_batch_limit', args: { max: this.limits.maxFiles } };
+      else if (!validFilename(file.name)) issue = { code: 'attachment_invalid_name' };
       else if (!mediaType || !this.allowedMimes.has(mediaType)) issue = { code: 'attachment_unknown_mime', args: { mime: mediaType || 'unknown' } };
       else if (file.size === 0) issue = { code: 'attachment_file_empty' };
       else if (file.size > this.limits.maxFileBytes) issue = { code: 'attachment_file_too_large', args: { bytes: file.size, max: this.limits.maxFileBytes } };
@@ -349,17 +415,20 @@ export class AttachmentBatchController {
   }
 
   async restart(): Promise<AttachmentRef[]> {
-    if (this.uploading || !this.active) throw new Error('attachment_batch_not_restartable');
+    if (this.uploading) throw new Error('attachment_batch_not_restartable');
     const uploadItems = this.items.filter((item) => item.state === 'interrupted' && item.file);
     if (!uploadItems.length) throw new Error('attachment_batch_not_restartable');
     const old = this.active;
     this.active = undefined;
-    old.abort.abort();
-    try {
-      await this.callbacks.cancel({ target: this.target, upload_id: old.uploadId });
-    } catch {
-      this.markInterrupted(uploadItems, { code: 'attachment_cancel_failed' });
-      throw { code: 'attachment_cancel_failed' } satisfies AttachmentIssue;
+    if (old) {
+      old.abort.abort();
+      old.cancelHashing?.();
+      try {
+        await this.callbacks.cancel({ target: this.target, upload_id: old.uploadId });
+      } catch {
+        this.markInterrupted(uploadItems, { code: 'attachment_cancel_failed' });
+        throw { code: 'attachment_cancel_failed' } satisfies AttachmentIssue;
+      }
     }
     for (const item of uploadItems) {
       item.state = 'selected';
@@ -373,16 +442,29 @@ export class AttachmentBatchController {
 
   async cancel(): Promise<void> {
     const active = this.active;
+    const pendingBegin = this.pendingBegin;
     this.epoch += 1;
     this.active = undefined;
     this.uploading = false;
     this.items = [];
     this.batchIssue = undefined;
     active?.abort.abort();
+    active?.cancelHashing?.();
     this.notify();
-    if (!active) return;
+    let uploadId = active?.uploadId;
+    if (!uploadId && pendingBegin) {
+      try {
+        const result = await pendingBegin;
+        if (this.pendingBegin !== pendingBegin) return;
+        this.pendingBegin = undefined;
+        uploadId = result.upload_id;
+      } catch {
+        return;
+      }
+    }
+    if (!uploadId) return;
     try {
-      await this.callbacks.cancel({ target: this.target, upload_id: active.uploadId });
+      await this.callbacks.cancel({ target: this.target, upload_id: uploadId });
     } catch {
       throw { code: 'attachment_cancel_failed' } satisfies AttachmentIssue;
     }
@@ -409,13 +491,18 @@ export class AttachmentBatchController {
     this.notify();
 
     let began = false;
+    let beginPromise: Promise<UploadBeginResult> | undefined;
+    let hashing: BackgroundFileHasher | undefined;
     try {
-      const begin = await this.callbacks.begin({
+      beginPromise = this.callbacks.begin({
         target: this.target,
         files: uploadItems.map((item) => ({ name: item.name, media_type: item.mediaType, bytes: item.bytes })),
       }, abort.signal);
-      if (run !== this.epoch) return [];
+      this.pendingBegin = beginPromise;
+      const begin = await beginPromise;
       const expiresAt = Date.parse(begin.expires_at);
+      if (run !== this.epoch) return [];
+      if (this.pendingBegin === beginPromise) this.pendingBegin = undefined;
       if (!begin.upload_id || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
         const issue: AttachmentIssue = Number.isFinite(expiresAt) && expiresAt <= Date.now()
           ? { code: 'attachment_upload_expired' }
@@ -432,19 +519,23 @@ export class AttachmentBatchController {
         throw { code: 'attachment_invalid_response' } satisfies AttachmentIssue;
       }
       began = true;
-      this.active = { uploadId: begin.upload_id, expiresAt, abort };
+      hashing = new BackgroundFileHasher();
+      this.active = {
+        uploadId: begin.upload_id, expiresAt, abort, cancelHashing: () => hashing?.cancel(),
+      };
+      const backgroundDigests = uploadItems.map((item) => hashing!.digest(item.file!));
+      let sequence = 0;
 
       for (let fileIndex = 0; fileIndex < uploadItems.length; fileIndex += 1) {
         const item = uploadItems[fileIndex];
         const file = item.file!;
-        const wholeDigest = new IncrementalSha256();
-        let sequence = 0;
+        const backgroundDigest = backgroundDigests[fileIndex];
         let offset = 0;
         while (offset < file.size) {
           if (Date.now() >= expiresAt) throw { code: 'attachment_upload_expired' } satisfies AttachmentIssue;
           const bytes = new Uint8Array(await file.slice(offset, offset + begin.chunk_bytes).arrayBuffer());
           if (run !== this.epoch) return [];
-          wholeDigest.update(bytes);
+          // The worker owns the whole-file hash; chunks stay on the UI thread only for transport.
           const chunkSha256 = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)));
           const response = await this.callbacks.chunk({
             target: this.target,
@@ -464,8 +555,14 @@ export class AttachmentBatchController {
           item.progress = file.size === 0 ? 1 : offset / file.size;
           this.notify();
         }
-        item.digest = wholeDigest.digestHex();
+        const digest = backgroundDigest ? await backgroundDigest : undefined;
+        if (run !== this.epoch) return [];
+        item.digest = digest ?? await incrementalFileDigest(file, begin.chunk_bytes, () => run !== this.epoch);
+        if (!item.digest) return [];
       }
+      hashing.cancel();
+      hashing = undefined;
+      if (this.active) this.active.cancelHashing = undefined;
 
       if (Date.now() >= expiresAt) throw { code: 'attachment_upload_expired' } satisfies AttachmentIssue;
       const finished = await this.callbacks.finish({
@@ -495,6 +592,8 @@ export class AttachmentBatchController {
       this.notify();
       return this.orderedAttachments();
     } catch (error) {
+      hashing?.cancel();
+      if (this.pendingBegin === beginPromise) this.pendingBegin = undefined;
       if (run !== this.epoch) return [];
       this.uploading = false;
       const issue = issueFrom(error, began ? 'attachment_upload_state_unknown' : 'attachment_upload_failed');
@@ -528,6 +627,7 @@ export function attachmentIssueText(issue: AttachmentIssue): string {
     case 'attachment_unknown_mime': return 'This file type is not supported.';
     case 'attachment_invalid_name': return 'This file name is not supported.';
     case 'attachment_upload_expired': return 'The upload expired. Restart it to upload from the beginning.';
+    case 'attachment_upload_busy': return 'This device already has the maximum number of active uploads. Finish or cancel one, then retry.';
     case 'attachment_upload_state_unknown': return 'Upload progress is uncertain. Restart it from the beginning; it will not resume automatically.';
     case 'attachment_cancel_failed': return 'The local upload was cleared, but the relay could not confirm cancellation.';
     case 'attachment_invalid_response': return 'The relay returned an invalid upload response.';

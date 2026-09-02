@@ -1052,8 +1052,11 @@ func (s *gatewaySession) handleOpen(connID uint32, payload []byte) {
 		}
 		return nil
 	}
-	closeConn := func(_ CloseStatus, reason string) {
+	closeConn := func(status CloseStatus, reason string) {
 		s.client.removeConn(connID, conn)
+		if status == CloseUnauthorized {
+			reason = DeviceUnauthorizedReason
+		}
 		_ = s.enqueue(gatewaywire.EncodeFrame(gatewaywire.OpClose, connID, closeReasonBytes(reason)))
 	}
 	conn = &gatewayConn{recv: framing.NewReassembler(framing.GatewayChunkSize)}

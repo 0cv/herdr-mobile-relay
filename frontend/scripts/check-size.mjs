@@ -57,7 +57,13 @@ import { constants, gzipSync } from 'node:zlib';
 // The pairing QR is encoded by the relay, so the app only unpacks a bitmap.
 // Raised from 154 KiB for phone-managed speech voices and for the recovery
 // path that stops a refused pairing from reconnecting forever.
-const limitKiB = 155;
+// Raised from 155 KiB for the review hardening cutover: invitation-safe pairing,
+// exact push/watch routing, cancellable relay speech, and upload recovery add
+// 217 B gzip after moving attachment hashing out of the UI thread.
+// Raised from 156 KiB for the iOS Home Screen handoff, which holds the one-use
+// setup key for the installed copy and explains the waiting state, and for
+// reader speech from the agent's transcript instead of the relay copy command.
+const limitKiB = 157;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

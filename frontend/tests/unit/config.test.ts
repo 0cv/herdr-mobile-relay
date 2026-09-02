@@ -5,6 +5,7 @@ import {
   normalizeRelayConfig,
   quickSetupConfig,
   quickSetupInvitation,
+  shouldDeferPairingConnection,
   shouldRetainSetupFragment,
   saveRelayConfigs,
 } from '$lib/config';
@@ -27,6 +28,26 @@ describe('Home Screen setup handoff', () => {
       hash: '#setup=short',
     }, false)).toBe(false);
   });
+
+  it('defers one-use pairing secrets until the iOS Home Screen app opens', () => {
+    const invitation = {
+      ...setupLink('label=Fedora&relay=wss%3A%2F%2Frelay.example.com'),
+      hash: `#setup=${'A'.repeat(43)}&invite=${'B'.repeat(24)}&invite_version=1&invite_expires=2000000000000`,
+    };
+    expect(shouldDeferPairingConnection(invitation, false, 'Mozilla/5.0 (iPhone)', 0)).toBe(true);
+    expect(shouldDeferPairingConnection(invitation, false, 'Mozilla/5.0 (Macintosh)', 5)).toBe(true);
+    expect(shouldDeferPairingConnection(invitation, true, 'Mozilla/5.0 (iPhone)', 0)).toBe(false);
+    expect(shouldDeferPairingConnection(invitation, false, 'Mozilla/5.0 (Android)', 5)).toBe(false);
+
+    // The bootstrap relay key printed by setup is one-use as well: a tab that
+    // redeems it leaves the installed copy with a spent link.
+    const bootstrap = setupLink('label=Fedora&relay=wss%3A%2F%2Frelay.example.com');
+    expect(shouldDeferPairingConnection(bootstrap, false, 'Mozilla/5.0 (iPhone)', 0)).toBe(true);
+    expect(shouldDeferPairingConnection(bootstrap, false, 'Mozilla/5.0 (iPad)', 0)).toBe(true);
+    expect(shouldDeferPairingConnection(bootstrap, true, 'Mozilla/5.0 (iPhone)', 0)).toBe(false);
+    expect(shouldDeferPairingConnection(bootstrap, false, 'Mozilla/5.0 (Android)', 5)).toBe(false);
+    expect(shouldDeferPairingConnection({ ...bootstrap, hash: '#label=Fedora' }, false, 'Mozilla/5.0 (iPhone)', 0)).toBe(false);
+  });
 });
 describe('device invitation setup', () => {
   it('imports a one-use invitation without retaining its secret as a relay token', () => {
@@ -46,6 +67,30 @@ describe('device invitation setup', () => {
       label: 'Phone',
       url: 'wss://relay.example.com',
       token: '',
+    });
+  });
+
+  it('preserves existing relay transport fields when importing an invitation', () => {
+    const existing = normalizeRelayConfig({
+      label: 'Phone',
+      url: 'wss://old-relay.example.com',
+      token: TOKEN,
+      transport: 'hybrid',
+      gatewayUrl: 'wss://gateway.example.com',
+      gatewayUrls: ['wss://gateway.example.com'],
+    });
+    const locationValue = {
+      hash: `#setup=${'A'.repeat(43)}&invite=${'B'.repeat(24)}&invite_version=2&invite_expires=2000000000000&label=Phone&relay=wss%3A%2F%2Fold-relay.example.com`,
+      protocol: 'https:',
+      host: 'app.example.com',
+    };
+
+    expect(importQuickSetup([existing], locationValue)?.[0]).toMatchObject({
+      id: existing.id,
+      token: TOKEN,
+      transport: 'hybrid',
+      gatewayUrl: 'wss://gateway.example.com',
+      gatewayUrls: ['wss://gateway.example.com'],
     });
   });
 

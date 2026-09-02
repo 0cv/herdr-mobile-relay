@@ -19,24 +19,31 @@ const (
 )
 
 type Classification struct {
-	Kind           AttentionKind
-	Prompt         string
-	Command        string
-	Options        []string
-	ApprovalFocus  int
-	Interaction    *Interaction
-	QuestionLayout bool
+	Kind             AttentionKind
+	Prompt           string
+	Command          string
+	Options          []string
+	ApprovalFocus    int
+	Interaction      *Interaction
+	QuestionLayout   bool
+	ApprovalIdentity string
+	approvalSource   string
 }
 
 func ApprovalFingerprint(classification Classification) string {
 	if classification.Kind != AttentionApproval || len(classification.Options) < 2 {
 		return ""
 	}
+	if classification.ApprovalIdentity != "" {
+		return classification.ApprovalIdentity
+	}
 	encoded, err := json.Marshal(struct {
+		Source  string   `json:"source,omitempty"`
 		Prompt  string   `json:"prompt"`
 		Command string   `json:"command"`
 		Options []string `json:"options"`
 	}{
+		Source: stableApprovalSource(classification.approvalSource),
 		Prompt: classification.Prompt, Command: classification.Command, Options: classification.Options,
 	})
 	if err != nil {
@@ -44,6 +51,17 @@ func ApprovalFingerprint(classification Classification) string {
 	}
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
+}
+
+// A focus marker, the indentation that shifts with it, and trailing padding are
+// presentation: the same dialog with the cursor on another row is the same
+// approval and must hash to the same fingerprint. The marker class matches the
+// one ompPlanFocusPattern accepts, including ASCII ">", and requires the same
+// trailing space so quoted content like ">text" is left intact.
+var approvalFocusSourcePattern = regexp.MustCompile(`(?m)^[ \t]*(?:[❯›>\x{f054}][ \t]+)?|[ \t]+$`)
+
+func stableApprovalSource(source string) string {
+	return approvalFocusSourcePattern.ReplaceAllString(source, "")
 }
 
 type approvalMenuRow struct {
@@ -101,11 +119,12 @@ func Classify(text, agent string) Classification {
 				command = approvalCommand(summaryLines)
 			}
 			return Classification{
-				Kind:          AttentionApproval,
-				Prompt:        compact(strings.Join(summaryLines, "\n"), 500),
-				Command:       compact(command, 240),
-				Options:       options,
-				ApprovalFocus: focus,
+				Kind:           AttentionApproval,
+				Prompt:         compact(strings.Join(summaryLines, "\n"), 500),
+				Command:        compact(command, 240),
+				Options:        options,
+				ApprovalFocus:  focus,
+				approvalSource: approvalDialogSource(text, agent),
 			}
 		}
 	}
@@ -174,6 +193,47 @@ func liveApprovalDetails(text, agent string) ([]string, int, string) {
 		}
 	}
 	return options, focus, ""
+}
+
+func approvalDialogSource(text, agent string) string {
+	normalized := strings.ToLower(agent)
+	if strings.Contains(normalized, "opencode") {
+		return ""
+	}
+	if ompAskAgent(normalized) {
+		lines := cleanLines(text)
+		if header := lastLineMatching(lines, ompToolApprovalPattern); header >= 0 {
+			for end := header + 1; end < len(lines); end++ {
+				if strings.HasPrefix(lines[end], "╰") {
+					return strings.Join(lines[header:end+1], "\n")
+				}
+			}
+		}
+		header := lastLineMatching(lines, ompPlanMenuPattern)
+		if header < 0 {
+			return ""
+		}
+		for end := header + 1; end < len(lines); end++ {
+			if lines[end] == "" || ompBorderLine(lines[end]) {
+				return strings.Join(lines[header:end], "\n")
+			}
+		}
+		return ""
+	}
+	rawLines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	menuLines := make([]string, len(rawLines))
+	for index, line := range rawLines {
+		menuLines[index] = cleanCodexLine(line)
+	}
+	rows := latestApprovalMenu(menuLines)
+	if len(rows) < 2 {
+		return ""
+	}
+	headerStart := latestCompletedTurnLine(cleanLines(text)) + 1
+	if candidate := rows[0].line - 16; candidate > headerStart {
+		headerStart = candidate
+	}
+	return strings.Join(menuLines[headerStart:rows[len(rows)-1].line+1], "\n")
 }
 
 // The status block under a live dialog is at most this many non-empty lines.

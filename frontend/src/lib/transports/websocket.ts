@@ -31,10 +31,10 @@ export function createWebSocketTransport(
     codec: 'json',
     handlers,
     ...authentication,
-    createChannel: (channelHandlers) => createWebSocketChannel(
+    createChannel: (channelHandlers, encrypted) => createWebSocketChannel(
       relay,
       channelHandlers,
-      Boolean(relay.token || authentication.authentication),
+      encrypted,
     ),
   });
 }

@@ -16,12 +16,6 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HO
 ENV_FILE="$(relay_env_file "$SCRIPT_DIR")"
 export HERDR_RELAY_ENV="$ENV_FILE"
 
-# The quick tunnel serves the phone app from a hostname that changes on every
-# launch, so a phone's enrolled device credential is stranded under the old
-# origin. Each launch re-arms the one-use bootstrap invitation so the printed
-# setup link pairs the phone again; stable installs keep strict one-use.
-export HERDR_RELAY_REARM_BOOTSTRAP=1
-
 cleanup() {
     if [ -n "$TUNNEL_PID" ] && kill -0 "$TUNNEL_PID" 2>/dev/null; then
         kill "$TUNNEL_PID" 2>/dev/null || true
@@ -68,6 +62,15 @@ GATEWAY_URL="$(gateway_url "$ENV_FILE")"
 TUNNEL_TARGET_HOST="$HOST"
 if [ "$TUNNEL_TARGET_HOST" = "0.0.0.0" ]; then
     TUNNEL_TARGET_HOST="127.0.0.1"
+fi
+
+# The quick tunnel serves the phone app from a hostname that changes on every
+# launch, so every device enrolled under the previous hostname is stranded.
+# Each tunnel launch starts with an empty device list and re-arms the one-use
+# bootstrap invitation so the printed setup link pairs the phone again. A
+# gateway keeps a stable identity, so its pairings survive a restart.
+if [ -z "$GATEWAY_URL" ]; then
+    export HERDR_RELAY_REARM_BOOTSTRAP=1
 fi
 
 if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] && installed_relay_service_active; then

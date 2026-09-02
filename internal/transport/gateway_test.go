@@ -650,6 +650,24 @@ func TestGatewayClientRejectsInvalidProof(t *testing.T) {
 	}
 }
 
+func TestGatewayCarriesUnauthorizedCloseReason(t *testing.T) {
+	harness := newGatewayHarness(t, 4)
+	harness.waitRegistered(t)
+	harness.link.write(t, gatewaywire.OpOpen, 4, harness.openPayload(t, harness.rendezvousKey))
+	waitFor(t, "gateway connection", func() bool { return harness.client.Status().Clients == 1 })
+
+	conn := harness.client.lookupConn(4)
+	if conn == nil {
+		t.Fatal("gateway connection is missing")
+	}
+	conn.pipe.Close(CloseUnauthorized, "ignored")
+
+	frame := harness.link.expect(t, gatewaywire.OpClose, 4)
+	if string(frame.payload) != DeviceUnauthorizedReason {
+		t.Fatalf("close reason = %q, want %q", frame.payload, DeviceUnauthorizedReason)
+	}
+}
+
 func TestGatewayClientEnforcesMaxClients(t *testing.T) {
 	harness := newGatewayHarness(t, 1)
 	harness.waitRegistered(t)

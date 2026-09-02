@@ -4,11 +4,12 @@ import type { E2EEWireFrame } from '../e2ee';
 import type { RelayConfig } from '../types';
 import { chunk, decodeWireFrame, encodeWireFrame, Reassembler } from './chunking';
 import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
-import type {
-  FrameChannel,
-  FrameChannelHandlers,
-  RelayTransport,
-  TransportHandlers,
+import {
+  DEVICE_UNAUTHORIZED_CODE,
+  type FrameChannel,
+  type FrameChannelHandlers,
+  type RelayTransport,
+  type TransportHandlers,
 } from './types';
 
 /** Gateway protocol version carried in every hello message. */
@@ -183,7 +184,11 @@ export function createGatewayChannel(
           fail(error instanceof Error && error.message ? error.message : 'The gateway sent an invalid frame.');
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (event.reason === DEVICE_UNAUTHORIZED_CODE) {
+          fail('This relay no longer accepts this device', true, DEVICE_UNAUTHORIZED_CODE);
+          return;
+        }
         fail(phase === 'open' ? 'The gateway connection closed.' : 'The gateway refused the connection.');
       };
       socket.onerror = () => {

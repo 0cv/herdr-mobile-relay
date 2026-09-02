@@ -11,13 +11,13 @@ import type {
   RelayDeviceCredential,
   RelayInvitation,
 } from '../device-auth';
-import type {
-  FrameChannel,
-  FrameChannelFactory,
-  RelayTransport,
-  TransportHandlers,
-  TransportKind,
-  TransportStatusDetail,
+import {
+  type FrameChannel,
+  type FrameChannelFactory,
+  type RelayTransport,
+  type TransportHandlers,
+  type TransportKind,
+  type TransportStatusDetail,
 } from './types';
 
 export const E2EE_HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -26,8 +26,8 @@ export interface EncryptedTransportOptions {
   kind: TransportKind;
   /** Relay bootstrap/rendezvous key. Empty enables tokenless loopback development. */
   token: string;
-  /** Per-relay browser credential or one-use invitation used by E2EE v2. */
-  authentication?: RelayDeviceCredential | RelayInvitation;
+  /** Resolves the current credential when this path actually opens. */
+  getAuthentication?: () => RelayDeviceCredential | RelayInvitation | undefined;
   /**
    * Persists authenticated identity before the connection becomes visible.
    * Invitation handlers must atomically replace the invitation with the issued
@@ -45,7 +45,7 @@ export interface EncryptedTransportOptions {
 
 export type TransportAuthentication = Pick<
   EncryptedTransportOptions,
-  'authentication' | 'onAuthenticated'
+  'getAuthentication' | 'onAuthenticated'
 >;
 
 /**
@@ -58,17 +58,17 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
   const {
     kind,
     token,
-    authentication,
     codec,
     handlers,
   } = options;
-  const encrypted = Boolean(token || authentication);
+  let encrypted = false;
   const handshakeTimeoutMs = options.handshakeTimeoutMs ?? E2EE_HANDSHAKE_TIMEOUT_MS;
 
   let channel: FrameChannel | null = null;
   let handshake: E2EEClientHandshake | null = null;
   let challenge: E2EEClientHandshakeChallenge | null = null;
   let session: E2EESession | null = null;
+  let presentedAuthentication: RelayDeviceCredential | RelayInvitation | undefined;
   let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
   let sendQueue: Promise<void> = Promise.resolve();
   let receiveQueue: Promise<void> = Promise.resolve();
@@ -118,11 +118,10 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
       if (finished) return;
       if (!session) {
         if (challenge) {
-          if (!authentication) throw new Error('No device authentication is available for this relay.');
+          if (!presentedAuthentication) throw new Error('No device authentication is available for this relay.');
           const completed = await challenge.complete(frame);
           if (finished) return;
-          await options.onAuthenticated?.(authentication, completed.enrollment);
-          if (finished) return;
+          await options.onAuthenticated?.(presentedAuthentication, completed.enrollment);
           session = completed.session;
           challenge = null;
           markReady();
@@ -151,6 +150,8 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
     connect(): void {
       if (channel || finished) return;
       handlers.onStatus('connecting');
+      presentedAuthentication = options.getAuthentication?.();
+      encrypted = Boolean(token || presentedAuthentication);
       channel = options.createChannel({
         onOpen(): void {
           if (finished) return;
@@ -158,15 +159,14 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
             markReady();
             return;
           }
-          if (!authentication) {
+          if (!presentedAuthentication) {
             finish({ reason: 'Pair this browser before connecting to the relay' });
             return;
           }
           handshakeTimer = setTimeout(() => {
             finish({ reason: 'Encrypted relay handshake timed out' });
           }, handshakeTimeoutMs);
-          void createE2EEClientHandshake(authentication, undefined, codec).then((created) => {
-            if (finished) return;
+          void createE2EEClientHandshake(presentedAuthentication, undefined, codec).then((created) => {
             handshake = created;
             channel?.sendFrame(JSON.stringify(created.hello));
           }).catch(() => {
@@ -177,7 +177,7 @@ export function createEncryptedTransport(options: EncryptedTransportOptions): Re
         onClose(detail?: TransportStatusDetail): void {
           finish(detail ?? { reason: 'Relay disconnected' });
         },
-      });
+      }, encrypted);
       channel.open();
     },
     send(payload: Record<string, unknown>): boolean {

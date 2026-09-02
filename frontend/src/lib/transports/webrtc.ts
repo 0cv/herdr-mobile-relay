@@ -3,11 +3,11 @@ import type { E2EEWireFrame } from '../e2ee';
 import type { RelayConfig } from '../types';
 import { chunk, decodeWireFrame, encodeWireFrame, Reassembler } from './chunking';
 import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
-import type {
-  FrameChannel,
-  FrameChannelHandlers,
-  RelayTransport,
-  TransportHandlers,
+import {
+  type FrameChannel,
+  type FrameChannelHandlers,
+  type RelayTransport,
+  type TransportHandlers,
 } from './types';
 
 /** DataChannel label negotiated with the relay. */
@@ -79,11 +79,11 @@ export function createWebRTCChannel(
     connection = null;
   }
 
-  function fail(reason: string, options?: { fatal?: boolean; notifyPeer?: boolean }): void {
+  function fail(reason: string, options?: { fatal?: boolean; notifyPeer?: boolean; code?: string }): void {
     if (closed) return;
     closed = true;
     teardown(options?.notifyPeer ?? true);
-    handlers.onClose(options?.fatal ? { reason, fatal: true } : { reason });
+    handlers.onClose(options?.fatal ? { reason, fatal: true, code: options.code } : { reason });
   }
 
   function flush(): void {
@@ -141,7 +141,9 @@ export function createWebRTCChannel(
       return;
     }
     if (message.type === 'webrtc_closed') {
-      fail(String(message.reason || 'The computer closed the direct connection.'), { notifyPeer: false });
+      fail(String(message.reason || 'The computer closed the direct connection.'), {
+        notifyPeer: false,
+      });
       return;
     }
     if (message.type === 'command_result' && message.ok === false) {

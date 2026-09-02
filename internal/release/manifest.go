@@ -216,8 +216,8 @@ func Build(root, version, revision, target string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	// The bridge release speaks both transports so app-first and relay-first
-	// rollout windows both stay connected; see ValidateUpgradeCompatibility.
+	// This release supports both encrypted WebSocket and hybrid v2 paths. It
+	// intentionally does not claim compatibility with the retired E2EE v1.
 	manifest := Manifest{
 		Schema:   ManifestSchema,
 		Version:  version,

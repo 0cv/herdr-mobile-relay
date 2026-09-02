@@ -70,12 +70,9 @@ func TestResetWithBootstrapAtomicallyReplacesCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invitation, err := reopened.ActiveInvitation()
-	if err != nil {
-		t.Fatal(err)
-	}
+	invitation := reopened.state.Invitation
 	if invitation == nil || invitation.InvitationID != bootstrapInvitationID || invitation.Role != RoleController {
-		t.Fatalf("ActiveInvitation() = %#v", invitation)
+		t.Fatalf("persisted invitation = %#v", invitation)
 	}
 }
 
@@ -103,6 +100,32 @@ func TestBootstrapInvitationRefreshesWhenFirstUsedAfterExpiry(t *testing.T) {
 	}
 	if !store.state.Invitation.ExpiresAt.Equal(now.Add(invitationLifetime)) {
 		t.Fatalf("refreshed expiry = %s", store.state.Invitation.ExpiresAt)
+	}
+}
+
+func TestBootstrapInvitationDoesNotCountFailedProofs(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := bytes.Repeat([]byte{9}, secretBytes)
+	if err := store.EnsureBootstrapInvitation(secret, "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	selector := transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1,
+	}
+	for range maxInviteAttempts + 1 {
+		if _, err := store.CompleteE2EEAuth(context.Background(), selector, false); !errors.Is(err, ErrAuthentication) {
+			t.Fatalf("failed proof error = %v", err)
+		}
+	}
+	if store.state.Invitation == nil || store.state.Invitation.FailedAttempts != 0 {
+		t.Fatalf("bootstrap invitation after failed proofs = %#v", store.state.Invitation)
+	}
+	resolved, err := store.ResolveE2EESecret(context.Background(), selector)
+	if err != nil || !bytes.Equal(resolved, secret) {
+		t.Fatalf("ResolveE2EESecret() = %x, %v", resolved, err)
 	}
 }
 
@@ -159,10 +182,7 @@ func TestBootstrapStaysConsumedForStableInstalls(t *testing.T) {
 	if err := store.EnsureBootstrapInvitation(bytes.Repeat([]byte{5}, secretBytes), "relay", "en"); err != nil {
 		t.Fatal(err)
 	}
-	invitation, err := store.ActiveInvitation()
-	if err != nil {
-		t.Fatal(err)
-	}
+	invitation := store.state.Invitation
 	if invitation != nil {
 		t.Fatalf("consumed bootstrap re-armed without reenrollment: %#v", invitation)
 	}
@@ -179,10 +199,7 @@ func TestRearmedBootstrapEnrollsAReplacementDeviceEachLaunch(t *testing.T) {
 	if err := store.EnsureBootstrapInvitation(secret, "relay", "en"); err != nil {
 		t.Fatal(err)
 	}
-	invitation, err := store.ActiveInvitation()
-	if err != nil {
-		t.Fatal(err)
-	}
+	invitation := store.state.Invitation
 	if invitation == nil || invitation.InvitationID != bootstrapInvitationID {
 		t.Fatalf("re-armed invitation = %#v", invitation)
 	}

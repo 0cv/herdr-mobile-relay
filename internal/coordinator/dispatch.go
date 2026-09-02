@@ -260,11 +260,11 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
 
 	switch action {
-	case "submit_prompt", "prompt":
+	case "submit_prompt":
 		return d.handlePrompt(ctx, receivedAt, requestID, paneID, message)
-	case "send_keys", "keys":
+	case "send_keys":
 		return d.handleKeys(ctx, receivedAt, requestID, paneID, message)
-	case "send_text", "text":
+	case "send_text":
 		return d.handleText(ctx, receivedAt, requestID, paneID, message)
 	case "send_input":
 		return d.handleInput(ctx, receivedAt, requestID, paneID, message)
@@ -342,16 +342,17 @@ func isQoderAgent(agent string) bool {
 }
 
 func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+	const action = "submit_prompt"
 	text := stringValue(message, "text")
 	if paneID == "" || text == "" {
-		return d.fail(requestID, "prompt", paneID, "Text and agent are required")
+		return d.fail(requestID, action, paneID, "Text and agent are required")
 	}
 	if len([]rune(text)) > promptMaxChars {
-		return d.fail(requestID, "prompt", paneID, "Prompt is longer than 100,000 characters")
+		return d.fail(requestID, action, paneID, "Prompt is longer than 100,000 characters")
 	}
 	generation := d.state.Generation(paneID)
 	if stale := d.waitTestGate(ctx, paneID, generation); stale != nil {
-		stale.RequestID, stale.Action = requestID, "prompt"
+		stale.RequestID, stale.Action = requestID, action
 		return stale
 	}
 	requiresEnter := false
@@ -361,80 +362,82 @@ func (d *Dispatcher) handlePrompt(ctx context.Context, receivedAt time.Time, req
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandPrompt, paneID, commandDeadline, text),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "prompt"); stale != nil {
+		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
 			return EffectResult{Result: stale}
 		}
 		if !requiresEnter {
 			if err := d.herdr.Prompt(effectCtx, paneID, text); err != nil {
-				return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
+				return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 			}
-			return EffectResult{Result: completed(requestID, "prompt", paneID, nil)}
+			return EffectResult{Result: completed(requestID, action, paneID, nil)}
 		}
 		if err := d.herdr.SendText(effectCtx, paneID, text); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
+			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
 		if err := d.paneSessionError(token); err != nil {
 			err = partiallyApplied("prompt text was already delivered", err)
-			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
+			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
 		if err := d.herdr.SendKeys(effectCtx, paneID, []string{"Enter"}); err != nil {
 			err = partiallyApplied("prompt text was already delivered", err)
-			return EffectResult{Result: d.failErr(requestID, "prompt", paneID, err)}
+			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
-		return EffectResult{Result: completed(requestID, "prompt", paneID, nil)}
+		return EffectResult{Result: completed(requestID, action, paneID, nil)}
 	}))
 	if result.OK {
-		d.recordActivityWithExtract("prompt", "sent", "Prompt sent", text, paneID, requestID)
+		d.recordActivityWithExtract(action, "sent", "Prompt sent", text, paneID, requestID)
 		d.wake()
 	}
 	return result
 }
 
 func (d *Dispatcher) handleKeys(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+	const action = "send_keys"
 	keys, err := stringSlice(message["keys"])
 	if paneID == "" || err != nil || len(keys) == 0 {
-		return d.fail(requestID, "keys", paneID, "Keys and agent are required")
+		return d.fail(requestID, action, paneID, "Keys and agent are required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandKeys, paneID, commandDeadline, keys),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "keys"); stale != nil {
+		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
 			return EffectResult{Result: stale}
 		}
 		if err := d.herdr.SendKeys(effectCtx, paneID, keys); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "keys", paneID, err)}
+			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
-		return EffectResult{Result: completed(requestID, "keys", paneID, nil)}
+		return EffectResult{Result: completed(requestID, action, paneID, nil)}
 	}))
 	if result.OK {
 		label := stringValue(message, "activity_label")
 		if label == "" {
 			label = "keys"
 		}
-		d.recordActivity("keys", "sent", label, paneID, requestID)
+		d.recordActivity(action, "sent", label, paneID, requestID)
 		d.wake()
 	}
 	return result
 }
 
 func (d *Dispatcher) handleText(ctx context.Context, receivedAt time.Time, requestID, paneID string, message map[string]any) *CommandResult {
+	const action = "send_text"
 	text := stringValue(message, "text")
 	if paneID == "" || text == "" {
-		return d.fail(requestID, "text", paneID, "Text and agent are required")
+		return d.fail(requestID, action, paneID, "Text and agent are required")
 	}
 	result := d.schedule(ctx, ScheduleOptions{
 		Command: d.command(ctx, receivedAt, requestID, CommandText, paneID, commandDeadline, text),
 	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		if stale := d.paneSessionCurrent(token, requestID, "text"); stale != nil {
+		if stale := d.paneSessionCurrent(token, requestID, action); stale != nil {
 			return EffectResult{Result: stale}
 		}
 		if err := d.herdr.SendText(effectCtx, paneID, text); err != nil {
-			return EffectResult{Result: d.failErr(requestID, "text", paneID, err)}
+			return EffectResult{Result: d.failErr(requestID, action, paneID, err)}
 		}
-		return EffectResult{Result: completed(requestID, "text", paneID, nil)}
+		return EffectResult{Result: completed(requestID, action, paneID, nil)}
 	}))
 	if result.OK {
-		d.recordActivityWithExtract("text", "sent", "Text inserted", text, paneID, requestID)
+		d.recordActivityWithExtract(action, "sent", "Text inserted", text, paneID, requestID)
 		d.wake()
 	}
 	return result

@@ -553,7 +553,12 @@ textarea { min-height: 6.5rem; resize: vertical; }
    of the newest lines. A leased pane keeps the rules above, where the pane
    really is this wide. Box-drawing rows past this width are classified in
    terminal.ts and scroll inside their own row instead of wrapping. */
+.term-content.preserve-layout.resize-pending > .term-screen {
+  min-width: 0;
+  width: 100%;
+}
 .term-content.preserve-layout.resize-pending > .term-screen > .ansi-line {
+  max-width: 100%;
   /* `anywhere`, not `break-word`: only `anywhere` also shrinks a row's
      min-content, which keeps one long token from holding a run wider than the
      pane. Words still break at spaces first, so prose stays whole. */

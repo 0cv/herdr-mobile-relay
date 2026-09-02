@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
@@ -23,7 +24,7 @@ func (s *Server) validateUploadTarget(target protocol.TargetRef) error {
 }
 func (s *Server) expandPromptAttachmentReferences(action string, message map[string]any, target *protocol.TargetRef) error {
 	switch action {
-	case "prompt", "send_text", "submit_prompt", "text":
+	case "send_text", "submit_prompt":
 	default:
 		return nil
 	}
@@ -82,6 +83,11 @@ func (s *Server) handleUploadBegin(client *transport.ClientConn, requestID strin
 		s.sendUploadError(client, message, requestID, "upload_begin_result", errors.New("upload_unavailable"))
 		return
 	}
+	if identity, authenticated := client.Identity(); authenticated {
+		request.Owner = identity.DeviceID
+	} else {
+		request.Owner = "connection:" + client.ID()
+	}
 	result, err := s.uploadM.Begin(request)
 	if err != nil {
 		s.sendUploadError(client, message, requestID, "upload_begin_result", err)
@@ -136,6 +142,13 @@ func (s *Server) handleUploadFinish(client *transport.ClientConn, requestID stri
 	if err != nil {
 		s.sendUploadError(client, message, requestID, "upload_finish_result", err)
 		return
+	}
+	if s.dispatcher != nil {
+		summary := fmt.Sprintf("Attached %d files", len(result.Attachments))
+		if len(result.Attachments) == 1 {
+			summary = "Attached " + result.Attachments[0].Name
+		}
+		s.dispatcher.RecordActivity("upload", "completed", summary, request.Target.PaneID, requestID)
 	}
 	s.sendUploadResult(client, message, requestID, "upload_finish_result", result)
 }
@@ -224,6 +237,8 @@ func publicUploadErrorCode(code string) string {
 		return "attachment_unknown_mime"
 	case "upload_session_expired":
 		return "attachment_upload_expired"
+	case "upload_session_limit":
+		return "attachment_upload_busy"
 	case "upload_chunk_out_of_order", "upload_chunk_digest_mismatch", "upload_final_digest_mismatch",
 		"upload_incomplete", "upload_scope_mismatch", "upload_session_not_found":
 		return "attachment_upload_state_unknown"

@@ -170,7 +170,7 @@ if [ -n "$speech_missing" ]; then
     if [ "$INSTALL_MISSING" -eq 1 ]; then
         answer="${HERDR_SETUP_YES:-}"
         if [ "$answer" != "1" ] && [ -t 0 ]; then
-            printf 'Download the English voice that reads responses aloud (about 115 MB with the engine, cached across updates)? [Y/n] '
+            printf 'Download the English voice that reads responses aloud (about 82–90 MB with the engine, cached across updates)? [Y/n] '
             read -r answer
         fi
         case "$answer" in

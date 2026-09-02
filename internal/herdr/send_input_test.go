@@ -58,6 +58,46 @@ func TestSendInputUsesOfficialPasteAwareRequest(t *testing.T) {
 	}
 }
 
+func TestSendInputWrittenStructuredErrorIsDispatchedUnknown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		var request struct {
+			ID string `json:"id"`
+		}
+		if json.NewDecoder(conn).Decode(&request) != nil {
+			return
+		}
+		_ = json.NewEncoder(conn).Encode(map[string]any{
+			"id": request.ID,
+			"error": map[string]any{
+				"code": "invalid_key", "message": "text was accepted before a key failed",
+			},
+		})
+	}()
+
+	client := NewClient("unused", path)
+	err = client.SendInput(context.Background(), "pane-1", PaneInput{
+		Text: "possibly applied", Keys: []string{"Enter"},
+	})
+	if !errors.Is(err, ErrDispatchedUnknown) || errors.Is(err, ErrNotStarted) {
+		t.Fatalf("SendInput() error = %v, want dispatched unknown", err)
+	}
+	var cliErr *CLIError
+	if !errors.As(err, &cliErr) || cliErr.Code != "invalid_key" {
+		t.Fatalf("SendInput() error = %v, want structured CLI error", err)
+	}
+}
+
 func TestSendInputRejectsUnsupportedKeysBeforeDispatch(t *testing.T) {
 	for _, key := range []string{"Home", "End", "PageUp", "PageDown", "Delete", "Escape", "\\x1b[A", "meta+Enter", "ctrl+a", "F25"} {
 		t.Run(key, func(t *testing.T) {

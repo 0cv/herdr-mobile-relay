@@ -46,9 +46,11 @@ for (const relative of compressedAssets) {
 
 const assets = await readdir(join(root, 'assets'));
 const scripts = assets.filter((name) => name.endsWith('.js'));
+const workerScripts = scripts.filter((name) => /^attachment-hash\.worker-[A-Za-z0-9_-]+\.js$/.test(name));
 const styles = assets.filter((name) => name.endsWith('.css'));
-if (scripts.length !== 1 || scripts[0] !== 'app.js') {
-  throw new Error(`Expected only assets/app.js; found ${scripts.join(', ')}`);
+const unexpectedScripts = scripts.filter((name) => name !== 'app.js' && !workerScripts.includes(name));
+if (!scripts.includes('app.js') || workerScripts.length !== 1 || unexpectedScripts.length !== 0) {
+  throw new Error(`Expected assets/app.js and one attachment hash worker; found ${scripts.join(', ')}`);
 }
 if (styles.length !== 1 || styles[0] !== 'app.css') {
   throw new Error(`Expected only assets/app.css; found ${styles.join(', ')}`);

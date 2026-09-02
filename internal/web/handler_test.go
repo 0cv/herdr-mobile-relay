@@ -20,6 +20,11 @@ func setupTestWebRoot(t *testing.T) string {
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>hello</html>"), 0o644)
 	os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("console.log('app')"), 0o644)
 	os.WriteFile(filepath.Join(dir, "assets", "app.css"), []byte("body{}"), 0o644)
+	os.WriteFile(
+		filepath.Join(dir, "assets", "attachment-hash.worker-D_WkX-nj.js"),
+		[]byte("self.onmessage = () => {}"),
+		0o644,
+	)
 	os.WriteFile(filepath.Join(dir, "sw.js"), []byte("// sw"), 0o644)
 	os.WriteFile(filepath.Join(dir, "manifest-loader.js"), []byte("// manifest loader"), 0o644)
 	os.WriteFile(filepath.Join(dir, "setup.webmanifest"), []byte("{}"), 0o644)
@@ -55,6 +60,33 @@ func TestServesAllowedAsset(t *testing.T) {
 	}
 	if etag := w.Header().Get("ETag"); etag == "" {
 		t.Error("missing ETag")
+	}
+}
+
+func TestServesOnlyVersionedAttachmentHashWorker(t *testing.T) {
+	root := setupTestWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	for _, requestPath := range []string{
+		"/assets/attachment-hash.worker-D_WkX-nj.js",
+		"/assets/attachment-hash.worker-.js",
+		"/assets/attachment-hash.worker-D.WkX.js",
+		"/assets/unrelated-worker-D_WkX-nj.js",
+	} {
+		req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		want := http.StatusNotFound
+		if requestPath == "/assets/attachment-hash.worker-D_WkX-nj.js" {
+			want = http.StatusOK
+		}
+		if w.Code != want {
+			t.Errorf("%s status = %d, want %d", requestPath, w.Code, want)
+		}
 	}
 }
 

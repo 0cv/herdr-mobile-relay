@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
+import { reportAppAnomaly } from '$lib/crash-banner';
 import {
   adoptRelaySpeech,
   armSpeechKeepalive,
@@ -42,6 +43,22 @@ afterEach(() => {
   securityState.update((state) => ({ ...state, locked: false }));
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe('crash banner recovery', () => {
+  it('reports a later independent failure after dismissal', () => {
+    reportAppAnomaly('first independent test failure');
+    const first = document.querySelector<HTMLElement>('[role="alert"]');
+    expect(first?.textContent).toContain('first independent test failure');
+
+    first?.click();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+
+    reportAppAnomaly('second independent test failure');
+    const second = document.querySelector<HTMLElement>('[role="alert"]');
+    expect(second?.textContent).toContain('second independent test failure');
+    second?.click();
+  });
 });
 
 describe('exact route identity', () => {
@@ -167,9 +184,15 @@ describe('relay speech', () => {
     expect(element.plays).toBe(1);
 
     const sent: { text: string; language: string }[] = [];
+    const cancellations: Array<() => void> = [];
     const send = vi.fn((text: string, language: string) => {
       sent.push({ text, language });
-      return Promise.resolve({ data: { audio: btoa(`RIFF-${sent.length}`) } });
+      const cancel = vi.fn();
+      cancellations.push(cancel);
+      return Object.assign(
+        Promise.resolve({ data: { audio: btoa(`RIFF-${sent.length}`) } }),
+        { cancel },
+      );
     });
     const sentence = 'The relay confirmed every change landed as expected.';
     expect(speakViaRelay(Array.from({ length: 12 }, () => sentence).join(' '), send)).toBe(true);
@@ -186,6 +209,7 @@ describe('relay speech', () => {
 
     // Stopping mid-fragment pauses the element and ends the run.
     stopSpeech();
+    expect(cancellations.at(-1)).toHaveBeenCalledOnce();
     expect(element.paused).toBe(true);
     expect(get(speechState)).toBe('idle');
     element.onended?.();

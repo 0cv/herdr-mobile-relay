@@ -17,7 +17,9 @@ import {
   normalizeRelayConfig,
   quickSetupConfig,
   quickSetupInvitation,
+  RELAY_KEY_BYTES,
   saveRelayConfigs,
+  shouldDeferPairingConnection,
   shouldRetainSetupFragment,
 } from './config';
 import {
@@ -50,8 +52,13 @@ import {
   relayProtocolError,
   RELAY_PROTOCOL_VERSION,
 } from './protocol';
-import { targetRefForAgent } from './resource-id';
-import { adoptRelaySpeech, isSpeechLanguage } from './speech';
+import {
+  normalizeFrontendTargetRef,
+  targetRefForAgent,
+  targetRefMatchesAgent,
+  targetStoreKey,
+} from './resource-id';
+import { adoptRelaySpeech, isSpeechLanguage, type SpeechRequest } from './speech';
 import {
   PUSH_CATEGORIES,
   defaultDevicePushPolicy,
@@ -116,6 +123,7 @@ const PANE_READ_RETRY_MS = 35_000;
 // out the full handshake timeout plus backoff — the "dozens of seconds before
 // streaming resumes after sleep" a phone sees in gateway mode.
 const STALE_CONNECTING_MS = 5_000;
+const PAIRING_DEFERRED_MESSAGE = 'Add Herdr to the iPhone or iPad Home Screen, then open it there to finish pairing.';
 // Proof-of-life cadence for every connected relay. The gateway reaps a quiet
 // phone connection after five minutes and never pings one, so a hidden but
 // still-running page loses its socket silently and pays a full re-dial (TLS +
@@ -411,6 +419,7 @@ class RelayStore {
   private pendingSlashCommands = new Map<string, PendingSlashCommands>();
   private respondingTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconnectAttempts = new Map<string, number>();
+  private deferredPairingRelays = new Set<string>();
   private reconnectEnabled = true;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private hidden = false;
@@ -430,18 +439,21 @@ class RelayStore {
 
   initialize(connect = true): void {
     let relays = loadRelayConfigs();
+    this.deferredPairingRelays.clear();
     const setup = quickSetupConfig(location);
     const invitation = quickSetupInvitation(location);
     const imported = importQuickSetup(relays, location);
     if (imported) {
       relays = imported;
-      if (setup && invitation) {
-        const relay = this.relayForSetup(relays, setup);
-        if (relay && !this.hasDeviceCredential(relay.id)) {
+      const relay = setup ? this.relayForSetup(relays, setup) : undefined;
+      if (relay) {
+        if (this.deferPairing(relay, location)) {
+          this.showToast(PAIRING_DEFERRED_MESSAGE);
+        } else if (invitation && this.shouldSaveInvitation(relay.id, invitation)) {
           try {
             this.deviceCredentials.saveInvitation(relay.id, invitation);
           } catch {
-            this.deviceCredentials.remove(relay.id);
+            // A malformed or expired link must not remove a working credential.
           }
         }
       }
@@ -453,6 +465,37 @@ class RelayStore {
     this.relayConfigs.set(relays);
     if (connect) this.connectAll();
   }
+
+  /**
+   * Records whether this browser must leave the link's one-use secret for the
+   * installed Home Screen copy to redeem.
+   */
+  private deferPairing(relay: RelayConfig, locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>): boolean {
+    const deferred = shouldDeferPairingConnection(
+      locationValue,
+      navigator.standalone,
+      navigator.userAgent,
+      navigator.maxTouchPoints,
+    );
+    if (deferred) {
+      this.deferredPairingRelays.add(relay.id);
+      this.markPairingDeferred(relay);
+    } else {
+      this.deferredPairingRelays.delete(relay.id);
+    }
+    return deferred;
+  }
+
+  /** A deferred relay shows as a disconnected row that explains why it never dials. */
+  private markPairingDeferred(relay: RelayConfig): void {
+    this.disconnectRelay(relay.id);
+    const connection = this.newConnection(relay);
+    connection.status = 'disconnected';
+    connection.closed = true;
+    connection.pairingDeferred = true;
+    this.connectionsValue.set(relay.id, connection);
+    this.emitConnections();
+  }
   private relayForSetup(relays: RelayConfig[], setup: Omit<RelayConfig, 'id'>): RelayConfig | undefined {
     if (setup.transport === 'hybrid') {
       const gateways = setup.gatewayUrls ?? [setup.gatewayUrl ?? ''];
@@ -462,38 +505,41 @@ class RelayStore {
     }
     return relays.find((relay) => relay.url === setup.url);
   }
-  private hasDeviceCredential(relayId: string): boolean {
-    return this.deviceCredentials.get(relayId)?.kind === 'credential';
+  private shouldSaveInvitation(relayId: string, invitation: Omit<RelayInvitation, 'kind'>): boolean {
+    const stored = this.deviceCredentials.get(relayId);
+    if (!stored) return true;
+    if (stored.kind === 'invitation') {
+      return stored.id !== invitation.id || stored.version !== invitation.version;
+    }
+    return stored.invitationId !== invitation.id && invitation.expiresAt > stored.issuedAt;
   }
-
-
 
   importSetupLink(locationValue: Pick<Location, 'hash' | 'protocol' | 'host' | 'pathname' | 'search'> = location, connect = true): boolean {
     const setup = quickSetupConfig(locationValue);
     const invitation = quickSetupInvitation(locationValue);
     const imported = importQuickSetup(get(this.relayConfigs), locationValue);
     if (!imported || !setup) return false;
-    if (invitation) {
-      const relay = this.relayForSetup(imported, setup);
-      if (!relay) return false;
-      // An invitation is spent the moment it pairs. Walking back to the
-      // setup link — the browser keeps that entry in history — must not
-      // replace the credential it produced, or the relay refuses the phone.
-      if (!this.hasDeviceCredential(relay.id)) {
-        try {
-          this.deviceCredentials.saveInvitation(relay.id, invitation);
-        } catch {
-          return false;
-        }
-      }
-    }
+    const relay = this.relayForSetup(imported, setup);
+    if (!relay) return false;
+    // Persist the entry before deciding, so a deferred relay row exists for
+    // the connection state and the installed copy finds the same relay id.
     this.relayConfigs.set(imported);
     saveRelayConfigs(imported);
+    const deferred = this.deferPairing(relay, locationValue);
+    if (!deferred && invitation && this.shouldSaveInvitation(relay.id, invitation)) {
+      try {
+        this.deviceCredentials.saveInvitation(relay.id, invitation);
+      } catch {
+        return false;
+      }
+    }
     if (!shouldRetainSetupFragment(locationValue, navigator.standalone)) {
       history.replaceState(history.state, '', locationValue.pathname + locationValue.search);
     }
     if (connect) this.connectAll(true);
-    this.showToast(invitation ? 'Device invitation imported.' : 'Relay added from the setup link.');
+    this.showToast(deferred
+      ? PAIRING_DEFERRED_MESSAGE
+      : invitation ? 'Device invitation imported.' : 'Relay added from the setup link.');
     return true;
   }
 
@@ -526,8 +572,13 @@ class RelayStore {
     const existing = relays.find((relay) => (next.url
       ? relay.url === next.url
       : relay.gatewayUrl === next.gatewayUrl && relay.token === next.token));
+    // Re-adding or editing an entry must not forget that this relay was paired:
+    // the flag is what keeps a credential-less invitation relay off the
+    // plaintext path.
     const updated = existing
-      ? relays.map((relay) => (relay.id === existing.id ? { ...next, id: existing.id } : relay))
+      ? relays.map((relay) => (relay.id === existing.id
+        ? normalizeRelayConfig({ ...next, id: existing.id, paired: next.paired || existing.paired })
+        : relay))
       : [...relays, next];
     this.relayConfigs.set(updated);
     saveRelayConfigs(updated);
@@ -537,6 +588,7 @@ class RelayStore {
   removeRelay(id: string): void {
     this.disconnectRelay(id);
     this.reconnectAttempts.delete(id);
+    this.deferredPairingRelays.delete(id);
     this.deviceCredentials.remove(id);
     this.devicesValue.delete(id);
     this.devices.set(new Map(this.devicesValue));
@@ -566,14 +618,17 @@ class RelayStore {
       this.workspaces.set([]);
     }
     this.blockedSnapshotMisses.clear();
-    for (const relay of get(this.relayConfigs)) this.connectRelay(relay);
+    for (const relay of get(this.relayConfigs)) {
+      if (this.deferredPairingRelays.has(relay.id)) this.markPairingDeferred(relay);
+      else this.connectRelay(relay);
+    }
   }
 
   private relayAuthentication(relay: RelayConfig): RelayInvitation | RelayDeviceCredential | undefined {
     const stored = this.deviceCredentials.get(relay.id);
     if (stored) return stored;
     const secret = UTF8_ENCODER.encode(relay.token);
-    if (secret.byteLength !== 32) return undefined;
+    if (secret.byteLength !== RELAY_KEY_BYTES) return undefined;
     return this.deviceCredentials.saveInvitation(relay.id, {
       id: 'bootstrap',
       version: 1,
@@ -582,9 +637,57 @@ class RelayStore {
     });
   }
 
-  connectRelay(relay: RelayConfig): void {
+  /**
+   * Reports that a dial cannot authenticate, decided from local state alone.
+   * There is no credential to present, no usable relay key to bootstrap one
+   * from, and the relay is known to speak the encrypted handshake — because it
+   * was entered through an invitation or has already enrolled a credential, or
+   * because a relay key is configured but is not a usable one.
+   *
+   * A relay whose key can still bootstrap is excluded: `reset_devices` re-arms
+   * the relay's bootstrap invitation, so that dial is how a controller
+   * re-enrols. A tokenless relay that never paired is excluded too — it takes
+   * the unencrypted path, and a failure there is indistinguishable from a relay
+   * that is simply down, so it stays on the reconnect ladder.
+   */
+  private pairingRequired(relay: RelayConfig): boolean {
+    if (this.deviceCredentials.get(relay.id)) return false;
+    if (UTF8_ENCODER.encode(relay.token).byteLength === RELAY_KEY_BYTES) return false;
+    return Boolean(relay.paired) || Boolean(relay.token);
+  }
+
+  /**
+   * Records that this relay speaks the encrypted handshake, the moment a
+   * credential is enrolled against it. An invitation-paired entry stores no
+   * relay key, so this flag is what survives the credential being revoked,
+   * reset, or dropped with an expired invitation.
+   */
+  private markRelayPaired(relayId: string): void {
+    const relays = get(this.relayConfigs);
+    const existing = relays.find((relay) => relay.id === relayId);
+    if (!existing || existing.paired) return;
+    const paired = { ...existing, paired: true } as const;
+    const updated = relays.map((relay) => (relay.id === relayId ? paired : relay));
+    this.relayConfigs.set(updated);
+    saveRelayConfigs(updated);
+    const connection = this.connectionsValue.get(relayId);
+    if (connection) connection.relay = paired;
+  }
+
+  private markPairingRequired(relay: RelayConfig): void {
+    if (this.connectionsValue.get(relay.id)?.pairingRequired) return;
     this.disconnectRelay(relay.id);
-    const connection: RelayConnection = {
+    const connection = this.newConnection(relay);
+    connection.status = 'disconnected';
+    connection.closed = true;
+    connection.pairingRequired = true;
+    this.connectionsValue.set(relay.id, connection);
+    this.emitConnections();
+    this.showToast(`${relay.label} needs pairing. Import a device invitation link.`, true);
+  }
+
+  private newConnection(relay: RelayConfig): RelayConnection {
+    return {
       relay,
       transport: null,
       status: 'connecting',
@@ -609,6 +712,8 @@ class RelayStore {
       host: '',
       protocol: 0,
       authRejected: false,
+      pairingRequired: false,
+      pairingDeferred: false,
       version: '',
       releaseVersion: '',
       revision: '',
@@ -618,9 +723,18 @@ class RelayStore {
       pushStatus: '',
       vapidPublicKey: '',
     };
+  }
+
+  connectRelay(relay: RelayConfig): void {
+    if (this.deferredPairingRelays.has(relay.id)) return;
+    if (this.pairingRequired(relay)) {
+      this.markPairingRequired(relay);
+      return;
+    }
+    this.disconnectRelay(relay.id);
+    const connection = this.newConnection(relay);
     this.connectionsValue.set(relay.id, connection);
     this.emitConnections();
-    const authentication = this.relayAuthentication(relay);
     connection.transport = createRelayTransport(relay, {
       onMessage: (message) => {
         if (!this.isCurrentConnection(relay.id, connection)) return;
@@ -632,12 +746,13 @@ class RelayStore {
       onStatus: (status, detail) => {
         this.applyTransportStatus(relay, connection, status, detail);
       },
-    }, authentication ? {
-      authentication,
+    }, {
+      getAuthentication: () => this.relayAuthentication(relay),
       onAuthenticated: (presented, enrollment) => {
         commitDeviceEnrollment(this.deviceCredentials, relay.id, presented, enrollment);
+        this.markRelayPaired(relay.id);
       },
-    } : {});
+    });
     connection.transport.connect();
   }
 
@@ -678,16 +793,13 @@ class RelayStore {
     this.clearHealthTimer(connection);
     connection.status = 'disconnected';
     this.rejectPendingOperations(relay.id, detail?.reason || 'Relay disconnected');
-    // The relay refuses this device's credential. Reconnecting replays the
-    // same rejected material, so the phone stops and says how to recover.
+    // The relay refuses this device's credential. Keep it until a confirmed,
+    // newer invitation replaces it: gateway close reasons are not authenticated.
     if (detail?.code === 'device_unauthorized') {
       connection.authRejected = true;
       connection.closed = true;
       clearTimeout(connection.reconnectTimer ?? undefined);
       connection.reconnectTimer = null;
-      // The stored material is what the relay refuses, so drop it: the next
-      // invitation link then pairs this phone instead of being ignored.
-      this.deviceCredentials.remove(relay.id);
       this.emitConnections();
       this.showToast(`${relay.label} refused this device. Import a new invitation link.`, true);
       return;
@@ -707,7 +819,10 @@ class RelayStore {
     connection.lastMessageAt = Date.now();
     connection.status = 'connected';
     this.emitConnections();
-    if (runningAsInstalledApp()) {
+    const authentication = this.deviceCredentials.get(relayId);
+    if (runningAsInstalledApp()
+      && authentication?.kind === 'credential'
+      && authentication.role === 'controller') {
       this.sendRaw(relayId, {
         type: 'register_app_origin',
         origin: location.origin,
@@ -772,9 +887,7 @@ class RelayStore {
 
   disconnectRelay(id: string): void {
     this.clearSlashCommandCacheForRelay(id);
-    for (const paneId of this.pendingPaneReads.keys()) {
-      if (paneId.startsWith(`${id}::`)) this.pendingPaneReads.delete(paneId);
-    }
+    this.pendingPaneReads.clear();
     for (const paneId of this.paneWatchesStarted) {
       if (paneId.startsWith(`${id}::`)) this.paneWatchesStarted.delete(paneId);
     }
@@ -806,6 +919,7 @@ class RelayStore {
     const relays = get(this.relayConfigs);
     for (const relay of relays) {
       const connection = this.connectionsValue.get(relay.id);
+      if (connection?.authRejected || connection?.pairingRequired) continue;
       if (connection?.status === 'connecting') {
         // Replace a dial that predates the event this revalidation reacts to:
         // it likely started before the network came back and is blackholed.
@@ -1228,9 +1342,35 @@ class RelayStore {
       this.publishAgents('agent update');
       return;
     }
+    const paneMessageTarget = (message: Record<string, any>): FrontendTargetRef | null => {
+      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+      const agent = this.agentsValue.find((candidate) => candidate.pane_id === paneId)
+        || this.watchedPanes.get(paneId);
+      if (!agent) return null;
+      if (!Object.prototype.hasOwnProperty.call(message, 'target')) return targetRefForAgent(agent);
+      return normalizeFrontendTargetRef({
+        ...(message.target as Record<string, unknown>),
+        relay_id: relayId,
+      });
+    };
+    const paneMessageMatches = (message: Record<string, any>): boolean => {
+      if (!Object.prototype.hasOwnProperty.call(message, 'target')) return true;
+      const target = paneMessageTarget(message);
+      if (!target) return false;
+      const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+      const agent = this.agentsValue.find((candidate) => candidate.pane_id === paneId)
+        || this.watchedPanes.get(paneId);
+      return Boolean(agent && targetRefMatchesAgent(target, agent));
+    };
+    const clearPendingPaneRead = (message: Record<string, any>): void => {
+      const target = paneMessageTarget(message);
+      const key = target && targetStoreKey(target);
+      if (key) this.pendingPaneReads.delete(key);
+    };
     if (message.type === 'pane_unchanged') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-      this.pendingPaneReads.delete(paneId);
+      if (!paneMessageMatches(message)) return;
+      clearPendingPaneRead(message);
       if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
         this.paneContentFingerprints.set(paneId, message.content_fingerprint);
       }
@@ -1239,12 +1379,14 @@ class RelayStore {
     }
     if (message.type === 'pane_resync') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+      if (!paneMessageMatches(message)) return;
       const watched = this.watchedPanes.get(paneId);
       if (watched) this.readPane(watched, true);
       return;
     }
     if (message.type === 'pane_delta') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
+      if (!paneMessageMatches(message)) return;
       const frame = this.terminalFramesValue.get(paneId);
       const baseFingerprint = this.paneContentFingerprints.get(paneId);
       // Released relays encoded metadata-only deltas as null. Preserve the
@@ -1283,7 +1425,8 @@ class RelayStore {
     }
     if (message.type === 'pane_content') {
       const paneId = clientPaneId(relayId, String(message.pane_id || ''));
-      this.pendingPaneReads.delete(paneId);
+      if (!paneMessageMatches(message)) return;
+      clearPendingPaneRead(message);
       if (typeof message.content_fingerprint === 'string' && message.content_fingerprint) {
         this.paneContentFingerprints.set(paneId, message.content_fingerprint);
       }
@@ -1365,9 +1508,7 @@ class RelayStore {
     for (const paneId of this.blockedSnapshotMisses.keys()) {
       if (paneId.startsWith(`${relayId}::`)) this.blockedSnapshotMisses.delete(paneId);
     }
-    for (const paneId of this.pendingPaneReads.keys()) {
-      if (paneId.startsWith(`${relayId}::`)) this.pendingPaneReads.delete(paneId);
-    }
+    this.pendingPaneReads.clear();
     this.publishAgents('relay removal');
   }
 
@@ -1585,7 +1726,10 @@ class RelayStore {
       device_id: intent.deviceId,
     });
     const current = this.deviceCredential(intent.relayId);
-    if (current?.deviceId === intent.deviceId) this.deviceCredentials.remove(intent.relayId);
+    if (current?.deviceId === intent.deviceId) {
+      this.deviceCredentials.remove(intent.relayId);
+      this.surfacePairingRequirement(intent.relayId);
+    }
     await this.refreshDevices(intent.relayId);
   }
 
@@ -1594,6 +1738,17 @@ class RelayStore {
     this.deviceCredentials.remove(intent.relayId);
     this.devicesValue.delete(intent.relayId);
     this.devices.set(new Map(this.devicesValue));
+    this.surfacePairingRequirement(intent.relayId);
+  }
+
+  /**
+   * Answers the question the phone would otherwise spend a reconnect ladder on:
+   * once this browser's own credential is gone, an invitation-paired relay has
+   * nothing left to present, so say so now instead of retrying in the dark.
+   */
+  private surfacePairingRequirement(relayId: string): void {
+    const relay = get(this.relayConfigs).find((entry) => entry.id === relayId);
+    if (relay && this.pairingRequired(relay)) this.markPairingRequired(relay);
   }
 
   async forgetCurrentDevice(relayId: string): Promise<void> {
@@ -1616,6 +1771,28 @@ class RelayStore {
       pane_id: agent.raw_pane_id,
       ...identity,
     }, timeoutMs);
+  }
+
+  speakToAgent(agent: Agent, text: string, language: string): SpeechRequest {
+    const speechRequestId = commandRequestId();
+    const promise = this.sendToAgent(agent, {
+      type: 'speak_text',
+      text,
+      language,
+      speech_request_id: speechRequestId,
+    }, 20_000) as SpeechRequest;
+    promise.cancel = () => {
+      const identity = this.agentTargetPayload(agent);
+      if (!identity) return;
+      this.sendRaw(agent.relay_id, {
+        type: 'cancel_speech',
+        pane_id: agent.raw_pane_id,
+        speech_request_id: speechRequestId,
+        protocol: RELAY_PROTOCOL_VERSION,
+        ...identity,
+      });
+    };
+    return promise;
   }
 
   /**
@@ -2055,6 +2232,7 @@ class RelayStore {
       hasMore: data.has_more === true,
       total: Math.max(0, Number(data.total) || 0),
       fileTruncated: data.file_truncated === true,
+      sourceCorrupt: data.source_corrupt === true,
       omoPlan: normalizeOmoTodoState(data.omo_plan),
     };
   }
@@ -2072,10 +2250,12 @@ class RelayStore {
   }
 
   readPane(agent: Agent, force = false): void {
-    const requestedAt = this.pendingPaneReads.get(agent.pane_id);
-    if (!force && requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
     const identity = this.agentTargetPayload(agent);
     if (!identity) return;
+    const readKey = targetStoreKey(identity.target);
+    if (!readKey) return;
+    const requestedAt = this.pendingPaneReads.get(readKey);
+    if (!force && requestedAt && Date.now() - requestedAt < PANE_READ_RETRY_MS) return;
     this.paneWatchesStarted.delete(agent.pane_id);
     const sent = this.sendRaw(agent.relay_id, {
       type: 'read_pane',
@@ -2085,7 +2265,7 @@ class RelayStore {
       content_fingerprint: force ? '' : this.paneContentFingerprints.get(agent.pane_id) || '',
       ...identity,
     });
-    if (sent) this.pendingPaneReads.set(agent.pane_id, Date.now());
+    if (sent) this.pendingPaneReads.set(readKey, Date.now());
   }
 
   watchPane(agent: Agent): void {
@@ -2115,12 +2295,13 @@ class RelayStore {
 
   private startPaneWatch(paneId: string): void {
     const agent = this.watchedPanes.get(paneId);
-    if (!agent || this.paneWatchesStarted.has(paneId) || this.pendingPaneReads.has(paneId)) return;
+    if (!agent || this.paneWatchesStarted.has(paneId)) return;
     const connection = this.connectionsValue.get(agent.relay_id);
     if (!connection?.capabilities.includes('pane_realtime_delta')) return;
     const contentFingerprint = this.paneContentFingerprints.get(paneId);
     const identity = this.agentTargetPayload(agent);
-    if (!contentFingerprint || !identity) return;
+    const readKey = identity && targetStoreKey(identity.target);
+    if (!contentFingerprint || !identity || !readKey || this.pendingPaneReads.has(readKey)) return;
     const budget = this.paneBudget(agent.relay_id);
     const sent = this.sendRaw(agent.relay_id, {
       type: 'watch_pane',

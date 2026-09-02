@@ -81,9 +81,17 @@ func TestPushConfigFixtureHasRequiredCutoverFields(t *testing.T) {
 	}
 	if fixture.Type != "push_config" || fixture.Protocol != Version ||
 		fixture.Version == "" || fixture.ReleaseVersion == "" || fixture.Revision == "" ||
-		fixture.Update == nil || fixture.AppDeploy == nil ||
-		len(fixture.Capabilities) != len(Capabilities) {
+		fixture.Update == nil || fixture.AppDeploy == nil {
 		t.Fatalf("incomplete push_config fixture: %+v", fixture)
+	}
+	fixtureCapabilities := make(map[string]bool, len(fixture.Capabilities))
+	for _, capability := range fixture.Capabilities {
+		fixtureCapabilities[capability] = true
+	}
+	for _, capability := range Capabilities {
+		if !fixtureCapabilities[capability] {
+			t.Fatalf("push_config fixture is missing base capability %q", capability)
+		}
 	}
 	foundAttentionClassification := false
 	for _, capability := range fixture.Capabilities {

@@ -18,13 +18,17 @@ interface RelayFixture {
 interface BootOptions {
   standalone?: boolean;
   navigatorStandalone?: boolean;
+  userAgent?: string;
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone }) => {
+  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
     if (navigatorStandalone !== null) {
       Object.defineProperty(navigator, 'standalone', { configurable: true, value: navigatorStandalone });
+    }
+    if (userAgent) {
+      Object.defineProperty(navigator, 'userAgent', { configurable: true, value: userAgent });
     }
     if (standalone) {
       const nativeMatchMedia = window.matchMedia.bind(window);
@@ -415,6 +419,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     savedRelays: relays,
     standalone: options.standalone ?? false,
     navigatorStandalone: options.navigatorStandalone ?? null,
+    userAgent: options.userAgent ?? '',
   });
   await page.goto(path);
 }
@@ -471,6 +476,21 @@ async function handshake(page: Page, index: number, overrides: Record<string, un
 }
 
 const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' };
+
+test('guides an unpairable relay without ever dialing it', async ({ page }) => {
+  // A relay key that is not a usable relay key, with no enrolled credential:
+  // nothing can be presented, so the app must not spend a dial finding out.
+  await boot(page, [{ ...fedora, token: 'truncated-key' }]);
+
+  await expect(page.getByText('Fedora needs pairing. Import a device invitation link.')).toBeVisible();
+  expect(await socketCount(page)).toBe(0);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.waitForTimeout(80);
+  expect(await socketCount(page)).toBe(0);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByText('This computer needs pairing. Import a device invitation link, or remove and add the relay.')).toBeVisible();
+});
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
   await boot(page, [fedora]);
@@ -873,11 +893,16 @@ test('keeps device verification modal until native authentication succeeds', asy
   await expect.poll(() => socketCount(page)).toBe(1);
 });
 
-test('keeps an iOS setup link available for Home Screen installation', async ({ page }) => {
-  const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
-  await boot(page, [], `/${setupHash}`, { navigatorStandalone: false });
+const IPHONE_SAFARI_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
-  await expect.poll(() => socketCount(page)).toBe(1);
+test('keeps an iOS setup link unredeemed for Home Screen installation', async ({ page }) => {
+  const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
+  await boot(page, [], `/${setupHash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+
+  // The bootstrap key is one-use and the installed copy has its own storage:
+  // a Safari tab that dialled would spend it before the Home Screen app opens.
+  await expect(page.getByRole('status').filter({ hasText: 'Add Herdr to the iPhone or iPad Home Screen' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'This browser tab keeps the setup link unused' })).toBeVisible();
   expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('setup.webmanifest');
   expect(await page.evaluate(() => location.hash)).toBe(setupHash);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_relays') || '[]')[0]))
@@ -886,6 +911,24 @@ test('keeps an iOS setup link available for Home Screen installation', async ({ 
       url: 'wss://relay-fedora.example.com',
       token: '0123456789abcdef0123456789abcdef',
     });
+  await page.waitForTimeout(500);
+  expect(await socketCount(page)).toBe(0);
+
+  // Focus and reconnect requests must not spend the key either.
+  await page.evaluate(() => {
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Waiting for the Home Screen app' })).toBeVisible();
+  await page.getByRole('button', { name: 'Reconnect All' }).click();
+  await page.waitForTimeout(500);
+  expect(await socketCount(page)).toBe(0);
+});
+
+test('an iOS browser tab without pairing material still connects', async ({ page }) => {
+  await boot(page, [fedora], '/', { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+  await expect.poll(() => socketCount(page)).toBe(1);
 });
 
 test('imports quick setup and merges agents from multiple relays', async ({ page }) => {
@@ -927,11 +970,13 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
   });
   await page.reload();
   await expect.poll(() => socketCount(page)).toBe(2);
-  await expect.poll(async () =>
-    (await commandsForSocket(page, 0)).some((command) => command.type === 'register_app_origin')).toBe(true);
   const base = 0;
   await handshake(page, base);
   await handshake(page, base + 1);
+  expect((await commandsForSocket(page, base)).some((command) =>
+    command.type === 'register_app_origin')).toBe(false);
+  expect((await commandsForSocket(page, base + 1)).some((command) =>
+    command.type === 'register_app_origin')).toBe(false);
   await server(page, base, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Fedora app', agent: 'codex' }] });
   await server(page, base + 1, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Mac app', agent: 'claude', options: ['Approve once', 'Deny'] }] });
   const headerBox = await page.getByRole('banner').boundingBox();
@@ -2174,6 +2219,56 @@ test('keeps a wide pane readable while its size lease is still pending', async (
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
 });
 
+test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_lease'] });
+  await page.evaluate(() => {
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        fedora: {
+          kind: 'credential',
+          id: 'credential-reader',
+          version: 1,
+          secret: 'R'.repeat(43),
+          deviceId: 'device-reader',
+          role: 'reader',
+          locale: 'en',
+          issuedAt: Date.now(),
+        },
+      },
+    }));
+  });
+  // Push a fresh connection snapshot so App's derived reader-role state observes
+  // the persisted credential before the agent view is rendered.
+  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_lease'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader pane', agent: 'claude' }],
+  });
+  await page.getByRole('button', { name: 'Open Reader pane on Fedora' }).click();
+  const wideRow = `https://example.test/${'reader-output'.repeat(40)}`;
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: wideRow,
+  });
+
+  await expect(page.getByRole('status')).toContainText('Reader access is read only');
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
+  const terminal = page.getByRole('log');
+  const geometry = await terminal.evaluate((element) => {
+    const row = element.querySelector<HTMLElement>('.ansi-line')!;
+    return {
+      rowHeight: row.getBoundingClientRect().height,
+      lineHeight: Number.parseFloat(getComputedStyle(row).lineHeight),
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    };
+  });
+  expect(geometry.rowHeight).toBeGreaterThan(geometry.lineHeight * 1.5);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+});
+
 test('estimates wrapped row heights while a lease is pending', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -2625,6 +2720,91 @@ test('reads a response aloud in the language the relay has a voice for', async (
     .filter((command) => command.type === 'speak_text').length).toBe(1);
   expect((await commandsForSocket(page, 0)).find((command) => command.type === 'speak_text'))
     .toMatchObject({ language: 'fr', text: 'Remote markdown response\nExact copied output' });
+});
+
+test('speak reports the relay copy failure when no parser can read the pane', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
+    speech_languages: ['en'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Spoken omp', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Spoken omp on Fedora' }).click();
+  // omp draws no response marker the phone can parse, so the relay's /copy
+  // transaction is the only source of text.
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: ' Completed omp response.\n\n────────────────────\n\n────────────────────',
+  });
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(1);
+  await setAutoCommands(page, false);
+
+  await page.getByRole('button', { name: 'Read latest response aloud' }).click();
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'copy_agent_response')).toHaveLength(1);
+  const copyCommand = (await commandsForSocket(page, 0))
+    .find((command) => command.type === 'copy_agent_response') as Record<string, unknown>;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'copy_agent_response',
+    request_id: copyCommand.request_id,
+    ok: false,
+    phase: 'failed',
+    error: 'Agent did not confirm a copied response',
+  });
+  await expect(page.getByRole('status').filter({ hasText: 'Agent did not confirm a copied response' })).toBeVisible();
+  expect((await commandsForSocket(page, 0)).filter((command) => command.type === 'speak_text')).toHaveLength(0);
+});
+
+test('a reader speaks the latest transcript turn without the relay copy command', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await page.evaluate(() => {
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        fedora: {
+          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
+          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
+        },
+      },
+    }));
+  });
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
+    speech_languages: ['en'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Read aloud', agent: 'omp', conversation_history_available: true }],
+  });
+  await setConversationFixture(page, {
+    entries: [
+      { id: 'turn-1', timestamp: '2026-09-02T10:00:00Z', role: 'user', text: 'Summarise the build' },
+      { id: 'turn-2', timestamp: '2026-09-02T10:00:05Z', role: 'assistant', text: 'The build passed with no warnings.' },
+    ],
+    total: 2,
+  });
+  await page.getByRole('button', { name: 'Open Read aloud on Fedora' }).click();
+  await expect(page.getByRole('status')).toContainText('Reader access is read only');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: ' Completed omp response.' });
+
+  await page.getByRole('button', { name: 'Read latest response aloud' }).click();
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'speak_text').length).toBe(1);
+  const commands = await commandsForSocket(page, 0);
+  // The relay copy command types into the agent's terminal, which a reader may
+  // not do; the agent's transcript is the read-only source instead.
+  expect(commands.filter((command) => command.type === 'copy_agent_response')).toHaveLength(0);
+  expect(commands.find((command) => command.type === 'speak_text'))
+    .toMatchObject({ text: 'The build passed with no warnings.' });
 });
 
 test('downloads a missing relay speech voice from Settings', async ({ page }) => {
@@ -5343,7 +5523,8 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
     }],
   });
   await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#pane=fedora%3A%3Aw1%3Ap2');
+  await expect.poll(() => page.evaluate(() => location.hash))
+    .toBe('#pane=r3.WzMsImZlZG9yYSIsInByaW1hcnkiLCJ3MTpwMiIsInRlcm1pbmFsLXcxOnAyIiwxLCIiXQ');
   await page.getByRole('button', { name: 'Manage agent' }).click();
   const manageDialog = page.getByRole('dialog', { name: 'Manage Agent' });
   await expect(manageDialog).toBeVisible();

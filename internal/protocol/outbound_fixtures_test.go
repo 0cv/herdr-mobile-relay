@@ -69,7 +69,7 @@ func TestCommandResultFixtureIsExact(t *testing.T) {
 	expected := map[string]any{
 		"type":       "command_result",
 		"request_id": "req-001",
-		"action":     "prompt",
+		"action":     "submit_prompt",
 		"ok":         true,
 		"phase":      "completed",
 		"error":      "",

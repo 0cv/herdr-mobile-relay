@@ -11,7 +11,7 @@
 
   let {
     plan,
-    title = 'OMO plan',
+    title = 'Oh My OpenCode plan',
   }: {
     plan: OmoTodoState;
     title?: string;

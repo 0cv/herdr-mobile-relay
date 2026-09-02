@@ -2,16 +2,6 @@ import { get, writable } from 'svelte/store';
 import { base64UrlDecode, base64UrlEncode } from './base64url';
 import { DEVICE_CREDENTIAL_KEY, DEVICE_LOCK_KEY } from './config';
 import { relayStore } from './store';
-import {
-  BrowserDeviceCredentialStore,
-  commitDeviceEnrollment,
-  forgetDeviceAfterRevocation,
-  type DeviceEnrollmentResult,
-  type DeviceIntentHandler,
-  type RelayDeviceCredential,
-  type RelayInvitation,
-  type RevokeDeviceIntent,
-} from './device-auth';
 
 
 export interface SecurityState {
@@ -30,47 +20,6 @@ export const securityState = writable<SecurityState>({
   hint: "Uses this browser's platform authenticator. Requires HTTPS.",
 });
 
-/**
- * Relay credentials live in ordinary origin-scoped browser storage. WebAuthn
- * below gates this app's UI after resume; it does not make those stored relay
- * secrets hardware-backed or inaccessible to same-origin script.
- */
-export function relayDeviceAuthentication(
-  relayId: string,
-  storage: Storage = localStorage,
-): RelayInvitation | RelayDeviceCredential | null {
-  return new BrowserDeviceCredentialStore(storage).get(relayId);
-}
-
-export function rememberRelayInvitation(
-  relayId: string,
-  invitation: Omit<RelayInvitation, 'kind'>,
-  storage: Storage = localStorage,
-): RelayInvitation {
-  return new BrowserDeviceCredentialStore(storage).saveInvitation(relayId, invitation);
-}
-
-export function completeRelayDeviceEnrollment(
-  relayId: string,
-  presented: RelayInvitation | RelayDeviceCredential,
-  enrollment: DeviceEnrollmentResult,
-  storage: Storage = localStorage,
-): RelayDeviceCredential {
-  return commitDeviceEnrollment(
-    new BrowserDeviceCredentialStore(storage),
-    relayId,
-    presented,
-    enrollment,
-  );
-}
-
-export function forgetRelayDevice(
-  relayId: string,
-  revoke: DeviceIntentHandler<RevokeDeviceIntent>,
-  storage: Storage = localStorage,
-): Promise<void> {
-  return forgetDeviceAfterRevocation(new BrowserDeviceCredentialStore(storage), relayId, revoke);
-}
 
 let unlockInProgress = false;
 let automaticUnlockPending = false;
@@ -194,10 +143,10 @@ export function lockForDevice(reason: 'open' | 'resume' = 'resume'): void {
   // Locking gates the interface, not the transport. Dropping the connection
   // here used to be free — the app was going idle anyway — but it now costs
   // every verification user the warm-resume path, and it buys no secrecy: the
-  // relay key sits in localStorage and the unlock redials with it unchanged,
-  // so a live socket grants an attacker nothing a dial would not. Pane traffic
-  // stops separately (TerminalView treats a locked app as not visible), so
-  // nothing streams behind the unlock dialog.
+  // per-device credential sits in localStorage and the unlock redials with it
+  // unchanged, so a live socket grants an attacker nothing a dial would not.
+  // Pane traffic stops separately (TerminalView treats a locked app as not
+  // visible), so nothing streams behind the unlock dialog.
   automaticUnlockPending = true;
   securityState.update((state) => ({ ...state, locked: true, reason, status: '' }));
 }

@@ -61,11 +61,6 @@ type Credential struct {
 	Current      bool      `json:"current,omitempty"`
 }
 
-type CredentialGrant struct {
-	Credential Credential `json:"credential"`
-	Secret     string     `json:"secret"`
-}
-
 type Invitation struct {
 	InvitationID string    `json:"invitation_id"`
 	Version      uint64    `json:"version"`
@@ -74,17 +69,6 @@ type Invitation struct {
 	Name         string    `json:"name"`
 	Role         Role      `json:"role"`
 	Locale       string    `json:"locale"`
-}
-
-type InvitationInfo struct {
-	InvitationID      string    `json:"invitation_id"`
-	Version           uint64    `json:"version"`
-	ExpiresAt         time.Time `json:"expires_at"`
-	Name              string    `json:"name"`
-	Role              Role      `json:"role"`
-	Locale            string    `json:"locale"`
-	FailedAttempts    int       `json:"failed_attempts"`
-	AttemptsRemaining int       `json:"attempts_remaining"`
 }
 
 type credentialRecord struct {
@@ -238,33 +222,6 @@ func (s *Store) EnsureBootstrapInvitation(secret []byte, name, locale string) er
 	return nil
 }
 
-func (s *Store) ActiveInvitation() (*InvitationInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	record := s.state.Invitation
-	if record == nil {
-		return nil, nil
-	}
-	if !s.now().UTC().Before(record.ExpiresAt) {
-		s.state.Invitation = nil
-		if err := s.persistLocked(); err != nil {
-			s.state.Invitation = record
-			return nil, fmt.Errorf("expire invitation: %w", err)
-		}
-		return nil, nil
-	}
-	return &InvitationInfo{
-		InvitationID:      record.InvitationID,
-		Version:           record.Version,
-		ExpiresAt:         record.ExpiresAt,
-		Name:              record.Name,
-		Role:              record.Role,
-		Locale:            record.Locale,
-		FailedAttempts:    record.FailedAttempts,
-		AttemptsRemaining: maxInviteAttempts - record.FailedAttempts,
-	}, nil
-}
-
 func (s *Store) ListCredentials(currentCredentialID string) []Credential {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -333,42 +290,6 @@ func (s *Store) RevokeCredential(credentialID string) (Credential, error) {
 	return record.Credential, nil
 }
 
-func (s *Store) ResetCredential(credentialID string) (CredentialGrant, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	index := s.credentialIndex(credentialID)
-	if index < 0 {
-		return CredentialGrant{}, ErrNotFound
-	}
-	secret, err := s.randomValue(secretBytes)
-	if err != nil {
-		return CredentialGrant{}, err
-	}
-	previous := s.state.Credentials[index]
-	record := &s.state.Credentials[index]
-	record.Version++
-	record.Secret = secret
-	record.Revoked = false
-	record.LastSeenAt = time.Time{}
-	if err := s.persistLocked(); err != nil {
-		s.state.Credentials[index] = previous
-		return CredentialGrant{}, fmt.Errorf("persist credential reset: %w", err)
-	}
-	return CredentialGrant{Credential: record.Credential, Secret: secret}, nil
-}
-
-func (s *Store) Reset() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	previous := s.state
-	s.state.Invitation = nil
-	s.state.Credentials = nil
-	if err := s.persistLocked(); err != nil {
-		s.state = previous
-		return fmt.Errorf("persist device reset: %w", err)
-	}
-	return nil
-}
 func (s *Store) ResetWithBootstrap(secret []byte, name, locale string) error {
 	name, locale, err := validateMetadata(name, RoleController, locale)
 	if err != nil {

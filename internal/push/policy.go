@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/0cv/herdr-mobile-relay/internal/localize"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
@@ -46,7 +47,9 @@ type PushEventKey struct {
 }
 
 func (k PushEventKey) Validate() error {
-	if strings.TrimSpace(k.DeviceID) == "" || strings.TrimSpace(k.EventID) == "" {
+	if !validPushIdentifier(k.DeviceID, true) || !validPushIdentifier(k.EventID, true) ||
+		!validPushTargetIdentifier(k.ServerSessionID, false) || !validPushTargetIdentifier(k.PaneID, false) ||
+		!validPushTargetIdentifier(k.TerminalID, false) || !validPushTargetIdentifier(k.AgentSessionID, false) {
 		return errors.New("push_invalid_event_key")
 	}
 	switch k.Category {
@@ -59,6 +62,20 @@ func (k PushEventKey) Validate() error {
 		return errors.New("push_invalid_category")
 	}
 	return nil
+}
+
+func validPushIdentifier(value string, required bool) bool {
+	if value == "" {
+		return !required
+	}
+	return len(value) <= 256 && utf8.ValidString(value) && strings.TrimSpace(value) == value
+}
+
+func validPushTargetIdentifier(value string, required bool) bool {
+	if value == "" {
+		return !required
+	}
+	return utf8.ValidString(value) && strings.TrimSpace(value) == value
 }
 
 func (k PushEventKey) Target() protocol.TargetRef {

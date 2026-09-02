@@ -97,6 +97,15 @@ export interface RelayConfig {
    * normalizes to its single primary, so both fields always agree.
    */
   gatewayUrls?: string[];
+  /**
+   * This computer was entered through an encrypted pairing: a device invitation
+   * link, or a credential enrolled against it. An invitation-paired entry keeps
+   * no relay key, so without this flag a removed credential is indistinguishable
+   * from a relay that never had one and the app dials the plaintext path at an
+   * encrypted relay forever. Present only when true, so legacy entries keep the
+   * exact shape they were stored with.
+   */
+  paired?: true;
 }
 
 export interface AgentProfile {
@@ -352,6 +361,7 @@ export interface ConversationPage {
   hasMore: boolean;
   total: number;
   fileTruncated: boolean;
+  sourceCorrupt: boolean;
   omoPlan?: OmoTodoState;
 }
 
@@ -394,6 +404,16 @@ export interface RelayConnectionView {
   capabilities: string[];
   /** The relay refused this device's credential; pairing again is the only fix. */
   authRejected: boolean;
+  /**
+   * The relay expects an encrypted handshake but this browser holds nothing to
+   * present, so no dial was attempted; importing an invitation is the only fix.
+   */
+  pairingRequired: boolean;
+  /**
+   * This iOS browser tab is holding the link's one-use secret for the Home
+   * Screen copy, so it never dials; installing the app is the only next step.
+   */
+  pairingDeferred: boolean;
   /** Languages this relay has a voice for, empty when it cannot read aloud. */
   speechLanguages: string[];
   /** Voice cache state per language, empty until the relay reports it. */

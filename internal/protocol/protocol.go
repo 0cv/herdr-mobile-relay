@@ -110,6 +110,7 @@ var actionCatalog = map[string]ActionMetadata{
 	"agent_start":              mutateAction("agent_start", true, true),
 	"agent_stop":               mutateAction("agent_stop", true, true),
 	"answer_question":          mutateAction("answer_question", true, true),
+	"cancel_speech":            readAction("cancel_speech"),
 	"check_update":             readAction("check_update"),
 	"clarify_question":         mutateAction("clarify_question", true, true),
 	"clear_activities":         mutateAction("clear_activities", false, false),
@@ -120,19 +121,17 @@ var actionCatalog = map[string]ActionMetadata{
 	"get_activity":             readAction("get_activity"),
 	"get_conversation_history": readAction("get_conversation_history"),
 	"install_update":           mutateAction("install_update", false, false),
-	"keys":                     mutateAction("keys", true, true),
 	"lease_pane_size":          mutateAction("lease_pane_size", true, false),
 	"list_directories":         readAction("list_directories"),
 	"list_slash_commands":      readAction("list_slash_commands"),
 	"navigate_question":        mutateAction("navigate_question", true, true),
 	"pane_applied":             readAction("pane_applied"),
-	"prompt":                   mutateAction("prompt", true, true),
 	"push_open_ref":            readAction("push_open_ref"),
 	"push_policy_get":          readAction("push_policy_get"),
 	"push_policy_set":          mutateAction("push_policy_set", false, false),
 	"push_snooze":              mutateAction("push_snooze", false, false),
 	"push_subscribe":           mutateAction("push_subscribe", false, false),
-	"push_test_device":         mutateAction("push_test_device", false, false),
+	"push_test_device":         mutateAction("push_test_device", false, true),
 	"push_unsubscribe":         mutateAction("push_unsubscribe", false, false),
 	"push_viewed_pane":         mutateAction("push_viewed_pane", false, false),
 	"qr_code":                  readAction("qr_code"),
@@ -154,7 +153,6 @@ var actionCatalog = map[string]ActionMetadata{
 	"speech_voices_list":       readAction("speech_voices_list"),
 	"submit_prompt":            mutateAction("submit_prompt", true, true),
 	"tab_reorder":              mutateAction("tab_reorder", true, true),
-	"text":                     mutateAction("text", true, true),
 	"unwatch_pane":             readAction("unwatch_pane"),
 	"upload_begin":             mutateAction("upload_begin", false, true),
 	"upload_cancel":            mutateAction("upload_cancel", false, true),
@@ -459,6 +457,7 @@ type PushConfig struct {
 const AgentResponseCopyCapability = "agent_response_copy"
 
 const SpeechSynthesisCapability = "speech_synthesis"
+const SpeechVoiceManagementCapability = "speech_voice_management"
 
 var Capabilities = []string{
 	"attention_classification",
@@ -475,6 +474,5 @@ var Capabilities = []string{
 	"workspace_inspection",
 	"semantic_input",
 	"secret_input",
-	"speech_voice_management",
 	"invitation_qr",
 }

@@ -83,6 +83,12 @@ export const THEME_COLORS: Record<Theme, string> = {
   latte: '#eff1f5',
 };
 
+/**
+ * Relay keys are used as raw secret bytes, not decoded: the relay refuses to
+ * start unless its key is exactly this many bytes (`config.Validate`).
+ */
+export const RELAY_KEY_BYTES = 32;
+
 export function relayLabelFromUrl(url: string): string {
   try {
     return new URL(url).hostname.split('.')[0] || 'relay';
@@ -159,6 +165,9 @@ export function normalizeRelayConfig(relay: Partial<RelayConfig>): RelayConfig {
     url,
     token: relay.token || '',
   };
+  // Only ever written when true: `loadRelayConfigs` normalizes stored entries
+  // on every read, and a legacy entry must round-trip unchanged.
+  if (relay.paired) config.paired = true;
   // Legacy entries keep their exact stored shape: no transport field at all.
   if (relay.transport !== 'hybrid' && (url || !gatewayUrl)) return config;
   config.transport = 'hybrid';
@@ -258,12 +267,30 @@ export function shouldRetainSetupFragment(
   return standalone === false && quickSetupConfig(locationValue) !== null;
 }
 
+/**
+ * An iOS browser tab and a Home Screen app keep separate storage, so a one-use
+ * pairing secret redeemed in the tab is spent before the installed copy ever
+ * opens. Both a device invitation and the bootstrap relay key are one-use.
+ */
+export function shouldDeferPairingConnection(
+  locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>,
+  standalone: boolean | undefined,
+  userAgent: string,
+  maxTouchPoints = 0,
+): boolean {
+  if (standalone !== false) return false;
+  if (!quickSetupInvitation(locationValue) && !quickSetupConfig(locationValue)?.token) return false;
+  return /\b(?:iPhone|iPad|iPod)\b/iu.test(userAgent)
+    || (/\bMacintosh\b/iu.test(userAgent) && maxTouchPoints > 1);
+}
+
 export function importQuickSetup(
   relays: RelayConfig[],
   locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>,
 ): RelayConfig[] | null {
   const setup = quickSetupConfig(locationValue);
   if (!setup) return null;
+  const invitation = quickSetupInvitation(locationValue);
   // A shared gateway hosts many computers, so a hybrid entry is matched on the
   // credential or the label rather than on the gateway address alone. Any
   // shared entry counts: a relay that gained a gateway or reordered its list
@@ -283,10 +310,14 @@ export function importQuickSetup(
     id: existing?.id,
     label: existing?.label || setup.label,
     url: setup.url,
-    token: setup.token,
-    transport: setup.transport,
-    gatewayUrl: setup.gatewayUrl,
-    gatewayUrls: setup.gatewayUrls,
+    token: invitation && existing ? existing.token : setup.token,
+    transport: invitation && existing ? existing.transport : setup.transport,
+    gatewayUrl: invitation && existing ? existing.gatewayUrl : setup.gatewayUrl,
+    gatewayUrls: invitation && existing ? existing.gatewayUrls : setup.gatewayUrls,
+    // An invitation link is an encrypted pairing, and the entry it creates
+    // carries no relay key. Recording that here is the only way to tell such a
+    // relay apart from a tokenless one once its credential is gone.
+    paired: invitation ? true : existing?.paired,
   });
   return existing ? relays.map((relay) => (relay.id === existing.id ? next : relay)) : [...relays, next];
 }

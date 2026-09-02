@@ -40,6 +40,7 @@ function storedLanguage(): string {
 export const speechEnabled = writable(localStorage.getItem(ENABLED_KEY) === 'true');
 export const speechLanguage = writable(storedLanguage());
 export const speechState = writable<SpeechState>(get(speechEnabled) ? 'idle' : 'off');
+let cancelRelaySynthesis: (() => void) | undefined;
 
 export function setSpeechEnabled(enabled: boolean): void {
   localStorage.setItem(ENABLED_KEY, String(enabled));
@@ -142,6 +143,10 @@ function silentWAV(): Blob {
   return new Blob([data], { type: 'audio/wav' });
 }
 
+// Identifies the current arm so a refusal that arrives after the attempt was
+// abandoned does not overwrite the message explaining why it was abandoned.
+let keepaliveArm = 0;
+
 /**
  * Speak taps must arm the element before any await: transient activation does
  * not survive the round trip to the relay, and a play() outside it is
@@ -150,15 +155,18 @@ function silentWAV(): Blob {
  */
 export function armSpeechKeepalive(onIssue?: (message: string) => void): void {
   if (get(securityState).locked || !get(speechEnabled)) return;
+  const arm = ++keepaliveArm;
   // A moment of silence unlocks the persistent element for every later
   // programmatic play; the fetched fragments arrive long after the tap.
   setRelaySource(silentWAV());
   relayElement().play()?.catch(() => {
+    if (arm !== keepaliveArm) return;
     onIssue?.('The browser blocked background audio; reading may stop when the screen locks.');
   });
 }
 
 export function releaseSpeechKeepalive(): void {
+  keepaliveArm++;
   if (get(speechState) !== 'speaking') stopPlayback();
 }
 
@@ -180,7 +188,8 @@ export function initializeSpeech(): () => void {
 // the generation guard keeps that resolution from continuing the old run.
 let speakGeneration = 0;
 
-export type SpeechSender = (text: string, language: string) => Promise<{ data?: Record<string, unknown> }>;
+export type SpeechRequest = Promise<{ data?: Record<string, unknown> }> & { cancel?: () => void };
+export type SpeechSender = (text: string, language: string) => SpeechRequest;
 
 /**
  * Reads text with the relay's speech engine: fragments are synthesized on the
@@ -205,11 +214,17 @@ async function playRelayChunks(
 ): Promise<void> {
   const language = get(speechLanguage);
   let pending = send(chunks[0], language);
+  cancelRelaySynthesis = pending.cancel;
   try {
     for (let index = 0; index < chunks.length; index++) {
-      const result = await pending;
+      const request = pending;
+      const result = await request;
+      if (cancelRelaySynthesis === request.cancel) cancelRelaySynthesis = undefined;
       if (generation !== speakGeneration) return;
-      if (index + 1 < chunks.length) pending = send(chunks[index + 1], language);
+      if (index + 1 < chunks.length) {
+        pending = send(chunks[index + 1], language);
+        cancelRelaySynthesis = pending.cancel;
+      }
       const audio = String(result.data?.audio || '');
       if (!audio) throw new Error('The relay returned no audio.');
       const bytes = Uint8Array.from(atob(audio), (char) => char.charCodeAt(0));
@@ -218,8 +233,10 @@ async function playRelayChunks(
     }
     speechState.set('idle');
     stopPlayback();
+    cancelRelaySynthesis = undefined;
   } catch (error) {
     if (generation !== speakGeneration) return;
+    cancelRelaySynthesis = undefined;
     speakGeneration++;
     speechState.set('error');
     stopPlayback();
@@ -244,6 +261,8 @@ function playRelayBlob(blob: Blob): Promise<void> {
 
 export function stopSpeech(): void {
   speakGeneration++;
+  cancelRelaySynthesis?.();
+  cancelRelaySynthesis = undefined;
   stopPlayback();
   speechState.set(get(speechEnabled) ? 'idle' : 'off');
 }

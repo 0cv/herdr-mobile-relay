@@ -50,6 +50,7 @@
     const connection = connections.get(relay.id);
     return connection?.status === 'connected' && connection.inventory.state === 'ready';
   }));
+  const deferredRelays = $derived(relays.filter((relay) => connections.get(relay.id)?.pairingDeferred));
 
   const statusDefinitions = [
     ['attention', 'Needs inspection', 'warning'],
@@ -635,6 +636,11 @@
     <div class="empty-state" role="status">Loading agents…</div>
   {:else if !agents.length && readyRelays.length}
     <div class="empty-state" role="status">No chat agents are running.</div>
+  {:else if !agents.length && deferredRelays.length === relays.length}
+    <div class="empty-state" role="status">
+      <p>Add Herdr to the Home Screen, then open it there to finish pairing.</p>
+      <p>This browser tab keeps the setup link unused so the installed app can redeem it.</p>
+    </div>
   {:else if !agents.length && !unavailableRelays.length}
     <div class="empty-state" role="status">Waiting for relays…</div>
   {/if}

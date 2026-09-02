@@ -16,7 +16,8 @@ func clearAllEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
-		ClaudeListEnv, QoderListEnv, CodexListEnv, PiListEnv, OMPListEnv,
+		"OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "XDG_DATA_HOME",
+		ClaudeListEnv, QoderListEnv, CodexListEnv, PiListEnv, OMPListEnv, OMOListEnv, OpenCodeListEnv,
 	} {
 		t.Setenv(name, "")
 	}
@@ -261,6 +262,33 @@ func TestOMPAndPiRoots(t *testing.T) {
 			t.Fatalf("OMP(%q) = %v, want %v (OMPListEnv must not leak into Pi)", home, got, wantOMP)
 		}
 	})
+}
+
+func TestOMORootsCoverCurrentStandaloneAndLegacyLayouts(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".omo"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".omo", "settings.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(OMOListEnv, "/relay-root")
+	t.Setenv("OMO_CODING_AGENT_DIR", "/omo-env")
+	t.Setenv("SENPI_CODING_AGENT_DIR", "/senpi-env")
+	t.Setenv("PI_CODING_AGENT_DIR", "/pi-env")
+	want := []string{
+		filepath.Join("/relay-root", "sessions"),
+		filepath.Join("/omo-env", "sessions"),
+		filepath.Join("/senpi-env", "sessions"),
+		filepath.Join("/pi-env", "sessions"),
+		filepath.Join(home, ".omo", "agent", "sessions"),
+		filepath.Join(home, ".omo", "sessions"),
+		filepath.Join(home, ".senpi", "agent", "sessions"),
+	}
+	if got := OMO(home); !slices.Equal(got, want) {
+		t.Fatalf("OMO(%q) = %v, want %v", home, got, want)
+	}
 }
 
 // A named profile makes Oh My Pi ignore PI_CODING_AGENT_DIR entirely, so a

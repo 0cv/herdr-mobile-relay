@@ -4,11 +4,6 @@ relay_release_root() {
     printf '%s\n' "${HERDR_RELEASE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/herdr-mobile-relay}"
 }
 
-# Speech voices are large downloads that no release owns, so they live in the
-# cache directory an update never rewrites. The relay resolves the same path.
-relay_speech_dir() {
-    printf '%s\n' "${XDG_CACHE_HOME:-$HOME/.cache}/herdr-mobile-relay/speech"
-}
 
 relay_binary() {
     local binary
@@ -517,6 +512,21 @@ pause_before_close() {
     fi
 }
 
+# Wrangler refuses to start on an older Node, and npx only says so after a long
+# download, so every candidate below is version-checked before it is offered.
+NODE_MIN_MAJOR=22
+
+node_major_version() {
+    local reported
+    reported="$("$1" --version 2>/dev/null)" || return 1
+    reported="${reported#v}"
+    reported="${reported%%.*}"
+    case "$reported" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    printf '%s\n' "$reported"
+}
+
 # Plugin panes inherit herdr's environment, not an interactive shell's, so a
 # node installed by nvm, fnm, volta, or asdf is invisible here even though the
 # person's own terminal finds it: the manager's PATH entry comes from a shell rc
@@ -526,6 +536,7 @@ pause_before_close() {
 node_bin_dir() {
     local env_file="${1:-}"
     local candidate
+    local major
     local recorded=""
     local on_path=""
 
@@ -552,6 +563,8 @@ node_bin_dir() {
             *) continue ;;
         esac
         [ -x "$candidate/node" ] && [ -x "$candidate/npx" ] || continue
+        major="$(node_major_version "$candidate/node")" || continue
+        [ "$major" -ge "$NODE_MIN_MAJOR" ] || continue
         printf '%s\n' "$candidate"
         return 0
     done

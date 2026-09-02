@@ -707,6 +707,7 @@ func clearBlockedDetails(agent *AgentState) {
 	agent.Prompt = ""
 	agent.Command = ""
 	agent.Options = nil
+	agent.ApprovalFingerprint = ""
 	agent.Interaction = nil
 	agent.QuestionLayout = false
 	agent.InteractionID = ""
@@ -718,6 +719,7 @@ func copyBlockedDetails(destination, source *AgentState) {
 	destination.Prompt = source.Prompt
 	destination.Command = source.Command
 	destination.Options = append([]string(nil), source.Options...)
+	destination.ApprovalFingerprint = source.ApprovalFingerprint
 	destination.Interaction = source.Interaction
 	destination.QuestionLayout = source.QuestionLayout
 	destination.InteractionID = source.InteractionID

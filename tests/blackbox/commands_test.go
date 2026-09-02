@@ -47,7 +47,7 @@ func TestSendPromptAndReceiveResult(t *testing.T) {
 	if msg["request_id"] != "test-req-1" {
 		t.Errorf("request_id = %v", msg["request_id"])
 	}
-	if msg["action"] != "prompt" {
+	if msg["action"] != "submit_prompt" {
 		t.Errorf("action = %v", msg["action"])
 	}
 	if msg["ok"] != true {
@@ -133,7 +133,7 @@ func TestSendKeysCommand(t *testing.T) {
 	if msg["ok"] != true {
 		t.Errorf("ok = %v, error = %v", msg["ok"], msg["error"])
 	}
-	if msg["action"] != "keys" {
+	if msg["action"] != "send_keys" {
 		t.Errorf("action = %v", msg["action"])
 	}
 }
