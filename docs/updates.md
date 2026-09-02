@@ -35,7 +35,16 @@ not, open it:
 herdr plugin action invoke setup --plugin herdr-mobile-relay.events
 ```
 
-Choose your connection option again to print a fresh bootstrap QR. It is
+If your phones load the app from a separately hosted origin — every gateway
+setup, and any tunnel setup that chose an installed app — that app is still
+0.19.1 and cannot talk to the new relay. The phone-driven updater would have
+published it first; a manual upgrade has to: on the deployment-owner computer
+choose **8. Configure App Deployment** and answer **Y** to "Deploy app version
+0.20.0 now?". The menu's status line says so as long as the hosted app is
+behind ("serves 0.19.1, this relay ships 0.20.0 — deploy with 8"). Relays
+that serve the app themselves through a tunnel need nothing more.
+
+Then choose your connection option to print a fresh bootstrap QR. It is
 one-use: pair exactly one phone with it, making that phone the first
 controller. Use **Settings → Devices → Invite Device** on that controller to
 create a separate invitation for every additional controller or reader.
