@@ -205,6 +205,26 @@ func (s *Store) EnsureBootstrapInvitation(secret []byte, name, locale string) er
 		(!s.rearmBootstrap || record.FailedAttempts < maxInviteAttempts) {
 		return nil
 	}
+	return s.armBootstrapLocked(secret, name, locale, now)
+}
+
+// ArmBootstrapInvitation mints a fresh one-use bootstrap invitation while
+// keeping every enrolled device. The operator asks for it by printing the
+// setup link again, so each print pairs exactly one more phone.
+func (s *Store) ArmBootstrapInvitation(secret []byte, name, locale string) error {
+	name, locale, err := validateMetadata(name, RoleController, locale)
+	if err != nil {
+		return err
+	}
+	if len(secret) != secretBytes {
+		return errors.New("bootstrap device secret must be 32 bytes")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.armBootstrapLocked(secret, name, locale, s.now().UTC())
+}
+
+func (s *Store) armBootstrapLocked(secret []byte, name, locale string, now time.Time) error {
 	previous := s.state.Invitation
 	s.state.Invitation = &invitationRecord{
 		InvitationID: bootstrapInvitationID,

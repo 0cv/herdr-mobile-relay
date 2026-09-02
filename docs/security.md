@@ -85,7 +85,12 @@ The bootstrap invitation is one-use on stable installs. Its ten-minute window
 is measured from each presentation while no device has enrolled yet — a relay
 with no paired phone would otherwise be unpairable ten minutes after start,
 with no way in — so the first successful enrolment, not the clock, is what
-consumes it. The quick tunnel is the exception: it serves the app from a
+consumes it. Printing the setup link again arms one more: the setup scripts
+signal the running relay (`SIGUSR1`, found through `relay.pid` beside
+`relay.env`) before drawing the QR, and the relay mints a fresh ten-minute
+bootstrap invitation without touching the devices already enrolled. Only a
+local process can send that signal, which is the same trust the printed key
+already carries. The quick tunnel is the exception: it serves the app from a
 hostname that changes on every launch, so a phone's enrolled credential is
 stranded under the previous origin and can never be presented again. Each
 tunnel launch therefore starts with an empty device list and one fresh one-use

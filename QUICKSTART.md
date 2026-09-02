@@ -39,7 +39,8 @@ Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
 the one-use bootstrap invitation in the URL fragment, which is never sent in
 the HTTP request. The installed app removes it after enrollment. iOS browser
 tabs retain it without redeeming it and direct you to the installed app, which
-prevents a disposable Safari tab from consuming the invitation.
+prevents a disposable Safari tab from consuming the invitation. Each printed
+link pairs one phone within ten minutes; print it again for the next phone.
 
 Keep the Quick Start pane open. Ctrl-C stops the relay, and on the tunnel path
 the next run creates a new hostname and setup link.

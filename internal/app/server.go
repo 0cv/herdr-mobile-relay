@@ -520,6 +520,12 @@ func (s *Server) Run(ctx context.Context) error {
 		s.recordSafeError("durable agent triage unavailable", err)
 		s.logger.Warn("durable agent triage unavailable", "error", err)
 	}
+	if err := s.writePIDFile(); err != nil {
+		s.recordSafeError("relay pid file unavailable", err)
+		s.logger.Warn("relay pid file unavailable", "error", err)
+	} else {
+		defer os.Remove(s.pidFilePath())
+	}
 
 	journal, err := activity.OpenJournal(s.cfg.CacheDir)
 	if err != nil {
@@ -1415,6 +1421,10 @@ func (s *Server) Run(ctx context.Context) error {
 	signal.Notify(profileSignals, syscall.SIGHUP)
 	defer signal.Stop(profileSignals)
 	startBackground(func() { s.reloadProfilesLoop(ctx, profileSignals) })
+	bootstrapSignals := make(chan os.Signal, 1)
+	signal.Notify(bootstrapSignals, syscall.SIGUSR1)
+	defer signal.Stop(bootstrapSignals)
+	startBackground(func() { s.armBootstrapLoop(ctx, bootstrapSignals) })
 	if s.udp != nil {
 		startBackground(func() { s.udp.Run(ctx) })
 	}
@@ -2607,6 +2617,46 @@ func (s *Server) reloadProfilesLoop(ctx context.Context, signals <-chan os.Signa
 			s.logger.Info("agent profiles reloaded", "profiles", len(profiles))
 		}
 	}
+}
+
+// armBootstrapLoop re-arms the one-use bootstrap invitation on SIGUSR1. The
+// setup scripts send it right before printing the setup link, so every printed
+// QR pairs one more phone without revoking the devices already enrolled. Only a
+// local process can signal the relay, which is the trust the printed key needs.
+func (s *Server) armBootstrapLoop(ctx context.Context, signals <-chan os.Signal) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-signals:
+			s.logger.Info("bootstrap invitation re-arm requested", "outcome", s.armBootstrapInvitation())
+		}
+	}
+}
+
+func (s *Server) armBootstrapInvitation() string {
+	if s.deviceAuth == nil {
+		return "no relay key configured"
+	}
+	if err := s.deviceAuth.ArmBootstrapInvitation([]byte(s.cfg.Token), s.hostname, "en"); err != nil {
+		s.recordSafeError("bootstrap invitation re-arm failed", err)
+		return err.Error()
+	}
+	return "armed for one more device"
+}
+
+func (s *Server) pidFilePath() string {
+	return filepath.Join(s.cfg.RuntimeDir, "relay.pid")
+}
+
+func (s *Server) writePIDFile() error {
+	if s.cfg.RuntimeDir == "" {
+		return errors.New("runtime directory is not configured")
+	}
+	if err := os.MkdirAll(s.cfg.RuntimeDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(s.pidFilePath(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 }
 
 func (s *Server) publicInventoryStatus() map[string]any {

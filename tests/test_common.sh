@@ -1345,4 +1345,42 @@ esac
 grep -Fq 'hostname: relay-fedora.old.test' "$MOVE_CONFIG" ||
     { echo "the refused move still touched the ingress" >&2; exit 1; }
 
+# Printing a setup link re-arms the running relay through relay.pid and SIGUSR1,
+# and says plainly when no relay is running here.
+ARM_DIR="$WORK_DIR/arm"
+mkdir -p "$ARM_DIR"
+ARM_ENV="$ARM_DIR/relay.env"
+: > "$ARM_ENV"
+ARM_LOG="$ARM_DIR/signals.log"
+: > "$ARM_LOG"
+bash -c 'trap "echo usr1 >> \"$1\"" USR1; while :; do sleep 0.1; done' _ "$ARM_LOG" &
+ARM_PID=$!
+printf '%s\n' "$ARM_PID" > "$ARM_DIR/relay.pid"
+sleep 0.2
+arm_setup_link "$ARM_ENV" ||
+    { echo "arm_setup_link failed against a live pid" >&2; kill "$ARM_PID"; exit 1; }
+sleep 0.3
+kill "$ARM_PID" 2>/dev/null || true
+wait "$ARM_PID" 2>/dev/null || true
+grep -Fxq usr1 "$ARM_LOG" ||
+    { echo "the relay was not signalled to re-arm the bootstrap" >&2; exit 1; }
+printf '%s\n' "$ARM_PID" > "$ARM_DIR/relay.pid"
+if arm_setup_link "$ARM_ENV"; then
+    echo "a stale relay.pid was treated as a running relay" >&2
+    exit 1
+fi
+rm -f "$ARM_DIR/relay.pid"
+if arm_setup_link "$ARM_ENV"; then
+    echo "a missing relay.pid was treated as a running relay" >&2
+    exit 1
+fi
+case "$(print_setup_link_arming 0)" in
+    *"pairs one phone within 10 minutes"*) ;;
+    *) echo "the armed link hint is missing" >&2; exit 1 ;;
+esac
+case "$(print_setup_link_arming 1)" in
+    *"relay is not running here"*) ;;
+    *) echo "the not-running hint is missing" >&2; exit 1 ;;
+esac
+
 echo "common shell tests passed"

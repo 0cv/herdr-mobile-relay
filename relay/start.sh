@@ -118,11 +118,14 @@ if [ -n "$GATEWAY_URL" ]; then
     record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
     PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
 
+    ARMED=0
+    arm_setup_link "$ENV_FILE" || ARMED=$?
     echo ""
     echo "✓ Relay ready!"
     echo ""
     print_phone_setup "$PHONE_URL"
     echo ""
+    print_setup_link_arming "$ARMED"
     echo "  No Cloudflare account, domain, or cloudflared install is involved."
     echo "  The gateway only copies encrypted frames it cannot read, and the phone"
     echo "  upgrades to a direct connection whenever the network allows it."
@@ -198,6 +201,8 @@ elif command -v cloudflared >/dev/null 2>&1; then
     PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
     DIRECT_URL="$URL/#$SETUP_FRAGMENT"
 
+    ARMED=0
+    arm_setup_link "$ENV_FILE" || ARMED=$?
     echo ""
     echo "✓ Relay ready!"
     echo ""
@@ -208,6 +213,7 @@ elif command -v cloudflared >/dev/null 2>&1; then
         print_phone_setup_url "$DIRECT_URL"
     fi
     echo ""
+    print_setup_link_arming "$ARMED"
     echo "  The phone app and relay are both served by this tunnel."
     echo "  The link configures this relay automatically and removes the token from the address bar."
     echo "  Keep this terminal open; press Ctrl-C here to stop the quick start."

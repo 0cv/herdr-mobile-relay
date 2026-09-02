@@ -28,10 +28,13 @@ if [ -n "$GATEWAY_URL" ]; then
     PHONE_APP_BASE="$(gateway_phone_app_base_url "$ENV_FILE")"
     record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
 
+    ARMED=0
+    arm_setup_link "$ENV_FILE" || ARMED=$?
     echo "🐑 Herdr Mobile Relay phone setup"
     echo ""
     print_phone_setup "$PHONE_APP_BASE/#$SETUP_FRAGMENT"
     echo ""
+    print_setup_link_arming "$ARMED"
     echo "  Gateway: $GATEWAY_URL"
     echo "  The relay must be running for the link to work:"
     echo "  make service-status"
@@ -68,7 +71,8 @@ PHONE_APP_BASE="$(choose_phone_app_base_url "$PHONE_APP_FALLBACK" "$ENV_FILE" st
 record_phone_app_origin "$PHONE_APP_BASE" "$ENV_FILE"
 PHONE_URL="$PHONE_APP_BASE/#$SETUP_FRAGMENT"
 DIRECT_URL="$PHONE_APP_FALLBACK/#$SETUP_FRAGMENT"
-
+ARMED=0
+arm_setup_link "$ENV_FILE" || ARMED=$?
 echo "🐑 Herdr Mobile Relay phone setup"
 echo ""
 print_phone_setup "$PHONE_URL"
@@ -78,5 +82,6 @@ if [ "$PHONE_URL" != "$DIRECT_URL" ]; then
     print_phone_setup_url "$DIRECT_URL"
 fi
 echo ""
+print_setup_link_arming "$ARMED"
 echo "  The relay and tunnel must be running for the link to work:"
 echo "  make service-status"
