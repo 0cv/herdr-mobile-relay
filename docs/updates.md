@@ -44,12 +44,12 @@ choose **8. Configure App Deployment** and answer **Y** to "Deploy app version
 behind ("serves 0.19.1, this relay ships 0.20.0 — deploy with 8"). Relays
 that serve the app themselves through a tunnel need nothing more.
 
-Then choose your connection option to print a fresh bootstrap QR. It is
-one-use: pair exactly one phone with it, making that phone the first
-controller. Use **Settings → Devices → Invite Device** on that controller to
-create a separate invitation for every additional controller or reader.
-Previously paired phones cannot reuse their v0.19.1 key or the already-consumed
-bootstrap link.
+Then choose your connection option to print a fresh bootstrap QR. It pairs one
+phone; print it again (**Choose Phone App and Show QR** in the setup menu) for each
+additional phone, or use **Settings → Devices → Invite Device** on a paired
+controller to create a reader or controller invitation from the phone.
+Previously paired phones cannot reuse their v0.19.1 key: pair them again with a
+freshly printed link.
 
 `HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1` in front of the install command suppresses
 the automatic menu; it exists for unattended upgrades, not for this one.

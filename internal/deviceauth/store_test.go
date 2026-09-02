@@ -40,6 +40,48 @@ func TestRevokeCredentialPreservesLastController(t *testing.T) {
 	}
 }
 
+func TestArmBootstrapInvitationKeepsEnrolledDevices(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := bytes.Repeat([]byte{9}, secretBytes)
+	if err := store.EnsureBootstrapInvitation(secret, "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	// The first phone consumes the bootstrap; a stable install then refuses to
+	// re-arm it on its own.
+	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureBootstrapInvitation(secret, "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	if store.state.Invitation != nil {
+		t.Fatal("stable install re-armed the consumed bootstrap by itself")
+	}
+
+	if err := store.ArmBootstrapInvitation(secret, "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	if store.state.Invitation == nil || store.state.Invitation.InvitationID != bootstrapInvitationID {
+		t.Fatalf("bootstrap not re-armed: %#v", store.state.Invitation)
+	}
+	if got := len(store.ListCredentials("")); got != 1 {
+		t.Fatalf("enrolled devices after re-arm = %d, want 1 kept", got)
+	}
+	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1,
+	}, true); err != nil {
+		t.Fatalf("second phone could not pair with the re-armed bootstrap: %v", err)
+	}
+	if got := len(store.ListCredentials("")); got != 2 {
+		t.Fatalf("enrolled devices after second pairing = %d, want 2", got)
+	}
+}
+
 func TestResetWithBootstrapAtomicallyReplacesCredentials(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)

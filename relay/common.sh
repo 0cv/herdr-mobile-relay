@@ -1637,6 +1637,32 @@ print_phone_setup() {
     emit_phone_setup_url "$phone_url"
 }
 
+# The bootstrap invitation in a setup link is one-use: the first phone that
+# pairs consumes it. Printing the link is the operator asking for one more
+# pairing, so the running relay is told to arm a fresh invitation before the
+# link is shown. The relay records its pid beside relay.env and re-arms on
+# SIGUSR1. Returns 1 when no relay is running here.
+arm_setup_link() {
+    local env_file="$1"
+    local pid
+
+    pid="$(head -1 "$(dirname "$env_file")/relay.pid" 2>/dev/null || true)"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    kill -USR1 "$pid" 2>/dev/null || return 1
+    sleep 0.3
+}
+
+print_setup_link_arming() {
+    if [ "$1" -eq 0 ]; then
+        echo "  This link pairs one phone within 10 minutes. Print it again for another."
+    else
+        echo "  The relay is not running here; start it, then print the link again."
+    fi
+}
+
 require_supported_platform() {
     case "$(uname -s)" in
         Darwin|Linux)

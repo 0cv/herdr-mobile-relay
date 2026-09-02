@@ -3,6 +3,15 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Print the setup link again to pair one more phone: every print re-arms the
+  relay's one-use bootstrap invitation without revoking the devices already
+  paired, instead of refusing the second phone with "client proof did not
+  authenticate".
+
 ## [0.20.0] - 2026-09-02
 
 ### Added
@@ -1290,6 +1299,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.0...HEAD
 [0.20.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.19.1...v0.20.0
 
 [0.19.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.19.0...v0.19.1

@@ -73,7 +73,8 @@ A controller opens **Settings → Devices → Invite Device** to create a ten-mi
 one-use invitation. The relay draws both a complete setup link and its QR code;
 share either privately. The first browser that completes the encrypted
 handshake consumes the invitation. Create a separate invitation for every
-additional controller or reader.
+additional controller or reader, or print the setup link again on the
+computer: every print arms the relay's bootstrap for one more phone.
 
 | Invite a device | Paired devices |
 | --- | --- |
