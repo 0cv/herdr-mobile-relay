@@ -22,17 +22,28 @@ per-device credentials. The phone updater intentionally refuses this transport
 boundary because neither an app-first nor a relay-first rollout can keep the
 old phone connected.
 
-Upgrade each relay manually:
+Upgrade each relay manually, exactly as for a fresh install:
 
 ```bash
-HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes
+herdr plugin install 0cv/herdr-mobile-relay
 ```
 
-Then reopen the setup menu and print a fresh bootstrap QR. It is one-use: pair
-exactly one phone with it, making that phone the first controller. Use
-**Settings → Devices → Invite Device** on that controller to create a separate
-invitation for every additional controller or reader. Previously paired phones
-cannot reuse their v0.19.1 key or the already-consumed bootstrap link.
+The setup menu opens by itself a moment after the install finishes. If it does
+not, open it:
+
+```bash
+herdr plugin action invoke setup --plugin herdr-mobile-relay.events
+```
+
+Choose your connection option again to print a fresh bootstrap QR. It is
+one-use: pair exactly one phone with it, making that phone the first
+controller. Use **Settings → Devices → Invite Device** on that controller to
+create a separate invitation for every additional controller or reader.
+Previously paired phones cannot reuse their v0.19.1 key or the already-consumed
+bootstrap link.
+
+`HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1` in front of the install command suppresses
+the automatic menu; it exists for unattended upgrades, not for this one.
 
 ## The deployment-owner role
 
