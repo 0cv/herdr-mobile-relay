@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { base64UrlDecode, base64UrlEncode } from '$lib/base64url';
-import type { E2EEWireFrame } from '$lib/e2ee';
+import { E2EESession, type E2EEWireFrame } from '$lib/e2ee';
 import {
   importQuickSetup,
   loadRelayConfigs,
@@ -166,9 +169,9 @@ describe('gateway frame channel', () => {
     socket.text({ type: 'ready', proto: 1 });
     expect(recorder.opens).toBe(1);
 
-    for (const piece of chunk(Uint8Array.from([1, 0, 9]), GATEWAY_MAX_CHUNK_BYTES)) socket.binary(piece);
+    for (const piece of chunk(Uint8Array.from([2, 0, 9]), GATEWAY_MAX_CHUNK_BYTES)) socket.binary(piece);
     expect(recorder.frames).toHaveLength(1);
-    expect(Array.from(recorder.frames[0] as Uint8Array)).toEqual([1, 0, 9]);
+    expect(Array.from(recorder.frames[0] as Uint8Array)).toEqual([2, 0, 9]);
 
     channel.sendFrame(Uint8Array.from([7, 7]));
     const single = socket.sent[1] as Uint8Array;
@@ -350,11 +353,28 @@ describe('binary transport chunk framing', () => {
     }
   });
 
-  it('keeps handshake frames textual and data frames binary', () => {
+  it('keeps handshake frames textual and sealed frames binary', async () => {
     const hello = '{"type":"e2ee_server_hello"}';
     expect(decodeWireFrame(encodeWireFrame(hello))).toBe(hello);
-    const data = Uint8Array.from([1, 0, 0, 0, 0, 0, 0, 0, 0, 7]);
-    expect(decodeWireFrame(encodeWireFrame(data))).toBe(data);
+
+    // Cross-language vector shared with Go `internal/transport`: the relay
+    // writes exactly these bytes on the gateway and WebRTC paths. The sniffer
+    // must keep them binary and the phone session must open them.
+    const vector = JSON.parse(readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'contracts', 'fixtures', 'e2ee', 'v2.json'),
+      'utf8',
+    ));
+    const record = vector.records.s2c;
+    const relayFrame = base64UrlDecode(record.binary_frame);
+    expect(Array.from(relayFrame.subarray(0, 2))).toEqual([2, 0]);
+    const sniffed = decodeWireFrame(encodeWireFrame(relayFrame));
+    expect(sniffed).toBe(relayFrame);
+
+    const importKey = (value: string) => crypto.subtle.importKey(
+      'raw', base64UrlDecode(value), 'AES-GCM', false, ['encrypt', 'decrypt'],
+    );
+    const phone = new E2EESession(await importKey(vector.c2s_key), await importKey(vector.s2c_key), 'binary');
+    expect(await phone.decrypt(sniffed)).toBe(record.plaintext);
   });
 
   /**
@@ -580,9 +600,9 @@ describe('webrtc data channel', () => {
       data.receive(piece);
     }
     expect(recorder.frames[0]).toBe('{"type":"e2ee_server_hello"}');
-    for (const piece of chunk(Uint8Array.from([1, 0, 5, 5]), DATA_CHANNEL_MAX_CHUNK_BYTES)) data.receive(piece);
+    for (const piece of chunk(Uint8Array.from([2, 0, 5, 5]), DATA_CHANNEL_MAX_CHUNK_BYTES)) data.receive(piece);
     expect(recorder.frames).toHaveLength(2);
-    expect(Array.from(recorder.frames[1] as Uint8Array)).toEqual([1, 0, 5, 5]);
+    expect(Array.from(recorder.frames[1] as Uint8Array)).toEqual([2, 0, 5, 5]);
 
     signal.deliver({ type: 'webrtc_closed', request_id: requestId, reason: 'relay closed it' });
     expect(recorder.closes).toEqual([{ reason: 'relay closed it' }]);

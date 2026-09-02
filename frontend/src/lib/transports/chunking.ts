@@ -1,4 +1,4 @@
-import type { E2EEWireFrame } from '../e2ee';
+import { hasBinaryFrameHeader, type E2EEWireFrame } from '../e2ee';
 
 /**
  * Chunk framing shared by every binary-codec transport.
@@ -21,8 +21,6 @@ export const CHUNK_STALL_TIMEOUT_MS = 30_000;
 
 const FLAG_START = 1;
 const FLAG_END = 2;
-const BINARY_FRAME_VERSION = 1;
-const BINARY_FRAME_KIND_DATA = 0;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 
@@ -139,8 +137,5 @@ export function encodeWireFrame(frame: E2EEWireFrame): Uint8Array<ArrayBuffer> {
 }
 
 export function decodeWireFrame(payload: Uint8Array<ArrayBuffer>): E2EEWireFrame {
-  const data = payload.length >= CHUNK_HEADER_BYTES
-    && payload[0] === BINARY_FRAME_VERSION
-    && payload[1] === BINARY_FRAME_KIND_DATA;
-  return data ? payload : decoder.decode(payload);
+  return hasBinaryFrameHeader(payload) ? payload : decoder.decode(payload);
 }

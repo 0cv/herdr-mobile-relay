@@ -3,6 +3,17 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.2] - 2026-09-02
+
+### Fixed
+
+- Restore gateway and direct WebRTC connections, broken for every phone since
+  0.20.0: the phone still recognised the previous encrypted frame header on
+  those paths, so the first sealed frame from the relay was read as text and
+  the connection dropped right after pairing, leaving the phone refused on
+  its retry. The frame header is now a single shared contract pinned by the
+  Go and browser test vectors. Cloudflare tunnel connections were unaffected.
+
 ## [0.20.1] - 2026-09-02
 
 ### Fixed
@@ -1299,6 +1310,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.20.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.19.1...v0.20.0
 
