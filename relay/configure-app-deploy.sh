@@ -28,7 +28,7 @@ if ! NODE_DIR="$(node_bin_dir "$ENV_FILE")"; then
     echo "  ~/.local/share/fnm/aliases/default/bin, ~/.volta/bin, ~/.asdf/shims," >&2
     echo "  /opt/homebrew/bin, /usr/local/bin, ~/.local/bin, and /usr/bin." >&2
     echo "  Set HERDR_APP_DEPLOY_NODE_DIR in $ENV_FILE to the directory holding" >&2
-    echo "  node and npx, or install Node.js 26, then rerun this action." >&2
+    echo "  node and npx, or install Node.js 22 or newer, then rerun this action." >&2
     exit 1
 fi
 NODE_BIN="$NODE_DIR/node"

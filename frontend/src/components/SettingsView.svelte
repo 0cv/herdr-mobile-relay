@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import DeviceSettings from '$components/DeviceSettings.svelte';
+  import NotificationSettings from '$components/NotificationSettings.svelte';
   import AppDialog from '$components/ui/AppDialog.svelte';
   import AppSwitch from '$components/ui/AppSwitch.svelte';
   import Button from '$components/ui/Button.svelte';
@@ -20,6 +22,16 @@
     type Theme,
   } from '$lib/config';
   import {
+    setSpeechEnabled,
+    setSpeechLanguage,
+    SPEECH_LANGUAGES,
+    speechEnabled,
+    speechLanguage,
+    speechLanguageLabel,
+    speechState,
+    stopSpeech,
+  } from '$lib/speech';
+  import {
     homeLayout,
     interfaceSize,
     setHomeLayout,
@@ -27,29 +39,38 @@
     setTerminalHeightLease,
     setTerminalHistoryLines,
     setTerminalRefreshInterval,
+    setTerminalWakeLock,
     setTheme,
     terminalHeightLease,
+    terminalWakeLock,
     terminalHistoryLines,
     terminalRefreshInterval,
     theme,
   } from '$lib/preferences';
   import { relayVersionMeta, shortRevision } from '$lib/protocol';
   import {
-    finishedNotificationsEnabled,
     notificationsSupported,
     pushPreferences,
     pushSupported,
     refreshPushPreferences,
     removeRelayPushSubscription,
-    setFinishedNotifications,
+    sendPushPolicy,
+    sendTargetedPushTest,
     toggleNotifications,
   } from '$lib/push';
+  import {
+    defaultDevicePushPolicy,
+    type NotificationPlatformInfo,
+    type NotificationPolicyScope,
+    type PushTestState,
+  } from '$lib/push-policy';
   import {
     deviceVerificationEnabled,
     deviceVerificationSupported,
     securityState,
     setDeviceVerificationRequired,
   } from '$lib/security';
+  import { wakeLockState } from '$lib/wake-lock';
   import { relayStore } from '$lib/store';
   import {
     appUpdateStatus,
@@ -62,7 +83,7 @@
     reloadApp,
     setUpdateProgressError,
   } from '$lib/updates';
-  import type { AppUpdateStatus, RelayConfig, RelayConnectionView } from '$lib/types';
+  import type { AppUpdateStatus, RelayConfig, RelayConnectionView, RelaySpeechVoice } from '$lib/types';
 
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
@@ -80,11 +101,15 @@
       targetVersion: string;
       description: string;
     };
+  let { readOnlyRelayIds = new Set<string>() }: { readOnlyRelayIds?: Set<string> } = $props();
 
   const relays = relayStore.relayConfigs;
   const connections = relayStore.connections;
   const agents = relayStore.agents;
   const notificationBusy = relayStore.notificationBusy;
+  const devices = relayStore.devices;
+  const pushPolicies = relayStore.pushPolicies;
+  const pushTests = relayStore.pushTests;
   const appUpdate = appUpdateStatus;
   let previousAppUpdate = $state<AppUpdateStatus | null>(null);
   let checkingUpdates = $state(false);
@@ -92,7 +117,18 @@
   const appUpdateForLayout = $derived(
     appUpdateChecking && previousAppUpdate ? previousAppUpdate : $appUpdate,
   );
-
+  const wakeLockStatus = $derived.by(() => {
+    if (!$terminalWakeLock) return 'Off';
+    if (!('wakeLock' in navigator)) return 'Unavailable in this browser';
+    return {
+      disabled: 'Ready when a visible Terminal opens',
+      unsupported: 'Unavailable in this browser',
+      requesting: 'Requesting…',
+      active: 'Active while Terminal is visible',
+      released: 'Released while Terminal is hidden or closed',
+      failed: 'Request failed',
+    }[$wakeLockState];
+  });
   $effect(() => {
     if (!appUpdateChecking) previousAppUpdate = $appUpdate;
   });
@@ -102,7 +138,6 @@
   let relayLabel = $state('');
   let relayUrl = $state('');
   let relayToken = $state('');
-  let finished = $state(finishedNotificationsEnabled());
   let deviceLock = $state(deviceVerificationEnabled());
   let updateOpen = $state(false);
   let pendingUpdateAction = $state<SafeUpdateAction | null>(null);
@@ -111,6 +146,11 @@
   let removalRelayId = $state('');
   let removalOpen = $state(false);
   let busyRelayId = $state('');
+  let speechVoiceBusy = $state<string[]>([]);
+  const speechVoiceRequested = new Set<string>();
+  function isReadOnlyRelay(relayId: string): boolean {
+    return readOnlyRelayIds.has(relayId);
+  }
 
   const relayRows = $derived($relays.map((relay) => ({
     relay,
@@ -120,10 +160,17 @@
   const degradedCount = $derived([...$connections.values()].filter(
     (connection) => connection.status === 'connected' && connection.inventory.state !== 'ready',
   ).length);
+  const relaysWithoutVoice = $derived(relayRows
+    .filter(({ connection }) => connection?.status === 'connected'
+      && !connection.speechLanguages.includes($speechLanguage))
+    .map(({ relay }) => relay.label || relay.id));
+  const speechVoiceRelays = $derived(relayRows.filter(({ connection }) => connection?.status === 'connected'
+    && connection.capabilities.includes('speech_voice_management')));
   const manualRow = $derived(relayRows.find(({ relay }) => relay.id === manualRelayId));
   const removalRow = $derived(relayRows.find(({ relay }) => relay.id === removalRelayId));
-  const appDeploymentOwner = $derived(relayRows.find(({ connection }) => (
-    connection?.status === 'connected'
+  const appDeploymentOwner = $derived(relayRows.find(({ relay, connection }) => (
+    !isReadOnlyRelay(relay.id)
+    && connection?.status === 'connected'
     && connection.capabilities.includes('app_deploy')
     && connection.appDeploy.configured
     && connection.appDeploy.origin === location.origin
@@ -175,8 +222,9 @@
         description: `Publish the phone app first, then update ${owner.relay.label} and continue with the remaining relays.`,
       };
     }
-    const installable = relayRows.filter(({ connection }) => (
-      connection?.status === 'connected'
+    const installable = relayRows.filter(({ relay, connection }) => (
+      !isReadOnlyRelay(relay.id)
+      && connection?.status === 'connected'
       && connection.capabilities.includes('self_update')
       && !relayNeedsManualBootstrap(connection)
       && connection.update.state === 'available'
@@ -208,11 +256,40 @@
       || $appUpdate.state === 'reload-ready'
       || relayRows.some(({ connection }) => connection?.update.state === 'available'),
   );
-  const notification = $derived.by(() => notificationMeta(
-    [...$connections.values()],
-    $notificationBusy,
-    $pushPreferences,
+  const notificationScopes = $derived.by((): NotificationPolicyScope[] => relayRows.flatMap(({ relay }) => {
+    const credential = relayStore.deviceCredential(relay.id);
+    if (!credential) return [];
+    const device = ($devices.get(relay.id) || []).find(candidate => candidate.deviceId === credential.deviceId);
+    return [{
+      relay_id: relay.id,
+      relay_label: relay.label,
+      device_id: credential.deviceId,
+      device_label: device?.name || 'This device',
+      current_device: true,
+      policy: $pushPolicies.get(relay.id)
+        || defaultDevicePushPolicy(credential.deviceId, document.documentElement.lang || 'en'),
+    }];
+  }));
+  const notificationTestStates = $derived.by((): Record<string, PushTestState> => Object.fromEntries(
+    [...$pushTests].map(([relayId, state]) => [relayId, state]),
   ));
+  const notificationPlatform = $derived.by((): NotificationPlatformInfo => {
+    void $pushPreferences;
+    const userAgent = navigator.userAgent;
+    const platform = /iPad|iPhone|iPod/i.test(userAgent)
+      ? 'ios'
+      : /Android/i.test(userAgent)
+        ? 'android'
+        : 'other';
+    const standalone = (window.matchMedia?.('(display-mode: standalone)').matches ?? false)
+      || (navigator as Navigator & { standalone?: boolean }).standalone === true;
+    return {
+      platform,
+      installed: standalone,
+      supports_push: pushSupported(),
+      permission: notificationsSupported() ? Notification.permission : 'unavailable',
+    };
+  });
 
   function updateActionLabel(action: SafeUpdateAction | null): string {
     if (action?.kind === 'reload_app') return 'Load Update';
@@ -243,10 +320,6 @@
     removalRelayId = '';
   }
 
-  async function changeFinished(value: boolean) {
-    finished = value;
-    await setFinishedNotifications(value);
-  }
 
   async function changeDeviceLock(value: boolean) {
     const changed = await setDeviceVerificationRequired(value);
@@ -373,16 +446,18 @@
     const action = pendingUpdateAction;
     pendingUpdateAction = null;
     updateOpen = false;
-    if (!action) return;
+    if (!action || action.kind !== 'reload_app' && isReadOnlyRelay(action.relayId)) return;
     if (action.kind === 'reload_app') {
-      const relayIds = relayRows.map(({ relay }) => relay.id);
+      const relayIds = relayRows.filter(({ relay }) => !isReadOnlyRelay(relay.id)).map(({ relay }) => relay.id);
       if (relayIds.length) queueUpdateProgressForReload(action.targetVersion, relayIds);
       reloadApp(action.targetVersion);
       return;
     }
     const relayIds = [
       action.relayId,
-      ...relayRows.map(({ relay }) => relay.id).filter((relayId) => relayId !== action.relayId),
+      ...relayRows
+        .map(({ relay }) => relay.id)
+        .filter((relayId) => relayId !== action.relayId && !isReadOnlyRelay(relayId)),
     ];
     beginUpdateProgress(action.targetVersion, relayIds, action.relayId, action.appRelayId);
     busyRelayId = action.relayId;
@@ -404,22 +479,57 @@
     }
   }
 
-  function notificationMeta(all: RelayConnectionView[], busy: boolean, preferences: { notificationsEnabled: boolean; optedIn: boolean }) {
-    if (!notificationsSupported()) return { label: 'Notifications Unavailable', hint: 'This browser does not support page notifications.', disabled: true };
-    if (Notification.permission === 'denied') return { label: 'Notifications Blocked', hint: 'Enable notifications in this browser site settings.', disabled: true };
-    if (!preferences.notificationsEnabled) return { label: 'Enable Notifications', hint: pushSupported() ? 'Required before closed-app push notifications can work.' : 'Required before background tabs can notify.', disabled: false };
-    if (!pushSupported()) return { label: 'Notifications Enabled', hint: 'Background tabs can notify while this browser keeps the page alive.', disabled: true };
-    const connected = all.filter((connection) => connection.status === 'connected');
-    const synced = connected.filter((connection) => connection.pushStatus === 'subscribed').length;
-    const syncing = connected.some((connection) => ['syncing', 'sent'].includes(connection.pushStatus));
-    if (busy || syncing) return { label: 'Syncing Push…', hint: 'Updating this browser subscription on connected relays.', disabled: true };
-    if (!connected.length) return { label: 'Sync Push Subscription', hint: 'Connect a relay before syncing push notifications.', disabled: true };
-    if (!preferences.optedIn) return { label: 'Enable Push Notifications', hint: 'Push is stopped for this browser; site permission remains allowed.', disabled: false };
-    if (synced === connected.length) return { label: 'Stop Push Notifications', hint: `Push subscription synced with ${synced} relay${synced === 1 ? '' : 's'}.`, disabled: false };
-    if (connected.some((connection) => connection.pushStatus === 'key-mismatch')) return { label: 'Sync Push Subscription', hint: 'A relay changed its push key. Sync again to refresh this device.', disabled: false };
-    if (connected.some((connection) => connection.pushStatus === 'failed')) return { label: 'Sync Push Subscription', hint: 'Push subscription sync failed. Reconnect and try again.', disabled: false };
-    return { label: 'Sync Push Subscription', hint: synced ? `Push synced with ${synced}/${connected.length} connected relays.` : 'Push can wake this app when an agent blocks.', disabled: false };
+  function speechVoiceKey(relayId: string, language: string): string {
+    return `${relayId}:${language}`;
   }
+
+  function speechVoiceFor(connection: RelayConnectionView | undefined, language: string): RelaySpeechVoice | undefined {
+    return connection?.speechVoices.find((voice) => voice.language === language);
+  }
+
+  /** A 63,206,179-byte voice reads as "63 MB": a phone row has no room for more. */
+  function speechVoiceSize(bytes: number): string {
+    return `${Math.max(1, Math.round(bytes / 1_000_000))} MB`;
+  }
+
+  function speechVoiceState(voice: RelaySpeechVoice | undefined): string {
+    if (voice?.installed) return `Neural voice cached, ${speechVoiceSize(voice.bytes)}`;
+    if (voice?.bytes) return `Not downloaded - ${speechVoiceSize(voice.bytes)} download`;
+    return 'No voice on this computer';
+  }
+
+  async function changeSpeechVoice(relayId: string, language: string, install: boolean) {
+    const key = speechVoiceKey(relayId, language);
+    if (speechVoiceBusy.includes(key)) return;
+    speechVoiceBusy = [...speechVoiceBusy, key];
+    try {
+      if (install) await relayStore.installSpeechVoice(relayId, language);
+      else await relayStore.removeSpeechVoice(relayId, language);
+      relayStore.showToast(`${speechLanguageLabel(language)} voice ${install ? 'downloaded' : 'removed'}.`);
+    } catch (error) {
+      relayStore.showToast((error as Error).message, true);
+    } finally {
+      speechVoiceBusy = speechVoiceBusy.filter((entry) => entry !== key);
+    }
+  }
+
+  // One list per connected relay: every later install or remove is broadcast
+  // by the relay itself, and a relay that drops is asked again on reconnect.
+  $effect(() => {
+    for (const { relay, connection } of relayRows) {
+      const capable = connection?.status === 'connected'
+        && connection.capabilities.includes('speech_voice_management');
+      if (!capable) {
+        speechVoiceRequested.delete(relay.id);
+        continue;
+      }
+      if (!$speechEnabled || speechVoiceRequested.has(relay.id)) continue;
+      speechVoiceRequested.add(relay.id);
+      void relayStore.listSpeechVoices(relay.id).catch((error: Error) => {
+        relayStore.showToast(error.message, true);
+      });
+    }
+  });
 
   function pushStatusLabel(connection?: RelayConnectionView): string {
     if (!connection) return 'not connected';
@@ -499,6 +609,21 @@
               <span>{currentRelay.url}</span>
             {/if}
             <small>Push: {pushStatusLabel(connection)}</small>
+            {#if connection?.authRejected}
+              <small class="error" role="alert">
+                This computer refused this device. Import a new invitation link, or remove and add the relay.
+              </small>
+            {/if}
+            {#if connection?.pairingRequired}
+              <small class="error" role="alert">
+                This computer needs pairing. Import a device invitation link, or remove and add the relay.
+              </small>
+            {/if}
+            {#if connection?.pairingDeferred}
+              <small class="warning" role="status">
+                Waiting for the Home Screen app: add Herdr to the Home Screen and open it there to pair this computer.
+              </small>
+            {/if}
             {#if connectionStatus === 'connected' && connection?.inventory.state !== 'ready'}
               <small class="warning" role="status">
                 {connection?.inventory.state === 'error'
@@ -534,6 +659,29 @@
     </div>
     <p class="hint">Use one relay URL per computer. Relay keys stay in this browser’s local storage and encrypt relay messages end to end.</p>
   </Card>
+  {#each relayRows as { relay, connection } (relay.id)}
+    {@const credential = relayStore.deviceCredential(relay.id)}
+    {#if credential}
+      <DeviceSettings
+        relayId={relay.id}
+        relayLabel={relay.label}
+        devices={$devices.get(relay.id) || []}
+        currentDeviceId={credential.deviceId}
+        connected={connection?.status === 'connected'}
+        canAdminister={credential.role === 'controller'}
+        canInvite={Boolean(relay.url)}
+        onRename={(intent) => relayStore.renameDevice(intent)}
+        onInvite={(intent) => relayStore.createDeviceInvitation(intent)}
+        onRevoke={(intent) => relayStore.revokeDevice(intent)}
+        onReset={(intent) => relayStore.resetDevices(intent)}
+        onForgetCurrent={() => relayStore.forgetCurrentDevice(relay.id)}
+        onQrCode={connection?.capabilities.includes('invitation_qr')
+          ? ((text) => relayStore.qrCode(relay.id, text))
+          : undefined}
+      />
+    {/if}
+  {/each}
+
 
   <Card>
     <h3>Appearance</h3>
@@ -572,7 +720,7 @@
         >{item}</button>
       {/each}
     </fieldset>
-    <p class="hint">Lines kept in the terminal view. History shows the newest rows Herdr serves per read (up to 1,000), rendered at the current width. Use Copy or Conversation History for clean response text.</p>
+    <p class="hint">Lines kept in the terminal view. Direct connections honor the selected limit; gateway transport caps each read at 1,000 lines to bound relayed traffic. Use Copy or Conversation History for clean response text.</p>
     <fieldset class="choice-grid history-grid refresh-grid">
       <legend>Terminal Refresh</legend>
       {#each TERMINAL_REFRESH_OPTIONS as item (item)}
@@ -593,21 +741,93 @@
       onchange={(value) => setTerminalHeightLease(value)}
     />
     <p class="hint" id="height-lease-hint">Off by default. Also leases the terminal at the phone's height so full-screen agents redraw to fit the phone instead of serving a mostly empty desktop-sized grid. The shared pane physically shrinks on the computer, and inline agents such as omp or Claude Code can strand duplicate status bars in the scrollback each time the height changes.</p>
+    <AppSwitch
+      checked={$terminalWakeLock}
+      label="Keep Screen Awake"
+      descriptionId="wake-lock-hint"
+      onchange={(value) => setTerminalWakeLock(value)}
+    />
+    <p class="hint" id="wake-lock-hint">Off by default. When enabled, requests the browser screen wake lock only while a Terminal is mounted and visible. Status: {wakeLockStatus}.</p>
+    <AppSwitch
+      checked={$speechEnabled}
+      label="Read Responses Aloud"
+      descriptionId="speech-hint"
+      onchange={(value) => setSpeechEnabled(value)}
+    />
+    <p class="hint" id="speech-hint">Enabled automatically the first time a connected relay offers a compatible voice; after that, this setting remains under your control. Adds a Speak button next to Copy in the Terminal and Conversation History views. The relay synthesizes each response with its own neural voice and streams the audio here encrypted, so reading continues while the screen is off. Response text never reaches a third-party speech server.</p>
+    <label class="field-label settings-field" for="speech-language">Language</label>
+    <select
+      id="speech-language"
+      disabled={!$speechEnabled}
+      value={$speechLanguage}
+      onchange={(event) => setSpeechLanguage(event.currentTarget.value)}
+    >
+      {#each SPEECH_LANGUAGES as language (language.code)}
+        <option value={language.code}>{language.label}</option>
+      {/each}
+    </select>
+    {#if $speechState === 'error'}
+      <p class="hint error" role="alert">Reading aloud failed. Check the relay's voice below, then try again.</p>
+    {/if}
+    {#if $speechEnabled && relaysWithoutVoice.length}
+      <p class="hint" role="status">No {speechLanguageLabel($speechLanguage)} voice on {relaysWithoutVoice.join(', ')}. Download it below, or install a system speech engine on that computer.</p>
+    {/if}
+    {#if $speechState === 'speaking'}
+      <Button variant="secondary" size="sm" onclick={stopSpeech}>Stop reading</Button>
+    {/if}
+    {#if $speechEnabled}
+      {#each speechVoiceRelays as { relay, connection } (relay.id)}
+        <div class="relay-list">
+          <p class="hint">Voices on {relay.label}{connection?.speechCacheDir ? `, cached in ${connection.speechCacheDir}` : ''}</p>
+          {#if connection && !connection.speechEngineInstalled}
+            <p class="hint" role="status">The neural speech engine is not installed on {relay.label} yet. The first download installs it too.</p>
+          {/if}
+          {#each SPEECH_LANGUAGES as language (language.code)}
+            {@const voice = speechVoiceFor(connection, language.code)}
+            {@const busy = speechVoiceBusy.includes(speechVoiceKey(relay.id, language.code))}
+            <article class="relay-row" aria-label={`${language.label} voice on ${relay.label}`}>
+              <div class="relay-info">
+                <strong>{language.label}</strong>
+                <small>{speechVoiceState(voice)}</small>
+              </div>
+              <div class="relay-actions">
+                {#if voice?.installed}
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    aria-busy={busy}
+                    disabled={busy}
+                    aria-label={`Remove the ${language.label} voice on ${relay.label}`}
+                    onclick={() => changeSpeechVoice(relay.id, language.code, false)}
+                  >{busy ? 'Removing…' : 'Remove'}</Button>
+                {:else}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    aria-busy={busy}
+                    disabled={busy}
+                    aria-label={`Download the ${language.label} voice on ${relay.label}`}
+                    onclick={() => changeSpeechVoice(relay.id, language.code, true)}
+                  >{busy ? 'Downloading…' : 'Download'}</Button>
+                {/if}
+              </div>
+            </article>
+          {/each}
+        </div>
+      {/each}
+    {/if}
   </Card>
 
-  <Card>
-    <h3>Notifications</h3>
-    <Button disabled={notification.disabled} onclick={() => toggleNotifications()}>{notification.label}</Button>
-    <AppSwitch
-      checked={finished}
-      disabled={!pushSupported() || !$pushPreferences.optedIn || !connectedCount || $notificationBusy}
-      label="Notify When Agents Finish"
-      descriptionId="finished-notification-hint"
-      onchange={changeFinished}
-    />
-    <p class="hint" id="finished-notification-hint">Optional. Blocked-agent notifications remain enabled whenever push is active.</p>
-    <p class="hint" role="status">{notification.hint}</p>
-  </Card>
+  <NotificationSettings
+    scopes={notificationScopes}
+    platform={notificationPlatform}
+    testStates={notificationTestStates}
+    busy={$notificationBusy}
+    deliveryEnabled={$pushPreferences.optedIn}
+    onpolicychange={({ relay_id, policy }) => sendPushPolicy(relay_id, policy)}
+    ontoggle={() => toggleNotifications()}
+    ontest={(request) => { sendTargetedPushTest(request); }}
+  />
 
   <Card>
     <h3>Security</h3>

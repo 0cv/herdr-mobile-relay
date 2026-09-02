@@ -1,20 +1,25 @@
 import { base64UrlDecode, base64UrlEncode, type Base64UrlBytes } from './base64url';
+import type {
+  DeviceEnrollmentResult,
+  RelayDeviceAuthentication,
+} from './device-auth';
 
-export const E2EE_SUBPROTOCOL = 'herdr-e2ee-v1';
+export const E2EE_SUBPROTOCOL = 'herdr-e2ee-v2';
 
-const E2EE_VERSION = 1;
+const E2EE_VERSION = 2;
 const NONCE_BYTES = 32;
 const PUBLIC_KEY_BYTES = 65;
-const BINARY_FRAME_VERSION = 1;
+const AUTH_SECRET_BYTES = 32;
+const BINARY_FRAME_VERSION = 2;
 const BINARY_FRAME_KIND_DATA = 0;
 const BINARY_FRAME_HEADER_BYTES = 10;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
-const clientProofLabel = encoder.encode('herdr-e2ee-v1 client\0');
-const serverProofLabel = encoder.encode('herdr-e2ee-v1 server\0');
-const keySaltLabel = encoder.encode('herdr-e2ee-v1 key\0');
-const clientKeyInfo = encoder.encode('herdr-e2ee-v1 c2s');
-const serverKeyInfo = encoder.encode('herdr-e2ee-v1 s2c');
+const clientProofLabel = encoder.encode('herdr-e2ee-v2 client\0');
+const serverProofLabel = encoder.encode('herdr-e2ee-v2 server\0');
+const keySaltLabel = encoder.encode('herdr-e2ee-v2 key\0');
+const clientKeyInfo = encoder.encode('herdr-e2ee-v2 c2s');
+const serverKeyInfo = encoder.encode('herdr-e2ee-v2 s2c');
 
 /**
  * Encrypted-frame encoding. `json` is the original text envelope spoken by the
@@ -31,7 +36,11 @@ type Bytes = Base64UrlBytes;
 
 export interface E2EEClientHello {
   type: 'e2ee_client_hello';
-  version: 1;
+  version: 2;
+  auth_kind: 'credential' | 'invitation';
+  auth_id: string;
+  auth_version: number;
+  locale: string;
   nonce: string;
   public_key: string;
   proof: string;
@@ -39,12 +48,17 @@ export interface E2EEClientHello {
 
 export interface E2EEClientHandshake {
   hello: E2EEClientHello;
-  complete(serverHello: unknown): Promise<E2EEClientHandshakeResult>;
+  complete(serverHello: unknown): Promise<E2EEClientHandshakeChallenge>;
+}
+
+export interface E2EEClientHandshakeChallenge {
+  finish: E2EEWireFrame;
+  complete(serverFinish: E2EEWireFrame): Promise<E2EEClientHandshakeResult>;
 }
 
 export interface E2EEClientHandshakeResult {
   session: E2EESession;
-  finish: E2EEWireFrame;
+  enrollment: DeviceEnrollmentResult;
 }
 
 export interface E2EEClientEphemeral {
@@ -154,21 +168,27 @@ function decodeJsonFrame(rawFrame: E2EEWireFrame): ParsedFrame {
 }
 
 export async function createE2EEClientHandshake(
-  token: string,
+  authentication: RelayDeviceAuthentication,
   ephemeral?: E2EEClientEphemeral,
   codec: E2EECodec = 'json',
 ): Promise<E2EEClientHandshake> {
-  const tokenBytes = encoder.encode(token);
-  if (tokenBytes.byteLength < 16) throw new Error('Relay keys must be at least 16 bytes.');
   if (!crypto.subtle) throw new Error('Encrypted relay connections require Web Crypto support.');
-
+  const authId = validateAuthenticationId(authentication.id);
+  const authVersion = validateAuthenticationVersion(authentication.version);
+  const authSecret = base64UrlDecode(authentication.secret);
+  if (authSecret.byteLength !== AUTH_SECRET_BYTES) {
+    throw new Error('Device authentication secrets must be 32 bytes.');
+  }
+  const locale = validatedDeviceLocale(navigator.language);
+  const authBinding = authenticationBinding(authentication.kind, authId, authVersion);
   const authKey = await crypto.subtle.importKey(
     'raw',
-    tokenBytes,
+    authSecret,
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign'],
   );
+  authSecret.fill(0);
   let keyPair = ephemeral?.keyPair;
   if (!keyPair) {
     keyPair = await crypto.subtle.generateKey(
@@ -182,19 +202,23 @@ export async function createE2EEClientHandshake(
     : crypto.getRandomValues(new Uint8Array(new ArrayBuffer(NONCE_BYTES)));
   if (clientNonce.length !== NONCE_BYTES) throw new Error('Encrypted relay handshake nonce must be 32 bytes.');
   const clientPublic = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey));
-  const clientProof = await authTag(authKey, clientProofLabel, clientNonce, clientPublic);
-  let completed = false;
+  const clientProof = await authTag(authKey, clientProofLabel, authBinding, clientNonce, clientPublic);
+  let helloCompleted = false;
 
   return {
     hello: {
       type: 'e2ee_client_hello',
       version: E2EE_VERSION,
+      auth_kind: authentication.kind,
+      auth_id: authId,
+      auth_version: authVersion,
+      locale,
       nonce: base64UrlEncode(clientNonce),
       public_key: base64UrlEncode(clientPublic),
       proof: base64UrlEncode(clientProof),
     },
-    async complete(rawServerHello: unknown): Promise<E2EEClientHandshakeResult> {
-      if (completed) throw new Error('Encrypted relay handshake is already complete.');
+    async complete(rawServerHello: unknown): Promise<E2EEClientHandshakeChallenge> {
+      if (helloCompleted) throw new Error('Encrypted relay handshake is already complete.');
       const serverHello = asRecord(rawServerHello);
       if (serverHello.type !== 'e2ee_server_hello' || serverHello.version !== E2EE_VERSION) {
         throw new Error('Relay did not provide a supported encrypted handshake.');
@@ -202,10 +226,10 @@ export async function createE2EEClientHandshake(
       const serverNonce = decodeSizedField(serverHello.nonce, NONCE_BYTES);
       const serverPublic = decodeSizedField(serverHello.public_key, PUBLIC_KEY_BYTES);
       const serverProof = decodeSizedField(serverHello.proof, 32);
-      const transcript = concatenate(clientNonce, clientPublic, serverNonce, serverPublic);
+      const transcript = concatenate(authBinding, clientNonce, clientPublic, serverNonce, serverPublic);
       const expectedProof = await authTag(authKey, serverProofLabel, transcript);
       if (!constantTimeEqual(serverProof, expectedProof)) {
-        throw new Error('Relay key verification failed.');
+        throw new Error('Relay device authentication failed.');
       }
 
       const importedServerPublic = await crypto.subtle.importKey(
@@ -239,17 +263,93 @@ export async function createE2EEClientHandshake(
         ),
       ]);
       sharedSecret.fill(0);
-      completed = true;
+      helloCompleted = true;
       const session = new E2EESession(sendKey, receiveKey, codec);
       const finish = await session.encrypt(JSON.stringify({
         type: 'e2ee_client_finish',
         version: E2EE_VERSION,
       }));
-      return { session, finish };
+      let finishCompleted = false;
+      return {
+        finish,
+        async complete(rawServerFinish: E2EEWireFrame): Promise<E2EEClientHandshakeResult> {
+          if (finishCompleted) throw new Error('Encrypted relay handshake is already complete.');
+          const plaintext = await session.decrypt(rawServerFinish);
+          const enrollment = parseServerFinish(plaintext, authentication.kind);
+          finishCompleted = true;
+          return { session, enrollment };
+        },
+      };
     },
   };
 }
 
+
+function authenticationBinding(
+  kind: RelayDeviceAuthentication['kind'],
+  id: string,
+  version: number,
+): Bytes {
+  if (kind !== 'credential' && kind !== 'invitation') {
+    throw new Error('Unsupported device authentication kind.');
+  }
+  return encoder.encode(`herdr-e2ee-v2 auth\0${kind}\0${id}\0${version}\0`);
+}
+
+function validatedDeviceLocale(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9-]{1,32}$/u.test(value)) return 'en';
+  return value;
+}
+
+function validateAuthenticationId(value: unknown): string {
+  if (typeof value !== 'string' || !value || value.length > 256 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error('Invalid device authentication id.');
+  }
+  return value;
+}
+
+function validateAuthenticationVersion(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error('Invalid device authentication version.');
+  }
+  return value;
+}
+
+function parseServerFinish(
+  plaintext: string,
+  authenticationKind: RelayDeviceAuthentication['kind'],
+): DeviceEnrollmentResult {
+  const finish = asRecord(JSON.parse(plaintext));
+  if (finish.type !== 'e2ee_server_finish' || finish.version !== E2EE_VERSION) {
+    throw new Error('Relay did not finish device authentication.');
+  }
+  const credentialSecret = finish.credential_secret;
+  if (authenticationKind === 'invitation' && typeof credentialSecret !== 'string') {
+    throw new Error('Relay did not issue a device credential.');
+  }
+  if (authenticationKind === 'credential' && credentialSecret !== undefined) {
+    throw new Error('Relay unexpectedly replaced an enrolled device credential.');
+  }
+  if (credentialSecret !== undefined) {
+    if (typeof credentialSecret !== 'string' || base64UrlDecode(credentialSecret).byteLength !== AUTH_SECRET_BYTES) {
+      throw new Error('Relay issued an invalid device credential.');
+    }
+  }
+  const role = finish.role;
+  if (role !== 'reader' && role !== 'controller') throw new Error('Relay returned an invalid device role.');
+  const locale = String(finish.locale ?? '');
+  if (!/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(locale) || locale.length > 35) {
+    throw new Error('Relay returned an invalid device locale.');
+  }
+  return {
+    deviceId: validateAuthenticationId(finish.device_id),
+    credentialId: validateAuthenticationId(finish.credential_id),
+    credentialVersion: validateAuthenticationVersion(finish.credential_version),
+    ...(credentialSecret === undefined ? {} : { credentialSecret }),
+    role,
+    locale,
+  };
+}
 
 async function authTag(key: CryptoKey, ...parts: Bytes[]): Promise<Bytes> {
   const signature = await crypto.subtle.sign('HMAC', key, concatenate(...parts));
@@ -263,7 +363,7 @@ function frameNonce(sequence: number): Bytes {
 }
 
 function frameAAD(direction: 'c2s' | 's2c', sequence: number): Bytes {
-  const prefix = encoder.encode(`herdr-e2ee-v1 ${direction}`);
+  const prefix = encoder.encode(`herdr-e2ee-v2 ${direction}`);
   const aad = new Uint8Array(new ArrayBuffer(prefix.length + 1 + 8));
   aad.set(prefix);
   new DataView(aad.buffer).setBigUint64(prefix.length + 1, BigInt(sequence), false);

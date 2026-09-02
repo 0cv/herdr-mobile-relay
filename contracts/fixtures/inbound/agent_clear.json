@@ -2,6 +2,6 @@
   "type": "command",
   "action": "agent_clear",
   "request_id": "req-005",
-  "protocol": 2,
+  "protocol": 3,
   "pane_id": "pane-1"
 }

@@ -19,6 +19,9 @@ type AgentState struct {
 	PaneID                       string                 `json:"pane_id"`
 	RawPaneID                    string                 `json:"raw_pane_id"`
 	TerminalID                   string                 `json:"terminal_id"`
+	ServerSessionID              string                 `json:"server_session_id,omitempty"`
+	Generation                   int64                  `json:"generation"`
+	AgentSessionID               string                 `json:"agent_session_id,omitempty"`
 	TabID                        string                 `json:"tab_id"`
 	TabLabel                     string                 `json:"tab_label"`
 	TabNumber                    int                    `json:"tab_number"`
@@ -42,6 +45,7 @@ type AgentState struct {
 	Prompt                       string                 `json:"prompt,omitempty"`
 	Command                      string                 `json:"command,omitempty"`
 	Options                      []string               `json:"options,omitempty"`
+	ApprovalFingerprint          string                 `json:"approval_fingerprint,omitempty"`
 	Interaction                  *question.Interaction  `json:"interaction,omitempty"`
 	QuestionLayout               bool                   `json:"question_layout,omitempty"`
 	InteractionID                string                 `json:"-"`
@@ -703,6 +707,7 @@ func clearBlockedDetails(agent *AgentState) {
 	agent.Prompt = ""
 	agent.Command = ""
 	agent.Options = nil
+	agent.ApprovalFingerprint = ""
 	agent.Interaction = nil
 	agent.QuestionLayout = false
 	agent.InteractionID = ""
@@ -714,6 +719,7 @@ func copyBlockedDetails(destination, source *AgentState) {
 	destination.Prompt = source.Prompt
 	destination.Command = source.Command
 	destination.Options = append([]string(nil), source.Options...)
+	destination.ApprovalFingerprint = source.ApprovalFingerprint
 	destination.Interaction = source.Interaction
 	destination.QuestionLayout = source.QuestionLayout
 	destination.InteractionID = source.InteractionID
@@ -857,8 +863,10 @@ func applyAttentionClassification(
 	nextInteraction := classification.Interaction
 	nextQuestionLayout := classification.QuestionLayout
 	nextInteractionID := ""
+	nextApprovalFingerprint := question.ApprovalFingerprint(classification)
 	if classification.Kind != question.AttentionApproval {
 		options = nil
+		nextApprovalFingerprint = ""
 	}
 	if classification.Kind != question.AttentionQuestion {
 		nextInteraction = nil
@@ -871,6 +879,7 @@ func applyAttentionClassification(
 		agent.Prompt != classification.Prompt ||
 		agent.Command != classification.Command ||
 		!stringSlicesEqual(agent.Options, options) ||
+		agent.ApprovalFingerprint != nextApprovalFingerprint ||
 		!interactionsEqual(agent.Interaction, nextInteraction) ||
 		agent.QuestionLayout != nextQuestionLayout ||
 		agent.InteractionID != nextInteractionID
@@ -878,6 +887,7 @@ func applyAttentionClassification(
 	agent.Prompt = classification.Prompt
 	agent.Command = classification.Command
 	agent.Options = options
+	agent.ApprovalFingerprint = nextApprovalFingerprint
 	agent.Interaction = nextInteraction
 	agent.QuestionLayout = nextQuestionLayout
 	agent.InteractionID = nextInteractionID
@@ -905,6 +915,7 @@ func blockedDetailsEqual(left, right *AgentState) bool {
 		left.Prompt == right.Prompt &&
 		left.Command == right.Command &&
 		stringSlicesEqual(left.Options, right.Options) &&
+		left.ApprovalFingerprint == right.ApprovalFingerprint &&
 		interactionsEqual(left.Interaction, right.Interaction) &&
 		left.QuestionLayout == right.QuestionLayout &&
 		left.InteractionID == right.InteractionID
@@ -961,6 +972,7 @@ func (s *State) Snapshot() []*AgentState {
 	for _, a := range s.agents {
 		cp := *a
 		cp.StateRevision = s.revision[cp.PaneID]
+		cp.Generation = s.generation[cp.PaneID]
 		if doneStatuses[cp.Status] && s.ackDone[cp.PaneID] {
 			cp.Status = "idle"
 		}
@@ -1067,6 +1079,7 @@ func (s *State) Agent(paneID string) (*AgentState, bool) {
 	}
 	copy := *agent
 	copy.StateRevision = s.revision[paneID]
+	copy.Generation = s.generation[paneID]
 	return &copy, true
 }
 

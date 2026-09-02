@@ -3,12 +3,13 @@ import { connectProof, deriveRelayId } from '../gateway-credentials';
 import type { E2EEWireFrame } from '../e2ee';
 import type { RelayConfig } from '../types';
 import { chunk, decodeWireFrame, encodeWireFrame, Reassembler } from './chunking';
-import { createEncryptedTransport } from './encrypted';
-import type {
-  FrameChannel,
-  FrameChannelHandlers,
-  RelayTransport,
-  TransportHandlers,
+import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
+import {
+  DEVICE_UNAUTHORIZED_CODE,
+  type FrameChannel,
+  type FrameChannelHandlers,
+  type RelayTransport,
+  type TransportHandlers,
 } from './types';
 
 /** Gateway protocol version carried in every hello message. */
@@ -183,7 +184,11 @@ export function createGatewayChannel(
           fail(error instanceof Error && error.message ? error.message : 'The gateway sent an invalid frame.');
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (event.reason === DEVICE_UNAUTHORIZED_CODE) {
+          fail('This relay no longer accepts this device', true, DEVICE_UNAUTHORIZED_CODE);
+          return;
+        }
         fail(phase === 'open' ? 'The gateway connection closed.' : 'The gateway refused the connection.');
       };
       socket.onerror = () => {
@@ -215,7 +220,11 @@ export function createGatewayChannel(
 }
 
 /** The relayed fallback path: one E2EE session carried by the blind gateway. */
-export function createGatewayTransport(relay: RelayConfig, handlers: TransportHandlers): RelayTransport {
+export function createGatewayTransport(
+  relay: RelayConfig,
+  handlers: TransportHandlers,
+  authentication: TransportAuthentication = {},
+): RelayTransport {
   // The hello is parsed long before the E2EE handshake finishes, so the port is
   // known by the time this session reports itself usable — which is also the
   // moment the path manager starts the direct attempt that needs it.
@@ -224,6 +233,7 @@ export function createGatewayTransport(relay: RelayConfig, handlers: TransportHa
     kind: 'gateway',
     token: relay.token,
     codec: 'binary',
+    ...authentication,
     handlers: {
       onMessage: (message) => handlers.onMessage(message),
       onStatus(status, detail): void {

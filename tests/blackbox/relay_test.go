@@ -28,7 +28,7 @@ type TestEnv struct {
 }
 
 func setupEnv(t *testing.T) *TestEnv {
-	scenario := `{"panes":[{"pane_id":"pane-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
+	scenario := `{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","agent":"claude","name":"test","agent_status":"working","tab_id":"tab-1","workspace_id":"ws-1","cwd":"/tmp","revision":1,"foreground_cwd":"/tmp"}],"tabs":[{"tab_id":"tab-1","workspace_id":"ws-1","label":"main","number":1,"cwd":"/tmp"}]}`
 	return setupEnvWithScenario(t, scenario)
 }
 
@@ -194,7 +194,7 @@ func TestHealthzEndpoint(t *testing.T) {
 	if body["instance"] != "blackbox-test" {
 		t.Errorf("instance = %v", body["instance"])
 	}
-	if body["protocol"] != float64(2) {
+	if body["protocol"] != float64(3) {
 		t.Errorf("protocol = %v", body["protocol"])
 	}
 }

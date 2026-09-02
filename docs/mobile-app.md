@@ -10,21 +10,45 @@ setup and want to know what every screen and control is for.
   renamed agents, workspaces, and tabs reflected within seconds through a
   live Herdr event stream.
 - Start, rename, clear, and stop agents from relay-provided launch profiles.
-- Send prompts, terminal keys, slash commands, screenshots, and photos; drafts
-  survive locally for 48 hours. Search loaded terminal output and open explicit
-  HTTP(S) links.
-- Answer verified approvals from Codex, Claude Code, Qoder, Oh My Pi, and Pi,
-  plus structured questions from those agents and OpenCode.
-- Inspect the current agent's workspace files, images, Git status, and unified
-  diffs without exposing a write action.
-- Read searchable native conversations for Claude Code, Codex, Qoder, Pi, and
-  Oh My Pi in focused conversation or full-history form; review a rolling
-  24-hour activity summary and receive blocked or completion notifications.
+- Send prompts, atomic terminal text-and-key input, slash commands, and
+  cancellable attachment batches; drafts survive locally for 48 hours. Search
+  loaded terminal output and open explicit HTTP(S) links.
+- Answer approvals bound to the current prompt, command, and ordered choices
+  from Codex, Claude Code, Qoder, Oh My Pi, and Pi, plus structured questions
+  from those agents and OpenCode.
+- Inspect the current agent's workspace files, images, Git status, upstream
+  ahead/behind counts, and unified diffs without exposing a write action.
+- Read searchable native conversations for Claude Code, Codex, OpenCode,
+  Qoder, Pi, Oh My Pi, and Oh My OpenCode in focused conversation or
+  full-history form; validated Oh My OpenCode plans appear with their current
+  task states.
+- Configure durable notification categories, settle delay, cooldown, snooze,
+  and a neutral delivery test separately for each paired relay and device.
+- Pair named controller or reader devices. Reader devices can inspect agents,
+  conversations, and workspaces; manage their own notifications; and revoke
+  themselves, but cannot control agents or administer other devices.
 - Optionally require device verification before the app connects at open, and
   again before the interface unlocks on resume. A resume keeps the existing
   encrypted session, so verifying is instant rather than a fresh connection;
   the unlock screen covers the page and the terminal stops streaming until it
   succeeds.
+- Optionally request a screen wake lock only while a terminal is visible, or
+  read responses aloud in English, French, German, Spanish, or Chinese. The
+  relay synthesizes the audio and streams it to the phone encrypted - real
+  media playback that keeps reading with the screen off, and response text
+  never reaches a third-party speech server. On hosts with a published Piper
+  runtime, setup downloads the neural engine and English voice into
+  `$XDG_CACHE_HOME/herdr-mobile-relay/speech` when `XDG_CACHE_HOME` is set, or
+  `~/.cache/herdr-mobile-relay/speech` otherwise. Relay updates never touch the
+  cache. Reading aloud switches itself on the first time a relay reports a
+  voice; after that the setting decides. Every other language is downloaded on
+  demand, from Settings on the phone or with
+  `relay/speech-voices.sh --languages fr`, and Settings lists what a relay has
+  cached and removes voices one language at a time. Stock Apple Silicon uses
+  macOS `say` and does not offer neural downloads unless Piper is already
+  installed. Without a neural voice the relay falls back to espeak-ng, espeak,
+  flite, or macOS `say`; a language it cannot speak is reported in Settings
+  instead of failing at the Speak button.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |
@@ -38,6 +62,27 @@ setup and want to know what every screen and control is for.
 | Git Inspection | Native Conversations |
 | --- | --- |
 | <img src="../images/git-history.jpeg" alt="Read-only mobile Git diff with diff-aware colors and zoom controls" width="392"> | <img src="../images/conversations.jpeg" alt="Mobile native conversation history rendered from the agent transcript" width="392"> |
+
+| Terminal | Read Aloud |
+| --- | --- |
+| <img src="../images/terminal.jpeg" alt="Mobile terminal with Copy, Speak, attachments, and terminal keys" width="392"> | <img src="../images/speech.jpeg" alt="Speech settings with the language choice and the relay's cached voices" width="392"> |
+
+## Paired devices
+
+A controller opens **Settings → Devices → Invite Device** to create a ten-minute,
+one-use invitation. The relay draws both a complete setup link and its QR code;
+share either privately. The first browser that completes the encrypted
+handshake consumes the invitation. Create a separate invitation for every
+additional controller or reader.
+
+| Invite a device | Paired devices |
+| --- | --- |
+| <img src="../images/devices-invite.jpeg" alt="Invite Device dialog choosing a name and the reader role" width="392"> | <img src="../images/devices.jpeg" alt="Paired devices with rename, revoke, forget, and reset controls" width="392"> |
+
+An uncaught phone-side error appears in a bottom **App error** banner because
+mobile browsers often provide no useful console. Copy or photograph its text
+for a bug report, then tap the banner to dismiss it; a later independent error
+will display a new banner.
 
 ## Workspace navigation and inspection
 
@@ -108,16 +153,18 @@ controls to resize it without changing the rest of the app.
 
 ## Mobile terminal
 
-The mobile terminal always uses **Resize Session**. While a terminal is open
-and the app is visible, the relay leases the live PTY at the measured phone
-width. Closing the terminal restores the previous width about ten seconds
-later, so stepping back into the same agent resumes instantly instead of
-resizing the pane twice. A hidden page keeps renewing its lease for five
-minutes — desktop Safari reports an occluded window as hidden, so brief
-switches to another app must not resize the shared pane — after which the
-desktop size returns within about two minutes. A sleeping phone freezes
-sooner than that, a disconnecting phone and relay shutdown restore the size
-immediately, and returning to the terminal takes the phone size again.
+Controller terminals use **Resize Session** whenever the relay advertises size
+leases. While a terminal is open and the app is visible, the relay leases the
+live PTY at the measured phone width. Reader terminals never change the shared
+PTY; they wrap desktop-width rows to the phone viewport instead. Closing a
+controller terminal restores the previous width about ten seconds later, so
+stepping back into the same agent resumes instantly instead of resizing the
+pane twice. A hidden controller page keeps renewing its lease for five minutes
+— desktop Safari reports an occluded window as hidden, so brief switches to
+another app must not resize the shared pane — after which the desktop size
+returns within about two minutes. A sleeping phone freezes sooner than that, a
+disconnecting phone and relay shutdown restore the size immediately, and
+returning to the terminal takes the phone size again.
 
 **Lease Terminal Height** (Settings → Terminal, off by default) additionally
 leases the phone's measured height, so full-screen agents redraw to fit the
@@ -130,11 +177,11 @@ mostly drive full-screen TUIs from the phone. While the height is leased, the
 on-screen keyboard never shrinks it — the lease keeps the resting height and
 re-measures when the keyboard closes.
 
-Terminal History keeps 100, 500, or 1,000 lines in the terminal view. 1,000 is
-the default, the largest option, and the ceiling on the gateway-relayed path.
-The "older history" notice reports when rows beyond the served window exist.
-Use **Copy** for the latest response or **Conversation History** for clean,
-searchable earlier turns.
+Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
+1,000 is the default and the ceiling on the gateway-relayed path; direct
+connections can use 10,000. The "older history" notice reports when rows beyond
+the served window exist. Use **Copy** for the latest response or
+**Conversation History** for clean, searchable earlier turns.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. It opens on the newest turn and stays there as
@@ -142,15 +189,22 @@ turns arrive; scrolling up to read holds your position until you return to the
 end. **Conversation** keeps each user prompt and the latest agent answer from
 that exchange. **Full history** shows every recorded message with collapsible
 tool activity. Both use an escaped Markdown subset, search filters the
-currently displayed view, and each message can copy its original Markdown.
+currently displayed view, each fenced code block has its own copy control, and
+each message can copy its original Markdown.
 The composer below the history sends ordinary multiline prompts and accepts
-one or more images from the file picker or clipboard. Images are uploaded to
-the computer and added to the prompt by path; the history does not render them
-inline. Draft persistence, slash-command suggestions, hidden-value entry,
-approvals, structured questions, and terminal menus remain in the terminal
-view. The composer locks when one of those interactions needs attention, and
-the **Terminal** header button switches to the same agent without adding
-repeated view toggles to browser history.
+one or more validated attachments from the file picker or clipboard. Supported
+files are images, UTF-8 text, Markdown, PDF, JSON, CSV, DOCX, XLSX, PPTX, ODT,
+ODS, and ODP. Uploads show per-file progress, can be cancelled, and interrupted
+files restart from the beginning. Live uploads are bound to the exact target
+generation; after restart, opaque references remain bound to the server
+session, pane, terminal, and agent session that created them. The relay
+revalidates the current exact target before resolving a reference. The history
+does not
+render attachments inline. Draft persistence, slash-command suggestions,
+hidden-value entry, approvals, structured questions, and terminal menus remain
+in the terminal view. The composer locks when one of those interactions needs
+attention, and the **Terminal** header button switches to the same agent without
+adding repeated view toggles to browser history.
 
 Hidden reasoning, injected system records, and sidechain turns remain excluded.
 Reads are confined to known session directories and the newest 16 MiB of very

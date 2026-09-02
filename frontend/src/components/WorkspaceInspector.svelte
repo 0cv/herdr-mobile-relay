@@ -316,6 +316,13 @@
           </svg>
         </Button>
         {#if git?.available && git.branch}<span class="git-branch" title="Git branch">{git.branch}</span>{/if}
+        {#if git?.available}
+          {#if git.ahead !== undefined && git.behind !== undefined}
+            <span class="git-branch" title="Commits relative to the configured upstream">↑{git.ahead} ↓{git.behind}</span>
+          {:else}
+            <span class="git-branch" title="This branch has no configured upstream">No upstream</span>
+          {/if}
+        {/if}
         <label class="workspace-search">
           <span class="sr-only">Filter workspace {section}</span>
           <input bind:value={query} type="search" placeholder={`Filter ${section}…`} autocomplete="off" />

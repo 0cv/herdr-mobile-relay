@@ -15,6 +15,25 @@ verification fails.
 Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit.
 
+## Upgrading from v0.19.1
+
+Version 0.20.0 replaces E2EE v1 and the shared relay key with E2EE v2 and
+per-device credentials. The phone updater intentionally refuses this transport
+boundary because neither an app-first nor a relay-first rollout can keep the
+old phone connected.
+
+Upgrade each relay manually:
+
+```bash
+HERDR_MOBILE_RELAY_NO_AUTO_SETUP=1 herdr plugin install 0cv/herdr-mobile-relay --yes
+```
+
+Then reopen the setup menu and print a fresh bootstrap QR. It is one-use: pair
+exactly one phone with it, making that phone the first controller. Use
+**Settings → Devices → Invite Device** on that controller to create a separate
+invitation for every additional controller or reader. Previously paired phones
+cannot reuse their v0.19.1 key or the already-consumed bootstrap link.
+
 ## The deployment-owner role
 
 The relay-hosted app updates with its relay. For a separately hosted Cloudflare
@@ -23,9 +42,10 @@ Pages app, configure exactly one stable relay as deployment owner with the
 before it installs and restarts the relay; a failed download, compatibility
 check, deployment, or public-origin check leaves the current relay running.
 
-The optional deployment-owner role requires Node.js 26 and Cloudflare
-credentials on that computer only. The action looks for `node` where nvm, fnm,
-volta, and asdf put it, not only on `PATH`.
+The optional deployment-owner role requires Node.js 22 or newer — Wrangler's own
+floor, and what the action verifies before it records a directory — plus
+Cloudflare credentials on that computer only. The action looks for `node` where
+nvm, fnm, volta, and asdf put it, not only on `PATH`.
 
 A Pages project can only deploy a domain it already serves. When the origin you
 enter is not one of them, and the account has exactly one Pages project, the

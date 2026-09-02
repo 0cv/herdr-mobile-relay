@@ -1,6 +1,6 @@
 {
   "type": "lease_pane_size",
-  "protocol": 2,
+  "protocol": 3,
   "request_id": "req-lease-size",
   "pane_id": "pane-1",
   "columns": 84,

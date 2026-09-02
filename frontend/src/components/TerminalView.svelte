@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import AttachmentProgress from '$components/AttachmentProgress.svelte';
   import Button from '$components/ui/Button.svelte';
   import QuestionForm from '$components/QuestionForm.svelte';
   import {
@@ -26,8 +27,19 @@
     terminalRowOffsets,
     terminalSearchText,
   } from '$lib/terminal-find';
+  import {
+    armSpeechKeepalive,
+    releaseSpeechKeepalive,
+    speakViaRelay,
+    speechEnabled,
+    speechLanguage,
+    speechLanguageLabel,
+    speechState,
+    stopSpeech,
+  } from '$lib/speech';
   import { interfaceSize, terminalHeightLease, theme } from '$lib/preferences';
   import { replaceView } from '$lib/router';
+  import { targetRefForAgent } from '$lib/resource-id';
   import { securityState } from '$lib/security';
   import { relayStore } from '$lib/store';
   import {
@@ -40,6 +52,7 @@
     terminalScreenColumns,
   } from '$lib/terminal';
   import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
+  import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
   import type {
     Agent,
     SlashCommand,
@@ -48,6 +61,7 @@
   } from '$lib/types';
   import type { RenderedTerminalRow } from '$lib/terminal';
   import { VirtualTerminalIndex } from '$lib/virtual-terminal';
+  import { mountTerminalWakeLock } from '$lib/wake-lock';
 
   const connections = relayStore.connections;
 
@@ -56,11 +70,13 @@
     allAgents,
     frame,
     responding,
+    readOnly = false,
   }: {
     agent: Agent;
     allAgents: Agent[];
     frame?: TerminalFrame;
     responding: Set<string>;
+    readOnly?: boolean;
   } = $props();
 
   interface VirtualTerminalAnchor {
@@ -78,6 +94,7 @@
   let terminalElement = $state<HTMLDivElement>(null!);
   let cellMeasureElement = $state<HTMLSpanElement>(null!);
   let fileInput = $state<HTMLInputElement>(null!);
+  let imageInput = $state<HTMLInputElement>(null!);
   let modifierInputElement = $state<HTMLInputElement>(null!);
   let findInputElement = $state<HTMLInputElement>(null!);
   let composerElement = $state<HTMLTextAreaElement>(null!);
@@ -130,10 +147,13 @@
   let virtualRowObserver: ResizeObserver | undefined;
   let virtualHeightCache = new Map<string, number>();
   const virtualIndex = new VirtualTerminalIndex();
+  const wideGridOffsets = new Map<number, number>();
+  let wideGridOffsetsPane = '';
   let lastFormat = '';
   let lastContent = '';
   let lastPreserveLayout = false;
   let lastPreserveLineEnds = false;
+  let lastRenderColumnCap = 0;
   let jumpVisible = $state(false);
   let arrowsOpen = $state(false);
   let fkeysOpen = $state(false);
@@ -148,6 +168,11 @@
   let keySending = $state(false);
   let uploadStatus = $state('');
   let uploadError = $state(false);
+  let uploadingAttachment = $state(false);
+  let attachmentController = $state<AttachmentBatchController | null>(null);
+  let attachmentSnapshot = $state<AttachmentBatchSnapshot | null>(null);
+  let attachmentUnsubscribe: (() => void) | null = null;
+  let attachmentCancelRequested = false;
   let copyingAgentResponse = $state(false);
   let paneSizeLeaseError = $state('');
   let requestedPaneId = '';
@@ -207,11 +232,11 @@
   const responsePending = $derived(agentNeedsResponse(agent));
   const approvalMode = $derived(responsePending && attentionKind(agent) === 'approval');
   const inspectionMode = $derived(agentNeedsInspection(agent));
-  const inputLocked = $derived(responsePending || inspectionMode);
+  const inputLocked = $derived(readOnly || responsePending || inspectionMode);
   const interaction = $derived(questionInteraction(agent));
-  const questionMode = $derived(Boolean(responsePending && attentionKind(agent) === 'question' && interaction));
+  const questionMode = $derived(Boolean(!readOnly && responsePending && attentionKind(agent) === 'question' && interaction));
   const resizeSessionActive = $derived(
-    Boolean($connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
+    Boolean(!readOnly && $connections.get(agent.relay_id)?.capabilities.includes('pane_size_lease')),
   );
   // The capability only says the relay can lease; it does not mean this pane
   // has a width yet. The wrapping layout is engaged solely when it does.
@@ -225,8 +250,9 @@
   // scrolling sideways. A relay that can lease but has not granted a width yet
   // is showing a pane whose width is nobody's: alignment is already lost, so
   // those rows wrap at the container instead of stranding the reader on line
-  // tails after every refresh.
-  const resizeLayoutPending = $derived(resizeSessionActive && !resizeLayoutActive);
+  // tails after every refresh. Readers use the same wrapping regime because
+  // their role can never obtain a size lease.
+  const resizeLayoutPending = $derived(readOnly || (resizeSessionActive && !resizeLayoutActive));
   const options = $derived(approvalOptions(agent));
   const nextBlocked = $derived(sortedAgents(allAgents.filter((item) => agentNeedsResponse(item) && item.pane_id !== agent.pane_id))[0]);
   const slashQuery = $derived(composer.startsWith('/') && !/\s/.test(composer) ? composer.slice(1).toLocaleLowerCase() : null);
@@ -247,7 +273,7 @@
       .replaceAll(TERMINAL_SEPARATOR_TOKEN, '────────'),
   );
   const terminalTextMode = $derived(inspectionMode && terminalTextInputActive(terminalPlainText));
-  const composerLocked = $derived(responsePending || (inspectionMode && !terminalTextMode));
+  const composerLocked = $derived(readOnly || responsePending || (inspectionMode && !terminalTextMode));
   // The relay recognizes the prompt; that recognition is what opens the masked
   // input, even while the generic composer stays locked for inspection.
   const noEchoActive = $derived(Boolean(frame?.paneId === agent.pane_id && frame?.noEcho));
@@ -255,7 +281,7 @@
   const secretInputSupported = $derived(
     Boolean($connections.get(agent.relay_id)?.capabilities.includes('secret_input')),
   );
-  const secretMode = $derived(noEchoActive && secretInputSupported);
+  const secretMode = $derived(!readOnly && noEchoActive && secretInputSupported);
   const terminalMenu = $derived(detectTerminalMenu(terminalPlainText));
   const visibleTerminalMenu = $derived(
     !approvalMode
@@ -285,6 +311,7 @@
       && responseCopyProfileSupported(agent.agent),
     );
   });
+  const relaySpeechLanguages = $derived($connections.get(agent.relay_id)?.speechLanguages ?? []);
   const terminalCopyText = $derived(latestCompletedResponse(frame?.content || ''));
   const terminalContentStyle = $derived.by(() => {
     // Every width is emitted in px of the measured probe cell, never in ch:
@@ -384,8 +411,9 @@
     // Keyed to the session, not to resizeLayoutActive, on purpose: a relay that
     // can lease will repaint this pane at the phone's width, so trailing padding
     // measured at the desktop width is stale whether or not the width has landed
-    // yet. Only a relay that cannot lease keeps its line ends.
-    const preserveLineEnds = !resizeSessionActive;
+    // yet. A reader cannot lease at all, so its rows wrap at the phone instead
+    // of trailing off the side of a desktop-width grid.
+    const preserveLineEnds = !resizeSessionActive && !readOnly;
     // A frame read while the agent repaints at a new width is transient. Keep
     // the phone's last stable frame painted until the new stable frame lands,
     // but never past the deadline: a relay that keeps flagging frames would
@@ -465,6 +493,11 @@
     const interfaceSizeValue = $interfaceSize;
     const paneId = agent.pane_id;
     void interfaceSizeValue;
+    if (readOnly) {
+      releasePaneSizeLease(componentMounted);
+      paneSizeLeaseError = '';
+      return;
+    }
     if (questionMode) {
       releasePaneSizeLease(componentMounted);
       paneSizeLeaseError = '';
@@ -564,6 +597,7 @@
   onMount(() => {
     let mounted = true;
     componentMounted = true;
+    const stopWakeLock = mountTerminalWakeLock();
     void relayStore.loadSlashCommands(agent).then((catalog) => {
       if (!mounted) return;
       slashCatalog = catalog;
@@ -644,16 +678,21 @@
       releasePaneSizeLease(false);
       virtualRowObserver?.disconnect();
       if (virtualWindowFrame) cancelAnimationFrame(virtualWindowFrame);
+      stopWakeLock();
     };
   });
 
   async function applyFrame(
     next: TerminalFrame,
     preserve = true,
-    preserveLineEnds = preserve && !resizeSessionActive,
+    preserveLineEnds = preserve && !resizeSessionActive && !readOnly,
   ) {
+    const renderColumnCap = resizeLayoutActive
+      ? lastLeasedColumns
+      : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0);
     const layoutChanged = preserve !== lastPreserveLayout
-      || preserveLineEnds !== lastPreserveLineEnds;
+      || preserveLineEnds !== lastPreserveLineEnds
+      || renderColumnCap !== lastRenderColumnCap;
     if (next.content === lastContent && next.format === lastFormat && !layoutChanged) return;
     const rendered = renderTerminalContent(
       next.content,
@@ -664,7 +703,7 @@
       // of fixed-width cells with no wrap opportunity between them, so past
       // the cap it must render as plain text that can wrap instead. Zero means
       // "no cap", which only a relay that cannot lease is entitled to.
-      resizeLayoutActive ? lastLeasedColumns : (resizeLayoutPending ? measuredPaneColumns() || 0 : 0),
+      renderColumnCap,
     );
     lastContent = next.content;
     if (rendered.display === displayed && rendered.html === renderedHtml
@@ -682,9 +721,8 @@
       : pendingResizeAnchor || currentVirtualAnchor(previousTop);
     // Rows cropped from the front shift every index; keep the anchor on the
     // same row.
-    const rowShift = previousAnchor
-      ? renderedRowShift(renderedRows, rendered.rows)
-      : 0;
+    const rowShift = renderedRowShift(renderedRows, rendered.rows);
+    if (rowShift) wideGridOffsets.clear();
     if (previousAnchor && rowShift) {
       previousAnchor = { ...previousAnchor, index: Math.max(0, previousAnchor.index - rowShift) };
     }
@@ -699,6 +737,7 @@
     lastFormat = next.format;
     lastPreserveLayout = preserve;
     lastPreserveLineEnds = preserveLineEnds;
+    lastRenderColumnCap = renderColumnCap;
     const nextTop = resetVirtualRows(
       stick ? Number.POSITIVE_INFINITY : previousTop,
       previousAnchor,
@@ -830,8 +869,8 @@
       // (the leased width, fixed grids excepted) and pending (the container).
       // A relay that cannot lease keeps every row on one line.
       const wraps = (!lastPreserveLayout
-        || resizeLayoutPending
-        || (resizeLayoutActive && !row.fixedGrid))
+        || (resizeLayoutPending && !row.wideGrid)
+        || (resizeLayoutActive && !row.fixedGrid && !row.wideGrid))
         ? Math.max(1, Math.ceil(row.columns / wrappingColumns))
         : 1;
       return lineHeight * wraps;
@@ -862,12 +901,56 @@
   function mountedVirtualHtml(start: number, end: number): string {
     let html = '';
     for (let index = start; index < end; index += 1) {
-      html += renderedRows[index].html.replace(
-        '<span ',
-        `<span data-terminal-row="${index}" `,
-      );
+      const attributes = renderedRows[index].wideGrid && wideGridBlocks[index] >= 0
+        ? `<span data-terminal-row="${index}" data-terminal-wide-block="${wideGridBlocks[index]}" `
+        : `<span data-terminal-row="${index}" `;
+      html += renderedRows[index].html.replace('<span ', attributes);
     }
     return html;
+  }
+
+  // Contiguous wide box-drawn rows form one logical table. Their borders were
+  // collapsed to separators, so a separator between two wide rows continues
+  // the block instead of splitting the table into per-row scroll islands.
+  const wideGridBlocks = $derived.by(() => {
+    const blocks = new Array<number>(renderedRows.length).fill(-1);
+    let block = -1;
+    let open = false;
+    for (let index = 0; index < renderedRows.length; index += 1) {
+      if (renderedRows[index].wideGrid) {
+        if (!open) {
+          block += 1;
+          open = true;
+        }
+        blocks[index] = block;
+      } else if (!renderedRows[index].separator) {
+        open = false;
+      }
+    }
+    return blocks;
+  });
+
+  function syncWideGridScroll(event: Event) {
+    const row = event.target;
+    if (!(row instanceof HTMLElement) || row.dataset.terminalWideBlock === undefined || !terminalElement) return;
+    const block = Number(row.dataset.terminalWideBlock);
+    if (wideGridOffsetsPane !== agent.pane_id) {
+      wideGridOffsets.clear();
+      wideGridOffsetsPane = agent.pane_id;
+    }
+    if (wideGridOffsets.get(block) === row.scrollLeft) return;
+    wideGridOffsets.set(block, row.scrollLeft);
+    for (const sibling of terminalElement.querySelectorAll<HTMLElement>(`[data-terminal-wide-block="${block}"]`)) {
+      if (sibling !== row && sibling.scrollLeft !== row.scrollLeft) sibling.scrollLeft = row.scrollLeft;
+    }
+  }
+
+  function restoreWideGridScroll() {
+    if (!terminalElement || wideGridOffsetsPane !== agent.pane_id) return;
+    for (const row of terminalElement.querySelectorAll<HTMLElement>('[data-terminal-wide-block]')) {
+      const offset = wideGridOffsets.get(Number(row.dataset.terminalWideBlock));
+      if (offset && row.scrollLeft !== offset) row.scrollLeft = offset;
+    }
   }
 
   function renderVirtualWindow(scrollTop: number, force = false) {
@@ -892,7 +975,9 @@
   }
 
   function observeVirtualRows() {
-    if (!terminalElement || typeof ResizeObserver === 'undefined') return;
+    if (!terminalElement) return;
+    restoreWideGridScroll();
+    if (typeof ResizeObserver === 'undefined') return;
     virtualRowObserver ||= new ResizeObserver(measureVirtualRows);
     virtualRowObserver.disconnect();
     for (const row of terminalElement.querySelectorAll<HTMLElement>('[data-terminal-row]')) {
@@ -1101,16 +1186,14 @@
     const text = submittedDraft.replace(/[\r\n]+$/g, '');
     if (!text || composerLocked || sendingPrompt) return;
     const terminalText = terminalTextMode;
-    let terminalTextInserted = false;
     sendingPrompt = true;
     composer = '';
     clearPromptDraft(agent);
     try {
       if (terminalText) {
-        await relayStore.sendToAgent(agent, { type: 'send_text', text });
-        terminalTextInserted = true;
         await relayStore.sendToAgent(agent, {
-          type: 'send_keys',
+          type: 'send_input',
+          text,
           keys: ['Enter'],
           activity_label: 'Submitted terminal text',
         });
@@ -1126,16 +1209,11 @@
         && error.data !== null
         && 'dispatched_unknown' in error.data
         && error.data.dispatched_unknown === true;
-      if (!composer && !dispatchedUnknown && !terminalTextInserted) composer = submittedDraft;
+      if (!composer && !dispatchedUnknown) composer = submittedDraft;
       const detail = error instanceof Error
         ? error.message
         : terminalText ? 'Terminal text could not be submitted.' : 'Prompt could not be sent.';
-      const recovery = terminalText && terminalTextInserted
-        ? `${detail} Text remains in the terminal; use Enter to submit it.`
-        : dispatchedUnknown
-          ? `${detail} Check the terminal before sending again.`
-          : detail;
-      relayStore.showToast(recovery, true);
+      relayStore.showToast(dispatchedUnknown ? `${detail} Check the terminal before sending again.` : detail, true);
     } finally {
       sendingPrompt = false;
       setTimeout(() => relayStore.readPane(agent), 500);
@@ -1228,6 +1306,7 @@
   }
 
   function sendKeys(keys: string[], activityLabel = ''): Promise<boolean> {
+    if (readOnly) return Promise.resolve(false);
     return new Promise((resolve) => {
       keyQueue.push({ keys, label: activityLabel || keys.join(', '), resolve });
       void drainKeyQueue();
@@ -1274,31 +1353,97 @@
     }, 2_000);
   }
 
+  let fetchingSpeechText = $state(false);
+
+  interface AgentResponseSource {
+    text: string;
+    /** The agent's own text (relay copy or its transcript), not a terminal parse. */
+    exact: boolean;
+    failure: string;
+  }
+
+  /**
+   * The agent's latest complete response, from the most exact source this
+   * device may use. A controller runs the relay's copy transaction, which types
+   * into the agent's terminal; a reader may not, so it reads the agent's own
+   * transcript instead. The terminal parse is the last resort for both.
+   * `haltOnCopyFailure` returns the relay's failure without a fallback.
+   */
+  async function latestAgentResponse(haltOnCopyFailure = false): Promise<AgentResponseSource> {
+    let failure = '';
+    if (!readOnly && agentResponseCopySupported) {
+      try {
+        const result = await relayStore.sendToAgent(agent, { type: 'copy_agent_response' }, 15_000);
+        const text = String(result.data?.text || '');
+        if (text.trim()) return { text, exact: true, failure: '' };
+      } catch (error) {
+        failure = error instanceof Error && error.message ? error.message : 'Could not copy the agent response.';
+        if (haltOnCopyFailure) return { text: '', exact: false, failure };
+      }
+    }
+    if (agent.conversation_history_available) {
+      try {
+        const page = await relayStore.getConversationHistory(agent, '', 8);
+        const latest = page.entries.findLast((entry) => entry.role === 'assistant' && entry.text.trim());
+        if (latest) return { text: latest.text, exact: true, failure: '' };
+      } catch (error) {
+        failure ||= error instanceof Error && error.message ? error.message : 'Could not read the conversation.';
+      }
+    }
+    return { text: terminalCopyText, exact: false, failure };
+  }
+
+  async function speakTerminalResponse() {
+    if ($speechState === 'speaking') {
+      stopSpeech();
+      return;
+    }
+    if (fetchingSpeechText) return;
+    const toast = (message: string) => relayStore.showToast(message, true);
+    // Checked before anything plays: unlocking audio for a language the relay
+    // cannot speak leaves the phone with a silent stream and no explanation.
+    if (!relaySpeechLanguages.includes($speechLanguage)) {
+      toast(`This relay has no ${speechLanguageLabel($speechLanguage)} voice; install a Piper voice for it on that computer.`);
+      return;
+    }
+    // Armed before the relay round trip: the tap's activation window does not
+    // survive the await, and audio started after it is autoplay-blocked.
+    armSpeechKeepalive(toast);
+    fetchingSpeechText = true;
+    try {
+      const { text, failure } = await latestAgentResponse();
+      const spoke = text.trim() && speakViaRelay(
+        text,
+        (chunk, language) => relayStore.speakToAgent(agent, chunk, language),
+        toast,
+      );
+      if (!spoke) {
+        releaseSpeechKeepalive();
+        if (!text.trim()) toast(failure || 'No completed agent response is available to read aloud.');
+      }
+    } finally {
+      fetchingSpeechText = false;
+    }
+  }
+
   async function copyTerminalOutput() {
     copiedAgentResponseText = '';
     let text = '';
     let copiedAgentResponse = false;
-    if (agentResponseCopySupported) {
-      copyingAgentResponse = true;
-      try {
-        const result = await relayStore.sendToAgent(agent, { type: 'copy_agent_response' }, 15_000);
-        const remoteText = String(result.data?.text || '');
-        if (!remoteText.trim()) {
-          relayStore.showToast('The agent returned no response to copy.', true);
-          return;
-        }
-        text = remoteText;
-        copiedAgentResponse = true;
-        copiedAgentResponseText = remoteText;
-      } catch (error) {
-        const message = error instanceof Error && error.message
-          ? error.message
-          : 'Could not copy the agent response.';
-        relayStore.showToast(message, true);
+    copyingAgentResponse = true;
+    try {
+      const response = await latestAgentResponse(true);
+      if (response.failure && !response.text.trim()) {
+        relayStore.showToast(response.failure, true);
         return;
-      } finally {
-        copyingAgentResponse = false;
       }
+      if (response.exact) {
+        text = response.text;
+        copiedAgentResponse = true;
+        copiedAgentResponseText = response.text;
+      }
+    } finally {
+      copyingAgentResponse = false;
     }
     if (!text) text = terminalCopyText || terminalPlainText;
     if (!text.trim()) {
@@ -1358,6 +1503,7 @@
     copiedAgentResponseText = '';
   }
   function toggleModifier(which: 'ctrl' | 'alt' | 'shift') {
+    if (readOnly) return;
     arrowsOpen = false;
     fkeysOpen = false;
     if (which === 'ctrl') ctrlArmed = !ctrlArmed;
@@ -1459,6 +1605,9 @@
   }
 
   function handleScroll() {
+    // A scroll event queued during teardown can fire after Svelte has already
+    // cleared the bind:this reference; there is nothing left to measure.
+    if (!terminalElement) return;
     if (virtualScrollResetPending) {
       rememberVirtualScrollGeometry(terminalElement);
       return;
@@ -1505,6 +1654,7 @@
   function paneSizeLeaseSupported(target: Agent): boolean {
     const connection = $connections.get(target.relay_id);
     return componentMounted
+      && !readOnly
       && !questionMode
       && connection?.status === 'connected'
       && connection.capabilities.includes('pane_size_lease');
@@ -1681,21 +1831,109 @@
   }
 
 
+  function appendUploadedAttachments(attachments: AttachmentRef[]): void {
+    const rejected = attachmentSnapshot?.items.filter((item) => item.state === 'rejected') || [];
+    if (!attachments.length) {
+      uploadStatus = attachmentCancelRequested
+        ? 'Attachment upload canceled.'
+        : rejected.length
+          ? 'No selected attachments passed validation.'
+          : 'No attachments were uploaded.';
+      uploadError = !attachmentCancelRequested;
+      return;
+    }
+    const prefix = composer && !composer.endsWith('\n') ? '\n' : '';
+    composer += `${prefix}${attachments.map((attachment) => `Attachment: ${attachment.ref}`).join('\n')}\n`;
+    uploadStatus = `Attached ${attachments.map((attachment) => attachment.name).join(', ')}${rejected.length ? `; ${rejected.length} rejected` : ''}`;
+    uploadError = rejected.length > 0;
+    if (!rejected.length) attachmentSnapshot = null;
+  }
+
+  function releaseAttachmentController(controller: AttachmentBatchController, force = false): void {
+    if (!force && attachmentSnapshot?.items.some((item) => item.state === 'interrupted')) return;
+    attachmentUnsubscribe?.();
+    attachmentUnsubscribe = null;
+    if (attachmentController === controller) attachmentController = null;
+  }
+
   async function filesSelected(files: FileList | File[]) {
-    for (const file of [...files].filter((item) => item.type.startsWith('image/'))) {
-      uploadStatus = `Uploading ${file.name || 'image'}…`;
-      uploadError = false;
-      try {
-        const path = await relayStore.uploadImage(agent, file);
-        const prefix = composer && !composer.endsWith('\n') ? '\n' : '';
-        composer += `${prefix}Image: ${path}\n`;
-        uploadStatus = `Image attached: ${path.split(/[\\/]/).pop() || 'image'}`;
-      } catch (error) {
-        uploadStatus = (error as Error).message;
-        uploadError = true;
+    const selected = [...files];
+    if (readOnly || !selected.length || uploadingAttachment) return;
+    uploadingAttachment = true;
+    uploadStatus = `Uploading ${selected.length} attachment${selected.length === 1 ? '' : 's'}…`;
+    uploadError = false;
+    attachmentCancelRequested = false;
+    let controller: AttachmentBatchController | null = null;
+    try {
+      const previous = attachmentController;
+      if (previous) {
+        try {
+          await previous.cancel();
+        } finally {
+          releaseAttachmentController(previous, true);
+        }
       }
+      controller = relayStore.attachmentController(agent);
+      attachmentController = controller;
+      attachmentUnsubscribe?.();
+      attachmentUnsubscribe = controller.subscribe((snapshot) => {
+        attachmentSnapshot = snapshot;
+      });
+      controller.select(selected);
+      const attachments = await controller.upload();
+      appendUploadedAttachments(attachments);
+    } catch (error) {
+      uploadStatus = attachmentCancelRequested
+        ? 'Attachment upload canceled.'
+        : error instanceof Error && error.message
+          ? error.message
+          : 'Attachments could not be uploaded.';
+      uploadError = !attachmentCancelRequested;
+    } finally {
+      uploadingAttachment = false;
+      if (controller) releaseAttachmentController(controller);
     }
   }
+  async function restartAttachmentUpload(): Promise<void> {
+    const controller = attachmentController;
+    if (!controller || uploadingAttachment) return;
+    uploadingAttachment = true;
+    uploadStatus = 'Restarting interrupted files from the beginning…';
+    uploadError = false;
+    attachmentCancelRequested = false;
+    try {
+      appendUploadedAttachments(await controller.restart());
+    } catch (error) {
+      uploadStatus = error instanceof Error && error.message
+        ? error.message
+        : 'Attachments could not be restarted.';
+      uploadError = true;
+    } finally {
+      uploadingAttachment = false;
+      releaseAttachmentController(controller);
+    }
+  }
+
+
+  async function cancelAttachmentUpload(): Promise<void> {
+    const controller = attachmentController;
+    if (!controller) return;
+    attachmentCancelRequested = true;
+    try {
+      await controller.cancel();
+      attachmentSnapshot = null;
+    } catch {
+      uploadStatus = 'The relay could not confirm attachment cancellation.';
+      uploadError = true;
+    } finally {
+      releaseAttachmentController(controller, true);
+    }
+  }
+
+  onDestroy(() => {
+    attachmentUnsubscribe?.();
+    void attachmentController?.cancel();
+  });
 
   function paste(event: ClipboardEvent) {
     const files = [...(event.clipboardData?.items || [])]
@@ -1712,7 +1950,13 @@
   }
 
   function openNext() {
-    if (nextBlocked) replaceView({ view: 'terminal', paneId: nextBlocked.pane_id });
+    if (nextBlocked) {
+      replaceView({
+        view: 'terminal',
+        paneId: nextBlocked.pane_id,
+        target: targetRefForAgent(nextBlocked) || undefined,
+      });
+    }
   }
 </script>
 
@@ -1767,13 +2011,13 @@
   {#if arrowsOpen}
     <div class="arrow-popup">
       <span aria-hidden="true"></span>
-      <button aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
+      <button disabled={readOnly || keySending} aria-label="Up" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Up')}>↑</button>
       <span aria-hidden="true"></span>
-      <button aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
+      <button disabled={readOnly || keySending} aria-label="Left" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Left')}>←</button>
       <span aria-hidden="true"></span>
-      <button aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
+      <button disabled={readOnly || keySending} aria-label="Right" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Right')}>→</button>
       <span aria-hidden="true"></span>
-      <button aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
+      <button disabled={readOnly || keySending} aria-label="Down" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Down')}>↓</button>
       <span aria-hidden="true"></span>
     </div>
   {/if}
@@ -1784,6 +2028,7 @@
     <div class="fkey-popup" role="group" aria-label="Function keys">
       {#each FUNCTION_KEYS as number (number)}
         <button
+          disabled={readOnly || keySending}
           onpointerdown={(event) => event.preventDefault()}
           onclick={() => sendFunctionKey(number)}
         >F{number}</button>
@@ -1796,9 +2041,13 @@
   class:has-actions={inputLocked || nextBlocked}
   class:question-only={questionMode}
   class:find-open={findOpen}
+  class:reader={readOnly}
   class="terminal-view"
   aria-label={`${questionMode ? 'Questions' : 'Terminal'} for ${agent.project || agent.name || agent.agent || 'agent'}`}
 >
+  {#if readOnly}
+    <p class="key-feedback" role="status">Reader access is read only. Use a controller device to send input or answer prompts.</p>
+  {/if}
   {#if questionMode && interaction}
     <QuestionForm {agent} {interaction} responding={responding.has(agent.pane_id)} />
     {#if keyControlStatus}
@@ -1867,6 +2116,7 @@
     role="log"
     aria-label="Agent terminal output"
     onscroll={handleScroll}
+    onscrollcapture={syncWideGridScroll}
   >
     <span
       bind:this={cellMeasureElement}
@@ -1931,6 +2181,17 @@
       disabled={copyingAgentResponse || responding.has(agent.pane_id)}
       onclick={copyTerminalOutput}
     >{@render copyIcon()}</Button>
+    {#if $speechEnabled}
+      <Button
+        variant="secondary"
+        size="sm"
+        aria-label={$speechState === 'speaking' ? 'Stop reading response' : 'Read latest response aloud'}
+        title={$speechState === 'speaking' ? 'Stop reading' : `Read latest response in ${speechLanguageLabel($speechLanguage)}`}
+        aria-busy={fetchingSpeechText}
+        disabled={fetchingSpeechText}
+        onclick={() => { void speakTerminalResponse(); }}
+      >{$speechState === 'speaking' ? 'Stop' : 'Speak'}</Button>
+    {/if}
   </div>
 
   <div class="terminal-bottom" onfocusin={focusComposer} onfocusout={blurComposer}>
@@ -2000,12 +2261,12 @@
               autocapitalize="none"
               spellcheck="false"
               enterkeyhint="send"
-              disabled={sendingSecret}
+              disabled={readOnly || sendingSecret}
               onkeydown={secretKeydown}
             />
             <Button
               size="sm"
-              disabled={!secretValue || sendingSecret}
+              disabled={readOnly || !secretValue || sendingSecret}
               aria-label="Send hidden value"
               onclick={submitSecret}
             >{sendingSecret ? '…' : 'Send'}</Button>
@@ -2017,13 +2278,23 @@
       </section>
     {/if}
     <div class="term-input">
-      <Button variant="ghost" size="icon" disabled={inputLocked} aria-label="Attach image" onclick={() => fileInput.click()}>
+      <!-- Images get their own input: a mixed accept list makes Android offer
+           the generic file picker instead of the photo picker, hiding
+           screenshots behind a Files detour. -->
+      <div class="attach-stack">
+      <Button variant="ghost" size="icon" disabled={inputLocked || uploadingAttachment} aria-label="Attach photos" onclick={() => imageInput.click()}>
         <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
           <rect x="3" y="4" width="18" height="16" rx="2"></rect>
           <circle cx="8.5" cy="9" r="1.5"></circle>
           <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19"></path>
         </svg>
       </Button>
+      <Button variant="ghost" size="icon" disabled={inputLocked || uploadingAttachment} aria-label="Attach files" onclick={() => fileInput.click()}>
+        <svg class="button-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+        </svg>
+      </Button>
+      </div>
       <div class:awaiting-approval={approvalMode && !composerFocused} class:has-text={Boolean(composer)} class="composer-field">
         <textarea
           bind:this={composerElement}
@@ -2055,9 +2326,13 @@
         ></textarea>
         {#if composer}<button class="input-clear" aria-label="Clear prompt text" onclick={clearComposer}>×</button>{/if}
       </div>
-      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || sendingPrompt} aria-label={sendingPrompt ? 'Submitting input' : inspectionMode ? 'Submit terminal text' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
-      <input bind:this={fileInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
+      <Button size="icon" disabled={!composer.replace(/[\r\n]+$/g, '') || composerLocked || sendingPrompt || uploadingAttachment} aria-label={sendingPrompt ? 'Submitting input' : inspectionMode ? 'Submit terminal text' : 'Send prompt'} onclick={sendPrompt}>{sendingPrompt ? '…' : '➤'}</Button>
+      <input bind:this={imageInput} type="file" accept="image/*" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
+      <input bind:this={fileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/markdown,text/csv,application/json,application/pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp" multiple hidden onchange={(event) => { void filesSelected(event.currentTarget.files || []); event.currentTarget.value = ''; }} />
     </div>
+    {#if attachmentSnapshot?.items.length}
+      <AttachmentProgress snapshot={attachmentSnapshot} oncancel={cancelAttachmentUpload} onrestart={restartAttachmentUpload} />
+    {/if}
     {#if uploadStatus}<p class:error={uploadError} class="upload-status" role="status">{uploadStatus}</p>{/if}
     {#if draftPersistenceWarning}<p class="upload-status error" role="status">{draftPersistenceWarning}</p>{/if}
     {#if paneSizeLeaseError}<p class="upload-status error" role="alert">{paneSizeLeaseError}</p>{/if}
@@ -2077,7 +2352,7 @@
             <Button
               variant={action.cancel ? 'secondary' : 'default'}
               size="sm"
-              disabled={keySending}
+              disabled={readOnly || keySending}
               onclick={() => { void sendKeys(action.keys, action.label); }}
             ><kbd>{menuKeyLabel(action.keys)}</kbd>{action.label}</Button>
           {/each}
@@ -2085,7 +2360,7 @@
       </section>
     {/if}
 
-    {#if approvalMode && !responding.has(agent.pane_id)}
+    {#if approvalMode && !readOnly && !responding.has(agent.pane_id)}
       <div class="quick-actions" aria-label="Approval choices">
         {#each options as option, index (`${index}:${option}`)}
           <Button
@@ -2103,13 +2378,14 @@
       <p class:error={keyFeedbackError} class="key-feedback" role="status" aria-live="polite">{keyControlStatus}</p>
     {/if}
     <div class="term-keys" aria-busy={keySending}>
-      <Button variant="secondary" size="sm" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
-      <Button variant="secondary" size="sm" aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
+      <Button variant="secondary" size="sm" disabled={readOnly || keySending} onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Escape', 'Cancelled prompt')}>Esc</Button>
+      <Button variant="secondary" size="sm" disabled={readOnly || keySending} aria-label="Tab" title="Send Tab" onpointerdown={(event) => event.preventDefault()} onclick={sendTab}>{@render tabIcon()}</Button>
       <div class="modifier-menu">
         <input
           id="modifier-key-input"
           class="modifier-key-input"
           bind:this={modifierInputElement}
+          disabled={readOnly}
           aria-label="Modifier shortcut character"
           autocomplete="off"
           autocapitalize="none"
@@ -2122,6 +2398,7 @@
         <Button
           variant="secondary"
           size="sm"
+          disabled={readOnly || keySending}
           aria-controls="modifier-key-input"
           aria-pressed={shiftArmed}
           aria-label="Shift"
@@ -2132,6 +2409,7 @@
         <Button
           variant="secondary"
           size="sm"
+          disabled={readOnly || keySending}
           aria-controls="modifier-key-input"
           aria-pressed={ctrlArmed}
           aria-label="Ctrl"
@@ -2142,6 +2420,7 @@
         <Button
           variant="secondary"
           size="sm"
+          disabled={readOnly || keySending}
           aria-controls="modifier-key-input"
           aria-pressed={altArmed}
           title="Arm Alt; combine it with Ctrl or Shift"
@@ -2154,6 +2433,7 @@
         <Button
           variant="secondary"
           size="sm"
+          disabled={readOnly || keySending}
           aria-label="Function keys"
           aria-expanded={fkeysOpen}
           onpointerdown={(event) => event.preventDefault()}
@@ -2165,6 +2445,7 @@
         <Button
           variant="secondary"
           size="sm"
+          disabled={readOnly || keySending}
           aria-label="Arrow keys"
           aria-expanded={arrowsOpen}
           onpointerdown={(event) => event.preventDefault()}
@@ -2174,7 +2455,7 @@
         </Button>
         {@render arrowPopup()}
       </div>
-      <Button variant="secondary" size="sm" aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
+      <Button variant="secondary" size="sm" disabled={readOnly || keySending} aria-label="Enter" onpointerdown={(event) => event.preventDefault()} onclick={() => sendTerminalKey('Enter')}>Enter</Button>
     </div>
   </div>
 </div>

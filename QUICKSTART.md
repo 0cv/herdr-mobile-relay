@@ -36,8 +36,10 @@ installed Herdr app — a gateway carries relay traffic only. It reuses a record
 or `HERDR_PHONE_APP_URL` origin, and asks for one when neither exists.
 
 Scan the QR or open the complete HTTPS setup link. Keep it private: it contains
-the relay encryption key in the URL fragment. The fragment is not sent in the
-HTTP request, and the app removes it after import.
+the one-use bootstrap invitation in the URL fragment, which is never sent in
+the HTTP request. The installed app removes it after enrollment. iOS browser
+tabs retain it without redeeming it and direct you to the installed app, which
+prevents a disposable Safari tab from consuming the invitation.
 
 Keep the Quick Start pane open. Ctrl-C stops the relay, and on the tunnel path
 the next run creates a new hostname and setup link.
@@ -47,6 +49,14 @@ the next run creates a new hostname and setup link.
 Run an agent in Herdr or tap **＋** in the phone app. You can inspect output,
 send prompts, answer approvals and plan questions, upload images, and manage the
 agent lifecycle.
+
+On hosts with a published Piper runtime, setup downloads the engine and the
+English voice that reads responses aloud, cached outside the release so updates
+never fetch them again. Reading aloud turns itself on the first time. French,
+German, Spanish, and Chinese are downloaded on demand from the phone's Settings
+or with `relay/speech-voices.sh --languages fr`. Stock Apple Silicon uses
+macOS `say`; Settings does not offer neural voice downloads unless Piper is
+already installed.
 
 ## Skip Cloudflare
 

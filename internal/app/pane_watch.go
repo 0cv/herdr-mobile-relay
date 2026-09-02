@@ -8,6 +8,7 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/history"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 )
 
@@ -30,6 +31,7 @@ type paneWatchFrame struct {
 type paneWatch struct {
 	client   *transport.ClientConn
 	paneID   string
+	target   protocol.TargetRef
 	lines    int
 	format   string
 	interval time.Duration
@@ -57,11 +59,16 @@ func (s *Server) startPaneWatch(client *transport.ClientConn, message map[string
 	if format != "ansi" {
 		format = "text"
 	}
+	target := protocol.TargetRef{ServerSessionID: "primary", PaneID: paneID}
+	if inbound, err := protocol.DecodeMap(message); err == nil && inbound.Target != nil {
+		target = *inbound.Target
+	}
 	interval := requestedPaneWatchInterval(message["interval_ms"])
 	ctx, cancel := context.WithCancel(client.Context())
 	watch := &paneWatch{
 		client:   client,
 		paneID:   paneID,
+		target:   target,
 		lines:    lines,
 		format:   format,
 		interval: interval,
@@ -200,6 +207,7 @@ func (s *Server) readPaneWatchFrame(watch *paneWatch) (map[string]any, *paneWatc
 	message := watchMessage(watch)
 	s.applyPaneReadLease(message)
 	response := s.preparePaneResponse(message, s.dispatcher.HandleReadPane(watch.ctx, message))
+	response["target"] = watch.target
 	content, ok := successfulPaneContent(response)
 	if !ok {
 		return response, nil
@@ -258,7 +266,7 @@ func (s *Server) handlePaneApplied(client *transport.ClientConn, message map[str
 		return
 	}
 	watch.mu.Unlock()
-	s.hub.Send(client, map[string]any{"type": "pane_resync", "pane_id": paneID})
+	s.hub.Send(client, map[string]any{"type": "pane_resync", "pane_id": paneID, "target": watch.target})
 }
 
 func requestedPaneWatchInterval(value any) time.Duration {
@@ -276,6 +284,7 @@ func watchMessage(watch *paneWatch) map[string]any {
 		"pane_id": watch.paneID,
 		"lines":   watch.lines,
 		"format":  watch.format,
+		"target":  watch.target,
 	}
 }
 

@@ -162,6 +162,29 @@ if [ "${#missing_tools[@]}" -ne 0 ]; then
     exit 1
 fi
 
+# Voices are cached outside the release, so this download happens once per
+# computer rather than once per update. The relay binary owns the catalog and
+# does the downloading, which the prerequisite check above already required.
+speech_missing="$("$SCRIPT_DIR/speech-voices.sh" --missing)"
+if [ -n "$speech_missing" ]; then
+    if [ "$INSTALL_MISSING" -eq 1 ]; then
+        answer="${HERDR_SETUP_YES:-}"
+        if [ "$answer" != "1" ] && [ -t 0 ]; then
+            printf 'Download the English voice that reads responses aloud (about 82–90 MB with the engine, cached across updates)? [Y/n] '
+            read -r answer
+        fi
+        case "$answer" in
+            ""|1|y|Y|yes|YES)
+                "$SCRIPT_DIR/speech-voices.sh" ||
+                    echo "Speech voices were not installed; reading aloud falls back to the system speech engine."
+                ;;
+            *) echo "Skipped the speech voice. Run relay/speech-voices.sh later, or download it from the phone's Settings." ;;
+        esac
+    else
+        echo "Optional: run relay/speech-voices.sh to cache the English voice that reads responses aloud."
+    fi
+fi
+
 if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ ! -f "$WEB_ENV_FILE" ]; then
     install -m 0600 "$REPO_DIR/.env.example" "$WEB_ENV_FILE"
     echo "Created $WEB_ENV_FILE"

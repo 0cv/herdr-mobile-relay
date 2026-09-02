@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,10 +22,14 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/conversation"
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
+	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
+	"github.com/0cv/herdr-mobile-relay/internal/protocol"
+	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
 	"github.com/0cv/herdr-mobile-relay/internal/session"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
+	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
 	"github.com/coder/websocket"
 )
@@ -41,6 +46,203 @@ func testServerWithCacheDir(cacheDir string) *Server {
 		CacheDir:   cacheDir,
 	}
 	return New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+func TestAuthorizeAuthenticatedIdentity(t *testing.T) {
+	mutation := protocol.ActionMetadata{Operation: "send_input", Class: protocol.ActionMutating}
+	read := protocol.ActionMetadata{Operation: "read_pane", Class: protocol.ActionReadOnly}
+
+	for _, test := range []struct {
+		name          string
+		identity      transport.AuthenticatedIdentity
+		authenticated bool
+		action        protocol.ActionMetadata
+		deviceID      string
+		wantDenied    bool
+	}{
+		{name: "reader mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: mutation, wantDenied: true},
+		{name: "reader read", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleReader)}, authenticated: true, action: read},
+		{name: "reader self revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-current"},
+		{name: "reader other revoke", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "revoke_device", Class: protocol.ActionMutating}, deviceID: "device-other", wantDenied: true},
+		{name: "controller mutation", identity: transport.AuthenticatedIdentity{Role: string(protocol.RoleController)}, authenticated: true, action: mutation},
+		{name: "local connection", action: mutation},
+		{name: "unauthenticated push subscribe", action: protocol.ActionMetadata{Operation: "push_subscribe", Class: protocol.ActionMutating}, wantDenied: true},
+		{name: "reader own-device push policy", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "push_policy_set", Class: protocol.ActionMutating}, deviceID: "spoofed-other"},
+		{name: "unauthenticated push open", action: protocol.ActionMetadata{Operation: "push_open_ref", Class: protocol.ActionReadOnly}, wantDenied: true},
+		{name: "reader push test", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleReader)}, authenticated: true, action: protocol.ActionMetadata{Operation: "push_test_device", Class: protocol.ActionMutating}},
+		{name: "unauthenticated push test", action: protocol.ActionMetadata{Operation: "push_test_device", Class: protocol.ActionMutating}, wantDenied: true},
+		{name: "controller push test", identity: transport.AuthenticatedIdentity{DeviceID: "device-current", Role: string(protocol.RoleController)}, authenticated: true, action: protocol.ActionMetadata{Operation: "push_test_device", Class: protocol.ActionMutating}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := authorizeAuthenticatedIdentity(test.identity, test.authenticated, test.action, test.deviceID)
+			if (err != nil) != test.wantDenied {
+				t.Fatalf("authorizeAuthenticatedIdentity() error = %#v, want denied %v", err, test.wantDenied)
+			}
+			if err != nil && (err.Code != protocol.ErrorReaderDenied || err.Args["operation"] != test.action.Operation) {
+				t.Fatalf("authorizeAuthenticatedIdentity() error = %#v", err)
+			}
+		})
+	}
+}
+
+func TestReservePushTestThrottlesPerDevice(t *testing.T) {
+	server := testServer()
+	now := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	if !server.reservePushTest("device-1", now) {
+		t.Fatal("first push test was throttled")
+	}
+	if server.reservePushTest("device-1", now.Add(pushTestInterval-time.Millisecond)) {
+		t.Fatal("repeated push test inside interval was accepted")
+	}
+	if !server.reservePushTest("device-2", now.Add(time.Second)) {
+		t.Fatal("one device throttled another device")
+	}
+	if !server.reservePushTest("device-1", now.Add(pushTestInterval)) {
+		t.Fatal("push test remained throttled after interval")
+	}
+	// Nothing older than one interval can throttle anything, so stale rows are
+	// dropped rather than accumulating one timestamp per device that ever asked
+	// for a test.
+	if !server.reservePushTest("device-3", now.Add(time.Hour)) {
+		t.Fatal("later push test was throttled")
+	}
+	if len(server.pushTestLast) != 1 {
+		t.Fatalf("push test throttle retained %d devices, want 1", len(server.pushTestLast))
+	}
+	// A revoked device leaves no throttle behind for the next enrolment.
+	server.forgetPushTest("device-3")
+	if !server.reservePushTest("device-3", now.Add(time.Hour)) {
+		t.Fatal("re-enrolled device inherited the revoked device's throttle")
+	}
+}
+
+func TestValidateExactPaneTargetBindsCurrentTerminalGenerationAndAgentSession(t *testing.T) {
+	server := testServer()
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", ServerSessionID: "primary", TerminalID: "terminal-1",
+		Generation: 4, SessionID: "agent-session-1",
+	}}, server.state.RevisionCounter())
+	current, ok := server.state.Agent("pane-1")
+	if !ok {
+		t.Fatal("committed agent missing")
+	}
+	exact := protocol.TargetRef{
+		ServerSessionID: current.ServerSessionID, PaneID: current.PaneID, TerminalID: current.TerminalID,
+		Generation: current.Generation, AgentSessionID: current.SessionID,
+	}
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1", Target: &exact}, true); err != nil {
+		t.Fatalf("exact target rejected: %#v", err)
+	}
+	for name, mutate := range map[string]func(*protocol.TargetRef){
+		"server session": func(target *protocol.TargetRef) { target.ServerSessionID = "other" },
+		"pane":           func(target *protocol.TargetRef) { target.PaneID = "pane-2" },
+		"terminal":       func(target *protocol.TargetRef) { target.TerminalID = "terminal-2" },
+		"generation":     func(target *protocol.TargetRef) { target.Generation++ },
+		"agent session":  func(target *protocol.TargetRef) { target.AgentSessionID = "agent-session-2" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := exact
+			mutate(&changed)
+			if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1", Target: &changed}, true); err == nil {
+				t.Fatal("stale target was accepted")
+			}
+		})
+	}
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1"}, true); err == nil {
+		t.Fatal("authenticated pane command without a target was accepted")
+	}
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1"}, false); err != nil {
+		t.Fatalf("local pane command without a target was rejected: %#v", err)
+	}
+}
+
+func TestValidateExactPaneTargetAllowsStaleOwnerCleanup(t *testing.T) {
+	server := testServer()
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", ServerSessionID: "primary", TerminalID: "terminal-new",
+		Generation: 5, SessionID: "agent-session-new",
+	}}, server.state.RevisionCounter())
+	stale := protocol.TargetRef{
+		ServerSessionID: "primary", PaneID: "pane-1", TerminalID: "terminal-old",
+		Generation: 4, AgentSessionID: "agent-session-old",
+	}
+	for _, action := range []string{"unwatch_pane", "release_pane_size", "cancel_speech"} {
+		if err := validateExactPaneTarget(server.state, protocol.Inbound{
+			Type: action, PaneID: "pane-1", Target: &stale,
+		}, true); err != nil {
+			t.Fatalf("%s rejected stale cleanup target: %#v", action, err)
+		}
+	}
+	stale.PaneID = "pane-2"
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{
+		Type: "unwatch_pane", PaneID: "pane-1", Target: &stale,
+	}, true); err == nil {
+		t.Fatal("cleanup accepted a different pane")
+	}
+}
+
+// The agents broadcast deep-copies snapshots through JSON before projecting
+// wire identity, and the phone can only echo what that copy advertises. The
+// identity that survives the round trip must satisfy validateExactPaneTarget,
+// or every command against an agent with a resolved session is rejected -
+// exactly the shape of the field failure this test was written after: the
+// internal SessionID is json:"-", so it silently vanished from the broadcast
+// and phones echoed an empty agent_session_id forever.
+func TestBroadcastAgentIdentitySatisfiesExactTargetValidation(t *testing.T) {
+	server := testServer()
+	agent := &coordinator.AgentState{
+		PaneID: "pane-1", RawPaneID: "pane-1", TerminalID: "terminal-1",
+		Agent: "omp", Status: "working",
+		Session: "/home/user/.omp/agent/sessions/-work/2026-08-30T19-57-25-194Z_x.jsonl",
+	}
+	server.resolveAgentSessionName(agent)
+	server.state.CommitInventory([]*coordinator.AgentState{agent}, server.state.RevisionCounter())
+
+	data, err := json.Marshal(server.state.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire []*coordinator.AgentState
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	server.projectAgentResources(wire)
+	advertised := wire[0]
+	if advertised.AgentSessionID == "" {
+		t.Fatal("agents broadcast lost the agent session identity")
+	}
+	echoed := protocol.TargetRef{
+		ServerSessionID: advertised.ServerSessionID,
+		PaneID:          advertised.RawPaneID,
+		TerminalID:      advertised.TerminalID,
+		Generation:      advertised.Generation,
+		AgentSessionID:  advertised.AgentSessionID,
+	}
+	if err := validateExactPaneTarget(server.state, protocol.Inbound{PaneID: "pane-1", Target: &echoed}, true); err != nil {
+		t.Fatalf("broadcast identity rejected by exact-target validation: %#v", err)
+	}
+}
+
+func TestBoundPushPolicyUsesAuthenticatedDevice(t *testing.T) {
+	current := push.DefaultDevicePolicy("old-device", "en")
+	raw := json.RawMessage(`{
+		"device_id":"spoofed-device",
+		"locale":"spoofed-locale",
+		"categories":{"attention":true,"question":false,"brief":true,"finished":false,"update":true,"test":true},
+		"settle_ms":5000,
+		"cooldown_ms":60000,
+		"snoozed":true,
+		"snooze_until":"2026-08-31T13:00:00Z",
+		"update_once":false
+	}`)
+	policy, err := boundPushPolicy(raw, "authenticated-device", "zh-CN", current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.DeviceID != "authenticated-device" || policy.Locale != "zh-CN" ||
+		policy.Settle != 5*time.Second || policy.Cooldown != time.Minute ||
+		!policy.Snoozed || policy.UpdateOnce {
+		t.Fatalf("bound policy = %#v", policy)
+	}
 }
 
 func TestResolveAgentSessionName(t *testing.T) {
@@ -582,6 +784,358 @@ func sendCopyRequest(t *testing.T, conn *websocket.Conn, requestID, paneID strin
 	return result
 }
 
+func TestSpeakTextSynthesizesOverTheWire(t *testing.T) {
+	s := testServer()
+	synthesized := ""
+	spokenLanguage := ""
+	availableLanguages := []string{"en", "fr"}
+	s.speechStatus = func() speech.Catalog {
+		return speech.Catalog{Languages: append([]string(nil), availableLanguages...)}
+	}
+	s.speechSynth = func(_ context.Context, text, language string) ([]byte, error) {
+		synthesized = text
+		spokenLanguage = language
+		if strings.Contains(text, "fail") {
+			return nil, errors.New("engine detail stays server-side")
+		}
+		return []byte("RIFFfakewav"), nil
+	}
+	// Mirrors the production gate: an action missing from the protocol
+	// catalog is rejected as unknown_action before any dispatch case runs.
+	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		defer admitted()
+		if message["type"] != "speak_text" {
+			return
+		}
+		inbound, err := protocol.DecodeMap(message)
+		if err != nil {
+			t.Errorf("decode speak_text: %v", err)
+			return
+		}
+		if _, known := protocol.ScopeFor(inbound); !known {
+			t.Error("speak_text is not a registered protocol action")
+			return
+		}
+		requestID, _ := message["request_id"].(string)
+		speechRequestID, _ := message["speech_request_id"].(string)
+		text, _ := message["text"].(string)
+		language, _ := message["language"].(string)
+		s.speakText(client, requestID, speechRequestID, text, language)
+	})
+	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		server.Close()
+		t.Fatalf("dial speak test client: %v", err)
+	}
+	t.Cleanup(func() {
+		conn.CloseNow()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.hub.Shutdown(shutdownCtx)
+		server.Close()
+	})
+	request := func(text, language string) map[string]any {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{
+			"type":       "speak_text",
+			"request_id": "req-1",
+			"text":       text,
+			"language":   language,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+			t.Fatalf("write speak request: %v", err)
+		}
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read speak result: %v", err)
+		}
+		var result map[string]any
+		if err := json.Unmarshal(data, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	result := request("hello phone", "fr")
+	data, _ := result["data"].(map[string]any)
+	if result["ok"] != true || data["format"] != "wav" ||
+		data["audio"] != base64.StdEncoding.EncodeToString([]byte("RIFFfakewav")) {
+		t.Fatalf("speak result = %+v, want base64 wav payload", result)
+	}
+	if synthesized != "hello phone" || spokenLanguage != "fr" {
+		t.Fatalf("synthesized %q in %q, want the requested text and language", synthesized, spokenLanguage)
+	}
+
+	// Engine details never reach the phone; the toast stays generic.
+	failed := request("please fail", "en")
+	if failed["ok"] != false || failed["error"] != "Speech synthesis failed on this computer" {
+		t.Fatalf("failed result = %+v, want generic synthesis failure", failed)
+	}
+
+	// A language this host has no voice for is refused before synthesis.
+	unsupported := request("hallo", "de")
+	if unsupported["ok"] != false || unsupported["error"] != "This computer has no voice for that language" {
+		t.Fatalf("unsupported language result = %+v", unsupported)
+	}
+
+	availableLanguages = nil
+	missing := request("hello", "en")
+	if missing["ok"] != false || missing["error"] != "No speech engine is installed on this computer" {
+		t.Fatalf("missing engine result = %+v", missing)
+	}
+}
+
+func TestCancelSpeechStopsRelaySynthesis(t *testing.T) {
+	s := testServer()
+	s.speechStatus = func() speech.Catalog {
+		return speech.Catalog{Languages: []string{"en"}}
+	}
+	started := make(chan struct{})
+	s.speechSynth = func(ctx context.Context, _, _ string) ([]byte, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		admitted()
+		action, _ := message["type"].(string)
+		speechRequestID, _ := message["speech_request_id"].(string)
+		switch action {
+		case "speak_text":
+			requestID, _ := message["request_id"].(string)
+			s.speakText(client, requestID, speechRequestID, "stop this", "en")
+		case "cancel_speech":
+			s.cancelSpeech(client.ID(), speechRequestID)
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		server.Close()
+		t.Fatalf("dial speech cancellation client: %v", err)
+	}
+	t.Cleanup(func() {
+		conn.CloseNow()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.hub.Shutdown(shutdownCtx)
+		server.Close()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := conn.Write(ctx, websocket.MessageText, []byte(
+		`{"type":"speak_text","request_id":"speak-1","speech_request_id":"speech-1"}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("speech synthesis did not start")
+	}
+	if err := conn.Write(ctx, websocket.MessageText, []byte(
+		`{"type":"cancel_speech","speech_request_id":"speech-1"}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read cancelled speech result: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result["request_id"] != "speak-1" || result["ok"] != false {
+		t.Fatalf("cancelled speech result = %#v", result)
+	}
+}
+
+func TestSpeechVoiceManagementOverTheWire(t *testing.T) {
+	s := testServer()
+	installed := map[string]bool{"en": true}
+	s.speechStatus = func() speech.Catalog {
+		status := speech.Catalog{CacheDir: "/cache/speech", EngineInstalled: true, ManagementSupported: true}
+		for _, language := range speech.Offered {
+			engine := "espeak-ng"
+			if installed[language] {
+				engine = "piper"
+				status.Languages = append(status.Languages, language)
+			}
+			status.Voices = append(status.Voices, speech.VoiceStatus{
+				Language:  language,
+				Name:      language + "-voice",
+				Installed: installed[language],
+				Bytes:     63 << 20,
+				Engine:    engine,
+			})
+		}
+		return status
+	}
+	requested := ""
+	s.speechInstall = func(_ context.Context, language string) error {
+		requested = language
+		if language == "zh" {
+			return errors.New("engine detail stays server-side")
+		}
+		installed[language] = true
+		return nil
+	}
+	s.speechRemove = func(language string) error {
+		delete(installed, language)
+		return nil
+	}
+	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		defer admitted()
+		action, _ := message["type"].(string)
+		requestID, _ := message["request_id"].(string)
+		language, _ := message["language"].(string)
+		inbound, err := protocol.DecodeMap(message)
+		if err != nil {
+			t.Errorf("decode %s: %v", action, err)
+			return
+		}
+		scope, known := protocol.ScopeFor(inbound)
+		if !known {
+			t.Errorf("%s is not a registered protocol action", action)
+			return
+		}
+		switch action {
+		case "speech_voices_list":
+			if scope.Action.Class != protocol.ActionReadOnly {
+				t.Error("listing voices must stay a read-only action")
+			}
+			s.sendCommandResult(client, requestID, action, true, "completed", "", "", s.speechVoicePayload(nil))
+		case "speech_voice_install", "speech_voice_remove":
+			if scope.Action.Class != protocol.ActionMutating {
+				t.Errorf("%s must be a mutating action so readers cannot run it", action)
+			}
+			s.changeSpeechVoice(client, requestID, action, language)
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		server.Close()
+		t.Fatalf("dial voice test client: %v", err)
+	}
+	t.Cleanup(func() {
+		conn.CloseNow()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = s.hub.Shutdown(shutdownCtx)
+		server.Close()
+	})
+	exchange := func(request map[string]any) []map[string]any {
+		t.Helper()
+		payload, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+			t.Fatalf("write %v: %v", request["type"], err)
+		}
+		var messages []map[string]any
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				t.Fatalf("read %v result: %v", request["type"], err)
+			}
+			var message map[string]any
+			if err := json.Unmarshal(data, &message); err != nil {
+				t.Fatal(err)
+			}
+			messages = append(messages, message)
+			if message["type"] == "command_result" {
+				return messages
+			}
+		}
+	}
+	voiceState := func(message map[string]any) map[string]bool {
+		t.Helper()
+		payload, _ := message["data"].(map[string]any)
+		if payload == nil {
+			payload = message
+		}
+		voices, _ := payload["voices"].([]any)
+		if len(voices) != len(speech.Offered) {
+			t.Fatalf("payload lists %d voices, want %d", len(voices), len(speech.Offered))
+		}
+		state := map[string]bool{}
+		for _, entry := range voices {
+			voice, _ := entry.(map[string]any)
+			language, _ := voice["language"].(string)
+			state[language], _ = voice["installed"].(bool)
+		}
+		return state
+	}
+
+	listed := exchange(map[string]any{"type": "speech_voices_list", "request_id": "list-1"})
+	result := listed[len(listed)-1]
+	data, _ := result["data"].(map[string]any)
+	if result["ok"] != true || data["cache_dir"] != "/cache/speech" || data["engine_installed"] != true {
+		t.Fatalf("list result = %+v", result)
+	}
+	if state := voiceState(result); !state["en"] || state["fr"] {
+		t.Fatalf("listed voices = %+v, want English only", state)
+	}
+
+	// Installing answers the caller and tells every phone what the computer
+	// can speak now, so a second device is never left with a stale list.
+	messages := exchange(map[string]any{"type": "speech_voice_install", "request_id": "install-1", "language": "fr", "protocol": protocol.Version})
+	if requested != "fr" {
+		t.Fatalf("installed language = %q, want fr", requested)
+	}
+	broadcast := map[string]any{}
+	for _, message := range messages {
+		if message["type"] == "speech_voices" {
+			broadcast = message
+		}
+	}
+	if len(broadcast) == 0 {
+		t.Fatalf("install sent no speech_voices broadcast: %+v", messages)
+	}
+	if state := voiceState(broadcast); !state["fr"] {
+		t.Fatalf("broadcast voices = %+v, want French installed", state)
+	}
+	if languages, _ := broadcast["languages"].([]any); len(languages) != 2 {
+		t.Fatalf("broadcast languages = %+v, want English and French", broadcast["languages"])
+	}
+	if s.speakableLanguages()[1] != "fr" {
+		t.Fatalf("relay speakable languages = %v, want French included", s.speakableLanguages())
+	}
+
+	removed := exchange(map[string]any{"type": "speech_voice_remove", "request_id": "remove-1", "language": "fr", "protocol": protocol.Version})
+	if state := voiceState(removed[len(removed)-1]); state["fr"] {
+		t.Fatalf("remove result = %+v, want French gone", removed[len(removed)-1])
+	}
+
+	// A failed download keeps engine details server-side and still reports the
+	// unchanged catalog.
+	failed := exchange(map[string]any{"type": "speech_voice_install", "request_id": "install-2", "language": "zh", "protocol": protocol.Version})
+	result = failed[len(failed)-1]
+	if result["ok"] != false || result["error"] != "Downloading the Chinese voice failed on this computer" {
+		t.Fatalf("failed install result = %+v", result)
+	}
+	if state := voiceState(result); state["zh"] {
+		t.Fatalf("failed install reported Chinese as installed: %+v", result)
+	}
+
+	unsupported := exchange(map[string]any{"type": "speech_voice_install", "request_id": "install-3", "language": "ja", "protocol": protocol.Version})
+	result = unsupported[len(unsupported)-1]
+	if result["ok"] != false || result["error"] != "That language is not one this app reads aloud" {
+		t.Fatalf("unsupported language result = %+v", result)
+	}
+}
+
 func TestCopyAgentResponseValidatesPaneState(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -728,8 +1282,8 @@ func TestHealthz(t *testing.T) {
 	if resp["revision"] != "abc123" {
 		t.Errorf("revision = %v, want abc123", resp["revision"])
 	}
-	if resp["protocol"] != float64(2) {
-		t.Errorf("protocol = %v, want 2", resp["protocol"])
+	if resp["protocol"] != float64(protocol.Version) {
+		t.Errorf("protocol = %v, want %d", resp["protocol"], protocol.Version)
 	}
 	if resp["gateway_available_version"] != "0.9.0" {
 		t.Errorf("gateway_available_version = %v, want 0.9.0", resp["gateway_available_version"])
@@ -752,6 +1306,53 @@ func TestReadyzNotReady(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["status"] != "unavailable" {
 		t.Errorf("status = %v, want unavailable", resp["status"])
+	}
+}
+
+func enrollBootstrapDevice(t *testing.T, runtimeDir, token string) {
+	t.Helper()
+	store, err := deviceauth.Open(filepath.Join(runtimeDir, "device-auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureBootstrapInvitation([]byte(token), "relay", "en"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: "bootstrap", Version: 1,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRearmedLaunchStartsWithoutStrandedDevices(t *testing.T) {
+	token := strings.Repeat("k", 32)
+	for _, test := range []struct {
+		name    string
+		rearm   bool
+		devices int
+	}{
+		{name: "quick tunnel forgets devices stranded under the previous hostname", rearm: true, devices: 0},
+		{name: "stable install keeps its paired devices", rearm: false, devices: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			runtimeDir := filepath.Join(root, "runtime")
+			enrollBootstrapDevice(t, runtimeDir, token)
+			cfg := &config.Config{
+				Token:          token,
+				RearmBootstrap: test.rearm,
+				RuntimeDir:     runtimeDir,
+				CacheDir:       filepath.Join(root, "cache"),
+			}
+			s := New(cfg, "0.9.0", "abc123", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if s.deviceAuth == nil {
+				t.Fatal("device store was not initialized")
+			}
+			if got := len(s.deviceAuth.ListCredentials("")); got != test.devices {
+				t.Fatalf("paired devices after launch = %d, want %d", got, test.devices)
+			}
+		})
 	}
 }
 
@@ -877,14 +1478,18 @@ func TestCommittedStateViewTracksSnapshotsAndDeltas(t *testing.T) {
 	s.broadcastCommitted(map[string]any{
 		"type": "agents",
 		"agents": []*coordinator.AgentState{{
-			PaneID: "pane-1", Status: "working", Project: "project",
+			PaneID: "pane-1", Status: "blocked", Project: "project",
+			BlockedEventID: "event-1", AttentionKind: question.AttentionApproval,
+			Options: []string{"Approve", "Deny"}, ApprovalFingerprint: "approval-fingerprint-1",
 		}},
 	})
 	s.broadcastCommitted(map[string]any{
-		"type": "agent_update", "pane_id": "pane-1", "status": "blocked", "event_id": "event-1",
+		"type": "agent_update", "pane_id": "pane-1", "status": "blocked", "project": "renamed",
 	})
 	agents := s.committedAgents()
-	if len(agents) != 1 || agents[0].Status != "blocked" || agents[0].BlockedEventID != "event-1" {
+	if len(agents) != 1 || agents[0].Status != "blocked" ||
+		agents[0].BlockedEventID != "event-1" ||
+		agents[0].ApprovalFingerprint != "approval-fingerprint-1" {
 		t.Fatalf("committed agents = %+v", agents)
 	}
 	s.broadcastCommitted(map[string]any{
@@ -1313,6 +1918,12 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 		"pane_id": "w1:p1",
 		"content": "unchanged output",
 		"format":  "ansi",
+		"target": protocol.TargetRef{
+			ServerSessionID: "primary",
+			PaneID:          "w1:p1",
+			TerminalID:      "terminal-w1:p1",
+			Generation:      4,
+		},
 	}
 	fingerprint := paneFingerprint("unchanged output")
 	unchanged := unchangedPaneResponse(
@@ -1324,6 +1935,9 @@ func TestUnchangedPaneResponseSuppressesTerminalContent(t *testing.T) {
 	}
 	if unchanged["type"] != "pane_unchanged" || unchanged["pane_id"] != "w1:p1" {
 		t.Fatalf("unexpected unchanged response: %#v", unchanged)
+	}
+	if unchanged["target"] != response["target"] {
+		t.Fatalf("unchanged response lost exact target: %#v", unchanged)
 	}
 	if _, included := unchanged["content"]; included {
 		t.Fatalf("unchanged response included terminal content: %#v", unchanged)

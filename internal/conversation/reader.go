@@ -28,6 +28,7 @@ const (
 	locationCacheTTL        = 60 * time.Second
 	locationMissTTL         = 5 * time.Second
 	maxLocationCacheEntries = 2048
+	maxOMOCacheEntries      = 8
 )
 
 var canonicalSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -51,18 +52,23 @@ type Entry struct {
 }
 
 type Page struct {
-	Available     bool    `json:"available"`
-	Reason        string  `json:"reason,omitempty"`
-	Entries       []Entry `json:"entries"`
-	HasMore       bool    `json:"has_more"`
-	Total         int     `json:"total"`
-	FileTruncated bool    `json:"file_truncated,omitempty"`
+	Available     bool          `json:"available"`
+	ReasonCode    string        `json:"reason_code,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
+	Entries       []Entry       `json:"entries"`
+	HasMore       bool          `json:"has_more"`
+	Total         int           `json:"total"`
+	FileTruncated bool          `json:"file_truncated,omitempty"`
+	SourceCorrupt bool          `json:"source_corrupt,omitempty"`
+	OMOPlan       *OMOTodoState `json:"omo_plan,omitempty"`
 }
 type Reader struct {
 	home      string
 	mu        sync.Mutex
 	locations map[string]locationCacheEntry
 	locating  map[string]chan struct{}
+	omoCache  map[string]omoCacheEntry
+	openCode  *openCodeReader
 }
 
 type locationCacheEntry struct {
@@ -82,7 +88,8 @@ type Location struct {
 func NewReader(home string) *Reader {
 	return &Reader{
 		home: home, locations: make(map[string]locationCacheEntry),
-		locating: make(map[string]chan struct{}),
+		locating: make(map[string]chan struct{}), omoCache: make(map[string]omoCacheEntry),
+		openCode: newOpenCodeReader(home),
 	}
 }
 
@@ -99,7 +106,7 @@ func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 func Supported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
-		"pi", "picodingagent", "omp", "ohmypi":
+		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode":
 		return true
 	default:
 		return false
@@ -125,16 +132,22 @@ func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page,
 }
 
 func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
+	if normalizedAgent(agent) == "opencode" {
+		return r.readOpenCodeFor(cwd, sessionID, before, limit)
+	}
+	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
+		return r.readOMO(cwd, sessionID, before, limit)
+	}
 	if !Supported(agent) {
-		return unavailable("Conversation history is not available for this agent."), nil
+		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return unavailable("This agent has not reported a conversation session yet."), nil
+		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
 	}
 	location := r.Locate(agent, cwd, sessionID)
 	if location.Path == "" {
-		return unavailable("No conversation log is available for this session."), nil
+		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
 	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
@@ -169,9 +182,12 @@ func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, er
 		FileTruncated: clipped,
 	}, nil
 }
-
 func unavailable(reason string) Page {
-	return Page{Available: false, Reason: reason, Entries: []Entry{}}
+	return unavailableCode("source_unavailable", reason)
+}
+
+func unavailableCode(code, reason string) Page {
+	return Page{Available: false, ReasonCode: code, Reason: reason, Entries: []Entry{}}
 }
 
 // Locate returns the exact contained transcript selected for agent, cwd and

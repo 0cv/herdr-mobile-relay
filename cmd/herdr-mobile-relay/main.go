@@ -19,6 +19,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/eventhook"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
+	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/stablestate"
 	"github.com/0cv/herdr-mobile-relay/internal/support"
 	relayupdate "github.com/0cv/herdr-mobile-relay/internal/update"
@@ -141,6 +142,12 @@ func run(args []string) (int, error) {
 			return 2, errors.New("stable-state requires an operation")
 		}
 		return status(stablestate.Run(args, os.Stdout, os.Stderr))
+	case "speech-voices":
+		err := speech.Run(context.Background(), args, os.Stdout, os.Stderr)
+		if errors.Is(err, speech.ErrUsage) {
+			return 2, err
+		}
+		return status(err)
 	case "support":
 		if len(args) != 0 {
 			return 2, errors.New("support does not accept arguments")

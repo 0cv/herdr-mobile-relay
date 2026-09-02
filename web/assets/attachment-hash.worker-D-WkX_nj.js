@@ -1,0 +1,1 @@
+(function(){function e(e){let t=``;for(let n of e)t+=n.toString(16).padStart(2,`0`);return t}self.addEventListener(`message`,async t=>{let{id:n,file:r}=t.data;try{let t=await crypto.subtle.digest(`SHA-256`,await r.arrayBuffer());self.postMessage({id:n,digest:e(new Uint8Array(t))})}catch{self.postMessage({id:n,error:`attachment_hash_failed`})}})})();

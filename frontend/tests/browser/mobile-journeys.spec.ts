@@ -18,13 +18,17 @@ interface RelayFixture {
 interface BootOptions {
   standalone?: boolean;
   navigatorStandalone?: boolean;
+  userAgent?: string;
 }
 
 async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options: BootOptions = {}) {
-  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone }) => {
+  await page.addInitScript(({ savedRelays, standalone, navigatorStandalone, userAgent }) => {
     if (savedRelays.length) localStorage.setItem('herdr_relays', JSON.stringify(savedRelays));
     if (navigatorStandalone !== null) {
       Object.defineProperty(navigator, 'standalone', { configurable: true, value: navigatorStandalone });
+    }
+    if (userAgent) {
+      Object.defineProperty(navigator, 'userAgent', { configurable: true, value: userAgent });
     }
     if (standalone) {
       const nativeMatchMedia = window.matchMedia.bind(window);
@@ -49,6 +53,25 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     let nextInteraction: Record<string, unknown> | null = null;
     let conversationFixture: { entries: unknown[]; total: number } | null = null;
     let autoCommands = true;
+    const uploadFiles = new Map<string, Array<{ name: string; media_type: string; bytes: number }>>();
+    const uploadReceived = new Map<string, number>();
+    const installedVoices = new Set(['en']);
+    const voiceNames: Record<string, string> = {
+      en: 'en_US-lessac-medium', fr: 'fr_FR-siwis-medium', de: 'de_DE-thorsten-medium',
+      es: 'es_ES-davefx-medium', zh: 'zh_CN-huayan-medium',
+    };
+    const speechVoicePayload = () => ({
+      cache_dir: '/home/test/.cache/herdr-mobile-relay/speech',
+      engine_installed: true,
+      languages: ['en', 'fr', 'de', 'es', 'zh'].filter((code) => installedVoices.has(code)),
+      voices: ['en', 'fr', 'de', 'es', 'zh'].map((code) => ({
+        language: code,
+        name: voiceNames[code],
+        installed: installedVoices.has(code),
+        bytes: 63206179,
+        engine: installedVoices.has(code) ? 'piper' : 'espeak-ng',
+      })),
+    });
 
     class MockSocket {
       static OPEN = 1;
@@ -76,10 +99,60 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         socketCommands[this.index].push(message);
         if (['e2ee_client_hello', 'read_pane', 'watch_pane', 'unwatch_pane', 'pane_applied', 'get_activity', 'list_directories', 'refresh_agents'].includes(String(message.type))) return;
         if (!autoCommands) return;
-        if (message.type === 'upload_image') {
+        if (message.type === 'upload_begin') {
+          const uploadId = `upload-${String(message.request_id)}`;
+          uploadFiles.set(uploadId, message.files as Array<{ name: string; media_type: string; bytes: number }>);
           queueMicrotask(() => this.server({
-            type: 'upload_result', ok: true, request_id: message.request_id, pane_id: message.pane_id,
-            path: '/home/test/.cache/herdr-mobile-relay/uploads/shot.png',
+            type: 'upload_begin_result',
+            request_id: message.request_id,
+            result: {
+              upload_id: uploadId,
+              chunk_bytes: 262144,
+              expires_at: new Date(Date.now() + 60_000).toISOString(),
+              limits: { max_files: 8, max_file_bytes: 20971520, max_batch_bytes: 52428800 },
+            },
+          }));
+          return;
+        }
+        if (message.type === 'upload_chunk') {
+          const key = `${String(message.upload_id)}:${String(message.file_index)}`;
+          const received = (uploadReceived.get(key) || 0) + atob(String(message.data || '')).length;
+          uploadReceived.set(key, received);
+          queueMicrotask(() => this.server({
+            type: 'upload_chunk_result',
+            request_id: message.request_id,
+            result: {
+              file_index: message.file_index,
+              next_sequence: Number(message.sequence) + 1,
+              received_bytes: received,
+            },
+          }));
+          return;
+        }
+        if (message.type === 'upload_finish') {
+          const files = uploadFiles.get(String(message.upload_id)) || [];
+          const digests = message.files as Array<{ file_index: number; sha256: string }>;
+          queueMicrotask(() => this.server({
+            type: 'upload_finish_result',
+            request_id: message.request_id,
+            result: {
+              attachments: files.map((file, index) => ({
+                ref: `attachment:test-${index + 1}`,
+                name: file.name,
+                media_type: file.media_type,
+                bytes: file.bytes,
+                sha256: digests[index]?.sha256 || '',
+                expires_at: new Date(Date.now() + 60_000).toISOString(),
+              })),
+            },
+          }));
+          return;
+        }
+        if (message.type === 'upload_cancel') {
+          queueMicrotask(() => this.server({
+            type: 'upload_cancel_result',
+            request_id: message.request_id,
+            result: {},
           }));
           return;
         }
@@ -255,6 +328,37 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           }));
           return;
         }
+        if (message.type === 'speak_text') {
+          const samples = 800;
+          const wav = new Uint8Array(44 + samples * 2);
+          const view = new DataView(wav.buffer);
+          const ascii = (offset: number, value: string) => {
+            for (let i = 0; i < value.length; i++) wav[offset + i] = value.charCodeAt(i);
+          };
+          ascii(0, 'RIFF'); view.setUint32(4, 36 + samples * 2, true); ascii(8, 'WAVEfmt ');
+          view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+          view.setUint32(24, 8000, true); view.setUint32(28, 16000, true);
+          view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+          ascii(36, 'data'); view.setUint32(40, samples * 2, true);
+          queueMicrotask(() => this.server({
+            type: 'command_result',
+            action: message.type,
+            request_id: message.request_id,
+            ok: true,
+            phase: 'completed',
+            data: { format: 'wav', audio: btoa(String.fromCharCode(...wav)) },
+          }));
+          return;
+        }
+        if (['speech_voices_list', 'speech_voice_install', 'speech_voice_remove'].includes(String(message.type))) {
+          if (message.type === 'speech_voice_install') installedVoices.add(String(message.language));
+          if (message.type === 'speech_voice_remove') installedVoices.delete(String(message.language));
+          queueMicrotask(() => this.server({
+            type: 'command_result', action: message.type, request_id: message.request_id,
+            ok: true, phase: 'completed', data: speechVoicePayload(),
+          }));
+          return;
+        }
         if (message.type === 'push_subscribe' || message.type === 'push_unsubscribe') return;
         const phase = message.type === 'answer_question' && nextInteraction
           ? 'advanced'
@@ -276,7 +380,25 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
         }));
       }
       close() { this.readyState = MockSocket.CLOSED; }
-      server(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) } as MessageEvent); }
+      server(message: unknown) {
+        const withExactIdentity = (agent: Record<string, unknown>) => ({
+          server_session_id: 'primary',
+          terminal_id: `terminal-${String(agent.pane_id)}`,
+          generation: 1,
+          agent_session_id: '',
+          ...(agent.attention_kind === 'approval' && Array.isArray(agent.options) && agent.options.length >= 2
+            ? { approval_fingerprint: `fingerprint-${String(agent.event_id || agent.pane_id)}` }
+            : {}),
+          ...agent,
+        });
+        let payload = message as Record<string, unknown>;
+        if (payload?.type === 'agents' && Array.isArray(payload.agents)) {
+          payload = { ...payload, agents: (payload.agents as Record<string, unknown>[]).map(withExactIdentity) };
+        } else if ((payload?.type === 'blocked' || payload?.type === 'agent_update') && payload.pane_id) {
+          payload = withExactIdentity(payload);
+        }
+        this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
+      }
       serverClose() { this.readyState = MockSocket.CLOSED; this.onclose?.(); }
     }
 
@@ -297,6 +419,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     savedRelays: relays,
     standalone: options.standalone ?? false,
     navigatorStandalone: options.navigatorStandalone ?? null,
+    userAgent: options.userAgent ?? '',
   });
   await page.goto(path);
 }
@@ -345,7 +468,7 @@ async function setConversationFixture(page: Page, fixture: ConversationFixture |
 
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
   await server(page, index, {
-    type: 'push_config', protocol: 2, version: 'abc1234', host: index ? 'mac' : 'fedora',
+    type: 'push_config', protocol: 3, version: 'abc1234', host: index ? 'mac' : 'fedora',
     capabilities: ['attention_classification', 'clear_activities', 'directory_browser', 'self_update', 'structured_questions', 'slash_commands'],
     agent_profiles: [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
     ...overrides,
@@ -353,6 +476,21 @@ async function handshake(page: Page, index: number, overrides: Record<string, un
 }
 
 const fedora = { id: 'fedora', label: 'Fedora', url: 'wss://fedora.example', token: '' };
+
+test('guides an unpairable relay without ever dialing it', async ({ page }) => {
+  // A relay key that is not a usable relay key, with no enrolled credential:
+  // nothing can be presented, so the app must not spend a dial finding out.
+  await boot(page, [{ ...fedora, token: 'truncated-key' }]);
+
+  await expect(page.getByText('Fedora needs pairing. Import a device invitation link.')).toBeVisible();
+  expect(await socketCount(page)).toBe(0);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await page.waitForTimeout(80);
+  expect(await socketCount(page)).toBe(0);
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByText('This computer needs pairing. Import a device invitation link, or remove and add the relay.')).toBeVisible();
+});
 
 test('manages workspace modals, grouped worktrees, and drag ordering', async ({ page }) => {
   await boot(page, [fedora]);
@@ -671,7 +809,7 @@ test('keeps activity cards inside the page and confirms permanent deletion', asy
   await dialog.getByRole('button', { name: 'Delete all' }).click();
   await expect(page.getByText('No activity yet.')).toBeVisible();
   expect((await commands(page)).find((command) => command.type === 'clear_activities'))
-    .toMatchObject({ type: 'clear_activities', protocol: 2 });
+    .toMatchObject({ type: 'clear_activities', protocol: 3 });
 });
 
 test('sizes captured activity text with terminal typography', async ({ page }) => {
@@ -755,11 +893,16 @@ test('keeps device verification modal until native authentication succeeds', asy
   await expect.poll(() => socketCount(page)).toBe(1);
 });
 
-test('keeps an iOS setup link available for Home Screen installation', async ({ page }) => {
-  const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
-  await boot(page, [], `/${setupHash}`, { navigatorStandalone: false });
+const IPHONE_SAFARI_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
-  await expect.poll(() => socketCount(page)).toBe(1);
+test('keeps an iOS setup link unredeemed for Home Screen installation', async ({ page }) => {
+  const setupHash = '#setup=0123456789abcdef0123456789abcdef&label=Fedora%20Workstation&relay=wss%3A%2F%2Frelay-fedora.example.com';
+  await boot(page, [], `/${setupHash}`, { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+
+  // The bootstrap key is one-use and the installed copy has its own storage:
+  // a Safari tab that dialled would spend it before the Home Screen app opens.
+  await expect(page.getByRole('status').filter({ hasText: 'Add Herdr to the iPhone or iPad Home Screen' })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'This browser tab keeps the setup link unused' })).toBeVisible();
   expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('setup.webmanifest');
   expect(await page.evaluate(() => location.hash)).toBe(setupHash);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_relays') || '[]')[0]))
@@ -768,6 +911,24 @@ test('keeps an iOS setup link available for Home Screen installation', async ({ 
       url: 'wss://relay-fedora.example.com',
       token: '0123456789abcdef0123456789abcdef',
     });
+  await page.waitForTimeout(500);
+  expect(await socketCount(page)).toBe(0);
+
+  // Focus and reconnect requests must not spend the key either.
+  await page.evaluate(() => {
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('status').filter({ hasText: 'Waiting for the Home Screen app' })).toBeVisible();
+  await page.getByRole('button', { name: 'Reconnect All' }).click();
+  await page.waitForTimeout(500);
+  expect(await socketCount(page)).toBe(0);
+});
+
+test('an iOS browser tab without pairing material still connects', async ({ page }) => {
+  await boot(page, [fedora], '/', { navigatorStandalone: false, userAgent: IPHONE_SAFARI_UA });
+  await expect.poll(() => socketCount(page)).toBe(1);
 });
 
 test('imports quick setup and merges agents from multiple relays', async ({ page }) => {
@@ -805,14 +966,17 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
       ...relay,
       token: '',
     }))));
+    localStorage.removeItem('herdr_device_auth_v1');
   });
   await page.reload();
   await expect.poll(() => socketCount(page)).toBe(2);
-  await expect.poll(async () =>
-    (await commandsForSocket(page, 0)).some((command) => command.type === 'register_app_origin')).toBe(true);
   const base = 0;
   await handshake(page, base);
   await handshake(page, base + 1);
+  expect((await commandsForSocket(page, base)).some((command) =>
+    command.type === 'register_app_origin')).toBe(false);
+  expect((await commandsForSocket(page, base + 1)).some((command) =>
+    command.type === 'register_app_origin')).toBe(false);
   await server(page, base, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Fedora app', agent: 'codex' }] });
   await server(page, base + 1, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Mac app', agent: 'claude', options: ['Approve once', 'Deny'] }] });
   const headerBox = await page.getByRole('banner').boundingBox();
@@ -957,7 +1121,7 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   });
   const planInput = page.getByPlaceholder('Needs inspection — use terminal controls');
   await expect(planInput).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Attach image' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Attach files' })).toBeDisabled();
   const directions = await page.locator('.generic-menu-actions > div > button').evaluateAll((elements) =>
     elements.slice(0, 4).map((element) => ({
       key: element.querySelector('kbd')?.textContent,
@@ -985,10 +1149,9 @@ test('centers plan keys and enables text only for the terminal editor', async ({
   await terminalInput.fill('custom weekend');
   await page.getByRole('button', { name: 'Submit terminal text' }).click();
   await expect.poll(async () => (await commands(page))
-    .filter((command) => command.type === 'send_text' || command.type === 'send_keys')
+    .filter((command) => ['send_input', 'send_text', 'send_keys'].includes(String(command.type)))
     .map((command) => ({ type: command.type, text: command.text, keys: command.keys }))).toEqual([
-      { type: 'send_text', text: 'custom weekend', keys: undefined },
-      { type: 'send_keys', text: undefined, keys: ['Enter'] },
+      { type: 'send_input', text: 'custom weekend', keys: ['Enter'] },
     ]);
   await server(page, 0, {
     type: 'pane_content',
@@ -1297,7 +1460,7 @@ test('confirms and tracks one relay update through its verified reconnect', asyn
     expected_version: '0.8.0',
     expected_revision: 'f'.repeat(40),
     expected_origin: origin,
-    protocol: 2,
+    protocol: 3,
   });
   await server(page, 0, {
     type: 'update_status',
@@ -2056,6 +2219,56 @@ test('keeps a wide pane readable while its size lease is still pending', async (
   expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
 });
 
+test('wraps wide terminal output for a paired reader credential', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_lease'] });
+  await page.evaluate(() => {
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        fedora: {
+          kind: 'credential',
+          id: 'credential-reader',
+          version: 1,
+          secret: 'R'.repeat(43),
+          deviceId: 'device-reader',
+          role: 'reader',
+          locale: 'en',
+          issuedAt: Date.now(),
+        },
+      },
+    }));
+  });
+  // Push a fresh connection snapshot so App's derived reader-role state observes
+  // the persisted credential before the agent view is rendered.
+  await handshake(page, 0, { capabilities: ['attention_classification', 'pane_size_lease'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Reader pane', agent: 'claude' }],
+  });
+  await page.getByRole('button', { name: 'Open Reader pane on Fedora' }).click();
+  const wideRow = `https://example.test/${'reader-output'.repeat(40)}`;
+  await server(page, 0, {
+    type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: wideRow,
+  });
+
+  await expect(page.getByRole('status')).toContainText('Reader access is read only');
+  await expect(page.getByRole('combobox', { name: 'Prompt' })).toBeDisabled();
+  const terminal = page.getByRole('log');
+  const geometry = await terminal.evaluate((element) => {
+    const row = element.querySelector<HTMLElement>('.ansi-line')!;
+    return {
+      rowHeight: row.getBoundingClientRect().height,
+      lineHeight: Number.parseFloat(getComputedStyle(row).lineHeight),
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    };
+  });
+  expect(geometry.rowHeight).toBeGreaterThan(geometry.lineHeight * 1.5);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+});
+
 test('estimates wrapped row heights while a lease is pending', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -2465,6 +2678,180 @@ test('uses relay response copy before parser and surfaces failures', async ({ pa
   await expect(page.getByRole('status').filter({ hasText: 'Agent response copied.' })).toBeVisible();
 });
 
+test('reads a response aloud in the language the relay has a voice for', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
+    speech_languages: ['en'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Spoken output', agent: 'codex' }],
+  });
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  // A relay that can already read aloud turns the setting on by itself the
+  // first time; the phone never has to find it.
+  await expect(page.getByRole('switch', { name: 'Read Responses Aloud' })).toBeChecked();
+  await page.getByLabel('Language').selectOption('fr');
+  await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: 'Open Spoken output on Fedora' }).click();
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: '     Parsed terminal response.',
+  });
+  const speakButton = page.getByRole('button', { name: 'Read latest response aloud' });
+  await speakButton.click();
+  await expect(page.getByRole('status').filter({ hasText: 'This relay has no French voice' })).toBeVisible();
+  expect((await commandsForSocket(page, 0)).filter((command) => command.type === 'speak_text')).toHaveLength(0);
+
+  // The relay gains a French voice; the same button now streams audio for it.
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
+    speech_languages: ['en', 'fr'],
+  });
+  await speakButton.click();
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'speak_text').length).toBe(1);
+  expect((await commandsForSocket(page, 0)).find((command) => command.type === 'speak_text'))
+    .toMatchObject({ language: 'fr', text: 'Remote markdown response\nExact copied output' });
+});
+
+test('speak reports the relay copy failure when no parser can read the pane', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
+    speech_languages: ['en'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Spoken omp', agent: 'omp' }],
+  });
+  await page.getByRole('button', { name: 'Open Spoken omp on Fedora' }).click();
+  // omp draws no response marker the phone can parse, so the relay's /copy
+  // transaction is the only source of text.
+  await server(page, 0, {
+    type: 'pane_content',
+    pane_id: 'w1:p1',
+    format: 'plain',
+    content: ' Completed omp response.\n\n────────────────────\n\n────────────────────',
+  });
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'list_slash_commands')).toHaveLength(1);
+  await setAutoCommands(page, false);
+
+  await page.getByRole('button', { name: 'Read latest response aloud' }).click();
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'copy_agent_response')).toHaveLength(1);
+  const copyCommand = (await commandsForSocket(page, 0))
+    .find((command) => command.type === 'copy_agent_response') as Record<string, unknown>;
+  await server(page, 0, {
+    type: 'command_result',
+    action: 'copy_agent_response',
+    request_id: copyCommand.request_id,
+    ok: false,
+    phase: 'failed',
+    error: 'Agent did not confirm a copied response',
+  });
+  await expect(page.getByRole('status').filter({ hasText: 'Agent did not confirm a copied response' })).toBeVisible();
+  expect((await commandsForSocket(page, 0)).filter((command) => command.type === 'speak_text')).toHaveLength(0);
+});
+
+test('a reader speaks the latest transcript turn without the relay copy command', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await page.evaluate(() => {
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        fedora: {
+          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
+          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
+        },
+      },
+    }));
+  });
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'agent_response_copy'],
+    speech_languages: ['en'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'idle', project: 'Read aloud', agent: 'omp', conversation_history_available: true }],
+  });
+  await setConversationFixture(page, {
+    entries: [
+      { id: 'turn-1', timestamp: '2026-09-02T10:00:00Z', role: 'user', text: 'Summarise the build' },
+      { id: 'turn-2', timestamp: '2026-09-02T10:00:05Z', role: 'assistant', text: 'The build passed with no warnings.' },
+    ],
+    total: 2,
+  });
+  await page.getByRole('button', { name: 'Open Read aloud on Fedora' }).click();
+  await expect(page.getByRole('status')).toContainText('Reader access is read only');
+  await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'plain', content: ' Completed omp response.' });
+
+  await page.getByRole('button', { name: 'Read latest response aloud' }).click();
+  await expect.poll(async () => (await commandsForSocket(page, 0))
+    .filter((command) => command.type === 'speak_text').length).toBe(1);
+  const commands = await commandsForSocket(page, 0);
+  // The relay copy command types into the agent's terminal, which a reader may
+  // not do; the agent's transcript is the read-only source instead.
+  expect(commands.filter((command) => command.type === 'copy_agent_response')).toHaveLength(0);
+  expect(commands.find((command) => command.type === 'speak_text'))
+    .toMatchObject({ text: 'The build passed with no warnings.' });
+});
+
+test('downloads a missing relay speech voice from Settings', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'slash_commands', 'speech_voice_management'],
+    speech_languages: ['en'],
+  });
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('switch', { name: 'Read Responses Aloud' })).toBeChecked();
+  await page.getByLabel('Language').selectOption('fr');
+  await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toBeVisible();
+
+  const englishRow = page.getByLabel('English voice on Fedora', { exact: true });
+  const frenchRow = page.getByLabel('French voice on Fedora', { exact: true });
+  await expect(englishRow).toContainText('Neural voice cached, 63 MB');
+  await expect(frenchRow).toContainText('Not downloaded - 63 MB download');
+
+  // A download in flight parks only its own row.
+  await setAutoCommands(page, false);
+  const germanDownload = page.getByLabel('German voice on Fedora', { exact: true })
+    .getByRole('button', { name: 'Download the German voice on Fedora' });
+  await germanDownload.click();
+  await expect(germanDownload).toBeDisabled();
+  await expect(germanDownload).toHaveText('Downloading…');
+  await expect(germanDownload).toHaveAttribute('aria-busy', 'true');
+  await setAutoCommands(page, true);
+
+  await frenchRow.getByRole('button', { name: 'Download the French voice on Fedora' }).click();
+  await expect(frenchRow).toContainText('Neural voice cached, 63 MB');
+  await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toHaveCount(0);
+
+  // The language being read aloud is never blocked from removal; the relay
+  // falls back to its own system engine.
+  await frenchRow.getByRole('button', { name: 'Remove the French voice on Fedora' }).click();
+  await expect(frenchRow).toContainText('Not downloaded - 63 MB download');
+  await expect(page.getByRole('status').filter({ hasText: 'No French voice on Fedora' })).toBeVisible();
+  const sent = await commandsForSocket(page, 0);
+  expect(sent.filter((command) => command.type === 'speech_voices_list')).toHaveLength(1);
+  expect(sent.filter((command) => command.type === 'speech_voice_install'))
+    .toMatchObject([{ language: 'de' }, { language: 'fr' }]);
+  expect(sent.filter((command) => command.type === 'speech_voice_remove'))
+    .toMatchObject([{ language: 'fr' }]);
+});
+
 test('virtualizes large ANSI grids when Resize Session is unavailable', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -2645,7 +3032,7 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   expect(acquire).toMatchObject({
     type: 'lease_pane_size',
     pane_id: 'w1:p1',
-    protocol: 2,
+    protocol: 3,
   });
   expect(acquire.request_id).toEqual(expect.any(String));
   expect(acquire).not.toHaveProperty('client_id');
@@ -2773,7 +3160,7 @@ test('leases measured terminal columns and releases on teardown', async ({ page 
   expect(release).toMatchObject({
     type: 'release_pane_size',
     pane_id: 'w1:p1',
-    protocol: 2,
+    protocol: 3,
   });
   expect(release.request_id).toEqual(expect.any(String));
   expect(release).not.toHaveProperty('client_id');
@@ -3144,10 +3531,11 @@ test('keeps the reader anchored while streamed output grows and unsticks on scro
   await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeHidden();
 });
 
-test('wraps stale wide grids but preserves current grids in Resize Session', async ({ page }) => {
+test('scrolls stale wide grids in place and preserves current grids in Resize Session', async ({ page }) => {
   const staleTable = [
     `┌${'─'.repeat(180)}┐`,
     `│ ${'Lookback | Sharpe | Max DD | 2x-cost Sharpe'.padEnd(178)}│`,
+    `│ ${'12m      | 1.31   | -9.4%  | 1.02'.padEnd(178)}│`,
     `└${'─'.repeat(180)}┘`,
   ];
   const desktopHistory = Array.from({ length: 46 }, (_, index) => `desktop history row ${index + 1}`);
@@ -3194,17 +3582,39 @@ test('wraps stale wide grids but preserves current grids in Resize Session', asy
   });
   expect(Math.max(...lineHeights.heights)).toBeLessThan(lineHeights.lineHeight * 1.2);
   // The desktop-width rows sit above the screen; the stale grid enters the
-  // DOM once it is scrolled into view and wraps instead of overflowing.
+  // DOM once it is scrolled into view and pans inside its own rows instead of
+  // wrapping or panning the pane.
   await terminal.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
   });
   await expect(terminal).toContainText('Lookback | Sharpe | Max DD | 2x-cost Sharpe');
-  const wrappedGeometry = await terminal.evaluate((element) => ({
-    clientWidth: element.clientWidth,
-    scrollWidth: element.scrollWidth,
-  }));
-  expect(wrappedGeometry.scrollWidth).toBeLessThanOrEqual(wrappedGeometry.clientWidth);
+  await expect(terminal.locator('.terminal-wide-grid')).toHaveCount(2);
+  const wideGeometry = await terminal.evaluate((element) => {
+    const rows = [...element.querySelectorAll<HTMLElement>('.terminal-wide-grid')];
+    const lineHeight = Number.parseFloat(getComputedStyle(rows[0]).lineHeight);
+    return {
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      lineHeight,
+      rowHeights: rows.map((row) => row.getBoundingClientRect().height),
+      rowScrollable: rows.map((row) => row.scrollWidth > row.clientWidth),
+    };
+  });
+  // The pane itself never pans sideways; each wide row is its own scroller
+  // and stays a single unwrapped line.
+  expect(wideGeometry.scrollWidth).toBeLessThanOrEqual(wideGeometry.clientWidth);
+  expect(wideGeometry.rowScrollable).toEqual([true, true]);
+  expect(Math.max(...wideGeometry.rowHeights)).toBeLessThan(wideGeometry.lineHeight * 1.2);
+
+  // Panning one row of the table pans its whole block in lockstep.
+  await terminal.evaluate((element) => {
+    const row = element.querySelector<HTMLElement>('.terminal-wide-grid')!;
+    row.scrollLeft = 60;
+    row.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(() => terminal.evaluate((element) => [...element.querySelectorAll<HTMLElement>('.terminal-wide-grid')]
+    .map((row) => row.scrollLeft))).toEqual([60, 60]);
 });
 
 test('surfaces one explicit error when a pane-size lease fails', async ({ page }) => {
@@ -3325,6 +3735,9 @@ test('reads and replies from native conversation history', async ({ page }) => {
       status: 'working',
       project: 'History app',
       agent: 'omp',
+      server_session_id: 'session-1',
+      terminal_id: 'terminal-1',
+      generation: 1,
       session: 'Current session',
       conversation_history_available: true,
     }],
@@ -3353,7 +3766,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
 
   const composer = page.getByRole('textbox', { name: 'Prompt' });
   await composer.fill('Review the attached screen');
-  const imageInput = page.locator('.conversation-composer input[type=file]');
+  const imageInput = page.locator('.conversation-composer input[type=file][accept="image/*"]');
   await imageInput.setInputFiles({
     name: 'history-shot.png',
     mimeType: 'image/png',
@@ -3361,11 +3774,11 @@ test('reads and replies from native conversation history', async ({ page }) => {
   });
   const attachedPrompt = [
     'Review the attached screen',
-    'Image: /home/test/.cache/herdr-mobile-relay/uploads/shot.png',
+    'Attachment: attachment:test-1',
     '',
   ].join('\n');
   await expect(composer).toHaveValue(attachedPrompt);
-  await expect(page.getByText('Image attached: shot.png')).toBeVisible();
+  await expect(page.getByText('Attached history-shot.png')).toBeVisible();
   const historyReadsBeforeSend = (await commands(page))
     .filter((command) => command.type === 'get_conversation_history').length;
   await page.getByRole('button', { name: 'Send prompt' }).click();
@@ -3373,7 +3786,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
     command.type === 'submit_prompt' && command.text === attachedPrompt.replace(/\n$/, '')
   ))).toMatchObject({ pane_id: 'w1:p1' });
   await expect(composer).toHaveValue('');
-  await expect(page.getByText('Image attached: shot.png')).toBeHidden();
+  await expect(page.getByText('Attached history-shot.png')).toBeHidden();
   await expect.poll(async () => (await commands(page))
     .filter((command) => command.type === 'get_conversation_history').length).toBeGreaterThan(historyReadsBeforeSend);
 
@@ -3382,10 +3795,10 @@ test('reads and replies from native conversation history', async ({ page }) => {
     mimeType: 'image/png',
     buffer: Buffer.from('png'),
   });
-  await expect(page.getByText('Image attached: shot.png')).toBeVisible();
+  await expect(page.getByText('Attached history-shot.png')).toBeVisible();
   await page.getByRole('button', { name: 'Clear prompt text' }).click();
   await expect(composer).toHaveValue('');
-  await expect(page.getByText('Image attached: shot.png')).toBeHidden();
+  await expect(page.getByText('Attached history-shot.png')).toBeHidden();
 
   await setAutoCommands(page, false);
   await composer.fill('restore this known failure');
@@ -3442,6 +3855,9 @@ test('reads and replies from native conversation history', async ({ page }) => {
     status: 'blocked',
     attention_kind: 'approval',
     options: ['Approve once', 'Reject'],
+    server_session_id: 'session-1',
+    terminal_id: 'terminal-1',
+    generation: 1,
     updated_at: 2,
   });
   await expect(composer).toBeDisabled();
@@ -4076,12 +4492,12 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await boot(page, [fedora], `/#notify=${target}`);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
-  expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', event_id: 'notice-1', project: 'Approvals', agent: 'claude', options: ['Approve once', 'Deny'] }] });
+  // A legacy notification action has no backend-verifiable identity: the app
+  // opens the live thread read-only and never executes the approval itself.
   await expect(page.getByRole('main', { name: /Terminal for Approvals/ })).toBeVisible();
-  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(1);
-  expect((await commands(page)).find((command) => command.type === 'respond')).toMatchObject({ event_id: 'notice-1' });
+  await expect(page.getByRole('status').filter({ hasText: 'No notification action was taken' })).toBeVisible();
+  expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
 
   const first = {
     id: 'q1', kind: 'single_select', question: 'Choose deployment scope',
@@ -4135,7 +4551,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await expect(page.getByRole('group', { name: 'Choose device coverage' })).toBeVisible();
   await expect(page.getByText('Question 2 of 2')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Previous' })).toBeVisible();
-  expect(answer).toMatchObject({ selected_indices: [0], other_selected: false, protocol: 2 });
+  expect(answer).toMatchObject({ selected_indices: [0], other_selected: false, protocol: 3 });
   for (let update = 0; update < 3; update += 1) {
     await server(page, 0, {
       type: 'agent_update', pane_id: 'w1:p1', status: 'blocked', pane_revision: 10 + update,
@@ -4184,7 +4600,7 @@ test('handles approvals, chained questions, and notification routing', async ({ 
   await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Proceed with plan' }).click();
   await expect(page.getByRole('button', { name: 'Copy', exact: true })).toBeDisabled();
-  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(2);
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(1);
   const approvalResponse = (await commands(page)).filter((command) => command.type === 'respond').at(-1)!;
   await server(page, 0, {
     type: 'command_result', request_id: approvalResponse.request_id, action: 'respond', ok: true, phase: 'accepted',
@@ -4334,7 +4750,7 @@ test('keeps a nonfinal question mounted when a transient frame is confirmed', as
   await expect(page.getByRole('group', { name: second.question })).toBeVisible();
 });
 
-test('rejects stale notification approvals and retries transient failures', async ({ page }) => {
+test('never executes notification approvals, stale or current', async ({ page }) => {
   const staleTarget = encodeURIComponent(JSON.stringify({
     pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'old-event',
   }));
@@ -4345,24 +4761,18 @@ test('rejects stale notification approvals and retries transient failures', asyn
     type: 'agents',
     agents: [{ pane_id: 'w1:p1', status: 'blocked', attention_kind: 'approval', options: ['Approve once', 'Deny'], event_id: 'new-event', project: 'Stale approval', agent: 'codex' }],
   });
-  await expect(page.getByRole('status').filter({ hasText: /older approval request/ })).toBeVisible();
+  await expect(page.getByRole('main', { name: /Terminal for Stale approval/ })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'No notification action was taken' })).toBeVisible();
   expect((await commands(page)).filter((command) => command.type === 'respond')).toHaveLength(0);
 
-  const retryTarget = encodeURIComponent(JSON.stringify({
+  // Even a target naming the current event opens read-only: a legacy
+  // notification action carries no backend-verifiable approval identity.
+  const currentTarget = encodeURIComponent(JSON.stringify({
     pane_id: 'w1:p1', host: 'fedora', action: 'approve', index: 0, total: 2, notification_id: 'new-event',
   }));
-  await page.evaluate(() => (window as any).__relayAutoCommands(false));
-  await page.evaluate((target) => { location.hash = `#notify=${target}`; }, retryTarget);
-  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(1);
-  const first = (await commands(page)).filter((command) => command.type === 'respond')[0];
-  await server(page, 0, {
-    type: 'command_result', request_id: first.request_id, action: 'respond', ok: false, phase: 'failed', error: 'Relay reconnecting',
-  });
-  await expect(page.getByRole('status').filter({ hasText: 'Relay reconnecting' })).toBeVisible();
-
-  await page.evaluate(() => (window as any).__relayAutoCommands(true));
-  await page.evaluate((target) => { location.hash = `#notify=${target}`; }, retryTarget);
-  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(2);
+  await page.evaluate((target) => { location.hash = `#notify=${target}`; }, currentTarget);
+  await expect(page.getByRole('main', { name: /Terminal for Stale approval/ })).toBeVisible();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'respond').length).toBe(0);
 });
 
 test('restores structured questions from the cached agent snapshot after reload', async ({ page }) => {
@@ -4466,7 +4876,7 @@ test('keeps the third single choice checked across live pane transitions', async
   await expect(page.getByRole('log', { name: 'Agent terminal output' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Refresh terminal' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: /Terminal width:/ })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Attach image' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Attach files' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Arrow keys' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
@@ -4589,10 +4999,10 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
   await handshake(page, 0);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode' }] });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 }] });
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
   await expect(page.getByRole('img', { name: 'Agent working' })).toBeVisible();
-  const attachImage = page.getByRole('button', { name: 'Attach image' });
+  const attachFiles = page.getByRole('button', { name: 'Attach files' });
   const arrowKeys = page.getByRole('button', { name: 'Arrow keys' });
   const enterKey = page.getByRole('button', { name: 'Enter' });
   const tabKey = page.getByRole('button', { name: 'Tab', exact: true });
@@ -4601,7 +5011,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   const altKey = page.getByRole('button', { name: 'Alt', exact: true });
   const modifierLetter = page.getByRole('textbox', { name: 'Modifier shortcut character' });
   const copyOutput = page.getByRole('button', { name: 'Copy', exact: true });
-  await expect(attachImage.locator('svg')).toBeVisible();
+  await expect(attachFiles.locator('svg')).toBeVisible();
   await expect(arrowKeys.locator('svg')).toBeVisible();
   await expect(enterKey).toBeVisible();
   await expect(ctrlKey).toBeVisible();
@@ -4611,7 +5021,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect(ctrlKey).toHaveAttribute('aria-pressed', 'false');
   await expect(shiftKey).toHaveAttribute('aria-pressed', 'false');
   await expect(altKey).toHaveAttribute('aria-pressed', 'false');
-  await expect(attachImage).not.toContainText('▧');
+  await expect(attachFiles).not.toContainText('▧');
   await expect(arrowKeys).not.toContainText('⌨');
   await arrowKeys.click();
   await expect(page.getByRole('button', { name: 'Up', exact: true })).toBeVisible();
@@ -4712,7 +5122,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await page.getByRole('button', { name: 'Back' }).click();
   await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'refresh_agents').length)
     .toBe(refreshesBeforeBack + 1);
-  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode' }] });
+  await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'opencode', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 }] });
   await expect(page.getByRole('button', { name: 'Open Terminal app on Fedora' })).toBeVisible();
   await page.getByRole('button', { name: 'Open Terminal app on Fedora' }).click();
   await server(page, 0, { type: 'pane_content', pane_id: 'w1:p1', format: 'ansi', content: '     + Thought: 1.0s\n\u001b[38;5;6m     Safe <img src=x onerror=alert(1)>\u001b[0m\n     Docs https://example.com/report?q=1\n     Details\n     ▣ Build · model · 1s' });
@@ -4798,7 +5208,7 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   const claudeRule = '─'.repeat(120);
   await server(page, 0, {
     type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'claude' }],
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Terminal app', agent: 'claude', server_session_id: 'session-1', terminal_id: 'terminal-1', generation: 1 }],
   });
   await server(page, 0, {
     type: 'pane_content', pane_id: 'w1:p1', format: 'ansi',
@@ -4852,9 +5262,23 @@ test('refreshes agents on return home and preserves shared terminal behavior', a
   await expect.poll(() => terminal.evaluate((element) =>
     element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(2);
 
-  await page.locator('input[type=file]').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from('png') });
-  await expect(composer).toHaveValue(/Image: \/home\/test\/.cache\/herdr-mobile-relay\/uploads\/shot.png/);
-  expect((await commands(page)).find((command) => command.type === 'upload_image')).toMatchObject({ mime: 'image/png', protocol: 2, pane_id: 'w1:p1' });
+  await page.locator('input[type=file][accept="image/*"]').setInputFiles({ name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from('png') });
+  await expect(composer).toHaveValue(/Attachment: attachment:test-1/);
+  expect((await commands(page)).find((command) => command.type === 'upload_begin')).toMatchObject({
+    files: [{ name: 'shot.png', media_type: 'image/png', bytes: 3 }],
+    protocol: 3,
+    target: {
+      server_session_id: 'session-1',
+      pane_id: 'w1:p1',
+      terminal_id: 'terminal-1',
+      generation: 1,
+    },
+  });
+  expect((await commands(page)).find((command) => command.type === 'upload_chunk')).toMatchObject({
+    data: 'cG5n',
+    sha256: '8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c',
+    protocol: 3,
+  });
 
   await composer.fill('send this');
   await page.getByRole('button', { name: 'Send prompt' }).click();
@@ -5099,7 +5523,8 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
     }],
   });
   await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#pane=fedora%3A%3Aw1%3Ap2');
+  await expect.poll(() => page.evaluate(() => location.hash))
+    .toBe('#pane=r3.WzMsImZlZG9yYSIsInByaW1hcnkiLCJ3MTpwMiIsInRlcm1pbmFsLXcxOnAyIiwxLCIiXQ');
   await page.getByRole('button', { name: 'Manage agent' }).click();
   const manageDialog = page.getByRole('dialog', { name: 'Manage Agent' });
   await expect(manageDialog).toBeVisible();
@@ -5187,7 +5612,12 @@ test('launches and manages agent lifecycle commands', async ({ page }) => {
   await page.getByRole('button', { name: 'Confirm Clear' }).click();
   await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_clear')).toBe(true);
   await server(page, 0, { type: 'agents', agents: [{ pane_id: 'w1:p3', status: 'working', project: 'relay', cwd: '/home/test/Development/relay', name: 'clear-codex-123', agent: 'codex' }] });
-  await expect.poll(() => page.evaluate(() => location.hash)).toBe('#pane=fedora%3A%3Aw1%3Ap3');
+  await expect.poll(() => page.evaluate(() => {
+    const token = location.hash.match(/^#pane=r3\.(.+)$/)?.[1] || '';
+    if (!token) return null;
+    const padded = token.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - token.length % 4) % 4);
+    return JSON.parse(atob(padded));
+  })).toEqual([3, 'fedora', 'primary', 'w1:p3', 'terminal-w1:p3', 1, '']);
   await expect(page.getByRole('main', { name: 'Terminal for relay' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Manage agent' }).click();

@@ -2,8 +2,8 @@
   import { untrack } from 'svelte';
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
-  import { clientPaneId } from '$lib/agents';
   import { suggestedLaunchName } from '$lib/launch';
+  import { targetRefForAgent } from '$lib/resource-id';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
 
@@ -11,10 +11,12 @@
     relayId: requestedRelayId = '',
     workspaceId = '',
     cwd: requestedCwd = '',
+    readOnlyRelayIds = new Set<string>(),
   }: {
     relayId?: string;
     workspaceId?: string;
     cwd?: string;
+    readOnlyRelayIds?: Set<string>;
   } = $props();
   const relays = relayStore.relayConfigs;
   const connections = relayStore.connections;
@@ -54,6 +56,7 @@
       workspace.relay_id === relayId && workspace.workspace_id === workspaceId
     )) || null,
   );
+  const readOnly = $derived(readOnlyRelayIds.has(relayId));
 
   $effect(() => {
     if (requestedRelayPending && connectedRelays.some((relay) => relay.id === requestedRelayId)) {
@@ -105,7 +108,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (!relayId || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
+    if (!relayId || readOnly || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
     submitting = true;
     error = false;
     status = 'Starting agent…';
@@ -132,9 +135,9 @@
         name: launchName,
         cwd: launchCwd,
       });
-      const paneId = launchedAgent?.pane_id || (rawPaneId ? clientPaneId(relayId, rawPaneId) : '');
-      replaceView(paneId
-        ? { view: 'terminal', paneId }
+      const target = launchedAgent ? targetRefForAgent(launchedAgent) : null;
+      replaceView(launchedAgent && target
+        ? { view: 'terminal', paneId: launchedAgent.pane_id, target }
         : { view: 'agents' });
     } catch (caught) {
       status = (caught as Error).message;
@@ -158,6 +161,7 @@
       {#if unavailableRelays.length}
         <p class="warning" role="status">Agent inventory is unavailable on {unavailableRelays.map((relay) => relay.label).join(', ')}.</p>
       {/if}
+      {#if readOnly}<p class="warning" role="status">This paired device has read-only access to the selected relay.</p>{/if}
       {#if targetWorkspace}
         <p class="hint">New tab in workspace <strong>{targetWorkspace.label}</strong>. The desktop keeps its current focus.</p>
       {/if}
@@ -219,7 +223,7 @@
       <label for="launch-prompt">Initial task <span class="optional">(optional)</span></label>
       <textarea id="launch-prompt" bind:value={prompt} maxlength="100000" placeholder="Describe the task to start…"></textarea>
       <p class="hint">Sent to the agent as its first prompt after it starts.</p>
-      <Button type="submit" disabled={submitting || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
+      <Button type="submit" disabled={submitting || readOnly || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
       {#if status}<p class:error class="form-status" role="status">{status}</p>{/if}
     </form>
   </Card>

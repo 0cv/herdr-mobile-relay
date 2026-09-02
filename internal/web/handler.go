@@ -19,6 +19,8 @@ import (
 var allowedAssets = map[string]bool{
 	"index.html":            true,
 	"manifest.webmanifest":  true,
+	"manifest-loader.js":    true,
+	"setup.webmanifest":     true,
 	"notification-icons.js": true,
 	"sw.js":                 true,
 	"version.json":          true,
@@ -92,6 +94,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if extension == ".woff2" {
 		contentType = "font/woff2"
 	}
+	if extension == ".webmanifest" {
+		contentType = "application/manifest+json"
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -133,7 +138,33 @@ func canonicalAssetPath(raw string) (string, bool) {
 }
 
 func isAllowedAsset(asset string) bool {
-	return allowedAssets[asset] || strings.HasPrefix(asset, "icons/") || strings.HasPrefix(asset, "fonts/")
+	return allowedAssets[asset] ||
+		isAttachmentHashWorker(asset) ||
+		strings.HasPrefix(asset, "icons/") ||
+		strings.HasPrefix(asset, "fonts/")
+}
+
+func isAttachmentHashWorker(asset string) bool {
+	const (
+		prefix = "assets/attachment-hash.worker-"
+		suffix = ".js"
+	)
+	if !strings.HasPrefix(asset, prefix) || !strings.HasSuffix(asset, suffix) {
+		return false
+	}
+	hash := strings.TrimSuffix(strings.TrimPrefix(asset, prefix), suffix)
+	if hash == "" {
+		return false
+	}
+	for _, character := range hash {
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') &&
+			character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func acceptsBrotli(header string) bool {
@@ -190,7 +221,9 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' blob: data:; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+	// media-src blob: carries relay-synthesized speech audio; every blob is
+	// built in-page from E2EE payloads, never fetched from a remote origin.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' blob: data:; media-src blob:; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 }
 
 func setCacheHeaders(w http.ResponseWriter, _ string) {

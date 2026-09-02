@@ -1,5 +1,5 @@
 {
   "type": "clear_activities",
-  "protocol": 2,
+  "protocol": 3,
   "request_id": "req-clear-activities"
 }

@@ -48,11 +48,13 @@ import (
 // scan one level too high. The service wrapper exports every key of
 // relay.env into the relay process, so these belong in that file.
 const (
-	ClaudeListEnv = "HERDR_CLAUDE_CONFIG_DIRS"
-	QoderListEnv  = "HERDR_QODER_CONFIG_DIRS"
-	CodexListEnv  = "HERDR_CODEX_CONFIG_DIRS"
-	PiListEnv     = "HERDR_PI_CONFIG_DIRS"
-	OMPListEnv    = "HERDR_OMP_CONFIG_DIRS"
+	ClaudeListEnv   = "HERDR_CLAUDE_CONFIG_DIRS"
+	QoderListEnv    = "HERDR_QODER_CONFIG_DIRS"
+	CodexListEnv    = "HERDR_CODEX_CONFIG_DIRS"
+	PiListEnv       = "HERDR_PI_CONFIG_DIRS"
+	OMPListEnv      = "HERDR_OMP_CONFIG_DIRS"
+	OpenCodeListEnv = "HERDR_OPENCODE_DATA_DIRS"
+	OMOListEnv      = "HERDR_OMO_CONFIG_DIRS"
 )
 
 // Claude reports the transcript roots for Claude Code, honouring
@@ -76,6 +78,53 @@ func Codex(home string) []string {
 // that read a file stored beside the sessions tree (session_index.jsonl).
 func CodexHomes(home string) []string {
 	return resolve(home, CodexListEnv, "CODEX_HOME", filepath.Join(home, ".codex"), "")
+}
+
+// OpenCodeData reports the only directories in which the relay will accept an
+// OpenCode database. Entries name data directories, not database files.
+func OpenCodeData(home string) []string {
+	xdgData := strings.TrimSpace(os.Getenv("XDG_DATA_HOME"))
+	if xdgData == "" {
+		xdgData = filepath.Join(home, ".local", "share")
+	}
+	return resolve(home, OpenCodeListEnv, "", filepath.Join(xdgData, "opencode"), "")
+}
+
+// OpenCodeDBs reports fixed database filenames under the configured OpenCode
+// data directories. A caller must still re-check containment and regular-file
+// status immediately before opening one.
+func OpenCodeDBs(home string) []string {
+	roots := OpenCodeData(home)
+	paths := make([]string, 0, len(roots))
+	for _, root := range roots {
+		paths = append(paths, filepath.Join(root, "opencode.db"))
+	}
+	return paths
+}
+
+// OMO reports every supported Pi-compatible transcript root for Oh My
+// OpenAgent. The relay cannot see a pane's environment, so it scans the
+// branded, standalone Senpi, and pre-unification layouts in addition to any
+// relay-side or process environment override.
+func OMO(home string) []string {
+	branded := filepath.Join(home, ".omo", "agent")
+	legacy := filepath.Join(home, ".omo")
+	discovered := []string{
+		os.Getenv("SENPI_CODING_AGENT_DIR"),
+		os.Getenv("PI_CODING_AGENT_DIR"),
+		branded,
+	}
+	if info, err := os.Stat(filepath.Join(legacy, "settings.json")); err == nil && info.Mode().IsRegular() {
+		discovered = append(discovered, legacy)
+	}
+	return resolve(
+		home,
+		OMOListEnv,
+		"OMO_CODING_AGENT_DIR",
+		filepath.Join(home, ".senpi", "agent"),
+		"sessions",
+		discovered...,
+	)
 }
 
 // Pi reports the session roots for the Pi coding agent, including the agent

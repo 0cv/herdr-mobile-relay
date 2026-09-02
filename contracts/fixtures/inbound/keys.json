@@ -2,7 +2,7 @@
   "type": "command",
   "action": "send_keys",
   "request_id": "req-002",
-  "protocol": 2,
+  "protocol": 3,
   "pane_id": "pane-1",
   "keys": ["Enter"]
 }

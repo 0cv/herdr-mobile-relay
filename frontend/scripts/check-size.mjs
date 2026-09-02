@@ -37,7 +37,33 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 127 KiB for compact conversation tool cards and pending-lease
 // terminal recovery: payload formatting/clamping and bounded resize handling
 // both ship in the single bootstrap bundle.
-const limitKiB = 128;
+// Raised from 128 KiB for paired-device administration, durable notification
+// policy, validated attachment batches, exact target routing, local speech,
+// wake lock, and OMO plan UI added to the required single application bundle.
+// Raised from 150 KiB for stale-width terminal tables: rows wider than the
+// leased pane keep their cell grid inside per-row lockstep scrollers instead
+// of wrapping into misaligned fragments.
+// Raised from 151 KiB for on-device diagnosability and the speak flow:
+// uncaught errors and store invariant violations report on a raw-DOM banner
+// (phones have no console), and reading responses aloud gained sanitized
+// speech text, an automatic phone-language voice, and failure toasts.
+// Raised from 152 KiB for screen-off speech: a near-silent keepalive stream
+// keeps the tab audible so reading aloud survives the phone sleeping, with
+// lock-screen Stop controls and sentence-chunked utterances under the
+// Android TTS input limit.
+// Raised from 153 KiB for the relay computer voice: sentence fragments are
+// synthesized on the relay and streamed here encrypted, then played as real
+// media - the only speech path Android keeps alive with the screen off.
+// The pairing QR is encoded by the relay, so the app only unpacks a bitmap.
+// Raised from 154 KiB for phone-managed speech voices and for the recovery
+// path that stops a refused pairing from reconnecting forever.
+// Raised from 155 KiB for the review hardening cutover: invitation-safe pairing,
+// exact push/watch routing, cancellable relay speech, and upload recovery add
+// 217 B gzip after moving attachment hashing out of the UI thread.
+// Raised from 156 KiB for the iOS Home Screen handoff, which holds the one-use
+// setup key for the installed copy and explains the waiting state, and for
+// reader speech from the agent's transcript instead of the relay copy command.
+const limitKiB = 157;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

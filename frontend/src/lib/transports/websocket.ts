@@ -1,12 +1,18 @@
 import { E2EE_SUBPROTOCOL, type E2EEWireFrame } from '../e2ee';
 import type { RelayConfig } from '../types';
-import { createEncryptedTransport } from './encrypted';
+import { createEncryptedTransport, type TransportAuthentication } from './encrypted';
 import type {
   FrameChannel,
   FrameChannelHandlers,
   RelayTransport,
   TransportHandlers,
 } from './types';
+
+/**
+ * The relay closes with this application code when it refuses a device's
+ * credential. It matches `transport.UnauthorizedCloseCode` on the relay.
+ */
+export const UNAUTHORIZED_CLOSE_CODE = 4401;
 
 /**
  * The original direct browser WebSocket path: the phone reaches the relay over
@@ -17,19 +23,26 @@ import type {
 export function createWebSocketTransport(
   relay: RelayConfig,
   handlers: TransportHandlers,
+  authentication: TransportAuthentication = {},
 ): RelayTransport {
   return createEncryptedTransport({
     kind: 'websocket',
     token: relay.token,
     codec: 'json',
     handlers,
-    createChannel: (channelHandlers) => createWebSocketChannel(relay, channelHandlers),
+    ...authentication,
+    createChannel: (channelHandlers, encrypted) => createWebSocketChannel(
+      relay,
+      channelHandlers,
+      encrypted,
+    ),
   });
 }
 
 function createWebSocketChannel(
   relay: RelayConfig,
   handlers: FrameChannelHandlers,
+  encrypted: boolean,
 ): FrameChannel {
   let socket: WebSocket | null = null;
   let closed = false;
@@ -47,7 +60,7 @@ function createWebSocketChannel(
     open(): void {
       if (closed || socket) return;
       try {
-        socket = relay.token
+        socket = encrypted
           ? new WebSocket(relay.url, E2EE_SUBPROTOCOL)
           : new WebSocket(relay.url);
       } catch {
@@ -58,7 +71,7 @@ function createWebSocketChannel(
         if (closed) return;
         // A relay that ignores the encrypted subprotocol would otherwise get a
         // plaintext hello, so refuse the socket before anything is sent.
-        if (relay.token
+        if (encrypted
           && typeof socket?.protocol === 'string'
           && socket.protocol !== E2EE_SUBPROTOCOL) {
           fail('Relay did not negotiate encrypted transport');
@@ -73,9 +86,19 @@ function createWebSocketChannel(
       socket.onerror = () => {
         fail('Relay connection failed');
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (closed) return;
         closed = true;
+        // 4401: the relay refuses this device's credential. Retrying replays
+        // the same rejected material, so the path manager must not.
+        if (event?.code === UNAUTHORIZED_CLOSE_CODE) {
+          handlers.onClose({
+            reason: 'This relay no longer accepts this device',
+            fatal: true,
+            code: 'device_unauthorized',
+          });
+          return;
+        }
         handlers.onClose({ reason: 'Relay disconnected' });
       };
     },

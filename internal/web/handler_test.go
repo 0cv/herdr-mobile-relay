@@ -20,7 +20,14 @@ func setupTestWebRoot(t *testing.T) string {
 	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>hello</html>"), 0o644)
 	os.WriteFile(filepath.Join(dir, "assets", "app.js"), []byte("console.log('app')"), 0o644)
 	os.WriteFile(filepath.Join(dir, "assets", "app.css"), []byte("body{}"), 0o644)
+	os.WriteFile(
+		filepath.Join(dir, "assets", "attachment-hash.worker-D_WkX-nj.js"),
+		[]byte("self.onmessage = () => {}"),
+		0o644,
+	)
 	os.WriteFile(filepath.Join(dir, "sw.js"), []byte("// sw"), 0o644)
+	os.WriteFile(filepath.Join(dir, "manifest-loader.js"), []byte("// manifest loader"), 0o644)
+	os.WriteFile(filepath.Join(dir, "setup.webmanifest"), []byte("{}"), 0o644)
 	os.WriteFile(filepath.Join(dir, "icons", "icon-192.png"), []byte("png-data"), 0o644)
 	os.WriteFile(filepath.Join(dir, "fonts", "nerd-symbols.woff2"), []byte("font-data"), 0o644)
 	os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("secret"), 0o644)
@@ -53,6 +60,59 @@ func TestServesAllowedAsset(t *testing.T) {
 	}
 	if etag := w.Header().Get("ETag"); etag == "" {
 		t.Error("missing ETag")
+	}
+}
+
+func TestServesOnlyVersionedAttachmentHashWorker(t *testing.T) {
+	root := setupTestWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+
+	for _, requestPath := range []string{
+		"/assets/attachment-hash.worker-D_WkX-nj.js",
+		"/assets/attachment-hash.worker-.js",
+		"/assets/attachment-hash.worker-D.WkX.js",
+		"/assets/unrelated-worker-D_WkX-nj.js",
+	} {
+		req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		want := http.StatusNotFound
+		if requestPath == "/assets/attachment-hash.worker-D_WkX-nj.js" {
+			want = http.StatusOK
+		}
+		if w.Code != want {
+			t.Errorf("%s status = %d, want %d", requestPath, w.Code, want)
+		}
+	}
+}
+
+// index.html loads manifest-loader.js, which selects one of the two
+// webmanifests at runtime. A relay that refuses any of the three serves an
+// app that can never register its manifest, so they belong to the allowlist
+// together.
+func TestServesManifestLoaderChain(t *testing.T) {
+	root := setupTestWebRoot(t)
+	h, err := NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, contentType := range map[string]string{
+		"/manifest-loader.js": "text/javascript; charset=utf-8",
+		"/setup.webmanifest":  "application/manifest+json",
+	} {
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != 200 {
+			t.Fatalf("%s status = %d, want 200", path, w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != contentType {
+			t.Errorf("%s content-type = %q, want %q", path, ct, contentType)
+		}
 	}
 }
 

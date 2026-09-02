@@ -246,6 +246,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .card h3 { font-size: .95rem; margin: 0 0 .8rem; }
 .form-stack { display: flex; flex-direction: column; gap: .5rem; }
 .form-stack label, .field-label { font-size: .78rem; font-weight: 650; }
+/* A control that sits directly in a card, without the form stack's own gap. */
+.settings-field { display: block; margin: .9rem 0 .3rem; }
 input, select, textarea {
   background: var(--input);
   border: 1px solid var(--border);
@@ -262,7 +264,7 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .app-update-status-checking { inset: 0 0 auto; margin-top: .45rem; position: absolute; }
 .update-check-button:disabled { cursor: wait; filter: none; opacity: 1; }
 .hint, .form-status, .question-status { color: var(--muted); font-size: .74rem; line-height: 1.45; margin: .45rem 0 0; }
-.form-status.error, .upload-status.error { color: var(--danger); }
+.form-status.error, .upload-status.error, .hint.error { color: var(--danger); }
 .optional { font-weight: 400; }
 .warning { color: var(--warning) !important; }
 
@@ -315,8 +317,9 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .relay-list { border-top: 1px solid var(--border); margin-top: 1rem; }
 .relay-row { align-items: center; border-bottom: 1px solid var(--border); display: flex; gap: .65rem; padding: .75rem 0; }
 .relay-info { display: flex; flex: 1; flex-direction: column; min-width: 0; }
-.relay-info span, .relay-info small { color: var(--muted); font-size: .7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.relay-info ol { font-size: .7rem; margin: .15rem 0 .35rem 1rem; overflow-wrap: anywhere; padding: 0; }
+.relay-info span, .relay-info small { color: var(--muted); font-size: .74rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.relay-info small.error { color: var(--danger); white-space: normal; }
+.relay-info ol { font-size: .74rem; margin: .15rem 0 .35rem 1rem; overflow-wrap: anywhere; padding: 0; }
 .relay-actions { display: flex; flex: 0 0 auto; flex-direction: column; gap: .3rem; }
 .update-command { background: var(--input); border: 1px solid var(--border); border-radius: .55rem; font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; padding: .7rem; user-select: text; white-space: pre-wrap; }
 .checkout-update { border-top: 1px solid var(--border); margin-top: 1rem; padding-top: .85rem; }
@@ -393,6 +396,11 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .conversation-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: .1rem .05rem .6rem; }
 .conversation-input-area { flex: 0 0 auto; margin-top: auto; min-width: 0; }
 .conversation-composer { align-items: flex-end; display: flex; gap: .45rem; }
+/* Attach controls stack vertically beside the composer so two targets cost
+   one narrow column instead of two full icon widths of typing space. */
+.attach-stack { display: flex; flex-direction: column; gap: .18rem; }
+.attach-stack .button-icon { height: 1.3rem; min-height: 1.3rem; width: 2.2rem; }
+.attach-stack .button-symbol { height: 1.05rem; width: 1.05rem; }
 .conversation-composer-status { color: var(--muted); font-size: .68rem; margin: .35rem .2rem 0; }
 .conversation-composer-status.error { color: var(--danger); }
 /* The turns live in their own box so a ResizeObserver can watch the height of
@@ -524,13 +532,33 @@ textarea { min-height: 6.5rem; resize: vertical; }
 }
 .term-content.preserve-layout.resize-layout .terminal-grid-line .terminal-cell-run { display: inline-block; }
 .term-content.preserve-layout.resize-layout .terminal-cell-run { display: inline; }
+/* A box-drawn row wider than the pane cannot reflow, but wrapping it destroys
+   its column alignment. It keeps its cell grid inside a per-row horizontal
+   scroller clipped at the pane width; TerminalView keeps a contiguous block's
+   rows scrolling in lockstep so the table pans as one unit. Only this row
+   scrolls - the pane itself never pans sideways. */
+.term-content.preserve-layout:is(.resize-layout, .resize-pending) > .term-screen > .ansi-line.terminal-wide-grid {
+  display: block;
+  max-width: var(--terminal-width, 100%);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  overflow-wrap: normal;
+  white-space: pre;
+  scrollbar-width: none;
+}
+.term-content.preserve-layout .terminal-wide-grid .terminal-cell-run { display: inline-block; }
 /* No lease has landed: the pane's width is not the phone's, so column
    alignment is already lost. Wrap at the container rather than scrolling
    sideways - a pan survives every refresh, stranding the reader on the tails
    of the newest lines. A leased pane keeps the rules above, where the pane
-   really is this wide. Box-drawing rows are handled in TerminalView, which
-   renders them as wrappable text past this width instead of a cell grid. */
+   really is this wide. Box-drawing rows past this width are classified in
+   terminal.ts and scroll inside their own row instead of wrapping. */
+.term-content.preserve-layout.resize-pending > .term-screen {
+  min-width: 0;
+  width: 100%;
+}
 .term-content.preserve-layout.resize-pending > .term-screen > .ansi-line {
+  max-width: 100%;
   /* `anywhere`, not `break-word`: only `anywhere` also shrinks a row's
      min-content, which keeps one long token from holding a run wider than the
      pane. Words still break at spaces first, so prose stays whole. */

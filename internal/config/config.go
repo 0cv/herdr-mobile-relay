@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -50,6 +51,10 @@ type Config struct {
 	WebRTCUDPPort       int
 	ForceRelayTransport bool
 	PortMappingEnabled  bool
+	// RearmBootstrap starts every process with an empty device list and a fresh
+	// one-use bootstrap invitation. Only the quick-tunnel flow sets it: its app
+	// origin changes each launch, so no enrolled credential can be presented again.
+	RearmBootstrap bool
 
 	CacheDir   string
 	ConfigHome string
@@ -73,6 +78,7 @@ func Load() (*Config, error) {
 		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
 		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
 		PortMappingEnabled:  envBoolOr("HERDR_REACHABILITY_PORT_MAPPING", true),
+		RearmBootstrap:      envBoolOr("HERDR_RELAY_REARM_BOOTSTRAP", false),
 	}
 
 	if origins := os.Getenv("HERDR_ALLOWED_ORIGINS"); origins != "" {
@@ -133,8 +139,8 @@ func (c *Config) validate() error {
 	if c.Token == "" && c.Host != "127.0.0.1" && c.Host != "::1" && c.Host != "localhost" {
 		return fmt.Errorf("refusing to bind tokenless relay to non-loopback address %s", c.Host)
 	}
-	if c.Token != "" && len(c.Token) < 16 {
-		return fmt.Errorf("relay key must be at least 16 bytes")
+	if c.Token != "" && len(c.Token) != 32 {
+		return errors.New("relay key must be exactly 32 bytes")
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("invalid port %d", c.Port)

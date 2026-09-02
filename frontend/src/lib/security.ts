@@ -3,6 +3,7 @@ import { base64UrlDecode, base64UrlEncode } from './base64url';
 import { DEVICE_CREDENTIAL_KEY, DEVICE_LOCK_KEY } from './config';
 import { relayStore } from './store';
 
+
 export interface SecurityState {
   locked: boolean;
   busy: boolean;
@@ -18,6 +19,7 @@ export const securityState = writable<SecurityState>({
   status: '',
   hint: "Uses this browser's platform authenticator. Requires HTTPS.",
 });
+
 
 let unlockInProgress = false;
 let automaticUnlockPending = false;
@@ -141,10 +143,10 @@ export function lockForDevice(reason: 'open' | 'resume' = 'resume'): void {
   // Locking gates the interface, not the transport. Dropping the connection
   // here used to be free — the app was going idle anyway — but it now costs
   // every verification user the warm-resume path, and it buys no secrecy: the
-  // relay key sits in localStorage and the unlock redials with it unchanged,
-  // so a live socket grants an attacker nothing a dial would not. Pane traffic
-  // stops separately (TerminalView treats a locked app as not visible), so
-  // nothing streams behind the unlock dialog.
+  // per-device credential sits in localStorage and the unlock redials with it
+  // unchanged, so a live socket grants an attacker nothing a dial would not.
+  // Pane traffic stops separately (TerminalView treats a locked app as not
+  // visible), so nothing streams behind the unlock dialog.
   automaticUnlockPending = true;
   securityState.update((state) => ({ ...state, locked: true, reason, status: '' }));
 }

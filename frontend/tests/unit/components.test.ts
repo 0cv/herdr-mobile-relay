@@ -163,7 +163,7 @@ describe('accessible Svelte interactions', () => {
       responding: new Set<string>(),
     });
     expect(screen.getByPlaceholderText('Needs inspection — use terminal controls')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Attach image' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     choiceView.unmount();
 
     const unknownView = render(TerminalView, {
@@ -178,16 +178,17 @@ describe('accessible Svelte interactions', () => {
     });
     const terminalInput = screen.getByPlaceholderText('Type terminal input…');
     expect(terminalInput).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Attach image' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Enter' })).toBeEnabled();
     expect(screen.queryByText('must not render')).not.toBeInTheDocument();
     await user.type(terminalInput, 'custom weekend');
     await user.click(screen.getByRole('button', { name: 'Submit terminal text' }));
-    expect(send).toHaveBeenNthCalledWith(1, unknown, {
-      type: 'send_text', text: 'custom weekend',
-    });
-    expect(send).toHaveBeenNthCalledWith(2, unknown, {
-      type: 'send_keys', keys: ['Enter'], activity_label: 'Submitted terminal text',
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(unknown, {
+      type: 'send_input',
+      text: 'custom weekend',
+      keys: ['Enter'],
+      activity_label: 'Submitted terminal text',
     });
     unknownView.unmount();
     vi.restoreAllMocks();
@@ -600,6 +601,48 @@ describe('accessible Svelte interactions', () => {
     }
   });
 
+  it('reports corrupt conversation records separately from file truncation', async () => {
+    const user = userEvent.setup();
+    const agent: Agent = {
+      relay_id: 'fedora', relay_label: 'Fedora', raw_pane_id: 'w1:p9', pane_id: 'fedora::w1:p9',
+      project: 'relay', agent: 'opencode', status: 'working', cwd: '/home/test/relay',
+    };
+    const history = vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValueOnce({
+      available: true,
+      reason: '',
+      entries: [{
+        id: 'turn-1', timestamp: '2026-09-02T12:00:00Z',
+        role: 'assistant', text: 'valid turn', tools: [],
+      }],
+      hasMore: true,
+      total: 2,
+      fileTruncated: false,
+      sourceCorrupt: true,
+    }).mockResolvedValue({
+      available: true,
+      reason: '',
+      entries: [{
+        id: 'turn-0', timestamp: '2026-09-02T11:00:00Z',
+        role: 'user', text: 'older turn', tools: [],
+      }],
+      hasMore: false,
+      total: 2,
+      fileTruncated: false,
+      sourceCorrupt: false,
+    });
+    try {
+      const view = render(ConversationHistory, { agent });
+      expect(await screen.findByText(/Some OpenCode records could not be decoded/)).toBeInTheDocument();
+      expect(screen.queryByText(/larger than 16 MB/)).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Load older turns' }));
+      await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(2));
+      expect(screen.getByText(/Some OpenCode records could not be decoded/)).toBeInTheDocument();
+      view.unmount();
+    } finally {
+      history.mockRestore();
+    }
+  });
+
   it('persists the conversation composer draft across remounts and clears it on send', async () => {
     const user = userEvent.setup();
     const agent: Agent = {
@@ -607,7 +650,8 @@ describe('accessible Svelte interactions', () => {
       project: 'relay', agent: 'codex', status: 'working', cwd: '/home/test/relay',
     };
     vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
-      available: true, reason: '', entries: [], hasMore: false, total: 0, fileTruncated: false,
+      available: true, reason: '', entries: [], hasMore: false, total: 0,
+      fileTruncated: false, sourceCorrupt: false,
     });
     const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
       type: 'command_result', request_id: 'prompt-1', ok: true,

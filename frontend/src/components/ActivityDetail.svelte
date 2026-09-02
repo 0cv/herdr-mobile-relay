@@ -4,6 +4,7 @@
   import { activityTone } from '$lib/activity';
   import { clientPaneId } from '$lib/agents';
   import { navigate, replaceView } from '$lib/router';
+  import { targetRefForAgent } from '$lib/resource-id';
   import { relayStore } from '$lib/store';
 
   const activities = relayStore.activities;
@@ -28,7 +29,7 @@
   function goToThread() {
     if (!activity?.pane_id) return;
     if (agent) void relayStore.acknowledgePane(agent);
-    navigate({ view: 'terminal', paneId });
+    navigate({ view: 'terminal', paneId, target: agent ? targetRefForAgent(agent) || undefined : undefined });
   }
 
   async function copyExtract() {

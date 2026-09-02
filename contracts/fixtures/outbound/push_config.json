@@ -2,7 +2,7 @@
   "type": "push_config",
   "vapid_public_key": "BTest-key-base64url",
   "host": "dev-workstation",
-  "protocol": 2,
+  "protocol": 3,
   "version": "0.9.0",
   "release_version": "0.9.0",
   "revision": "abc123",
@@ -21,8 +21,12 @@
     "pane_size_lease",
     "pane_size_lease_rows",
     "workspace_inspection",
-    "secret_input"
+    "semantic_input",
+    "secret_input",
+    "speech_voice_management",
+    "invitation_qr"
   ],
+  "speech_languages": ["en", "fr"],
   "inventory": {"state": "ready"},
   "agent_profiles": [
     {"id": "claude", "label": "Claude"},

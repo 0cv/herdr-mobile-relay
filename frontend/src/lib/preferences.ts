@@ -8,6 +8,7 @@ import {
   TERMINAL_HISTORY_KEY,
   TERMINAL_HISTORY_OPTIONS,
   TERMINAL_HEIGHT_LEASE_KEY,
+  TERMINAL_WAKE_LOCK_KEY,
   TERMINAL_REFRESH_KEY,
   TERMINAL_REFRESH_OPTIONS,
   THEME_COLORS,
@@ -68,6 +69,9 @@ export const homeLayout = writable<HomeLayout>(savedHomeLayout());
 export const terminalHeightLease = writable<boolean>(
   localStorage.getItem(TERMINAL_HEIGHT_LEASE_KEY) === 'true',
 );
+export const terminalWakeLock = writable<boolean>(
+  localStorage.getItem(TERMINAL_WAKE_LOCK_KEY) === 'true',
+);
 
 function applyTheme(value: Theme): void {
   document.documentElement.dataset.theme = value;
@@ -102,6 +106,11 @@ export function setTerminalHeightLease(value: boolean): void {
   localStorage.setItem(TERMINAL_HEIGHT_LEASE_KEY, String(value));
   terminalHeightLease.set(value);
 }
+export function setTerminalWakeLock(value: boolean): void {
+  localStorage.setItem(TERMINAL_WAKE_LOCK_KEY, String(value));
+  terminalWakeLock.set(value);
+}
+
 
 export function setHomeLayout(value: HomeLayout): void {
   localStorage.setItem(HOME_LAYOUT_KEY, value);

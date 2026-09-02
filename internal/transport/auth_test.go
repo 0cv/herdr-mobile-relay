@@ -22,7 +22,7 @@ func TestEncryptedUpgradeRequiresSubprotocol(t *testing.T) {
 	if webSocketUpgradeAllowed(cfg, req) {
 		t.Error("expected upgrade without encrypted subprotocol to fail")
 	}
-	req.Header.Set("Sec-WebSocket-Protocol", "chat, herdr-e2ee-v1")
+	req.Header.Set("Sec-WebSocket-Protocol", "chat, "+e2eeSubprotocol)
 	if !webSocketUpgradeAllowed(cfg, req) {
 		t.Error("expected encrypted subprotocol to pass")
 	}

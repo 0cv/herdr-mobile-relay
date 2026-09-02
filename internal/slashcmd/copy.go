@@ -31,12 +31,22 @@ var copyProfiles = map[string]CopyProfile{
 		Confirmation: regexp.MustCompile(`(?im)copied\s+(?:to\s+clipboard\s*\(|via\s+terminal\s+escape\s+sequence\s+\(unverified,\s*)(?P<chars>[0-9]+)\s+characters?\)?\.?`),
 		Composer:     regexp.MustCompile(`(?m)^\s*│\s*>\s*(?P<text>.*?)\s*│\s*$`),
 	},
+	// OMP 0.20 draws its composer as a bare line between two full-width rules,
+	// opens /copy as a "Copy · pick what to put on the clipboard" panel, and
+	// confirms with "Copied assistant message to clipboard". Keep the rounded
+	// 0.19 composer, its "╭─ Copy to clipboard" picker, and its "last message"
+	// wording in the same matchers so upgraded relays can still copy from agent
+	// versions that have not adopted the redesign.
 	"omp": {
-		PreSubmission:  regexp.MustCompile(`(?ims)^\s*╰─\s*/copy\b[^\r\n╯]*─╯\s*\r?\n(?:.*\r?\n){0,2}\s*[^\r\n]*\bcopy\s+Pick\s+text\s+or\s+code\b`),
-		PostSubmission: regexp.MustCompile(`(?m)^\s*╭─\s+Copy to clipboard\b.*$`),
-		Confirmation:   regexp.MustCompile(`(?im)copied\s+last\s+message\s+to\s+clipboard`),
+		PreSubmission: regexp.MustCompile(
+			`(?ims)(?:^[ \t]*/copy[ \t]*\r?\n[ \t]*─{20,}[ \t]*\r?\n(?:.*\r?\n){0,2}[^\r\n]*\bcopy\s+Pick\s+text\s+or\s+code\b|^\s*╰─\s*/copy\b[^\r\n╯]*─╯\s*\r?\n(?:.*\r?\n){0,2}\s*[^\r\n]*\bcopy\s+Pick\s+text\s+or\s+code\b)`,
+		),
+		PostSubmission: regexp.MustCompile(
+			`(?m)^(?:\s*╭─\s+Copy to clipboard\b.*|[ \t]*\S*[ \t]*Copy\s+·\s+pick\s+what\s+to\s+put\s+on\s+the\s+clipboard\b.*)$`,
+		),
+		Confirmation: regexp.MustCompile(`(?im)copied\s+(?:last|assistant)\s+message\s+to\s+clipboard`),
 		Composer: regexp.MustCompile(
-			`(?m)^\s*╰─\s*(?P<text>(?:/[^\r\n╯]*?)?)\s*─╯\s*$`,
+			`(?m)^(?:[ \t]*─{20,}[ \t]*\r?\n[ \t]*|[ \t]*╰─[ \t]*)(?P<text>(?:/[^\r\n╯]*?)?)[ \t]*(?:\r?\n[ \t]*─{20,}[ \t]*|─╯[ \t]*)$`,
 		),
 	},
 	"pi": {

@@ -36,6 +36,14 @@ func blockedEventID(t *testing.T, d *Dispatcher, paneID string) string {
 	}
 	return agent.BlockedEventID
 }
+func approvalIdentity(t *testing.T, d *Dispatcher, paneID string, index int) (string, string) {
+	t.Helper()
+	agent, ok := d.state.Agent(paneID)
+	if !ok || agent.ApprovalFingerprint == "" || index < 0 || index >= len(agent.Options) {
+		t.Fatalf("blocked pane %q has no exact approval identity", paneID)
+	}
+	return agent.ApprovalFingerprint, agent.Options[index]
+}
 
 const approvalPane = `Would you like to run this command?
 $ make check
@@ -44,9 +52,14 @@ $ make check
 Enter to select · Esc to cancel`
 
 func commitApproval(state *State, paneID string) {
+	classification := question.Classify(approvalPane, "codex")
 	state.CommitInventory([]*AgentState{{
 		PaneID: paneID, Agent: "codex", Status: "blocked",
-		AttentionKind: "approval", Options: []string{"Approve", "Reject"},
+		AttentionKind:       question.AttentionApproval,
+		Prompt:              classification.Prompt,
+		Command:             classification.Command,
+		Options:             append([]string(nil), classification.Options...),
+		ApprovalFingerprint: question.ApprovalFingerprint(classification),
 	}}, state.RevisionCounter())
 }
 
@@ -67,15 +80,18 @@ func TestDuplicateApprovalDispatchesOnce(t *testing.T) {
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
+	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
 	approve := func(reqID string) {
 		d.Handle(context.Background(), map[string]any{
-			"action":     "respond",
-			"request_id": reqID,
-			"pane_id":    "pane-1",
-			"event_id":   eventID,
-			"index":      float64(0),
-			"total":      float64(2),
+			"action":               "respond",
+			"request_id":           reqID,
+			"pane_id":              "pane-1",
+			"event_id":             eventID,
+			"approval_fingerprint": fingerprint,
+			"choice":               choice,
+			"index":                float64(0),
+			"total":                float64(2),
 		})
 	}
 
@@ -108,13 +124,16 @@ func TestApprovalRevalidationRejectsCompletedNumberedProse(t *testing.T) {
 		"  printf '{\"ok\":true}\\n'\n"+
 		"fi\n")
 	state := NewState(testLogger())
+
 	commitApproval(state, "pane-1")
 	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
 	eventID := blockedEventID(t, d, "pane-1")
+	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
 	result := d.Handle(context.Background(), map[string]any{
 		"action": "respond", "request_id": "stale", "pane_id": "pane-1",
-		"event_id": eventID, "index": float64(0), "total": float64(2),
+		"event_id": eventID, "approval_fingerprint": fingerprint, "choice": choice,
+		"index": float64(0), "total": float64(2),
 	})
 	if result.OK || result.Error != "Approval choices are no longer available" {
 		t.Fatalf("approval result = %+v", result)
@@ -122,6 +141,37 @@ func TestApprovalRevalidationRejectsCompletedNumberedProse(t *testing.T) {
 	data, _ := os.ReadFile(record)
 	if strings.Contains(string(data), "send-keys") {
 		t.Fatalf("approval keys were sent after chat revalidation:\n%s", data)
+	}
+}
+func TestApprovalRevalidationRejectsSameLengthChangedChoices(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "invocations.log")
+	changedPane := `Would you like to run this command?
+$ make deploy
+❯ 1. Run
+  2. Cancel
+Enter to select · Esc to cancel`
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"printf '%s\\n' \"$*\" >> \""+record+"\"\n"+
+		"if [ \"$1 $2\" = \"pane read\" ]; then\n"+
+		"  printf '"+changedPane+"\\n'\n"+
+		"else\n"+
+		"  printf '{\"ok\":true}\\n'\n"+
+		"fi\n")
+	state := NewState(testLogger())
+	commitApproval(state, "pane-1")
+	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
+	result := d.Handle(context.Background(), map[string]any{
+		"action": "respond", "request_id": "changed", "pane_id": "pane-1",
+		"event_id": blockedEventID(t, d, "pane-1"), "approval_fingerprint": fingerprint,
+		"choice": choice, "index": float64(0), "total": float64(2),
+	})
+	if result.OK || result.Error != "Approval choices are no longer available" {
+		t.Fatalf("changed approval result = %+v", result)
+	}
+	if data, _ := os.ReadFile(record); strings.Contains(string(data), "send-keys") {
+		t.Fatalf("approval keys were sent after same-length choices changed:\n%s", data)
 	}
 }
 
@@ -159,8 +209,9 @@ func TestApprovalDispatchNavigatesFromReparsedLiveFocus(t *testing.T) {
 	state := NewState(testLogger())
 	state.CommitInventory([]*AgentState{{
 		PaneID: "pane-1", Agent: "qodercli", Status: "blocked",
-		AttentionKind: question.AttentionApproval,
-		Options:       append([]string(nil), classification.Options...),
+		AttentionKind:       question.AttentionApproval,
+		Options:             append([]string(nil), classification.Options...),
+		ApprovalFingerprint: question.ApprovalFingerprint(classification),
 	}}, state.RevisionCounter())
 	d := NewDispatcher(
 		herdr.NewClient(bin, filepath.Join(dir, "sock")),
@@ -168,13 +219,16 @@ func TestApprovalDispatchNavigatesFromReparsedLiveFocus(t *testing.T) {
 		nil,
 		testLogger(),
 	)
+	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 	result := d.Handle(context.Background(), map[string]any{
-		"action":     "respond",
-		"request_id": "focus-aware",
-		"pane_id":    "pane-1",
-		"event_id":   blockedEventID(t, d, "pane-1"),
-		"index":      float64(0),
-		"total":      float64(len(classification.Options)),
+		"action":               "respond",
+		"request_id":           "focus-aware",
+		"pane_id":              "pane-1",
+		"event_id":             blockedEventID(t, d, "pane-1"),
+		"approval_fingerprint": fingerprint,
+		"choice":               choice,
+		"index":                float64(0),
+		"total":                float64(len(classification.Options)),
 	})
 	if !result.OK || result.Phase != "accepted" {
 		t.Fatalf("approval result = %+v", result)

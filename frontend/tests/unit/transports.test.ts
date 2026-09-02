@@ -42,12 +42,13 @@ import {
   DIRECT_STABILITY_MS,
   FORCE_RELAY_KEY,
 } from '$lib/transports/path-manager';
-import type {
-  FrameChannelHandlers,
-  RelayTransport,
-  TransportHandlers,
-  TransportStatus,
-  TransportStatusDetail,
+import {
+  DEVICE_UNAUTHORIZED_CODE,
+  type FrameChannelHandlers,
+  type RelayTransport,
+  type TransportHandlers,
+  type TransportStatus,
+  type TransportStatusDetail,
 } from '$lib/transports/types';
 import type { RelayConfig } from '$lib/types';
 
@@ -81,7 +82,7 @@ class MockGatewaySocket {
   sent: (string | ArrayBufferView)[] = [];
   closeCode: number | null = null;
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { reason: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((event: { data: string | ArrayBuffer }) => void) | null = null;
 
@@ -90,6 +91,7 @@ class MockGatewaySocket {
   send(payload: string | ArrayBufferView): void { this.sent.push(payload); }
   close(code?: number): void { this.closeCode = code ?? 1000; }
   text(payload: unknown): void { this.onmessage?.({ data: JSON.stringify(payload) }); }
+  serverClose(reason: string): void { this.onclose?.({ reason }); }
   binary(frame: Uint8Array): void {
     this.onmessage?.({ data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) as ArrayBuffer });
   }
@@ -215,8 +217,21 @@ describe('gateway frame channel', () => {
     expect(recorder.closes[0]?.reason).toBeTruthy();
     expect(recorder.opens).toBe(0);
     // A late close from the same socket must not double-report.
-    socket.onclose?.();
+    socket.onclose?.({ reason: '' });
     expect(recorder.closes).toHaveLength(1);
+  });
+
+  it('maps a relayed unauthorized close to a fatal device rejection', () => {
+    const recorder = channelRecorder();
+    createGatewayChannel(HYBRID_RELAY, recorder).open();
+
+    MockGatewaySocket.instances[0].serverClose(DEVICE_UNAUTHORIZED_CODE);
+
+    expect(recorder.closes).toEqual([{
+      reason: 'This relay no longer accepts this device',
+      fatal: true,
+      code: DEVICE_UNAUTHORIZED_CODE,
+    }]);
   });
 
   it('rejects an unsupported protocol version and a missing gateway address', async () => {
@@ -577,6 +592,7 @@ describe('webrtc data channel', () => {
     expect(signal.sent.filter((message) => message.type === 'webrtc_close')).toHaveLength(0);
   });
 
+
   it('gives the peer connection the ICE servers it was handed', () => {
     // Off LAN the host candidates alone are unreachable, so the direct path
     // needs the address the gateway reflects back through address discovery.
@@ -741,7 +757,7 @@ describe('hybrid path manager', () => {
     expect(transport.send({ type: 'refresh_agents' })).toBe(true);
     expect(gateways[0].sent.at(-1)).toMatchObject({ type: 'refresh_agents' });
 
-    directs[0].handlers.onMessage({ type: 'push_config', protocol: 2 });
+    directs[0].handlers.onMessage({ type: 'push_config', protocol: 3 });
     expect(statuses.filter((event) => event.status === 'connected')).toHaveLength(2);
     // The direct path keeps naming the gateway that signalled it: the phone
     // still depends on that candidate to rebuild the session.
@@ -752,6 +768,15 @@ describe('hybrid path manager', () => {
     expect(messages.at(-1)).toMatchObject({ type: 'push_config' });
     expect(transport.send({ type: 'refresh_agents' })).toBe(true);
     expect(directs[0].sent.at(-1)).toMatchObject({ type: 'refresh_agents' });
+    gateways[0].handlers.onMessage({
+      type: 'upload_chunk_result',
+      request_id: 'upload-before-promotion',
+      result: { next_sequence: 2 },
+    });
+    expect(messages.at(-1)).toMatchObject({
+      type: 'upload_chunk_result',
+      request_id: 'upload-before-promotion',
+    });
 
     // The relayed session stays up for ten seconds of direct stability.
     vi.advanceTimersByTime(DIRECT_STABILITY_MS - 1);
@@ -761,7 +786,7 @@ describe('hybrid path manager', () => {
 
     // A message from the drained gateway must not reach the store any more.
     gateways[0].handlers.onMessage({ type: 'agents', agents: ['stale'] });
-    expect(messages.at(-1)).toMatchObject({ type: 'push_config' });
+    expect(messages.at(-1)).toMatchObject({ type: 'upload_chunk_result' });
   });
 
   it('falls back to a fresh gateway when the direct path dies and retries with backoff', () => {
@@ -769,7 +794,7 @@ describe('hybrid path manager', () => {
     transport.connect();
     gateways[0].handlers.onStatus('connected');
     directs[0].handlers.onStatus('connected');
-    directs[0].handlers.onMessage({ type: 'push_config', protocol: 2 });
+    directs[0].handlers.onMessage({ type: 'push_config', protocol: 3 });
     vi.advanceTimersByTime(DIRECT_STABILITY_MS);
     expect(gateways[0].closed).toBe(true);
 
@@ -813,7 +838,7 @@ describe('hybrid path manager', () => {
     transport.connect();
     gateways[0].handlers.onStatus('connected');
     directs[0].handlers.onStatus('connected');
-    directs[0].handlers.onMessage({ type: 'push_config', protocol: 2 });
+    directs[0].handlers.onMessage({ type: 'push_config', protocol: 3 });
     vi.advanceTimersByTime(DIRECT_STABILITY_MS);
     directs[0].handlers.onStatus('closed', { reason: 'The direct connection closed.' });
 
@@ -890,6 +915,41 @@ describe('hybrid path manager', () => {
 
     legacies[0].handlers.onMessage({ type: 'agents', agents: [] });
     expect(messages).toEqual([{ type: 'agents', agents: [] }]);
+  });
+
+  it('never replays rejected device material on another path', () => {
+    const legacies: FakeTransport[] = [];
+    const transport = createHybridTransport(
+      { ...HYBRID_RELAY, url: 'wss://fedora.example' },
+      handlers,
+      {
+        createGateway: (_relay, gatewayHandlers) => {
+          const fake = fakeTransport('gateway', gatewayHandlers);
+          gateways.push(fake);
+          return fake;
+        },
+        createDirect: (_relay, signal, directHandlers) => {
+          const fake = fakeTransport('webrtc', directHandlers);
+          signals.push(signal);
+          directs.push(fake);
+          return fake;
+        },
+        createLegacy: (_relay, legacyHandlers) => {
+          const fake = fakeTransport('websocket', legacyHandlers);
+          legacies.push(fake);
+          return fake;
+        },
+      },
+    );
+    transport.connect();
+    gateways[0].handlers.onStatus('closed', {
+      reason: 'This relay no longer accepts this device',
+      fatal: true,
+      code: DEVICE_UNAUTHORIZED_CODE,
+    });
+
+    expect(legacies).toHaveLength(0);
+    expect(statuses.at(-1)?.detail?.code).toBe(DEVICE_UNAUTHORIZED_CODE);
   });
 
   it('does not fall back when a hybrid-only relay has no legacy URL', () => {

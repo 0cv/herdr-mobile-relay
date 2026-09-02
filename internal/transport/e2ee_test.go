@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -62,9 +63,33 @@ type e2eeVectorRecord struct {
 	Ciphertext string    `json:"ciphertext"`
 	Frame      e2eeFrame `json:"frame"`
 }
+type fixedE2EEAuthResolver struct {
+	secret []byte
+}
 
-func TestE2EEVersionOneVector(t *testing.T) {
-	rawVector, err := os.ReadFile("../../contracts/fixtures/e2ee/v1.json")
+func (r fixedE2EEAuthResolver) ResolveE2EESecret(_ context.Context, selector E2EEAuthSelector) ([]byte, error) {
+	if selector != (E2EEAuthSelector{Kind: E2EEAuthCredential, ID: "credential-test", Version: 7}) {
+		return nil, errors.New("unknown test credential")
+	}
+	return append([]byte(nil), r.secret...), nil
+}
+
+func (r fixedE2EEAuthResolver) CompleteE2EEAuth(_ context.Context, selector E2EEAuthSelector, authenticated bool) (E2EEAuthResult, error) {
+	if !authenticated {
+		return E2EEAuthResult{}, errors.New("test proof rejected")
+	}
+	if _, err := r.ResolveE2EESecret(context.Background(), selector); err != nil {
+		return E2EEAuthResult{}, err
+	}
+	return E2EEAuthResult{Identity: AuthenticatedIdentity{
+		DeviceID: "device-test", CredentialID: selector.ID, Role: "controller", Locale: "en", CredentialVersion: selector.Version,
+	}}, nil
+}
+
+func (fixedE2EEAuthResolver) IsE2EEAuthRejected(error) bool { return true }
+
+func TestE2EEVersionTwoVector(t *testing.T) {
+	rawVector, err := os.ReadFile("../../contracts/fixtures/e2ee/v2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,26 +120,30 @@ func TestE2EEVersionOneVector(t *testing.T) {
 	if !bytes.Equal(serverPublic, decodeVectorField(t, vector.Server.PublicKey)) {
 		t.Fatal("server public key does not match vector")
 	}
-
-	clientProof := e2eeAuthTag(vector.RelayKey, e2eeClientProofLabel, clientNonce, clientPublic)
+	selector := E2EEAuthSelector{Kind: vector.Client.Hello.AuthKind, ID: vector.Client.Hello.AuthID, Version: vector.Client.Hello.AuthVersion}
+	binding := e2eeAuthBinding(selector)
+	clientProof := e2eeAuthTag([]byte(vector.RelayKey), e2eeClientProofLabel, binding, clientNonce, clientPublic)
 	if !bytes.Equal(clientProof, decodeVectorField(t, vector.Client.Proof)) {
 		t.Fatal("client proof does not match vector")
 	}
 	if vector.Client.Hello != (e2eeClientHello{
-		Type:      "e2ee_client_hello",
-		Version:   e2eeVersion,
-		Nonce:     vector.Client.Nonce,
-		PublicKey: vector.Client.PublicKey,
-		Proof:     vector.Client.Proof,
+		Type:        "e2ee_client_hello",
+		Version:     e2eeVersion,
+		AuthKind:    selector.Kind,
+		AuthID:      selector.ID,
+		AuthVersion: selector.Version,
+		Nonce:       vector.Client.Nonce,
+		PublicKey:   vector.Client.PublicKey,
+		Proof:       vector.Client.Proof,
 	}) {
 		t.Fatal("client hello does not match vector fields")
 	}
 
-	transcript := e2eeTranscript(clientNonce, clientPublic, serverNonce, serverPublic)
+	transcript := e2eeTranscript(binding, clientNonce, clientPublic, serverNonce, serverPublic)
 	if !bytes.Equal(transcript, decodeVectorField(t, vector.Transcript)) {
 		t.Fatal("transcript does not match vector")
 	}
-	serverProof := e2eeAuthTag(vector.RelayKey, e2eeServerProofLabel, transcript)
+	serverProof := e2eeAuthTag([]byte(vector.RelayKey), e2eeServerProofLabel, transcript)
 	if !bytes.Equal(serverProof, decodeVectorField(t, vector.Server.Proof)) {
 		t.Fatal("server proof does not match vector")
 	}
@@ -135,15 +164,15 @@ func TestE2EEVersionOneVector(t *testing.T) {
 	if !bytes.Equal(sharedSecret, decodeVectorField(t, vector.SharedSecret)) {
 		t.Fatal("shared secret does not match vector")
 	}
-	keySalt := e2eeAuthTag(vector.RelayKey, e2eeKeySaltLabel, transcript)
+	keySalt := e2eeAuthTag([]byte(vector.RelayKey), e2eeKeySaltLabel, transcript)
 	if !bytes.Equal(keySalt, decodeVectorField(t, vector.KeySalt)) {
 		t.Fatal("key salt does not match vector")
 	}
-	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v1 c2s", 32)
+	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 c2s", 32)
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v1 s2c", 32)
+	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 s2c", 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,17 +235,17 @@ func decodeVectorField(t *testing.T, value string) []byte {
 }
 
 func TestParseE2EEClientFinishRejectsMalformedPlaintext(t *testing.T) {
-	if err := parseE2EEClientFinish([]byte(`{"type":"e2ee_client_finish","version":1}`)); err != nil {
+	if err := parseE2EEClientFinish([]byte(`{"type":"e2ee_client_finish","version":2}`)); err != nil {
 		t.Fatal(err)
 	}
 	invalidUTF8 := append(
-		[]byte(`{"type":"e2ee_client_finish","version":1,"unknown":"`),
+		[]byte(`{"type":"e2ee_client_finish","version":2,"unknown":"`),
 		0xff,
 	)
 	invalidUTF8 = append(invalidUTF8, '"', '}')
 	for _, plaintext := range [][]byte{
 		[]byte(`null`),
-		[]byte(`{"type":"e2ee_client_finish","version":2}`),
+		[]byte(`{"type":"e2ee_client_finish","version":1}`),
 		invalidUTF8,
 	} {
 		if err := parseE2EEClientFinish(plaintext); err == nil {
@@ -286,6 +315,7 @@ func TestE2EESessionEncryptsAuthenticatesAndOrdersFrames(t *testing.T) {
 func TestEncryptedHubAuthenticatesBeforeRegistrationAndProtectsMessages(t *testing.T) {
 	const token = "0123456789abcdef0123456789abcdef"
 	hub := NewHub(&config.Config{Token: token}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hub.SetE2EEAuthResolver(fixedE2EEAuthResolver{secret: []byte(token)})
 	connected := make(chan struct{}, 1)
 	received := make(chan map[string]any, 1)
 	hub.SetOnConnect(func(client *ClientConn) {
@@ -452,14 +482,19 @@ func testClientE2EEHandshake(
 	if _, err := rand.Read(clientNonce); err != nil {
 		t.Fatal(err)
 	}
+	selector := E2EEAuthSelector{Kind: E2EEAuthCredential, ID: "credential-test", Version: 7}
+	binding := e2eeAuthBinding(selector)
 	clientPublic := privateKey.PublicKey().Bytes()
-	clientProof := e2eeAuthTag(token, e2eeClientProofLabel, clientNonce, clientPublic)
+	clientProof := e2eeAuthTag([]byte(token), e2eeClientProofLabel, binding, clientNonce, clientPublic)
 	hello, err := json.Marshal(e2eeClientHello{
-		Type:      "e2ee_client_hello",
-		Version:   e2eeVersion,
-		Nonce:     base64.RawURLEncoding.EncodeToString(clientNonce),
-		PublicKey: base64.RawURLEncoding.EncodeToString(clientPublic),
-		Proof:     base64.RawURLEncoding.EncodeToString(clientProof),
+		Type:        "e2ee_client_hello",
+		Version:     e2eeVersion,
+		AuthKind:    selector.Kind,
+		AuthID:      selector.ID,
+		AuthVersion: selector.Version,
+		Nonce:       base64.RawURLEncoding.EncodeToString(clientNonce),
+		PublicKey:   base64.RawURLEncoding.EncodeToString(clientPublic),
+		Proof:       base64.RawURLEncoding.EncodeToString(clientProof),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -490,8 +525,8 @@ func testClientE2EEHandshake(
 	if err != nil {
 		t.Fatal(err)
 	}
-	transcript := e2eeTranscript(clientNonce, clientPublic, serverNonce, serverPublicBytes)
-	wantServerProof := e2eeAuthTag(token, e2eeServerProofLabel, transcript)
+	transcript := e2eeTranscript(binding, clientNonce, clientPublic, serverNonce, serverPublicBytes)
+	wantServerProof := e2eeAuthTag([]byte(token), e2eeServerProofLabel, transcript)
 	if !hmac.Equal(serverProof, wantServerProof) {
 		t.Fatal("server proof did not authenticate")
 	}
@@ -503,12 +538,12 @@ func testClientE2EEHandshake(
 	if err != nil {
 		t.Fatal(err)
 	}
-	keySalt := e2eeAuthTag(token, e2eeKeySaltLabel, transcript)
-	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v1 c2s", 32)
+	keySalt := e2eeAuthTag([]byte(token), e2eeKeySaltLabel, transcript)
+	clientKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 c2s", 32)
 	if err != nil {
 		t.Fatal(err)
 	}
-	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v1 s2c", 32)
+	serverKey, err := hkdf.Key(sha256.New, sharedSecret, keySalt, "herdr-e2ee-v2 s2c", 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -530,6 +565,25 @@ func testClientE2EEHandshake(
 	}
 	if err := conn.Write(ctx, websocket.MessageText, encryptedFinish); err != nil {
 		t.Fatal(err)
+	}
+	messageType, encryptedServerFinish, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.MessageText {
+		t.Fatalf("server finish message type = %v, want text", messageType)
+	}
+	plaintextServerFinish, err := session.open(encryptedServerFinish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serverFinish e2eeServerFinish
+	if err := json.Unmarshal(plaintextServerFinish, &serverFinish); err != nil {
+		t.Fatal(err)
+	}
+	if serverFinish.Type != "e2ee_server_finish" || serverFinish.DeviceID != "device-test" ||
+		serverFinish.CredentialID != selector.ID || serverFinish.CredentialVersion != selector.Version {
+		t.Fatalf("server finish = %#v", serverFinish)
 	}
 	return session, hello, encryptedFinish
 }

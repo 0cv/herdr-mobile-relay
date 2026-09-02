@@ -64,6 +64,15 @@ if [ "$TUNNEL_TARGET_HOST" = "0.0.0.0" ]; then
     TUNNEL_TARGET_HOST="127.0.0.1"
 fi
 
+# The quick tunnel serves the phone app from a hostname that changes on every
+# launch, so every device enrolled under the previous hostname is stranded.
+# Each tunnel launch starts with an empty device list and re-arms the one-use
+# bootstrap invitation so the printed setup link pairs the phone again. A
+# gateway keeps a stable identity, so its pairings survive a restart.
+if [ -z "$GATEWAY_URL" ]; then
+    export HERDR_RELAY_REARM_BOOTSTRAP=1
+fi
+
 if [ "${HERDR_DEV_TUNNEL:-}" != 1 ] && installed_relay_service_active; then
     # The checkout's dev tunnel intentionally uses isolated ports and state,
     # so it may coexist with the installed production service.

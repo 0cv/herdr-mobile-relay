@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AttachmentBatchController } from '$lib/attachments';
 import { dailyActivitySummary, formatWorkingDuration } from '$lib/daily-activity';
-import { safeMarkdownHtml } from '$lib/markdown';
+import { fencedCodeText, safeMarkdownHtml, speakableText } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
@@ -243,6 +244,24 @@ describe('safe rich output', () => {
     expect(safeMarkdownHtml('| a | b |\n| --- |\n| 1 | 2 |')).not.toContain('<table>');
     expect(safeMarkdownHtml('---')).toBe('<hr>');
   });
+
+  it('copies only complete nonempty fenced code blocks', () => {
+    expect(fencedCodeText('before\n```ts\nconst value = 1;\n```\nafter\n```\nsecond()\n```'))
+      .toBe('const value = 1;\n\nsecond()');
+    expect(fencedCodeText('```\n\n```\n```ts\nunfinished')).toBeNull();
+  });
+
+  it('reduces markdown to prose worth hearing', () => {
+    // A speech engine reads formatting characters aloud - backticks were
+    // literally spoken on a phone - and a fenced block read character by
+    // character is noise.
+    expect(speakableText('Committed as `2c0060d`, gate **green**.'))
+      .toBe('Committed as 2c0060d, gate green.');
+    expect(speakableText('# Done\n\n- first *step*\n- see [the docs](https://example.com/x)\n\n```ts\nconst noise = 1;\n```\n\n---\n\nAfter.'))
+      .toBe('Done\nfirst step\nsee the docs\nCode block omitted.\nAfter.');
+    expect(speakableText('| Name | Value |\n| --- | --- |\n| a | 1 |'))
+      .toBe('Name, Value\na, 1');
+  });
 });
 
 describe('rendering without Intl.Segmenter', () => {
@@ -347,5 +366,280 @@ describe('daily activity summary', () => {
 
     expect(summary.workingMs).toBe(24 * 60 * 60_000);
     expect(summary.relays).toBe(1);
+  });
+});
+
+describe('attachment batches', () => {
+  it('uses one monotonically increasing sequence across every file', async () => {
+    const sequences: number[] = [];
+    const names = ['first.txt', 'second.txt'];
+    const controller = new AttachmentBatchController({
+      server_session_id: 'server-session',
+      pane_id: 'pane',
+      terminal_id: 'terminal',
+      agent_session_id: 'session',
+      generation: 1,
+    }, {
+      begin: async () => ({
+        upload_id: 'upload',
+        chunk_bytes: 2,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        limits: { max_files: 8, max_file_bytes: 1024, max_batch_bytes: 2048 },
+      }),
+      chunk: async (request) => {
+        sequences.push(request.sequence);
+        return {
+          file_index: request.file_index,
+          next_sequence: request.sequence + 1,
+          received_bytes: request.data.byteLength,
+        };
+      },
+      finish: async (request) => ({
+        attachments: request.files.map((file, index) => ({
+          ref: `ref-${index}`,
+          name: names[index],
+          media_type: 'text/plain',
+          bytes: 2,
+          sha256: file.sha256,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        })),
+      }),
+      cancel: async () => undefined,
+    }, {
+      maxFiles: 8,
+      maxFileBytes: 1024,
+      maxBatchBytes: 2048,
+      maxChunkBytes: 2,
+    });
+    controller.select([
+      new File(['ab'], names[0], { type: 'text/plain' }),
+      new File(['cd'], names[1], { type: 'text/plain' }),
+    ]);
+
+    await expect(controller.upload()).resolves.toHaveLength(2);
+    expect(sequences).toEqual([0, 1]);
+  });
+
+  it('falls back to incremental hashing when the worker fails after construction', async () => {
+    const terminate = vi.fn();
+    class FailingWorker {
+      private errorListener?: EventListenerOrEventListenerObject;
+      addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+        if (type === 'error') this.errorListener = listener;
+      }
+      postMessage() {
+        queueMicrotask(() => {
+          if (typeof this.errorListener === 'function') this.errorListener(new Event('error'));
+          else this.errorListener?.handleEvent(new Event('error'));
+        });
+      }
+      terminate() { terminate(); }
+    }
+    vi.stubGlobal('Worker', FailingWorker);
+    const finish = vi.fn(async (request) => ({
+      attachments: [{
+        ref: 'ref-fallback',
+        name: 'note.txt',
+        media_type: 'text/plain',
+        bytes: 4,
+        sha256: request.files[0].sha256,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      }],
+    }));
+    const controller = new AttachmentBatchController({
+      server_session_id: 'server-session', pane_id: 'pane', terminal_id: 'terminal', generation: 1,
+    }, {
+      begin: async () => ({
+        upload_id: 'upload-fallback',
+        chunk_bytes: 2,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 },
+      }),
+      chunk: async (request) => ({
+        file_index: request.file_index,
+        next_sequence: request.sequence + 1,
+        received_bytes: (request.sequence + 1) * request.data.byteLength,
+      }),
+      finish,
+      cancel: async () => undefined,
+    }, {
+      maxFiles: 1, maxFileBytes: 1024, maxBatchBytes: 1024, maxChunkBytes: 2,
+    });
+    controller.select([new File(['note'], 'note.txt', { type: 'text/plain' })]);
+    try {
+      await expect(controller.upload()).resolves.toHaveLength(1);
+      expect(finish).toHaveBeenCalledOnce();
+      expect(finish.mock.calls[0][0].files[0].sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(terminate).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('terminates and settles every queued worker hash when cancelled', async () => {
+    const terminate = vi.fn();
+    let posted = 0;
+    class WaitingWorker {
+      addEventListener() {}
+      postMessage() { posted += 1; }
+      terminate() { terminate(); }
+    }
+    vi.stubGlobal('Worker', WaitingWorker);
+    const cancel = vi.fn(async () => undefined);
+    const finish = vi.fn(async () => ({ attachments: [] }));
+    const controller = new AttachmentBatchController({
+      server_session_id: 'server-session', pane_id: 'pane', terminal_id: 'terminal', generation: 1,
+    }, {
+      begin: async () => ({
+        upload_id: 'upload-cancel-hash',
+        chunk_bytes: 4,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        limits: { max_files: 2, max_file_bytes: 1024, max_batch_bytes: 2048 },
+      }),
+      chunk: async (request) => ({
+        file_index: request.file_index,
+        next_sequence: request.sequence + 1,
+        received_bytes: request.data.byteLength,
+      }),
+      finish,
+      cancel,
+    }, {
+      maxFiles: 2, maxFileBytes: 1024, maxBatchBytes: 2048, maxChunkBytes: 4,
+    });
+    controller.select([
+      new File(['one'], 'one.txt', { type: 'text/plain' }),
+      new File(['two'], 'two.txt', { type: 'text/plain' }),
+    ]);
+    const upload = controller.upload();
+    try {
+      await vi.waitFor(() => expect(posted).toBe(2));
+      await expect(controller.cancel()).resolves.toBeUndefined();
+      await expect(upload).resolves.toEqual([]);
+      expect(terminate).toHaveBeenCalledOnce();
+      expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ upload_id: 'upload-cancel-hash' }));
+      expect(finish).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shows overflow files and accepts iOS photo MIME types', () => {
+    const controller = new AttachmentBatchController({
+      server_session_id: 'server-session',
+      pane_id: 'pane',
+      terminal_id: 'terminal',
+      generation: 1,
+    }, {
+      begin: async () => { throw new Error('unused'); },
+      chunk: async () => { throw new Error('unused'); },
+      finish: async () => { throw new Error('unused'); },
+      cancel: async () => undefined,
+    }, {
+      maxFiles: 1,
+      maxFileBytes: 1024,
+      maxBatchBytes: 2048,
+      maxChunkBytes: 1024,
+    });
+
+    const snapshot = controller.select([
+      new File(['photo'], 'photo.heic', { type: 'image/heic' }),
+      new File(['note'], 'note.txt', { type: 'text/plain' }),
+    ]);
+
+    expect(snapshot.items).toHaveLength(2);
+    expect(snapshot.items[0]).toMatchObject({ state: 'selected', mediaType: 'image/heic' });
+    expect(snapshot.items[1]).toMatchObject({ state: 'rejected', issue: { code: 'attachment_batch_limit' } });
+  });
+
+  it('restarts from the beginning after upload_begin fails', async () => {
+    const begin = vi.fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue({
+        upload_id: 'upload-retry',
+        chunk_bytes: 1024,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 },
+      });
+    const controller = new AttachmentBatchController({
+      server_session_id: 'server-session',
+      pane_id: 'pane',
+      terminal_id: 'terminal',
+      generation: 1,
+    }, {
+      begin,
+      chunk: async (request) => ({
+        file_index: request.file_index,
+        next_sequence: request.sequence + 1,
+        received_bytes: request.data.byteLength,
+      }),
+      finish: async (request) => ({
+        attachments: [{
+          ref: 'ref',
+          name: 'note.txt',
+          media_type: 'text/plain',
+          bytes: 4,
+          sha256: request.files[0].sha256,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        }],
+      }),
+      cancel: async () => undefined,
+    }, {
+      maxFiles: 1,
+      maxFileBytes: 1024,
+      maxBatchBytes: 1024,
+      maxChunkBytes: 1024,
+    });
+    controller.select([new File(['note'], 'note.txt', { type: 'text/plain' })]);
+
+    await expect(controller.upload()).rejects.toMatchObject({ code: 'attachment_upload_failed' });
+    expect(controller.snapshot().canRestart).toBe(true);
+    await expect(controller.restart()).resolves.toHaveLength(1);
+  });
+
+  it('cancels the relay session when cleared during upload_begin', async () => {
+    let resolveBegin!: (result: {
+      upload_id: string;
+      chunk_bytes: number;
+      expires_at: string;
+      limits: { max_files: number; max_file_bytes: number; max_batch_bytes: number };
+    }) => void;
+    const begin = new Promise<{
+      upload_id: string;
+      chunk_bytes: number;
+      expires_at: string;
+      limits: { max_files: number; max_file_bytes: number; max_batch_bytes: number };
+    }>((resolve) => { resolveBegin = resolve; });
+    const cancel = vi.fn(async () => undefined);
+    const controller = new AttachmentBatchController({
+      server_session_id: 'server-session',
+      pane_id: 'pane',
+      terminal_id: 'terminal',
+      generation: 1,
+    }, {
+      begin: async () => begin,
+      chunk: async () => { throw new Error('unused'); },
+      finish: async () => { throw new Error('unused'); },
+      cancel,
+    }, {
+      maxFiles: 1,
+      maxFileBytes: 1024,
+      maxBatchBytes: 1024,
+      maxChunkBytes: 1024,
+    });
+    controller.select([new File(['note'], 'note.txt', { type: 'text/plain' })]);
+    const upload = controller.upload();
+    await Promise.resolve();
+    const clearing = controller.cancel();
+    resolveBegin({
+      upload_id: 'pending-upload',
+      chunk_bytes: 1024,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      limits: { max_files: 1, max_file_bytes: 1024, max_batch_bytes: 1024 },
+    });
+
+    await expect(upload).resolves.toEqual([]);
+    await expect(clearing).resolves.toBeUndefined();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ upload_id: 'pending-upload' }));
   });
 });

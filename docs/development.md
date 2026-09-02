@@ -55,11 +55,23 @@ dependencies are nspr nss dbus-libs atk at-spi2-atk cups-libs at-spi2-core
 libXcomposite libXdamage libXext libXfixes libXrandr mesa-libgbm cairo pango
 alsa-lib, per passportxyz/passport's fedora-install-playwright-deps.sh).
 Publishing the hosted web app (`make web-deploy`,
-`make web-preview`) shells out to `npx wrangler` and still needs Node.js 26 on
-that computer only. Packaged users need no toolchain at all.
+`make web-preview`) shells out to `npx wrangler`, which requires Node.js 22 or
+newer on that computer only; CI and the relay's deploy action are exercised on
+Node.js 26. Packaged users need no toolchain at all.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
 failure injection, and process-control traces for black-box tests.
+
+## Phone-side crash diagnostics
+
+The production frontend installs raw DOM handlers before Svelte mounts. An
+uncaught exception or rejected promise appears in a bottom **App error** banner;
+tap it to dismiss it and allow a later error to be shown. Phones usually have
+no accessible console, so include that text in a bug report.
+
+For local `make dev-tunnel` diagnosis, set `HERDR_DEV_RUNTIME=1` before the
+build. This enables Svelte's development runtime so invariant failures include
+their data and indexes in the on-device banner. Release builds leave it off.
 
 ## Troubleshooting local runs
 

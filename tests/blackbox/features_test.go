@@ -2,6 +2,7 @@ package blackbox
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,35 @@ import (
 
 	"github.com/coder/websocket"
 )
+
+func awaitAgentTarget(t *testing.T, conn *websocket.Conn, ctx context.Context) map[string]any {
+	t.Helper()
+	for {
+		message := readNextJSON(t, conn, ctx)
+		if message["type"] != "agents" {
+			continue
+		}
+		agents, _ := message["agents"].([]any)
+		if len(agents) == 0 {
+			request, _ := json.Marshal(map[string]any{"type": "refresh_agents"})
+			if err := conn.Write(ctx, websocket.MessageText, request); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		agent, _ := agents[0].(map[string]any)
+		target := map[string]any{
+			"server_session_id": agent["server_session_id"],
+			"pane_id":           agent["pane_id"],
+			"terminal_id":       agent["terminal_id"],
+			"generation":        agent["generation"],
+		}
+		if target["server_session_id"] == "" || target["pane_id"] == "" || target["terminal_id"] == "" || target["generation"] == nil {
+			t.Fatalf("agent target is incomplete: %v", agent)
+		}
+		return target
+	}
+}
 
 func TestOnConnectHandshake(t *testing.T) {
 	env := setupEnv(t)
@@ -34,7 +64,7 @@ func TestOnConnectHandshake(t *testing.T) {
 	if msg["type"] != "push_config" {
 		t.Fatalf("first message type = %v, want push_config", msg["type"])
 	}
-	if msg["protocol"] != float64(2) {
+	if msg["protocol"] != float64(3) {
 		t.Errorf("protocol = %v", msg["protocol"])
 	}
 	caps, ok := msg["capabilities"].([]any)
@@ -85,20 +115,57 @@ func TestInstallUpdateBootstrapDoesNotRequireProtocolV2(t *testing.T) {
 	}
 }
 
-func TestUploadImage(t *testing.T) {
+func TestUnknownServerSessionCannotFallThroughToPrimary(t *testing.T) {
 	env := setupEnv(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	// 1x1 PNG pixel
-	pngData := base64.StdEncoding.EncodeToString([]byte{
+	payload, err := json.Marshal(map[string]any{
+		"type":              "submit_prompt",
+		"protocol":          3,
+		"request_id":        "unknown-session",
+		"server_session_id": "named-session",
+		"pane_id":           "pane-1",
+		"text":              "must not reach primary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		message := readNextJSON(t, conn, ctx)
+		if message["request_id"] != "unknown-session" {
+			continue
+		}
+		apiError, _ := message["error"].(map[string]any)
+		if message["type"] != "error" || apiError["code"] != "invalid_request" {
+			t.Fatalf("unknown server session response = %+v", message)
+		}
+		break
+	}
+	if operation := findFakeOperation(t, env.operationsLog, "agent", "prompt"); operation != nil {
+		t.Fatalf("unknown server session reached primary dispatcher: %#v", operation)
+	}
+}
+
+func TestUploadAttachmentBatch(t *testing.T) {
+	env := setupEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	png := []byte{
 		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 		0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
 		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
@@ -108,68 +175,119 @@ func TestUploadImage(t *testing.T) {
 		0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc,
 		0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
 		0x44, 0xae, 0x42, 0x60, 0x82,
-	})
-
-	upload := map[string]any{
-		"type":       "upload_image",
-		"protocol":   2,
-		"request_id": "upload-1",
-		"pane_id":    "pane-1",
-		"filename":   "test-screenshot.png",
-		"mime":       "image/png",
-		"data":       "data:image/png;base64," + pngData,
 	}
-	data, _ := json.Marshal(upload)
+	target := awaitAgentTarget(t, conn, ctx)
+	begin := map[string]any{
+		"type":       "upload_begin",
+		"protocol":   3,
+		"request_id": "upload-begin-1",
+		"target":     target,
+		"files": []map[string]any{{
+			"name": "test-screenshot.png", "media_type": "image/png", "bytes": len(png),
+		}},
+	}
+	data, _ := json.Marshal(begin)
 	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
-		t.Fatalf("write: %v", err)
+		t.Fatalf("write begin: %v", err)
+	}
+	beginMessage := readJSON(t, conn, ctx, 5*time.Second)
+	if beginMessage["type"] != "upload_begin_result" {
+		t.Fatalf("begin type = %v", beginMessage["type"])
+	}
+	beginResult, _ := beginMessage["result"].(map[string]any)
+	uploadID, _ := beginResult["upload_id"].(string)
+	if uploadID == "" {
+		t.Fatal("upload id is empty")
 	}
 
-	msg := readJSON(t, conn, ctx, 5*time.Second)
-	if msg["type"] != "upload_result" {
-		t.Fatalf("type = %v, want upload_result", msg["type"])
+	digest := fmt.Sprintf("%x", sha256.Sum256(png))
+	chunk := map[string]any{
+		"type": "upload_chunk", "protocol": 3, "request_id": "upload-chunk-1",
+		"target": target, "upload_id": uploadID, "file_index": 0, "sequence": 0,
+		"data": base64.StdEncoding.EncodeToString(png), "sha256": digest,
 	}
-	if msg["ok"] != true {
-		t.Fatalf("ok = %v, error = %v", msg["ok"], msg["error"])
+	data, _ = json.Marshal(chunk)
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write chunk: %v", err)
 	}
-	if msg["request_id"] != "upload-1" {
-		t.Errorf("request_id = %v", msg["request_id"])
+	chunkMessage := readJSON(t, conn, ctx, 5*time.Second)
+	if chunkMessage["type"] != "upload_chunk_result" {
+		t.Fatalf("chunk type = %v", chunkMessage["type"])
 	}
-	path, _ := msg["path"].(string)
-	if path == "" {
-		t.Error("path is empty")
+
+	finish := map[string]any{
+		"type": "upload_finish", "protocol": 3, "request_id": "upload-finish-1",
+		"target": target, "upload_id": uploadID,
+		"files": []map[string]any{{"file_index": 0, "sha256": digest}},
+	}
+	data, _ = json.Marshal(finish)
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write finish: %v", err)
+	}
+	finishMessage := readJSON(t, conn, ctx, 5*time.Second)
+	if finishMessage["type"] != "upload_finish_result" {
+		t.Fatalf("finish type = %v", finishMessage["type"])
+	}
+	finishResult, _ := finishMessage["result"].(map[string]any)
+	attachments, _ := finishResult["attachments"].([]any)
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %v", finishResult["attachments"])
+	}
+	attachment, _ := attachments[0].(map[string]any)
+	ref, _ := attachment["ref"].(string)
+	if ref == "" {
+		t.Fatal("attachment reference is empty")
+	}
+	if _, exists := attachment["path"]; exists {
+		t.Fatal("attachment leaked its host path")
+	}
+	prompt := map[string]any{
+		"type": "submit_prompt", "protocol": 3, "request_id": "attachment-prompt",
+		"pane_id": "pane-1", "target": target, "text": "Review this file:\nAttachment: " + ref,
+	}
+	data, _ = json.Marshal(prompt)
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	result := readJSON(t, conn, ctx, 5*time.Second)
+	if result["type"] != "command_result" || result["ok"] != true {
+		t.Fatalf("attachment prompt result = %v", result)
+	}
+	operation := findFakeOperation(t, env.operationsLog, "agent", "prompt", "pane-1")
+	if len(operation) < 4 || !strings.Contains(operation[3], "/uploads/objects/") || operation[3] == "Review this file:\nAttachment: "+ref {
+		t.Fatalf("attachment prompt did not resolve an opaque reference: %v", operation)
 	}
 }
 
-func TestUploadImageRejectsBadMime(t *testing.T) {
+func TestUploadAttachmentRejectsBadMime(t *testing.T) {
 	env := setupEnv(t)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	upload := map[string]any{
-		"type":       "upload_image",
-		"protocol":   2,
-		"request_id": "upload-bad",
-		"pane_id":    "pane-1",
-		"filename":   "evil.exe",
-		"mime":       "application/octet-stream",
-		"data":       "data:application/octet-stream;base64,AAAA",
+	target := awaitAgentTarget(t, conn, ctx)
+	request := map[string]any{
+		"type": "upload_begin", "protocol": 3, "request_id": "upload-bad",
+		"target": target,
+		"files": []map[string]any{{
+			"name": "evil.exe", "media_type": "application/octet-stream", "bytes": 3,
+		}},
 	}
-	data, _ := json.Marshal(upload)
-	conn.Write(ctx, websocket.MessageText, data)
-
-	msg := readJSON(t, conn, ctx, 5*time.Second)
-	if msg["type"] != "upload_result" {
-		t.Fatalf("type = %v", msg["type"])
+	data, _ := json.Marshal(request)
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write: %v", err)
 	}
-	if msg["ok"] != false {
-		t.Error("expected ok=false for non-image mime")
+	message := readJSON(t, conn, ctx, 5*time.Second)
+	if message["type"] != "upload_begin_result" {
+		t.Fatalf("type = %v", message["type"])
+	}
+	apiError, _ := message["error"].(map[string]any)
+	if apiError["code"] != "attachment_unknown_mime" {
+		t.Fatalf("error = %v", message["error"])
 	}
 }
 
@@ -367,7 +485,8 @@ func TestApprovalRequiresCurrentInventoryEventAndDispatchesOnce(t *testing.T) {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	var eventID string
-	for eventID == "" {
+	var approvalFingerprint string
+	for eventID == "" || approvalFingerprint == "" {
 		msg := readNextJSON(t, conn, ctx)
 		if msg["type"] != "agents" {
 			continue
@@ -378,6 +497,7 @@ func TestApprovalRequiresCurrentInventoryEventAndDispatchesOnce(t *testing.T) {
 		}
 		agent, _ := agents[0].(map[string]any)
 		eventID, _ = agent["event_id"].(string)
+		approvalFingerprint, _ = agent["approval_fingerprint"].(string)
 		options, _ := agent["options"].([]any)
 		if eventID != "" && len(options) != 3 {
 			t.Fatalf("approval options = %#v, want 3 choices", agent["options"])
@@ -387,9 +507,10 @@ func TestApprovalRequiresCurrentInventoryEventAndDispatchesOnce(t *testing.T) {
 	sendApproval := func(requestID, approvalEventID string) {
 		t.Helper()
 		payload, marshalErr := json.Marshal(map[string]any{
-			"type": "respond", "protocol": 2, "request_id": requestID,
+			"type": "respond", "protocol": 3, "request_id": requestID,
 			"pane_id": "pane-1", "event_id": approvalEventID,
-			"index": 0, "total": 3,
+			"approval_fingerprint": approvalFingerprint,
+			"choice":               "Approve once", "index": 0, "total": 3,
 		})
 		if marshalErr != nil {
 			t.Fatal(marshalErr)
@@ -457,9 +578,11 @@ func TestCapturedQoderAttentionFlowsThroughRelay(t *testing.T) {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	var approvalEventID string
+	var approvalFingerprint string
+	var approvalChoice string
 	notesSeen := false
 	deadline := time.After(8 * time.Second)
-	for approvalEventID == "" || !notesSeen {
+	for approvalEventID == "" || approvalFingerprint == "" || !notesSeen {
 		select {
 		case <-deadline:
 			t.Fatalf(
@@ -486,6 +609,8 @@ func TestCapturedQoderAttentionFlowsThroughRelay(t *testing.T) {
 				options, _ := agent["options"].([]any)
 				if agent["attention_kind"] == "approval" && len(options) == 5 {
 					approvalEventID, _ = agent["event_id"].(string)
+					approvalFingerprint, _ = agent["approval_fingerprint"].(string)
+					approvalChoice, _ = options[0].(string)
 				}
 			case "notes-pane":
 				interaction, _ := agent["interaction"].(map[string]any)
@@ -498,13 +623,15 @@ func TestCapturedQoderAttentionFlowsThroughRelay(t *testing.T) {
 	}
 
 	payload, err := json.Marshal(map[string]any{
-		"type":       "respond",
-		"protocol":   2,
-		"request_id": "qoder-approval",
-		"pane_id":    "approval-pane",
-		"event_id":   approvalEventID,
-		"index":      0,
-		"total":      5,
+		"type":                 "respond",
+		"protocol":             3,
+		"request_id":           "qoder-approval",
+		"pane_id":              "approval-pane",
+		"event_id":             approvalEventID,
+		"approval_fingerprint": approvalFingerprint,
+		"choice":               approvalChoice,
+		"index":                0,
+		"total":                5,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -1,0 +1,12 @@
+{
+  "type": "upload_cancel",
+  "protocol": 3,
+  "request_id": "req-upload-cancel",
+  "target": {
+    "server_session_id": "primary",
+    "pane_id": "pane-1",
+    "terminal_id": "terminal-1",
+    "generation": 1
+  },
+  "upload_id": "upload-opaque"
+}

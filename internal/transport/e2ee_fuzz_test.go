@@ -9,7 +9,7 @@ import (
 )
 
 func FuzzE2EEClientHello(f *testing.F) {
-	rawVector, err := os.ReadFile("../../contracts/fixtures/e2ee/v1.json")
+	rawVector, err := os.ReadFile("../../contracts/fixtures/e2ee/v2.json")
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -25,13 +25,17 @@ func FuzzE2EEClientHello(f *testing.F) {
 	invalidPoint := make([]byte, e2eePublicKeyBytes)
 	invalidPoint[0] = 0x04
 	invalidNonce := make([]byte, e2eeNonceBytes)
+	selector := E2EEAuthSelector{Kind: E2EEAuthCredential, ID: "credential-test", Version: 7}
 	invalidPointHello, err := json.Marshal(e2eeClientHello{
-		Type:      "e2ee_client_hello",
-		Version:   e2eeVersion,
-		Nonce:     base64.RawURLEncoding.EncodeToString(invalidNonce),
-		PublicKey: base64.RawURLEncoding.EncodeToString(invalidPoint),
+		Type:        "e2ee_client_hello",
+		Version:     e2eeVersion,
+		AuthKind:    selector.Kind,
+		AuthID:      selector.ID,
+		AuthVersion: selector.Version,
+		Nonce:       base64.RawURLEncoding.EncodeToString(invalidNonce),
+		PublicKey:   base64.RawURLEncoding.EncodeToString(invalidPoint),
 		Proof: base64.RawURLEncoding.EncodeToString(
-			e2eeAuthTag(vector.RelayKey, e2eeClientProofLabel, invalidNonce, invalidPoint),
+			e2eeAuthTag([]byte(vector.RelayKey), e2eeClientProofLabel, e2eeAuthBinding(selector), invalidNonce, invalidPoint),
 		),
 	})
 	if err != nil {
@@ -41,12 +45,12 @@ func FuzzE2EEClientHello(f *testing.F) {
 	f.Add(validHello)
 	f.Add(invalidPointHello)
 	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"type":"e2ee_client_hello","version":1}`))
-	f.Add([]byte(`{"type":"e2ee_client_hello","version":1,"nonce":"%%%","public_key":"","proof":""}`))
-	f.Add([]byte(`{"type":"e2ee_client_hello","version":1,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","proof":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`))
+	f.Add([]byte(`{"type":"e2ee_client_hello","version":2}`))
+	f.Add([]byte(`{"type":"e2ee_client_hello","version":2,"auth_kind":"credential","auth_id":"test","auth_version":1,"nonce":"%%%","public_key":"","proof":""}`))
+	f.Add([]byte(`{"type":"e2ee_client_hello","version":2,"auth_kind":"credential","auth_id":"test","auth_version":1,"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","proof":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`))
 
 	f.Fuzz(func(t *testing.T, rawHello []byte) {
-		hello, err := parseE2EEClientHello(rawHello, vector.RelayKey)
+		hello, err := parseE2EEClientHello(rawHello)
 		if err != nil {
 			return
 		}
@@ -73,9 +77,9 @@ func FuzzE2EEEncryptedEnvelope(f *testing.F) {
 
 	f.Add(validFrame)
 	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"type":"e2ee","version":1,"sequence":-1,"ciphertext":""}`))
-	f.Add([]byte(`{"type":"e2ee","version":1,"sequence":9007199254740992,"ciphertext":""}`))
-	f.Add([]byte(`{"type":"e2ee","version":1,"sequence":0,"ciphertext":"%%%"}`))
+	f.Add([]byte(`{"type":"e2ee","version":2,"sequence":-1,"ciphertext":""}`))
+	f.Add([]byte(`{"type":"e2ee","version":2,"sequence":9007199254740992,"ciphertext":""}`))
+	f.Add([]byte(`{"type":"e2ee","version":2,"sequence":0,"ciphertext":"%%%"}`))
 
 	f.Fuzz(func(t *testing.T, rawFrame []byte) {
 		receiver, err := newE2EESession(serverKey, clientKey, e2eeServerDirection, e2eeClientDirection)

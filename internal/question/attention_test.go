@@ -255,7 +255,7 @@ func TestClassifyIdleInputAfterProviderErrorAsChat(t *testing.T) {
 	}{
 		{agent: "claude", tail: "❯\nOpus 5 | ctx: 31% | main"},
 		{agent: "codex", tail: "› Use /skills to list available skills\ngpt-5.6-sol · Context 27% used"},
-		{agent: "omp", tail: "╭── GPT-5.6-Luna · xhi · ~/project · main ╮\n╰─                                      ─╯"},
+		{agent: "omp", tail: "────────────────────\n\n────────────────────\n 󰵗  ·  cv · GPT-5.6-Sol · xhi · 6.4%/272K · 17:32"},
 		{agent: "pi", tail: "────────────────\n\n────────────────\n~/project (main)\n$0.000 (sub) 0.0%/272k (auto) · gpt-5.6-luna"},
 		{agent: "opencode", tail: "┃ Ask anything... \"Fix broken tests\" ┃\n┃ Build · Qwen3.6-27B ┃"},
 		{agent: "kimi", tail: "╭────────────────╮\n│ >              │\n╰────────────────╯\n~/project main\ncontext: 0%"},
@@ -1189,4 +1189,84 @@ func attentionFixture(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return string(content)
+}
+
+func TestApprovalFingerprintIgnoresPaneChangesOutsideDialog(t *testing.T) {
+	snapshot := attentionFixture(t, "omp-tool-approval.ansi")
+	first := Classify(snapshot+"\nStatus: 10%/272K\n", "omp")
+	second := Classify(snapshot+"\nStatus: 11%/272K\n", "omp")
+	if first.Kind != AttentionApproval || second.Kind != AttentionApproval {
+		t.Fatalf("approval classifications = %+v and %+v", first, second)
+	}
+	if ApprovalFingerprint(first) != ApprovalFingerprint(second) {
+		t.Fatal("status footer repaint changed the approval fingerprint")
+	}
+}
+
+func TestApprovalFingerprintIgnoresFocusMarkerMovement(t *testing.T) {
+	snapshot := attentionFixture(t, "omp-tool-approval.ansi")
+	first := Classify(snapshot, "omp")
+	moved := strings.Replace(snapshot, "\uf054 Approve", "  Approve", 1)
+	moved = strings.Replace(moved, "   Deny", " \uf054 Deny", 1)
+	second := Classify(moved, "omp")
+	if first.Kind != AttentionApproval || second.Kind != AttentionApproval ||
+		first.ApprovalFocus == second.ApprovalFocus {
+		t.Fatalf("approval classifications = %+v and %+v", first, second)
+	}
+	if ApprovalFingerprint(first) != ApprovalFingerprint(second) {
+		t.Fatalf("focus marker movement changed the approval fingerprint:\nfirst: %q\nsecond: %q", stableApprovalSource(first.approvalSource), stableApprovalSource(second.approvalSource))
+	}
+}
+
+func TestApprovalFingerprintIgnoresAsciiFocusMarkerAndPadding(t *testing.T) {
+	base := Classification{
+		Kind: AttentionApproval, Prompt: "Allow command?", Command: "make check",
+		Options: []string{"Approve", "Deny"},
+	}
+	first := base
+	first.approvalSource = "Allow tool: bash\n> Approve\n  Deny"
+	second := base
+	second.approvalSource = "Allow tool: bash\n  Approve\n> Deny   "
+	if ApprovalFingerprint(first) != ApprovalFingerprint(second) {
+		t.Fatalf("ascii focus marker changed the approval fingerprint:\nfirst: %q\nsecond: %q",
+			stableApprovalSource(first.approvalSource), stableApprovalSource(second.approvalSource))
+	}
+	// Content is still identity: a marker glyph glued to text is not a marker.
+	quoted := base
+	quoted.approvalSource = "Allow tool: bash\n>Approve\n  Deny"
+	if ApprovalFingerprint(quoted) == ApprovalFingerprint(first) {
+		t.Fatal("quoted content was stripped as a focus marker")
+	}
+}
+
+func TestApprovalFingerprintBindsPromptCommandAndOrderedOptions(t *testing.T) {
+	base := Classification{
+		Kind: AttentionApproval, Prompt: "Allow command?", Command: "make check",
+		Options: []string{"Approve", "Reject"},
+	}
+	fingerprint := ApprovalFingerprint(base)
+	if len(fingerprint) != 64 {
+		t.Fatalf("fingerprint length = %d", len(fingerprint))
+	}
+	for _, changed := range []Classification{
+		{Kind: AttentionApproval, Prompt: "Allow another command?", Command: base.Command, Options: base.Options},
+		{Kind: AttentionApproval, Prompt: base.Prompt, Command: "make deploy", Options: base.Options},
+		{Kind: AttentionApproval, Prompt: base.Prompt, Command: base.Command, Options: []string{"Reject", "Approve"}},
+	} {
+		if ApprovalFingerprint(changed) == fingerprint {
+			t.Fatalf("changed approval retained fingerprint: %+v", changed)
+		}
+	}
+	raw := base
+	raw.approvalSource = "Allow command?\nmake  check\n" + strings.Repeat("a", 600)
+	rawChanged := raw
+	rawChanged.approvalSource = "Allow command?\nmake check\n" + strings.Repeat("a", 599) + "b"
+	if ApprovalFingerprint(raw) == ApprovalFingerprint(rawChanged) {
+		t.Fatal("exact approval source change retained fingerprint")
+	}
+	precomputed := raw
+	precomputed.ApprovalIdentity = strings.Repeat("f", 64)
+	if got := ApprovalFingerprint(precomputed); got != precomputed.ApprovalIdentity {
+		t.Fatalf("precomputed fingerprint = %q", got)
+	}
 }

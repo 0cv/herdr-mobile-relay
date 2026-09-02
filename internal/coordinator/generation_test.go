@@ -60,6 +60,7 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 	d := NewDispatcher(herdr.NewClient(recordingHerdr(t, dir, record, approvalPane), filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
 	commitApproval(d.state, "pane-1")
 	eventID := blockedEventID(t, d, "pane-1")
+	fingerprint, choice := approvalIdentity(t, d, "pane-1", 0)
 
 	slot := d.paneSlot("pane-1")
 	slot <- struct{}{}
@@ -67,7 +68,8 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 	resCh := make(chan *CommandResult, 1)
 	go func() {
 		resCh <- d.Handle(context.Background(), map[string]any{
-			"action": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID, "index": float64(0),
+			"action": "respond", "request_id": "a", "pane_id": "pane-1", "event_id": eventID,
+			"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
 		})
 	}()
 
@@ -81,7 +83,8 @@ func TestApprovalLedgerReleasedOnStaleGeneration(t *testing.T) {
 
 	// The claim must have been released: a retry can now dispatch.
 	second := d.Handle(context.Background(), map[string]any{
-		"action": "respond", "request_id": "b", "pane_id": "pane-1", "event_id": eventID, "index": float64(0),
+		"action": "respond", "request_id": "b", "pane_id": "pane-1", "event_id": eventID,
+		"approval_fingerprint": fingerprint, "choice": choice, "index": float64(0), "total": float64(2),
 	})
 	if !second.OK {
 		t.Fatalf("retry after stale-generation abort was blocked: phase=%q err=%q (ledger not released)", second.Phase, second.Error)

@@ -48,6 +48,7 @@
     'restarting',
   ]);
   const OPERATION_TIMEOUT_MS = 5 * 60 * 1_000;
+  let { readOnlyRelayIds = new Set<string>() }: { readOnlyRelayIds?: Set<string> } = $props();
 
   const plan = updateProgressPlan;
   const relays = relayStore.relayConfigs;
@@ -67,7 +68,10 @@
     if (!$plan) return [];
     return $plan.relayIds.map((relayId) => {
       const relay = $relays.find((candidate) => candidate.id === relayId);
-      return relayProgress($plan, relayId, relay, $connections.get(relayId), now);
+      const row = relayProgress($plan, relayId, relay, $connections.get(relayId), now);
+      return readOnlyRelayIds.has(relayId)
+        ? { ...row, canStart: false, detail: 'This paired device has read-only access to this relay.' }
+        : row;
     });
   });
   const phoneApp = $derived(appProgress($plan, $connections, $appUpdate));
@@ -281,7 +285,7 @@
   }
 
   async function startRelayUpdate(row: RelayProgressRow): Promise<void> {
-    if (!$plan || !row.relay || busyRelayId) return;
+    if (!$plan || !row.relay || busyRelayId || readOnlyRelayIds.has(row.id)) return;
     const relayId = row.id;
     busyRelayId = relayId;
     markUpdateProgressRelayStarted(relayId);
@@ -363,7 +367,7 @@
               {/if}
             </div>
             {#if row.canStart && !active && row.tone === 'danger'}
-              <Button size="sm" disabled={Boolean(busyRelayId)} onclick={() => startRelayUpdate(row)}>Try Again</Button>
+              <Button size="sm" disabled={Boolean(busyRelayId) || readOnlyRelayIds.has(row.id)} onclick={() => startRelayUpdate(row)}>Try Again</Button>
             {/if}
           </article>
         {/each}

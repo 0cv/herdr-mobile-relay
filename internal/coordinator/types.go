@@ -16,6 +16,7 @@ const (
 	CommandPrompt     CommandKind = "prompt"
 	CommandKeys       CommandKind = "keys"
 	CommandText       CommandKind = "text"
+	CommandInput      CommandKind = "send_input"
 	CommandSecret     CommandKind = "send_secret"
 	CommandApproval   CommandKind = "approval"
 	CommandQuestion   CommandKind = "question"

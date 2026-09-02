@@ -9,6 +9,7 @@ export const LEGACY_FONT_KEY = 'herdr_home_font_size';
 export const TERMINAL_HISTORY_KEY = 'herdr_terminal_history_lines';
 export const TERMINAL_REFRESH_KEY = 'herdr_terminal_refresh_ms';
 export const TERMINAL_HEIGHT_LEASE_KEY = 'herdr_terminal_height_lease';
+export const TERMINAL_WAKE_LOCK_KEY = 'herdr_terminal_wake_lock';
 export const HOME_LAYOUT_KEY = 'herdr_home_workspace_layout';
 export const DEVICE_LOCK_KEY = 'herdr_require_device_unlock';
 export const DEVICE_CREDENTIAL_KEY = 'herdr_device_unlock_credential';
@@ -38,7 +39,7 @@ export const THEME_TERMINAL_SCHEMES: Record<Theme, TerminalScheme> = {
 };
 export const INTERFACE_SIZES = ['compact', 'regular', 'large'] as const;
 export type InterfaceSize = (typeof INTERFACE_SIZES)[number];
-export const TERMINAL_HISTORY_OPTIONS = [100, 500, 1_000] as const;
+export const TERMINAL_HISTORY_OPTIONS = [100, 500, 1_000, 10_000] as const;
 export type TerminalHistoryLines = (typeof TERMINAL_HISTORY_OPTIONS)[number];
 export const TERMINAL_REFRESH_OPTIONS = [100, 250, 500, 1_000] as const;
 export type TerminalRefreshInterval = (typeof TERMINAL_REFRESH_OPTIONS)[number];
@@ -81,6 +82,12 @@ export const THEME_COLORS: Record<Theme, string> = {
   rose: '#191724',
   latte: '#eff1f5',
 };
+
+/**
+ * Relay keys are used as raw secret bytes, not decoded: the relay refuses to
+ * start unless its key is exactly this many bytes (`config.Validate`).
+ */
+export const RELAY_KEY_BYTES = 32;
 
 export function relayLabelFromUrl(url: string): string {
   try {
@@ -158,6 +165,9 @@ export function normalizeRelayConfig(relay: Partial<RelayConfig>): RelayConfig {
     url,
     token: relay.token || '',
   };
+  // Only ever written when true: `loadRelayConfigs` normalizes stored entries
+  // on every read, and a legacy entry must round-trip unchanged.
+  if (relay.paired) config.paired = true;
   // Legacy entries keep their exact stored shape: no transport field at all.
   if (relay.transport !== 'hybrid' && (url || !gatewayUrl)) return config;
   config.transport = 'hybrid';
@@ -196,9 +206,35 @@ export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[]
 export function saveRelayConfigs(relays: RelayConfig[], storage: Storage = localStorage): void {
   storage.setItem(RELAYS_KEY, JSON.stringify(relays));
 }
+export interface QuickSetupInvitation {
+  id: string;
+  version: number;
+  secret: string;
+  expiresAt: number;
+}
+
+export function quickSetupInvitation(locationValue: Pick<Location, 'hash'>): QuickSetupInvitation | null {
+  const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
+  const id = params.get('invite') || '';
+  if (!id) return null;
+  const secret = params.get('setup') || '';
+  const version = Number(params.get('invite_version'));
+  const expiresAt = Number(params.get('invite_expires'));
+  if (
+    !/^[A-Za-z0-9_-]{16,128}$/.test(id)
+    || !/^[A-Za-z0-9_-]{43}$/.test(secret)
+    || !Number.isSafeInteger(version)
+    || version < 1
+    || !Number.isSafeInteger(expiresAt)
+    || expiresAt < 1
+  ) return null;
+  return { id, version, secret, expiresAt };
+}
+
 
 export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>): Omit<RelayConfig, 'id'> | null {
   const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
+  const invitation = quickSetupInvitation(locationValue);
   const token = params.get('setup') || '';
   if (token.length < 16 || token.length > 512) return null;
   if (!['http:', 'https:'].includes(locationValue.protocol)) return null;
@@ -212,7 +248,7 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
     // The separator stays literal; each entry is percent-encoded on its own.
     const gatewayUrls = gatewayOrigins(configuredGateways.split(','), locationValue.protocol);
     if (!gatewayUrls.length) return null;
-    return { label, url: '', token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls };
+    return { label, url: '', token: invitation ? '' : token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls };
   }
   const configuredRelay = params.get('relay');
   let url = `${locationValue.protocol === 'https:' ? 'wss:' : 'ws:'}//${locationValue.host}`;
@@ -221,7 +257,7 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
     if (!origin) return null;
     url = origin;
   }
-  return { label, url, token };
+  return { label, url, token: invitation ? '' : token };
 }
 
 export function shouldRetainSetupFragment(
@@ -231,12 +267,30 @@ export function shouldRetainSetupFragment(
   return standalone === false && quickSetupConfig(locationValue) !== null;
 }
 
+/**
+ * An iOS browser tab and a Home Screen app keep separate storage, so a one-use
+ * pairing secret redeemed in the tab is spent before the installed copy ever
+ * opens. Both a device invitation and the bootstrap relay key are one-use.
+ */
+export function shouldDeferPairingConnection(
+  locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>,
+  standalone: boolean | undefined,
+  userAgent: string,
+  maxTouchPoints = 0,
+): boolean {
+  if (standalone !== false) return false;
+  if (!quickSetupInvitation(locationValue) && !quickSetupConfig(locationValue)?.token) return false;
+  return /\b(?:iPhone|iPad|iPod)\b/iu.test(userAgent)
+    || (/\bMacintosh\b/iu.test(userAgent) && maxTouchPoints > 1);
+}
+
 export function importQuickSetup(
   relays: RelayConfig[],
   locationValue: Pick<Location, 'hash' | 'protocol' | 'host'>,
 ): RelayConfig[] | null {
   const setup = quickSetupConfig(locationValue);
   if (!setup) return null;
+  const invitation = quickSetupInvitation(locationValue);
   // A shared gateway hosts many computers, so a hybrid entry is matched on the
   // credential or the label rather than on the gateway address alone. Any
   // shared entry counts: a relay that gained a gateway or reordered its list
@@ -245,15 +299,25 @@ export function importQuickSetup(
     ? relays.find((relay) => relay.transport === 'hybrid'
       && (relay.gatewayUrls ?? [relay.gatewayUrl ?? '']).some((entry) => setup.gatewayUrls?.includes(entry))
       && (relay.token === setup.token || relay.label === setup.label))
-    : relays.find((relay) => relay.url === setup.url);
+    // A quick tunnel mints a new hostname on every relay restart, but the
+    // relay's key persists. The same key is the same relay, so the stored
+    // entry - and the device credential enrolled under its id - follows the
+    // relay to its new address instead of pairing a second time and being
+    // refused: the relay's one-use bootstrap invitation is already consumed.
+    : relays.find((relay) => relay.url === setup.url)
+      ?? relays.find((relay) => Boolean(setup.token) && relay.token === setup.token);
   const next = normalizeRelayConfig({
     id: existing?.id,
     label: existing?.label || setup.label,
     url: setup.url,
-    token: setup.token,
-    transport: setup.transport,
-    gatewayUrl: setup.gatewayUrl,
-    gatewayUrls: setup.gatewayUrls,
+    token: invitation && existing ? existing.token : setup.token,
+    transport: invitation && existing ? existing.transport : setup.transport,
+    gatewayUrl: invitation && existing ? existing.gatewayUrl : setup.gatewayUrl,
+    gatewayUrls: invitation && existing ? existing.gatewayUrls : setup.gatewayUrls,
+    // An invitation link is an encrypted pairing, and the entry it creates
+    // carries no relay key. Recording that here is the only way to tell such a
+    // relay apart from a tokenless one once its credential is gone.
+    paired: invitation ? true : existing?.paired,
   });
   return existing ? relays.map((relay) => (relay.id === existing.id ? next : relay)) : [...relays, next];
 }

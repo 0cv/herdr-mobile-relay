@@ -1,6 +1,6 @@
 {
   "type": "release_pane_size",
-  "protocol": 2,
+  "protocol": 3,
   "request_id": "req-release-size",
   "pane_id": "pane-1"
 }

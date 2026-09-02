@@ -61,11 +61,12 @@ func TestCopyProfilesMatchRecordedConfirmations(t *testing.T) {
 		{name: "claude-direct-real.ansi", agent: "claude", wantChars: 2333, wantLines: 13},
 		{name: "codex-direct-real.ansi", agent: "codex", wantChars: -1, wantLines: -1},
 		{name: "omp-direct-real.ansi", agent: "omp", wantChars: -1, wantLines: -1},
+		{name: "omp-confirmation-0.20.ansi", agent: "omp", wantChars: -1, wantLines: -1},
 		{name: "pi-direct-real.ansi", agent: "pi", wantChars: -1, wantLines: -1},
 		{name: "qoder-direct-real.ansi", agent: "qoder", wantChars: 801, wantLines: 9},
 	}
 	for _, test := range tests {
-		t.Run(test.agent, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			content, err := os.ReadFile(filepath.Join("..", "copyresponse", "testdata", test.name))
 			if err != nil {
 				t.Fatal(err)
@@ -95,11 +96,14 @@ func TestCopyProfilesMatchRecordedMenusAndPickers(t *testing.T) {
 		{name: "kimi-copy-menu-real.ansi", agent: "kimi", menu: false},
 		{name: "omp-copy-menu-real.ansi", agent: "omp", menu: true},
 		{name: "omp-picker-real.ansi", agent: "omp", picker: true},
+		{name: "omp-picker-0.20.ansi", agent: "omp", picker: true},
+		{name: "omp-idle-0.20.ansi", agent: "omp"},
+		{name: "omp-confirmation-0.20.ansi", agent: "omp"},
 		{name: "pi-direct-real.ansi", agent: "pi"},
 		{name: "qoder-copy-menu-real.ansi", agent: "qoder", menu: true},
 	}
 	for _, test := range tests {
-		t.Run(test.agent, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			content, err := os.ReadFile(filepath.Join("..", "copyresponse", "testdata", test.name))
 			if err != nil {
 				t.Fatal(err)
@@ -127,10 +131,12 @@ func TestCopyProfileComposerRecognizesIdlePlaceholders(t *testing.T) {
 	}{
 		{name: "codex-direct-real.ansi", agent: "codex", want: "", found: true},
 		{name: "omp-direct-real.ansi", agent: "omp", want: "", found: true},
+		{name: "omp-idle-0.20.ansi", agent: "omp", want: "", found: true},
+		{name: "omp-confirmation-0.20.ansi", agent: "omp", want: "", found: true},
 		{name: "pi-direct-real.ansi", agent: "pi", want: "", found: false},
 	}
 	for _, test := range tests {
-		t.Run(test.agent, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			content, err := os.ReadFile(filepath.Join("..", "copyresponse", "testdata", test.name))
 			if err != nil {
 				t.Fatal(err)
@@ -156,6 +162,35 @@ func TestCopyProfileComposerRecognizesIdlePlaceholders(t *testing.T) {
 	}
 	if got, found := kimi.ComposerText(string(content)); got != "/copy" || !found {
 		t.Fatalf("Kimi ComposerText() = (%q, %v), want (/copy, true)", got, found)
+	}
+}
+
+func TestOMPCopyProfileRecognizesLegacyRoundedComposer(t *testing.T) {
+	profile, ok := CopyProfileFor("omp", "")
+	if !ok {
+		t.Fatal("missing OMP copy profile")
+	}
+	for _, test := range []struct {
+		snapshot string
+		want     string
+	}{
+		{snapshot: "completed output\n╰─                              ─╯\n", want: ""},
+		{snapshot: "completed output\n╰─ /copy                        ─╯\n", want: "/copy"},
+	} {
+		if got, found := profile.ComposerText(test.snapshot); !found || got != test.want {
+			t.Fatalf("ComposerText() = (%q, %v), want (%q, true)", got, found, test.want)
+		}
+	}
+	menu := "╰─ /copy ─╯\ncopy  Pick text or code\n"
+	if !profile.MenuOpen(menu) {
+		t.Fatal("MenuOpen() rejected the legacy rounded composer palette")
+	}
+	recorded, err := os.ReadFile(filepath.Join("..", "copyresponse", "testdata", "omp-direct-v0.19.1.ansi"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, found := profile.ComposerText(string(recorded)); !found || got != "" {
+		t.Fatalf("recorded v0.19.1 ComposerText() = (%q, %v), want empty composer", got, found)
 	}
 }
 

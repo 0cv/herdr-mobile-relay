@@ -73,6 +73,8 @@ type GitFile struct {
 type GitStatus struct {
 	Available bool      `json:"available"`
 	Branch    string    `json:"branch,omitempty"`
+	Ahead     *int      `json:"ahead,omitempty"`
+	Behind    *int      `json:"behind,omitempty"`
 	Files     []GitFile `json:"files"`
 	Truncated bool      `json:"truncated,omitempty"`
 }
@@ -385,6 +387,25 @@ func GitStatusFor(ctx context.Context, workspace string) (GitStatus, error) {
 			continue
 		}
 		status.Files = append(status.Files, entry)
+	}
+	counts, countCode, countErr := runGit(
+		ctx,
+		root.path,
+		128,
+		"rev-list",
+		"--left-right",
+		"--count",
+		"HEAD...@{upstream}",
+	)
+	if countErr != nil {
+		return GitStatus{}, countErr
+	}
+	if countCode == 0 {
+		var ahead, behind int
+		if _, err := fmt.Sscanf(strings.TrimSpace(counts), "%d %d", &ahead, &behind); err == nil && ahead >= 0 && behind >= 0 {
+			status.Ahead = &ahead
+			status.Behind = &behind
+		}
 	}
 	return status, nil
 }

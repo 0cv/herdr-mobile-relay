@@ -94,13 +94,19 @@ for tool in ls sort tail printenv; do
     ln -s "$(command -v "$tool")" "$NODE_TOOL_PATH/$tool"
 done
 fake_node_dir() {
-    mkdir -p "$1"
-    printf '#!/bin/sh\nexit 0\n' > "$1/node"
-    printf '#!/bin/sh\nexit 0\n' > "$1/npx"
-    chmod 700 "$1/node" "$1/npx"
+    local dir="$1"
+    local version="${2:-26.1.0}"
+    mkdir -p "$dir"
+    cat > "$dir/node" <<EOF
+#!/bin/sh
+[ "\$1" = --version ] && { echo "v$version"; exit 0; }
+exit 0
+EOF
+    printf '#!/bin/sh\nexit 0\n' > "$dir/npx"
+    chmod 700 "$dir/node" "$dir/npx"
 }
-fake_node_dir "$NODE_HOME/.nvm/versions/node/v20.0.0/bin"
-fake_node_dir "$NODE_HOME/.nvm/versions/node/v26.1.0/bin"
+fake_node_dir "$NODE_HOME/.nvm/versions/node/v20.0.0/bin" 20.0.0
+fake_node_dir "$NODE_HOME/.nvm/versions/node/v26.1.0/bin" 26.1.0
 test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH="$NODE_TOOL_PATH" node_bin_dir)" = \
     "$NODE_HOME/.nvm/versions/node/v26.1.0/bin"
 fake_node_dir "$NODE_HOME/.nvm/current/bin"
@@ -126,6 +132,21 @@ mkdir -p "$NODE_HOME/half/bin"
 printf '#!/bin/sh\nexit 0\n' > "$NODE_HOME/half/bin/node"
 chmod 700 "$NODE_HOME/half/bin/node"
 printf "HERDR_APP_DEPLOY_NODE_DIR='%s'\n" "$NODE_HOME/half/bin" > "$NODE_ENV_FILE"
+test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH="$NODE_TOOL_PATH" node_bin_dir "$NODE_ENV_FILE")" = \
+    "$NODE_HOME/.nvm/current/bin"
+
+# Wrangler's floor is enforced here rather than discovered halfway through an
+# npx download: a recorded node that is too old loses to a usable one.
+fake_node_dir "$NODE_HOME/legacy/bin" 20.19.0
+printf "HERDR_APP_DEPLOY_NODE_DIR='%s'\n" "$NODE_HOME/legacy/bin" > "$NODE_ENV_FILE"
+test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH="$NODE_TOOL_PATH" node_bin_dir "$NODE_ENV_FILE")" = \
+    "$NODE_HOME/.nvm/current/bin"
+
+# A node that cannot report a version is not a node this action will drive.
+fake_node_dir "$NODE_HOME/silent/bin"
+printf '#!/bin/sh\nexit 0\n' > "$NODE_HOME/silent/bin/node"
+chmod 700 "$NODE_HOME/silent/bin/node"
+printf "HERDR_APP_DEPLOY_NODE_DIR='%s'\n" "$NODE_HOME/silent/bin" > "$NODE_ENV_FILE"
 test "$(HOME="$NODE_HOME" NVM_DIR="$NODE_HOME/.nvm" PATH="$NODE_TOOL_PATH" node_bin_dir "$NODE_ENV_FILE")" = \
     "$NODE_HOME/.nvm/current/bin"
 
@@ -257,7 +278,11 @@ esac
 EOF
 chmod 700 "$DEPLOY_BIN/relay-stub"
 printf '#!/bin/sh\nprintf "{}\\n"\n' > "$DEPLOY_BIN/npx"
-printf '#!/bin/sh\nexit 0\n' > "$DEPLOY_BIN/node"
+cat > "$DEPLOY_BIN/node" <<'EOF'
+#!/bin/sh
+[ "$1" = --version ] && { echo "v26.1.0"; exit 0; }
+exit 0
+EOF
 # Stands in for the Cloudflare API: records the attach request and reports the
 # domain as served from then on.
 cat > "$DEPLOY_BIN/curl" <<'EOF'

@@ -1,6 +1,6 @@
 {
   "type": "push_subscribe",
-  "protocol": 2,
+  "protocol": 3,
   "client_id": "device-1:relay-1",
   "replace_endpoints": [],
   "notify_finished": true,
