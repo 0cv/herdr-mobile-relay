@@ -3,6 +3,44 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.0] - 2026-09-02
+
+### Added
+
+- Upload screenshots, photos, text, Markdown, PDF, JSON, CSV, and common office
+  documents in cancellable multi-file batches.
+- Read and search native OpenCode and Oh My OpenCode conversation history, with
+  validated Oh My OpenCode plan projection.
+- Read agent responses aloud on the relay, manage cached Piper voices from the
+  phone on supported hosts, and fall back to installed system speech engines.
+- Pair named controller and read-only devices with independent revocation and
+  per-device notification categories, settle delay, cooldown, snooze, and
+  delivery tests.
+- Show relay startup failures in a persistent crash banner with recovery
+  guidance instead of leaving the browser without a diagnosis.
+- Generate scannable QR codes for one-use device invitation links.
+- Remember that a computer was paired over the encrypted handshake, so a phone
+  whose credential is revoked, reset, or never stored asks for a new invitation
+  link instead of retrying an unauthenticated connection it cannot complete.
+
+### Changed
+
+- Replace the shared relay key with named, revocable controller and reader
+  device credentials over E2EE v2. Upgrading from v0.19.1 requires a manual
+  relay upgrade and re-pairing every phone; the README and upgrade guide
+  document this transport boundary.
+
+### Fixed
+
+- Upload multi-file batches with one relay-wide chunk sequence, reject chunks
+  after the final declared file without crashing, and parse OpenCode's real
+  `sqlite3 -json` text representation.
+- Keep valid phone credentials when authentication fails because of a transient
+  relay store or rate-limit error, and prevent unauthenticated guesses from
+  burning the full-entropy bootstrap invitation.
+- Keep every readable attachment reference when one persisted record is
+  unusable, instead of quarantining the whole index and dropping the rest.
+
 ## [0.19.1] - 2026-08-29
 
 ### Fixed
@@ -1251,6 +1289,8 @@ project follows [Semantic Versioning](https://semver.org/).
   distorting their cells.
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
+
+[0.20.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.19.1...v0.20.0
 
 [0.19.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.19.0...v0.19.1
 
