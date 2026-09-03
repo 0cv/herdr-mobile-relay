@@ -23,12 +23,14 @@ FRESH_TOKEN_RECORD="$WORK_DIR/fresh-installer-token"
 FRESH_REPO_RECORD="$WORK_DIR/fresh-installer-repository"
 RESTART_LOG="$WORK_DIR/restarts"
 SETUP_RECORD="$WORK_DIR/setup-invocations"
-mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$SOURCE_CONFIG/push" \
-    "$SOURCE_CONFIG/cloudflared" \
+mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$SOURCE_CONFIG/device-auth" \
+    "$SOURCE_CONFIG/push" "$SOURCE_CONFIG/cloudflared" \
     "$TARGET_CONFIG/push" "$(dirname "$UNIT_FILE")" "$FAKE_BIN"
 
 printf "HERDR_RELAY_TOKEN='source-token'\nHERDR_RELAY_INSTANCE_ID='source-instance'\nHERDR_RELAY_PORT='18375'\nCLOUDFLARED_CONFIG='%s/cloudflared/config.yml'\n" \
     "$SOURCE_CONFIG" > "$SOURCE_ENV"
+printf '{"schema_version":1,"credentials":[{"credential_id":"source-credential"}]}\n' \
+    > "$SOURCE_CONFIG/device-auth/devices.json"
 printf 'source-subscriptions\n' > "$SOURCE_CONFIG/push/subscriptions.json"
 printf 'source-origin\n' > "$SOURCE_CONFIG/phone-app-origin"
 printf 'source-configured-origin\n' > "$SOURCE_CONFIG/phone-app-origin-configured"
@@ -222,6 +224,7 @@ grep -Fx "Environment=HERDR_RELAY_ENV=$TARGET_CONFIG/relay.env" "$UNIT_FILE" >/d
 grep -F source-token "$TARGET_CONFIG/relay.env" >/dev/null
 grep -F source-instance "$TARGET_CONFIG/relay.env" >/dev/null
 grep -F "HERDR_GITHUB_TOKEN_FILE='$TARGET_CONFIG/github-token'" "$TARGET_CONFIG/relay.env" >/dev/null
+grep -F source-credential "$TARGET_CONFIG/device-auth/devices.json" >/dev/null
 test "$(cat "$TARGET_CONFIG/push/subscriptions.json")" = source-subscriptions
 test "$(cat "$TARGET_CONFIG/update-state.json")" = source-update
 test "$(cat "$TARGET_CONFIG/app-deploy-state.json")" = source-app-deploy

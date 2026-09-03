@@ -150,6 +150,13 @@ func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (tra
 		}
 		return transport.E2EEAuthResult{}, ErrInvitationExpired
 	}
+	if record.PendingCredentialID != "" {
+		index := s.credentialIndex(record.PendingCredentialID)
+		if index < 0 {
+			return transport.E2EEAuthResult{}, ErrAuthentication
+		}
+		return credentialAuthResult(s.state.Credentials[index], true)
+	}
 	deviceID, err := s.uniqueDeviceIDLocked()
 	if err != nil {
 		return transport.E2EEAuthResult{}, err
@@ -174,12 +181,11 @@ func (s *Store) redeemInvitationLocked(selector transport.E2EEAuthSelector) (tra
 		},
 		Secret: secret,
 	}
-	previousInvitation := record
-	s.state.Invitation = nil
+	record.PendingCredentialID = credentialID
 	s.state.Credentials = append(s.state.Credentials, credential)
 	if err := s.persistLocked(); err != nil {
 		s.state.Credentials = s.state.Credentials[:len(s.state.Credentials)-1]
-		s.state.Invitation = previousInvitation
+		record.PendingCredentialID = ""
 		clear(secretBytesValue)
 		return transport.E2EEAuthResult{}, fmt.Errorf("persist invitation redemption: %w", err)
 	}
@@ -203,17 +209,36 @@ func (s *Store) completeCredentialLocked(selector transport.E2EEAuthSelector) (t
 	}
 	previousLastSeen := record.LastSeenAt
 	previousLocale := record.Locale
+	previousInvitation := s.state.Invitation
 	record.LastSeenAt = s.now().UTC()
 	record.Locale = string(localize.NormalizeLocale(selector.Locale))
+	if invitation := s.state.Invitation; invitation != nil &&
+		invitation.PendingCredentialID == record.CredentialID {
+		s.state.Invitation = nil
+	}
 	if err := s.persistLocked(); err != nil {
 		record.LastSeenAt = previousLastSeen
 		record.Locale = previousLocale
+		s.state.Invitation = previousInvitation
 		return transport.E2EEAuthResult{}, fmt.Errorf("persist credential last seen: %w", err)
 	}
-	return transport.E2EEAuthResult{Identity: transport.AuthenticatedIdentity{
+	return credentialAuthResult(*record, false)
+}
+
+func credentialAuthResult(record credentialRecord, issueSecret bool) (transport.E2EEAuthResult, error) {
+	result := transport.E2EEAuthResult{Identity: transport.AuthenticatedIdentity{
 		DeviceID: record.DeviceID, CredentialID: record.CredentialID, Role: string(record.Role),
 		Locale: record.Locale, CredentialVersion: record.Version,
-	}}, nil
+	}}
+	if !issueSecret {
+		return result, nil
+	}
+	secret, err := decodeStoredSecret(record.Secret)
+	if err != nil {
+		return transport.E2EEAuthResult{}, err
+	}
+	result.CredentialSecret = secret
+	return result, nil
 }
 
 func (s *Store) uniqueDeviceIDLocked() (string, error) {

@@ -252,6 +252,7 @@ migrate_source_config() {
     mkdir -p "$TARGET_CONFIG_ROOT"
     chmod 700 "$TARGET_CONFIG_ROOT"
     copy_migration_entry "$source_env" relay.env
+    copy_migration_entry "$source_root/device-auth" device-auth
     copy_migration_entry "$source_root/push" push
     copy_migration_entry "$source_root/phone-app-origin" phone-app-origin
     copy_migration_entry "$source_root/phone-app-origin-configured" phone-app-origin-configured

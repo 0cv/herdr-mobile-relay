@@ -205,7 +205,7 @@ legacy_root_entry_allowed() {
         config:update-job-*.json|config:app-deploy-job-*.json)
             [ -f "$entry_path" ] && [ ! -L "$entry_path" ]
             ;;
-        config:push|config:cloudflared)
+        config:device-auth|config:push|config:cloudflared)
             [ -d "$entry_path" ] && [ ! -L "$entry_path" ]
             ;;
         cache:activity.jsonl|cache:activity.tombstones|cache:post-install.sh|cache:post-install.log|\
