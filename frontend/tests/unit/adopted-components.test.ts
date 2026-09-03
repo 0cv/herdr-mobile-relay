@@ -5,7 +5,7 @@ import AgentList from '$components/AgentList.svelte';
 import GlobalJump from '$components/GlobalJump.svelte';
 import TerminalView from '$components/TerminalView.svelte';
 import { relayStore } from '$lib/store';
-import type { Agent } from '$lib/types';
+import type { Agent, RelayConnectionView } from '$lib/types';
 
 function agent(overrides: Partial<Agent> = {}): Agent {
   return {
@@ -83,6 +83,76 @@ describe('adopted navigation and terminal controls', () => {
     });
 
     expect(workspace?.open).toBe(true);
+  });
+
+  it('names the computer once per workspace and gives every agent its directory', () => {
+    const working = agent({
+      status: 'working',
+      tab_id: 'tab-1',
+      tab_label: 'Review',
+      cwd: '/home/dev/code/app',
+    });
+    const blocked = agent({
+      raw_pane_id: 'pane-2',
+      pane_id: 'relay-a::pane-2',
+      workspace_id: 'workspace-2',
+      project: 'docs',
+      cwd: '/srv/docs',
+      status: 'blocked',
+      prompt: 'Run make check?',
+      options: ['Approve once'],
+      attention_kind: 'approval',
+    });
+    const outsideHome = agent({
+      raw_pane_id: 'pane-3',
+      pane_id: 'relay-a::pane-3',
+      workspace_id: 'workspace-3',
+      project: 'srv-docs',
+      cwd: '/srv/docs',
+    });
+    const withoutCwd = agent({
+      raw_pane_id: 'pane-4',
+      pane_id: 'relay-a::pane-4',
+      status: 'working',
+      tab_id: 'tab-4',
+      tab_label: 'No directory',
+      cwd: '',
+    });
+    const connections = new Map([['relay-a', {
+      status: 'connected', home: '/home/dev', inventory: { state: 'ready' }, capabilities: [],
+    } as unknown as RelayConnectionView]]);
+    render(AgentList, {
+      agents: [working, blocked, outsideHome, withoutCwd],
+      relays: [],
+      connections,
+      responding: new Set<string>(),
+      onopen: vi.fn(),
+    });
+
+    const card = screen.getByText('mobile', { selector: 'summary strong' }).closest('details')!;
+    expect(card.querySelector('summary .workspace-card-title .host-badge')).toHaveTextContent('@Laptop');
+    expect(card.querySelector('summary .path-row')).toHaveTextContent('~/code/app');
+    // A working session opens its card, so the agent row is already visible.
+    expect(card.querySelector('.compact-agent-card .agent-path')).toHaveTextContent('~/code/app');
+    expect(card.querySelector('.compact-agent-card .host-badge')).toBeNull();
+    // An agent that reports no directory keeps its name, still without the
+    // computer its card already names.
+    const nameOnly = card.querySelector('.workspace-tab[aria-label="No directory tab"] .agent-project')!;
+    expect(nameOnly).toHaveTextContent('mobile');
+    expect(nameOnly.querySelector('.host-badge')).toBeNull();
+    // The computer stays in the accessible name even where the row drops it.
+    expect(screen.getAllByRole('button', { name: 'Open mobile on Laptop' })).toHaveLength(2);
+
+    // A directory outside the relay's home directory keeps its absolute path.
+    const outside = screen.getByText('srv-docs', { selector: 'summary strong' }).closest('details')!;
+    expect(outside.querySelector('summary .path-row')).toHaveTextContent('/srv/docs');
+    expect(outside.querySelector('.compact-agent-card .agent-path')).toHaveTextContent('/srv/docs');
+
+    // Agents needing input are listed outside any workspace card, so their
+    // rows still have to name the computer.
+    const attention = screen.getByRole('heading', { name: 'Needs input' }).closest('section')!;
+    expect(attention.querySelector('.host-badge')).toHaveTextContent('@Laptop');
+    expect(attention.querySelector('.agent-path')).toBeNull();
   });
 
   it('sends a detected terminal menu action through the serialized key path', async () => {

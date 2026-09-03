@@ -75,6 +75,7 @@ type Server struct {
 	version  string
 	revision string
 	hostname string
+	home     string
 	logger   *slog.Logger
 
 	state          *coordinator.State
@@ -207,6 +208,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		version:             version,
 		revision:            revision,
 		hostname:            hostname,
+		home:                home,
 		logger:              logger,
 		state:               state,
 		hub:                 hub,
@@ -606,6 +608,7 @@ func (s *Server) Run(ctx context.Context) error {
 			Type:            "push_config",
 			VAPIDPublicKey:  vapidPublicKey,
 			Host:            s.hostname,
+			Home:            s.home,
 			Protocol:        protocol.Version,
 			Version:         s.version,
 			ReleaseVersion:  s.version,

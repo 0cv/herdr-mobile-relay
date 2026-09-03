@@ -399,6 +399,8 @@ export interface RelayConnectionView {
    */
   activeGatewayUrl: string;
   host: string;
+  /** The relay user's home directory, so paths print as `~/…`. */
+  home: string;
   protocol: number;
   version: string;
   releaseVersion: string;

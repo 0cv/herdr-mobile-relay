@@ -433,9 +433,12 @@ func DecodeFailureResponse(raw map[string]any) map[string]any {
 }
 
 type PushConfig struct {
-	Type           string   `json:"type"`
-	VAPIDPublicKey string   `json:"vapid_public_key"`
-	Host           string   `json:"host"`
+	Type           string `json:"type"`
+	VAPIDPublicKey string `json:"vapid_public_key"`
+	Host           string `json:"host"`
+	// Home lets the phone print a checkout as "~/code/app" instead of the
+	// computer's absolute path, which rarely fits a phone row.
+	Home           string   `json:"home"`
 	Protocol       int      `json:"protocol"`
 	Version        string   `json:"version"`
 	ReleaseVersion string   `json:"release_version"`

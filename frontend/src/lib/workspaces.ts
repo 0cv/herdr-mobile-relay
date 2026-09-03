@@ -83,6 +83,19 @@ export function informativePath(path: string, label: string): string {
   return pathBase(path).toLowerCase() === label.trim().toLowerCase() ? '' : path;
 }
 
+/**
+ * A directory as the relay's own tools print it: `~/code/app` under that
+ * computer's home directory, the absolute path anywhere else. Matches the
+ * relay's directory browser labels.
+ */
+export function homeRelativePath(path: string, home: string): string {
+  if (!path) return '';
+  const base = home.replace(/\/+$/, '');
+  if (!base) return path;
+  if (path === base) return '~';
+  return path.startsWith(`${base}/`) ? `~/${path.slice(base.length + 1)}` : path;
+}
+
 export function workspaceIdentity(agent: Agent): string {
   const identity = String(agent.workspace_id || agent.cwd || agent.raw_pane_id || agent.pane_id);
   return `${agent.relay_id}\u0000${identity}`;

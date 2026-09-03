@@ -5,7 +5,7 @@ import { fencedCodeText, safeMarkdownHtml, speakableText } from '$lib/markdown';
 import { detectTerminalMenu, terminalTextInputActive } from '$lib/terminal-menu';
 import { linkifyTerminalText, renderTerminalContent } from '$lib/terminal';
 import type { Activity, Agent, RelayWorkspace } from '$lib/types';
-import { informativePath, relayWorkspaceTrees, workspaceGroups, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
+import { homeRelativePath, informativePath, relayWorkspaceTrees, workspaceGroups, workspaceProvenance, workspaceStateTone } from '$lib/workspaces';
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -147,6 +147,18 @@ describe('workspace navigation', () => {
     expect(informativePath('/home/user/worktrees/fix-one', 'fix-one')).toBe('');
     expect(informativePath('/home/user/worktrees/fix-one', 'fix/one')).toBe('/home/user/worktrees/fix-one');
     expect(informativePath('', 'fix-one')).toBe('');
+  });
+
+  it('prints directories against the relay home directory', () => {
+    expect(homeRelativePath('/home/dev/code/app', '/home/dev')).toBe('~/code/app');
+    expect(homeRelativePath('/home/dev', '/home/dev')).toBe('~');
+    expect(homeRelativePath('/home/dev/code/app', '/home/dev/')).toBe('~/code/app');
+    // Outside the home directory, and for a relay that reported no home
+    // directory at all, the absolute path is all there is to show.
+    expect(homeRelativePath('/srv/deploy', '/home/dev')).toBe('/srv/deploy');
+    expect(homeRelativePath('/home/developer/app', '/home/dev')).toBe('/home/developer/app');
+    expect(homeRelativePath('/home/dev/code/app', '')).toBe('/home/dev/code/app');
+    expect(homeRelativePath('', '/home/dev')).toBe('');
   });
 
   it('uses relay activity order when workspace timestamps tie', () => {

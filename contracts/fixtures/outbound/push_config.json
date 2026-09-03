@@ -2,6 +2,7 @@
   "type": "push_config",
   "vapid_public_key": "BTest-key-base64url",
   "host": "dev-workstation",
+  "home": "/home/dev",
   "protocol": 3,
   "version": "0.9.0",
   "release_version": "0.9.0",

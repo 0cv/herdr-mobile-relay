@@ -18,7 +18,7 @@
   import { homeLayout } from '$lib/preferences';
   import { relayStore } from '$lib/store';
   import type { Agent, RelayConfig, RelayConnectionView, RelayWorkspace } from '$lib/types';
-  import { informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
+  import { homeRelativePath, informativePath, workspaceGroupTrees, workspaceGroups, workspaceIdentity, workspaceProvenance, workspaceStateTone, type WorkspaceGroup, type WorkspaceGroupTree, type WorkspaceTab } from '$lib/workspaces';
 
   let {
     agents,
@@ -410,6 +410,13 @@
     return labels.join(' · ');
   }
 
+  // Home-relative where the relay reported its home directory, absolute
+  // otherwise: a row says which directory the agent runs in, not just its
+  // last segment.
+  function relayPath(relayId: string, path: string): string {
+    return homeRelativePath(path, connections.get(relayId)?.home || '');
+  }
+
   function relativeTimestamp(timestamp: number): string {
     if (!timestamp) return '';
     const seconds = Math.max(0, Math.floor((relativeNow - timestamp) / 1_000));
@@ -435,6 +442,18 @@
   });
 </script>
 
+<!-- Drawn rather than typed: the shipped Nerd Font is a terminal-sized
+     download the home screen has no other reason to fetch. -->
+{#snippet folderIcon()}
+  <svg class="path-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    <path d="M3 5.5h7l2 2h9v11H3z"></path>
+  </svg>
+{/snippet}
+
+{#snippet pathRow(path: string)}
+  <small class="path-row">{@render folderIcon()}<span>{path}</span></small>
+{/snippet}
+
 {#snippet agentGrid(visible: Agent[], compact: boolean, reorderWorkspace?: WorkspaceGroup, reorderTabId?: string)}
   <div class:compact-agent-grid={compact} class="agent-grid">
     {#each visible as agent (agent.pane_id)}
@@ -446,6 +465,7 @@
       {@const needsInspection = group === 'attention'}
       {@const meta = agentMeta(agent, compact)}
       {@const age = relativeAge(agent)}
+      {@const agentPath = compact ? relayPath(agent.relay_id, String(agent.cwd || '')) : ''}
       {@const inventoryReady = !connections.has(agent.relay_id) || connections.get(agent.relay_id)?.inventory.state === 'ready'}
       <article class:blocked class:compact-agent-card={compact} class:stale={!inventoryReady} class="agent-card">
         <button
@@ -466,7 +486,13 @@
           </span>
           <span class="agent-copy">
             <span class="agent-title-row">
-              <span class="agent-project">{displayName(agent)} <span class="host-badge">@{hostLabel(agent)}</span></span>
+              {#if agentPath}
+                <!-- Inside a workspace card the computer is named once, on the
+                     card, so the row spends its width on the directory. -->
+                <span class="agent-path">{@render folderIcon()}<span>{agentPath}</span></span>
+              {:else}
+                <span class="agent-project">{displayName(agent)}{#if !compact} <span class="host-badge">@{hostLabel(agent)}</span>{/if}</span>
+              {/if}
               {#if compact && age}
                 <time class="agent-age" datetime={new Date(agentLastActiveAt(agent)).toISOString()} title={new Date(agentLastActiveAt(agent)).toLocaleString()}>{age}</time>
               {/if}
@@ -564,8 +590,11 @@
             ></span>
           {/if}
           <span class="workspace-card-copy">
-            <strong>{workspace.label}</strong>
-            <small>{[workspace.cwd, `@${workspace.host}`].filter(Boolean).join(' · ')}</small>
+            <span class="workspace-card-title">
+              <strong>{workspace.label}</strong>
+              {#if workspace.host}<span class="host-badge">@{workspace.host}</span>{/if}
+            </span>
+            {#if workspace.cwd}{@render pathRow(relayPath(workspace.relayId, workspace.cwd))}{/if}
           </span>
           <span
             class="workspace-counts"
@@ -592,12 +621,12 @@
         {#if tree.children.length}
           <div class="workspace-worktree-list" role="group" aria-label={`${workspace.label} worktrees`}>
             {#each tree.children as child (child.key)}
-              {@const childPath = informativePath(child.cwd, child.label)}
+              {@const childPath = informativePath(relayPath(child.relayId, child.cwd), child.label)}
               <section class="workspace-worktree-card" aria-label={`${child.label} worktree`}>
                 <header>
                   <span>
                     <strong>{child.label}</strong>
-                    {#if childPath}<small>{childPath}</small>{/if}
+                    {#if childPath}{@render pathRow(childPath)}{/if}
                   </span>
                   <span>{child.tabCount} {child.tabCount === 1 ? 'tab' : 'tabs'}</span>
                 </header>

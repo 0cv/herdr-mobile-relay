@@ -712,6 +712,7 @@ class RelayStore {
       directoryError: '',
       directoryGeneration: 0,
       host: '',
+      home: '',
       protocol: 0,
       authRejected: false,
       pairingRequired: false,
@@ -1109,6 +1110,7 @@ class RelayStore {
       });
       connection.vapidPublicKey = String(message.vapid_public_key || '');
       connection.host = String(message.host || '');
+      connection.home = String(message.home || '').slice(0, 1024);
       connection.protocol = Number.isInteger(message.protocol) && message.protocol > 0 ? message.protocol : 1;
       connection.version = typeof message.version === 'string' ? message.version.slice(0, 40) : '';
       connection.releaseVersion = String(message.release_version || '').slice(0, 32);

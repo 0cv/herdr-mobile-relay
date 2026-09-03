@@ -63,7 +63,13 @@ import { constants, gzipSync } from 'node:zlib';
 // Raised from 156 KiB for the iOS Home Screen handoff, which holds the one-use
 // setup key for the installed copy and explains the waiting state, and for
 // reader speech from the agent's transcript instead of the relay copy command.
-const limitKiB = 157;
+// Raised from 157 KiB for home-screen directory rows: each agent card now
+// prints its working directory against the relay's home directory instead of
+// repeating the computer name, which adds 395 B gzip to the 0.20.5 bundle and
+// lands the 0.20.6 payload exactly on the old ceiling. Script and stylesheet
+// names carry a content hash, so index.html's compressed size drifts a couple
+// of bytes per build: a release sitting on the limit fails the next one.
+const limitKiB = 158;
 const limit = limitKiB * 1024;
 const root = resolve(process.argv[2] || 'dist');
 const files = ['index.html', 'assets/app.js', 'assets/app.css'];

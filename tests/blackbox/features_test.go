@@ -67,6 +67,10 @@ func TestOnConnectHandshake(t *testing.T) {
 	if msg["protocol"] != float64(3) {
 		t.Errorf("protocol = %v", msg["protocol"])
 	}
+	home, _ := os.UserHomeDir()
+	if home == "" || msg["home"] != home {
+		t.Errorf("home = %v, want %q", msg["home"], home)
+	}
 	caps, ok := msg["capabilities"].([]any)
 	if !ok || len(caps) == 0 {
 		t.Error("capabilities missing or empty")

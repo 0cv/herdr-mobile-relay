@@ -469,6 +469,7 @@ async function setConversationFixture(page: Page, fixture: ConversationFixture |
 async function handshake(page: Page, index: number, overrides: Record<string, unknown> = {}) {
   await server(page, index, {
     type: 'push_config', protocol: 3, version: 'abc1234', host: index ? 'mac' : 'fedora',
+    home: '/home/test',
     capabilities: ['attention_classification', 'clear_activities', 'directory_browser', 'self_update', 'structured_questions', 'slash_commands'],
     agent_profiles: [{ id: 'codex', label: 'Codex' }, { id: 'claude', label: 'Claude Code' }],
     ...overrides,
@@ -508,13 +509,13 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
   };
   const shellOnly = {
     workspace_id: 'w2', number: 2, label: 'Shell Only', pane_count: 1, tab_count: 1,
-    cwd: '/work/shell-only',
+    cwd: '/home/test/shell-only',
   };
   await server(page, 0, { type: 'workspaces', workspaces: [parent, shellOnly] });
   await server(page, 0, {
     type: 'agents',
     agents: [{
-      pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', tab_number: 1,
+      pane_id: 'w1:p1', workspace_id: 'w1', tab_id: 'w1:t1', tab_number: 1, cwd: '/work/project',
       tab_label: 'Agent', status: 'working', project: 'fallback-project', agent: 'codex',
     }],
   });
@@ -525,6 +526,15 @@ test('manages workspace modals, grouped worktrees, and drag ordering', async ({ 
   await expect(page.getByText('No agents are running in this workspace.')).toBeHidden();
   await page.locator('.workspace-card').filter({ hasText: 'Shell Only' }).locator('summary').click();
   await expect(page.getByText('No agents are running in this workspace.')).toBeVisible();
+  // The computer is named on the workspace card, once, and every row under it
+  // spends its width on the directory instead of repeating that name.
+  const projectWorkspace = page.locator('.workspace-card').filter({ hasText: 'Project' }).first();
+  await expect(projectWorkspace.locator('summary .workspace-card-title .host-badge')).toHaveText('@Fedora');
+  await expect(projectWorkspace.locator('summary .path-row')).toHaveText('/work/project');
+  await expect(projectWorkspace.locator('.compact-agent-card .agent-path')).toHaveText('/work/project');
+  await expect(projectWorkspace.locator('.compact-agent-card .host-badge')).toHaveCount(0);
+  await expect(page.locator('.workspace-card').filter({ hasText: 'Shell Only' }).locator('summary .path-row'))
+    .toHaveText('~/shell-only');
 
   await page.getByRole('button', { name: 'Manage workspaces' }).click();
   await expect(page.locator('#workspace-manager-title')).toBeVisible();

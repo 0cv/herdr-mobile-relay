@@ -97,6 +97,14 @@ agents, hosts, and relays.
 At 900 CSS pixels and wider, an agent rail keeps those workspace groups beside
 the open terminal.
 
+A workspace card names its computer on the first line, beside the workspace
+label, and gives the second line to the workspace directory. Agent rows inside
+the card, including those nested in a linked worktree, show their own working
+directory rather than repeating that computer name. A directory inside the
+computer's home directory is written `~/code/app`, matching how the relay's
+directory browser labels it; every other directory is written in full. An
+agent that reports no directory keeps its name on that line.
+
 When the relay advertises tab ordering, press and hold an agent card until its
 tab lifts, then drag to reorder the tab in Herdr; a plain tap still opens the
 agent, and Alt+arrow keys on a focused card provide the same control. The

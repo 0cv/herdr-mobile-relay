@@ -301,6 +301,13 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .agent-title-row { align-items: baseline; display: flex; gap: .5rem; min-width: 0; }
 .agent-title-row .agent-project { flex: 1; }
 .agent-age { color: var(--muted); flex: 0 0 auto; font-size: .66rem; font-variant-numeric: tabular-nums; }
+/* One line, one directory: the icon and the age keep their size while the
+   path itself takes the remaining width and truncates. */
+.path-row, .agent-path { align-items: center; display: flex; gap: .28rem; min-width: 0; }
+.path-row > span, .agent-path > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.path-symbol { flex: 0 0 auto; height: .85em; stroke: var(--muted); width: .85em; }
+.agent-path { flex: 1; font-size: .8rem; font-weight: 600; }
+.agent-title-row .agent-path { align-self: center; }
 .compact-agent-grid { gap: .28rem; }
 .compact-agent-card { background: color-mix(in srgb, var(--card) 78%, transparent); border-radius: .58rem; }
 .compact-agent-card .agent-open { align-items: center; padding: .54rem .68rem; }
@@ -813,6 +820,10 @@ textarea { min-height: 6.5rem; resize: vertical; }
 .workspace-card[open] > summary::before { transform: rotate(90deg); }
 .workspace-card-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .workspace-card-copy strong { font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Label and computer share the first line; the label yields width first. */
+.workspace-card-title { align-items: baseline; display: flex; gap: .4rem; min-width: 0; }
+.workspace-card-title > strong { min-width: 0; }
+.workspace-card-title > .host-badge { flex: 0 0 auto; }
 .workspace-card-copy small { color: var(--muted); font-size: .65rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-counts { align-items: flex-end; color: var(--muted); display: flex; flex: 0 0 auto; flex-direction: column; font-size: .62rem; line-height: 1.35; }
 .workspace-working-count { color: var(--warning); font-style: normal; font-weight: 700; }

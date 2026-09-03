@@ -3,6 +3,19 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.6] - 2026-09-03
+
+### Changed
+
+- Home screen rows say which directory an agent runs in. A workspace card
+  names its computer on the first line, next to the label, and spends the
+  second line on the workspace directory. Every agent row under it - including
+  rows nested in a linked worktree - shows its own working directory instead of
+  repeating the computer name and the directory's last segment. Directories
+  under the computer's home directory print as `~/code/app`, as the relay's own
+  tools print them; anywhere else the absolute path is shown. The relay reports
+  its home directory in `push_config` for this.
+
 ## [0.20.5] - 2026-09-03
 
 ### Added
