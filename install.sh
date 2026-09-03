@@ -197,7 +197,7 @@ legacy_root_entry_allowed() {
     entry_name=$2
     entry_path=$3
     case "$root_kind:$entry_name" in
-        config:relay.env|config:.env|config:phone-app-origin|config:stable-setup.json|\
+        config:relay.env|config:.env|config:phone-app-origin|config:phone-app-origin-configured|config:stable-setup.json|\
         config:update-state.json|config:app-deploy-state.json|config:support-state.json|config:github-token|\
         config:update.lock|config:app-deploy.lock)
             [ -f "$entry_path" ] && [ ! -L "$entry_path" ]
