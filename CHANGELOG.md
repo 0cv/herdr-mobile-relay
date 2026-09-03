@@ -3,6 +3,15 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.3] - 2026-09-03
+
+### Fixed
+
+- Install the plugin over an existing background-service setup that has a
+  recorded phone-app origin. The installer now accepts the state file its
+  migration copies into persistent plugin configuration instead of rolling
+  back before service cutover.
+
 ## [0.20.2] - 2026-09-02
 
 ### Fixed
@@ -1310,6 +1319,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.20.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.2...v0.20.3
 [0.20.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.19.1...v0.20.0

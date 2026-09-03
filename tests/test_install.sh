@@ -56,6 +56,7 @@ legacy_config="$legacy_home/.config/herdr-mobile-relay"
 legacy_cache="$legacy_home/.cache/herdr-mobile-relay"
 mkdir -p "$legacy_config/push" "$legacy_cache/claude-history" "$legacy_cache/uploads"
 printf "HERDR_RELAY_TOKEN='legacy-token'\nHERDR_RELAY_INSTANCE_ID='legacy-instance'\n" > "$legacy_config/relay.env"
+printf 'https://app.example.test\n' > "$legacy_config/phone-app-origin-configured"
 printf '[]\n' > "$legacy_config/push/subscriptions.json"
 printf '{"state":"failed"}\n' > "$legacy_config/update-state.json"
 printf '{"state":"idle"}\n' > "$legacy_config/app-deploy-state.json"
@@ -72,6 +73,7 @@ prepare_install_roots "$legacy_release" "$legacy_config" "$legacy_cache"
 test -f "$legacy_config/.herdr-mobile-relay-installation"
 test -f "$legacy_cache/.herdr-mobile-relay-installation"
 grep -F legacy-token "$legacy_config/relay.env" >/dev/null
+test "$(cat "$legacy_config/phone-app-origin-configured")" = "https://app.example.test"
 grep -F failed "$legacy_config/update-state.json" >/dev/null
 grep -F idle "$legacy_config/app-deploy-state.json" >/dev/null
 grep -F preserved "$legacy_cache/claude-history/pane.json" >/dev/null
