@@ -1319,8 +1319,15 @@ func enrollBootstrapDevice(t *testing.T, runtimeDir, token string) {
 	if err := store.EnsureBootstrapInvitation([]byte(token), "relay", "en"); err != nil {
 		t.Fatal(err)
 	}
+	result, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: "bootstrap", Version: 1, Locale: "en",
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
-		Kind: transport.E2EEAuthInvitation, ID: "bootstrap", Version: 1,
+		Kind: transport.E2EEAuthCredential, ID: result.Identity.CredentialID,
+		Version: result.Identity.CredentialVersion, Locale: result.Identity.Locale,
 	}, true); err != nil {
 		t.Fatal(err)
 	}

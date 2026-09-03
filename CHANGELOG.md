@@ -3,6 +3,17 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.4] - 2026-09-03
+
+### Fixed
+
+- Preserve paired-device credentials when plugin installation moves an
+  existing background service into persistent plugin configuration.
+- Keep a newly issued device credential recoverable until the phone proves it
+  on a follow-up connection. If the gateway connection drops while delivering
+  that credential, the same invitation can retry instead of leaving the phone
+  refused.
+
 ## [0.20.3] - 2026-09-03
 
 ### Fixed
@@ -1319,6 +1330,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.20.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.3...v0.20.4
 [0.20.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.2...v0.20.3
 [0.20.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.0...v0.20.1

@@ -77,15 +77,16 @@ type credentialRecord struct {
 }
 
 type invitationRecord struct {
-	InvitationID   string    `json:"invitation_id"`
-	Version        uint64    `json:"version"`
-	Secret         string    `json:"secret"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	Name           string    `json:"name"`
-	Role           Role      `json:"role"`
-	Locale         string    `json:"locale"`
-	FailedAttempts int       `json:"failed_attempts"`
-	NextAttemptAt  time.Time `json:"next_attempt_at,omitempty"`
+	InvitationID        string    `json:"invitation_id"`
+	Version             uint64    `json:"version"`
+	Secret              string    `json:"secret"`
+	ExpiresAt           time.Time `json:"expires_at"`
+	Name                string    `json:"name"`
+	Role                Role      `json:"role"`
+	Locale              string    `json:"locale"`
+	FailedAttempts      int       `json:"failed_attempts"`
+	NextAttemptAt       time.Time `json:"next_attempt_at,omitempty"`
+	PendingCredentialID string    `json:"pending_credential_id,omitempty"`
 }
 
 type diskState struct {
@@ -208,9 +209,9 @@ func (s *Store) EnsureBootstrapInvitation(secret []byte, name, locale string) er
 	return s.armBootstrapLocked(secret, name, locale, now)
 }
 
-// ArmBootstrapInvitation mints a fresh one-use bootstrap invitation while
-// keeping every enrolled device. The operator asks for it by printing the
-// setup link again, so each print pairs exactly one more phone.
+// ArmBootstrapInvitation mints a bootstrap invitation while keeping every
+// enrolled device. The operator asks for it by printing the setup link again,
+// so each print pairs exactly one more phone.
 func (s *Store) ArmBootstrapInvitation(secret []byte, name, locale string) error {
 	name, locale, err := validateMetadata(name, RoleController, locale)
 	if err != nil {
@@ -298,13 +299,19 @@ func (s *Store) RevokeCredential(credentialID string) (Credential, error) {
 		return Credential{}, ErrLastController
 	}
 	previous := *record
+	previousInvitation := s.state.Invitation
 	if !record.Revoked {
 		record.Revoked = true
 		record.Version++
 		record.Secret = ""
 	}
+	if invitation := s.state.Invitation; invitation != nil &&
+		invitation.PendingCredentialID == credentialID {
+		s.state.Invitation = nil
+	}
 	if err := s.persistLocked(); err != nil {
 		s.state.Credentials[index] = previous
+		s.state.Invitation = previousInvitation
 		return Credential{}, fmt.Errorf("persist credential revocation: %w", err)
 	}
 	return record.Credential, nil
@@ -486,6 +493,7 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 func validateState(state diskState) error {
 	seenDevices := make(map[string]struct{}, len(state.Credentials))
 	seenCredentials := make(map[string]struct{}, len(state.Credentials))
+	activeCredentials := make(map[string]struct{}, len(state.Credentials))
 	for _, record := range state.Credentials {
 		if record.DeviceID == "" || record.CredentialID == "" || record.Version == 0 {
 			return errors.New("credential identity is incomplete")
@@ -505,8 +513,11 @@ func validateState(state diskState) error {
 			if record.Secret != "" {
 				return errors.New("revoked credential retains a secret")
 			}
-		} else if !validSecret(record.Secret) {
-			return errors.New("credential secret is invalid")
+		} else {
+			if !validSecret(record.Secret) {
+				return errors.New("credential secret is invalid")
+			}
+			activeCredentials[record.CredentialID] = struct{}{}
 		}
 	}
 	if invitation := state.Invitation; invitation != nil {
@@ -518,6 +529,11 @@ func validateState(state diskState) error {
 		}
 		if _, _, err := validateMetadata(invitation.Name, invitation.Role, invitation.Locale); err != nil {
 			return err
+		}
+		if invitation.PendingCredentialID != "" {
+			if _, exists := activeCredentials[invitation.PendingCredentialID]; !exists {
+				return errors.New("invitation pending credential is invalid")
+			}
 		}
 	}
 	return nil

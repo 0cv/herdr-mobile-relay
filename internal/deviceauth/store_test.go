@@ -49,10 +49,17 @@ func TestArmBootstrapInvitationKeepsEnrolledDevices(t *testing.T) {
 	if err := store.EnsureBootstrapInvitation(secret, "relay", "en"); err != nil {
 		t.Fatal(err)
 	}
-	// The first phone consumes the bootstrap; a stable install then refuses to
-	// re-arm it on its own.
-	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+	// The first phone confirms its new credential; a stable install then
+	// refuses to re-arm the consumed bootstrap by itself.
+	first, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
 		Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthCredential, ID: first.Identity.CredentialID,
+		Version: first.Identity.CredentialVersion, Locale: first.Identity.Locale,
 	}, true); err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +86,88 @@ func TestArmBootstrapInvitationKeepsEnrolledDevices(t *testing.T) {
 	}
 	if got := len(store.ListCredentials("")); got != 2 {
 		t.Fatalf("enrolled devices after second pairing = %d, want 2", got)
+	}
+}
+
+func TestInvitationRedemptionRetriesUntilCredentialAuthentication(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapSecret := bytes.Repeat([]byte{3}, secretBytes)
+	if err := store.EnsureBootstrapInvitation(bootstrapSecret, "phone", "en"); err != nil {
+		t.Fatal(err)
+	}
+	invitationSelector := transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: bootstrapInvitationID, Version: 1, Locale: "en",
+	}
+	first, err := store.CompleteE2EEAuth(context.Background(), invitationSelector, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.state.Invitation == nil ||
+		store.state.Invitation.PendingCredentialID != first.Identity.CredentialID {
+		t.Fatalf("pending invitation = %#v", store.state.Invitation)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := reopened.ResolveE2EESecret(context.Background(), invitationSelector)
+	if err != nil || !bytes.Equal(resolved, bootstrapSecret) {
+		t.Fatalf("ResolveE2EESecret() = %x, %v", resolved, err)
+	}
+	retried, err := reopened.CompleteE2EEAuth(context.Background(), invitationSelector, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Identity != first.Identity {
+		t.Fatalf("retried identity = %#v, want %#v", retried.Identity, first.Identity)
+	}
+	if !bytes.Equal(retried.CredentialSecret, first.CredentialSecret) {
+		t.Fatal("retry issued a different credential secret")
+	}
+	if got := len(reopened.ListCredentials("")); got != 1 {
+		t.Fatalf("enrolled devices after retry = %d, want 1", got)
+	}
+
+	if _, err := reopened.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthCredential, ID: first.Identity.CredentialID,
+		Version: first.Identity.CredentialVersion, Locale: first.Identity.Locale,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.state.Invitation != nil {
+		t.Fatalf("confirmed credential retained invitation: %#v", reopened.state.Invitation)
+	}
+}
+
+func TestRevokingPendingCredentialConsumesInvitation(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.state.Credentials = []credentialRecord{
+		testCredential("device-one", "credential-one", RoleController),
+	}
+	invitation, err := store.CreateInvitation("tablet", RoleReader, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.CompleteE2EEAuth(context.Background(), transport.E2EEAuthSelector{
+		Kind: transport.E2EEAuthInvitation, ID: invitation.InvitationID,
+		Version: invitation.Version, Locale: invitation.Locale,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RevokeCredential(result.Identity.CredentialID); err != nil {
+		t.Fatal(err)
+	}
+	if store.state.Invitation != nil {
+		t.Fatalf("revoked credential retained invitation: %#v", store.state.Invitation)
 	}
 }
 
