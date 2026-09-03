@@ -71,15 +71,20 @@ than a human-chosen value.
 ## Paired device authorization
 
 The relay key bootstraps a first controller credential. That controller can
-create a one-use invitation for another browser on a direct WSS relay, then
-name, revoke, or reset paired devices. Each credential has a reader or
-controller role. The authoritative protocol catalog defaults mutations to
-controller-only; readers can inspect agents, conversations, workspaces, and
-device state but cannot send input, answer approvals, upload, or administer
-other devices. A reader may manage its own push delivery and revoke its own
-credential. Only a controller may register the app origin used for notification
-links. Revocation closes the device's live clients, enrollment tickets, and
-push subscriptions.
+create a one-use invitation for another browser, then name, revoke, or reset
+paired devices. An invitation link carries the invitation secret and the
+computer's address: its WSS URL on a direct relay, or, on a gateway relay, the
+gateway list plus the relay id and rendezvous key that answer the gateway's
+challenge. Both are derived one-way from the relay key, so an invited device
+can reach the computer through the gateway - as any holder of a direct URL can
+reach a direct relay - but cannot re-arm or redeem the bootstrap. Each
+credential has a reader or controller role. The authoritative protocol catalog
+defaults mutations to controller-only; readers can inspect agents,
+conversations, workspaces, and device state but cannot send input, answer
+approvals, upload, or administer other devices. A reader may manage its own
+push delivery and revoke its own credential. Only a controller may register
+the app origin used for notification links. Revocation closes the device's
+live clients, enrollment tickets, and push subscriptions.
 
 The bootstrap invitation is one-use on stable installs. Its ten-minute window
 is measured from each presentation while no device has enrolled yet — a relay

@@ -99,6 +99,47 @@ describe('device invitation setup', () => {
       hash: `#setup=${'A'.repeat(43)}&invite=short&invite_version=1&invite_expires=2000000000000`,
     })).toBeNull();
   });
+
+  it('imports a gateway invitation with the rendezvous it needs to connect', () => {
+    const relayId = 'Ccy3nT9AULlAceTEnhTvoQ';
+    const rendezvous = 'xvT5VptkJHebIfy8b9PSGTJMkdRb-J_P2SXrtNRoLyA';
+    const link = (extra: string) => ({
+      hash: `#setup=${'A'.repeat(43)}&invite=${'B'.repeat(24)}&invite_version=1&invite_expires=2000000000000`
+        + `&label=Fedora&gateways=wss%3A%2F%2Fa.example,wss%3A%2F%2Fb.example${extra}`,
+      protocol: 'https:',
+      host: 'app.example.com',
+    });
+    expect(quickSetupConfig(link(`&relay_id=${relayId}&rendezvous=${rendezvous}`))).toEqual({
+      label: 'Fedora',
+      url: '',
+      token: '',
+      transport: 'hybrid',
+      gatewayUrl: 'wss://a.example',
+      gatewayUrls: ['wss://a.example', 'wss://b.example'],
+      gatewayRelayId: relayId,
+      rendezvousKey: rendezvous,
+    });
+    // Without the rendezvous the invited device could never reach the relay.
+    expect(quickSetupConfig(link(''))).toBeNull();
+    expect(quickSetupConfig(link(`&relay_id=${relayId}`))).toBeNull();
+    expect(quickSetupConfig(link(`&relay_id=short&rendezvous=${rendezvous}`))).toBeNull();
+
+    // The stored entry keeps both, and a second computer on the same gateway
+    // with the same label stays a separate entry because its relay id differs.
+    const imported = importQuickSetup([], link(`&relay_id=${relayId}&rendezvous=${rendezvous}`))!;
+    expect(imported).toHaveLength(1);
+    expect(imported[0]).toMatchObject({ paired: true, gatewayRelayId: relayId, rendezvousKey: rendezvous });
+    saveRelayConfigs(imported);
+    expect(loadRelayConfigs()[0]).toMatchObject({ gatewayRelayId: relayId, rendezvousKey: rendezvous });
+    const otherId = 'Ccy3nT9AULlAceTEnhTvoR';
+    const both = importQuickSetup(imported, link(`&relay_id=${otherId}&rendezvous=${rendezvous}`))!;
+    expect(both).toHaveLength(2);
+    expect(both.map((relay) => relay.gatewayRelayId)).toEqual([relayId, otherId]);
+    // Re-importing the first computer's invitation updates its entry in place.
+    const again = importQuickSetup(both, link(`&relay_id=${relayId}&rendezvous=${rendezvous}`))!;
+    expect(again).toHaveLength(2);
+    expect(again[0].id).toBe(imported[0].id);
+  });
 });
 
 

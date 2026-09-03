@@ -1,5 +1,5 @@
 import { base64UrlDecode, base64UrlEncode } from '../base64url';
-import { connectProof, deriveRelayId } from '../gateway-credentials';
+import { canRendezvous, connectProof, gatewayRendezvous } from '../gateway-credentials';
 import type { E2EEWireFrame } from '../e2ee';
 import type { RelayConfig } from '../types';
 import { chunk, decodeWireFrame, encodeWireFrame, Reassembler } from './chunking';
@@ -104,8 +104,8 @@ export function createGatewayChannel(
     if (Number(hello.proto) !== GATEWAY_PROTO) throw new Error('The gateway speaks an unsupported protocol version.');
     const stunPort = advertisedStunPort(hello);
     if (stunPort > 0) options.onStunPort?.(stunPort);
-    const relayId = await deriveRelayId(relay.token);
-    const proof = await connectProof(relay.token, relayId, base64UrlDecode(String(hello.nonce || '')));
+    const { relayId, rendezvousKey } = await gatewayRendezvous(relay);
+    const proof = await connectProof(rendezvousKey, relayId, base64UrlDecode(String(hello.nonce || '')));
     if (phase !== 'hello') return;
     phase = 'ready';
     socket?.send(JSON.stringify({
@@ -151,8 +151,8 @@ export function createGatewayChannel(
         fail('This computer has no gateway address configured.', true);
         return;
       }
-      if (!relay.token) {
-        fail('Gateway connections require a relay key.', true);
+      if (!canRendezvous(relay)) {
+        fail('Gateway connections require a relay key or an invitation for this computer.', true);
         return;
       }
       phase = 'hello';

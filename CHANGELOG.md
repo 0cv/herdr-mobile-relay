@@ -3,6 +3,23 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.5] - 2026-09-03
+
+### Added
+
+- Invite devices from a phone paired through a gateway. The invitation link
+  carries the gateway list with the computer's relay id and rendezvous key,
+  both derived one-way from the relay key, so the invited device can reach the
+  computer without holding anything it could bootstrap-pair with. **Invite
+  Device** was greyed out on every gateway relay before.
+
+### Fixed
+
+- Version the phone app's script and stylesheet by content hash instead of a
+  manually bumped counter. 0.20.3 and 0.20.4 shipped a changed bundle under the
+  same counter, so a separately hosted app kept serving the cached 0.20.2 bundle
+  for hours after each update and the phone reported the old version.
+
 ## [0.20.4] - 2026-09-03
 
 ### Fixed
@@ -1330,6 +1347,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.20.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.4...v0.20.5
 [0.20.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.3...v0.20.4
 [0.20.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.2...v0.20.3
 [0.20.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.1...v0.20.2

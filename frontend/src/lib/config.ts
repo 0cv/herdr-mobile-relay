@@ -1,3 +1,4 @@
+import { canRendezvous, RELAY_ID_LENGTH } from './gateway-credentials';
 import type { RelayConfig } from './types';
 
 export const RELAYS_KEY = 'herdr_relays';
@@ -97,16 +98,17 @@ export function relayLabelFromUrl(url: string): string {
   }
 }
 
-export function makeRelayId(label: string, url: string, gatewayUrl = ''): string {
+export function makeRelayId(label: string, url: string, gatewayUrl = '', gatewayRelayId = ''): string {
   // A hybrid relay has no URL of its own, so its identity is the gateway it
-  // answers on plus the label from its setup link.
+  // answers on plus the label from its setup link. An invited entry also has
+  // the computer's rendezvous id, which keeps two same-named computers apart.
   const target = url || gatewayUrl;
-  return `${label || relayLabelFromUrl(target)}-${target}`
+  return `${label || relayLabelFromUrl(target)}-${target}${gatewayRelayId ? `-${gatewayRelayId}` : ''}`
     .toLowerCase()
     .replace(/^wss?:\/\//, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 48) || 'relay';
+    .slice(0, 72) || 'relay';
 }
 
 /**
@@ -159,8 +161,9 @@ export function normalizeRelayConfig(relay: Partial<RelayConfig>): RelayConfig {
   const gateways = gatewayOrigins([String(relay.gatewayUrl || ''), ...listed], 'http:');
   const gatewayUrl = gateways[0] || '';
   const label = String(relay.label || relayLabelFromUrl(url || gatewayUrl)).trim();
+  const rendezvous = isRelayId(relay.gatewayRelayId) && isRendezvousKey(relay.rendezvousKey);
   const config: RelayConfig = {
-    id: relay.id || makeRelayId(label, url, gatewayUrl),
+    id: relay.id || makeRelayId(label, url, gatewayUrl, rendezvous ? relay.gatewayRelayId : ''),
     label,
     url,
     token: relay.token || '',
@@ -173,7 +176,19 @@ export function normalizeRelayConfig(relay: Partial<RelayConfig>): RelayConfig {
   config.transport = 'hybrid';
   config.gatewayUrl = gatewayUrl;
   if (gateways.length) config.gatewayUrls = gateways;
+  if (rendezvous) {
+    config.gatewayRelayId = relay.gatewayRelayId;
+    config.rendezvousKey = relay.rendezvousKey;
+  }
   return config;
+}
+
+function isRelayId(value: unknown): value is string {
+  return typeof value === 'string' && value.length === RELAY_ID_LENGTH && /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+function isRendezvousKey(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
 
 export function loadRelayConfigs(storage: Storage = localStorage): RelayConfig[] {
@@ -213,6 +228,16 @@ export interface QuickSetupInvitation {
   expiresAt: number;
 }
 
+/**
+ * An invitation must tell the invited device where the computer is: its
+ * direct relay URL, or the gateway rendezvous this device can derive from the
+ * relay key or received in its own invitation.
+ */
+export function canInviteFrom(relay: RelayConfig): boolean {
+  if (relay.url) return true;
+  return relay.transport === 'hybrid' && canRendezvous(relay);
+}
+
 export function quickSetupInvitation(locationValue: Pick<Location, 'hash'>): QuickSetupInvitation | null {
   const params = new URLSearchParams(String(locationValue.hash || '').replace(/^#/, ''));
   const id = params.get('invite') || '';
@@ -248,7 +273,16 @@ export function quickSetupConfig(locationValue: Pick<Location, 'hash' | 'protoco
     // The separator stays literal; each entry is percent-encoded on its own.
     const gatewayUrls = gatewayOrigins(configuredGateways.split(','), locationValue.protocol);
     if (!gatewayUrls.length) return null;
-    return { label, url: '', token: invitation ? '' : token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls };
+    const config: Omit<RelayConfig, 'id'> = {
+      label, url: '', token: invitation ? '' : token, transport: 'hybrid', gatewayUrl: gatewayUrls[0], gatewayUrls,
+    };
+    if (!invitation) return config;
+    // An invited device holds no relay key, so the link must carry what the
+    // gateway challenge needs; without it the entry could never connect.
+    const gatewayRelayId = params.get('relay_id');
+    const rendezvousKey = params.get('rendezvous');
+    if (!isRelayId(gatewayRelayId) || !isRendezvousKey(rendezvousKey)) return null;
+    return { ...config, gatewayRelayId, rendezvousKey };
   }
   const configuredRelay = params.get('relay');
   let url = `${locationValue.protocol === 'https:' ? 'wss:' : 'ws:'}//${locationValue.host}`;
@@ -291,14 +325,23 @@ export function importQuickSetup(
   const setup = quickSetupConfig(locationValue);
   if (!setup) return null;
   const invitation = quickSetupInvitation(locationValue);
-  // A shared gateway hosts many computers, so a hybrid entry is matched on the
-  // credential or the label rather than on the gateway address alone. Any
-  // shared entry counts: a relay that gained a gateway or reordered its list
-  // updates its entry instead of pairing itself a second time.
+  // A shared gateway hosts many computers. A link that names the computer's
+  // rendezvous id is matched on it; a keyed entry made from a setup link has
+  // no id to compare, so its label decides. Any shared entry counts: a relay
+  // that gained a gateway or reordered its list updates its entry instead of
+  // pairing itself a second time.
+  const sameComputer = (relay: RelayConfig): boolean => {
+    if (setup.gatewayRelayId) {
+      return relay.gatewayRelayId
+        ? relay.gatewayRelayId === setup.gatewayRelayId
+        : Boolean(relay.token) && relay.label === setup.label;
+    }
+    return relay.token === setup.token || relay.label === setup.label;
+  };
   const existing = setup.transport === 'hybrid'
     ? relays.find((relay) => relay.transport === 'hybrid'
       && (relay.gatewayUrls ?? [relay.gatewayUrl ?? '']).some((entry) => setup.gatewayUrls?.includes(entry))
-      && (relay.token === setup.token || relay.label === setup.label))
+      && sameComputer(relay))
     // A quick tunnel mints a new hostname on every relay restart, but the
     // relay's key persists. The same key is the same relay, so the stored
     // entry - and the device credential enrolled under its id - follows the
@@ -314,6 +357,8 @@ export function importQuickSetup(
     transport: invitation && existing ? existing.transport : setup.transport,
     gatewayUrl: invitation && existing ? existing.gatewayUrl : setup.gatewayUrl,
     gatewayUrls: invitation && existing ? existing.gatewayUrls : setup.gatewayUrls,
+    gatewayRelayId: setup.gatewayRelayId ?? existing?.gatewayRelayId,
+    rendezvousKey: setup.rendezvousKey ?? existing?.rendezvousKey,
     // An invitation link is an encrypted pairing, and the entry it creates
     // carries no relay key. Recording that here is the only way to tell such a
     // relay apart from a tokenless one once its credential is gone.

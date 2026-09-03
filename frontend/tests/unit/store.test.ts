@@ -2547,3 +2547,65 @@ describe('relay command store', () => {
     expect(error?.message).toBe('This relay does not support phone-managed speech voices yet');
   });
 });
+
+describe('device invitation links', () => {
+  const invitation = {
+    invitation_id: 'C'.repeat(24), version: 1, secret: 'S'.repeat(43), expires_at: '2033-01-01T00:00:00Z',
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+  });
+
+  afterEach(() => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    vi.restoreAllMocks();
+  });
+
+  it('carries the derived gateway rendezvous, never the relay key', async () => {
+    relayStore.relayConfigs.set([{
+      id: 'gw-fedora', label: 'Fedora', url: '', token: '0123456789abcdef0123456789abcdef',
+      transport: 'hybrid', gatewayUrl: 'wss://a.example', gatewayUrls: ['wss://a.example', 'wss://b.example'],
+    }]);
+    const send = vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({
+      ok: true, phase: 'confirmed', data: { invitation },
+    } as never);
+    const link = await relayStore.createDeviceInvitation({ relayId: 'gw-fedora', name: 'Tablet', role: 'reader' });
+    expect(send).toHaveBeenCalledWith('gw-fedora', { type: 'create_device_invitation', name: 'Tablet', role: 'reader' });
+    const params = new URLSearchParams(new URL(link).hash.slice(1));
+    expect(params.get('gateways')).toBe('wss://a.example,wss://b.example');
+    // The Go vector for this relay key: routable id plus the challenge key.
+    expect(params.get('relay_id')).toBe('Ccy3nT9AULlAceTEnhTvoQ');
+    expect(params.get('rendezvous')).toBe('xvT5VptkJHebIfy8b9PSGTJMkdRb-J_P2SXrtNRoLyA');
+    expect(params.get('setup')).toBe('S'.repeat(43));
+    expect(params.has('relay')).toBe(false);
+    expect(link).not.toContain('0123456789abcdef0123456789abcdef');
+  });
+
+  it('lets an invited controller invite further devices from its own rendezvous', async () => {
+    relayStore.relayConfigs.set([{
+      id: 'gw-fedora', label: 'Fedora', url: '', token: '', paired: true,
+      transport: 'hybrid', gatewayUrl: 'wss://a.example', gatewayUrls: ['wss://a.example'],
+      gatewayRelayId: 'Ccy3nT9AULlAceTEnhTvoQ', rendezvousKey: 'xvT5VptkJHebIfy8b9PSGTJMkdRb-J_P2SXrtNRoLyA',
+    }]);
+    vi.spyOn(relayStore, 'sendCommand').mockResolvedValue({ ok: true, phase: 'confirmed', data: { invitation } } as never);
+    const link = await relayStore.createDeviceInvitation({ relayId: 'gw-fedora', name: 'Tablet', role: 'reader' });
+    const params = new URLSearchParams(new URL(link).hash.slice(1));
+    expect(params.get('relay_id')).toBe('Ccy3nT9AULlAceTEnhTvoQ');
+    expect(params.get('rendezvous')).toBe('xvT5VptkJHebIfy8b9PSGTJMkdRb-J_P2SXrtNRoLyA');
+  });
+
+  it('refuses before minting when the computer has no address to carry', async () => {
+    relayStore.relayConfigs.set([{
+      id: 'gw-fedora', label: 'Fedora', url: '', token: '', paired: true,
+      transport: 'hybrid', gatewayUrl: 'wss://a.example', gatewayUrls: ['wss://a.example'],
+    }]);
+    const send = vi.spyOn(relayStore, 'sendCommand');
+    await expect(relayStore.createDeviceInvitation({ relayId: 'gw-fedora', name: 'Tablet', role: 'reader' }))
+      .rejects.toThrow(/no address/);
+    expect(send).not.toHaveBeenCalled();
+  });
+});
