@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { brotliDecompressSync } from 'node:zlib';
@@ -57,11 +58,15 @@ if (styles.length !== 1 || styles[0] !== 'app.css') {
 }
 
 const html = await readFile(join(root, 'index.html'), 'utf8');
-for (const reference of [`assets/app.js?v=${versions.assets}`, `assets/app.css?v=${versions.assets}`]) {
+// The reference must name the hash of the file actually shipped: that is what
+// makes a changed bundle a new URL on every phone, with no counter to forget.
+for (const asset of ['assets/app.js', 'assets/app.css']) {
+  const digest = createHash('sha256').update(await readFile(join(root, asset))).digest('hex').slice(0, 16);
+  const reference = `${asset}?v=${digest}`;
   if (!html.includes(reference)) throw new Error(`index.html is missing ${reference}`);
 }
 if (/assets\/app\.(?:js|css)(?!\?v=)/.test(html)) {
-  throw new Error('Application asset references must carry the manual cache-busting version');
+  throw new Error('Application asset references must carry the content hash');
 }
 
 const appVersion = JSON.parse(await readFile(join(root, 'version.json'), 'utf8'));

@@ -234,7 +234,7 @@
           variant="secondary"
           size="sm"
           disabled={disabled || !connected || !canInvite}
-          title={canInvite ? 'Invite another device' : 'Configure a direct encrypted WebSocket endpoint to create invitation links'}
+          title={canInvite ? 'Invite another device' : 'This computer has no address an invitation could carry'}
           onclick={beginInvite}
         >
           Invite Device

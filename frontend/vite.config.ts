@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
@@ -53,7 +54,8 @@ function stableReleaseAssets(): Plugin {
       if (!appJavascript || appJavascript.type !== 'chunk') {
         this.error('Vite did not emit assets/app.js as a JavaScript chunk');
       }
-      if (stylesheets.length !== 1 || stylesheets[0]?.fileName !== 'assets/app.css') {
+      const appStylesheet = stylesheets[0];
+      if (stylesheets.length !== 1 || appStylesheet?.fileName !== 'assets/app.css' || appStylesheet.type !== 'asset') {
         this.error(`Expected only assets/app.css; found ${stylesheets.map((item) => item.fileName).join(', ')}`);
       }
 
@@ -65,18 +67,27 @@ function stableReleaseAssets(): Plugin {
       if (!html || html.type !== 'asset' || typeof html.source !== 'string') {
         this.error('Vite did not emit index.html');
       }
+      // The query is the content hash, so a changed bundle is a new URL on
+      // every phone regardless of whether a release remembered to bump the
+      // asset counter; the counter only orders same-version deploys.
+      const scriptVersion = assetContentVersion(appJavascript.code);
+      const styleVersion = assetContentVersion(appStylesheet.source);
       const versioned = html.source
-        .replace(/(assets\/app\.js)(?!\?v=)/g, `$1?v=${versions.assets}`)
-        .replace(/(assets\/app\.css)(?!\?v=)/g, `$1?v=${versions.assets}`);
-      if (!versioned.includes(`assets/app.js?v=${versions.assets}`)) {
+        .replace(/(assets\/app\.js)(?!\?v=)/g, `$1?v=${scriptVersion}`)
+        .replace(/(assets\/app\.css)(?!\?v=)/g, `$1?v=${styleVersion}`);
+      if (!versioned.includes(`assets/app.js?v=${scriptVersion}`)) {
         this.error('Generated index.html does not reference the versioned application script');
       }
-      if (!versioned.includes(`assets/app.css?v=${versions.assets}`)) {
+      if (!versioned.includes(`assets/app.css?v=${styleVersion}`)) {
         this.error('Generated index.html does not reference the versioned application stylesheet');
       }
       html.source = versioned;
     },
   };
+}
+
+export function assetContentVersion(source: string | Uint8Array): string {
+  return createHash('sha256').update(source).digest('hex').slice(0, 16);
 }
 
 // HERDR_DEV_RUNTIME=1 builds the bundle with Svelte's dev runtime, whose

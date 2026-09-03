@@ -1,4 +1,4 @@
-import { base64UrlEncode } from './base64url';
+import { base64UrlDecode, base64UrlEncode } from './base64url';
 
 /**
  * Browser mirror of `internal/gatewaywire`. Both identifiers are derived
@@ -46,14 +46,48 @@ export async function deriveRelayId(token: string): Promise<string> {
   return base64UrlEncode(await deriveBytes(token, RELAY_ID_INFO, RELAY_ID_BYTES));
 }
 
+/** Returns the secret that answers the gateway challenge; the gateway never sees it. */
+export async function deriveRendezvousKey(token: string): Promise<string> {
+  return base64UrlEncode(await deriveBytes(token, RENDEZVOUS_INFO, RENDEZVOUS_KEY_BYTES));
+}
+
+export interface GatewayRendezvous {
+  relayId: string;
+  rendezvousKey: string;
+}
+
+/** Whether this entry can answer a gateway challenge at all. */
+export function canRendezvous(relay: { token: string; gatewayRelayId?: string; rendezvousKey?: string }): boolean {
+  return Boolean(relay.token) || Boolean(relay.gatewayRelayId && relay.rendezvousKey);
+}
+
+/**
+ * What a device needs to reach a computer through its gateway. A device that
+ * holds the relay key derives both values; a device paired through an
+ * invitation received them in the link and holds nothing it could bootstrap
+ * with.
+ */
+export async function gatewayRendezvous(
+  relay: { token: string; gatewayRelayId?: string; rendezvousKey?: string },
+): Promise<GatewayRendezvous> {
+  if (relay.token) {
+    return { relayId: await deriveRelayId(relay.token), rendezvousKey: await deriveRendezvousKey(relay.token) };
+  }
+  if (relay.gatewayRelayId && relay.rendezvousKey) {
+    return { relayId: relay.gatewayRelayId, rendezvousKey: relay.rendezvousKey };
+  }
+  throw new Error('Gateway connections require a relay key or an invitation for this computer.');
+}
+
 /**
  * Answers a gateway challenge. The relay id is bound into the tag so a proof
  * captured for one relay cannot be replayed against another. Only the relay
  * can verify the result; the gateway forwards it untouched.
  */
-export async function connectProof(token: string, relayId: string, nonce: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
+export async function connectProof(rendezvousKey: string, relayId: string, nonce: Uint8Array): Promise<Uint8Array<ArrayBuffer>> {
   if (nonce.length !== GATEWAY_NONCE_BYTES) throw new Error('Gateway sent an invalid challenge.');
-  const keyBytes = await deriveBytes(token, RENDEZVOUS_INFO, RENDEZVOUS_KEY_BYTES);
+  const keyBytes = base64UrlDecode(rendezvousKey);
+  if (keyBytes.byteLength !== RENDEZVOUS_KEY_BYTES) throw new Error('The stored gateway rendezvous key is invalid.');
   const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const relayIdBytes = encoder.encode(relayId);
   const message = new Uint8Array(new ArrayBuffer(CONNECT_PROOF_TAG.length + relayIdBytes.length + nonce.length));

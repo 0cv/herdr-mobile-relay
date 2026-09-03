@@ -8,6 +8,7 @@ import {
   type UploadFinishResult,
 } from './attachments';
 import {
+  canInviteFrom,
   importQuickSetup,
   loadRelayConfigs,
   MAX_PANE_SIZE_COLUMNS,
@@ -22,6 +23,7 @@ import {
   shouldDeferPairingConnection,
   shouldRetainSetupFragment,
 } from './config';
+import { gatewayRendezvous } from './gateway-credentials';
 import {
   BrowserDeviceCredentialStore,
   commitDeviceEnrollment,
@@ -1680,9 +1682,12 @@ class RelayStore {
   async createDeviceInvitation(intent: CreateInvitationIntent): Promise<string> {
     const relay = get(this.relayConfigs).find((entry) => entry.id === intent.relayId);
     if (!relay) throw new CommandError('Relay configuration is unavailable');
-    if (!relay.url) {
-      throw new CommandError('Device invitation links require a direct encrypted WebSocket endpoint');
+    if (!canInviteFrom(relay)) {
+      throw new CommandError('This computer has no address an invitation could carry');
     }
+    // Resolved before the relay mints anything, so a failure here leaves no
+    // orphaned one-use invitation behind.
+    const rendezvous = relay.url ? null : await gatewayRendezvous(relay);
     const result = await this.sendCommand(intent.relayId, {
       type: 'create_device_invitation',
       name: intent.name,
@@ -1706,8 +1711,16 @@ class RelayStore {
       invite_version: String(version),
       invite_expires: String(expiresAt),
       label: relay.label,
-      relay: relay.url,
     });
+    if (rendezvous) {
+      // The invited device reaches this computer through its gateways with
+      // the derived rendezvous, never with the relay key itself.
+      params.set('gateways', (relay.gatewayUrls ?? [relay.gatewayUrl ?? '']).join(','));
+      params.set('relay_id', rendezvous.relayId);
+      params.set('rendezvous', rendezvous.rendezvousKey);
+    } else {
+      params.set('relay', relay.url);
+    }
     const link = new URL(location.href);
     link.hash = params.toString();
     return link.toString();

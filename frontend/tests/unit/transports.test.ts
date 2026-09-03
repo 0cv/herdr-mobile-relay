@@ -12,7 +12,14 @@ import {
   quickSetupConfig,
   saveRelayConfigs,
 } from '$lib/config';
-import { connectProof, deriveRelayId, RELAY_ID_LENGTH } from '$lib/gateway-credentials';
+import {
+  canRendezvous,
+  connectProof,
+  deriveRelayId,
+  deriveRendezvousKey,
+  gatewayRendezvous,
+  RELAY_ID_LENGTH,
+} from '$lib/gateway-credentials';
 import {
   chunk,
   decodeWireFrame,
@@ -67,6 +74,7 @@ import type { RelayConfig } from '$lib/types';
  */
 const VECTOR_TOKEN = '0123456789abcdef0123456789abcdef';
 const VECTOR_RELAY_ID = 'Ccy3nT9AULlAceTEnhTvoQ';
+const VECTOR_RENDEZVOUS_KEY = 'xvT5VptkJHebIfy8b9PSGTJMkdRb-J_P2SXrtNRoLyA';
 const VECTOR_NONCE = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8';
 const VECTOR_PROOF = 'Hwp4L_KZVzHeZz5Sgm-gqvpRee6Io4M-jqaIJqm8zpc';
 
@@ -119,21 +127,33 @@ function channelRecorder(): ChannelRecorder {
 }
 
 describe('gateway credentials', () => {
-  it('matches the Go relay id and connect proof vector', async () => {
+  it('matches the Go relay id, rendezvous key and connect proof vector', async () => {
     const relayId = await deriveRelayId(VECTOR_TOKEN);
     expect(relayId).toBe(VECTOR_RELAY_ID);
     expect(relayId).toHaveLength(RELAY_ID_LENGTH);
+    expect(await deriveRendezvousKey(VECTOR_TOKEN)).toBe(VECTOR_RENDEZVOUS_KEY);
 
-    const proof = await connectProof(VECTOR_TOKEN, relayId, base64UrlDecode(VECTOR_NONCE));
+    const proof = await connectProof(VECTOR_RENDEZVOUS_KEY, relayId, base64UrlDecode(VECTOR_NONCE));
     expect(base64UrlEncode(proof)).toBe(VECTOR_PROOF);
     expect(proof).toHaveLength(32);
   });
 
   it('binds the proof to the relay id and rejects malformed challenges', async () => {
-    const other = await connectProof(VECTOR_TOKEN, 'Ccy3nT9AULlAceTEnhTvoR', base64UrlDecode(VECTOR_NONCE));
+    const other = await connectProof(VECTOR_RENDEZVOUS_KEY, 'Ccy3nT9AULlAceTEnhTvoR', base64UrlDecode(VECTOR_NONCE));
     expect(base64UrlEncode(other)).not.toBe(VECTOR_PROOF);
-    await expect(connectProof(VECTOR_TOKEN, VECTOR_RELAY_ID, new Uint8Array(8))).rejects.toThrow(/challenge/);
+    await expect(connectProof(VECTOR_RENDEZVOUS_KEY, VECTOR_RELAY_ID, new Uint8Array(8))).rejects.toThrow(/challenge/);
+    await expect(connectProof('AAAA', VECTOR_RELAY_ID, base64UrlDecode(VECTOR_NONCE))).rejects.toThrow(/rendezvous key/);
     await expect(deriveRelayId('')).rejects.toThrow(/relay key/);
+  });
+
+  it('answers from the relay key or from an invitation, never from nothing', async () => {
+    // An invited device holds no relay key; the link gave it the rendezvous.
+    const invited = { token: '', gatewayRelayId: VECTOR_RELAY_ID, rendezvousKey: VECTOR_RENDEZVOUS_KEY };
+    expect(canRendezvous(invited)).toBe(true);
+    expect(await gatewayRendezvous(invited)).toEqual({ relayId: VECTOR_RELAY_ID, rendezvousKey: VECTOR_RENDEZVOUS_KEY });
+    expect(await gatewayRendezvous({ token: VECTOR_TOKEN })).toEqual({ relayId: VECTOR_RELAY_ID, rendezvousKey: VECTOR_RENDEZVOUS_KEY });
+    expect(canRendezvous({ token: '', gatewayRelayId: VECTOR_RELAY_ID })).toBe(false);
+    await expect(gatewayRendezvous({ token: '' })).rejects.toThrow(/relay key or an invitation/);
   });
 });
 
@@ -145,6 +165,26 @@ describe('gateway frame channel', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('connects an invited device from its stored rendezvous', async () => {
+    const recorder = channelRecorder();
+    const channel = createGatewayChannel({
+      ...HYBRID_RELAY, token: '', paired: true, gatewayRelayId: VECTOR_RELAY_ID, rendezvousKey: VECTOR_RENDEZVOUS_KEY,
+    }, recorder);
+    channel.open();
+    const socket = MockGatewaySocket.instances[0];
+    socket.text({ type: 'gateway_hello', proto: 1, nonce: VECTOR_NONCE });
+    await vi.waitFor(() => expect(socket.sent).toHaveLength(1));
+    expect(JSON.parse(String(socket.sent[0]))).toMatchObject({ relay_id: VECTOR_RELAY_ID, proof: VECTOR_PROOF });
+    expect(recorder.closes).toHaveLength(0);
+  });
+
+  it('refuses to dial without a relay key or rendezvous', () => {
+    const recorder = channelRecorder();
+    createGatewayChannel({ ...HYBRID_RELAY, token: '', paired: true }, recorder).open();
+    expect(MockGatewaySocket.instances).toHaveLength(0);
+    expect(recorder.closes[0]).toMatchObject({ fatal: true, reason: expect.stringMatching(/relay key or an invitation/) });
   });
 
   it('answers the challenge, opens on ready, and chunks frames both ways', async () => {

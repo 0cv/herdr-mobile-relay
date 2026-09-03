@@ -8,6 +8,7 @@
   import Card from '$components/ui/Card.svelte';
   import {
     APP_VERSION,
+    canInviteFrom,
     HOME_LAYOUTS,
     HOME_LAYOUT_LABELS,
     INTERFACE_SIZES,
@@ -669,7 +670,7 @@
         currentDeviceId={credential.deviceId}
         connected={connection?.status === 'connected'}
         canAdminister={credential.role === 'controller'}
-        canInvite={Boolean(relay.url)}
+        canInvite={canInviteFrom(relay)}
         onRename={(intent) => relayStore.renameDevice(intent)}
         onInvite={(intent) => relayStore.createDeviceInvitation(intent)}
         onRevoke={(intent) => relayStore.revokeDevice(intent)}

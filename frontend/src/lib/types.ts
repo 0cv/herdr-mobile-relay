@@ -98,6 +98,14 @@ export interface RelayConfig {
    */
   gatewayUrls?: string[];
   /**
+   * Gateway rendezvous for an entry that holds no relay key. Both values are
+   * derived one-way from the relay key by the controller that issued the
+   * invitation, so the invited device can reach the computer through its
+   * gateway without being able to bootstrap-pair with it.
+   */
+  gatewayRelayId?: string;
+  rendezvousKey?: string;
+  /**
    * This computer was entered through an encrypted pairing: a device invitation
    * link, or a credential enrolled against it. An invitation-paired entry keeps
    * no relay key, so without this flag a removed credential is indistinguishable
