@@ -38,7 +38,7 @@
   // race and the link's workspace and directory are silently dropped.
   let requestedRelayPending = untrack(() => Boolean(requestedRelayId));
   let directoryLoadGeneration = 0;
-  let directoryRelayId = '';
+  let directoryRelayId = $state('');
   let directoryBrowser: HTMLDivElement;
 
   const connectedRelays = $derived($relays.filter((relay) => {
@@ -90,6 +90,7 @@
     try {
       const listing = await relayStore.listDirectories(loadRelayId, path);
       if (generation !== directoryLoadGeneration || relayId !== loadRelayId) return;
+      directoryOpen = false;
       cwd = listing.current.path;
       directoryRelayId = loadRelayId;
       name = suggestedLaunchName(cwd, profileId);
@@ -108,7 +109,7 @@
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
-    if (!relayId || readOnly || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
+    if (!relayId || readOnly || connection?.directoryLoading || directoryRelayId !== relayId || !profileId || !cwd || !name) return;
     submitting = true;
     error = false;
     status = 'Starting agent…';
@@ -223,7 +224,7 @@
       <label for="launch-prompt">Initial task <span class="optional">(optional)</span></label>
       <textarea id="launch-prompt" bind:value={prompt} maxlength="100000" placeholder="Describe the task to start…"></textarea>
       <p class="hint">Sent to the agent as its first prompt after it starts.</p>
-      <Button type="submit" disabled={submitting || readOnly || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
+      <Button type="submit" disabled={submitting || readOnly || connection?.directoryLoading || directoryRelayId !== relayId || !relayId || !profileId || !cwd || !name}>Start Agent</Button>
       {#if status}<p class:error class="form-status" role="status">{status}</p>{/if}
     </form>
   </Card>

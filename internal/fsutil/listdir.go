@@ -65,7 +65,7 @@ func ListDirectories(path, home string) DirListing {
 		return DirListing{}
 	}
 
-	var result DirListing
+	result := DirListing{Directories: []DirEntry{}}
 	result.Current.Path = path
 	result.Current.Label = displayPath(path, home)
 

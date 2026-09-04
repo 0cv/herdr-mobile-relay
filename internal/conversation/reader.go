@@ -31,7 +31,10 @@ const (
 	maxOMOCacheEntries      = 8
 )
 
-var canonicalSessionID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+var (
+	canonicalSessionID           = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	claudeProjectNonAlphanumeric = regexp.MustCompile(`[^A-Za-z0-9]`)
+)
 
 type ToolActivity struct {
 	ID        string `json:"id,omitempty"`
@@ -245,12 +248,12 @@ func (r *Reader) locate(agent, cwd, sessionID string) Location {
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSession(r.claudeRoots(), cwd, sessionID+".jsonl")
+		return findProjectSession(r.claudeRoots(), cwd, sessionID+".jsonl", claudeProjectNonAlphanumeric.ReplaceAllString(cwd, "-"))
 	case "qoder", "qodercli":
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSession(r.qoderRoots(), cwd, sessionID+".jsonl")
+		return findProjectSession(r.qoderRoots(), cwd, sessionID+".jsonl", "")
 	case "codex", "openaicodex":
 		if !canonicalSessionID.MatchString(sessionID) {
 			return Location{}
@@ -290,9 +293,9 @@ func isDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
-func findProjectSession(roots []string, cwd, filename string) Location {
+func findProjectSession(roots []string, cwd, filename, preferredProjectName string) Location {
 	for _, root := range roots {
-		for _, projectDir := range projectDirectories(root, cwd) {
+		for _, projectDir := range projectDirectories(root, cwd, preferredProjectName) {
 			if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
 				return Location{Path: path, Root: root}
 			}
@@ -301,7 +304,7 @@ func findProjectSession(roots []string, cwd, filename string) Location {
 	return Location{}
 }
 
-func projectDirectories(root, cwd string) []string {
+func projectDirectories(root, cwd, preferredProjectName string) []string {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -318,18 +321,19 @@ func projectDirectories(root, cwd string) []string {
 	}
 
 	encoded := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
-	exact := map[string]bool{encoded: true, "-" + encoded: true}
-	directories := make([]string, 0, 2)
-	seen := make(map[string]bool, 2)
-	for _, entry := range entries {
-		if !exact[entry.Name()] {
+	candidates := [...]string{preferredProjectName, "-" + encoded, encoded}
+	directories := make([]string, 0, len(candidates))
+	seen := make(map[string]bool, len(candidates))
+	for _, name := range candidates {
+		if name == "" {
 			continue
 		}
-		path := filepath.Join(root, entry.Name())
-		if isDir(path) {
-			directories = append(directories, path)
-			seen[path] = true
+		path := filepath.Join(root, name)
+		if seen[path] || !isDir(path) {
+			continue
 		}
+		directories = append(directories, path)
+		seen[path] = true
 	}
 	for _, entry := range entries {
 		path := filepath.Join(root, entry.Name())

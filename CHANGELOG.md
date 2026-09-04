@@ -3,6 +3,15 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.7] - 2026-09-04
+
+### Fixed
+
+- Browse and launch agents from directories with dots in their names, including
+  empty directories.
+- Resolve Claude Code conversation history for paths with non-alphanumeric
+  characters while keeping similarly named projects distinct.
+
 ## [0.20.6] - 2026-09-03
 
 ### Changed
@@ -1351,6 +1360,7 @@ project follows [Semantic Versioning](https://semver.org/).
   `/permissions` tab highlights follow arrow-key navigation.
 - Submit Qoder prompts and slash commands from **Send** without requiring a
   separate **Enter** action.
+
 - Suppress transient viewport-only snapshots while a resized terminal is still
   reflowing its scrollback.
 - Keep long URLs, hashes, and other unbroken strings within responsive terminal
@@ -1360,6 +1370,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.20.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.5...v0.20.6
 [0.20.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.4...v0.20.5
 [0.20.4]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.3...v0.20.4
 [0.20.3]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.2...v0.20.3

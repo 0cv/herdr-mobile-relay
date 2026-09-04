@@ -5451,6 +5451,55 @@ test('ignores a directory result after switching computers', async ({ page }) =>
   expect((await commandsForSocket(page, 0)).filter((command) => command.type === 'agent_start')).toHaveLength(0);
 });
 
+test('waits for a dotted directory selection before launching', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    agent_profiles: [{ id: 'claude', label: 'Claude Code' }],
+  });
+  await page.getByRole('button', { name: 'Start agent' }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'list_directories').length).toBe(1);
+  const initialDirectory = (await commands(page)).find((command) => command.type === 'list_directories')!;
+  await server(page, 0, {
+    type: 'command_result', request_id: initialDirectory.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/home/cv/Development', label: '~/Development' },
+      parent: '/home/cv',
+      directories: [
+        { name: 'test.com', path: '/home/cv/Development/test.com' },
+        { name: 'testcom', path: '/home/cv/Development/testcom' },
+      ],
+    },
+  });
+
+  await page.getByRole('button', { name: '~/Development' }).click();
+  await page.getByRole('button', { name: /test\.com/ }).click();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'list_directories').length).toBe(2);
+  const dottedDirectory = (await commands(page)).filter((command) => command.type === 'list_directories').at(-1)!;
+  expect(dottedDirectory).toMatchObject({ path: '/home/cv/Development/test.com' });
+  const startAgent = page.getByRole('button', { name: 'Start Agent', exact: true });
+  await expect(startAgent).toBeDisabled();
+
+  await server(page, 0, {
+    type: 'command_result', request_id: dottedDirectory.request_id, ok: true, phase: 'completed',
+    data: {
+      current: { path: '/home/cv/Development/test.com', label: '~/Development/test.com' },
+      parent: '/home/cv/Development',
+      directories: [],
+    },
+  });
+  await expect(page.getByRole('button', { name: '~/Development/test.com' })).toBeVisible();
+  await expect(page.getByLabel('Name')).toHaveValue('test-com-claude');
+  await expect(startAgent).toBeEnabled();
+  expect(await page.getByLabel('Name').evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true);
+
+  await startAgent.click();
+  await expect.poll(async () => (await commands(page)).some((command) => command.type === 'agent_start')).toBe(true);
+  expect((await commands(page)).find((command) => command.type === 'agent_start')).toMatchObject({
+    profile_id: 'claude', cwd: '/home/cv/Development/test.com', name: 'test-com-claude',
+  });
+});
+
 test('launches and manages agent lifecycle commands', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
