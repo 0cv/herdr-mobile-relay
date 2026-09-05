@@ -53,6 +53,7 @@ forwards --missing -- speech-voices missing
 forwards --missing --languages en,fr -- speech-voices missing --languages en,fr
 forwards --languages en,fr -- speech-voices install --languages en,fr
 forwards --remove --languages de -- speech-voices remove --languages de
+forwards --reinstall-runtime -- speech-voices reinstall-runtime
 
 # The binary decides the outcome, so its exit status has to survive the wrapper.
 rm -f "$ARGV_FILE"

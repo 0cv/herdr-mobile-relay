@@ -3,6 +3,17 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.8] - 2026-09-05
+
+### Fixed
+
+- Preserve Piper's relative shared-library symlinks during runtime extraction,
+  reject archive traversal, and verify a staged engine starts before publishing
+  it.
+- **Affected cached installations:** run
+  `relay/speech-voices.sh --reinstall-runtime`. It replaces only the cached
+  runtime and preserves every downloaded voice.
+
 ## [0.20.7] - 2026-09-04
 
 ### Fixed

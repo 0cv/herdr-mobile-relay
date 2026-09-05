@@ -59,6 +59,10 @@ or with `relay/speech-voices.sh --languages fr`. Stock Apple Silicon uses
 macOS `say`; Settings does not offer neural voice downloads unless Piper is
 already installed.
 
+If a relay was updated after a failed Piper runtime extraction, reinstall only
+the cached engine with `relay/speech-voices.sh --reinstall-runtime`. The
+downloaded voices remain in place.
+
 ## Skip Cloudflare
 
 Choose **Community WebRTC Gateway** in the setup menu. It checks the project's

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -61,6 +62,74 @@ var runtimeAssets = map[string]struct{ name, digest string }{
 }
 
 var installMu sync.Mutex
+
+const runtimeStartTimeout = 5 * time.Second
+
+type runtimeProbe struct {
+	size    int64
+	modTime int64
+	mode    os.FileMode
+	healthy bool
+}
+
+var runtimeProbeState struct {
+	sync.Mutex
+	entries map[string]runtimeProbe
+}
+
+func runtimeReady(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	stamp := runtimeProbe{
+		size:    info.Size(),
+		modTime: info.ModTime().UnixNano(),
+		mode:    info.Mode(),
+	}
+	runtimeProbeState.Lock()
+	if previous, ok := runtimeProbeState.entries[path]; ok &&
+		previous.size == stamp.size &&
+		previous.modTime == stamp.modTime &&
+		previous.mode == stamp.mode {
+		healthy := previous.healthy
+		runtimeProbeState.Unlock()
+		return healthy
+	}
+	runtimeProbeState.Unlock()
+
+	healthy := startRuntime(context.Background(), path) == nil
+	stamp.healthy = healthy
+	runtimeProbeState.Lock()
+	if runtimeProbeState.entries == nil {
+		runtimeProbeState.entries = make(map[string]runtimeProbe)
+	}
+	runtimeProbeState.entries[path] = stamp
+	runtimeProbeState.Unlock()
+	return healthy
+}
+
+func forgetRuntimeProbe(path string) {
+	runtimeProbeState.Lock()
+	delete(runtimeProbeState.entries, path)
+	runtimeProbeState.Unlock()
+}
+
+func startRuntime(ctx context.Context, binary string) error {
+	startupContext, cancel := context.WithTimeout(ctx, runtimeStartTimeout)
+	defer cancel()
+	output, err := exec.CommandContext(startupContext, binary, "--help").CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if errors.Is(startupContext.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("speech engine did not start within %s", runtimeStartTimeout)
+	}
+	if detail := strings.TrimSpace(string(output)); detail != "" {
+		return fmt.Errorf("speech engine failed to start: %s: %w", detail, err)
+	}
+	return fmt.Errorf("speech engine failed to start: %w", err)
+}
 
 // VoiceStatus is what one language looks like on this computer.
 type VoiceStatus struct {
@@ -140,10 +209,17 @@ func Status() Catalog {
 
 func piperInstalled(candidates []engine) bool {
 	for _, candidate := range candidates {
-		if candidate.binary == "piper" {
-			_, found := lookup(candidate)
-			return found
+		if candidate.binary != "piper" {
+			continue
 		}
+		path, found := lookup(candidate)
+		if !found {
+			return false
+		}
+		if filepath.Clean(path) == filepath.Clean(runtimeBinary()) {
+			return runtimeReady(path)
+		}
+		return true
 	}
 	return false
 }
@@ -220,6 +296,9 @@ func installRuntime(ctx context.Context) error {
 	if err := extractTarGz(archive, work); err != nil {
 		return err
 	}
+	if err := startRuntime(ctx, filepath.Join(work, "piper", "piper")); err != nil {
+		return fmt.Errorf("validate the speech engine: %w", err)
+	}
 	replaced := filepath.Join(engineDir, "piper.replaced")
 	os.RemoveAll(replaced)
 	current := filepath.Join(engineDir, "piper")
@@ -231,12 +310,34 @@ func installRuntime(ctx context.Context) error {
 	if err := os.Rename(filepath.Join(work, "piper"), current); err != nil {
 		return fmt.Errorf("install the speech engine: %w", err)
 	}
+	forgetRuntimeProbe(current)
 	os.RemoveAll(replaced)
 	return nil
 }
 
-// extractTarGz unpacks the engine archive, which holds one piper directory of
-// regular files and no links.
+func archivePath(name string) (string, error) {
+	name = filepath.Clean(filepath.FromSlash(name))
+	if name == "." || name == ".." || filepath.IsAbs(name) ||
+		strings.HasPrefix(name, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("unsafe path %q", name)
+	}
+	return name, nil
+}
+
+func safeLinkTarget(target string) bool {
+	target = filepath.FromSlash(target)
+	if target == "" || filepath.IsAbs(target) || filepath.VolumeName(target) != "" {
+		return false
+	}
+	for _, component := range strings.Split(filepath.ToSlash(target), "/") {
+		if component == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// extractTarGz unpacks the engine archive beneath destination.
 func extractTarGz(archive, destination string) error {
 	file, err := os.Open(archive)
 	if err != nil {
@@ -248,6 +349,12 @@ func extractTarGz(archive, destination string) error {
 		return fmt.Errorf("read %s: %w", filepath.Base(archive), err)
 	}
 	defer stream.Close()
+	root, err := os.OpenRoot(destination)
+	if err != nil {
+		return fmt.Errorf("open extraction root: %w", err)
+	}
+	defer root.Close()
+
 	reader := tar.NewReader(stream)
 	for {
 		header, err := reader.Next()
@@ -257,31 +364,43 @@ func extractTarGz(archive, destination string) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", filepath.Base(archive), err)
 		}
-		name := filepath.Clean(header.Name)
-		if strings.HasPrefix(name, "..") || filepath.IsAbs(name) {
-			return fmt.Errorf("%s contains an unsafe path: %s", filepath.Base(archive), header.Name)
+		name, err := archivePath(header.Name)
+		if err != nil {
+			return fmt.Errorf("%s contains %w: %s", filepath.Base(archive), err, header.Name)
 		}
-		target := filepath.Join(destination, name)
+		mode := os.FileMode(header.Mode).Perm()
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
+			if err := root.MkdirAll(name, mode); err != nil {
+				return fmt.Errorf("create %s: %w", name, err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+			if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+				return fmt.Errorf("create parent for %s: %w", name, err)
 			}
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(header.Mode).Perm())
+			out, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 			if err != nil {
-				return err
+				return fmt.Errorf("create %s: %w", name, err)
 			}
 			if _, err := io.Copy(out, reader); err != nil {
-				out.Close()
-				return err
+				_ = out.Close()
+				return fmt.Errorf("write %s: %w", name, err)
 			}
 			if err := out.Close(); err != nil {
-				return err
+				return fmt.Errorf("close %s: %w", name, err)
 			}
+		case tar.TypeSymlink:
+			if !safeLinkTarget(header.Linkname) {
+				return fmt.Errorf("%s contains an unsafe link target %q for %s", filepath.Base(archive), header.Linkname, name)
+			}
+			if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+				return fmt.Errorf("create parent for %s: %w", name, err)
+			}
+			if err := root.Symlink(filepath.FromSlash(header.Linkname), name); err != nil {
+				return fmt.Errorf("create link %s: %w", name, err)
+			}
+		default:
+			return fmt.Errorf("%s contains unsupported entry %s: %q", filepath.Base(archive), name, header.Typeflag)
 		}
 	}
 }
@@ -349,7 +468,7 @@ func download(ctx context.Context, url, destination, digest string) error {
 // Makefile use to cache voices from a shell.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("%w: herdr-mobile-relay speech-voices {list|missing|install|remove} [--languages en,fr]", ErrUsage)
+		return fmt.Errorf("%w: herdr-mobile-relay speech-voices {list|missing|install|reinstall-runtime|remove} [--languages en,fr]", ErrUsage)
 	}
 	operation, args := args[0], args[1:]
 	flags := flag.NewFlagSet("speech-voices", flag.ContinueOnError)
@@ -396,6 +515,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		for _, item := range missing(languages) {
 			fmt.Fprintln(stdout, item)
 		}
+		return nil
+	case "reinstall-runtime":
+		fmt.Fprintln(stdout, "Downloading the speech engine...")
+		if err := installRuntime(ctx); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Speech engine reinstalled in %s\n", filepath.Dir(filepath.Dir(runtimeBinary())))
 		return nil
 	case "install":
 		if !Status().ManagementSupported {

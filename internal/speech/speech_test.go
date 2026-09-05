@@ -54,7 +54,8 @@ func fakeEngine(t *testing.T, binDir, name, flag string, wav []byte) {
 	if err := os.WriteFile(source, wav, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeExecutable(t, binDir, name, `echo "$@" > `+binDir+`/`+name+`-args
+	writeExecutable(t, binDir, name, `if [ "$1" = "--help" ]; then exit 0; fi
+echo "$@" > `+binDir+`/`+name+`-args
 while [ "$1" != "`+flag+`" ]; do shift; done
 /bin/cat `+source+` > "$2"`)
 }

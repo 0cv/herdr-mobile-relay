@@ -15,9 +15,10 @@ COMMAND="install"
 LANGUAGES=""
 
 usage() {
-    echo "Usage: $0 [--languages en,fr,de,es,zh] [--missing | --remove]"
-    echo "  --missing   List what is not cached yet and exit"
-    echo "  --remove    Delete the cached voices for --languages"
+    echo "Usage: $0 [--languages en,fr,de,es,zh] [--missing | --reinstall-runtime | --remove]"
+    echo "  --missing             List what is not cached yet and exit"
+    echo "  --reinstall-runtime   Replace the cached engine without removing voices"
+    echo "  --remove              Delete the cached voices for --languages"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -29,6 +30,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --missing)
             COMMAND="missing"
+            shift
+            ;;
+        --reinstall-runtime)
+            COMMAND="reinstall-runtime"
             shift
             ;;
         --remove)

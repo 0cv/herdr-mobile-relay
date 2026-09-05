@@ -35,20 +35,23 @@ setup and want to know what every screen and control is for.
 - Optionally request a screen wake lock only while a terminal is visible, or
   read responses aloud in English, French, German, Spanish, or Chinese. The
   relay synthesizes the audio and streams it to the phone encrypted - real
-  media playback that keeps reading with the screen off, and response text
-  never reaches a third-party speech server. On hosts with a published Piper
-  runtime, setup downloads the neural engine and English voice into
+  media playback that keeps reading with the screen off, and response text never
+  reaches a third-party speech server. On hosts with a published Piper runtime,
+  setup downloads the neural engine and English voice into
   `$XDG_CACHE_HOME/herdr-mobile-relay/speech` when `XDG_CACHE_HOME` is set, or
   `~/.cache/herdr-mobile-relay/speech` otherwise. Relay updates never touch the
   cache. Reading aloud switches itself on the first time a relay reports a
-  voice; after that the setting decides. Every other language is downloaded on
-  demand, from Settings on the phone or with
+  voice; after that the setting decides. Every other
+  language is downloaded on demand, from Settings on the phone or with
   `relay/speech-voices.sh --languages fr`, and Settings lists what a relay has
-  cached and removes voices one language at a time. Stock Apple Silicon uses
-  macOS `say` and does not offer neural downloads unless Piper is already
-  installed. Without a neural voice the relay falls back to espeak-ng, espeak,
-  flite, or macOS `say`; a language it cannot speak is reported in Settings
-  instead of failing at the Speak button.
+  cached and removes voices one language at a time. If the runtime was cached
+  before a failed extraction fix, run
+  `relay/speech-voices.sh --reinstall-runtime`; this replaces only the engine
+  and keeps all downloaded voices. Stock Apple Silicon uses macOS `say` and does
+  not offer neural downloads unless Piper is already installed. Without a
+  neural voice the relay falls back to espeak-ng, espeak, flite, or macOS `say`;
+  a language it cannot speak is reported in Settings instead of failing at the
+  Speak button.
 - Detect Codex, Claude Code, OpenCode, Qoder CLI, Pi, Oh My Pi, and Kimi.
 
 | Agents | Native Resize |

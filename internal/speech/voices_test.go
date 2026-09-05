@@ -56,25 +56,37 @@ func digestOf(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// publishedRuntime serves an engine archive shaped like the real one: a piper
-// directory holding the executable.
+// publishedRuntime serves an engine archive shaped like the real one, including
+// the relative SONAME links its loader needs.
 func publishedRuntime(t *testing.T) {
+	t.Helper()
+	publishedRuntimeWithEngine(t, []byte("#!/bin/sh\nexit 0\n"))
+}
+
+func publishedRuntimeWithEngine(t *testing.T, engine []byte) {
 	t.Helper()
 	var archive bytes.Buffer
 	compressor := gzip.NewWriter(&archive)
 	writer := tar.NewWriter(compressor)
-	body := []byte("#!/bin/sh\nexit 0\n")
 	for _, entry := range []struct {
 		name string
 		mode int64
 		body []byte
+		link string
 	}{
-		{"piper/", 0o755, nil},
-		{"piper/piper", 0o755, body},
-		{"piper/espeak-ng-data/phontab", 0o644, []byte("data")},
+		{"piper/", 0o755, nil, ""},
+		{"piper/piper", 0o755, engine, ""},
+		{"piper/espeak-ng-data/phontab", 0o644, []byte("data"), ""},
+		{"piper/libonnxruntime.so.1.14.1", 0o644, []byte("library"), ""},
+		{"piper/libonnxruntime.so.1", 0o644, nil, "libonnxruntime.so.1.14.1"},
+		{"piper/libonnxruntime.so", 0o644, nil, "libonnxruntime.so.1"},
 	} {
 		header := &tar.Header{Name: entry.name, Mode: entry.mode, Size: int64(len(entry.body)), Typeflag: tar.TypeReg}
-		if entry.body == nil {
+		if entry.link != "" {
+			header.Typeflag = tar.TypeSymlink
+			header.Linkname = entry.link
+			header.Size = 0
+		} else if entry.body == nil {
 			header.Typeflag = tar.TypeDir
 			header.Size = 0
 		}
@@ -145,6 +157,23 @@ func TestInstallCachesTheEngineAndVoiceOnce(t *testing.T) {
 	if info, err := os.Stat(engine); err != nil || info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("cached engine = %v (%v), want an executable", info, err)
 	}
+	for name, target := range map[string]string{
+		"libonnxruntime.so":   "libonnxruntime.so.1",
+		"libonnxruntime.so.1": "libonnxruntime.so.1.14.1",
+	} {
+		path := filepath.Join(filepath.Dir(engine), name)
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%s = %v (%v), want a symlink", name, info, err)
+		}
+		link, err := os.Readlink(path)
+		if err != nil || link != target {
+			t.Fatalf("%s target = %q (%v), want %q", name, link, err, target)
+		}
+	}
+	if body, err := os.ReadFile(filepath.Join(filepath.Dir(engine), "libonnxruntime.so")); err != nil || string(body) != "library" {
+		t.Fatalf("reading the chained library alias = %q (%v), want library", body, err)
+	}
 	if items := missing([]string{"fr"}); len(items) != 0 {
 		t.Fatalf("missing() after install = %v, want none", items)
 	}
@@ -188,6 +217,147 @@ func TestInstallCachesTheEngineAndVoiceOnce(t *testing.T) {
 	}
 	if err := Remove("fr"); err != nil {
 		t.Fatalf("Remove() on an absent voice error = %v", err)
+	}
+}
+
+type testTarEntry struct {
+	name string
+	mode int64
+	body []byte
+	link string
+}
+
+func writeTestArchive(t *testing.T, entries []testTarEntry) string {
+	t.Helper()
+	var archive bytes.Buffer
+	compressor := gzip.NewWriter(&archive)
+	writer := tar.NewWriter(compressor)
+	for _, entry := range entries {
+		header := &tar.Header{
+			Name:     entry.name,
+			Mode:     entry.mode,
+			Size:     int64(len(entry.body)),
+			Typeflag: tar.TypeReg,
+		}
+		if entry.link != "" {
+			header.Typeflag = tar.TypeSymlink
+			header.Linkname = entry.link
+			header.Size = 0
+		} else if entry.body == nil {
+			header.Typeflag = tar.TypeDir
+			header.Size = 0
+		}
+		if err := writer.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(entry.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "runtime.tar.gz")
+	if err := os.WriteFile(path, archive.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestExtractTarGzRejectsChainedTraversal(t *testing.T) {
+	archive := writeTestArchive(t, []testTarEntry{
+		{name: "piper/", mode: 0o755},
+		{name: "piper/a", mode: 0o755, link: "."},
+		{name: "piper/b", mode: 0o755, link: "a/../.."},
+		{name: "piper/b/escaped", mode: 0o644, body: []byte("outside")},
+	})
+	destination := t.TempDir()
+	outside := filepath.Join(filepath.Dir(destination), "escaped")
+	_ = os.Remove(outside)
+	err := extractTarGz(archive, destination)
+	if err == nil || !strings.Contains(err.Error(), "unsafe link target") {
+		t.Fatalf("extractTarGz() error = %v, want unsafe link target", err)
+	}
+	if _, err := os.Lstat(outside); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("path outside extraction root = %v, want absent", err)
+	}
+}
+
+func TestBrokenCachedRuntimeIsReportedMissing(t *testing.T) {
+	restoreCatalog(t)
+	hermeticEnv(t, t.TempDir())
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	engineDir := filepath.Dir(runtimeBinary())
+	if err := os.MkdirAll(engineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, engineDir, "piper", "exit 1")
+
+	status := Status()
+	if status.EngineInstalled {
+		t.Fatal("Status() reports a broken cached engine as installed")
+	}
+	if got := strings.Join(missing([]string{"en"}), ","); got != "runtime,en" {
+		t.Fatalf("missing() = %q, want runtime,en", got)
+	}
+}
+
+func TestFailedRuntimeValidationKeepsExistingEngine(t *testing.T) {
+	restoreCatalog(t)
+	hermeticEnv(t, t.TempDir())
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	current := runtimeBinary()
+	if err := os.MkdirAll(filepath.Dir(current), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(current, old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	publishedRuntimeWithEngine(t, []byte("#!/bin/sh\nexit 1\n"))
+
+	err := installRuntime(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "validate the speech engine") {
+		t.Fatalf("installRuntime() error = %v, want validation failure", err)
+	}
+	if body, readErr := os.ReadFile(current); readErr != nil || string(body) != string(old) {
+		t.Fatalf("existing engine = %q (%v), want the old engine", body, readErr)
+	}
+}
+
+func TestReinstallRuntimePreservesVoices(t *testing.T) {
+	restoreCatalog(t)
+	hermeticEnv(t, t.TempDir())
+	cache := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	voices := voiceDir()
+	if err := os.MkdirAll(voices, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := installVoice(t, voices, "en_US-lessac-medium.onnx", true)
+	before, err := os.ReadFile(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedRuntime(t)
+
+	var output, errorOutput bytes.Buffer
+	if err := Run(context.Background(), []string{"reinstall-runtime"}, &output, &errorOutput); err != nil {
+		t.Fatalf("reinstall-runtime error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Speech engine reinstalled") {
+		t.Fatalf("reinstall-runtime output = %q", output.String())
+	}
+	if after, err := os.ReadFile(model); err != nil || string(after) != string(before) {
+		t.Fatalf("voice model after reinstall = %q (%v), want unchanged", after, err)
+	}
+	if _, err := os.Stat(runtimeBinary()); err != nil {
+		t.Fatalf("reinstalled runtime = %v", err)
 	}
 }
 

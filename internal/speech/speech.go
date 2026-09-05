@@ -250,6 +250,11 @@ func selectEngine(candidates []engine, language string) (selection, bool) {
 			continue
 		}
 		if path, installed := lookup(candidate); installed {
+			if candidate.binary == "piper" &&
+				filepath.Clean(path) == filepath.Clean(runtimeBinary()) &&
+				!runtimeReady(path) {
+				continue
+			}
 			return selection{engine: candidate, binary: path, voice: voice}, true
 		}
 	}
