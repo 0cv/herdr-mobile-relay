@@ -1529,11 +1529,9 @@ func (s *Server) reconcileProfileOwnership(agents []*coordinator.AgentState) {
 	observations := make([]profiles.Observation, 0, len(agents))
 	for _, agent := range agents {
 		s.resolveAgentSessionName(agent)
-		if agent.SessionID != "" {
-			observations = append(observations, profiles.Observation{
-				PaneID: agent.PaneID, NativeSessionID: agent.SessionID,
-			})
-		}
+		observations = append(observations, profiles.Observation{
+			PaneID: agent.PaneID, NativeSessionID: agent.SessionID,
+		})
 	}
 	if err := s.profiles.Reconcile(observations); err != nil {
 		s.recordSafeError("pane profile association reconciliation failed", err)

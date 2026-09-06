@@ -219,7 +219,12 @@ func TestServerReconcilesPersistedProfileOwnership(t *testing.T) {
 		t.Fatalf("first ownership = %q, %q", agents[0].ProfileID, agents[1].ProfileID)
 	}
 	restarted := newServer()
-	reloaded := []*coordinator.AgentState{{PaneID: "pane-personal", Agent: "copilot", Session: "session-personal"}}
+	reloaded := []*coordinator.AgentState{{PaneID: "pane-personal", Agent: "copilot"}}
+	restarted.reconcileProfileOwnership(reloaded)
+	if reloaded[0].ProfileID != "" {
+		t.Fatalf("temporarily unverifiable ownership = %q", reloaded[0].ProfileID)
+	}
+	reloaded[0].Session = "session-personal"
 	restarted.reconcileProfileOwnership(reloaded)
 	if reloaded[0].ProfileID != "personal" {
 		t.Fatalf("reloaded ownership = %q", reloaded[0].ProfileID)

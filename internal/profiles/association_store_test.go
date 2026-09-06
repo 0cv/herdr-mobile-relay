@@ -83,6 +83,95 @@ func TestAssociationRequiresExactNativeSessionAndConfiguredProfile(t *testing.T)
 	}
 }
 
+func TestPresentUnverifiedPanesPreserveAndRevalidateDurableAssociations(t *testing.T) {
+	configHome, stateDir := configuredCustomProfiles(t)
+	initial := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	initial.Remember("pane-personal", "personal")
+	initial.Remember("pane-emu", "emu")
+	exact := []Observation{
+		{PaneID: "pane-personal", NativeSessionID: "session-personal"},
+		{PaneID: "pane-emu", NativeSessionID: "session-emu"},
+	}
+	if err := initial.Reconcile(exact); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	unverified := []Observation{{PaneID: "pane-personal"}, {PaneID: "pane-emu"}}
+	if err := restarted.Reconcile(unverified); err != nil {
+		t.Fatalf("present panes with temporarily empty native IDs: %v", err)
+	}
+	for _, paneID := range []string{"pane-personal", "pane-emu"} {
+		if got := restarted.ResolvePane(paneID, "copilot"); got != "" {
+			t.Fatalf("unverified %s resolved to %q", paneID, got)
+		}
+	}
+	stored := readAssociationStore(t, stateDir)
+	if len(stored.Associations) != 2 {
+		t.Fatalf("unverified live panes erased durable associations: %+v", stored.Associations)
+	}
+
+	if err := restarted.Reconcile(exact); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.ResolvePane("pane-personal", "copilot"); got != "personal" {
+		t.Fatalf("personal association did not revalidate: %q", got)
+	}
+	if got := restarted.ResolvePane("pane-emu", "copilot"); got != "emu" {
+		t.Fatalf("EMU association did not revalidate: %q", got)
+	}
+}
+
+func TestMismatchedLiveSessionStaysUnknownWithoutErasingAssociation(t *testing.T) {
+	configHome, stateDir := configuredCustomProfiles(t)
+	initial := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	initial.Remember("pane", "personal")
+	if err := initial.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "expected"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	if err := restarted.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "different"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.ResolvePane("pane", "copilot"); got != "" {
+		t.Fatalf("mismatched live session resolved to %q", got)
+	}
+	if stored := readAssociationStore(t, stateDir); len(stored.Associations) != 1 || stored.Associations[0].NativeSessionID != "expected" {
+		t.Fatalf("mismatch changed durable association: %+v", stored.Associations)
+	}
+	if err := restarted.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "expected"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.ResolvePane("pane", "copilot"); got != "personal" {
+		t.Fatalf("restored exact session did not revalidate: %q", got)
+	}
+}
+
+func TestAssociationPrunesOnlyAbsentOrExplicitlyForgottenPanes(t *testing.T) {
+	configHome, stateDir := configuredCustomProfiles(t)
+	resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	resolver.Remember("absent", "personal")
+	resolver.Remember("forgotten", "emu")
+	observed := []Observation{
+		{PaneID: "absent", NativeSessionID: "session-absent"},
+		{PaneID: "forgotten", NativeSessionID: "session-forgotten"},
+	}
+	if err := resolver.Reconcile(observed); err != nil {
+		t.Fatal(err)
+	}
+	resolver.Forget("forgotten")
+	if err := resolver.Reconcile([]Observation{{PaneID: "forgotten", NativeSessionID: "session-forgotten"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolver.ResolvePane("forgotten", "copilot"); got != "" {
+		t.Fatalf("forgotten pane resolved to %q", got)
+	}
+	if stored := readAssociationStore(t, stateDir); len(stored.Associations) != 0 {
+		t.Fatalf("absent/forgotten associations remained: %+v", stored.Associations)
+	}
+}
+
 func TestAssociationReconcilePrunesRemovedProfileAndPersistsEmptyStore(t *testing.T) {
 	configHome, stateDir := configuredCustomProfiles(t)
 	resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
@@ -121,7 +210,6 @@ func TestAssociationReconcileRejectsInvalidAndAmbiguousObservations(t *testing.T
 		observed []Observation
 	}{
 		{name: "empty pane", observed: []Observation{{NativeSessionID: "session"}}},
-		{name: "empty session", observed: []Observation{{PaneID: "pane"}}},
 		{name: "control pane", observed: []Observation{{PaneID: "pane\n", NativeSessionID: "session"}}},
 		{name: "control session", observed: []Observation{{PaneID: "pane", NativeSessionID: "session\x7f"}}},
 		{name: "long pane", observed: []Observation{{PaneID: strings.Repeat("p", 257), NativeSessionID: "session"}}},
@@ -257,8 +345,8 @@ func TestAssociationValidationHelpers(t *testing.T) {
 	if _, err := validObservations([]Observation{{PaneID: " ", NativeSessionID: "session"}}); err == nil {
 		t.Fatal("normalized-empty pane was accepted")
 	}
-	if _, err := validObservations([]Observation{{PaneID: "pane", NativeSessionID: " "}}); err == nil {
-		t.Fatal("normalized-empty session was accepted")
+	if _, err := validObservations([]Observation{{PaneID: "pane"}}); err != nil {
+		t.Fatalf("unknown live session was rejected: %v", err)
 	}
 	left := map[string]Association{"pane": {PaneID: "pane", NativeSessionID: "one", ProfileID: "personal"}}
 	right := map[string]Association{"pane": {PaneID: "pane", NativeSessionID: "two", ProfileID: "personal"}}
@@ -450,4 +538,17 @@ func configuredCustomProfiles(t *testing.T) (string, string) {
 	}
 	t.Setenv("PATH", binDir)
 	return configHome, stateDir
+}
+
+func readAssociationStore(t *testing.T, stateDir string) associationStore {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(stateDir, associationStoreName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var store associationStore
+	if err := json.Unmarshal(data, &store); err != nil {
+		t.Fatal(err)
+	}
+	return store
 }

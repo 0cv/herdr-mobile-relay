@@ -81,14 +81,28 @@ func (r *Resolver) Reconcile(observed []Observation) error {
 		return err
 	}
 
-	next := make(map[string]Association, len(current))
-	for paneID, observation := range current {
-		if saved, ok := r.associations[paneID]; ok &&
-			saved.NativeSessionID == observation.NativeSessionID && configured[saved.ProfileID] {
-			next[paneID] = saved
+	next := make(map[string]Association, len(r.associations))
+	verified := make(map[string]string, len(current))
+	pending := make(map[string]string, len(r.remembered))
+	for paneID, profileID := range r.remembered {
+		if configured[profileID] {
+			pending[paneID] = profileID
 		}
-		if pending := r.remembered[paneID]; pending != "" && configured[pending] {
-			next[paneID] = Association{PaneID: paneID, NativeSessionID: observation.NativeSessionID, ProfileID: pending}
+	}
+	for paneID, observation := range current {
+		if r.forgotten[paneID] {
+			continue
+		}
+		if saved, ok := r.associations[paneID]; ok && configured[saved.ProfileID] {
+			next[paneID] = saved
+			if observation.NativeSessionID != "" && saved.NativeSessionID == observation.NativeSessionID {
+				verified[paneID] = saved.ProfileID
+			}
+		}
+		if profileID := pending[paneID]; profileID != "" && configured[profileID] && observation.NativeSessionID != "" {
+			next[paneID] = Association{PaneID: paneID, NativeSessionID: observation.NativeSessionID, ProfileID: profileID}
+			verified[paneID] = profileID
+			delete(pending, paneID)
 		}
 	}
 	if !sameAssociations(r.associations, next) && r.associationDir != "" {
@@ -97,10 +111,9 @@ func (r *Resolver) Reconcile(observed []Observation) error {
 		}
 	}
 	r.associations = next
-	clear(r.remembered)
-	for paneID, association := range next {
-		r.remembered[paneID] = association.ProfileID
-	}
+	r.verified = verified
+	r.remembered = pending
+	clear(r.forgotten)
 	return nil
 }
 
@@ -174,19 +187,21 @@ func validObservations(observed []Observation) (map[string]Observation, error) {
 	result := make(map[string]Observation, len(observed))
 	native := make(map[string]string, len(observed))
 	for _, observation := range observed {
-		if !validIdentifier(observation.PaneID) || !validIdentifier(observation.NativeSessionID) {
+		if !validIdentifier(observation.PaneID) || observation.NativeSessionID != "" && !validIdentifier(observation.NativeSessionID) {
 			return nil, errors.New("observed pane association has an invalid identifier")
 		}
 		observation.PaneID = normalizeIdentifier(observation.PaneID)
 		observation.NativeSessionID = strings.TrimSpace(observation.NativeSessionID)
-		if !validIdentifier(observation.PaneID) || !validIdentifier(observation.NativeSessionID) {
+		if !validIdentifier(observation.PaneID) || observation.NativeSessionID != "" && !validIdentifier(observation.NativeSessionID) {
 			return nil, errors.New("observed pane association has an invalid identifier")
 		}
-		if _, duplicate := result[observation.PaneID]; duplicate || native[observation.NativeSessionID] != "" {
+		if _, duplicate := result[observation.PaneID]; duplicate || observation.NativeSessionID != "" && native[observation.NativeSessionID] != "" {
 			return nil, errors.New("observed pane associations are ambiguous")
 		}
 		result[observation.PaneID] = observation
-		native[observation.NativeSessionID] = observation.PaneID
+		if observation.NativeSessionID != "" {
+			native[observation.NativeSessionID] = observation.PaneID
+		}
 	}
 	return result, nil
 }

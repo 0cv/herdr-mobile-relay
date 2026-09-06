@@ -64,6 +64,8 @@ type Resolver struct {
 	versions         map[string]cachedVersion
 	associationDir   string
 	associations     map[string]Association
+	verified         map[string]string
+	forgotten        map[string]bool
 	associationsRead bool
 	associationErr   error
 }
@@ -89,6 +91,8 @@ func NewResolver(configHome string, herdr IntegrationStatuser, options ...Option
 		herdr:        herdr,
 		remembered:   make(map[string]string),
 		associations: make(map[string]Association),
+		verified:     make(map[string]string),
+		forgotten:    make(map[string]bool),
 		aliases:      cloneAliases(defaultAliases),
 		skillDirs:    cloneStringSlices(defaultSkillDirs),
 		formats:      cloneStrings(defaultCommandFormats),
@@ -318,18 +322,32 @@ func (r *Resolver) Profile(id string) (Profile, bool) {
 func (r *Resolver) Remember(paneID, profileID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.remembered[normalizeIdentifier(paneID)] = normalizeIdentifier(profileID)
+	paneID = normalizeIdentifier(paneID)
+	r.remembered[paneID] = normalizeIdentifier(profileID)
+	delete(r.forgotten, paneID)
 }
 
 func (r *Resolver) Forget(paneID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.remembered, strings.ToLower(strings.TrimSpace(paneID)))
+	paneID = normalizeIdentifier(paneID)
+	delete(r.remembered, paneID)
+	delete(r.verified, paneID)
+	r.forgotten[paneID] = true
 }
 
 func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
 	r.mu.Lock()
-	if id := r.remembered[strings.ToLower(strings.TrimSpace(paneID))]; id != "" {
+	paneID = normalizeIdentifier(paneID)
+	if r.forgotten[paneID] {
+		r.mu.Unlock()
+		return ""
+	}
+	if id := r.remembered[paneID]; id != "" {
+		r.mu.Unlock()
+		return id
+	}
+	if id := r.verified[paneID]; id != "" {
 		r.mu.Unlock()
 		return id
 	}
