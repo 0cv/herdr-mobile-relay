@@ -9,7 +9,7 @@ import (
 
 func TestCopyProfileForVerifiedAgents(t *testing.T) {
 	for _, agent := range []string{
-		"claude", "claude-code", "codex", "kimi", "omp", "pi", "pi-coding-agent", "qoder", "qodercli",
+		"hermes", "hermes-agent", "claude", "claude-code", "codex", "kimi", "omp", "pi", "pi-coding-agent", "qoder", "qodercli",
 	} {
 		profile, ok := CopyProfileFor("", agent)
 		if !ok || profile.Confirmation == nil || profile.Composer == nil {
@@ -38,6 +38,15 @@ func TestCopyProfileConfirmationCounts(t *testing.T) {
 	chars, lines, matched = kimi.ConfirmationCounts("Copied to clipboard (28 characters).")
 	if !matched || chars != 28 || lines != -1 {
 		t.Fatalf("Kimi ConfirmationCounts() = (%d, %d, %v), want (28, -1, true)", chars, lines, matched)
+	}
+
+	hermes, ok := CopyProfileFor("hermes", "")
+	if !ok {
+		t.Fatal("missing Hermes copy profile")
+	}
+	chars, lines, matched = hermes.ConfirmationCounts("  Copied assistant response #2 to clipboard")
+	if !matched || chars != -1 || lines != -1 {
+		t.Fatalf("Hermes ConfirmationCounts() = (%d, %d, %v), want (-1, -1, true)", chars, lines, matched)
 	}
 
 	codex, ok := CopyProfileFor("codex", "")

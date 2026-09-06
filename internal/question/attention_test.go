@@ -69,6 +69,20 @@ const ompPlanApprovalView = `
 ╰────────────────────────────────────────────────────────────╯
 `
 
+const hermesApprovalView = `
+╭────────────────────────────────────────────────────────────╮
+│ ⚠️  Dangerous Command                                      │
+│                                                            │
+│ shell command via -c/-lc flag                              │
+│ rm -rf /tmp/build-cache                                    │
+│                                                            │
+│ ❯ 1. Allow once                                            │
+│   2. Allow for this session                                │
+│   3. Add to permanent allowlist                            │
+│   4. Deny                                                  │
+╰────────────────────────────────────────────────────────────╯
+`
+
 const ompToolApprovalView = `
 ╭─ Allow tool: bash ─────────────────────────────────────────────────────╮
 │                                                                        │
@@ -105,6 +119,7 @@ func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 		want    []string
 	}{
 		{"codex tool", "codex", codexApprovalView, []string{"Approve", "Reject"}},
+		{"hermes dangerous command", "hermes", hermesApprovalView, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}},
 		{"codex subagents", "codex", codexSubagentApprovalView, []string{"Approve all pending", "Configure individually", "Exit (cancel subagents)"}},
 		{"claude proceed", "claude", claudeApprovalView, []string{"Yes", "Yes, and remember this choice", "No"}},
 		{"claude permission", "claude", claudePermissionView, []string{"Allow once", "Reject"}},

@@ -190,6 +190,7 @@
   // Herdr's key parser covers f1..f24; the pad exposes the range phones need.
   const FUNCTION_KEYS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
   const RESPONSE_COPY_AGENT_IDS = new Set([
+    'hermes', 'hermesagent',
     'claude', 'claudecode', 'codex', 'openaicodex', 'kimi', 'kimicode',
     'omp', 'ohmypi', 'pi', 'picodingagent', 'qoder', 'qodercli',
   ]);

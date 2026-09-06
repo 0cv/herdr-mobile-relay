@@ -18,6 +18,10 @@ type CopyProfile struct {
 }
 
 var copyProfiles = map[string]CopyProfile{
+	"hermes": {
+		Confirmation: regexp.MustCompile(`(?im)copied\s+assistant\s+response\s+#(?P<index>[0-9]+)\s+to\s+clipboard`),
+		Composer:     regexp.MustCompile(`(?m)^\s*(?:[a-z0-9_-]+\s+)?[❯›>]\s*(?P<text>.*?)\s*$`),
+	},
 	"claude": {
 		Confirmation: regexp.MustCompile(`(?im)copied\s+to\s+clipboard\s*\((?P<chars>[0-9]+)\s+characters?,\s*(?P<lines>[0-9]+)\s+lines?\)`),
 		Composer:     regexp.MustCompile(`(?m)^\s*❯\s*(?P<text>.*?)\s*$`),
@@ -74,6 +78,9 @@ func CopyProfileFor(profileID, agent string) (CopyProfile, bool) {
 		key = strings.ReplaceAll(key, " ", "")
 		key = strings.ReplaceAll(key, "-", "")
 		switch key {
+		case "hermes", "hermesagent":
+			profile, ok := copyProfiles["hermes"]
+			return profile, ok
 		case "claude", "claudecode":
 			profile, ok := copyProfiles["claude"]
 			return profile, ok

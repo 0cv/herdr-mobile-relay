@@ -76,7 +76,7 @@ var (
 			`(?:esc|escape)\s+(?:to\s+)?(?:cancel|reject|deny|exit)|` +
 			`(?:↑/↓|up/down).*(?:navigate|select)|tab\s+to\s+(?:edit|amend))`,
 	)
-	normalPromptPattern = regexp.MustCompile(`(?i)^\s*[❯›>]\s*(?:$|(?:ask|describe|type|send|use)\b.*)$`)
+	normalPromptPattern = regexp.MustCompile(`(?i)^\s*(?:[a-z0-9_-]+\s+)?[❯›>]\s*(?:$|(?:ask|describe|type|send|use)\b.*)$`)
 	statusFooterPattern = regexp.MustCompile(
 		`(?i)(?:\bcontext\s+\d+%\s+used\b|\bctx\s*:?\s*(?:\d+%|-+)|` +
 			`\?\s+for\s+shortcuts|\b(?:manual|plan)\s+mode\b|` +
@@ -454,6 +454,11 @@ func approvalContinuation(line string) bool {
 func approvalHeader(agent, header string) bool {
 	lower := strings.ToLower(header)
 	switch {
+	case strings.Contains(agent, "hermes"):
+		return strings.Contains(lower, "dangerous command") ||
+			strings.Contains(lower, "permission required") ||
+			strings.Contains(lower, "allow once") ||
+			strings.Contains(lower, "allow for this session")
 	case strings.Contains(agent, "codex"):
 		return (strings.Contains(lower, "would you like to") ||
 			strings.Contains(lower, "do you want to") ||
