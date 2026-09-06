@@ -573,3 +573,22 @@ func stringReplace(value, old, replacement string) string {
 	}
 	return value
 }
+
+func TestChromePatternBoxDrawing(t *testing.T) {
+	cases := []string{
+		"─", "━", "═", "│", "|",
+		"╭────────────────────────────────────────────╮",
+		"╰────────────────────────────────────────────╯",
+		"├────────────────────────────────────────────┤",
+		"┌────────────────────────────────────────────┐",
+		"└────────────────────────────────────────────┘",
+		"  ╭──────────────────────────────────────────╮  ",
+		"  ╰──────────────────────────────────────────╯  ",
+	}
+	for _, c := range cases {
+		if !chromePattern.MatchString(c) {
+			t.Errorf("chromePattern failed to match box drawing line: %q", c)
+		}
+	}
+}
+
