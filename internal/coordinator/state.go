@@ -28,6 +28,7 @@ type AgentState struct {
 	TabOrder                     int                    `json:"tab_order,omitempty"`
 	WorkspaceID                  string                 `json:"workspace_id"`
 	Agent                        string                 `json:"agent"`
+	ProfileID                    string                 `json:"profile_id,omitempty"`
 	Name                         string                 `json:"name"`
 	Status                       string                 `json:"status"`
 	Focused                      bool                   `json:"_focused"`
@@ -483,7 +484,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			default:
 				cp.UpdatedAt = time.Now().UnixMilli()
 			}
-		} else if existing.Status == cp.Status && existing.Name == cp.Name && existing.Cwd == cp.Cwd && existing.Agent == cp.Agent &&
+		} else if existing.Status == cp.Status && existing.Name == cp.Name && existing.Cwd == cp.Cwd && existing.Agent == cp.Agent && existing.ProfileID == cp.ProfileID &&
 			existing.ActivitySeq == cp.ActivitySeq &&
 			existing.PaneRevision == cp.PaneRevision && existing.ScrollMaxOffset == cp.ScrollMaxOffset && existing.ForegroundCwd == cp.ForegroundCwd {
 			cp.UpdatedAt = existing.UpdatedAt
@@ -500,7 +501,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		attentionChanged := !blockedDetailsEqual(existing, &cp)
 
 		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||
-			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq ||
+			existing.Agent != cp.Agent || existing.ProfileID != cp.ProfileID || existing.ActivitySeq != cp.ActivitySeq ||
 			attentionChanged {
 			s.contentRev[incoming.PaneID]++
 		}

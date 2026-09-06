@@ -23,20 +23,23 @@ const (
 )
 
 type Config struct {
-	Host           string
-	Port           int
-	PluginPort     int
-	Token          string
-	InstanceID     string
-	AllowedOrigins []string
-	WebRoot        string
-	HerdrBin       string
-	SocketPath     string
-	PollInterval   float64
-	RuntimeDir     string
-	LogFormat      string
-	ReleaseRoot    string
-	ServiceName    string
+	Host                  string
+	Port                  int
+	PluginPort            int
+	Token                 string
+	InstanceID            string
+	AllowedOrigins        []string
+	WebRoot               string
+	HerdrBin              string
+	SocketPath            string
+	PollInterval          float64
+	RuntimeDir            string
+	LogFormat             string
+	ReleaseRoot           string
+	ServiceName           string
+	ManagedDeployment     bool
+	ExpectedInventoryPath string
+	ActiveGeneration      string
 
 	// GatewayURL is the configured tie-break leader, kept equal to
 	// GatewayURLs[0] so readers that only know one gateway keep working. The
@@ -63,17 +66,20 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		Host:         envOr("HERDR_RELAY_HOST", "127.0.0.1"),
-		Port:         envIntOr("HERDR_RELAY_PORT", 8375),
-		PluginPort:   envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
-		Token:        os.Getenv("HERDR_RELAY_TOKEN"),
-		InstanceID:   os.Getenv("HERDR_RELAY_INSTANCE_ID"),
-		WebRoot:      os.Getenv("HERDR_WEB_ROOT"),
-		HerdrBin:     os.Getenv("HERDR_BIN"),
-		SocketPath:   os.Getenv("HERDR_SOCKET_PATH"),
-		PollInterval: envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
-		LogFormat:    envOr("HERDR_RELAY_LOG_FORMAT", "text"),
-		ServiceName:  envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+		Host:                  envOr("HERDR_RELAY_HOST", "127.0.0.1"),
+		Port:                  envIntOr("HERDR_RELAY_PORT", 8375),
+		PluginPort:            envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
+		Token:                 os.Getenv("HERDR_RELAY_TOKEN"),
+		InstanceID:            os.Getenv("HERDR_RELAY_INSTANCE_ID"),
+		WebRoot:               os.Getenv("HERDR_WEB_ROOT"),
+		HerdrBin:              os.Getenv("HERDR_BIN"),
+		SocketPath:            os.Getenv("HERDR_SOCKET_PATH"),
+		PollInterval:          envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
+		LogFormat:             envOr("HERDR_RELAY_LOG_FORMAT", "text"),
+		ServiceName:           envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+		ManagedDeployment:     envBoolOr("HERDR_RELAY_MANAGED_DEPLOYMENT", false),
+		ExpectedInventoryPath: os.Getenv("HERDR_RELAY_EXPECTED_INVENTORY"),
+		ActiveGeneration:      os.Getenv("HERDR_RELAY_ACTIVE_GENERATION"),
 
 		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
 		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),

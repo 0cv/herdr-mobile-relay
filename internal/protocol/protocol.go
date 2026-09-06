@@ -42,6 +42,7 @@ const (
 	ErrorUnknownAction        = "unknown_action"
 	ErrorIncompatibleProtocol = "incompatible_protocol"
 	ErrorReaderDenied         = "reader_denied"
+	ErrorManagedDeployment    = "managed_deployment_policy"
 )
 
 type ActionReceipt struct {

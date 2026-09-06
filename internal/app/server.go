@@ -40,6 +40,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
 	"github.com/0cv/herdr-mobile-relay/internal/question"
+	"github.com/0cv/herdr-mobile-relay/internal/readiness"
 	"github.com/0cv/herdr-mobile-relay/internal/session"
 	"github.com/0cv/herdr-mobile-relay/internal/setuphelper"
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
@@ -164,7 +165,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	} else if idx := strings.Index(hostname, "."); idx > 0 {
 		hostname = hostname[:idx]
 	}
-	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
+	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient, profiles.WithAssociationStore(cfg.RuntimeDir))
 	conversationReader := conversation.NewReader(home)
 	sessResolver := session.NewResolverWithReader(home, conversationReader)
 	histManager := history.NewManager(cfg.CacheDir)
@@ -253,6 +254,27 @@ func armBootstrap(store *deviceauth.Store, cfg *config.Config, hostname string) 
 		return store.ResetWithBootstrap([]byte(cfg.Token), hostname, "en")
 	}
 	return store.EnsureBootstrapInvitation([]byte(cfg.Token), hostname, "en")
+}
+
+func removeCapability(capabilities []string, denied string) []string {
+	filtered := capabilities[:0]
+	for _, capability := range capabilities {
+		if capability != denied {
+			filtered = append(filtered, capability)
+		}
+	}
+	return filtered
+}
+
+func deploymentCapabilities(capabilities []string, managed, appConfigured bool) []string {
+	capabilities = append([]string(nil), capabilities...)
+	if managed {
+		capabilities = removeCapability(capabilities, "self_update")
+	}
+	if appConfigured && !managed {
+		capabilities = append(capabilities, "app_deploy")
+	}
+	return capabilities
 }
 
 func (s *Server) authorizeDeviceAction(client *transport.ClientConn, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
@@ -574,7 +596,7 @@ func (s *Server) Run(ctx context.Context) error {
 			vapidPublicKey = s.pushM.VAPIDPublicKey()
 		}
 		inventory := s.committedInventoryStatus()
-		capabilities := append([]string(nil), protocol.Capabilities...)
+		capabilities := deploymentCapabilities(protocol.Capabilities, s.cfg.ManagedDeployment, s.appDeployM.State().Configured)
 		if s.pushM != nil {
 			capabilities = append(capabilities, "typed_push", "push_policy")
 		}
@@ -594,9 +616,6 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if s.herdrC.SupportsWorkspaceMoveBlock() {
 			capabilities = append(capabilities, "workspace_reorder_block")
-		}
-		if s.appDeployM.State().Configured {
-			capabilities = append(capabilities, "app_deploy")
 		}
 		if s.hybrid.directEnabled() {
 			capabilities = append(capabilities, "webrtc_direct")
@@ -680,6 +699,14 @@ func (s *Server) Run(ctx context.Context) error {
 		if !protocol.Compatible(inbound) {
 			admitted()
 			s.hub.Send(client, protocol.IncompatibleResponse(inbound))
+			return
+		}
+		if s.cfg.ManagedDeployment && (inbound.Type == "install_update" || inbound.Type == "deploy_app_update") {
+			admitted()
+			s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+				protocol.ErrorManagedDeployment,
+				map[string]any{"operation": inbound.Type},
+			)))
 			return
 		}
 		requestedSessionID := scope.ServerSessionID
@@ -1343,8 +1370,8 @@ func (s *Server) Run(ctx context.Context) error {
 	})
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
+		s.reconcileProfileOwnership(agents)
 		for _, a := range agents {
-			s.resolveAgentSessionName(a)
 			if a.Status != "blocked" {
 				continue
 			}
@@ -1496,6 +1523,25 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = s.webH.Close()
 	}
 	return runErr
+}
+
+func (s *Server) reconcileProfileOwnership(agents []*coordinator.AgentState) {
+	observations := make([]profiles.Observation, 0, len(agents))
+	for _, agent := range agents {
+		s.resolveAgentSessionName(agent)
+		if agent.SessionID != "" {
+			observations = append(observations, profiles.Observation{
+				PaneID: agent.PaneID, NativeSessionID: agent.SessionID,
+			})
+		}
+	}
+	if err := s.profiles.Reconcile(observations); err != nil {
+		s.recordSafeError("pane profile association reconciliation failed", err)
+		s.logger.Warn("pane profile association reconciliation failed", "error", err)
+	}
+	for _, agent := range agents {
+		agent.ProfileID = s.profiles.ResolvePane(agent.PaneID, agent.Agent)
+	}
 }
 
 func canonicalHTTPPath(raw string) bool {
@@ -2214,25 +2260,40 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	inventory := s.state.InventoryStatus()
 	delete(inventory, "message")
 
-	readiness := "starting"
+	readinessState := "starting"
 	if ready {
 		switch inventory["state"] {
 		case "ready":
-			readiness = "ready"
+			readinessState = "ready"
 		case "error":
-			readiness = "degraded"
+			readinessState = "degraded"
+		}
+	}
+	var managedInventory *readiness.Result
+	if s.cfg.ManagedDeployment {
+		result := s.managedInventoryReadiness()
+		managedInventory = &result
+		if ready && inventory["state"] == "ready" {
+			if result.Ready {
+				readinessState = string(result.State)
+			} else {
+				readinessState = "blocked"
+			}
 		}
 	}
 
 	resp := map[string]any{
 		"status":          "ok",
-		"readiness":       readiness,
+		"readiness":       readinessState,
 		"inventory":       inventory,
 		"instance":        s.cfg.InstanceID,
 		"version":         s.version,
 		"release_version": s.version,
 		"revision":        s.revision,
 		"protocol":        protocol.Version,
+	}
+	if managedInventory != nil {
+		resp["expected_inventory"] = managedInventory
 	}
 	gateway := s.hybrid.status()
 	resp["gateway"] = gateway
@@ -2260,8 +2321,16 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 	status := "unavailable"
 	code := http.StatusServiceUnavailable
-	if ready && inventoryOK {
+	var managedInventory *readiness.Result
+	if s.cfg.ManagedDeployment {
+		result := s.managedInventoryReadiness()
+		managedInventory = &result
+	}
+	if ready && inventoryOK && (managedInventory == nil || managedInventory.Ready) {
 		status = "ready"
+		if managedInventory != nil {
+			status = string(managedInventory.State)
+		}
 		code = http.StatusOK
 	}
 
@@ -2272,10 +2341,24 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		"status":    status,
 		"inventory": inventory,
 	}
+	if managedInventory != nil {
+		resp["expected_inventory"] = managedInventory
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) managedInventoryReadiness() readiness.Result {
+	agents := s.state.Snapshot()
+	panes := make([]readiness.Pane, 0, len(agents))
+	for _, agent := range agents {
+		panes = append(panes, readiness.Pane{
+			PaneID: agent.PaneID, NativeSessionID: agent.SessionID, ProfileID: agent.ProfileID,
+		})
+	}
+	return readiness.Check(s.cfg.ExpectedInventoryPath, s.cfg.ActiveGeneration, panes)
 }
 
 func (s *Server) pruneUploads(ctx context.Context) {

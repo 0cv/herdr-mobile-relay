@@ -51,17 +51,21 @@ type IntegrationStatuser interface {
 }
 
 type Resolver struct {
-	mu         sync.Mutex
-	cached     []Profile
-	expires    time.Time
-	configHome string
-	herdr      IntegrationStatuser
-	remembered map[string]string
-	aliases    map[string]string
-	skillDirs  map[string][]string
-	formats    map[string]string
-	warned     map[string]bool
-	versions   map[string]cachedVersion
+	mu               sync.Mutex
+	cached           []Profile
+	expires          time.Time
+	configHome       string
+	herdr            IntegrationStatuser
+	remembered       map[string]string
+	aliases          map[string]string
+	skillDirs        map[string][]string
+	formats          map[string]string
+	warned           map[string]bool
+	versions         map[string]cachedVersion
+	associationDir   string
+	associations     map[string]Association
+	associationsRead bool
+	associationErr   error
 }
 
 type cachedVersion struct {
@@ -71,17 +75,30 @@ type cachedVersion struct {
 
 var semanticVersionPattern = regexp.MustCompile(`\b[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\b`)
 
-func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
-	return &Resolver{
-		configHome: configHome,
-		herdr:      herdr,
-		remembered: make(map[string]string),
-		aliases:    cloneAliases(defaultAliases),
-		skillDirs:  cloneStringSlices(defaultSkillDirs),
-		formats:    cloneStrings(defaultCommandFormats),
-		warned:     make(map[string]bool),
-		versions:   make(map[string]cachedVersion),
+type Option func(*Resolver)
+
+func WithAssociationStore(directory string) Option {
+	return func(resolver *Resolver) {
+		resolver.associationDir = directory
 	}
+}
+
+func NewResolver(configHome string, herdr IntegrationStatuser, options ...Option) *Resolver {
+	resolver := &Resolver{
+		configHome:   configHome,
+		herdr:        herdr,
+		remembered:   make(map[string]string),
+		associations: make(map[string]Association),
+		aliases:      cloneAliases(defaultAliases),
+		skillDirs:    cloneStringSlices(defaultSkillDirs),
+		formats:      cloneStrings(defaultCommandFormats),
+		warned:       make(map[string]bool),
+		versions:     make(map[string]cachedVersion),
+	}
+	for _, option := range options {
+		option(resolver)
+	}
+	return resolver
 }
 
 func (r *Resolver) Profiles() []Profile {
@@ -301,7 +318,7 @@ func (r *Resolver) Profile(id string) (Profile, bool) {
 func (r *Resolver) Remember(paneID, profileID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.remembered[strings.ToLower(strings.TrimSpace(paneID))] = profileID
+	r.remembered[normalizeIdentifier(paneID)] = normalizeIdentifier(profileID)
 }
 
 func (r *Resolver) Forget(paneID string) {

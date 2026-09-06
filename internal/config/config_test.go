@@ -31,6 +31,22 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadManagedDeployment(t *testing.T) {
+	t.Setenv("HERDR_RELAY_MANAGED_DEPLOYMENT", "true")
+	t.Setenv("HERDR_RELAY_EXPECTED_INVENTORY", "/tmp/expected-inventory.json")
+	t.Setenv("HERDR_RELAY_ACTIVE_GENERATION", "generation-1")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ManagedDeployment {
+		t.Fatal("managed deployment setting was ignored")
+	}
+	if cfg.ExpectedInventoryPath != "/tmp/expected-inventory.json" || cfg.ActiveGeneration != "generation-1" {
+		t.Fatalf("managed inventory config = %q, %q", cfg.ExpectedInventoryPath, cfg.ActiveGeneration)
+	}
+}
+
 func TestLoadRejectsTokenlessNonLoopback(t *testing.T) {
 	t.Setenv("HERDR_RELAY_HOST", "0.0.0.0")
 	t.Setenv("HERDR_RELAY_TOKEN", "")

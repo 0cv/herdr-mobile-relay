@@ -17,13 +17,14 @@ import (
 )
 
 const (
-	commandDeadline    = 12 * time.Second
-	approvalDeadline   = 9 * time.Second
-	questionDeadline   = 16 * time.Second
-	agentStartDeadline = 40 * time.Second
-	maxTabInsertIndex  = 10_000
-	promptMaxChars     = 100000
-	secretMaxRunes     = 256
+	commandDeadline              = 12 * time.Second
+	approvalDeadline             = 9 * time.Second
+	questionDeadline             = 16 * time.Second
+	agentStartDeadline           = 40 * time.Second
+	maxTabInsertIndex            = 10_000
+	promptMaxChars               = 100000
+	secretMaxRunes               = 256
+	unknownProfileOwnershipError = "Agent profile ownership is unknown"
 )
 
 type CommandResult struct {
@@ -258,6 +259,11 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	}
 
 	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
+	if action == "agent_stop" || action == "agent_clear" || action == "agent_restart" {
+		if denied := d.denyUnknownProfileOwnership(requestID, action, paneID); denied != nil {
+			return denied
+		}
+	}
 
 	switch action {
 	case "submit_prompt":
@@ -293,6 +299,17 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	default:
 		return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "failed", Error: "Unknown command"}
 	}
+}
+
+func (d *Dispatcher) denyUnknownProfileOwnership(requestID, action, paneID string) *CommandResult {
+	if d.profiles == nil || paneID == "" {
+		return nil
+	}
+	agent, exists := d.state.Agent(paneID)
+	if !exists || d.profiles.ResolvePane(paneID, agent.Agent) != "" {
+		return nil
+	}
+	return d.fail(requestID, action, paneID, unknownProfileOwnershipError)
 }
 
 func (d *Dispatcher) HandleAdmitted(
