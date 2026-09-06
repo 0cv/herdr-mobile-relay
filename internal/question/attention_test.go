@@ -29,6 +29,18 @@ $ npm test
 Esc to cancel · Enter to confirm
 `
 
+const claudeBoxedApprovalView = `
+╭────────────────────────────────────────╮
+│ Do you want to proceed?                 │
+│ Bash command                            │
+│ $ npm test                              │
+│ ❯ 1. Yes                                │
+│   2. Yes, and remember this choice      │
+│   3. No                                 │
+╰────────────────────────────────────────╯
+Esc to cancel · Enter to confirm
+`
+
 const claudePermissionView = `
 Claude needs your permission to use Bash.
 $ npm test
@@ -107,6 +119,7 @@ func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 		{"codex tool", "codex", codexApprovalView, []string{"Approve", "Reject"}},
 		{"codex subagents", "codex", codexSubagentApprovalView, []string{"Approve all pending", "Configure individually", "Exit (cancel subagents)"}},
 		{"claude proceed", "claude", claudeApprovalView, []string{"Yes", "Yes, and remember this choice", "No"}},
+		{"claude boxed proceed", "claude", claudeBoxedApprovalView, []string{"Yes", "Yes, and remember this choice", "No"}},
 		{"claude permission", "claude", claudePermissionView, []string{"Allow once", "Reject"}},
 		{"qoder allow", "qodercli", qoderApprovalView, []string{"Allow", "Reject"}},
 		{"omp plan review", "omp", ompPlanApprovalView, []string{

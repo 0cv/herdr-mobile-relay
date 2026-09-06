@@ -576,7 +576,7 @@ func stringReplace(value, old, replacement string) string {
 
 func TestChromePatternBoxDrawing(t *testing.T) {
 	cases := []string{
-		"─", "━", "═", "│", "|",
+		"─", "━", "═", "│", "|", "◔", "◑", "◕", "●",
 		"╭────────────────────────────────────────────╮",
 		"╰────────────────────────────────────────────╯",
 		"├────────────────────────────────────────────┤",
@@ -591,4 +591,3 @@ func TestChromePatternBoxDrawing(t *testing.T) {
 		}
 	}
 }
-
