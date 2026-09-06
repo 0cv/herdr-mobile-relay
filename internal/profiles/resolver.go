@@ -343,6 +343,10 @@ func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
 		r.mu.Unlock()
 		return ""
 	}
+	if r.associationErr != nil {
+		r.mu.Unlock()
+		return ""
+	}
 	if id := r.remembered[paneID]; id != "" {
 		r.mu.Unlock()
 		return id

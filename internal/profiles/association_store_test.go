@@ -222,7 +222,7 @@ func TestAssociationReconcileRejectsInvalidAndAmbiguousObservations(t *testing.T
 		{name: "duplicate session", observed: []Observation{{PaneID: "one", NativeSessionID: "session"}, {PaneID: "two", NativeSessionID: "session"}}},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+			t.Run(test.name, func(t *testing.T) {
 			resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
 			if err := resolver.Reconcile(test.observed); err == nil {
 				t.Fatal("invalid observations were accepted")
@@ -258,9 +258,10 @@ func TestAssociationStoreFailsClosedForInvalidFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
-			if err := resolver.Reconcile(nil); err == nil {
+			if err := resolver.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "session"}}); err == nil {
 				t.Fatal("invalid store was accepted")
 			}
+			assertCorruptStoreDoesNotGuessOwnership(t, resolver)
 		})
 	}
 }
@@ -290,6 +291,11 @@ func TestAssociationStoreRejectsUnsafeAndOversizedPaths(t *testing.T) {
 		if err := NewResolver(configHome, nil, WithAssociationStore(stateDir)).Reconcile(nil); err == nil {
 			t.Fatal("public store was accepted")
 		}
+		resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+		if err := resolver.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "session"}}); err == nil {
+			t.Fatal("public store was accepted during live reconciliation")
+		}
+		assertCorruptStoreDoesNotGuessOwnership(t, resolver)
 	})
 	t.Run("unreadable file", func(t *testing.T) {
 		stateDir := t.TempDir()
@@ -323,9 +329,11 @@ func TestAssociationStoreRejectsUnsafeAndOversizedPaths(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(stateDir, associationStoreName)); err != nil {
 			t.Fatal(err)
 		}
-		if err := NewResolver(configHome, nil, WithAssociationStore(stateDir)).Reconcile(nil); err == nil {
+		resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+		if err := resolver.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "session"}}); err == nil {
 			t.Fatal("symlink store was accepted")
 		}
+		assertCorruptStoreDoesNotGuessOwnership(t, resolver)
 	})
 	t.Run("oversized", func(t *testing.T) {
 		stateDir := t.TempDir()
@@ -543,6 +551,15 @@ func configuredCustomProfiles(t *testing.T) (string, string) {
 	}
 	t.Setenv("PATH", binDir)
 	return configHome, stateDir
+}
+
+func assertCorruptStoreDoesNotGuessOwnership(t *testing.T, resolver *Resolver) {
+	t.Helper()
+	for _, reportedAgent := range []string{"personal", "reported-personal"} {
+		if got := resolver.ResolvePane("pane", reportedAgent); got != "" {
+			t.Fatalf("corrupt association store guessed %q from reported agent %q", got, reportedAgent)
+		}
+	}
 }
 
 func readAssociationStore(t *testing.T, stateDir string) associationStore {
