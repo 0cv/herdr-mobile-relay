@@ -101,9 +101,12 @@ func TestPresentUnverifiedPanesPreserveAndRevalidateDurableAssociations(t *testi
 	if err := restarted.Reconcile(unverified); err != nil {
 		t.Fatalf("present panes with temporarily empty native IDs: %v", err)
 	}
-	for _, paneID := range []string{"pane-personal", "pane-emu"} {
-		if got := restarted.ResolvePane(paneID, "copilot"); got != "" {
-			t.Fatalf("unverified %s resolved to %q", paneID, got)
+	for paneID, reportedAgent := range map[string]string{
+		"pane-personal": "personal",
+		"pane-emu":      "reported-emu",
+	} {
+		if got := restarted.ResolvePane(paneID, reportedAgent); got != "" {
+			t.Fatalf("unverified %s guessed from reported agent %q as %q", paneID, reportedAgent, got)
 		}
 	}
 	stored := readAssociationStore(t, stateDir)
@@ -134,8 +137,10 @@ func TestMismatchedLiveSessionStaysUnknownWithoutErasingAssociation(t *testing.T
 	if err := restarted.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "different"}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := restarted.ResolvePane("pane", "copilot"); got != "" {
-		t.Fatalf("mismatched live session resolved to %q", got)
+	for _, reportedAgent := range []string{"personal", "reported-personal"} {
+		if got := restarted.ResolvePane("pane", reportedAgent); got != "" {
+			t.Fatalf("mismatched live session guessed from reported agent %q as %q", reportedAgent, got)
+		}
 	}
 	if stored := readAssociationStore(t, stateDir); len(stored.Associations) != 1 || stored.Associations[0].NativeSessionID != "expected" {
 		t.Fatalf("mismatch changed durable association: %+v", stored.Associations)
@@ -532,7 +537,7 @@ func configuredCustomProfiles(t *testing.T) (string, string) {
 			t.Fatal(err)
 		}
 	}
-	ini := "[config]\nreplace_profiles = true\n[profiles]\npersonal = Personal\nemu = EMU\n"
+	ini := "[config]\nreplace_profiles = true\n[profiles]\npersonal = Personal\nemu = EMU\n[aliases]\nreported-personal = personal\nreported-emu = emu\n"
 	if err := os.WriteFile(filepath.Join(configHome, "herdr", "agent-profiles.ini"), []byte(ini), 0o600); err != nil {
 		t.Fatal(err)
 	}
