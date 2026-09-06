@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/0cv/herdr-mobile-relay/internal/activeruntime"
 	"github.com/0cv/herdr-mobile-relay/internal/activity"
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 	"github.com/0cv/herdr-mobile-relay/internal/appdeploy"
@@ -64,6 +65,7 @@ type copyResponseRunner func(
 	copyresponse.ClipboardWriter,
 	int64,
 	copyresponse.RevisionReader,
+	copyresponse.MutationGuard,
 ) (copyresponse.Result, error)
 
 type speechRequest struct {
@@ -119,10 +121,11 @@ type Server struct {
 	deviceAuth       *deviceauth.Store
 	initErr          error
 
-	mu        sync.RWMutex
-	ready     bool
-	startedAt time.Time
-	errors    []string
+	mu                sync.RWMutex
+	ready             bool
+	startedAt         time.Time
+	errors            []string
+	managedTopologyMu sync.RWMutex
 
 	activityMu   sync.RWMutex
 	activityView []activity.Entry
@@ -217,7 +220,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		poller:              poller,
 		clipboardRead:       clipboardRead,
 		clipboardWrite:      clipboard.Write,
-		copyRunner:          copyresponse.Run,
+		copyRunner:          copyresponse.RunGuarded,
 		speechSynth:         speech.Synthesize,
 		speechStatus:        speech.Status,
 		speechInstall:       speech.Install,
@@ -275,6 +278,21 @@ func deploymentCapabilities(capabilities []string, managed, appConfigured bool) 
 		capabilities = append(capabilities, "app_deploy")
 	}
 	return capabilities
+}
+
+func managedCommandAllowedWhileNotReady(action protocol.ActionMetadata) bool {
+	if action.Class == protocol.ActionReadOnly {
+		return true
+	}
+	switch action.Operation {
+	case "clear_activities",
+		"create_device_invitation", "rename_device", "revoke_device", "reset_devices",
+		"push_policy_set", "push_snooze", "push_subscribe", "push_test_device", "push_unsubscribe", "push_viewed_pane",
+		"register_app_origin", "release_pane_size", "speech_voice_install", "speech_voice_remove", "upload_cancel":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) authorizeDeviceAction(client *transport.ClientConn, action protocol.ActionMetadata, deviceID string) *protocol.ApiError {
@@ -709,6 +727,18 @@ func (s *Server) Run(ctx context.Context) error {
 			)))
 			return
 		}
+		managedRuntimeCommand := s.cfg.ManagedDeployment && !managedCommandAllowedWhileNotReady(scope.Action)
+		if managedRuntimeCommand {
+			managedReadiness := s.managedInventoryReadiness()
+			if !managedReadiness.Ready {
+				admitted()
+				s.hub.Send(client, protocol.ErrorResponse(inbound.RequestID, protocol.NewApiError(
+					protocol.ErrorManagedRuntimeNotReady,
+					map[string]any{"state": managedReadiness.State, "generation": managedReadiness.Generation},
+				)))
+				return
+			}
+		}
 		requestedSessionID := scope.ServerSessionID
 		if scope.Target != nil {
 			if requestedSessionID != "" && scope.Target.ServerSessionID != "" && requestedSessionID != scope.Target.ServerSessionID {
@@ -753,6 +783,16 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		commandCtx := ctx
+		clientCommandCtx := client.Context()
+		var commandFence *managedCommandFence
+		if managedRuntimeCommand {
+			commandFence = s.managedCommandFence(inbound.RequestID, scope.Action.Operation, inbound.PaneID, managedTopologyTarget{
+				action: action, paneID: inbound.PaneID, workspaceID: inbound.WorkspaceID, profileID: inbound.ProfileID,
+			})
+			defer commandFence.close()
+			commandCtx = coordinator.WithExecutionFence(commandCtx, commandFence.check)
+			clientCommandCtx = coordinator.WithExecutionFence(clientCommandCtx, commandFence.check)
+		}
 		switch action {
 		case "check_update":
 			s.hub.Broadcast(map[string]any{"type": "update_status", "update": map[string]any{
@@ -795,21 +835,8 @@ func (s *Server) Run(ctx context.Context) error {
 			s.hub.Broadcast(map[string]any{"type": "app_deploy_status", "app_deploy": deployState})
 			s.sendCommandResult(client, inbound.RequestID, "deploy_app_update", true, "scheduled", "", "", map[string]any{"job": job, "app_deploy": deployState})
 		case "lease_pane_size":
-			columns, rows, leaseErr := s.paneSizeM.Acquire(client.Context(), client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows)
-			if leaseErr != nil {
-				s.sendCommandResult(client, inbound.RequestID, "lease_pane_size", false, "failed", leaseErr.Error(), inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(
-				client,
-				inbound.RequestID,
-				"lease_pane_size",
-				true,
-				"completed",
-				"",
-				inbound.PaneID,
-				map[string]any{"columns": columns, "rows": rows},
-			)
+			columns, rows, leaseErr := s.paneSizeM.AcquireGuarded(clientCommandCtx, client.ID(), inbound.PaneID, inbound.Columns, inbound.Rows, commandFence.guardFunc())
+			s.sendPaneSizeLeaseResult(client, inbound.RequestID, inbound.PaneID, columns, rows, leaseErr, commandFence)
 		case "release_pane_size":
 			leaseErr := s.paneSizeM.Release(client.Context(), client.ID(), inbound.PaneID)
 			if leaseErr != nil {
@@ -967,11 +994,11 @@ func (s *Server) Run(ctx context.Context) error {
 				s.hub.Send(client, commandResultMessage(result))
 			})
 		case "upload_begin":
-			s.handleUploadBegin(client, inbound.RequestID, msg)
+			s.handleUploadBegin(client, inbound.RequestID, msg, commandFence)
 		case "upload_chunk":
-			s.handleUploadChunk(client, inbound.RequestID, msg)
+			s.handleUploadChunk(client, inbound.RequestID, msg, commandFence)
 		case "upload_finish":
-			s.handleUploadFinish(client, inbound.RequestID, msg)
+			s.handleUploadFinish(client, inbound.RequestID, msg, commandFence)
 		case "upload_cancel":
 			s.handleUploadCancel(client, inbound.RequestID, msg)
 		case "workspace_create", "workspace_rename", "workspace_reorder", "workspace_close",
@@ -979,7 +1006,7 @@ func (s *Server) Run(ctx context.Context) error {
 			// The dispatcher signals admitted() as soon as it holds the
 			// topology ordering lock; the Herdr command itself must not
 			// block the hub's global ordered ingress.
-			result := s.dispatcher.HandleTopologyAdmitted(commandCtx, admitted, func(handlerCtx context.Context) *coordinator.CommandResult {
+			result := s.dispatcher.HandleTopologyAdmitted(commandCtx, inbound.RequestID, action, admitted, func(handlerCtx context.Context) *coordinator.CommandResult {
 				switch action {
 				case "workspace_create":
 					return s.dispatcher.HandleWorkspaceCreate(handlerCtx, inbound.RequestID, inbound.Cwd, inbound.Label)
@@ -1027,6 +1054,7 @@ func (s *Server) Run(ctx context.Context) error {
 					)
 				}
 			})
+			result = commandFence.finalize(commandCtx, result)
 			if auditedWrite {
 				s.recordWriteAudit(client, msg, result)
 			}
@@ -1052,7 +1080,7 @@ func (s *Server) Run(ctx context.Context) error {
 			generation := s.state.Generation(paneID)
 			agent, cwd := activeAgent.Agent, activeAgent.Cwd
 			home, _ := os.UserHomeDir()
-			profileID := s.profiles.ResolvePane(paneID, agent)
+			profileID := s.profiles.ResolvePaneSession(paneID, activeAgent.SessionID, agent)
 			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
 			agentVersion := s.profiles.AgentVersion(profileID)
 			location := s.conversationM.Locate(agent, cwd, activeAgent.SessionID)
@@ -1114,7 +1142,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case "copy_agent_response":
 			requestID, _ := msg["request_id"].(string)
 			paneID, _ := msg["pane_id"].(string)
-			s.copyAgentResponse(client, requestID, paneID)
+			s.copyAgentResponse(client, requestID, paneID, commandFence)
 		case "cancel_speech":
 			speechRequestID, _ := msg["speech_request_id"].(string)
 			s.cancelSpeech(client.ID(), speechRequestID)
@@ -1292,6 +1320,7 @@ func (s *Server) Run(ctx context.Context) error {
 			} else {
 				result = s.dispatcher.Handle(commandCtx, msg)
 			}
+			result = commandFence.finalize(commandCtx, result)
 			if auditedWrite {
 				s.recordWriteAudit(client, msg, result)
 			}
@@ -1366,12 +1395,16 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	})
 	s.poller.SetOnInventoryStatus(func(status map[string]any) {
+		if status["state"] != "ready" {
+			s.profiles.Invalidate()
+		}
 		s.broadcastCommitted(inventoryStatusMessage(status))
 	})
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
-		s.reconcileProfileOwnership(agents)
 		for _, a := range agents {
+			s.resolveAgentSessionName(a)
+			a.ProfileID = s.profiles.ResolvePaneSession(a.PaneID, a.SessionID, a.Agent)
 			if a.Status != "blocked" {
 				continue
 			}
@@ -1389,6 +1422,9 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			setAgentAttention(s.state, a, question.Classify(string(read.Content), a.Agent))
 		}
+	})
+	s.poller.SetAfterCommit(func(_ context.Context, agents []*coordinator.AgentState) {
+		s.reconcileProfileOwnership(agents)
 	})
 
 	mux := http.NewServeMux()
@@ -1534,12 +1570,20 @@ func (s *Server) reconcileProfileOwnership(agents []*coordinator.AgentState) {
 		})
 	}
 	if err := s.profiles.Reconcile(observations); err != nil {
+		s.profiles.Invalidate()
+		for _, agent := range agents {
+			agent.ProfileID = ""
+		}
+		s.state.CommitProfileOwnership(agents)
+		s.state.MarkInventoryFailure(err)
 		s.recordSafeError("pane profile association reconciliation failed", err)
 		s.logger.Warn("pane profile association reconciliation failed", "error", err)
+		return
 	}
 	for _, agent := range agents {
-		agent.ProfileID = s.profiles.ResolvePane(agent.PaneID, agent.Agent)
+		agent.ProfileID = s.profiles.ResolvePaneSession(agent.PaneID, agent.SessionID, agent.Agent)
 	}
+	s.state.CommitProfileOwnership(agents)
 }
 
 func canonicalHTTPPath(raw string) bool {
@@ -2267,6 +2311,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 			readinessState = "degraded"
 		}
 	}
+	if ready && !s.webBundleIdentityReady() {
+		readinessState = "degraded"
+	}
 	var managedInventory *readiness.Result
 	if s.cfg.ManagedDeployment {
 		result := s.managedInventoryReadiness()
@@ -2324,7 +2371,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		result := s.managedInventoryReadiness()
 		managedInventory = &result
 	}
-	if ready && inventoryOK && (managedInventory == nil || managedInventory.Ready) {
+	if ready && inventoryOK && s.webBundleIdentityReady() && (managedInventory == nil || managedInventory.Ready) {
 		status = "ready"
 		if managedInventory != nil {
 			status = string(managedInventory.State)
@@ -2334,10 +2381,19 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 	inventory := s.state.InventoryStatus()
 	delete(inventory, "message")
+	bundleHash := ""
+	if s.webH != nil {
+		bundleHash = s.webH.BundleHash()
+	}
 
 	resp := map[string]any{
-		"status":    status,
-		"inventory": inventory,
+		"status":          status,
+		"inventory":       inventory,
+		"instance":        s.cfg.InstanceID,
+		"release_version": s.version,
+		"revision":        s.revision,
+		"bundle_hash":     bundleHash,
+		"generation":      s.cfg.ActiveGeneration,
 	}
 	if managedInventory != nil {
 		resp["expected_inventory"] = managedInventory
@@ -2348,15 +2404,315 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func (s *Server) webBundleIdentityReady() bool {
+	if s.webH == nil || strings.TrimSpace(s.version) == "" || strings.TrimSpace(s.revision) == "" || strings.TrimSpace(s.webH.BundleHash()) == "" {
+		return false
+	}
+	if bundleVersion := strings.TrimSpace(s.webH.BundleVersion()); bundleVersion != "" && bundleVersion != s.version {
+		return false
+	}
+	if bundleRevision := strings.TrimSpace(s.webH.BundleRevision()); bundleRevision != "" && bundleRevision != s.revision {
+		return false
+	}
+	return true
+}
+
 func (s *Server) managedInventoryReadiness() readiness.Result {
-	agents := s.state.Snapshot()
+	s.managedTopologyMu.RLock()
+	defer s.managedTopologyMu.RUnlock()
+	return s.managedInventoryReadinessUnlocked()
+}
+
+func (s *Server) managedInventoryReadinessUnlocked() readiness.Result {
+	agents, inventoryReady := s.state.SnapshotAtReadyInventory()
+	if !inventoryReady {
+		return readiness.Result{State: readiness.StateUnavailable}
+	}
 	panes := make([]readiness.Pane, 0, len(agents))
 	for _, agent := range agents {
 		panes = append(panes, readiness.Pane{
 			PaneID: agent.PaneID, NativeSessionID: agent.SessionID, ProfileID: agent.ProfileID,
 		})
 	}
+	active, err := activeruntime.Load(s.cfg.ActiveRuntimePath)
+	if err != nil {
+		return readiness.Result{State: readiness.StateInvalidActiveRuntime, Observed: len(panes)}
+	}
+	if active.Generation != s.cfg.ActiveGeneration || active.SocketPath != s.cfg.SocketPath || active.ExpectedInventoryPath != s.cfg.ExpectedInventoryPath {
+		return readiness.Result{State: readiness.StateActiveRuntimeMismatch, Generation: active.Generation, Observed: len(panes)}
+	}
+	if pending, err := activeruntime.TopologyTransactionPending(s.cfg.ActiveRuntimePath); err != nil || pending {
+		return readiness.Result{State: readiness.StateTopologyTransactionPending, Generation: active.Generation, Observed: len(panes)}
+	}
 	return readiness.Check(s.cfg.ExpectedInventoryPath, s.cfg.ActiveGeneration, panes)
+}
+
+func (s *Server) managedExecutionFence(requestID, action, paneID string) func() *coordinator.CommandResult {
+	return s.managedExecutionFenceWith(requestID, action, paneID, s.managedInventoryReadiness)
+}
+
+func (s *Server) managedExecutionFenceWith(requestID, action, paneID string, check func() readiness.Result) func() *coordinator.CommandResult {
+	return func() *coordinator.CommandResult {
+		result := check()
+		if result.Ready {
+			return nil
+		}
+		return &coordinator.CommandResult{
+			RequestID: requestID,
+			Action:    action,
+			Phase:     "not_started",
+			Error:     "Managed runtime changed before execution",
+			PaneID:    paneID,
+			Data: map[string]any{
+				"error_code": protocol.ErrorManagedRuntimeNotReady,
+				"state":      result.State,
+				"generation": result.Generation,
+			},
+		}
+	}
+}
+
+var errManagedCommandFenced = errors.New("managed command fenced before effect")
+
+type managedCommandFence struct {
+	mu                   sync.Mutex
+	checkReadiness       func() *coordinator.CommandResult
+	acquireLease         func() (*activeruntime.Lease, error)
+	leaseFailure         func(error) *coordinator.CommandResult
+	lockTopology         func() func()
+	beginTopology        func() (*managedTopologyCommit, error)
+	beginTopologyFailure func(error) *coordinator.CommandResult
+	topologyFailure      func(error) *coordinator.CommandResult
+	lease                *activeruntime.Lease
+	releaseTopology      func()
+	topologyCommit       *managedTopologyCommit
+	validated            bool
+	finalized            bool
+	closed               bool
+	blocked              *coordinator.CommandResult
+	finalResult          *coordinator.CommandResult
+}
+
+func newManagedCommandFence(check func() *coordinator.CommandResult) *managedCommandFence {
+	return &managedCommandFence{checkReadiness: check}
+}
+
+func (s *Server) managedCommandFence(requestID, action, paneID string, targets ...managedTopologyTarget) *managedCommandFence {
+	target := managedTopologyTarget{action: action, paneID: paneID}
+	if len(targets) > 0 {
+		target = targets[0]
+	}
+	topologyAction := managedTopologyAction(action)
+	readinessCheck := s.managedInventoryReadiness
+	if topologyAction {
+		readinessCheck = s.managedInventoryReadinessUnlocked
+	}
+	fence := newManagedCommandFence(s.managedExecutionFenceWith(requestID, action, paneID, readinessCheck))
+	fence.acquireLease = func() (*activeruntime.Lease, error) {
+		return activeruntime.AcquireSharedLease(s.cfg.ActiveRuntimePath)
+	}
+	fence.leaseFailure = func(error) *coordinator.CommandResult {
+		return &coordinator.CommandResult{
+			RequestID: requestID,
+			Action:    action,
+			Phase:     "not_started",
+			Error:     "Managed runtime changed before execution",
+			PaneID:    paneID,
+			Data: map[string]any{
+				"error_code": protocol.ErrorManagedRuntimeNotReady,
+				"state":      readiness.StateInvalidActiveRuntime,
+			},
+		}
+	}
+	if topologyAction {
+		fence.lockTopology = func() func() {
+			s.managedTopologyMu.Lock()
+			return s.managedTopologyMu.Unlock
+		}
+		fence.beginTopology = func() (*managedTopologyCommit, error) {
+			if err := validateManagedTopologyCheckpointConfig(s.cfg); err != nil {
+				s.state.MarkInventoryFailure(errors.New("managed topology checkpoint is unavailable"))
+				return nil, err
+			}
+			before, ready := managedTopologySnapshotFromState(s.state)
+			if !ready {
+				return nil, errors.New("managed topology baseline is unavailable")
+			}
+			marker, err := activeruntime.BeginTopologyTransaction(s.cfg.ActiveRuntimePath, activeruntime.TopologyTransactionRecord{
+				Generation: s.cfg.ActiveGeneration, RequestID: requestID, Action: action, Target: managedTopologyTargetName(target), Panes: before.panes,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &managedTopologyCommit{
+				target:    target,
+				before:    before,
+				marker:    marker,
+				reconcile: s.poller.Reconcile,
+				snapshot:  func() (managedTopologySnapshot, bool) { return managedTopologySnapshotFromState(s.state) },
+				checkpoint: func(ctx context.Context, acknowledgedEmpty bool) error {
+					checkpointCtx, cancel := context.WithTimeout(ctx, time.Minute)
+					defer cancel()
+					return runManagedTopologyCheckpoint(checkpointCtx, s.cfg, acknowledgedEmpty)
+				},
+				publish: func(panes []readiness.Pane, acknowledgedEmpty bool) error {
+					return readiness.Publish(s.cfg.ExpectedInventoryPath, s.cfg.ActiveGeneration, panes, acknowledgedEmpty)
+				},
+			}, nil
+		}
+		fence.beginTopologyFailure = func(error) *coordinator.CommandResult {
+			return &coordinator.CommandResult{
+				RequestID: requestID,
+				Action:    action,
+				Phase:     "not_started",
+				Error:     "Managed topology transaction could not start; retry only after readiness is restored",
+				PaneID:    paneID,
+				Data: map[string]any{
+					"error_code": protocol.ErrorManagedRuntimeNotReady,
+					"state":      readiness.StateUnavailable,
+				},
+			}
+		}
+		fence.topologyFailure = func(error) *coordinator.CommandResult {
+			s.state.MarkInventoryFailure(errors.New("managed topology recovery checkpoint is unresolved"))
+			return &coordinator.CommandResult{
+				RequestID: requestID,
+				Action:    action,
+				Phase:     "dispatched_unknown",
+				Error:     "Topology changed, but its recovery checkpoint did not commit; review before retrying",
+				PaneID:    paneID,
+				Data: map[string]any{
+					"dispatched_unknown": true,
+					"error_code":         protocol.ErrorManagedRuntimeNotReady,
+					"state":              readiness.StateTopologyTransactionPending,
+				},
+			}
+		}
+	}
+	return fence
+}
+
+func (f *managedCommandFence) check() *coordinator.CommandResult {
+	if f.guard() != nil {
+		return f.blocked
+	}
+	return nil
+}
+
+func (f *managedCommandFence) guard() error {
+	if f == nil {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.blocked != nil || f.closed {
+		return errManagedCommandFenced
+	}
+	if f.validated {
+		return nil
+	}
+	if f.lockTopology != nil {
+		f.releaseTopology = f.lockTopology()
+	}
+	if f.acquireLease != nil {
+		lease, err := f.acquireLease()
+		if err != nil {
+			f.blocked = f.leaseFailure(err)
+			return errManagedCommandFenced
+		}
+		f.lease = lease
+	}
+	f.blocked = f.checkReadiness()
+	f.validated = true
+	if f.blocked != nil {
+		return errManagedCommandFenced
+	}
+	if f.beginTopology != nil {
+		commit, err := f.beginTopology()
+		if err != nil {
+			if f.beginTopologyFailure != nil {
+				f.blocked = f.beginTopologyFailure(err)
+			} else {
+				f.blocked = f.topologyFailure(err)
+			}
+			return errManagedCommandFenced
+		}
+		f.topologyCommit = commit
+	}
+	return nil
+}
+
+func (f *managedCommandFence) finalize(ctx context.Context, result *coordinator.CommandResult) *coordinator.CommandResult {
+	if f == nil {
+		return result
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.finalized {
+		if f.finalResult != nil {
+			return f.finalResult
+		}
+		return result
+	}
+	f.finalized = true
+	f.finalResult = result
+	if f.topologyCommit == nil {
+		return result
+	}
+	if err := f.topologyCommit.finish(ctx, result); err != nil {
+		f.blocked = f.topologyFailure(err)
+		f.finalResult = f.blocked
+	}
+	return f.finalResult
+}
+
+func (f *managedCommandFence) close() error {
+	if f == nil {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return nil
+	}
+	f.closed = true
+	var err error
+	if f.lease != nil {
+		err = f.lease.Close()
+	}
+	if f.releaseTopology != nil {
+		f.releaseTopology()
+	}
+	return err
+}
+
+func (f *managedCommandFence) guardFunc() func() error {
+	if f == nil {
+		return nil
+	}
+	return f.guard
+}
+
+func (s *Server) sendBlockedManagedCommand(client *transport.ClientConn, message map[string]any, fence *managedCommandFence) bool {
+	if fence == nil || fence.blocked == nil {
+		return false
+	}
+	if message != nil {
+		s.recordWriteAudit(client, message, fence.blocked)
+	}
+	s.hub.Send(client, commandResultMessage(fence.blocked))
+	return true
+}
+
+func (s *Server) sendPaneSizeLeaseResult(client *transport.ClientConn, requestID, paneID string, columns, rows int, leaseErr error, fence *managedCommandFence) {
+	if s.sendBlockedManagedCommand(client, nil, fence) {
+		return
+	}
+	if leaseErr != nil {
+		s.sendCommandResult(client, requestID, "lease_pane_size", false, "failed", leaseErr.Error(), paneID, nil)
+		return
+	}
+	s.sendCommandResult(client, requestID, "lease_pane_size", true, "completed", "", paneID, map[string]any{"columns": columns, "rows": rows})
 }
 
 func (s *Server) pruneUploads(ctx context.Context) {
@@ -2378,12 +2734,16 @@ func (s *Server) pruneUploads(ctx context.Context) {
 	}
 }
 
-func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, paneID string) {
+func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, paneID string, fence *managedCommandFence) {
 	if paneID == "" {
 		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent is required", paneID, nil)
 		return
 	}
-	agent, ok := s.state.Agent(paneID)
+	agent, ok, inventoryReady := s.state.AgentAtReadyInventory(paneID)
+	if !inventoryReady {
+		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent inventory is unavailable; wait for the next successful refresh", paneID, nil)
+		return
+	}
 	if !ok {
 		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent pane not found", paneID, nil)
 		return
@@ -2402,7 +2762,7 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 	}
 	generation := s.state.Generation(paneID)
 	agentName, _ := s.agentInfo(paneID)
-	profileID := s.profiles.ResolvePane(paneID, agentName)
+	profileID := s.profiles.ResolvePaneSession(paneID, agent.SessionID, agentName)
 	profile, ok := slashcmd.CopyProfileFor(profileID, agentName)
 	if !ok {
 		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", "Agent does not support response copying", paneID, nil)
@@ -2410,11 +2770,15 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 	}
 	s.copyMu.Lock()
 	defer s.copyMu.Unlock()
+	if fence != nil && fence.guard() != nil {
+		s.sendBlockedManagedCommand(client, nil, fence)
+		return
+	}
 	ctx, cancel := context.WithTimeout(client.Context(), 10*time.Second)
 	defer cancel()
 	runCopy := s.copyRunner
 	if runCopy == nil {
-		runCopy = copyresponse.Run
+		runCopy = copyresponse.RunGuarded
 	}
 	result, err := runCopy(
 		ctx,
@@ -2425,8 +2789,12 @@ func (s *Server) copyAgentResponse(client *transport.ClientConn, requestID, pane
 		s.clipboardWrite,
 		int64(agent.PaneRevision),
 		s.currentPaneRevision,
+		fence.guardFunc(),
 	)
 	if err != nil {
+		if s.sendBlockedManagedCommand(client, nil, fence) {
+			return
+		}
 		s.logger.Warn("agent response copy failed", "pane_id", paneID, "error", err)
 		s.sendCommandResult(client, requestID, "copy_agent_response", false, "failed", copyResponseError(err), paneID, nil)
 		return

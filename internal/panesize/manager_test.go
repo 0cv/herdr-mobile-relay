@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,6 +140,104 @@ func TestAcquireUsesForegroundTTYAndChangesColumnsOnly(t *testing.T) {
 	if len(runner.calls) != 3 || runner.calls[0].name != "ps" ||
 		!slices.Equal(runner.calls[2].args, []string{"-F", "/dev/pts/7", "cols", "84"}) {
 		t.Fatalf("command calls = %#v", runner.calls)
+	}
+}
+
+func TestAcquireGuardRechecksAfterManagerLockBeforeResize(t *testing.T) {
+	now := time.Unix(100, 0)
+	provider := &fakeProcessInfoProvider{infos: map[string]*herdr.PaneProcessInfo{
+		"pane-1": processInfo("pane-1", 321),
+	}}
+	runner := &fakeCommandRunner{
+		ttyByPID: map[int]string{321: "pts/7"},
+		sizes:    map[string]terminalSize{"/dev/pts/7": {rows: 37, columns: 132}},
+	}
+	manager := testManager(provider, runner, func() time.Time { return now })
+	promoted := atomic.Bool{}
+	promotedErr := errors.New("runtime promoted")
+	started := make(chan struct{})
+	done := make(chan error, 1)
+
+	manager.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			manager.mu.Unlock()
+		}
+	}()
+	go func() {
+		close(started)
+		_, _, err := manager.AcquireGuarded(context.Background(), "client-1", "pane-1", 84, 0, func() error {
+			if promoted.Load() {
+				return promotedErr
+			}
+			return nil
+		})
+		done <- err
+	}()
+	<-started
+	promoted.Store(true)
+	manager.mu.Unlock()
+	locked = false
+
+	if err := <-done; !errors.Is(err, promotedErr) {
+		t.Fatalf("AcquireGuarded() error = %v, want promotion", err)
+	}
+	if len(runner.setValues) != 0 || len(manager.panes) != 0 {
+		t.Fatalf("promoted runtime mutated pane: resized=%v panes=%d", runner.setValues, len(manager.panes))
+	}
+}
+
+func TestAcquireGuardRejectsPromotionAfterResolutionAndRestoresAnyPriorLease(t *testing.T) {
+	newFixture := func() (*Manager, *fakeCommandRunner) {
+		now := time.Unix(100, 0)
+		provider := &fakeProcessInfoProvider{infos: map[string]*herdr.PaneProcessInfo{"pane-1": processInfo("pane-1", 321)}}
+		runner := &fakeCommandRunner{ttyByPID: map[int]string{321: "pts/7"}, sizes: map[string]terminalSize{"/dev/pts/7": {rows: 37, columns: 132}}}
+		return testManager(provider, runner, func() time.Time { return now }), runner
+	}
+	promoted := errors.New("runtime promoted")
+	manager, runner := newFixture()
+	calls := 0
+	if _, _, err := manager.AcquireGuarded(context.Background(), "client", "pane-1", 84, 0, func() error {
+		calls++
+		if calls == 2 {
+			return promoted
+		}
+		return nil
+	}); !errors.Is(err, promoted) || len(manager.panes) != 0 || len(runner.setValues) != 0 {
+		t.Fatalf("post-resolution guard = (%v, panes=%d, resizes=%v)", err, len(manager.panes), runner.setValues)
+	}
+
+	for _, hadPrevious := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prior-%t", hadPrevious), func(t *testing.T) {
+			manager, runner := newFixture()
+			if hadPrevious {
+				if _, _, err := manager.Acquire(context.Background(), "client", "pane-1", 100, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			if _, _, err := manager.AcquireGuarded(context.Background(), "client", "pane-1", 84, 0, func() error {
+				calls++
+				if calls == 3 {
+					return promoted
+				}
+				return nil
+			}); !errors.Is(err, promoted) {
+				t.Fatalf("pre-resize guard error = %v", err)
+			}
+			state := manager.panes["pane-1"]
+			if hadPrevious {
+				if state == nil || state.leases["client"].Columns != 100 {
+					t.Fatalf("prior lease was not restored: %+v", state)
+				}
+			} else if state != nil && len(state.leases) != 0 {
+				t.Fatalf("new rejected lease survived: %+v", state.leases)
+			}
+			if got := runner.sizes["/dev/pts/7"].columns; got != 132 && !hadPrevious {
+				t.Fatalf("rejected resize changed terminal to %d columns", got)
+			}
+		})
 	}
 }
 

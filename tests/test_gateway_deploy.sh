@@ -299,6 +299,7 @@ export HERDR_GATEWAY_DEPLOY_SERVER="deploy@gw.example.test"
 export HERDR_GATEWAY_DEPLOY_REMOTE_DIR="/srv/herdr-gateway"
 run_deploy
 [ "$STATUS" -eq 0 ] || fail "seeding run exited $STATUS"
+REMEMBERED_BUNDLE_CANONICAL="$(CDPATH='' cd "$REMEMBERED_BUNDLE" && pwd)"
 
 STATE_FILE="$WORK_DIR/gateway-deploy"
 [ -f "$STATE_FILE" ] || fail "answers were not remembered beside the relay environment"
@@ -307,7 +308,7 @@ for EXPECTED in \
     "HERDR_GATEWAY_DEPLOY_SERVER='deploy@gw.example.test'" \
     "HERDR_GATEWAY_DEPLOY_REMOTE_DIR='/srv/herdr-gateway'" \
     "HERDR_GATEWAY_DEPLOY_EMAIL='ops@example.test'" \
-    "HERDR_GATEWAY_DEPLOY_DIR='$REMEMBERED_BUNDLE'"; do
+    "HERDR_GATEWAY_DEPLOY_DIR='$REMEMBERED_BUNDLE_CANONICAL'"; do
     grep -Fq "$EXPECTED" "$STATE_FILE" || fail "remembered answers lack $EXPECTED"
 done
 

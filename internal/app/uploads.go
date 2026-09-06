@@ -69,7 +69,11 @@ func validAttachmentReference(value string) bool {
 	return true
 }
 
-func (s *Server) handleUploadBegin(client *transport.ClientConn, requestID string, message map[string]any) {
+func (s *Server) handleUploadBegin(client *transport.ClientConn, requestID string, message map[string]any, fence *managedCommandFence) {
+	if fence != nil && fence.guard() != nil {
+		s.sendBlockedManagedCommand(client, message, fence)
+		return
+	}
 	var request upload.BeginRequest
 	if err := decodeUploadRequest(message, &request); err != nil {
 		s.sendUploadError(client, message, requestID, "upload_begin_result", err)
@@ -88,7 +92,7 @@ func (s *Server) handleUploadBegin(client *transport.ClientConn, requestID strin
 	} else {
 		request.Owner = "connection:" + client.ID()
 	}
-	result, err := s.uploadM.Begin(request)
+	result, err := s.uploadM.BeginGuarded(request, fence.guardFunc())
 	if err != nil {
 		s.sendUploadError(client, message, requestID, "upload_begin_result", err)
 		return
@@ -96,7 +100,11 @@ func (s *Server) handleUploadBegin(client *transport.ClientConn, requestID strin
 	s.sendUploadResult(client, message, requestID, "upload_begin_result", result)
 }
 
-func (s *Server) handleUploadChunk(client *transport.ClientConn, requestID string, message map[string]any) {
+func (s *Server) handleUploadChunk(client *transport.ClientConn, requestID string, message map[string]any, fence *managedCommandFence) {
+	if fence != nil && fence.guard() != nil {
+		s.sendBlockedManagedCommand(client, message, fence)
+		return
+	}
 	var request upload.ChunkRequest
 	if err := decodeUploadRequest(message, &request); err != nil {
 		s.sendUploadError(client, message, requestID, "upload_chunk_result", err)
@@ -113,7 +121,7 @@ func (s *Server) handleUploadChunk(client *transport.ClientConn, requestID strin
 		s.sendUploadError(client, message, requestID, "upload_chunk_result", errors.New("upload_unavailable"))
 		return
 	}
-	result, err := s.uploadM.Chunk(request)
+	result, err := s.uploadM.ChunkGuarded(request, fence.guardFunc())
 	if err != nil {
 		s.sendUploadError(client, message, requestID, "upload_chunk_result", err)
 		return
@@ -121,7 +129,11 @@ func (s *Server) handleUploadChunk(client *transport.ClientConn, requestID strin
 	s.sendUploadResult(client, message, requestID, "upload_chunk_result", result)
 }
 
-func (s *Server) handleUploadFinish(client *transport.ClientConn, requestID string, message map[string]any) {
+func (s *Server) handleUploadFinish(client *transport.ClientConn, requestID string, message map[string]any, fence *managedCommandFence) {
+	if fence != nil && fence.guard() != nil {
+		s.sendBlockedManagedCommand(client, message, fence)
+		return
+	}
 	var request upload.FinishRequest
 	if err := decodeUploadRequest(message, &request); err != nil {
 		s.sendUploadError(client, message, requestID, "upload_finish_result", err)
@@ -138,7 +150,7 @@ func (s *Server) handleUploadFinish(client *transport.ClientConn, requestID stri
 		s.sendUploadError(client, message, requestID, "upload_finish_result", errors.New("upload_unavailable"))
 		return
 	}
-	result, err := s.uploadM.Finish(request)
+	result, err := s.uploadM.FinishGuarded(request, fence.guardFunc())
 	if err != nil {
 		s.sendUploadError(client, message, requestID, "upload_finish_result", err)
 		return

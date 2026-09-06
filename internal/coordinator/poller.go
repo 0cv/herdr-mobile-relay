@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -20,6 +21,8 @@ const (
 	maxImmediateTopologyPolls = 3
 )
 
+var errTopologyStale = errors.New("inventory topology changed during reconcile")
+
 type Poller struct {
 	client              *herdr.Client
 	state               *State
@@ -30,10 +33,12 @@ type Poller struct {
 	onWorkspaceChange   func(workspaces []herdr.Workspace)
 	onStatus            func(status map[string]any)
 	enrich              func(context.Context, []*AgentState)
+	afterCommit         func(context.Context, []*AgentState)
 	hostname            string
 	topologyRetries     int
 	consecutiveFailures atomic.Int32
 	eventsActive        atomic.Bool
+	commitMu            sync.Mutex
 	// broadcastMu serializes snapshot broadcasts from the reconcile poll and
 	// the event stream, and guards the dedupe state below. Snapshots are read
 	// inside the lock so a slow commit path can never publish an older
@@ -74,6 +79,10 @@ func (p *Poller) SetEnrich(fn func(context.Context, []*AgentState)) {
 	p.enrich = fn
 }
 
+func (p *Poller) SetAfterCommit(fn func(context.Context, []*AgentState)) {
+	p.afterCommit = fn
+}
+
 func (p *Poller) Wake() {
 	select {
 	case p.wakeup <- struct{}{}:
@@ -86,7 +95,7 @@ func (p *Poller) ConsecutiveFailures() int {
 }
 
 func (p *Poller) Run(ctx context.Context) {
-	p.poll(ctx)
+	_ = p.poll(ctx)
 
 	timer := time.NewTimer(p.currentInterval())
 	defer timer.Stop()
@@ -102,16 +111,30 @@ func (p *Poller) Run(ctx context.Context) {
 				default:
 				}
 			}
-			p.poll(ctx)
+			_ = p.poll(ctx)
 			timer.Reset(p.currentInterval())
 		case <-timer.C:
-			p.poll(ctx)
+			_ = p.poll(ctx)
 			timer.Reset(p.currentInterval())
 		}
 	}
 }
 
-func (p *Poller) poll(ctx context.Context) {
+// Reconcile performs the same authoritative inventory refresh as the
+// background poller, but does not return until a stable sample commits or the
+// bounded topology retry budget is exhausted.
+func (p *Poller) Reconcile(ctx context.Context) error {
+	var err error
+	for attempt := 0; attempt <= maxImmediateTopologyPolls; attempt++ {
+		err = p.poll(ctx)
+		if !errors.Is(err, errTopologyStale) {
+			return err
+		}
+	}
+	return err
+}
+
+func (p *Poller) poll(ctx context.Context) error {
 	token := p.state.BeginPoll()
 	previousStatus := p.state.InventoryStatus()
 
@@ -121,7 +144,7 @@ func (p *Poller) poll(ctx context.Context) {
 		p.state.MarkInventoryFailure(err)
 		p.notifyStatusChange(previousStatus)
 		p.logger.Warn("inventory poll failed", "error", err)
-		return
+		return err
 	}
 	p.consecutiveFailures.Store(0)
 
@@ -131,7 +154,7 @@ func (p *Poller) poll(ctx context.Context) {
 		p.state.MarkInventoryFailure(err)
 		p.notifyStatusChange(previousStatus)
 		p.logger.Warn("workspace inventory poll failed", "error", err)
-		return
+		return err
 	}
 
 	tabs, tabErr := p.client.TabList(ctx)
@@ -149,11 +172,11 @@ func (p *Poller) poll(ctx context.Context) {
 		p.enrich(ctx, agents)
 	}
 
-	workspaceChanged, committed := p.state.CommitPoll(agents, workspaces, token)
+	workspaceChanged, committed := p.commitPoll(ctx, agents, workspaces, token)
 	if !committed {
 		p.logger.Debug("discarded topology-stale inventory sample")
 		p.handleTopologyStale(previousStatus)
-		return
+		return errTopologyStale
 	}
 	p.topologyRetries = 0
 	p.notifyStatusChange(previousStatus)
@@ -163,6 +186,17 @@ func (p *Poller) poll(ctx context.Context) {
 	if workspaceChanged {
 		p.notifyWorkspacesChanged()
 	}
+	return nil
+}
+
+func (p *Poller) commitPoll(ctx context.Context, agents []*AgentState, workspaces []herdr.Workspace, token PollToken) (workspaceChanged, committed bool) {
+	p.commitMu.Lock()
+	defer p.commitMu.Unlock()
+	workspaceChanged, committed = p.state.CommitPoll(agents, workspaces, token)
+	if committed && p.afterCommit != nil {
+		p.afterCommit(ctx, agents)
+	}
+	return workspaceChanged, committed
 }
 
 func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*AgentState {
@@ -325,7 +359,12 @@ func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.Topolog
 		p.enrich(ctx, agents)
 	}
 	p.consecutiveFailures.Store(0)
+	p.commitMu.Lock()
 	workspaceChanged := p.state.CommitTopology(agents, topology.Workspaces, baseRevision)
+	if p.afterCommit != nil {
+		p.afterCommit(ctx, agents)
+	}
+	p.commitMu.Unlock()
 	p.notifyStatusChange(previousStatus)
 	p.logger.Debug("event inventory committed", "agents", len(agents), "workspaces", len(topology.Workspaces), "topology", p.state.TopologyGeneration())
 	p.notifyAgentsChanged()

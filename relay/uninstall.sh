@@ -52,6 +52,35 @@ canonicalize() {
     fi
 }
 
+owned_install_sentinel_is_valid() {
+    local root="$1"
+    local canonical="$2"
+    local sentinel="$root/.herdr-mobile-relay-installation"
+    local metadata
+    local owner_uid
+    local line_count
+
+    [ -d "$root" ] && [ ! -L "$root" ] || return 1
+    [ -f "$sentinel" ] && [ ! -L "$sentinel" ] || return 1
+    if metadata="$(LC_ALL=C stat -f '%HT:%Lp:%l:%u' "$sentinel" 2>/dev/null)"; then
+        :
+    elif metadata="$(LC_ALL=C stat -c '%F:%a:%h:%u' "$sentinel" 2>/dev/null)"; then
+        :
+    else
+        return 1
+    fi
+    owner_uid="$(id -u)"
+    case "$metadata" in
+        "Regular File:600:1:$owner_uid"|"regular file:600:1:$owner_uid") ;;
+        *) return 1 ;;
+    esac
+    line_count="$(wc -l < "$sentinel" | tr -d '[:space:]')" || return 1
+    [ "$line_count" = 2 ] || return 1
+    [ "$(sed -n '1p' "$sentinel")" = 'product=herdr-mobile-relay' ] || return 1
+    [ "$(sed -n '2p' "$sentinel")" = "root=$canonical" ] || return 1
+    [ -z "$(sed -n '3p' "$sentinel")" ] || return 1
+}
+
 # Verify that the exact resolved target stays under HOME and contains relay
 # markers. This supports explicit HERDR_RELEASE_ROOT and XDG paths without
 # allowing an arbitrary directory to be removed.
@@ -81,12 +110,9 @@ verify_removal_target() {
     # Require a dedicated sentinel whose recorded canonical root matches the
     # deletion target. Generic relay-looking filenames never authorize removal.
     if [ -d "$canonical" ]; then
-        sentinel="$canonical/.herdr-mobile-relay-installation"
-        if [ ! -f "$sentinel" ] ||
-           ! grep -Fx 'product=herdr-mobile-relay' "$sentinel" >/dev/null ||
-           ! grep -Fx "root=$canonical" "$sentinel" >/dev/null; then
+        if ! owned_install_sentinel_is_valid "$canonical" "$canonical"; then
             echo "  REFUSING to remove $label: $canonical" >&2
-            echo "  Directory has no matching herdr-mobile-relay installation sentinel." >&2
+            echo "  Directory has no exact private single-link herdr-mobile-relay installation sentinel." >&2
             return 1
         fi
     fi
@@ -124,6 +150,9 @@ safe_remove_dir() {
     fi
     if [ "$label" = "releases" ]; then
         chmod -R u+w "$canonical"
+    fi
+    if ! verify_removal_target "$(canonicalize "$target")" "$label"; then
+        return 1
     fi
     rm -rf "$canonical"
     echo "  Removed $label: $canonical"

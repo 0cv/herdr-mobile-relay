@@ -200,6 +200,38 @@ func (s *State) InventoryReady() bool {
 	return s.inventoryReady
 }
 
+func (s *State) AgentAtReadyInventory(paneID string) (*AgentState, bool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.inventoryReady {
+		return nil, false, false
+	}
+	agent, exists := s.agents[paneID]
+	if !exists {
+		return nil, false, true
+	}
+	copy := *agent
+	copy.StateRevision = s.revision[paneID]
+	copy.Generation = s.generation[paneID]
+	return &copy, true, true
+}
+
+func (s *State) SnapshotAtReadyInventory() ([]*AgentState, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.inventoryReady {
+		return nil, false
+	}
+	result := make([]*AgentState, 0, len(s.agents))
+	for _, agent := range s.agents {
+		copy := *agent
+		copy.StateRevision = s.revision[copy.PaneID]
+		copy.Generation = s.generation[copy.PaneID]
+		result = append(result, &copy)
+	}
+	return result, true
+}
+
 func (s *State) MarkInventoryFailure(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -329,6 +361,9 @@ func (s *State) CompletionCurrent(paneID string, revision int64) bool {
 func (s *State) MarkTopologyChanged() {
 	s.mu.Lock()
 	s.topologyGen++
+	s.inventoryReady = false
+	s.inventoryErrorCode = ""
+	s.inventoryMessage = ""
 	s.mu.Unlock()
 }
 
@@ -400,6 +435,18 @@ func (s *State) CommitPoll(
 	workspaceChanged = s.commitWorkspacesLocked(workspaces)
 	s.commitInventoryLocked(agents, token.BaseRevision)
 	return workspaceChanged, true
+}
+
+func (s *State) CommitProfileOwnership(agents []*AgentState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, incoming := range agents {
+		current := s.agents[incoming.PaneID]
+		if current == nil || current.SessionID != incoming.SessionID || paneSessionReplaced(current, incoming) {
+			continue
+		}
+		current.ProfileID = incoming.ProfileID
+	}
 }
 
 func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {

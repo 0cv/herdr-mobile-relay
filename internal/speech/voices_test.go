@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -65,6 +66,7 @@ func publishedRuntime(t *testing.T) {
 
 func publishedRuntimeWithEngine(t *testing.T, engine []byte) {
 	t.Helper()
+	supportRuntimeFixture(t)
 	var archive bytes.Buffer
 	compressor := gzip.NewWriter(&archive)
 	writer := tar.NewWriter(compressor)
@@ -113,6 +115,16 @@ func publishedRuntimeWithEngine(t *testing.T, engine []byte) {
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("HERDR_PIPER_RUNTIME_BASE_URL", server.URL)
+}
+
+func supportRuntimeFixture(t *testing.T) {
+	t.Helper()
+	target := runtime.GOOS + "/" + runtime.GOARCH
+	if _, published := runtimeAssets[target]; published {
+		return
+	}
+	runtimeAssets[target] = struct{ name, digest string }{name: "piper_test.tar.gz"}
+	t.Cleanup(func() { delete(runtimeAssets, target) })
 }
 
 // restoreCatalog keeps a test's fixture digests from leaking into the next one.
@@ -288,6 +300,7 @@ func TestExtractTarGzRejectsChainedTraversal(t *testing.T) {
 
 func TestBrokenCachedRuntimeIsReportedMissing(t *testing.T) {
 	restoreCatalog(t)
+	supportRuntimeFixture(t)
 	hermeticEnv(t, t.TempDir())
 	cache := t.TempDir()
 	t.Setenv("XDG_CACHE_HOME", cache)

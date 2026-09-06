@@ -5,6 +5,7 @@ dist/
 .DS_Store
 .swiftpm/
 node_modules/
+__pycache__/
 playwright-report/
 test-results/
 .env

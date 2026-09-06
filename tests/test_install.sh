@@ -34,11 +34,129 @@ test "$checksum_url" = "https://api.github.com/repos/0cv/herdr-mobile-relay/rele
 commit_json='{"sha":"0123456789abcdef0123456789abcdef01234567","commit":{"tree":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}'
 test "$(resolve_tag_revision "$commit_json")" = "0123456789abcdef0123456789abcdef01234567"
 
+if offline_release_requested; then
+    echo "offline mode activated without explicit inputs" >&2
+    exit 1
+fi
+(HERDR_RELEASE_ARCHIVE=archive offline_release_requested)
+(HERDR_RELEASE_CHECKSUMS=checksums offline_release_requested)
+(HERDR_EXPECTED_REVISION=revision offline_release_requested)
+(HERDR_EXPECTED_ARCHIVE_SHA256=digest offline_release_requested)
+
 sentinel_root="$WORK_DIR/custom-root"
 write_install_sentinel "$sentinel_root"
 canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
 grep -Fx 'product=herdr-mobile-relay' "$sentinel_root/.herdr-mobile-relay-installation" >/dev/null
 grep -Fx "root=$canonical_root" "$sentinel_root/.herdr-mobile-relay-installation" >/dev/null
+install_sentinel_is_valid "$sentinel_root" "$canonical_root"
+install_sentinel_is_valid "$sentinel_root"
+
+(
+    stat() {
+        case "$1" in
+            -f) return 1 ;;
+            -c) printf 'regular file:600:1:%s\n' "$(id -u)" ;;
+        esac
+    }
+    install_sentinel_is_valid "$sentinel_root" "$canonical_root"
+)
+if (
+    stat() { return 1; }
+    install_sentinel_is_valid "$sentinel_root" "$canonical_root"
+); then
+    echo "install_sentinel_is_valid accepted a sentinel whose metadata could not be read" >&2
+    exit 1
+fi
+
+exit_cleanup_sentinel="$WORK_DIR/exit-cleanup-sentinel"
+: > "$exit_cleanup_sentinel"
+(
+    install_sentinel_temp="$exit_cleanup_sentinel"
+    work_dir=
+    herdr_command_pid=
+    on_install_exit
+)
+test ! -e "$exit_cleanup_sentinel"
+
+if (
+    mktemp() { return 1; }
+    write_install_sentinel "$WORK_DIR/mktemp-failure-root"
+) 2>/dev/null; then
+    echo "write_install_sentinel accepted a failed secure temporary-file creation" >&2
+    exit 1
+fi
+
+if (
+    printf() {
+        [ "$1" != 'root=%s\n' ] || return 1
+        command printf "$@"
+    }
+    write_install_sentinel "$WORK_DIR/write-failure-root"
+) 2>/dev/null; then
+    echo "write_install_sentinel accepted a failed sentinel write" >&2
+    exit 1
+fi
+
+if (
+    chmod() {
+        [ "$1" != 600 ] || return 1
+        command chmod "$@"
+    }
+    write_install_sentinel "$WORK_DIR/chmod-failure-root"
+) 2>/dev/null; then
+    echo "write_install_sentinel accepted a failed sentinel chmod" >&2
+    exit 1
+fi
+
+if (
+    mv() { return 1; }
+    write_install_sentinel "$WORK_DIR/move-failure-root"
+) 2>/dev/null; then
+    echo "write_install_sentinel accepted a failed sentinel move" >&2
+    exit 1
+fi
+
+if (
+    install_sentinel_is_valid() { return 1; }
+    write_install_sentinel "$WORK_DIR/post-validation-failure-root"
+) 2>/dev/null; then
+    echo "write_install_sentinel accepted a sentinel that failed post-install validation" >&2
+    exit 1
+fi
+
+mktemp_log="$WORK_DIR/sentinel-mktemp.log"
+mktemp_root="$WORK_DIR/mktemp-root"
+(
+    mktemp() {
+        printf '%s\n' "$1" > "$mktemp_log"
+        command mktemp "$@"
+    }
+    write_install_sentinel "$mktemp_root"
+)
+grep -F '.herdr-mobile-relay-installation.tmp.XXXXXX' "$mktemp_log" >/dev/null
+install_sentinel_is_valid "$mktemp_root" "$(CDPATH='' cd "$mktemp_root" && pwd -P)"
+
+for unsafe_kind in symlink hardlink public extra; do
+    unsafe_root="$WORK_DIR/unsafe-$unsafe_kind"
+    mkdir -p "$unsafe_root"
+    unsafe_canonical=$(CDPATH='' cd "$unsafe_root" && pwd -P)
+    unsafe_sentinel="$unsafe_root/.herdr-mobile-relay-installation"
+    printf 'product=herdr-mobile-relay\nroot=%s\n' "$unsafe_canonical" > "$unsafe_sentinel"
+    chmod 600 "$unsafe_sentinel"
+    case "$unsafe_kind" in
+        symlink)
+            mv "$unsafe_sentinel" "$unsafe_root/sentinel-target"
+            ln -s sentinel-target "$unsafe_sentinel"
+            ;;
+        hardlink) ln "$unsafe_sentinel" "$unsafe_root/sentinel-hardlink" ;;
+        public) chmod 644 "$unsafe_sentinel" ;;
+        extra) printf 'unexpected=true\n' >> "$unsafe_sentinel" ;;
+    esac
+    if (write_install_sentinel "$unsafe_root") 2>/dev/null; then
+        echo "write_install_sentinel accepted an unsafe $unsafe_kind sentinel" >&2
+        exit 1
+    fi
+done
 
 unowned_root="$WORK_DIR/unowned"
 mkdir -p "$unowned_root"
@@ -116,6 +234,90 @@ if run_with_timeout 1 sleep 3; then
 fi
 timeout_finished=$(date +%s)
 test "$((timeout_finished - timeout_started))" -lt 3
+
+auth_bin="$WORK_DIR/auth-bin"
+auth_args="$WORK_DIR/auth-argv"
+auth_env="$WORK_DIR/auth-env"
+auth_stdin="$WORK_DIR/auth-stdin"
+auth_output="$WORK_DIR/auth-output"
+mkdir -p "$auth_bin"
+cat > "$auth_bin/curl" <<'EOF'
+#!/bin/sh
+env > "$AUTH_ENV"
+printf '%s\n' "$@" > "$AUTH_ARGS"
+cat <&3 > "$AUTH_STDIN"
+output=
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = --output ]; then
+        output=$2
+        break
+    fi
+    shift
+done
+if [ -n "$output" ]; then
+    printf 'asset\n' > "$output"
+else
+    printf '{}\n'
+fi
+EOF
+chmod 700 "$auth_bin/curl"
+export AUTH_ARGS="$auth_args" AUTH_ENV="$auth_env" AUTH_STDIN="$auth_stdin"
+export GH_TOKEN=SENTINEL_GH_TOKEN_NOT_IN_FETCH_PROCESS
+export GITHUB_TOKEN=SENTINEL_GITHUB_TOKEN_NOT_IN_FETCH_PROCESS
+export HERDR_GITHUB_TOKEN_FILE=/SENTINEL_GITHUB_TOKEN_POINTER_NOT_IN_FETCH_PROCESS
+github_fetch_token=$GH_TOKEN
+PATH="$auth_bin:/usr/bin:/bin" fetch_json https://api.github.test/release > "$auth_output"
+test "$(cat "$auth_output")" = '{}'
+grep -F 'Authorization: token SENTINEL_GH_TOKEN_NOT_IN_FETCH_PROCESS' "$auth_stdin" >/dev/null
+if grep -F 'SENTINEL_' "$auth_args" "$auth_env" >/dev/null; then
+    echo "authenticated GitHub fetch exposed its token through argv or child environment" >&2
+    exit 1
+fi
+PATH="$auth_bin:/usr/bin:/bin" fetch https://api.github.test/asset "$auth_output"
+test "$(cat "$auth_output")" = asset
+grep -F 'Accept: application/octet-stream' "$auth_stdin" >/dev/null
+if grep -F 'SENTINEL_' "$auth_args" "$auth_env" >/dev/null; then
+    echo "authenticated GitHub asset fetch exposed its token through argv or child environment" >&2
+    exit 1
+fi
+unset github_fetch_token GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
+
+if (github_fetch_token='unsafe token'; validate_github_fetch_token) 2>/dev/null; then
+    echo "validate_github_fetch_token accepted unsupported characters" >&2
+    exit 1
+fi
+
+wget_bin="$WORK_DIR/wget-bin"
+wget_output="$WORK_DIR/wget-output"
+mkdir -p "$wget_bin"
+cat > "$wget_bin/wget" <<'EOF'
+#!/bin/sh
+output=
+for argument do
+    case "$argument" in
+        --output-document=*) output=${argument#--output-document=} ;;
+    esac
+done
+if [ "$output" = - ]; then
+    printf '{"transport":"wget"}\n'
+elif [ -n "$output" ]; then
+    printf 'wget asset\n' > "$output"
+fi
+EOF
+chmod 700 "$wget_bin/wget"
+github_fetch_token=
+(PATH="$wget_bin:/bin" fetch https://api.github.test/wget-asset "$wget_output")
+test "$(cat "$wget_output")" = 'wget asset'
+test "$(PATH="$wget_bin:/bin" fetch_json https://api.github.test/wget-json)" = '{"transport":"wget"}'
+if (PATH="$wget_bin:/bin" github_fetch_token=authenticated fetch https://api.github.test/wget-auth "$wget_output") 2>/dev/null; then
+    echo "fetch accepted authenticated wget transport" >&2
+    exit 1
+fi
+if (PATH="$wget_bin:/bin" github_fetch_token=authenticated fetch_json https://api.github.test/wget-auth) 2>/dev/null; then
+    echo "fetch_json accepted authenticated wget transport" >&2
+    exit 1
+fi
+unset github_fetch_token
 
 signal_downloader="$WORK_DIR/signal-downloader"
 for signal_kind in wget curl; do

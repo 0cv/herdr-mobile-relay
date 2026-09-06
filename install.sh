@@ -70,6 +70,9 @@ terminate_active_command() {
 
 on_install_exit() {
     terminate_active_command -TERM
+    if [ -n "${install_sentinel_temp:-}" ]; then
+        rm -f "$install_sentinel_temp"
+    fi
     if [ -n "${work_dir:-}" ]; then
         rm -rf "$work_dir"
     fi
@@ -82,25 +85,36 @@ on_install_signal() {
     exit "$herdr_exit_status"
 }
 
+validate_github_fetch_token() {
+    case "${github_fetch_token:-}" in
+        ""|*[!A-Za-z0-9_.-]*) fatal "GitHub release token contains unsupported characters" ;;
+    esac
+}
+
+authenticated_curl() {
+    accept=$1
+    shift
+    validate_github_fetch_token
+    run_with_timeout 120 env -u GH_TOKEN -u GITHUB_TOKEN -u HERDR_GITHUB_TOKEN_FILE \
+        curl --config /dev/fd/3 "$@" 3<<EOF
+header = "Authorization: token ${github_fetch_token}"
+header = "Accept: ${accept}"
+EOF
+}
+
 fetch() {
     if command -v curl >/dev/null 2>&1; then
-        if [ -n "${GH_TOKEN:-}" ]; then
-            run_with_timeout 120 curl --fail --show-error --silent --location \
-                --connect-timeout 10 --max-time 120 --output "$2" \
-                -H "Authorization: token ${GH_TOKEN}" \
-                -H "Accept: application/octet-stream" "$1"
+        if [ -n "${github_fetch_token:-}" ]; then
+            authenticated_curl application/octet-stream \
+                --fail --show-error --silent --location \
+                --connect-timeout 10 --max-time 120 --output "$2" --url "$1"
         else
             run_with_timeout 120 curl --fail --show-error --silent --location \
-                --connect-timeout 10 --max-time 120 --output "$2" "$1"
+                --connect-timeout 10 --max-time 120 --output "$2" --url "$1"
         fi
     elif command -v wget >/dev/null 2>&1; then
-        if [ -n "${GH_TOKEN:-}" ]; then
-            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document="$2" \
-                --header="Authorization: token ${GH_TOKEN}" \
-                --header="Accept: application/octet-stream" "$1"
-        else
-            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document="$2" "$1"
-        fi
+        [ -z "${github_fetch_token:-}" ] || fatal "curl is required for authenticated release downloads"
+        run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document="$2" "$1"
     else
         fatal "curl or wget is required"
     fi
@@ -108,25 +122,19 @@ fetch() {
 
 fetch_json() {
     if command -v curl >/dev/null 2>&1; then
-        if [ -n "${GH_TOKEN:-}" ]; then
-            run_with_timeout 120 curl --fail --show-error --silent --location \
-                --connect-timeout 10 --max-time 120 \
-                -H "Authorization: token ${GH_TOKEN}" \
-                -H "Accept: application/vnd.github+json" "$1"
+        if [ -n "${github_fetch_token:-}" ]; then
+            authenticated_curl application/vnd.github+json \
+                --fail --show-error --silent --location \
+                --connect-timeout 10 --max-time 120 --url "$1"
         else
             run_with_timeout 120 curl --fail --show-error --silent --location \
                 --connect-timeout 10 --max-time 120 \
-                -H "Accept: application/vnd.github+json" "$1"
+                -H "Accept: application/vnd.github+json" --url "$1"
         fi
     else
-        if [ -n "${GH_TOKEN:-}" ]; then
-            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document=- \
-                --header="Authorization: token ${GH_TOKEN}" \
-                --header="Accept: application/vnd.github+json" "$1"
-        else
-            run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document=- \
-                --header="Accept: application/vnd.github+json" "$1"
-        fi
+        [ -z "${github_fetch_token:-}" ] || fatal "curl is required for authenticated release downloads"
+        run_with_timeout 120 wget --quiet --timeout=120 --tries=1 --output-document=- \
+            --header="Accept: application/vnd.github+json" "$1"
     fi
 }
 
@@ -160,6 +168,13 @@ resolve_tag_revision() {
 "sha":"/' |
         sed -n 's/^"sha":"\([0-9a-fA-F][0-9a-fA-F]*\)".*/\1/p' |
         head -1
+}
+
+offline_release_requested() {
+    [ -n "${HERDR_RELEASE_ARCHIVE:-}" ] ||
+        [ -n "${HERDR_RELEASE_CHECKSUMS:-}" ] ||
+        [ -n "${HERDR_EXPECTED_REVISION:-}" ] ||
+        [ -n "${HERDR_EXPECTED_ARCHIVE_SHA256:-}" ]
 }
 
 sha256_file() {
@@ -256,14 +271,41 @@ validate_legacy_root() {
     fi
 }
 
+install_sentinel_is_valid() {
+    sentinel_check_root=$1
+    sentinel_check_canonical=${2:-}
+    sentinel_check_path="$sentinel_check_root/.herdr-mobile-relay-installation"
+    [ -d "$sentinel_check_root" ] && [ ! -L "$sentinel_check_root" ] || return 1
+    [ -f "$sentinel_check_path" ] && [ ! -L "$sentinel_check_path" ] || return 1
+    if sentinel_check_metadata=$(LC_ALL=C stat -f '%HT:%Lp:%l:%u' "$sentinel_check_path" 2>/dev/null); then
+        :
+    elif sentinel_check_metadata=$(LC_ALL=C stat -c '%F:%a:%h:%u' "$sentinel_check_path" 2>/dev/null); then
+        :
+    else
+        return 1
+    fi
+    sentinel_check_uid=$(id -u)
+    case "$sentinel_check_metadata" in
+        "Regular File:600:1:$sentinel_check_uid"|"regular file:600:1:$sentinel_check_uid") ;;
+        *) return 1 ;;
+    esac
+    if [ -z "$sentinel_check_canonical" ]; then
+        sentinel_check_canonical=$(CDPATH='' cd "$sentinel_check_root" && pwd -P) || return 1
+    fi
+    sentinel_check_lines=$(wc -l < "$sentinel_check_path" | tr -d '[:space:]') || return 1
+    [ "$sentinel_check_lines" = 2 ] || return 1
+    [ "$(sed -n '1p' "$sentinel_check_path")" = 'product=herdr-mobile-relay' ] || return 1
+    [ "$(sed -n '2p' "$sentinel_check_path")" = "root=$sentinel_check_canonical" ] || return 1
+    [ -z "$(sed -n '3p' "$sentinel_check_path")" ] || return 1
+}
+
 write_install_sentinel() {
     sentinel_root=$1
     root_kind=${2:-new}
     sentinel="$sentinel_root/.herdr-mobile-relay-installation"
-    if [ -f "$sentinel" ]; then
+    if [ -e "$sentinel" ] || [ -L "$sentinel" ]; then
         canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
-        grep -Fx 'product=herdr-mobile-relay' "$sentinel" >/dev/null &&
-            grep -Fx "root=$canonical_root" "$sentinel" >/dev/null ||
+        install_sentinel_is_valid "$sentinel_root" "$canonical_root" ||
             fatal "installation root has a mismatched ownership sentinel: $sentinel_root"
         return
     fi
@@ -286,13 +328,24 @@ write_install_sentinel() {
     fi
     chmod 700 "$sentinel_root"
     canonical_root=$(CDPATH='' cd "$sentinel_root" && pwd -P)
-    sentinel_temp="$sentinel_root/.herdr-mobile-relay-installation.$$"
-    {
+    install_sentinel_temp=$(mktemp "$sentinel_root/.herdr-mobile-relay-installation.tmp.XXXXXX") ||
+        fatal "could not create ownership sentinel safely: $sentinel_root"
+    if ! {
         printf 'product=herdr-mobile-relay\n'
         printf 'root=%s\n' "$canonical_root"
-    } > "$sentinel_temp"
-    chmod 600 "$sentinel_temp"
-    mv -f "$sentinel_temp" "$sentinel_root/.herdr-mobile-relay-installation"
+    } > "$install_sentinel_temp"; then
+        rm -f "$install_sentinel_temp"
+        install_sentinel_temp=
+        fatal "could not write ownership sentinel: $sentinel_root"
+    fi
+    if ! chmod 600 "$install_sentinel_temp" || ! mv -f "$install_sentinel_temp" "$sentinel"; then
+        rm -f "$install_sentinel_temp"
+        install_sentinel_temp=
+        fatal "could not install ownership sentinel: $sentinel_root"
+    fi
+    install_sentinel_temp=
+    install_sentinel_is_valid "$sentinel_root" "$canonical_root" ||
+        fatal "installed ownership sentinel failed validation: $sentinel_root"
 }
 
 prepare_install_roots() {
@@ -371,37 +424,79 @@ main() {
     stage="$work_dir/release"
     commit_json_path="$work_dir/commit.json"
 
-    info "Resolving ${BINARY} ${version} (${target}) from ${REPO}"
-    fetch_json "https://api.github.com/repos/${REPO}/commits/${tag}" > "$commit_json_path" ||
-        fatal "could not resolve release tag from GitHub API (private repositories require GH_TOKEN; SSH access authenticates Git only)"
-    commit_json=$(awk '{ printf "%s", $0 }' "$commit_json_path")
-    tag_revision=$(resolve_tag_revision "$commit_json")
-    case "$tag_revision" in
-        ????????????????????????????????????????) ;;
-        *) fatal "release tag did not resolve to an exact commit" ;;
-    esac
-    info "Downloading ${archive} from ${REPO}"
-    if [ -n "${GH_TOKEN:-}" ]; then
-        api_url="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
-        release_json_path="$work_dir/release.json"
-        fetch_json "$api_url" > "$release_json_path" ||
-            fatal "could not fetch release metadata from GitHub API"
-        release_json=$(awk '{ printf "%s", $0 }' "$release_json_path")
-        archive_url=$(resolve_asset_url "$release_json" "$archive")
-        checksum_url=$(resolve_asset_url "$release_json" "checksums.txt")
-        [ -n "$archive_url" ] || fatal "release has no asset named $archive"
-        [ -n "$checksum_url" ] || fatal "release has no asset named checksums.txt"
-        fetch "$checksum_url" "$checksums_path" ||
-            fatal "required checksums.txt download failed"
-        fetch "$archive_url" "$archive_path" ||
-            fatal "release archive download failed"
+    [ -z "${HERDR_RELEASE_BASE_URL:-}" ] || fatal "HERDR_RELEASE_BASE_URL is not accepted; release downloads are pinned to GitHub"
+    github_fetch_token=${GH_TOKEN:-${GITHUB_TOKEN:-}}
+    unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE
+    if offline_release_requested; then
+        [ -n "${HERDR_RELEASE_ARCHIVE:-}" ] &&
+            [ -n "${HERDR_RELEASE_CHECKSUMS:-}" ] &&
+            [ -n "${HERDR_EXPECTED_REVISION:-}" ] &&
+            [ -n "${HERDR_EXPECTED_ARCHIVE_SHA256:-}" ] ||
+            fatal "offline install requires archive, checksums, exact revision, and independent archive SHA-256"
+        case "$HERDR_RELEASE_ARCHIVE:$HERDR_RELEASE_CHECKSUMS" in
+            /*:/*) ;;
+            *) fatal "offline release archive and checksums paths must be absolute" ;;
+        esac
+        [ -f "$HERDR_RELEASE_ARCHIVE" ] && [ ! -L "$HERDR_RELEASE_ARCHIVE" ] ||
+            fatal "offline release archive must be a regular non-symlink file"
+        [ -f "$HERDR_RELEASE_CHECKSUMS" ] && [ ! -L "$HERDR_RELEASE_CHECKSUMS" ] ||
+            fatal "offline release checksums must be a regular non-symlink file"
+        [ "${#HERDR_EXPECTED_REVISION}" -eq 40 ] ||
+            fatal "offline expected revision must be an exact lowercase commit"
+        case "$HERDR_EXPECTED_REVISION" in
+            *[!0-9a-f]*) fatal "offline expected revision must be an exact lowercase commit" ;;
+        esac
+        [ "${#HERDR_EXPECTED_ARCHIVE_SHA256}" -eq 64 ] ||
+            fatal "offline expected archive SHA-256 must be exact lowercase hex"
+        case "$HERDR_EXPECTED_ARCHIVE_SHA256" in
+            *[!0-9a-f]*) fatal "offline expected archive SHA-256 must be exact lowercase hex" ;;
+        esac
+        [ "${HERDR_RELEASE_ARCHIVE##*/}" = "$archive" ] ||
+            fatal "offline release archive name does not match version and native target"
+        input_hash=$(sha256_file "$HERDR_RELEASE_ARCHIVE")
+        [ "$input_hash" = "$HERDR_EXPECTED_ARCHIVE_SHA256" ] ||
+            fatal "offline release archive does not match independent expected SHA-256"
+        cp "$HERDR_RELEASE_ARCHIVE" "$archive_path" || fatal "could not stage offline release archive"
+        cp "$HERDR_RELEASE_CHECKSUMS" "$checksums_path" || fatal "could not stage offline release checksums"
+        [ "$(sha256_file "$archive_path")" = "$HERDR_EXPECTED_ARCHIVE_SHA256" ] ||
+            fatal "offline release archive changed while being staged"
+        tag_revision="$HERDR_EXPECTED_REVISION"
+        github_fetch_token=
+        info "Installing reviewed offline ${BINARY} ${version} (${target})"
     else
-        base_url=${HERDR_RELEASE_BASE_URL:-"https://github.com/${REPO}/releases/download/${tag}"}
-        fetch "$base_url/checksums.txt" "$checksums_path" ||
-            fatal "required checksums.txt download failed"
-        fetch "$base_url/$archive" "$archive_path" ||
-            fatal "release archive download failed"
+        info "Resolving ${BINARY} ${version} (${target}) from ${REPO}"
+        fetch_json "https://api.github.com/repos/${REPO}/commits/${tag}" > "$commit_json_path" ||
+            fatal "could not resolve release tag from GitHub API (private repositories require GH_TOKEN; SSH access authenticates Git only)"
+        commit_json=$(awk '{ printf "%s", $0 }' "$commit_json_path")
+        tag_revision=$(resolve_tag_revision "$commit_json")
+        case "$tag_revision" in
+            ????????????????????????????????????????) ;;
+            *) fatal "release tag did not resolve to an exact commit" ;;
+        esac
+        info "Downloading ${archive} from ${REPO}"
+        if [ -n "$github_fetch_token" ]; then
+            api_url="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
+            release_json_path="$work_dir/release.json"
+            fetch_json "$api_url" > "$release_json_path" ||
+                fatal "could not fetch release metadata from GitHub API"
+            release_json=$(awk '{ printf "%s", $0 }' "$release_json_path")
+            archive_url=$(resolve_asset_url "$release_json" "$archive")
+            checksum_url=$(resolve_asset_url "$release_json" "checksums.txt")
+            [ -n "$archive_url" ] || fatal "release has no asset named $archive"
+            [ -n "$checksum_url" ] || fatal "release has no asset named checksums.txt"
+            fetch "$checksum_url" "$checksums_path" ||
+                fatal "required checksums.txt download failed"
+            fetch "$archive_url" "$archive_path" ||
+                fatal "release archive download failed"
+        else
+            base_url="https://github.com/${REPO}/releases/download/${tag}"
+            fetch "$base_url/checksums.txt" "$checksums_path" ||
+                fatal "required checksums.txt download failed"
+            fetch "$base_url/$archive" "$archive_path" ||
+                fatal "release archive download failed"
+        fi
     fi
+    unset github_fetch_token
 
     matches=$(awk -v name="$archive" '
         NF == 2 {
@@ -424,7 +519,7 @@ main() {
     [ -f "$stage/release-manifest.json" ] || fatal "archive is missing release-manifest.json"
 
     "$stage/$BINARY" verify-release --target "$target" "$stage" >/dev/null ||
-        fatal "offline release verification failed"
+        fatal "release verification failed"
     manifest_version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$stage/release-manifest.json" | head -1)
     revision=$(sed -n 's/^[[:space:]]*"revision":[[:space:]]*"\([^"]*\)".*/\1/p' "$stage/release-manifest.json" | head -1)
     [ "$manifest_version" = "$version" ] || fatal "release manifest version mismatch"

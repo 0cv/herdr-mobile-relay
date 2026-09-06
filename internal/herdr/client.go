@@ -715,13 +715,13 @@ func (c *Client) StartAgent(ctx context.Context, name, kind, paneID string, time
 		"--pane", paneID,
 		"--timeout", strconv.Itoa(timeoutMs),
 	); err != nil {
-		return "", fmt.Errorf("herdr agent start: %w", err)
+		return "", fmt.Errorf("herdr agent start: %w", dispatchedAfterSuccess(err))
 	}
 	if result.PaneID == "" {
 		result.PaneID = paneID
 	}
 	if result.PaneID == "" {
-		return "", errors.New("herdr agent start: response has no pane_id")
+		return "", fmt.Errorf("herdr agent start: %w", errors.Join(ErrDispatchedUnknown, errors.New("response has no pane_id")))
 	}
 	return result.PaneID, nil
 }

@@ -83,8 +83,11 @@ func (l *Lifecycle) ValidateStart(request StartRequest) (profiles.Profile, Start
 
 func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request StartRequest) (StartResult, error) {
 	if existing := l.reconcileExisting(ctx, profile.ID, request); existing != "" {
-		l.profiles.Remember(existing, profile.ID)
-		return StartResult{PaneID: existing, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}, nil
+		result := StartResult{PaneID: existing, Name: request.Name, Cwd: request.Cwd, WorkspaceID: request.WorkspaceID}
+		if err := l.profiles.Remember(existing, profile.ID); err != nil {
+			return result, fmt.Errorf("persist agent profile ownership: %w", err)
+		}
+		return result, nil
 	}
 
 	deadline, ok := ctx.Deadline()
@@ -113,23 +116,33 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 	if workspaceID == "" {
 		workspaceID = SelectWorkspaceForCwd(request.Cwd, inventory.Panes, workspaces, l.home)
 	}
+	if err := l.profiles.PreflightAssociationPersistence(); err != nil {
+		return StartResult{}, fmt.Errorf("preflight agent profile ownership: %w", err)
+	}
 
 	target, err := l.createTarget(startupCtx, workspaceID, request.Name, request.Cwd)
 	if err != nil {
 		return StartResult{}, err
 	}
+	result := StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}
+	if err := l.profiles.Remember(target.PaneID, profile.ID); err != nil {
+		return result, partiallyApplied("Herdr created the target but profile ownership intent was not durable", err)
+	}
 
 	startErr := l.startInTarget(startupCtx, profile, request.Name, target.PaneID)
 	if startErr != nil {
+		if herdr.IsRefused(startErr) || errors.Is(startErr, herdr.ErrNotStarted) {
+			if forgetErr := l.profiles.Forget(target.PaneID); forgetErr != nil {
+				return result, partiallyApplied("agent start was refused but ownership intent cleanup was not durable", forgetErr)
+			}
+		}
 		// The target stays open. Herdr created it, so closing it would destroy
 		// the workspace the user asked for and leave nothing to retry into. An
 		// uncertain dispatch may also have left an agent running in it, and
 		// the phone is told to review that agent before retrying.
-		return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, startErr
+		return result, startErr
 	}
-
-	l.profiles.Remember(target.PaneID, profile.ID)
-	return StartResult{PaneID: target.PaneID, Name: request.Name, Cwd: request.Cwd, WorkspaceID: target.WorkspaceID}, nil
+	return result, nil
 }
 
 func (l *Lifecycle) createTarget(ctx context.Context, workspaceID, label, cwd string) (*herdr.CreateResult, error) {
@@ -237,7 +250,7 @@ func (l *Lifecycle) reconcileExisting(ctx context.Context, profileID string, req
 		if request.WorkspaceID != "" && pane.WorkspaceID != request.WorkspaceID {
 			continue
 		}
-		if l.profiles.ResolvePane(pane.ID, pane.Agent) == profileID {
+		if l.profiles.ResolvePaneSession(pane.ID, strings.TrimSpace(pane.Session), pane.Agent) == profileID {
 			return pane.ID
 		}
 	}

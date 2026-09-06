@@ -270,8 +270,14 @@ export default async function setup() {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  relay.stdout?.on('data', (chunk) => { output += String(chunk); });
-  relay.stderr?.on('data', (chunk) => { output += String(chunk); });
+  relay.stdout?.on('data', (chunk) => {
+    output += String(chunk);
+    if (process.env.HERDR_ATTENTION_DEBUG === '1') process.stderr.write(chunk);
+  });
+  relay.stderr?.on('data', (chunk) => {
+    output += String(chunk);
+    if (process.env.HERDR_ATTENTION_DEBUG === '1') process.stderr.write(chunk);
+  });
 
   try {
     await waitForHealth(`http://127.0.0.1:${port}`, () => output);

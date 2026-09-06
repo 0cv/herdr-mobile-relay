@@ -26,6 +26,52 @@ relay_binary() {
     printf '%s\n' "$binary"
 }
 
+verified_installed_release() {
+    local release_root
+    local releases_dir
+    local current_release
+    local os
+    local arch
+    local target
+
+    release_root="$(relay_release_root)"
+    [ -d "$release_root/releases" ] && [ -d "$release_root/current" ] || {
+        echo "Verified installed relay release is unavailable under $release_root" >&2
+        return 1
+    }
+    release_root="$(cd "$release_root" && pwd -P)"
+    releases_dir="$(cd "$release_root/releases" && pwd -P)"
+    current_release="$(cd "$release_root/current" && pwd -P)"
+    case "$current_release" in
+        "$releases_dir"/*) ;;
+        *) echo "Installed relay current points outside the verified releases directory: $current_release" >&2; return 1 ;;
+    esac
+    [ -f "$current_release/release-manifest.json" ] && [ ! -L "$current_release/release-manifest.json" ] || {
+        echo "Installed relay release manifest is unavailable or unsafe: $current_release" >&2
+        return 1
+    }
+    [ -x "$current_release/herdr-mobile-relay" ] && [ ! -L "$current_release/herdr-mobile-relay" ] || {
+        echo "Installed relay verifier is unavailable or unsafe: $current_release" >&2
+        return 1
+    }
+    case "$(uname -s)" in
+        Linux) os=linux ;;
+        Darwin) os=darwin ;;
+        *) echo "Unsupported service platform: $(uname -s)" >&2; return 1 ;;
+    esac
+    case "$(uname -m)" in
+        x86_64|amd64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) echo "Unsupported service architecture: $(uname -m)" >&2; return 1 ;;
+    esac
+    target="$os/$arch"
+    "$current_release/herdr-mobile-relay" verify-release --target "$target" "$current_release" >/dev/null || {
+        echo "Installed relay release failed manifest verification: $current_release" >&2
+        return 1
+    }
+    printf '%s\n' "$current_release"
+}
+
 # The plugin is installed from a git clone, so its verified release belongs to
 # the repository that checkout points at: a fork or a private canary installs
 # its own bundle instead of this project's. Anything that is not a plain GitHub
@@ -80,12 +126,7 @@ relay_env_file() {
         printf '%s\n' "$HERDR_RELAY_ENV"
         return
     fi
-    if [ -z "${HERDR_PLUGIN_CONFIG_DIR:-}" ]; then
-        printf '%s/.env\n' "$script_dir"
-        return
-    fi
-
-    config_dir="$HERDR_PLUGIN_CONFIG_DIR"
+    config_dir="${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-mobile-relay}"
     plugin_env="$config_dir/relay.env"
     mkdir -p "$config_dir"
     chmod 700 "$config_dir"
@@ -697,20 +738,27 @@ remove_env_value_atomic() {
     mv "$temp_file" "$env_file"
 }
 
-persist_github_token() {
+sanitize_relay_runtime_env() {
     local env_file="$1"
-    local token_file
+    local directory
     local temp_file
 
-    if [ -z "${GH_TOKEN:-}" ]; then
-        return 0
+    directory="$(dirname "$env_file")"
+    rm -f "$directory/github-token" || return 1
+    [ -f "$env_file" ] || return 0
+    temp_file="$(mktemp "$directory/.relay-env.XXXXXX")" || return 1
+    if ! awk -F= '
+        $1 != "HERDR_GITHUB_TOKEN_FILE" &&
+        $1 != "GH_TOKEN" &&
+        $1 != "GITHUB_TOKEN" &&
+        $1 != "HERDR_WEB_ROOT" &&
+        $1 != "HERDR_RELAY_BIN"
+    ' "$env_file" > "$temp_file"; then
+        rm -f "$temp_file"
+        return 1
     fi
-    token_file="$(dirname "$env_file")/github-token"
-    temp_file="$(mktemp "$(dirname "$env_file")/.github-token.XXXXXX")"
-    printf '%s\n' "$GH_TOKEN" > "$temp_file"
-    chmod 600 "$temp_file"
-    mv "$temp_file" "$token_file"
-    set_env_value_atomic "$env_file" HERDR_GITHUB_TOKEN_FILE "$token_file"
+    chmod 600 "$temp_file" || { rm -f "$temp_file"; return 1; }
+    mv -f "$temp_file" "$env_file"
 }
 
 append_env_default() {
@@ -728,6 +776,11 @@ ensure_relay_env() {
     local env_file="$1"
     local cloudflared_config="${2:-}"
 
+    if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${HERDR_GITHUB_TOKEN_FILE:-}" ]; then
+        echo "Refusing relay setup while ambient GitHub credentials are present; unset GH_TOKEN, GITHUB_TOKEN, and HERDR_GITHUB_TOKEN_FILE first." >&2
+        return 1
+    fi
+
     if [ ! -f "$env_file" ]; then
         umask 077
         touch "$env_file"
@@ -744,10 +797,9 @@ ensure_relay_env() {
     if [ -n "$cloudflared_config" ]; then
         append_env_default "$env_file" CLOUDFLARED_CONFIG "$cloudflared_config"
     fi
-    persist_github_token "$env_file"
-    # Migrate older installs that exposed the token to the complete service
-    # process tree. Only the credential-file path remains in relay.env.
-    remove_env_value_atomic "$env_file" GH_TOKEN
+    # Strip every legacy GitHub secret and source-checkout runtime override in
+    # one atomic env rewrite, after making the legacy token path unreachable.
+    sanitize_relay_runtime_env "$env_file"
 }
 
 load_relay_env() {
@@ -797,6 +849,99 @@ wait_for_relay_health() {
     done
 
     return 1
+}
+
+wait_for_supervised_release() {
+    local state_path="$1"
+    local release_root="$2"
+    local instance="$3"
+    local local_health="$4"
+    local public_health="$5"
+    local managed="$6"
+    local active_runtime="$7"
+    local attempts="${8:-15}"
+    local delay="${9:-1}"
+    local binary="$release_root/herdr-mobile-relay"
+    local attempt
+    local result=""
+
+    case "$state_path:$release_root" in
+        /*:/*) ;;
+        *) echo "Supervisor state and release root must be absolute paths." >&2; return 1 ;;
+    esac
+    [ -n "$instance" ] || { echo "Relay instance ID is required for exact readiness." >&2; return 1; }
+    [ -x "$binary" ] || { echo "Verified Relay binary is unavailable: $binary" >&2; return 1; }
+    case "$attempts:$delay" in
+        *[!0-9:]*|0:*|*: ) echo "Readiness attempts and delay must be bounded integers." >&2; return 1 ;;
+    esac
+    [ "$attempts" -le 120 ] && [ "$delay" -le 60 ] || { echo "Readiness retry bounds are too large." >&2; return 1; }
+
+    set -- supervisor-ready \
+        --state "$state_path" \
+        --release-root "$release_root" \
+        --instance "$instance" \
+        --local-health "$local_health" \
+        --public-health "$public_health"
+    case "$managed" in
+        true)
+            case "$active_runtime" in
+                /*) set -- "$@" --managed --active-runtime "$active_runtime" ;;
+                *) echo "Managed readiness requires an absolute active-runtime path." >&2; return 1 ;;
+            esac
+            ;;
+        false)
+            [ -z "$active_runtime" ] || { echo "Ordinary readiness cannot name an active runtime." >&2; return 1; }
+            ;;
+        *) echo "Managed readiness mode must be exactly true or false." >&2; return 1 ;;
+    esac
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if result="$("$binary" "$@" 2>&1)"; then
+            printf '%s\n' "$result"
+            return 0
+        fi
+        if [ "$attempt" -lt "$attempts" ]; then
+            sleep "$delay"
+        fi
+    done
+    [ -z "$result" ] || printf '%s\n' "$result" >&2
+    return 1
+}
+
+wait_for_installed_relay_ready() {
+    local cloudflared_config="$1"
+    local attempts="${2:-15}"
+    local delay="${3:-1}"
+    local release_root
+    local state_root
+    local host="${HERDR_RELAY_HOST:-127.0.0.1}"
+    local port="${HERDR_RELAY_PORT:-8375}"
+    local local_health
+    local public_health="${HERDR_RELAY_PUBLIC_HEALTH_URL:-}"
+    local managed="${HERDR_RELAY_MANAGED_DEPLOYMENT:-false}"
+    local active_runtime=""
+
+    release_root="$(relay_release_root)/current"
+    state_root="${HERDR_RELAY_SUPERVISOR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay}"
+    case "$host" in
+        127.0.0.1|localhost) local_health="http://$host:$port/readyz" ;;
+        ::1) local_health="http://[::1]:$port/readyz" ;;
+        *) echo "Exact readiness requires a loopback Relay host." >&2; return 1 ;;
+    esac
+    if [ -z "$public_health" ]; then
+        public_host="$(yaml_scalar hostname "$cloudflared_config")"
+        if ! valid_hostname "$public_host"; then
+            echo "Cloudflare config has no valid public Relay hostname." >&2
+            return 1
+        fi
+        public_health="https://$public_host/readyz"
+    fi
+    if [ "$managed" = true ]; then
+        active_runtime="${HERDR_RELAY_ACTIVE_RUNTIME:-}"
+    fi
+    wait_for_supervised_release \
+        "$state_root/supervisor.json" "$release_root" "${HERDR_RELAY_INSTANCE_ID:-}" \
+        "$local_health" "$public_health" "$managed" "$active_runtime" "$attempts" "$delay"
 }
 
 json_string_field() {
@@ -864,6 +1009,38 @@ verify_relay_release_health() {
         [ "$(json_string_field "$health" release_version)" = "$expected_version" ] &&
         [ "$(json_string_field "$health" revision)" = "$expected_revision" ] &&
         [ "$(json_string_field "$health" bundle_hash)" = "$expected_web_hash" ]
+}
+
+relay_release_identity_at_endpoints() {
+    local local_health_url="$1"
+    local public_health_url="$2"
+    local local_health
+    local public_health
+    local version
+    local revision
+    local web_hash
+
+    command -v curl >/dev/null 2>&1 || {
+        echo "curl is required to capture exact Relay release identity." >&2
+        return 1
+    }
+    case "$local_health_url" in
+        http://127.0.0.1:*/healthz|http://localhost:*/healthz|http://\[::1\]:*/healthz) ;;
+        *) echo "Local Relay identity URL must be a loopback healthz endpoint." >&2; return 1 ;;
+    esac
+    case "$public_health_url" in
+        https://*/healthz) ;;
+        *) echo "Public Relay identity URL must be an HTTPS healthz endpoint." >&2; return 1 ;;
+    esac
+    local_health="$(curl -fsS --max-time 2 "$local_health_url" 2>/dev/null)" || return 1
+    public_health="$(curl -fsS --max-time 5 "$public_health_url" 2>/dev/null)" || return 1
+    version="$(json_string_field "$local_health" release_version)"
+    revision="$(json_string_field "$local_health" revision)"
+    web_hash="$(json_string_field "$local_health" bundle_hash)"
+    [ -n "$version" ] && [ -n "$revision" ] && [ -n "$web_hash" ] || return 1
+    verify_relay_release_health "$local_health" "$version" "$revision" "$web_hash" &&
+        verify_relay_release_health "$public_health" "$version" "$revision" "$web_hash" || return 1
+    printf '%s\n%s\n%s\n' "$version" "$revision" "$web_hash"
 }
 
 wait_for_relay_release_health() {

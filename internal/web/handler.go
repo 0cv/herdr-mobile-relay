@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"mime"
@@ -42,7 +43,10 @@ func NewHandler(webRoot string) (*Handler, error) {
 		return nil, fmt.Errorf("open web root %s: %w", webRoot, err)
 	}
 	handler := &Handler{root: root, files: root.FS()}
-	handler.loadIdentity()
+	if err := handler.loadIdentity(); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
 	return handler, nil
 }
 
@@ -240,7 +244,7 @@ func computeETag(body []byte) string {
 	return `"` + fmt.Sprintf("%x", sum[:16]) + `"`
 }
 
-func (h *Handler) loadIdentity() {
+func (h *Handler) loadIdentity() error {
 	versionData, err := fs.ReadFile(h.files, "version.json")
 	if err == nil {
 		var version struct {
@@ -248,17 +252,26 @@ func (h *Handler) loadIdentity() {
 			ReleaseVersion string `json:"release_version"`
 			Revision       string `json:"revision"`
 		}
-		if json.Unmarshal(versionData, &version) == nil {
-			h.bundleVersion = version.ReleaseVersion
-			if h.bundleVersion == "" {
-				h.bundleVersion = version.Version
-			}
-			h.bundleRevision = version.Revision
+		if err := json.Unmarshal(versionData, &version); err != nil {
+			return fmt.Errorf("parse web bundle version: %w", err)
 		}
+		h.bundleVersion = version.ReleaseVersion
+		if h.bundleVersion == "" {
+			h.bundleVersion = version.Version
+		}
+		h.bundleRevision = version.Revision
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read web bundle version: %w", err)
 	}
-	if bundleHash, err := relayrelease.WebHashFS(h.files); err == nil {
-		h.bundleHash = bundleHash
+	bundleHash, err := relayrelease.WebHashFS(h.files)
+	if err != nil {
+		return fmt.Errorf("hash web bundle: %w", err)
 	}
+	if bundleHash == "" {
+		return errors.New("web bundle is empty")
+	}
+	h.bundleHash = bundleHash
+	return nil
 }
 
 func (h *Handler) Close() error           { return h.root.Close() }

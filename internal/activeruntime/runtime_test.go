@@ -68,6 +68,29 @@ func TestLoadRejectsUnsafeRuntimeSnapshotFiles(t *testing.T) {
 			t.Fatal("symlink pointer accepted")
 		}
 	})
+	t.Run("same-inode symlink swap", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "active-runtime.json")
+		writeSnapshotFixture(t, path, valid(root))
+		moved := filepath.Join(root, "moved")
+		ops := defaultLoadIO()
+		ops.lstat = func(string) (os.FileInfo, error) {
+			info, err := os.Lstat(path)
+			if err != nil {
+				return nil, err
+			}
+			if err := os.Rename(path, moved); err != nil {
+				return nil, err
+			}
+			if err := os.Symlink(moved, path); err != nil {
+				return nil, err
+			}
+			return info, nil
+		}
+		if _, err := loadWith(ops, path); err == nil {
+			t.Fatal("same-inode symlink swap accepted")
+		}
+	})
 	t.Run("hardlink", func(t *testing.T) {
 		root := t.TempDir()
 		path := filepath.Join(root, "active-runtime.json")
@@ -190,7 +213,7 @@ func TestLoadPropagatesEveryOpenReadBoundaryFailure(t *testing.T) {
 }
 
 func TestRuntimeNameRejectsPathAndControlCharacters(t *testing.T) {
-	for _, value := range []string{"bad/name", `bad\name`, "bad\x7f"} {
+	for _, value := range []string{".", "..", "bad/name", `bad\name`, "bad\x7f"} {
 		if validName(value) {
 			t.Fatalf("unsafe generation accepted: %q", value)
 		}

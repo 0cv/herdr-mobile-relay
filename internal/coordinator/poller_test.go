@@ -1,11 +1,195 @@
 package coordinator
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
+
+func TestReconcileSynchronouslyCommitsFreshInventory(t *testing.T) {
+	root := t.TempDir()
+	fakeHerdr := filepath.Join(root, "herdr")
+	if err := os.WriteFile(fakeHerdr, []byte(`#!/bin/sh
+case "$*" in
+  "agent list") printf '%s\n' '{"result":{"agents":[]}}' ;;
+  "workspace list") printf '%s\n' '{"result":{"workspaces":[]}}' ;;
+  "tab list") printf '%s\n' '{"result":{"tabs":[]}}' ;;
+  "pane list") printf '%s\n' '{"result":{"panes":[]}}' ;;
+  *) exit 1 ;;
+esac
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := testState()
+	poller := NewPoller(herdr.NewClient(fakeHerdr, filepath.Join(root, "herdr.sock")), state, time.Second, testLogger())
+	if err := poller.Reconcile(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ready := state.SnapshotAtReadyInventory(); !ready {
+		t.Fatal("synchronous reconcile returned before the inventory committed")
+	}
+}
+
+func TestReconcileReturnsTheInventoryFailure(t *testing.T) {
+	root := t.TempDir()
+	fakeHerdr := filepath.Join(root, "herdr")
+	if err := os.WriteFile(fakeHerdr, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := testState()
+	poller := NewPoller(herdr.NewClient(fakeHerdr, filepath.Join(root, "herdr.sock")), state, time.Second, testLogger())
+	if err := poller.Reconcile(t.Context()); err == nil {
+		t.Fatal("synchronous reconcile hid the inventory failure")
+	}
+	if state.InventoryReady() {
+		t.Fatal("failed synchronous reconcile left the inventory ready")
+	}
+}
+
+func TestReconcileReturnsWorkspaceFailureAndExhaustsTopologyChurn(t *testing.T) {
+	t.Run("workspace failure", func(t *testing.T) {
+		root := t.TempDir()
+		fakeHerdr := writeScript(t, root, "herdr", "#!/bin/sh\ncase \"$1 $2\" in\n  'agent list') printf '%s\\n' '{\"result\":{\"agents\":[]}}' ;;\n  'workspace list') exit 1 ;;\n  *) printf '%s\\n' '{\"result\":{}}' ;;\nesac\n")
+		poller := NewPoller(herdr.NewClient(fakeHerdr, filepath.Join(root, "herdr.sock")), testState(), time.Second, testLogger())
+		if err := poller.Reconcile(t.Context()); err == nil {
+			t.Fatal("workspace inventory failure was hidden")
+		}
+	})
+
+	t.Run("topology churn", func(t *testing.T) {
+		root := t.TempDir()
+		fakeHerdr := writeScript(t, root, "herdr", "#!/bin/sh\ncase \"$1 $2\" in\n  'agent list') printf '%s\\n' '{\"result\":{\"agents\":[]}}' ;;\n  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n  'tab list') printf '%s\\n' '{\"result\":{\"tabs\":[]}}' ;;\n  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n  *) exit 1 ;;\nesac\n")
+		state := testState()
+		poller := NewPoller(herdr.NewClient(fakeHerdr, filepath.Join(root, "herdr.sock")), state, time.Second, testLogger())
+		poller.SetEnrich(func(context.Context, []*AgentState) { state.MarkTopologyChanged() })
+		if err := poller.Reconcile(t.Context()); !errors.Is(err, errTopologyStale) {
+			t.Fatalf("topology churn = %v, want %v", err, errTopologyStale)
+		}
+	})
+}
+
+func TestPollerRunCoversWakeTimerAndCancellation(t *testing.T) {
+	root := t.TempDir()
+	fakeHerdr := writeScript(t, root, "herdr", "#!/bin/sh\ncase \"$1 $2\" in\n  'agent list') printf '%s\\n' '{\"result\":{\"agents\":[]}}' ;;\n  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n  'tab list') printf '%s\\n' '{\"result\":{\"tabs\":[]}}' ;;\n  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n  *) exit 1 ;;\nesac\n")
+	poller := NewPoller(herdr.NewClient(fakeHerdr, filepath.Join(root, "herdr.sock")), testState(), 100*time.Millisecond, testLogger())
+	commits := make(chan struct{}, 4)
+	poller.SetAfterCommit(func(context.Context, []*AgentState) { commits <- struct{}{} })
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		poller.Run(ctx)
+		close(done)
+	}()
+	waitForPollerCommit(t, commits)
+	poller.Wake()
+	waitForPollerCommit(t, commits)
+	waitForPollerCommit(t, commits)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("poller did not stop after cancellation")
+	}
+}
+
+func waitForPollerCommit(t *testing.T, commits <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-commits:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for poll commit")
+	}
+}
+
+func TestRejectedPollCannotPublishPostCommitEnrichment(t *testing.T) {
+	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "pane-current", SessionID: "session-current", Status: "idle"}}, 0)
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	published := 0
+	poller.SetAfterCommit(func(context.Context, []*AgentState) { published++ })
+	stale := state.BeginPoll()
+	state.CommitTopology(
+		[]*AgentState{{PaneID: "pane-current", SessionID: "session-current", Status: "idle"}},
+		[]herdr.Workspace{{ID: "workspace-new", Label: "New"}},
+		state.RevisionCounter(),
+	)
+	if _, committed := poller.commitPoll(context.Background(), []*AgentState{{PaneID: "pane-stale", SessionID: "session-stale"}}, nil, stale); committed {
+		t.Fatal("topology-stale poll committed")
+	}
+	if published != 0 {
+		t.Fatalf("stale enrichment publications = %d, want 0", published)
+	}
+
+	fresh := state.BeginPoll()
+	if _, committed := poller.commitPoll(context.Background(), []*AgentState{{PaneID: "pane-current", SessionID: "session-current"}}, nil, fresh); !committed {
+		t.Fatal("fresh poll was rejected")
+	}
+	if published != 1 {
+		t.Fatalf("fresh enrichment publications = %d, want 1", published)
+	}
+}
+
+func TestPollAndEventSerializeCommitThroughPostCommitPublication(t *testing.T) {
+	state := testState()
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var orderMu sync.Mutex
+	var order []string
+	poller.SetAfterCommit(func(_ context.Context, agents []*AgentState) {
+		paneID := agents[0].PaneID
+		orderMu.Lock()
+		order = append(order, paneID)
+		orderMu.Unlock()
+		if paneID == "pane-old" {
+			close(firstEntered)
+			<-releaseFirst
+			return
+		}
+		close(secondEntered)
+	})
+
+	token := state.BeginPoll()
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		poller.commitPoll(context.Background(), []*AgentState{{PaneID: "pane-old", SessionID: "session-old"}}, nil, token)
+	}()
+	<-firstEntered
+	eventDone := make(chan struct{})
+	go func() {
+		defer close(eventDone)
+		poller.commitEventTopology(context.Background(), herdr.TopologySnapshot{Panes: []herdr.Pane{{ID: "pane-new", Session: "session-new", Agent: "codex"}}}, state.RevisionCounter())
+	}()
+	select {
+	case <-secondEntered:
+		t.Fatal("newer event published while older poll publication was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	<-pollDone
+	<-eventDone
+	<-secondEntered
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	if !reflect.DeepEqual(order, []string{"pane-old", "pane-new"}) {
+		t.Fatalf("publication order = %v", order)
+	}
+}
+
+func TestEventCommitAllowsNoPostCommitHook(t *testing.T) {
+	state := testState()
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	poller.commitEventTopology(context.Background(), herdr.TopologySnapshot{}, state.RevisionCounter())
+}
 
 func TestTopologyStaleRepollsAreBounded(t *testing.T) {
 	state := testState()

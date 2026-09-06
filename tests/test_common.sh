@@ -37,7 +37,21 @@ PACKAGED_BINARY="$(
     HERDR_RELAY_BIN="$DEV_RELAY_BIN" \
         bash -c '. "$1"; relay_binary' _ "$PACKAGED_RELEASE/relay/common.sh"
 )"
-test "$PACKAGED_BINARY" = "$PACKAGED_RELEASE/herdr-mobile-relay"
+PACKAGED_EXPECTED="$(CDPATH='' cd "$PACKAGED_RELEASE" && pwd -P)/herdr-mobile-relay"
+test "$PACKAGED_BINARY" = "$PACKAGED_EXPECTED"
+
+# A service installed from a release must never persist a config path back into
+# the source checkout. The default is the user's persistent config root, and a
+# legacy checkout-local .env is copied there exactly once for migration.
+PERSISTENT_HOME="$WORK_DIR/persistent-home"
+SOURCE_RELAY="$WORK_DIR/source-relay"
+mkdir -p "$PERSISTENT_HOME" "$SOURCE_RELAY"
+printf 'HERDR_RELAY_TOKEN=legacy-token\n' > "$SOURCE_RELAY/.env"
+PERSISTENT_ENV="$(HOME="$PERSISTENT_HOME" XDG_CONFIG_HOME="$PERSISTENT_HOME/config" HERDR_RELAY_ENV= HERDR_PLUGIN_CONFIG_DIR= relay_env_file "$SOURCE_RELAY")"
+test "$PERSISTENT_ENV" = "$PERSISTENT_HOME/config/herdr-mobile-relay/relay.env"
+test "$(cat "$PERSISTENT_ENV")" = 'HERDR_RELAY_TOKEN=legacy-token'
+test "$(stat -f '%Lp' "$PERSISTENT_HOME/config/herdr-mobile-relay" 2>/dev/null || stat -c '%a' "$PERSISTENT_HOME/config/herdr-mobile-relay")" = 700
+test "$(stat -f '%Lp' "$PERSISTENT_ENV" 2>/dev/null || stat -c '%a' "$PERSISTENT_ENV")" = 600
 
 # A plugin checkout installs the release of the repository it was cloned from,
 # in whichever URL form git recorded, and nothing else may pass for one.
@@ -410,21 +424,14 @@ ENV_FILE="$WORK_DIR/config/relay.env"
 mkdir -p "$(dirname "$ENV_FILE")"
 GH_TOKEN="test-private-token"
 export GH_TOKEN
-ensure_relay_env "$ENV_FILE"
-
-if grep -q '^GH_TOKEN=' "$ENV_FILE"; then
-    echo "relay.env exposed GH_TOKEN" >&2
+if ensure_relay_env "$ENV_FILE" >/dev/null 2>&1; then
+    echo "relay environment accepted an ambient GitHub token" >&2
     exit 1
 fi
-TOKEN_FILE="$(env_file_value "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE)"
-test "$TOKEN_FILE" = "$WORK_DIR/config/github-token"
-test "$(cat "$TOKEN_FILE")" = "$GH_TOKEN"
-if stat -c '%a' "$TOKEN_FILE" >/dev/null 2>&1; then
-    mode="$(stat -c '%a' "$TOKEN_FILE")"
-else
-    mode="$(stat -f '%Lp' "$TOKEN_FILE")"
-fi
-test "$mode" = "600"
+unset GH_TOKEN
+ensure_relay_env "$ENV_FILE"
+test -z "$(env_file_value "$ENV_FILE" HERDR_GITHUB_TOKEN_FILE)"
+test ! -e "$WORK_DIR/config/github-token"
 
 FAKE_PLIST_BUDDY="$WORK_DIR/PlistBuddy"
 PLIST_LOG="$WORK_DIR/plist.log"
@@ -436,7 +443,16 @@ chmod 700 "$FAKE_PLIST_BUDDY"
 export PLIST_LOG
 HERDR_PLIST_BUDDY="$FAKE_PLIST_BUDDY"
 export HERDR_PLIST_BUDDY
-touch "$WORK_DIR/service.plist"
+cat > "$WORK_DIR/service.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.herdr-mobile-relay.service</string>
+</dict>
+</plist>
+EOF
 update_launchd_release_paths "$WORK_DIR/service.plist" \
     "$WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh" \
     "$WORK_DIR/releases/current" \
@@ -527,6 +543,96 @@ EXACT_HEALTH="$(
 )"
 test "$(json_string_field "$EXACT_HEALTH" release_version)" = "0.9.0"
 test "$(cat "$HEALTH_ATTEMPTS")" = "2"
+
+SUPERVISED_RELEASE="$WORK_DIR/supervised-release"
+SUPERVISED_ARGS="$WORK_DIR/supervised-ready.args"
+SUPERVISED_ATTEMPTS="$WORK_DIR/supervised-ready.attempts"
+mkdir -p "$SUPERVISED_RELEASE"
+cat > "$SUPERVISED_RELEASE/herdr-mobile-relay" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$SUPERVISED_ARGS"
+if [ "${SUPERVISED_ALWAYS_FAIL:-}" = 1 ]; then
+    [ -z "${SUPERVISED_FAILURE_OUTPUT:-}" ] || printf '%s\n' "$SUPERVISED_FAILURE_OUTPUT"
+    exit 1
+fi
+attempt=0
+if [ -f "$SUPERVISED_ATTEMPTS" ]; then
+    attempt="$(cat "$SUPERVISED_ATTEMPTS")"
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" > "$SUPERVISED_ATTEMPTS"
+[ "$attempt" -gt 1 ] || exit 1
+printf '%s\n' '{"status":"ready","instance":"relay-personal"}'
+EOF
+chmod 700 "$SUPERVISED_RELEASE/herdr-mobile-relay"
+export SUPERVISED_ARGS SUPERVISED_ATTEMPTS
+SUPERVISED_RESULT="$(wait_for_supervised_release \
+    "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal \
+    http://127.0.0.1:8375/readyz https://relay.example/readyz \
+    true "$WORK_DIR/active-runtime.json" 3 0)"
+test "$(json_string_field "$SUPERVISED_RESULT" status)" = ready
+test "$(cat "$SUPERVISED_ATTEMPTS")" = 2
+test "$(sed -n '1p' "$SUPERVISED_ARGS")" = supervisor-ready
+for expected_pair in \
+    "--state|$WORK_DIR/supervisor.json" \
+    "--release-root|$SUPERVISED_RELEASE" \
+    "--instance|relay-personal" \
+    "--local-health|http://127.0.0.1:8375/readyz" \
+    "--public-health|https://relay.example/readyz" \
+    "--active-runtime|$WORK_DIR/active-runtime.json"; do
+    key="${expected_pair%%|*}"
+    value="${expected_pair#*|}"
+    awk -v key="$key" -v value="$value" 'previous == key && $0 == value { found = 1 } { previous = $0 } END { exit !found }' "$SUPERVISED_ARGS"
+done
+grep -Fx -- --managed "$SUPERVISED_ARGS" >/dev/null
+if wait_for_supervised_release "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz maybe "" 1 0; then
+    echo "supervised release verification accepted an ambiguous managed mode" >&2
+    exit 1
+fi
+
+expect_supervised_failure() {
+    if wait_for_supervised_release "$@" >/dev/null 2>&1; then
+        echo "supervised release verification accepted invalid arguments: $*" >&2
+        exit 1
+    fi
+}
+
+expect_supervised_failure relative-state "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "" 1 0
+expect_supervised_failure "$WORK_DIR/supervisor.json" relative-release relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "" 1 0
+expect_supervised_failure "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" "" http://127.0.0.1:8375/readyz https://relay.example/readyz false "" 1 0
+expect_supervised_failure "$WORK_DIR/supervisor.json" "$WORK_DIR/missing-release" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "" 1 0
+expect_supervised_failure "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "" invalid 0
+expect_supervised_failure "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "" 121 0
+expect_supervised_failure "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "" 1 61
+expect_supervised_failure "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz true relative-runtime 1 0
+expect_supervised_failure "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "$WORK_DIR/active-runtime.json" 1 0
+
+rm -f "$SUPERVISED_ATTEMPTS"
+SUPERVISED_ALWAYS_FAIL=1 expect_supervised_failure "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "" 1 0
+rm -f "$SUPERVISED_ATTEMPTS"
+SUPERVISED_ALWAYS_FAIL=1 SUPERVISED_FAILURE_OUTPUT='not ready' expect_supervised_failure "$WORK_DIR/supervisor.json" "$SUPERVISED_RELEASE" relay-personal http://127.0.0.1:8375/readyz https://relay.example/readyz false "" 1 0
+
+INSTALLED_ROOT="$WORK_DIR/installed-release"
+INSTALLED_CONFIG="$WORK_DIR/installed-cloudflared.yml"
+mkdir -p "$INSTALLED_ROOT/current"
+cp "$SUPERVISED_RELEASE/herdr-mobile-relay" "$INSTALLED_ROOT/current/herdr-mobile-relay"
+printf '%s\n' 'hostname: relay.example.test' > "$INSTALLED_CONFIG"
+
+rm -f "$SUPERVISED_ATTEMPTS"
+HERDR_RELEASE_ROOT="$INSTALLED_ROOT" HERDR_RELAY_SUPERVISOR_STATE_DIR="$WORK_DIR/installed-state" HERDR_RELAY_INSTANCE_ID=relay-personal HERDR_RELAY_HOST=::1 HERDR_RELAY_PUBLIC_HEALTH_URL=https://override.example.test/readyz wait_for_installed_relay_ready "$INSTALLED_CONFIG" 3 0 >/dev/null
+rm -f "$SUPERVISED_ATTEMPTS"
+HERDR_RELEASE_ROOT="$INSTALLED_ROOT" HERDR_RELAY_SUPERVISOR_STATE_DIR="$WORK_DIR/installed-state" HERDR_RELAY_INSTANCE_ID=relay-personal HERDR_RELAY_HOST=localhost HERDR_RELAY_PUBLIC_HEALTH_URL= wait_for_installed_relay_ready "$INSTALLED_CONFIG" 3 0 >/dev/null
+rm -f "$SUPERVISED_ATTEMPTS"
+HERDR_RELEASE_ROOT="$INSTALLED_ROOT" HERDR_RELAY_SUPERVISOR_STATE_DIR="$WORK_DIR/installed-state" HERDR_RELAY_INSTANCE_ID=relay-personal HERDR_RELAY_MANAGED_DEPLOYMENT=true HERDR_RELAY_ACTIVE_RUNTIME="$WORK_DIR/active-runtime.json" HERDR_RELAY_PUBLIC_HEALTH_URL=https://override.example.test/readyz wait_for_installed_relay_ready "$INSTALLED_CONFIG" 3 0 >/dev/null
+if HERDR_RELEASE_ROOT="$INSTALLED_ROOT" HERDR_RELAY_SUPERVISOR_STATE_DIR="$WORK_DIR/installed-state" HERDR_RELAY_INSTANCE_ID=relay-personal HERDR_RELAY_HOST=0.0.0.0 HERDR_RELAY_PUBLIC_HEALTH_URL=https://override.example.test/readyz wait_for_installed_relay_ready "$INSTALLED_CONFIG" 1 0 >/dev/null 2>&1; then
+    echo "installed readiness accepted a non-loopback host" >&2
+    exit 1
+fi
+printf '%s\n' 'hostname: not a hostname!' > "$INSTALLED_CONFIG"
+if HERDR_RELEASE_ROOT="$INSTALLED_ROOT" HERDR_RELAY_SUPERVISOR_STATE_DIR="$WORK_DIR/installed-state" HERDR_RELAY_INSTANCE_ID=relay-personal HERDR_RELAY_PUBLIC_HEALTH_URL= wait_for_installed_relay_ready "$INSTALLED_CONFIG" 1 0 >/dev/null 2>&1; then
+    echo "installed readiness accepted an invalid public hostname" >&2
+    exit 1
+fi
 
 GATEWAY_HEALTH='{"status":"ok","gateway":{"enabled":true,"registered":true,"relay_id":"AAAA","clients":1}}'
 test "$(gateway_registration_state "$GATEWAY_HEALTH")" = "true"
@@ -901,6 +1007,20 @@ case "$*" in
         ;;
 esac
 EOF
+cat > "$START_BIN_DIR/launchctl" <<'EOF'
+#!/bin/sh
+case "$1" in
+    print)
+        exit 0
+        ;;
+    kickstart)
+        printf 'restarted\n' > "$START_SERVICE_LOG"
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
 cat > "$START_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 printf '%s\n' '{"status":"ok","instance":"start-instance","version":"9.9.9","protocol":2}'
@@ -914,7 +1034,7 @@ cat > "$START_BIN_DIR/relay-bin" <<'EOF'
 printf '%s\n' "$*" >> "$START_RELAY_LOG"
 exit 1
 EOF
-chmod 700 "$START_SCRIPT_DIR/setup-link.sh" "$START_BIN_DIR/systemctl" \
+chmod 700 "$START_SCRIPT_DIR/setup-link.sh" "$START_BIN_DIR/systemctl" "$START_BIN_DIR/launchctl" \
     "$START_BIN_DIR/curl" "$START_BIN_DIR/herdr" "$START_BIN_DIR/relay-bin"
 export START_SERVICE_LOG START_RELAY_LOG
 START_OUTPUT="$(
@@ -1101,7 +1221,7 @@ exec 7<> "$STALE_MENU_FIFO"
 ) &
 STALE_MENU_PID=$!
 STALE_MENU_RENDERED=false
-for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+for _attempt in {1..100}; do
     if grep -q "Exit, change nothing" "$STALE_MENU_OUTPUT" 2>/dev/null; then
         STALE_MENU_RENDERED=true
         break
@@ -1382,5 +1502,86 @@ case "$(print_setup_link_arming 1)" in
     *"relay is not running here"*) ;;
     *) echo "the not-running hint is missing" >&2; exit 1 ;;
 esac
+
+# Installed release validation is deliberately fail-closed on every filesystem,
+# platform, architecture, and verifier boundary.
+VERIFIED_ROOT="$WORK_DIR/verified-release"
+VERIFIED_RELEASE="$VERIFIED_ROOT/releases/current-test"
+VERIFIED_FAILURE_MARKER="$WORK_DIR/verifier-fails"
+mkdir -p "$VERIFIED_RELEASE"
+ln -s releases/current-test "$VERIFIED_ROOT/current"
+printf '{}\n' > "$VERIFIED_RELEASE/release-manifest.json"
+cat > "$VERIFIED_RELEASE/herdr-mobile-relay" <<'EOF'
+#!/bin/sh
+[ ! -e "$VERIFIED_FAILURE_MARKER" ]
+EOF
+chmod 700 "$VERIFIED_RELEASE/herdr-mobile-relay"
+export VERIFIED_FAILURE_MARKER
+uname() {
+    case "${1:-}" in
+        -s) printf '%s\n' "${VERIFIED_OS:-Darwin}" ;;
+        -m) printf '%s\n' "${VERIFIED_ARCH:-arm64}" ;;
+        *) command uname "$@" ;;
+    esac
+}
+test "$(HERDR_RELEASE_ROOT="$VERIFIED_ROOT" VERIFIED_OS=Linux VERIFIED_ARCH=x86_64 verified_installed_release)" = "$VERIFIED_RELEASE"
+if HERDR_RELEASE_ROOT="$VERIFIED_ROOT" VERIFIED_OS=Plan9 verified_installed_release >/dev/null 2>&1; then
+    echo "installed release validation accepted an unsupported operating system" >&2
+    exit 1
+fi
+if HERDR_RELEASE_ROOT="$VERIFIED_ROOT" VERIFIED_ARCH=sparc verified_installed_release >/dev/null 2>&1; then
+    echo "installed release validation accepted an unsupported architecture" >&2
+    exit 1
+fi
+mv "$VERIFIED_RELEASE/release-manifest.json" "$VERIFIED_RELEASE/release-manifest.saved"
+if HERDR_RELEASE_ROOT="$VERIFIED_ROOT" verified_installed_release >/dev/null 2>&1; then
+    echo "installed release validation accepted a missing manifest" >&2
+    exit 1
+fi
+mv "$VERIFIED_RELEASE/release-manifest.saved" "$VERIFIED_RELEASE/release-manifest.json"
+chmod 600 "$VERIFIED_RELEASE/herdr-mobile-relay"
+if HERDR_RELEASE_ROOT="$VERIFIED_ROOT" verified_installed_release >/dev/null 2>&1; then
+    echo "installed release validation accepted a non-executable verifier" >&2
+    exit 1
+fi
+chmod 700 "$VERIFIED_RELEASE/herdr-mobile-relay"
+: > "$VERIFIED_FAILURE_MARKER"
+if HERDR_RELEASE_ROOT="$VERIFIED_ROOT" verified_installed_release >/dev/null 2>&1; then
+    echo "installed release validation accepted a failed manifest verification" >&2
+    exit 1
+fi
+rm -f "$VERIFIED_FAILURE_MARKER"
+unset -f uname
+
+# Failed sanitization must remove its private staging file and preserve the
+# original environment instead of committing a partial rewrite.
+SANITIZE_DIR="$WORK_DIR/sanitize-failure"
+SANITIZE_ENV="$SANITIZE_DIR/relay.env"
+mkdir -p "$SANITIZE_DIR"
+printf 'GH_TOKEN=legacy\nKEEP=present\n' > "$SANITIZE_ENV"
+if (
+    awk() { return 1; }
+    sanitize_relay_runtime_env "$SANITIZE_ENV"
+) >/dev/null 2>&1; then
+    echo "runtime environment sanitization hid an awk failure" >&2
+    exit 1
+fi
+grep -Fx 'GH_TOKEN=legacy' "$SANITIZE_ENV" >/dev/null
+test -z "$(find "$SANITIZE_DIR" -name '.relay-env.*' -print -quit)"
+
+# Endpoint identity capture rejects unavailable curl and both unsafe URL shapes
+# before making a request.
+if PATH="$WORK_DIR/empty-path" relay_release_identity_at_endpoints http://127.0.0.1:8375/healthz https://relay.example.test/healthz >/dev/null 2>&1; then
+    echo "release identity capture accepted a missing curl" >&2
+    exit 1
+fi
+if relay_release_identity_at_endpoints http://example.test/healthz https://relay.example.test/healthz >/dev/null 2>&1; then
+    echo "release identity capture accepted a non-loopback local endpoint" >&2
+    exit 1
+fi
+if relay_release_identity_at_endpoints http://127.0.0.1:8375/healthz http://relay.example.test/healthz >/dev/null 2>&1; then
+    echo "release identity capture accepted a non-HTTPS public endpoint" >&2
+    exit 1
+fi
 
 echo "common shell tests passed"

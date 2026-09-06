@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,198 @@ func newTestManager(t *testing.T, now *time.Time) *Manager {
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	return manager
+}
+
+func TestMutationGuardsRecheckAfterUploadLocks(t *testing.T) {
+	promotedErr := errors.New("runtime promoted")
+	guard := func(promoted *atomic.Bool) func() error {
+		return func() error {
+			if promoted.Load() {
+				return promotedErr
+			}
+			return nil
+		}
+	}
+
+	t.Run("begin", func(t *testing.T) {
+		now := time.Now()
+		manager := newTestManager(t, &now)
+		promoted := atomic.Bool{}
+		started := make(chan struct{})
+		done := make(chan error, 1)
+		manager.mu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				manager.mu.Unlock()
+			}
+		}()
+		go func() {
+			close(started)
+			_, err := manager.BeginGuarded(BeginRequest{
+				Target: uploadTarget(1), Files: []FileSpec{{Name: "note.txt", MediaType: "text/plain", Bytes: 1}},
+			}, guard(&promoted))
+			done <- err
+		}()
+		<-started
+		promoted.Store(true)
+		manager.mu.Unlock()
+		locked = false
+		if err := <-done; !errors.Is(err, promotedErr) {
+			t.Fatalf("BeginGuarded() error = %v, want promotion", err)
+		}
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		if len(manager.sessions) != 0 {
+			t.Fatalf("promoted runtime created %d upload sessions", len(manager.sessions))
+		}
+	})
+
+	t.Run("chunk", func(t *testing.T) {
+		now := time.Now()
+		manager := newTestManager(t, &now)
+		target := uploadTarget(1)
+		begin := beginOne(t, manager, target, "note.txt", "text/plain", 1)
+		manager.mu.Lock()
+		current := manager.sessions[begin.UploadID]
+		manager.mu.Unlock()
+		promoted := atomic.Bool{}
+		started := make(chan struct{})
+		done := make(chan error, 1)
+		current.mu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				current.mu.Unlock()
+			}
+		}()
+		go func() {
+			close(started)
+			_, err := manager.ChunkGuarded(ChunkRequest{
+				Target: target, UploadID: begin.UploadID, FileIndex: 0, Sequence: 0, Data: []byte("x"), SHA256: digestFor([]byte("x")),
+			}, guard(&promoted))
+			done <- err
+		}()
+		<-started
+		promoted.Store(true)
+		current.mu.Unlock()
+		locked = false
+		if err := <-done; !errors.Is(err, promotedErr) {
+			t.Fatalf("ChunkGuarded() error = %v, want promotion", err)
+		}
+		if current.files[0].received != 0 || current.sequence != 0 {
+			t.Fatalf("promoted runtime wrote chunk: received=%d sequence=%d", current.files[0].received, current.sequence)
+		}
+	})
+
+	t.Run("finish", func(t *testing.T) {
+		now := time.Now()
+		manager := newTestManager(t, &now)
+		target := uploadTarget(1)
+		begin := beginOne(t, manager, target, "note.txt", "text/plain", 1)
+		sendChunk(t, manager, target, begin.UploadID, 0, 0, []byte("x"))
+		manager.mu.Lock()
+		current := manager.sessions[begin.UploadID]
+		manager.mu.Unlock()
+		promoted := atomic.Bool{}
+		started := make(chan struct{})
+		done := make(chan error, 1)
+		current.mu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				current.mu.Unlock()
+			}
+		}()
+		go func() {
+			close(started)
+			_, err := manager.FinishGuarded(FinishRequest{
+				Target: target, UploadID: begin.UploadID, Files: []FileDigest{{FileIndex: 0, SHA256: digestFor([]byte("x"))}},
+			}, guard(&promoted))
+			done <- err
+		}()
+		<-started
+		promoted.Store(true)
+		current.mu.Unlock()
+		locked = false
+		if err := <-done; !errors.Is(err, promotedErr) {
+			t.Fatalf("FinishGuarded() error = %v, want promotion", err)
+		}
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		if manager.sessions[begin.UploadID] != current || len(manager.attachments) != 0 {
+			t.Fatalf("promoted runtime published upload: session=%p attachments=%d", manager.sessions[begin.UploadID], len(manager.attachments))
+		}
+	})
+}
+
+func TestMutationGuardsRejectEveryPreCommitBoundary(t *testing.T) {
+	promoted := errors.New("runtime promoted")
+	t.Run("begin manager commit", func(t *testing.T) {
+		now := time.Now()
+		manager := newTestManager(t, &now)
+		calls := 0
+		_, err := manager.BeginGuarded(BeginRequest{Target: uploadTarget(1), Files: []FileSpec{{Name: "note.txt", MediaType: "text/plain", Bytes: 1}}}, func() error {
+			calls++
+			if calls == 2 {
+				return promoted
+			}
+			return nil
+		})
+		if !errors.Is(err, promoted) || calls != 2 {
+			t.Fatalf("begin manager guard = (%v, calls=%d)", err, calls)
+		}
+	})
+	t.Run("begin filesystem commit", func(t *testing.T) {
+		now := time.Now()
+		manager := newTestManager(t, &now)
+		calls := 0
+		_, err := manager.BeginGuarded(BeginRequest{Target: uploadTarget(1), Files: []FileSpec{{Name: "note.txt", MediaType: "text/plain", Bytes: 1}}}, func() error {
+			calls++
+			if calls == 3 {
+				return promoted
+			}
+			return nil
+		})
+		if !errors.Is(err, promoted) || calls != 3 {
+			t.Fatalf("begin filesystem guard = (%v, calls=%d)", err, calls)
+		}
+	})
+	t.Run("chunk write", func(t *testing.T) {
+		now := time.Now()
+		manager := newTestManager(t, &now)
+		target := uploadTarget(1)
+		begin := beginOne(t, manager, target, "note.txt", "text/plain", 1)
+		calls := 0
+		_, err := manager.ChunkGuarded(ChunkRequest{Target: target, UploadID: begin.UploadID, FileIndex: 0, Sequence: 0, Data: []byte("x"), SHA256: digestFor([]byte("x"))}, func() error {
+			calls++
+			if calls == 2 {
+				return promoted
+			}
+			return nil
+		})
+		if !errors.Is(err, promoted) || calls != 2 {
+			t.Fatalf("chunk write guard = (%v, calls=%d)", err, calls)
+		}
+	})
+	t.Run("attachment publication", func(t *testing.T) {
+		now := time.Now()
+		manager := newTestManager(t, &now)
+		target := uploadTarget(1)
+		begin := beginOne(t, manager, target, "note.txt", "text/plain", 1)
+		sendChunk(t, manager, target, begin.UploadID, 0, 0, []byte("x"))
+		calls := 0
+		_, err := manager.FinishGuarded(FinishRequest{Target: target, UploadID: begin.UploadID, Files: []FileDigest{{FileIndex: 0, SHA256: digestFor([]byte("x"))}}}, func() error {
+			calls++
+			if calls == 2 {
+				return promoted
+			}
+			return nil
+		})
+		if !errors.Is(err, promoted) || calls != 2 {
+			t.Fatalf("attachment publication guard = (%v, calls=%d)", err, calls)
+		}
+	})
 }
 
 func beginOne(t *testing.T, manager *Manager, target protocol.TargetRef, name, mediaType string, size int64) BeginResult {

@@ -132,6 +132,26 @@ func (m *Manager) Acquire(
 	clientID, paneID string,
 	columns, rows int,
 ) (int, int, error) {
+	return m.acquire(ctx, clientID, paneID, columns, rows, nil)
+}
+
+// AcquireGuarded rechecks guard after any manager wait and immediately before
+// the terminal resize. A rejected guard leaves the pane and its leases alone.
+func (m *Manager) AcquireGuarded(
+	ctx context.Context,
+	clientID, paneID string,
+	columns, rows int,
+	guard func() error,
+) (int, int, error) {
+	return m.acquire(ctx, clientID, paneID, columns, rows, guard)
+}
+
+func (m *Manager) acquire(
+	ctx context.Context,
+	clientID, paneID string,
+	columns, rows int,
+	guard func() error,
+) (int, int, error) {
 	if clientID == "" || paneID == "" {
 		return 0, 0, ErrInvalidLease
 	}
@@ -149,6 +169,9 @@ func (m *Manager) Acquire(
 	}
 	if ctx.Err() != nil {
 		return 0, 0, ErrLeaseOwnerGone
+	}
+	if err := runGuard(guard); err != nil {
+		return 0, 0, err
 	}
 
 	now := m.now()
@@ -181,6 +204,9 @@ func (m *Manager) Acquire(
 	if ctx.Err() != nil {
 		return 0, 0, ErrLeaseOwnerGone
 	}
+	if err := runGuard(guard); err != nil {
+		return 0, 0, err
+	}
 
 	previous, hadPrevious := state.leases[clientID]
 	state.leases[clientID] = Lease{Columns: columns, Rows: rows, ExpiresAt: now.Add(m.ttl)}
@@ -204,6 +230,14 @@ func (m *Manager) Acquire(
 		resizeNeeded = true
 	}
 	if resizeNeeded {
+		if err := runGuard(guard); err != nil {
+			if hadPrevious {
+				state.leases[clientID] = previous
+			} else {
+				delete(state.leases, clientID)
+			}
+			return 0, 0, err
+		}
 		if err := m.setSize(ctx, state.tty, targetColumns, sttyRows); err != nil {
 			if hadPrevious {
 				state.leases[clientID] = previous
@@ -223,6 +257,13 @@ func (m *Manager) Acquire(
 		m.panes[paneID] = state
 	}
 	return targetColumns, targetRows, nil
+}
+
+func runGuard(guard func() error) error {
+	if guard == nil {
+		return nil
+	}
+	return guard()
 }
 
 // ActiveColumns reports the narrowest unexpired lease for a pane.

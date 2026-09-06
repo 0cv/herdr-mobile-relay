@@ -49,7 +49,10 @@ assert_not_contains() {
 write_stubs() {
     cat > "$BIN/uname" <<'EOF'
 #!/bin/sh
-echo Linux
+case "${1:-}" in
+    -m) echo x86_64 ;;
+    *) echo Linux ;;
+esac
 EOF
     cat > "$BIN/hostname" <<'EOF'
 #!/bin/sh
@@ -62,7 +65,19 @@ EOF
     cat > "$BIN/systemctl" <<'EOF'
 #!/bin/sh
 printf 'systemctl %s\n' "$*" >> "$STUB_LOG"
-exit 0
+case "$*" in
+    *herdr-mobile-relay.service*) ;;
+    *) exit 0 ;;
+esac
+case " $* " in
+    *" is-active "*) test -e "$HOME/.systemctl-active" ;;
+    *" is-enabled "*) test -e "$HOME/.systemctl-enabled" ;;
+    *" restart "*) : > "$HOME/.systemctl-active" ;;
+    *" enable "*) : > "$HOME/.systemctl-enabled" ;;
+    *" stop "*) rm -f "$HOME/.systemctl-active" ;;
+    *" disable "*) rm -f "$HOME/.systemctl-active" "$HOME/.systemctl-enabled" ;;
+    *) exit 0 ;;
+esac
 EOF
     cat > "$BIN/cloudflared" <<'EOF'
 #!/bin/bash
@@ -217,6 +232,29 @@ EOF
     chmod 700 "$BIN"/*
 }
 
+write_installed_release_stubs() {
+    local release_root="$HOME/.local/share/herdr-mobile-relay"
+    local release="$release_root/releases/test-release"
+
+    mkdir -p "$release/relay"
+    cat > "$release/herdr-mobile-relay" <<'EOF'
+#!/bin/sh
+printf 'installed-relay %s\n' "$*" >> "$STUB_LOG"
+case "${1:-}" in
+    verify-release) exit 0 ;;
+    supervisor-ready) printf '%s\n' '{"status":"ready"}' ;;
+    *) exit 2 ;;
+esac
+EOF
+    cat > "$release/relay/herdr-mobile-relay-service.sh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod 700 "$release/herdr-mobile-relay" "$release/relay/herdr-mobile-relay-service.sh"
+    printf '%s\n' '{"version":"test","revision":"test","target":"linux/amd64"}' > "$release/release-manifest.json"
+    ln -s releases/test-release "$release_root/current"
+}
+
 write_origin_cert() {
     local zone_id="$1"
 
@@ -239,6 +277,7 @@ new_case() {
     mkdir -p "$HOME" "$BIN"
     : > "$STUB_LOG"
     write_stubs
+    write_installed_release_stubs
 
     export HOME BIN STUB_LOG
     export PATH="$BIN:/usr/bin:/bin"
@@ -323,6 +362,7 @@ test_success_and_alternate_port() {
     [ "$MODE" = 600 ] \
         || fail "configured phone app origin is not private"
     assert_contains "$STUB_LOG" 'cloudflared tunnel create --output json --credentials-file'
+    assert_contains "$HOME/.config/systemd/user/herdr-mobile-relay.service" "ExecStart=$HOME/.local/share/herdr-mobile-relay/current/relay/herdr-mobile-relay-service.sh"
     assert_not_contains "$STUB_LOG" '--overwrite-dns'
     pass "successful creation uses the alternate relay port and prints QR only after verification"
 }

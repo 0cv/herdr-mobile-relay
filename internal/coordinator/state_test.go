@@ -541,6 +541,26 @@ func TestInflightPollCannotOverwriteNewerWorkspaceEvent(t *testing.T) {
 	}
 }
 
+func TestProfileOwnershipCommitRequiresExactCurrentNativeSession(t *testing.T) {
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", SessionID: "session-new", ProfileID: ""}}, 0)
+	state.CommitProfileOwnership([]*AgentState{{PaneID: "pane-1", SessionID: "session-old", ProfileID: "personal"}})
+	current, _ := state.Agent("pane-1")
+	if current.ProfileID != "" {
+		t.Fatalf("stale session published profile %q", current.ProfileID)
+	}
+	state.CommitProfileOwnership([]*AgentState{{PaneID: "pane-1", SessionID: "session-new", ProfileID: "personal"}})
+	current, _ = state.Agent("pane-1")
+	if current.ProfileID != "personal" {
+		t.Fatalf("exact session profile = %q", current.ProfileID)
+	}
+}
+
+func TestEmptyProfileOwnershipCommitIsANoop(t *testing.T) {
+	state := NewState(testLogger())
+	state.CommitProfileOwnership(nil)
+}
+
 func TestAttentionRevisionIgnoresUnrelatedPollChanges(t *testing.T) {
 	s := NewState(testLogger())
 	transitions := 0

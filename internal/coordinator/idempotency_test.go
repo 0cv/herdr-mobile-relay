@@ -215,7 +215,14 @@ func TestTabRenameAcceptsNaturalLabel(t *testing.T) {
 }
 
 func TestTabReorderUsesHerdrSocketAPI(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	// t.TempDir includes the test name and can exceed macOS's Unix-socket path
+	// limit. Keep the socket fixture deliberately short.
+	dir, err := os.MkdirTemp("/tmp", "hmr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socketPath := filepath.Join(dir, "h.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)

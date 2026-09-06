@@ -117,9 +117,10 @@ func setupEnvWithScenario(t *testing.T, scenario string) *TestEnv {
 
 func waitForStatus(t *testing.T, base, endpoint string, status int) {
 	t.Helper()
-	// Fresh CI runners build several test packages concurrently. Give the relay
-	// enough time to complete its first fake-Herdr inventory under that load.
-	for i := 0; i < 200; i++ {
+	// Fresh CI runners build several test packages concurrently, and race builds
+	// make each fake-Herdr inventory slower. Allow startup without weakening the
+	// endpoint or status proof.
+	for i := 0; i < 400; i++ {
 		resp, err := http.Get(base + endpoint)
 		if err == nil {
 			resp.Body.Close()

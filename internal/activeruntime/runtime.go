@@ -37,7 +37,7 @@ func defaultLoadIO() loadIO {
 	return loadIO{
 		lstat: os.Lstat,
 		open: func(path string) (snapshotFile, error) {
-			return os.Open(path)
+			return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		},
 	}
 }
@@ -121,7 +121,7 @@ func validateSnapshot(path string, snapshot Snapshot) error {
 }
 
 func validName(value string) bool {
-	if value == "" || len(value) > 256 || strings.TrimSpace(value) != value {
+	if value == "." || value == ".." || len(value) > 256 || strings.TrimSpace(value) != value {
 		return false
 	}
 	for _, character := range value {
@@ -129,7 +129,7 @@ func validName(value string) bool {
 			return false
 		}
 	}
-	return true
+	return value != ""
 }
 
 func normalizedAbsolute(path string) bool {

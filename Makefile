@@ -9,7 +9,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check changed-go-coverage changed-shell-coverage backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview
 
 help:
 	@echo "Common targets:"
@@ -87,7 +87,14 @@ go-check:
 	go test ./...
 	go test -race ./...
 
-backend-check: go-check shell-check production-path-audit
+changed-go-coverage:
+	scripts/check-changed-go-coverage.sh
+
+changed-shell-coverage:
+	python3 tests/test_changed_shell_coverage.py
+	python3 scripts/check-changed-shell-coverage.py
+
+backend-check: go-check changed-go-coverage shell-check changed-shell-coverage production-path-audit
 
 shell-check:
 	@for script in relay/*.sh; do bash -n "$$script" || exit; done
@@ -95,6 +102,11 @@ shell-check:
 	@for script in install.sh scripts/*.sh; do sh -n "$$script" || exit; done
 	sh tests/test_install.sh
 	bash tests/test_common.sh
+	bash tests/test_changed_shell_hostname.sh
+	bash tests/test_changed_shell_install.sh
+	bash tests/test_changed_shell_plugin.sh
+	bash tests/test_credential_hygiene.sh
+	bash tests/test_supervisor_service.sh
 	bash tests/test_gateway_deploy.sh
 	bash tests/test_plugin_build.sh
 	sh tests/test_release_scripts.sh
