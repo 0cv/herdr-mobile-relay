@@ -2540,8 +2540,15 @@ class RelayStore {
     this.emitConnections();
     try {
       const result = await this.sendCommand(relayId, { type: 'list_directories', path }, 10_000);
-      const listing = result.data as unknown as DirectoryListing;
-      if (!listing?.current) throw new CommandError('Relay returned an invalid directory listing');
+      const rawListing = result.data;
+      if (!rawListing || typeof rawListing !== 'object') {
+        throw new CommandError('Relay returned an invalid directory listing');
+      }
+      const listing = rawListing as unknown as DirectoryListing;
+      const currentPath = (listing.current as { path?: unknown } | null | undefined)?.path;
+      if (typeof currentPath !== 'string' || !currentPath.trim()) {
+        throw new CommandError('Relay returned an invalid directory listing');
+      }
       listing.directories = Array.isArray(listing.directories) ? listing.directories : [];
       if (!this.isCurrentConnection(relayId, connection)) {
         throw new CommandError('Relay reconnected while loading directories');
@@ -2690,7 +2697,8 @@ class RelayStore {
 
     const promise = this.sendToAgent(agent, { type: 'list_slash_commands' }, 10_000)
       .then((result) => {
-        const rawCommands = result.data?.commands;
+        const data = result.data && typeof result.data === 'object' ? result.data : {};
+        const rawCommands = data.commands;
         const commandsList = Array.isArray(rawCommands) ? rawCommands : [];
         const sources = new Set(['builtin', 'personal', 'project']);
         const commands = commandsList
@@ -2706,7 +2714,7 @@ class RelayStore {
               : 'builtin',
           }))
           .sort((left, right) => left.command.localeCompare(right.command, undefined, { sensitivity: 'base' }));
-        const catalog = { commands, truncated: Boolean(result.data.truncated) };
+        const catalog = { commands, truncated: Boolean(data.truncated) };
         if (this.pendingSlashCommands.get(agent.pane_id)?.promise === promise) {
           this.slashCommandCache.set(agent.pane_id, { identity, catalog });
         }
