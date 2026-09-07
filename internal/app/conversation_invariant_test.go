@@ -69,9 +69,9 @@ func writeClaudeTranscriptAnswering(t *testing.T, path, title, answer string) {
 func clearAgentEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
+		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERMES_HOME",
 		agentroots.ClaudeListEnv, agentroots.QoderListEnv, agentroots.CodexListEnv,
-		agentroots.PiListEnv, agentroots.OMPListEnv,
+		agentroots.PiListEnv, agentroots.OMPListEnv, agentroots.HermesListEnv,
 	} {
 		t.Setenv(name, "")
 	}

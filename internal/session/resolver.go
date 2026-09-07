@@ -74,6 +74,8 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 		name = extractOMPSessionTitle(location.Path)
 	case isPiSessionAgent(agentLower):
 		name = extractPiSessionTitle(location.Path)
+	case isHermesSessionAgent(agentLower):
+		name = location.Title
 	case strings.Contains(agentLower, "qoder"), strings.Contains(agentLower, "claude"):
 		name = extractTitle(location.Path)
 	case strings.Contains(agentLower, "codex"):
@@ -102,6 +104,11 @@ func isPiSessionAgent(agent string) bool {
 	default:
 		return false
 	}
+}
+
+func isHermesSessionAgent(agent string) bool {
+	normalized := strings.NewReplacer("-", "", "_", "", " ", "").Replace(strings.ToLower(strings.TrimSpace(agent)))
+	return normalized == "hermes" || normalized == "hermesagent"
 }
 
 func extractOMPSessionTitle(path string) string {

@@ -67,8 +67,9 @@ paths.
   Hermes, Qoder, OpenCode, Oh My Pi, and Pi.
 - Send prompts, terminal keys, and slash commands; attach screenshots, photos,
   and documents in cancellable batches.
-- Read and search each agent's native conversation, including OpenCode and Oh
-  My OpenCode plans; inspect workspace files, images, and Git diffs read-only.
+- Read and search each agent's native conversation, including Hermes, OpenCode
+  and Oh My OpenCode plans; inspect workspace files, images, and Git diffs
+  read-only.
 - Manage workspaces and Git worktrees; start, rename, clear, and stop agents.
 - Have the relay read responses aloud, even with the screen off.
 - Pair every phone as its own named device — controller or read-only reader —

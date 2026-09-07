@@ -15,9 +15,10 @@ import (
 func clearAllEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR",
+		"CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR", "HERMES_HOME",
 		"OMO_CODING_AGENT_DIR", "SENPI_CODING_AGENT_DIR", "XDG_DATA_HOME",
 		ClaudeListEnv, QoderListEnv, CodexListEnv, PiListEnv, OMPListEnv, OMOListEnv, OpenCodeListEnv,
+		HermesListEnv,
 	} {
 		t.Setenv(name, "")
 	}
@@ -737,5 +738,24 @@ func TestProfileCacheRefreshesDanglingSymlinkAfterExpiry(t *testing.T) {
 	wantProfile := filepath.Join(profiles, "mounted", "agent", "sessions")
 	if got := OMP(home); len(got) < 1 || got[0] != wantProfile {
 		t.Fatalf("refreshed roots = %v, want mounted profile %q", got, wantProfile)
+	}
+}
+
+func TestHermesDataAndDatabases(t *testing.T) {
+	clearAllEnv(t)
+	home := t.TempDir()
+	t.Setenv(HermesListEnv, strings.Join([]string{"/configured/one", "/configured/two"}, string(os.PathListSeparator)))
+	t.Setenv("HERMES_HOME", "/hermes-home")
+
+	wantData := []string{"/configured/one", "/configured/two", "/hermes-home", filepath.Join(home, ".hermes")}
+	if got := HermesData(home); !slices.Equal(got, wantData) {
+		t.Fatalf("HermesData(%q) = %v, want %v", home, got, wantData)
+	}
+	wantDBs := make([]string, 0, len(wantData))
+	for _, root := range wantData {
+		wantDBs = append(wantDBs, filepath.Join(root, "state.db"))
+	}
+	if got := HermesDBs(home); !slices.Equal(got, wantDBs) {
+		t.Fatalf("HermesDBs(%q) = %v, want %v", home, got, wantDBs)
 	}
 }
