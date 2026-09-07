@@ -3,6 +3,34 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.9] - 2026-09-07
+
+### Added
+
+- Add first-class support for Nous Hermes Agent, including native conversation
+  history, session titles, tool activity, response copy, mobile approvals, and
+  Hermes branding.
+- Add Hermes slash commands with `hermes`, `hermes-agent`, and `hermes agent`
+  aliases, 23 built-in commands, and best-effort project, profile, and personal
+  `SKILL.md` discovery.
+
+### Changed
+
+- Resolve Hermes state from `HERMES_HOME`, the default `~/.hermes` directory,
+  and `HERDR_HERMES_DATA_DIRS` for non-default data locations.
+- Keep Hermes approval controls stable while focus, status, and boxed-terminal
+  chrome repaint.
+
+### Fixed
+
+- Preserve a pending Hermes composer around response copying, including when
+  clearing succeeds but verification is canceled or temporarily fails, without
+  overwriting newer composer text.
+- Keep mobile approval controls visible for dialogs whose borders use standard
+  box-drawing corners, junctions, and tees.
+- Normalize empty directory and slash-command responses so `null` arrays from a
+  relay do not make the mobile client fail.
+
 ## [0.20.8] - 2026-09-05
 
 ### Fixed
@@ -1380,6 +1408,10 @@ project follows [Semantic Versioning](https://semver.org/).
   distorting their cells.
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
+
+[0.20.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.8...v0.20.9
+[0.20.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.7...v0.20.8
+[0.20.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.6...v0.20.7
 
 [0.20.6]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.5...v0.20.6
 [0.20.5]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.4...v0.20.5
