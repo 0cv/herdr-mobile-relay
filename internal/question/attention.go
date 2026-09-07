@@ -93,11 +93,11 @@ var (
 			`)\s*$`,
 	)
 	hermesApprovalPromptPattern = regexp.MustCompile(`(?i)^\s*⚠\x{fe0f}?\s+[❯›>]\s*$`)
-	hermesSpinnerLinePattern = regexp.MustCompile(
+	hermesSpinnerLinePattern    = regexp.MustCompile(
 		`^\s*💻\s+.+\(\s*(?:\d+(?:\.\d+)?s|\d+m\d+s)(?:\s*·\s*[↓↑]\s+\S+\s+tok)?\)\s*$`,
 	)
 	hermesStatusLinePattern = regexp.MustCompile(`^\s*⚕\s+\S+\s+│.*$`)
-	statusFooterPattern         = regexp.MustCompile(
+	statusFooterPattern     = regexp.MustCompile(
 		`(?i)(?:\bcontext\s+\d+%\s+used\b|\bctx\s*:?\s*(?:\d+%|-+)|` +
 			`\?\s+for\s+shortcuts|\b(?:manual|plan)\s+mode\b|` +
 			`\b(?:shift\+tab|ctrl\+|cmd\+)|\b\d+\s+agents?\b)`,
@@ -540,6 +540,7 @@ func approvalLabels(rows []approvalMenuRow) bool {
 	negative := regexp.MustCompile(`\b(?:no|deny|reject|cancel|exit)\b`).MatchString(last)
 	return positive && negative
 }
+
 // Hermes keeps the guard explanation below the numbered choices inside the
 // same bordered panel. Treat that bounded tail as dialog content, not newer
 // output; anything after its closing border still has to be recognized as

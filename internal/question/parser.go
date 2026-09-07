@@ -90,7 +90,7 @@ var (
 	otherPattern           = regexp.MustCompile(`(?i)^(?:type something\.?|type your own answer|none of the above|other)\b`)
 	selectedPattern        = regexp.MustCompile(`\s*[✓✔]\s*$`)
 	columnGapPattern       = regexp.MustCompile(`\s{2,}`)
-	chromePattern          = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|┃┆┊╭╮╯╰├┤┬┴┼◔◑◕●]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
+	chromePattern          = regexp.MustCompile(`(?i)^(?:[\s─━═_—│|◔◑◕●┃┆┊╭╮╯╰├┤┬┴┼┌┐└┘]+|.*\besc to cancel\b|.*\btype to queue\b|[◔◑◕●]\s+(?:shell|bash).*)$`)
 	promptSkipPattern      = regexp.MustCompile(`(?i)^(?:bash command|do you want to proceed\??|would you like to run\b.*|environment:\s*\w+|press enter to confirm\b.*|esc to cancel\b.*)$`)
 	commandPattern         = regexp.MustCompile(`^\s*[$>❯›]\s+(.+?)\s*$`)
 	turnDurationPattern    = regexp.MustCompile(

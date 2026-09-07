@@ -2217,6 +2217,28 @@ describe('relay command store', () => {
     expect(get(relayStore.connections).get(relayId)?.directoryBrowser).toBeNull();
   });
 
+  it('rejects directory results without a usable current path', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
+      capabilities: ['directory_browser'], agent_profiles: [],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const listing = relayStore.listDirectories(relayId);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({
+      type: 'command_result', request_id: request.request_id, ok: true, phase: 'confirmed',
+      data: { current: { path: '', label: '' }, parent: '', directories: [] },
+    });
+
+    await expect(listing).rejects.toThrow('Relay returned an invalid directory listing');
+    const connection = get(relayStore.connections).get(relayId);
+    expect(connection?.directoryBrowser).toBeNull();
+    expect(connection?.directoryError).toBe('Relay returned an invalid directory listing');
+    expect(connection?.directoryLoading).toBe(false);
+  });
+
   it('keeps the newest directory listing when responses arrive out of order', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();
@@ -2230,14 +2252,14 @@ describe('relay command store', () => {
 
     socket.message({
       type: 'command_result', request_id: newerRequest.request_id, ok: true, phase: 'confirmed',
-      data: { current: { path: '/home/test/newer', label: 'newer' }, parent: '/home/test', directories: [] },
+      data: { current: { path: '/home/test/newer', label: 'newer' }, parent: '/home/test', directories: null },
     });
     socket.message({
       type: 'command_result', request_id: olderRequest.request_id, ok: true, phase: 'confirmed',
       data: { current: { path: '/home/test/older', label: 'older' }, parent: '/home/test', directories: [] },
     });
 
-    await expect(newer).resolves.toMatchObject({ current: { path: '/home/test/newer' } });
+    await expect(newer).resolves.toMatchObject({ current: { path: '/home/test/newer' }, directories: [] });
     await expect(older).resolves.toMatchObject({ current: { path: '/home/test/older' } });
     expect(get(relayStore.connections).get(relayId)?.directoryBrowser?.current.path).toBe('/home/test/newer');
     expect(get(relayStore.connections).get(relayId)?.directoryLoading).toBe(false);
@@ -2311,6 +2333,26 @@ describe('relay command store', () => {
       data: { commands: [], truncated: false },
     });
     await expect(changed).resolves.toEqual({ commands: [], truncated: false });
+  });
+  it('normalizes slash command results without data', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora',
+      capabilities: ['slash_commands'], agent_profiles: [],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const agent = {
+      relay_id: relayId, relay_label: 'Fedora', raw_pane_id: 'w1:p1', pane_id: `${relayId}::w1:p1`,
+      agent: 'codex', cwd: '/home/test/project',
+      ...exactAgentFields(),
+    };
+
+    const pending = relayStore.loadSlashCommands(agent);
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed' });
+
+    await expect(pending).resolves.toEqual({ commands: [], truncated: false });
   });
 
   it('invalidates slash-command caches on reconnect and rejects unsupported relays', async () => {
