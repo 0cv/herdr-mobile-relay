@@ -7,6 +7,7 @@ import (
 
 var relayEnvironmentKeys = map[string]bool{
 	"CLAUDE_CONFIG_DIR": true, "CODEX_HOME": true, "HOME": true, "KIMI_CODE_HOME": true,
+	"HERMES_HOME": true, "HERDR_HERMES_DATA_DIRS": true,
 	"LANG": true, "LC_ALL": true, "LC_CTYPE": true, "OMO_CODING_AGENT_DIR": true, "PATH": true,
 	"PI_CODING_AGENT_DIR": true, "SENPI_CODING_AGENT_DIR": true,
 	"SSL_CERT_DIR": true, "SSL_CERT_FILE": true, "TMPDIR": true, "TZ": true,
@@ -26,7 +27,9 @@ var relayEnvironmentKeys = map[string]bool{
 	"HERDR_RELAY_HOST": true, "HERDR_RELAY_INSTANCE_ID": true, "HERDR_RELAY_LOG_FORMAT": true,
 	"HERDR_RELAY_MANAGED_DEPLOYMENT": true, "HERDR_RELAY_PLUGIN_PORT": true, "HERDR_RELAY_POLL_INTERVAL": true,
 	"HERDR_RELAY_PORT": true, "HERDR_RELAY_REARM_BOOTSTRAP": true, "HERDR_RELAY_SERVICE_NAME": true,
-	"HERDR_RELAY_TOKEN": true,
+	"HERDR_RELAY_TOKEN": true, "HERDR_RELAY_TOPOLOGY_COMMIT_HELPER": true,
+	"OURO_LEDGER_ROOT": true, "OURO_REMOTE_CONFIG": true, "OURO_SESSION_MAP": true,
+	"OURO_SHIM_DIRECTORY": true, "OURO_ZDOTDIR": true,
 }
 
 var tunnelEnvironmentKeys = map[string]bool{

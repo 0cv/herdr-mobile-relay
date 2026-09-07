@@ -102,6 +102,17 @@ assert_arg_pair --public-health "https://remote.example.test/readyz"
 assert_arg_pair --state "$TEST_HOME/.local/state/herdr-mobile-relay/supervisor.json"
 assert_arg_pair --log-dir "$TEST_HOME/.local/state/herdr-mobile-relay/logs"
 
+XDG_STATE_ROOT="$WORK_DIR/xdg-state"
+rm -f "$ARGS_FILE"
+HOME="$TEST_HOME" \
+XDG_STATE_HOME="$XDG_STATE_ROOT" \
+PATH="$BIN_DIR:/usr/bin:/bin" \
+HERDR_RELAY_ENV="$RELAY_ENV" \
+SUPERVISOR_ARGS="$ARGS_FILE" \
+"$TEST_BASH" "$ROOT_DIR/relay/herdr-mobile-relay-service.sh"
+assert_arg_pair --state "$XDG_STATE_ROOT/herdr-mobile-relay/supervisor.json"
+assert_arg_pair --log-dir "$XDG_STATE_ROOT/herdr-mobile-relay/logs"
+
 RELATIVE_HOME_LOG="$WORK_DIR/relative-home.log"
 if ! (
     cd "$WORK_DIR"
@@ -401,7 +412,12 @@ EOF
 cat > "$SERVICE_BIN/launchctl" <<'SH'
 #!/bin/sh
 case "$1" in
-    print) test -e "$LAUNCHCTL_STATE" ;;
+    print)
+        case "${2:-}" in
+            *com.herdr-remote.service) [ -n "${LEGACY_LAUNCHCTL_STATE:-}" ] && test -e "$LEGACY_LAUNCHCTL_STATE" ;;
+            *) test -e "$LAUNCHCTL_STATE" ;;
+        esac
+        ;;
     bootout)
         if [ "${REFUSE_LAUNCHD_BOOTOUT:-false}" = true ]; then
             exit 1
@@ -410,7 +426,10 @@ case "$1" in
            [ "${2:-}" != "gui/$(id -u)/com.herdr-mobile-relay.service" ]; then
             exit 1
         fi
-        rm -f "$LAUNCHCTL_STATE"
+        case "${2:-} ${3:-}" in
+            *com.herdr-remote.service*) [ -z "${LEGACY_LAUNCHCTL_STATE:-}" ] || rm -f "$LEGACY_LAUNCHCTL_STATE" ;;
+            *) rm -f "$LAUNCHCTL_STATE" ;;
+        esac
         ;;
     bootstrap) : > "$LAUNCHCTL_STATE" ;;
     enable|kickstart) ;;
@@ -453,7 +472,14 @@ cat > "$SERVICE_BIN/systemctl" <<'SH'
 printf '%s\n' "$@" >> "$SYSTEMCTL_ARGS"
 if [ "${STATEFUL_SYSTEMCTL:-false}" != true ]; then
     case " $* " in
-        *" is-active "*|*" is-enabled "*) test -f "$HOME/.config/systemd/user/herdr-mobile-relay.service"; exit $? ;;
+        *" is-active "*" herdr-mobile-relay.service "|*" is-enabled "*" herdr-mobile-relay.service ")
+            test -f "$HOME/.config/systemd/user/herdr-mobile-relay.service"
+            exit $?
+            ;;
+        *" is-active "*" herdr-remote.service "|*" is-enabled "*" herdr-remote.service ")
+            test -f "$HOME/.config/systemd/user/herdr-remote.service"
+            exit $?
+            ;;
         *) exit 0 ;;
     esac
 fi
@@ -772,9 +798,14 @@ fi
 SERVICE_JOURNAL_ARGS="$WORK_DIR/service-journal.args" HOME="$SERVICE_HOME" PATH="$SERVICE_BIN:/usr/bin:/bin" HERDR_RELAY_ENV="$SERVICE_ENV" TEST_UNAME=Linux "$TEST_BASH" "$ROOT_DIR/relay/service.sh" logs
 grep -Fx -- herdr-mobile-relay.service "$WORK_DIR/service-journal.args" >/dev/null
 
-awk 'NR < 62 { print ""; next } NR <= 209 { print; next } { exit }' "$ROOT_DIR/relay/install-service.sh" > "$WORK_DIR/install-service-functions.sh"
+awk '/^restore_relay_config\(\)/ { capture = 1 } !capture { print ""; next } /^trap cleanup_launchd_install EXIT/ { exit } { print }' "$ROOT_DIR/relay/install-service.sh" > "$WORK_DIR/install-service-functions.sh"
 # shellcheck source=/dev/null
 . "$WORK_DIR/install-service-functions.sh"
+LEGACY_WAS_LOADED=false
+LEGACY_STOPPED=false
+LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+LEGACY_PLIST="$WORK_DIR/legacy-launchd.plist"
+PREVIOUS_READINESS_CAPTURED=false
 
 LAUNCHD_FUNCTION_ROOT="$WORK_DIR/launchd-function-tests"
 mkdir -p "$LAUNCHD_FUNCTION_ROOT"
@@ -832,6 +863,7 @@ if capture_previous_service_readiness >/dev/null; then
 fi
 
 SERVICE_WAS_LOADED=true
+PREVIOUS_READINESS_CAPTURED=true
 RELEASE_ROOT="$LAUNCHD_FUNCTION_ROOT/release-root"
 PREVIOUS_CLOUDFLARED_CONFIG="$CAPTURE_CONFIG"
 PREVIOUS_LOCAL_HEALTH=http://127.0.0.1:8375/healthz
@@ -897,6 +929,53 @@ expect_launchd_rollback_failure loaded-proof loaded-proof true
 expect_launchd_rollback_failure unloaded-copy cp-unloaded false
 expect_launchd_rollback_failure unloaded-move mv-unloaded false
 
+(
+    LEGACY_STOPPED=true
+    LEGACY_WAS_LOADED=true
+    LEGACY_PLIST="$LAUNCHD_FUNCTION_ROOT/legacy.plist"
+    LEGACY_LABEL=com.herdr-remote.service
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    definition_replaced=false
+    restore_relay_config() { return 0; }
+    prove_previous_service_readiness() { return 0; }
+    reload_launchd_service_definition() { printf '%s\n' "$1:$2" > "$LAUNCHD_FUNCTION_ROOT/legacy-reload"; }
+    launchd_service_loaded() { return 0; }
+    rollback_launchd_install
+    grep -Fx "$LEGACY_PLIST:$LEGACY_LABEL" "$LAUNCHD_FUNCTION_ROOT/legacy-reload" >/dev/null
+)
+if (
+    LEGACY_STOPPED=true
+    LEGACY_WAS_LOADED=true
+    LEGACY_PLIST="$LAUNCHD_FUNCTION_ROOT/legacy.plist"
+    LEGACY_LABEL=com.herdr-remote.service
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    definition_replaced=false
+    restore_relay_config() { return 0; }
+    prove_previous_service_readiness() { return 0; }
+    reload_launchd_service_definition() { return 0; }
+    launchd_service_loaded() { return 1; }
+    rollback_launchd_install
+); then
+    echo "launchd rollback accepted an unproven legacy service restore" >&2
+    exit 1
+fi
+if (
+    LEGACY_STOPPED=true
+    LEGACY_WAS_LOADED=true
+    LEGACY_PLIST="$LAUNCHD_FUNCTION_ROOT/legacy.plist"
+    LEGACY_LABEL=com.herdr-remote.service
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    definition_replaced=false
+    restore_relay_config() { return 0; }
+    prove_previous_service_readiness() { return 0; }
+    reload_launchd_service_definition() { return 1; }
+    launchd_service_loaded() { return 0; }
+    rollback_launchd_install
+); then
+    echo "launchd rollback ignored a legacy service reload failure" >&2
+    exit 1
+fi
+
 LAUNCHD_CLEANUP_LOG="$LAUNCHD_FUNCTION_ROOT/cleanup.log"
 if (
     set +e
@@ -918,9 +997,14 @@ if (
 fi
 grep -F 'Launchd definition backup:' "$LAUNCHD_CLEANUP_LOG" >/dev/null
 
-awk 'NR < 74 { print ""; next } NR <= 227 { print; next } { exit }' "$ROOT_DIR/relay/install-systemd-user-service.sh" > "$WORK_DIR/install-systemd-functions.sh"
+awk '/^restore_relay_config\(\)/ { capture = 1 } !capture { print ""; next } /^trap cleanup_systemd_install EXIT/ { exit } { print }' "$ROOT_DIR/relay/install-systemd-user-service.sh" > "$WORK_DIR/install-systemd-functions.sh"
 # shellcheck source=/dev/null
 . "$WORK_DIR/install-systemd-functions.sh"
+LEGACY_WAS_ACTIVE=false
+LEGACY_WAS_ENABLED=false
+LEGACY_STOPPED=false
+LEGACY_LABEL=herdr-remote.service
+PREVIOUS_READINESS_CAPTURED=false
 
 SYSTEMD_FUNCTION_ROOT="$WORK_DIR/systemd-function-tests"
 mkdir -p "$SYSTEMD_FUNCTION_ROOT"
@@ -966,6 +1050,7 @@ if capture_previous_service_readiness >/dev/null; then
 fi
 
 SERVICE_WAS_ACTIVE=true
+PREVIOUS_READINESS_CAPTURED=true
 RELEASE_ROOT="$SYSTEMD_FUNCTION_ROOT/release-root"
 PREVIOUS_CLOUDFLARED_CONFIG="$CAPTURE_CONFIG"
 PREVIOUS_LOCAL_HEALTH=http://127.0.0.1:8375/healthz
@@ -1033,6 +1118,61 @@ expect_systemd_rollback_failure enabled-proof enabled-proof true true
 expect_systemd_rollback_failure disabled-proof disabled-proof false false
 expect_systemd_rollback_failure active-proof active-proof true false
 
+(
+    LEGACY_STOPPED=true
+    LEGACY_WAS_ACTIVE=true
+    LEGACY_WAS_ENABLED=true
+    LEGACY_LABEL=herdr-remote.service
+    definition_replaced=false
+    restore_relay_config() { return 0; }
+    prove_previous_service_readiness() { return 0; }
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        printf '%s\n' "$*" >> "$SYSTEMD_FUNCTION_ROOT/legacy-restore"
+        return 0
+    }
+    : > "$SYSTEMD_FUNCTION_ROOT/legacy-restore"
+    rollback_systemd_install
+    grep -Fx 'enable herdr-remote.service' "$SYSTEMD_FUNCTION_ROOT/legacy-restore" >/dev/null
+    grep -Fx 'restart herdr-remote.service' "$SYSTEMD_FUNCTION_ROOT/legacy-restore" >/dev/null
+)
+if (
+    LEGACY_STOPPED=true
+    LEGACY_WAS_ACTIVE=true
+    LEGACY_WAS_ENABLED=false
+    LEGACY_LABEL=herdr-remote.service
+    definition_replaced=false
+    restore_relay_config() { return 0; }
+    prove_previous_service_readiness() { return 0; }
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        [ "${1:-}" != is-active ]
+    }
+    rollback_systemd_install
+); then
+    echo "systemd rollback accepted an unproven legacy service restore" >&2
+    exit 1
+fi
+for legacy_restore_failure in enable restart; do
+    if (
+        LEGACY_STOPPED=true
+        LEGACY_WAS_ACTIVE=true
+        LEGACY_WAS_ENABLED=true
+        LEGACY_LABEL=herdr-remote.service
+        definition_replaced=false
+        restore_relay_config() { return 0; }
+        prove_previous_service_readiness() { return 0; }
+        systemctl() {
+            [ "${1:-}" != --user ] || shift
+            [ "${1:-}" != "$legacy_restore_failure" ]
+        }
+        rollback_systemd_install
+    ); then
+        echo "systemd rollback ignored a legacy service $legacy_restore_failure failure" >&2
+        exit 1
+    fi
+done
+
 SYSTEMD_CLEANUP_LOG="$SYSTEMD_FUNCTION_ROOT/cleanup.log"
 if (
     set +e
@@ -1063,7 +1203,7 @@ write_service_fragment() {
 }
 
 LAUNCHD_FRAGMENT="$WORK_DIR/install-service-functions.sh"
-write_service_fragment "$ROOT_DIR/relay/install-service.sh" 16 28 "$LAUNCHD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-service.sh" 17 29 "$LAUNCHD_FRAGMENT"
 (
     safe_env="$WORK_DIR/launchd-explicit.env"
     printf 'safe\n' > "$safe_env"
@@ -1079,7 +1219,7 @@ if (HERDR_RELAY_ENV="$launchd_unsafe_env"; . "$LAUNCHD_FRAGMENT") >/dev/null 2>&
     exit 1
 fi
 
-write_service_fragment "$ROOT_DIR/relay/install-service.sh" 212 221 "$LAUNCHD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-service.sh" 223 232 "$LAUNCHD_FRAGMENT"
 if (
     ENV_FILE="$launchd_unsafe_env"
     ENV_DIR="$WORK_DIR"
@@ -1091,7 +1231,7 @@ if (
     exit 1
 fi
 
-write_service_fragment "$ROOT_DIR/relay/install-service.sh" 222 231 "$LAUNCHD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-service.sh" 233 242 "$LAUNCHD_FRAGMENT"
 launchd_unsafe_token="$WORK_DIR/launchd-unsafe-token"
 ln -s "$WORK_DIR/missing-launchd-token" "$launchd_unsafe_token"
 if (
@@ -1105,7 +1245,7 @@ if (
     exit 1
 fi
 
-write_service_fragment "$ROOT_DIR/relay/install-service.sh" 233 256 "$LAUNCHD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-service.sh" 244 286 "$LAUNCHD_FRAGMENT"
 launchd_unsafe_plist="$WORK_DIR/launchd-unsafe.plist"
 ln -s "$WORK_DIR/missing-launchd-plist" "$launchd_unsafe_plist"
 if (
@@ -1115,6 +1255,9 @@ if (
     PLIST_BACKUP=
     SERVICE_WAS_LOADED=false
     SERVICE_TARGET=gui/501/com.herdr-mobile-relay.service
+    LEGACY_PLIST="$WORK_DIR/missing-legacy-launchd.plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    LEGACY_WAS_LOADED=false
     launchd_service_loaded() { return 1; }
     . "$LAUNCHD_FRAGMENT"
 ) >/dev/null 2>&1; then
@@ -1128,6 +1271,9 @@ if (
     PLIST_BACKUP=
     SERVICE_WAS_LOADED=false
     SERVICE_TARGET=gui/501/com.herdr-mobile-relay.service
+    LEGACY_PLIST="$WORK_DIR/missing-legacy-launchd.plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    LEGACY_WAS_LOADED=false
     launchd_service_loaded() { return 0; }
     . "$LAUNCHD_FRAGMENT"
 ) >/dev/null 2>&1; then
@@ -1142,15 +1288,104 @@ if (
     PLIST_BACKUP=
     SERVICE_WAS_LOADED=false
     SERVICE_TARGET=gui/501/com.herdr-mobile-relay.service
-    launchd_service_loaded() { return 0; }
+    LEGACY_PLIST="$WORK_DIR/missing-legacy-launchd.plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    LEGACY_WAS_LOADED=false
+    launchd_service_loaded() { [ "$1" = "$SERVICE_TARGET" ]; }
     capture_previous_service_readiness() { return 1; }
     . "$LAUNCHD_FRAGMENT"
 ) >/dev/null 2>&1; then
     echo "launchd installer accepted an existing service without an exact readiness snapshot" >&2
     exit 1
 fi
+(
+    PLIST="$WORK_DIR/missing-primary-launchd.plist"
+    LABEL=com.herdr-mobile-relay.service
+    PLIST_EXISTED=false
+    PLIST_BACKUP=
+    SERVICE_WAS_LOADED=false
+    SERVICE_TARGET=gui/501/com.herdr-mobile-relay.service
+    LEGACY_PLIST="$WORK_DIR/legacy-only-launchd.plist"
+    printf 'legacy\n' > "$LEGACY_PLIST"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    LEGACY_WAS_LOADED=false
+    PREVIOUS_READINESS_CAPTURED=false
+    launchd_service_loaded() { [ "$1" = "$LEGACY_SERVICE_TARGET" ]; }
+    capture_previous_service_readiness() { return 1; }
+    . "$LAUNCHD_FRAGMENT"
+    test "$LEGACY_WAS_LOADED" = true
+    test "$PREVIOUS_READINESS_CAPTURED" = false
+)
 
-write_service_fragment "$ROOT_DIR/relay/install-service.sh" 258 267 "$LAUNCHD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-service.sh" 260 272 "$LAUNCHD_FRAGMENT"
+launchd_legacy_plist="$WORK_DIR/legacy-launchd.plist"
+printf 'legacy\n' > "$launchd_legacy_plist"
+(
+    LEGACY_PLIST="$launchd_legacy_plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    LEGACY_WAS_LOADED=false
+    launchd_service_loaded() { return 0; }
+    . "$LAUNCHD_FRAGMENT"
+    test "$LEGACY_WAS_LOADED" = true
+)
+(
+    LEGACY_PLIST="$launchd_legacy_plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    LEGACY_WAS_LOADED=false
+    launchd_service_loaded() { return 1; }
+    set +e
+    . "$LAUNCHD_FRAGMENT"
+    set -e
+    test "$LEGACY_WAS_LOADED" = false
+)
+launchd_unsafe_legacy_plist="$WORK_DIR/unsafe-legacy-launchd.plist"
+ln -s "$WORK_DIR/missing-legacy-launchd" "$launchd_unsafe_legacy_plist"
+if (
+    LEGACY_PLIST="$launchd_unsafe_legacy_plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    LEGACY_WAS_LOADED=false
+    launchd_service_loaded() { return 1; }
+    . "$LAUNCHD_FRAGMENT"
+) >/dev/null 2>&1; then
+    echo "launchd installer accepted an unsafe legacy service definition" >&2
+    exit 1
+fi
+if (
+    LEGACY_PLIST="$WORK_DIR/missing-live-legacy-launchd.plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    LEGACY_WAS_LOADED=false
+    launchd_service_loaded() { return 0; }
+    . "$LAUNCHD_FRAGMENT"
+) >/dev/null 2>&1; then
+    echo "launchd installer accepted a loaded legacy service without its definition" >&2
+    exit 1
+fi
+
+write_service_fragment "$ROOT_DIR/relay/install-service.sh" 288 306 "$LAUNCHD_FRAGMENT"
+(
+    LEGACY_WAS_LOADED=true
+    LEGACY_STOPPED=false
+    LEGACY_PLIST="$launchd_legacy_plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    launchctl() { return 1; }
+    launchd_service_loaded() { return 1; }
+    . "$LAUNCHD_FRAGMENT"
+    test "$LEGACY_STOPPED" = true
+)
+if (
+    LEGACY_WAS_LOADED=true
+    LEGACY_STOPPED=false
+    LEGACY_PLIST="$launchd_legacy_plist"
+    LEGACY_SERVICE_TARGET=gui/501/com.herdr-remote.service
+    launchctl() { return 0; }
+    launchd_service_loaded() { return 0; }
+    . "$LAUNCHD_FRAGMENT"
+) >/dev/null 2>&1; then
+    echo "launchd installer accepted a legacy service that remained loaded" >&2
+    exit 1
+fi
+
+write_service_fragment "$ROOT_DIR/relay/install-service.sh" 288 315 "$LAUNCHD_FRAGMENT"
 if (
     service_transaction_changed=false
     ENV_DIR="$WORK_DIR/launchd-missing-wrapper-config"
@@ -1158,6 +1393,7 @@ if (
     CLOUDFLARED_CONFIG="$WORK_DIR/cloudflared.yml"
     SERVICE_WRAPPER="$WORK_DIR/missing-launchd-wrapper"
     WORK_DIR="$WORK_DIR/launchd-release"
+    LEGACY_WAS_LOADED=false
     ensure_relay_env() { return 0; }
     load_relay_env() { return 0; }
     verified_installed_release() { return 0; }
@@ -1167,7 +1403,7 @@ if (
     exit 1
 fi
 
-write_service_fragment "$ROOT_DIR/relay/install-service.sh" 302 306 "$LAUNCHD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-service.sh" 350 354 "$LAUNCHD_FRAGMENT"
 if (
     PLIST_TEMP="$WORK_DIR/invalid-candidate.plist"
     printf 'invalid\n' > "$PLIST_TEMP"
@@ -1195,7 +1431,7 @@ if (HERDR_RELAY_ENV="$systemd_unsafe_env"; . "$SYSTEMD_FRAGMENT") >/dev/null 2>&
     exit 1
 fi
 
-write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 230 239 "$SYSTEMD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 246 255 "$SYSTEMD_FRAGMENT"
 if (
     ENV_FILE="$systemd_unsafe_env"
     ENV_DIR="$WORK_DIR"
@@ -1207,7 +1443,7 @@ if (
     exit 1
 fi
 
-write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 240 249 "$SYSTEMD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 256 265 "$SYSTEMD_FRAGMENT"
 systemd_unsafe_token="$WORK_DIR/systemd-unsafe-token"
 ln -s "$WORK_DIR/missing-systemd-token" "$systemd_unsafe_token"
 if (
@@ -1221,7 +1457,7 @@ if (
     exit 1
 fi
 
-write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 251 275 "$SYSTEMD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 267 313 "$SYSTEMD_FRAGMENT"
 systemd_unsafe_unit="$WORK_DIR/systemd-unsafe.service"
 ln -s "$WORK_DIR/missing-systemd-unit" "$systemd_unsafe_unit"
 if (
@@ -1232,6 +1468,10 @@ if (
     UNIT_BACKUP=
     SERVICE_WAS_ACTIVE=false
     SERVICE_WAS_ENABLED=false
+    LEGACY_UNIT_FILE="$WORK_DIR/missing-legacy-systemd.service"
+    LEGACY_LABEL=herdr-remote.service
+    LEGACY_WAS_ACTIVE=false
+    LEGACY_WAS_ENABLED=false
     systemctl() { return 1; }
     . "$SYSTEMD_FRAGMENT"
 ) >/dev/null 2>&1; then
@@ -1246,7 +1486,14 @@ if (
     UNIT_BACKUP=
     SERVICE_WAS_ACTIVE=false
     SERVICE_WAS_ENABLED=false
-    systemctl() { return 0; }
+    LEGACY_UNIT_FILE="$WORK_DIR/missing-legacy-systemd.service"
+    LEGACY_LABEL=herdr-remote.service
+    LEGACY_WAS_ACTIVE=false
+    LEGACY_WAS_ENABLED=false
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        [ "${*: -1}" = "$LABEL" ]
+    }
     . "$SYSTEMD_FRAGMENT"
 ) >/dev/null 2>&1; then
     echo "systemd installer accepted an active service without its definition" >&2
@@ -1261,15 +1508,133 @@ if (
     UNIT_BACKUP=
     SERVICE_WAS_ACTIVE=false
     SERVICE_WAS_ENABLED=false
-    systemctl() { return 0; }
+    LEGACY_UNIT_FILE="$WORK_DIR/missing-legacy-systemd.service"
+    LEGACY_LABEL=herdr-remote.service
+    LEGACY_WAS_ACTIVE=false
+    LEGACY_WAS_ENABLED=false
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        [ "${*: -1}" = "$LABEL" ]
+    }
     capture_previous_service_readiness() { return 1; }
     . "$SYSTEMD_FRAGMENT"
 ) >/dev/null 2>&1; then
     echo "systemd installer accepted an existing service without an exact readiness snapshot" >&2
     exit 1
 fi
+(
+    UNIT_FILE="$WORK_DIR/missing-primary-systemd.service"
+    UNIT_DIR="$WORK_DIR"
+    LABEL=herdr-mobile-relay.service
+    UNIT_EXISTED=false
+    UNIT_BACKUP=
+    SERVICE_WAS_ACTIVE=false
+    SERVICE_WAS_ENABLED=false
+    LEGACY_UNIT_FILE="$WORK_DIR/legacy-only-systemd.service"
+    printf 'legacy\n' > "$LEGACY_UNIT_FILE"
+    LEGACY_LABEL=herdr-remote.service
+    LEGACY_WAS_ACTIVE=false
+    LEGACY_WAS_ENABLED=false
+    PREVIOUS_READINESS_CAPTURED=false
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        [ "${1:-}" = is-active ] && [ "${*: -1}" = "$LEGACY_LABEL" ]
+    }
+    capture_previous_service_readiness() { return 1; }
+    . "$SYSTEMD_FRAGMENT"
+    test "$LEGACY_WAS_ACTIVE" = true
+    test "$PREVIOUS_READINESS_CAPTURED" = false
+)
 
-write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 277 286 "$SYSTEMD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 278 293 "$SYSTEMD_FRAGMENT"
+systemd_legacy_unit="$WORK_DIR/legacy-systemd.service"
+printf 'legacy\n' > "$systemd_legacy_unit"
+(
+    LEGACY_UNIT_FILE="$systemd_legacy_unit"
+    LEGACY_LABEL=herdr-remote.service
+    LEGACY_WAS_ACTIVE=false
+    LEGACY_WAS_ENABLED=false
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        case "${1:-}" in
+            is-active|is-enabled) return 0 ;;
+        esac
+        return 1
+    }
+    . "$SYSTEMD_FRAGMENT"
+    test "$LEGACY_WAS_ACTIVE" = true
+    test "$LEGACY_WAS_ENABLED" = true
+)
+(
+    LEGACY_UNIT_FILE="$systemd_legacy_unit"
+    LEGACY_LABEL=herdr-remote.service
+    LEGACY_WAS_ACTIVE=false
+    LEGACY_WAS_ENABLED=false
+    systemctl() { return 1; }
+    set +e
+    . "$SYSTEMD_FRAGMENT"
+    set -e
+    test "$LEGACY_WAS_ACTIVE" = false
+    test "$LEGACY_WAS_ENABLED" = false
+)
+systemd_unsafe_legacy_unit="$WORK_DIR/unsafe-legacy-systemd.service"
+ln -s "$WORK_DIR/missing-legacy-systemd" "$systemd_unsafe_legacy_unit"
+if (
+    LEGACY_UNIT_FILE="$systemd_unsafe_legacy_unit"
+    LEGACY_LABEL=herdr-remote.service
+    LEGACY_WAS_ACTIVE=false
+    LEGACY_WAS_ENABLED=false
+    systemctl() { return 1; }
+    . "$SYSTEMD_FRAGMENT"
+) >/dev/null 2>&1; then
+    echo "systemd installer accepted an unsafe legacy service definition" >&2
+    exit 1
+fi
+if (
+    LEGACY_UNIT_FILE="$WORK_DIR/missing-live-legacy-systemd.service"
+    LEGACY_LABEL=herdr-remote.service
+    LEGACY_WAS_ACTIVE=false
+    LEGACY_WAS_ENABLED=false
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        [ "${1:-}" = is-active ]
+    }
+    . "$SYSTEMD_FRAGMENT"
+) >/dev/null 2>&1; then
+    echo "systemd installer accepted an active legacy service without its definition" >&2
+    exit 1
+fi
+
+write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 315 323 "$SYSTEMD_FRAGMENT"
+(
+    LEGACY_WAS_ACTIVE=true
+    LEGACY_STOPPED=false
+    LEGACY_LABEL=herdr-remote.service
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        case "${1:-}" in
+            stop|is-active) return 1 ;;
+        esac
+        return 0
+    }
+    . "$SYSTEMD_FRAGMENT"
+    test "$LEGACY_STOPPED" = true
+)
+if (
+    LEGACY_WAS_ACTIVE=true
+    LEGACY_STOPPED=false
+    LEGACY_LABEL=herdr-remote.service
+    systemctl() {
+        [ "${1:-}" != --user ] || shift
+        return 0
+    }
+    . "$SYSTEMD_FRAGMENT"
+) >/dev/null 2>&1; then
+    echo "systemd installer accepted a legacy service that remained active" >&2
+    exit 1
+fi
+
+write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 315 332 "$SYSTEMD_FRAGMENT"
 if (
     service_transaction_changed=false
     ENV_DIR="$WORK_DIR/systemd-missing-wrapper-config"
@@ -1277,6 +1642,7 @@ if (
     CLOUDFLARED_CONFIG="$WORK_DIR/cloudflared.yml"
     SERVICE_WRAPPER="$WORK_DIR/missing-systemd-wrapper"
     WORK_DIR="$WORK_DIR/systemd-release"
+    LEGACY_WAS_ACTIVE=false
     ensure_relay_env() { return 0; }
     load_relay_env() { return 0; }
     verified_installed_release() { return 0; }
@@ -1286,7 +1652,7 @@ if (
     exit 1
 fi
 
-write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 311 317 "$SYSTEMD_FRAGMENT"
+write_service_fragment "$ROOT_DIR/relay/install-systemd-user-service.sh" 357 363 "$SYSTEMD_FRAGMENT"
 if (
     UNIT_TEMP="$WORK_DIR/invalid-candidate.service"
     WORK_DIR="$WORK_DIR/systemd-work"

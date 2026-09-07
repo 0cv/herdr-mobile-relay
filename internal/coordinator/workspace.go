@@ -311,28 +311,44 @@ func (d *Dispatcher) lockTopology(ctx context.Context) func() {
 
 func (d *Dispatcher) topologyEffect(requestCtx context.Context, requestID string, kind CommandKind, paneID string, runner EffectRunner) EffectRunner {
 	fleetEpoch := d.fleetEpoch.Load()
+	finalize, managed := requestCtx.Value(resultFinalizerContextKey{}).(func(context.Context, *CommandResult) *CommandResult)
+	complete, hasCompleter := requestCtx.Value(resultCompleterContextKey{}).(func(context.Context, *CommandResult) *CommandResult)
 	return EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if fenced := executionFenceResult(requestCtx); fenced != nil {
 			return EffectResult{Result: fenced}
 		}
-		d.topologyMu.Lock()
-		defer d.topologyMu.Unlock()
-		if d.fleetEpoch.Load() != fleetEpoch {
-			return EffectResult{Result: d.topologyConflict(requestID, string(kind), paneID)}
-		}
-		result := runner.Run(effectCtx, token)
-		changed := result.BumpGeneration
-		if result.Result != nil {
-			changed = changed || result.Result.Phase == "dispatched_unknown"
-			if kind == CommandStart {
-				changed = changed || result.Result.OK || result.Result.PaneID != ""
+		result := func() EffectResult {
+			d.topologyMu.Lock()
+			defer d.topologyMu.Unlock()
+			if d.fleetEpoch.Load() != fleetEpoch {
+				return EffectResult{Result: d.topologyConflict(requestID, string(kind), paneID)}
 			}
+			result := runner.Run(effectCtx, token)
+			changed := result.BumpGeneration
+			if result.Result != nil {
+				changed = changed || result.Result.Phase == "dispatched_unknown"
+				if kind == CommandStart {
+					changed = changed || result.Result.OK || result.Result.PaneID != ""
+				}
+			}
+			if changed && !managed {
+				d.fleetChanged()
+			}
+			return result
+		}()
+		if managed {
+			result.Result = finalize(requestCtx, result.Result)
+			result.TopologyFinalized = commandResultOK(result.Result)
 		}
-		if changed {
-			d.fleetChanged()
+		if hasCompleter {
+			result.Result = complete(requestCtx, result.Result)
 		}
 		return result
 	})
+}
+
+func commandResultOK(result *CommandResult) bool {
+	return result != nil && result.OK
 }
 
 func (d *Dispatcher) topologyConflict(requestID, action, paneID string) *CommandResult {

@@ -95,11 +95,23 @@ func TestPendingAssociationAfterCrashNeverAuthorizesPaneIDReuse(t *testing.T) {
 	}
 
 	restarted := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	if got := restarted.ResolvePane("pane-new", "emu"); got != "" {
+		t.Fatalf("first-use resolution bypassed crash-persisted intent as %q", got)
+	}
+	if got := restarted.ResolvePaneSession("pane-new", "session-new", "emu"); got != "" {
+		t.Fatalf("first-use session resolution bypassed crash-persisted intent as %q", got)
+	}
 	if err := restarted.Reconcile([]Observation{{PaneID: "pane-new", NativeSessionID: "session-new"}}); err != nil {
 		t.Fatalf("reconcile after restart: %v", err)
 	}
 	if got := restarted.ResolvePaneSession("pane-new", "session-new", "copilot"); got != "" {
 		t.Fatalf("crash-persisted intent authorized a reused pane as %q", got)
+	}
+	if got := restarted.ResolvePane("pane-new", "emu"); got != "" {
+		t.Fatalf("crash-persisted intent fell back to reported profile %q", got)
+	}
+	if got := restarted.ResolvePaneSession("pane-new", "session-new", "emu"); got != "" {
+		t.Fatalf("crash-persisted session intent fell back to reported profile %q", got)
 	}
 	stored = readAssociationStore(t, stateDir)
 	if len(stored.Pending) != 1 || stored.Pending[0] != (pendingAssociation{PaneID: "pane-new", ProfileID: "personal"}) || len(stored.Associations) != 0 {
@@ -437,6 +449,34 @@ func TestMismatchedLiveSessionPrunesStaleAssociationAndCanRecover(t *testing.T) 
 	if stored := readAssociationStore(t, stateDir); len(stored.Associations) != 0 {
 		t.Fatalf("mismatch retained stale durable association: %+v", stored.Associations)
 	}
+	if err := restarted.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "different"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.ResolvePane("pane", "personal"); got != "" {
+		t.Fatalf("repeated mismatch restored reported-agent inference: %q", got)
+	}
+	if err := restarted.Reconcile([]Observation{{PaneID: "pane"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := restarted.ResolvePane("pane", "personal"); got != "" {
+		t.Fatalf("missing live session identity cleared durable rejection: %q", got)
+	}
+	afterRestart := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	if got := afterRestart.ResolvePane("pane", "personal"); got != "" {
+		t.Fatalf("first-use rejected identity restored reported-agent inference: %q", got)
+	}
+	if got := afterRestart.ResolvePaneSession("pane", "different", "personal"); got != "" {
+		t.Fatalf("first-use rejected session restored reported-agent inference: %q", got)
+	}
+	if err := afterRestart.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "different"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := afterRestart.ResolvePane("pane", "personal"); got != "" {
+		t.Fatalf("restart restored reported-agent inference for rejected identity: %q", got)
+	}
+	if err := restarted.Remember("pane", "personal"); err != nil {
+		t.Fatal(err)
+	}
 	if err := restarted.Remember("pane", "personal"); err != nil {
 		t.Fatal(err)
 	}
@@ -445,6 +485,20 @@ func TestMismatchedLiveSessionPrunesStaleAssociationAndCanRecover(t *testing.T) 
 	}
 	if got := restarted.ResolvePane("pane", "copilot"); got != "personal" {
 		t.Fatalf("reused pane did not establish fresh ownership: %q", got)
+	}
+}
+
+func TestRejectedIdentitiesPersistInStableOrder(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := writeAssociationState(stateDir, nil, nil, map[string]string{
+		"pane-z": "session-z",
+		"pane-a": "session-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := readAssociationStore(t, stateDir)
+	if len(store.Rejected) != 2 || store.Rejected[0].PaneID != "pane-a" || store.Rejected[1].PaneID != "pane-z" {
+		t.Fatalf("rejected identities = %+v, want stable pane order", store.Rejected)
 	}
 }
 
@@ -553,6 +607,11 @@ func TestAssociationStoreFailsClosedForInvalidFiles(t *testing.T) {
 		{name: "blank pending pane", content: `{"version":1,"associations":[],"pending":[{"pane_id":" ","profile_id":"personal"}]}`},
 		{name: "blank pending profile", content: `{"version":1,"associations":[],"pending":[{"pane_id":"pane","profile_id":" "]}`},
 		{name: "duplicate pending pane", content: `{"version":1,"associations":[],"pending":[{"pane_id":"pane","profile_id":"personal"},{"pane_id":"PANE","profile_id":"emu"}]}`},
+		{name: "empty rejected pane", content: `{"version":1,"associations":[],"rejected":[{"pane_id":"","native_session_id":"session"}]}`},
+		{name: "empty rejected session", content: `{"version":1,"associations":[],"rejected":[{"pane_id":"pane","native_session_id":""}]}`},
+		{name: "blank rejected pane", content: `{"version":1,"associations":[],"rejected":[{"pane_id":" ","native_session_id":"session"}]}`},
+		{name: "blank rejected session", content: `{"version":1,"associations":[],"rejected":[{"pane_id":"pane","native_session_id":" "}]}`},
+		{name: "duplicate rejected pane", content: `{"version":1,"associations":[],"rejected":[{"pane_id":"pane","native_session_id":"session-1"},{"pane_id":"PANE","native_session_id":"session-2"}]}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -561,6 +620,9 @@ func TestAssociationStoreFailsClosedForInvalidFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+			if got := resolver.ResolvePane("pane", "personal"); got != "" {
+				t.Fatalf("first-use corrupt store resolved ownership as %q", got)
+			}
 			if err := resolver.Reconcile([]Observation{{PaneID: "pane", NativeSessionID: "session"}}); err == nil {
 				t.Fatal("invalid store was accepted")
 			}

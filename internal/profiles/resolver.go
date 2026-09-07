@@ -73,6 +73,7 @@ type Resolver struct {
 	verified            map[string]string
 	forgotten           map[string]bool
 	untrusted           map[string]bool
+	rejected            map[string]string
 	associationsRead    bool
 	associationErr      error
 }
@@ -102,6 +103,7 @@ func NewResolver(configHome string, herdr IntegrationStatuser, options ...Option
 		verified:     make(map[string]string),
 		forgotten:    make(map[string]bool),
 		untrusted:    make(map[string]bool),
+		rejected:     make(map[string]string),
 		aliases:      cloneAliases(defaultAliases),
 		skillDirs:    cloneStringSlices(defaultSkillDirs),
 		formats:      cloneStrings(defaultCommandFormats),
@@ -370,15 +372,18 @@ func (r *Resolver) Remember(paneID, profileID string) error {
 		return err
 	}
 	nextPending := clonePending(r.pending)
+	nextRejected := cloneStrings(r.rejected)
 	nextPending[paneID] = profileID
-	if r.associationDir != "" && !samePending(r.pending, nextPending) {
-		if err := writeAssociationState(r.associationDir, r.associations, nextPending); err != nil {
+	delete(nextRejected, paneID)
+	if r.associationDir != "" && (!samePending(r.pending, nextPending) || !samePending(r.rejected, nextRejected)) {
+		if err := writeAssociationState(r.associationDir, r.associations, nextPending, nextRejected); err != nil {
 			delete(r.remembered, paneID)
 			delete(r.verified, paneID)
 			return fmt.Errorf("persist pane profile start intent: %w", err)
 		}
 	}
 	r.pending = nextPending
+	r.rejected = nextRejected
 	r.remembered[paneID] = profileID
 	delete(r.forgotten, paneID)
 	delete(r.untrusted, paneID)
@@ -397,7 +402,7 @@ func (r *Resolver) PreflightAssociationPersistence() error {
 	if r.associationDir == "" {
 		return nil
 	}
-	if err := writeAssociationState(r.associationDir, r.associations, r.pending); err != nil {
+	if err := writeAssociationState(r.associationDir, r.associations, r.pending, r.rejected); err != nil {
 		return fmt.Errorf("preflight pane profile association persistence: %w", err)
 	}
 	return nil
@@ -418,10 +423,12 @@ func (r *Resolver) Forget(paneID string) error {
 	}
 	nextAssociations := cloneAssociations(r.associations)
 	nextPending := clonePending(r.pending)
+	nextRejected := cloneStrings(r.rejected)
 	delete(nextAssociations, paneID)
 	delete(nextPending, paneID)
-	if r.associationDir != "" && (!sameAssociations(r.associations, nextAssociations) || !samePending(r.pending, nextPending)) {
-		if err := writeAssociationState(r.associationDir, nextAssociations, nextPending); err != nil {
+	delete(nextRejected, paneID)
+	if r.associationDir != "" && (!sameAssociations(r.associations, nextAssociations) || !samePending(r.pending, nextPending) || !samePending(r.rejected, nextRejected)) {
+		if err := writeAssociationState(r.associationDir, nextAssociations, nextPending, nextRejected); err != nil {
 			delete(r.remembered, paneID)
 			delete(r.verified, paneID)
 			r.forgotten[paneID] = true
@@ -430,6 +437,7 @@ func (r *Resolver) Forget(paneID string) error {
 	}
 	r.associations = nextAssociations
 	r.pending = nextPending
+	r.rejected = nextRejected
 	delete(r.remembered, paneID)
 	delete(r.verified, paneID)
 	r.forgotten[paneID] = true
@@ -439,11 +447,11 @@ func (r *Resolver) Forget(paneID string) error {
 func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
 	r.mu.Lock()
 	paneID = normalizeIdentifier(paneID)
-	if r.forgotten[paneID] || r.untrusted[paneID] {
+	if r.loadAssociationsLocked() != nil {
 		r.mu.Unlock()
 		return ""
 	}
-	if r.associationErr != nil {
+	if r.forgotten[paneID] || r.untrusted[paneID] || r.rejected[paneID] != "" {
 		r.mu.Unlock()
 		return ""
 	}
@@ -454,6 +462,10 @@ func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
 	if id := r.verified[paneID]; id != "" {
 		r.mu.Unlock()
 		return id
+	}
+	if _, pending := r.pending[paneID]; pending {
+		r.mu.Unlock()
+		return ""
 	}
 	if _, unverified := r.associations[paneID]; unverified {
 		r.mu.Unlock()
@@ -467,13 +479,21 @@ func (r *Resolver) ResolvePaneSession(paneID, nativeSessionID, reportedAgent str
 	r.mu.Lock()
 	paneID = normalizeIdentifier(paneID)
 	nativeSessionID = strings.TrimSpace(nativeSessionID)
-	if r.forgotten[paneID] || r.untrusted[paneID] || r.associationErr != nil {
+	if r.loadAssociationsLocked() != nil {
+		r.mu.Unlock()
+		return ""
+	}
+	if r.forgotten[paneID] || r.untrusted[paneID] || r.rejected[paneID] != "" {
 		r.mu.Unlock()
 		return ""
 	}
 	if id := r.remembered[paneID]; id != "" {
 		r.mu.Unlock()
 		return id
+	}
+	if _, pending := r.pending[paneID]; pending {
+		r.mu.Unlock()
+		return ""
 	}
 	if association, exists := r.associations[paneID]; exists {
 		if nativeSessionID != "" && association.NativeSessionID == nativeSessionID && r.verified[paneID] == association.ProfileID {

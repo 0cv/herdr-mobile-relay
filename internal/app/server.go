@@ -791,6 +791,7 @@ func (s *Server) Run(ctx context.Context) error {
 			})
 			defer commandFence.close()
 			commandCtx = coordinator.WithExecutionFence(commandCtx, commandFence.check)
+			commandCtx = coordinator.WithResultFinalizer(commandCtx, commandFence.finalize)
 			clientCommandCtx = coordinator.WithExecutionFence(clientCommandCtx, commandFence.check)
 		}
 		switch action {
@@ -1564,7 +1565,6 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) reconcileProfileOwnership(agents []*coordinator.AgentState) {
 	observations := make([]profiles.Observation, 0, len(agents))
 	for _, agent := range agents {
-		s.resolveAgentSessionName(agent)
 		observations = append(observations, profiles.Observation{
 			PaneID: agent.PaneID, NativeSessionID: agent.SessionID,
 		})
@@ -2362,14 +2362,23 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	ready := s.ready
 	s.mu.RUnlock()
 
-	inventoryOK := s.state.InventoryReady()
-
+	var inventoryOK bool
 	status := "unavailable"
 	code := http.StatusServiceUnavailable
 	var managedInventory *readiness.Result
 	if s.cfg.ManagedDeployment {
-		result := s.managedInventoryReadiness()
+		result := readiness.Result{
+			State:      readiness.StateTopologyTransactionPending,
+			Generation: s.cfg.ActiveGeneration,
+		}
+		if s.managedTopologyMu.TryRLock() {
+			inventoryOK = s.state.InventoryReady()
+			result = s.managedInventoryReadinessUnlocked()
+			s.managedTopologyMu.RUnlock()
+		}
 		managedInventory = &result
+	} else {
+		inventoryOK = s.state.InventoryReady()
 	}
 	if ready && inventoryOK && s.webBundleIdentityReady() && (managedInventory == nil || managedInventory.Ready) {
 		status = "ready"
@@ -2493,6 +2502,7 @@ type managedCommandFence struct {
 	topologyCommit       *managedTopologyCommit
 	validated            bool
 	finalized            bool
+	topologyFinalized    bool
 	closed               bool
 	blocked              *coordinator.CommandResult
 	finalResult          *coordinator.CommandResult
@@ -2578,7 +2588,8 @@ func (s *Server) managedCommandFence(requestID, action, paneID string, targets .
 				},
 			}
 		}
-		fence.topologyFailure = func(error) *coordinator.CommandResult {
+		fence.topologyFailure = func(err error) *coordinator.CommandResult {
+			s.logger.Warn("managed topology recovery checkpoint did not commit", "error", err)
 			s.state.MarkInventoryFailure(errors.New("managed topology recovery checkpoint is unresolved"))
 			return &coordinator.CommandResult{
 				RequestID: requestID,
@@ -2654,10 +2665,13 @@ func (f *managedCommandFence) finalize(ctx context.Context, result *coordinator.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.finalized {
-		if f.finalResult != nil {
-			return f.finalResult
+		if f.topologyFinalized {
+			return result
 		}
-		return result
+		if f.finalResult == nil {
+			return result
+		}
+		return f.finalResult
 	}
 	f.finalized = true
 	f.finalResult = result
@@ -2667,6 +2681,8 @@ func (f *managedCommandFence) finalize(ctx context.Context, result *coordinator.
 	if err := f.topologyCommit.finish(ctx, result); err != nil {
 		f.blocked = f.topologyFailure(err)
 		f.finalResult = f.blocked
+	} else {
+		f.topologyFinalized = true
 	}
 	return f.finalResult
 }

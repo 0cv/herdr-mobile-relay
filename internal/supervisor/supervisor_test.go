@@ -30,9 +30,13 @@ func TestChildEnvironmentsAreSeparateExplicitAllowlists(t *testing.T) {
 		"PATH=/managed/bin", "HOME=/managed/home", "TMPDIR=/managed/tmp", "LANG=en_US.UTF-8",
 		"CLAUDE_CONFIG_DIR=/native/claude", "CODEX_HOME=/native/codex", "PI_CODING_AGENT_DIR=/native/pi",
 		"OMO_CODING_AGENT_DIR=/native/omo", "SENPI_CODING_AGENT_DIR=/native/senpi", "KIMI_CODE_HOME=/native/kimi",
+		"HERMES_HOME=/native/hermes", "HERDR_HERMES_DATA_DIRS=/native/hermes-data",
 		"HTTP_PROXY=http://upper-http.proxy", "HTTPS_PROXY=https://upper-https.proxy", "NO_PROXY=127.0.0.1,.example.test",
 		"http_proxy=http://lower-http.proxy", "https_proxy=https://lower-https.proxy", "no_proxy=localhost,.internal.test",
 		"HERDR_RELAY_TOKEN=relay-secret-sentinel", "HERDR_RELAY_HOST=127.0.0.1", "HERDR_BIN=/managed/herdr",
+		"HERDR_RELAY_TOPOLOGY_COMMIT_HELPER=/managed/OuroWorkbenchRemote", "OURO_REMOTE_CONFIG=/managed/profiles.json",
+		"OURO_LEDGER_ROOT=/managed/ledger", "OURO_SESSION_MAP=/managed/session-map.json",
+		"OURO_SHIM_DIRECTORY=/managed/shims", "OURO_ZDOTDIR=/managed/zdotdir",
 		"HERDR_APP_DEPLOY_ORIGIN=https://app.example.test", "HERDR_CLOUDFLARE_PAGES_PROJECT=app-project",
 		"HERDR_CLOUDFLARE_PAGES_BRANCH=main", "HERDR_APP_DEPLOY_NPX=/managed/bin/npx", "HERDR_APP_DEPLOY_NODE_DIR=/managed/bin",
 		"HERDR_WEB_ROOT=/checkout/frontend/dist",
@@ -53,12 +57,17 @@ func TestChildEnvironmentsAreSeparateExplicitAllowlists(t *testing.T) {
 	for key, want := range map[string]string{
 		"CLAUDE_CONFIG_DIR": "/native/claude", "CODEX_HOME": "/native/codex", "PI_CODING_AGENT_DIR": "/native/pi",
 		"OMO_CODING_AGENT_DIR": "/native/omo", "SENPI_CODING_AGENT_DIR": "/native/senpi", "KIMI_CODE_HOME": "/native/kimi",
+		"HERMES_HOME": "/native/hermes", "HERDR_HERMES_DATA_DIRS": "/native/hermes-data",
+		"HERDR_RELAY_TOPOLOGY_COMMIT_HELPER": "/managed/OuroWorkbenchRemote", "OURO_REMOTE_CONFIG": "/managed/profiles.json",
+		"OURO_LEDGER_ROOT": "/managed/ledger", "OURO_SESSION_MAP": "/managed/session-map.json",
+		"OURO_SHIM_DIRECTORY": "/managed/shims", "OURO_ZDOTDIR": "/managed/zdotdir",
 	} {
 		assertEnvironmentValue(t, relay, key, want)
 		if slices.ContainsFunc(tunnel, func(entry string) bool { return strings.HasPrefix(entry, key+"=") }) {
 			t.Fatalf("tunnel inherited relay-only native root %s: %v", key, tunnel)
 		}
 	}
+
 	for key, want := range map[string]string{
 		"HTTP_PROXY": "http://upper-http.proxy", "HTTPS_PROXY": "https://upper-https.proxy", "NO_PROXY": "127.0.0.1,.example.test",
 		"http_proxy": "http://lower-http.proxy", "https_proxy": "https://lower-https.proxy", "no_proxy": "localhost,.internal.test",
@@ -79,6 +88,84 @@ func TestChildEnvironmentsAreSeparateExplicitAllowlists(t *testing.T) {
 	}
 	if !slices.IsSorted(relay) || !slices.IsSorted(tunnel) {
 		t.Fatalf("child environments are not deterministic: relay=%v tunnel=%v", relay, tunnel)
+	}
+}
+
+func TestHealthyPairToleratesManagedTopologyTransactionReadiness(t *testing.T) {
+	service := newInjectedSupervisor(t)
+	starter := &fakeStarter{}
+	service.start = starter.Start
+	ctx, cancel := context.WithCancel(context.Background())
+	checks := 0
+	service.health = func(context.Context) error {
+		checks++
+		switch checks {
+		case 1:
+			return nil
+		case 2:
+			return errTopologyTransactionPending
+		default:
+			cancel()
+			return context.Canceled
+		}
+	}
+	result := service.runPair(ctx, func(bool) error { return nil })
+	if !result.cancelled || result.unsafe || result.reason != "" || checks < 3 {
+		t.Fatalf("topology transaction readiness result = %+v, checks=%d", result, checks)
+	}
+}
+
+func TestHealthyPairRecyclesAfterManagedTopologyTransactionStalls(t *testing.T) {
+	service := newInjectedSupervisor(t)
+	service.config.StartupTimeout = 5 * time.Millisecond
+	service.config.HealthInterval = time.Millisecond
+	starter := &fakeStarter{}
+	service.start = starter.Start
+	checks := 0
+	service.health = func(context.Context) error {
+		checks++
+		if checks == 1 {
+			return nil
+		}
+		return errTopologyTransactionPending
+	}
+	result := service.runPair(context.Background(), func(bool) error { return nil })
+	if result.unsafe || !strings.Contains(result.reason, "topology transaction remained pending") || checks < 3 {
+		t.Fatalf("stalled topology transaction result = %+v, checks=%d", result, checks)
+	}
+}
+
+func TestReadReadinessRecognizesManagedTopologyTransaction(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		status            int
+		requireGeneration bool
+		wantPending       bool
+	}{
+		{name: "managed pending", status: http.StatusServiceUnavailable, requireGeneration: true, wantPending: true},
+		{name: "ordinary unavailable", status: http.StatusServiceUnavailable},
+		{name: "managed server failure", status: http.StatusInternalServerError, requireGeneration: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, `{"status":"unavailable","instance":"relay","release_version":"1.2.3","revision":"rev","bundle_hash":"web","generation":"g1","expected_inventory":{"state":"topology_transaction_pending","generation":"g1"}}`)
+			}))
+			defer server.Close()
+			_, err := readReadinessMode(t.Context(), server.URL, test.requireGeneration)
+			if errors.Is(err, errTopologyTransactionPending) != test.wantPending {
+				t.Fatalf("topology transaction readiness error = %v, want pending=%t", err, test.wantPending)
+			}
+		})
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"status":"unavailable","generation":"g1","expected_inventory":{"state":"topology_transaction_pending","generation":"g1"}}`)
+	}))
+	defer server.Close()
+	if _, err := readReadinessMode(t.Context(), server.URL, true); errors.Is(err, errTopologyTransactionPending) {
+		t.Fatal("incomplete pending identity bypassed readiness verification")
 	}
 }
 

@@ -27,7 +27,7 @@ esac
     exit 1
 }
 case "$REVISION" in
-    *[!0-9a-f]*)
+    *[!0123456789abcdef]*)
         echo "REVISION must be the exact lowercase 40-character Git HEAD" >&2
         exit 1
         ;;

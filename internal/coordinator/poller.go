@@ -38,6 +38,7 @@ type Poller struct {
 	topologyRetries     int
 	consecutiveFailures atomic.Int32
 	eventsActive        atomic.Bool
+	pollMu              sync.Mutex
 	commitMu            sync.Mutex
 	// broadcastMu serializes snapshot broadcasts from the reconcile poll and
 	// the event stream, and guards the dedupe state below. Snapshots are read
@@ -135,6 +136,9 @@ func (p *Poller) Reconcile(ctx context.Context) error {
 }
 
 func (p *Poller) poll(ctx context.Context) error {
+	p.pollMu.Lock()
+	defer p.pollMu.Unlock()
+
 	token := p.state.BeginPoll()
 	previousStatus := p.state.InventoryStatus()
 
@@ -361,9 +365,6 @@ func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.Topolog
 	p.consecutiveFailures.Store(0)
 	p.commitMu.Lock()
 	workspaceChanged := p.state.CommitTopology(agents, topology.Workspaces, baseRevision)
-	if p.afterCommit != nil {
-		p.afterCommit(ctx, agents)
-	}
 	p.commitMu.Unlock()
 	p.notifyStatusChange(previousStatus)
 	p.logger.Debug("event inventory committed", "agents", len(agents), "workspaces", len(topology.Workspaces), "topology", p.state.TopologyGeneration())

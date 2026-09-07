@@ -1,5 +1,5 @@
 {
-  "base": "4eb61d54d455199d58a3f7257b9464920121cefb",
+  "base": "c6e24cc3f627ecc791db39d77b177a754c46501e",
   "commands": [
     [
       "bash",
@@ -159,102 +159,116 @@
       "171-174"
     ],
     "relay/install-service.sh": [
-      "18",
-      "20",
-      "27-28",
-      "43",
-      "61-62",
-      "69",
-      "71",
-      "78",
-      "80-83",
-      "89",
-      "91",
-      "100",
-      "107",
-      "112",
-      "115-118",
-      "121",
-      "123",
-      "132",
-      "134",
-      "137-139",
-      "141",
-      "150",
+      "19",
+      "21",
+      "28-29",
+      "44",
+      "65-66",
+      "73",
+      "75",
+      "82",
+      "84-87",
+      "93",
+      "95",
+      "104",
+      "111",
+      "116",
+      "119-122",
+      "125",
+      "127",
+      "136",
+      "138",
+      "141-143",
+      "145",
       "154",
-      "159-160",
-      "165",
-      "171",
-      "175-176",
-      "178-180",
-      "183-185",
-      "197-199",
-      "207",
-      "209",
-      "211",
-      "216",
-      "226",
+      "158",
+      "163-164",
+      "169",
+      "175",
+      "179-180",
+      "182-184",
+      "190-191",
+      "194-196",
+      "208-210",
+      "218",
+      "220",
+      "222",
+      "227",
       "237",
-      "241",
-      "247",
-      "251",
-      "256-257",
-      "267",
-      "269",
-      "306-307",
+      "248",
+      "252",
+      "258-259",
+      "264-265",
+      "270",
+      "272",
+      "283",
+      "285-287",
+      "299",
+      "301",
+      "305-306",
+      "315",
       "317",
-      "321"
+      "354-355",
+      "365",
+      "368"
     ],
     "relay/install-systemd-user-service.sh": [
       "18",
       "20",
       "27-28",
       "54",
-      "73-74",
-      "81",
-      "83",
-      "90",
-      "92-95",
-      "101",
-      "103",
-      "112",
-      "119",
-      "124",
-      "127-130",
-      "133",
-      "135",
-      "144",
-      "146",
-      "149-151",
-      "153",
-      "162-163",
-      "169",
-      "173-174",
-      "176",
-      "183-184",
-      "189-190",
-      "196-198",
-      "201-203",
-      "215-217",
-      "225",
-      "227",
-      "229",
-      "234",
-      "239",
-      "244",
-      "249-250",
+      "77-78",
+      "85",
+      "87",
+      "94",
+      "96-99",
+      "105",
+      "107",
+      "116",
+      "123",
+      "128",
+      "131-134",
+      "137",
+      "139",
+      "148",
+      "150",
+      "153-155",
+      "157",
+      "166-167",
+      "173",
+      "177-178",
+      "180",
+      "187-188",
+      "193-194",
+      "200-202",
+      "206",
+      "212-214",
+      "217-219",
+      "231-233",
+      "241",
+      "243",
+      "245",
+      "250",
       "255",
-      "259",
-      "266",
-      "270",
-      "276",
-      "286",
-      "295-296",
-      "305",
-      "317-318",
-      "322",
-      "326",
-      "331"
+      "260",
+      "265-266",
+      "271",
+      "275",
+      "282",
+      "285",
+      "291",
+      "293",
+      "298-299",
+      "310",
+      "312-314",
+      "322-323",
+      "332",
+      "341-342",
+      "351",
+      "363-364",
+      "368",
+      "372",
+      "377"
     ],
     "relay/plugin-build.sh": [
       "168-172",
@@ -454,52 +468,52 @@
     {
       "file": "relay/install-service.sh",
       "name": "capture_previous_service_readiness",
-      "evidence": "relay/install-service.sh:84"
+      "evidence": "relay/install-service.sh:88"
     },
     {
       "file": "relay/install-service.sh",
       "name": "cleanup_launchd_install",
-      "evidence": "relay/install-service.sh:186"
+      "evidence": "relay/install-service.sh:197"
     },
     {
       "file": "relay/install-service.sh",
       "name": "prove_previous_service_readiness",
-      "evidence": "relay/install-service.sh:119"
+      "evidence": "relay/install-service.sh:123"
     },
     {
       "file": "relay/install-service.sh",
       "name": "restore_relay_config",
-      "evidence": "relay/install-service.sh:63"
+      "evidence": "relay/install-service.sh:67"
     },
     {
       "file": "relay/install-service.sh",
       "name": "rollback_launchd_install",
-      "evidence": "relay/install-service.sh:140"
+      "evidence": "relay/install-service.sh:144"
     },
     {
       "file": "relay/install-systemd-user-service.sh",
       "name": "capture_previous_service_readiness",
-      "evidence": "relay/install-systemd-user-service.sh:96"
+      "evidence": "relay/install-systemd-user-service.sh:100"
     },
     {
       "file": "relay/install-systemd-user-service.sh",
       "name": "cleanup_systemd_install",
-      "evidence": "relay/install-systemd-user-service.sh:204"
+      "evidence": "relay/install-systemd-user-service.sh:220"
     },
     {
       "file": "relay/install-systemd-user-service.sh",
       "name": "prove_previous_service_readiness",
-      "evidence": "relay/install-systemd-user-service.sh:131"
+      "evidence": "relay/install-systemd-user-service.sh:135"
     },
     {
       "file": "relay/install-systemd-user-service.sh",
       "name": "restore_relay_config",
-      "evidence": "relay/install-systemd-user-service.sh:75"
+      "evidence": "relay/install-systemd-user-service.sh:79"
     },
     {
       "file": "relay/install-systemd-user-service.sh",
       "name": "rollback_systemd_install",
-      "evidence": "relay/install-systemd-user-service.sh:152"
+      "evidence": "relay/install-systemd-user-service.sh:156"
     },
     {
       "file": "relay/plugin-build.sh",
@@ -2315,21 +2329,7 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 16,
-      "outcomes": [
-        {
-          "name": "status-zero",
-          "status": 0
-        },
-        {
-          "name": "status-nonzero",
-          "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 23,
+      "line": 17,
       "outcomes": [
         {
           "name": "status-zero",
@@ -2357,7 +2357,7 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 63,
+      "line": 25,
       "outcomes": [
         {
           "name": "status-zero",
@@ -2371,57 +2371,43 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 64,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:65"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 65,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:66"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 66,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:67"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
       "line": 67,
       "outcomes": [
         {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 68,
+      "outcomes": [
+        {
           "name": "status-0",
           "status": 0
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:68"
+          "evidence": "relay/install-service.sh:69"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 69,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:70"
         }
       ]
     },
@@ -2435,55 +2421,27 @@
         },
         {
           "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:71"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 71,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
           "evidence": "relay/install-service.sh:72"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 72,
-      "outcomes": [
-        {
-          "name": "status-zero",
-          "status": 0
-        },
-        {
-          "name": "status-nonzero",
-          "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 73,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:74"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
       "line": 74,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:75"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 75,
       "outcomes": [
         {
           "name": "status-0",
@@ -2500,12 +2458,40 @@
       "line": 76,
       "outcomes": [
         {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 77,
+      "outcomes": [
+        {
           "name": "status-0",
           "status": 0
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:77"
+          "evidence": "relay/install-service.sh:78"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 78,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:79"
         }
       ]
     },
@@ -2519,13 +2505,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:77"
+          "evidence": "relay/install-service.sh:80"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 90,
+      "line": 80,
       "outcomes": [
         {
           "name": "status-0",
@@ -2533,31 +2519,59 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:92"
+          "evidence": "relay/install-service.sh:81"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 96,
+      "line": 83,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:81"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 94,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:96"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 100,
       "outcomes": [
         {
           "name": "case-arm-97",
-          "evidence": "relay/install-service.sh:97"
+          "evidence": "relay/install-service.sh:101"
         },
         {
           "name": "case-arm-98",
-          "evidence": "relay/install-service.sh:98"
+          "evidence": "relay/install-service.sh:102"
         },
         {
           "name": "case-arm-99",
-          "evidence": "relay/install-service.sh:99"
+          "evidence": "relay/install-service.sh:103"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 103,
+      "line": 107,
       "outcomes": [
         {
           "name": "status-0",
@@ -2565,13 +2579,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:104"
+          "evidence": "relay/install-service.sh:108"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 105,
+      "line": 109,
       "outcomes": [
         {
           "name": "status-0",
@@ -2579,31 +2593,31 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:106"
+          "evidence": "relay/install-service.sh:110"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 108,
+      "line": 112,
       "outcomes": [
         {
           "name": "case-arm-109",
-          "evidence": "relay/install-service.sh:109"
+          "evidence": "relay/install-service.sh:113"
         },
         {
           "name": "case-arm-110",
-          "evidence": "relay/install-service.sh:110"
+          "evidence": "relay/install-service.sh:114"
         },
         {
           "name": "case-arm-111",
-          "evidence": "relay/install-service.sh:111"
+          "evidence": "relay/install-service.sh:115"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 113,
+      "line": 117,
       "outcomes": [
         {
           "name": "status-0",
@@ -2611,13 +2625,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:114"
+          "evidence": "relay/install-service.sh:118"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 122,
+      "line": 126,
       "outcomes": [
         {
           "name": "status-zero",
@@ -2631,7 +2645,7 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 127,
+      "line": 131,
       "outcomes": [
         {
           "name": "status-0",
@@ -2639,49 +2653,21 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:128"
+          "evidence": "relay/install-service.sh:132"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 128,
+      "line": 132,
       "outcomes": [
         {
           "name": "iteration-entered",
-          "evidence": "relay/install-service.sh:129"
+          "evidence": "relay/install-service.sh:133"
         },
         {
           "name": "literal-list-exhausted",
-          "evidence": "relay/install-service.sh:135"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 129,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:130"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 130,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:131"
+          "evidence": "relay/install-service.sh:139"
         }
       ]
     },
@@ -2690,18 +2676,18 @@
       "line": 133,
       "outcomes": [
         {
-          "name": "status-zero",
+          "name": "status-0",
           "status": 0
         },
         {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:134"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 143,
+      "line": 134,
       "outcomes": [
         {
           "name": "status-0",
@@ -2709,27 +2695,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:144"
+          "evidence": "relay/install-service.sh:135"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 144,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:145"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 145,
+      "line": 137,
       "outcomes": [
         {
           "name": "status-zero",
@@ -2738,20 +2710,6 @@
         {
           "name": "status-nonzero",
           "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 146,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:147"
         }
       ]
     },
@@ -2766,6 +2724,48 @@
         {
           "name": "alternate-control-path",
           "evidence": "relay/install-service.sh:148"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 148,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:149"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 149,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 150,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:151"
         }
       ]
     },
@@ -2799,7 +2799,7 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 156,
+      "line": 159,
       "outcomes": [
         {
           "name": "status-0",
@@ -2807,13 +2807,27 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:157"
+          "evidence": "relay/install-service.sh:160"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 161,
+      "line": 160,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:161"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 165,
       "outcomes": [
         {
           "name": "status-zero",
@@ -2822,20 +2836,6 @@
         {
           "name": "status-nonzero",
           "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 162,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:163"
         }
       ]
     },
@@ -2844,6 +2844,20 @@
       "line": 166,
       "outcomes": [
         {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:167"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 170,
+      "outcomes": [
+        {
           "name": "status-zero",
           "status": 0
         },
@@ -2855,7 +2869,7 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 167,
+      "line": 171,
       "outcomes": [
         {
           "name": "status-0",
@@ -2863,21 +2877,7 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:168"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 168,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:169"
+          "evidence": "relay/install-service.sh:172"
         }
       ]
     },
@@ -2897,7 +2897,7 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 177,
+      "line": 176,
       "outcomes": [
         {
           "name": "status-0",
@@ -2905,7 +2905,7 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:174"
+          "evidence": "relay/install-service.sh:177"
         }
       ]
     },
@@ -2919,35 +2919,49 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:182"
+          "evidence": "relay/install-service.sh:178"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 188,
+      "line": 185,
       "outcomes": [
         {
-          "name": "status-0",
-          "status": 0
+          "name": "legacy-restore-required",
+          "evidence": "relay/install-service.sh:186"
         },
         {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:189"
+          "name": "legacy-restore-not-required",
+          "evidence": "relay/install-service.sh:192"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 189,
+      "line": 186,
       "outcomes": [
         {
-          "name": "status-0",
-          "status": 0
+          "name": "reload-succeeded",
+          "evidence": "relay/install-service.sh:187"
         },
         {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:190"
+          "name": "reload-failed",
+          "evidence": "relay/install-service.sh:186"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 187,
+      "outcomes": [
+        {
+          "name": "legacy-loaded",
+          "evidence": "relay/install-service.sh:192"
+        },
+        {
+          "name": "legacy-not-loaded",
+          "evidence": "relay/install-service.sh:188"
         }
       ]
     },
@@ -2956,12 +2970,12 @@
       "line": 192,
       "outcomes": [
         {
-          "name": "status-zero",
+          "name": "status-0",
           "status": 0
         },
         {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:193"
         }
       ]
     },
@@ -2981,7 +2995,7 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 195,
+      "line": 199,
       "outcomes": [
         {
           "name": "status-0",
@@ -2989,7 +3003,7 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:196"
+          "evidence": "relay/install-service.sh:200"
         }
       ]
     },
@@ -3009,43 +3023,15 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 201,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:202"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
-      "line": 202,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:203"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
       "line": 203,
       "outcomes": [
         {
-          "name": "status-0",
+          "name": "status-zero",
           "status": 0
         },
         {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:204"
+          "name": "status-nonzero",
+          "status": "nonzero"
         }
       ]
     },
@@ -3065,29 +3051,29 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 205,
+      "line": 206,
       "outcomes": [
         {
-          "name": "status-zero",
+          "name": "status-0",
           "status": 0
         },
         {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:207"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 206,
+      "line": 211,
       "outcomes": [
         {
-          "name": "status-zero",
+          "name": "status-0",
           "status": 0
         },
         {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:212"
         }
       ]
     },
@@ -3096,18 +3082,46 @@
       "line": 212,
       "outcomes": [
         {
-          "name": "status-zero",
+          "name": "status-0",
           "status": 0
         },
         {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:213"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
       "line": 213,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:214"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 214,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:215"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 215,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3121,7 +3135,21 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 222,
+      "line": 216,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 217,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3136,6 +3164,20 @@
     {
       "file": "relay/install-service.sh",
       "line": 223,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 224,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3177,20 +3219,6 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 242,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:243"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-service.sh",
       "line": 244,
       "outcomes": [
         {
@@ -3205,7 +3233,7 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 248,
+      "line": 245,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3219,7 +3247,21 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 263,
+      "line": 253,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:254"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 255,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3233,35 +3275,203 @@
     },
     {
       "file": "relay/install-service.sh",
-      "line": 303,
+      "line": 260,
       "outcomes": [
         {
-          "name": "status-0",
+          "name": "status-zero",
           "status": 0
         },
         {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:304"
+          "name": "status-nonzero",
+          "status": "nonzero"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 314,
+      "line": 261,
       "outcomes": [
         {
-          "name": "status-0",
+          "name": "status-zero",
           "status": 0
         },
         {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:315"
+          "name": "status-nonzero",
+          "status": "nonzero"
         }
       ]
     },
     {
       "file": "relay/install-service.sh",
-      "line": 319,
+      "line": 266,
+      "outcomes": [
+        {
+          "name": "legacy-loaded",
+          "evidence": "relay/install-service.sh:271"
+        },
+        {
+          "name": "legacy-not-loaded",
+          "evidence": "relay/install-service.sh:273"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 267,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 273,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 274,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 280,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 289,
+      "outcomes": [
+        {
+          "name": "legacy-stop-required",
+          "evidence": "relay/install-service.sh:290"
+        },
+        {
+          "name": "legacy-stop-not-required",
+          "evidence": "relay/install-service.sh:307"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 291,
+      "outcomes": [
+        {
+          "name": "primary-bootout-succeeded",
+          "status": 0
+        },
+        {
+          "name": "fallback-bootout-attempted",
+          "evidence": "relay/install-service.sh:292"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 292,
+      "outcomes": [
+        {
+          "name": "fallback-bootout-failed",
+          "status": "nonzero"
+        },
+        {
+          "name": "fallback-bootout-completed",
+          "evidence": "relay/install-service.sh:293"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 295,
+      "outcomes": [
+        {
+          "name": "loop-body",
+          "evidence": "relay/install-service.sh:296"
+        },
+        {
+          "name": "loop-complete",
+          "evidence": "relay/install-service.sh:302"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 296,
+      "outcomes": [
+        {
+          "name": "legacy-unloaded",
+          "evidence": "relay/install-service.sh:297"
+        },
+        {
+          "name": "legacy-still-loaded",
+          "evidence": "relay/install-service.sh:300"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 302,
+      "outcomes": [
+        {
+          "name": "unload-timeout",
+          "evidence": "relay/install-service.sh:303"
+        },
+        {
+          "name": "legacy-unloaded",
+          "evidence": "relay/install-service.sh:307"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 311,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 351,
       "outcomes": [
         {
           "name": "status-0",
@@ -3269,7 +3479,21 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-service.sh:320"
+          "evidence": "relay/install-service.sh:352"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 362,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:363"
         }
       ]
     },
@@ -3317,7 +3541,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 75,
+      "line": 79,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3331,7 +3555,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 76,
+      "line": 80,
       "outcomes": [
         {
           "name": "status-0",
@@ -3339,13 +3563,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:77"
+          "evidence": "relay/install-systemd-user-service.sh:81"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 77,
+      "line": 81,
       "outcomes": [
         {
           "name": "status-0",
@@ -3353,35 +3577,7 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:78"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 78,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:79"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 79,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:80"
+          "evidence": "relay/install-systemd-user-service.sh:82"
         }
       ]
     },
@@ -3395,55 +3591,27 @@
         },
         {
           "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:83"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 83,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
           "evidence": "relay/install-systemd-user-service.sh:84"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 84,
-      "outcomes": [
-        {
-          "name": "status-zero",
-          "status": 0
-        },
-        {
-          "name": "status-nonzero",
-          "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 85,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:86"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
       "line": 86,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:87"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 87,
       "outcomes": [
         {
           "name": "status-0",
@@ -3460,12 +3628,40 @@
       "line": 88,
       "outcomes": [
         {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 89,
+      "outcomes": [
+        {
           "name": "status-0",
           "status": 0
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:89"
+          "evidence": "relay/install-systemd-user-service.sh:90"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 90,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:91"
         }
       ]
     },
@@ -3479,13 +3675,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:89"
+          "evidence": "relay/install-systemd-user-service.sh:92"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 102,
+      "line": 92,
       "outcomes": [
         {
           "name": "status-0",
@@ -3493,31 +3689,59 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:104"
+          "evidence": "relay/install-systemd-user-service.sh:93"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 108,
+      "line": 95,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:93"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 106,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:108"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 112,
       "outcomes": [
         {
           "name": "case-arm-109",
-          "evidence": "relay/install-systemd-user-service.sh:109"
+          "evidence": "relay/install-systemd-user-service.sh:113"
         },
         {
           "name": "case-arm-110",
-          "evidence": "relay/install-systemd-user-service.sh:110"
+          "evidence": "relay/install-systemd-user-service.sh:114"
         },
         {
           "name": "case-arm-111",
-          "evidence": "relay/install-systemd-user-service.sh:111"
+          "evidence": "relay/install-systemd-user-service.sh:115"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 115,
+      "line": 119,
       "outcomes": [
         {
           "name": "status-0",
@@ -3525,13 +3749,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:116"
+          "evidence": "relay/install-systemd-user-service.sh:120"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 117,
+      "line": 121,
       "outcomes": [
         {
           "name": "status-0",
@@ -3539,31 +3763,31 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:118"
+          "evidence": "relay/install-systemd-user-service.sh:122"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 120,
+      "line": 124,
       "outcomes": [
         {
           "name": "case-arm-121",
-          "evidence": "relay/install-systemd-user-service.sh:121"
+          "evidence": "relay/install-systemd-user-service.sh:125"
         },
         {
           "name": "case-arm-122",
-          "evidence": "relay/install-systemd-user-service.sh:122"
+          "evidence": "relay/install-systemd-user-service.sh:126"
         },
         {
           "name": "case-arm-123",
-          "evidence": "relay/install-systemd-user-service.sh:123"
+          "evidence": "relay/install-systemd-user-service.sh:127"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 125,
+      "line": 129,
       "outcomes": [
         {
           "name": "status-0",
@@ -3571,13 +3795,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:126"
+          "evidence": "relay/install-systemd-user-service.sh:130"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 134,
+      "line": 138,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3591,7 +3815,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 139,
+      "line": 143,
       "outcomes": [
         {
           "name": "status-0",
@@ -3599,49 +3823,21 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:140"
+          "evidence": "relay/install-systemd-user-service.sh:144"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 140,
+      "line": 144,
       "outcomes": [
         {
           "name": "iteration-entered",
-          "evidence": "relay/install-systemd-user-service.sh:141"
+          "evidence": "relay/install-systemd-user-service.sh:145"
         },
         {
           "name": "literal-list-exhausted",
-          "evidence": "relay/install-systemd-user-service.sh:147"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 141,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:142"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 142,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:143"
+          "evidence": "relay/install-systemd-user-service.sh:151"
         }
       ]
     },
@@ -3650,18 +3846,18 @@
       "line": 145,
       "outcomes": [
         {
-          "name": "status-zero",
+          "name": "status-0",
           "status": 0
         },
         {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:146"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 155,
+      "line": 146,
       "outcomes": [
         {
           "name": "status-0",
@@ -3669,41 +3865,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:156"
+          "evidence": "relay/install-systemd-user-service.sh:147"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 156,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:157"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 157,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:158"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 158,
+      "line": 149,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3731,7 +3899,35 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 164,
+      "line": 160,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:161"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 161,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:162"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 162,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3745,7 +3941,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 165,
+      "line": 163,
       "outcomes": [
         {
           "name": "status-0",
@@ -3753,13 +3949,27 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:166"
+          "evidence": "relay/install-systemd-user-service.sh:164"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 166,
+      "line": 168,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 169,
       "outcomes": [
         {
           "name": "status-0",
@@ -3767,7 +3977,7 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:167"
+          "evidence": "relay/install-systemd-user-service.sh:170"
         }
       ]
     },
@@ -3787,7 +3997,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 175,
+      "line": 174,
       "outcomes": [
         {
           "name": "status-0",
@@ -3795,35 +4005,7 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:177"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 177,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:178"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 178,
-      "outcomes": [
-        {
-          "name": "status-zero",
-          "status": 0
-        },
-        {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "evidence": "relay/install-systemd-user-service.sh:175"
         }
       ]
     },
@@ -3837,13 +4019,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:180"
+          "evidence": "relay/install-systemd-user-service.sh:181"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 180,
+      "line": 181,
       "outcomes": [
         {
           "name": "status-0",
@@ -3851,13 +4033,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:181"
+          "evidence": "relay/install-systemd-user-service.sh:182"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 185,
+      "line": 182,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3871,7 +4053,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 186,
+      "line": 183,
       "outcomes": [
         {
           "name": "status-0",
@@ -3879,13 +4061,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:187"
+          "evidence": "relay/install-systemd-user-service.sh:184"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 191,
+      "line": 184,
       "outcomes": [
         {
           "name": "status-0",
@@ -3893,27 +4075,27 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:192"
+          "evidence": "relay/install-systemd-user-service.sh:185"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 192,
+      "line": 189,
       "outcomes": [
         {
-          "name": "status-0",
+          "name": "status-zero",
           "status": 0
         },
         {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:193"
+          "name": "status-nonzero",
+          "status": "nonzero"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 193,
+      "line": 190,
       "outcomes": [
         {
           "name": "status-0",
@@ -3921,13 +4103,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:194"
+          "evidence": "relay/install-systemd-user-service.sh:191"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 199,
+      "line": 195,
       "outcomes": [
         {
           "name": "status-0",
@@ -3935,13 +4117,13 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:200"
+          "evidence": "relay/install-systemd-user-service.sh:196"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 206,
+      "line": 196,
       "outcomes": [
         {
           "name": "status-0",
@@ -3949,7 +4131,63 @@
         },
         {
           "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:197"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 197,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:198"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 203,
+      "outcomes": [
+        {
+          "name": "legacy-restore-required",
+          "evidence": "relay/install-systemd-user-service.sh:204"
+        },
+        {
+          "name": "legacy-restore-not-required",
+          "evidence": "relay/install-systemd-user-service.sh:215"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 204,
+      "outcomes": [
+        {
+          "name": "legacy-enable-required",
+          "evidence": "relay/install-systemd-user-service.sh:205"
+        },
+        {
+          "name": "legacy-enable-not-required",
           "evidence": "relay/install-systemd-user-service.sh:207"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 205,
+      "outcomes": [
+        {
+          "name": "enable-succeeded",
+          "evidence": "relay/install-systemd-user-service.sh:207"
+        },
+        {
+          "name": "enable-failed",
+          "evidence": "relay/install-systemd-user-service.sh:205"
         }
       ]
     },
@@ -3958,18 +4196,60 @@
       "line": 207,
       "outcomes": [
         {
-          "name": "status-0",
-          "status": 0
+          "name": "legacy-restart-required",
+          "evidence": "relay/install-systemd-user-service.sh:208"
         },
         {
-          "name": "alternate-control-path",
+          "name": "legacy-restart-not-required",
+          "evidence": "relay/install-systemd-user-service.sh:215"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 208,
+      "outcomes": [
+        {
+          "name": "restart-succeeded",
+          "evidence": "relay/install-systemd-user-service.sh:209"
+        },
+        {
+          "name": "restart-failed",
           "evidence": "relay/install-systemd-user-service.sh:208"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 210,
+      "line": 209,
+      "outcomes": [
+        {
+          "name": "legacy-active",
+          "evidence": "relay/install-systemd-user-service.sh:215"
+        },
+        {
+          "name": "legacy-not-active",
+          "evidence": "relay/install-systemd-user-service.sh:210"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 215,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:216"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 216,
       "outcomes": [
         {
           "name": "status-zero",
@@ -3978,90 +4258,6 @@
         {
           "name": "status-nonzero",
           "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 211,
-      "outcomes": [
-        {
-          "name": "status-zero",
-          "status": 0
-        },
-        {
-          "name": "status-nonzero",
-          "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 213,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:214"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 218,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:219"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 219,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:220"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 220,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:221"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 221,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:222"
         }
       ]
     },
@@ -4070,12 +4266,12 @@
       "line": 222,
       "outcomes": [
         {
-          "name": "status-zero",
+          "name": "status-0",
           "status": 0
         },
         {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:223"
         }
       ]
     },
@@ -4084,18 +4280,18 @@
       "line": 223,
       "outcomes": [
         {
-          "name": "status-zero",
+          "name": "status-0",
           "status": 0
         },
         {
-          "name": "status-nonzero",
-          "status": "nonzero"
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:224"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 224,
+      "line": 226,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4109,7 +4305,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 230,
+      "line": 227,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4123,7 +4319,91 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 231,
+      "line": 229,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:230"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 234,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:235"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 235,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:236"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 236,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:237"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 237,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:238"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 238,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 239,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4151,7 +4431,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 241,
+      "line": 246,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4165,7 +4445,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 251,
+      "line": 247,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4179,7 +4459,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 252,
+      "line": 256,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4193,49 +4473,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 260,
-      "outcomes": [
-        {
-          "name": "status-zero",
-          "status": 0
-        },
-        {
-          "name": "status-nonzero",
-          "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 261,
-      "outcomes": [
-        {
-          "name": "status-zero",
-          "status": 0
-        },
-        {
-          "name": "status-nonzero",
-          "status": "nonzero"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 262,
-      "outcomes": [
-        {
-          "name": "status-0",
-          "status": 0
-        },
-        {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:263"
-        }
-      ]
-    },
-    {
-      "file": "relay/install-systemd-user-service.sh",
-      "line": 263,
+      "line": 257,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4263,7 +4501,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 282,
+      "line": 268,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4277,7 +4515,7 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 312,
+      "line": 276,
       "outcomes": [
         {
           "name": "status-zero",
@@ -4291,21 +4529,91 @@
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 313,
+      "line": 277,
       "outcomes": [
         {
-          "name": "status-0",
+          "name": "status-zero",
           "status": 0
         },
         {
-          "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:314"
+          "name": "status-nonzero",
+          "status": "nonzero"
         }
       ]
     },
     {
       "file": "relay/install-systemd-user-service.sh",
-      "line": 314,
+      "line": 278,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 279,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 283,
+      "outcomes": [
+        {
+          "name": "legacy-enabled",
+          "evidence": "relay/install-systemd-user-service.sh:284"
+        },
+        {
+          "name": "legacy-disabled",
+          "evidence": "relay/install-systemd-user-service.sh:287"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 287,
+      "outcomes": [
+        {
+          "name": "legacy-active",
+          "evidence": "relay/install-systemd-user-service.sh:292"
+        },
+        {
+          "name": "legacy-inactive",
+          "evidence": "relay/install-systemd-user-service.sh:294"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 288,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 294,
       "outcomes": [
         {
           "name": "status-0",
@@ -4313,7 +4621,105 @@
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:315"
+          "evidence": "relay/install-systemd-user-service.sh:295"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 295,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 300,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 301,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 307,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 316,
+      "outcomes": [
+        {
+          "name": "legacy-stop-required",
+          "evidence": "relay/install-systemd-user-service.sh:317"
+        },
+        {
+          "name": "legacy-stop-not-required",
+          "evidence": "relay/install-systemd-user-service.sh:324"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 318,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:319"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 319,
+      "outcomes": [
+        {
+          "name": "legacy-still-active",
+          "evidence": "relay/install-systemd-user-service.sh:320"
+        },
+        {
+          "name": "legacy-stopped",
+          "evidence": "relay/install-systemd-user-service.sh:324"
         }
       ]
     },
@@ -4322,12 +4728,68 @@
       "line": 328,
       "outcomes": [
         {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 358,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 359,
+      "outcomes": [
+        {
           "name": "status-0",
           "status": 0
         },
         {
           "name": "alternate-control-path",
-          "evidence": "relay/install-systemd-user-service.sh:329"
+          "evidence": "relay/install-systemd-user-service.sh:360"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 360,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:361"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 374,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:375"
         }
       ]
     },

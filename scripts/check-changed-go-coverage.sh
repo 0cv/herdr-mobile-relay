@@ -2,7 +2,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
-BASE=${HERDR_CHANGED_COVERAGE_BASE:-4eb61d54d455199d58a3f7257b9464920121cefb}
+BASE=${HERDR_CHANGED_COVERAGE_BASE:-c6e24cc3f627ecc791db39d77b177a754c46501e}
 TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/herdr-changed-go-coverage.XXXXXX")
 trap 'rm -rf "$TEMP_ROOT"' EXIT HUP INT TERM
 

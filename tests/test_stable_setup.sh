@@ -67,6 +67,12 @@ EOF
 printf 'systemctl %s\n' "$*" >> "$STUB_LOG"
 case "$*" in
     *herdr-mobile-relay.service*) ;;
+    *herdr-remote.service*)
+        case " $* " in
+            *" is-active "*|*" is-enabled "*) exit 1 ;;
+            *) exit 0 ;;
+        esac
+        ;;
     *) exit 0 ;;
 esac
 case " $* " in

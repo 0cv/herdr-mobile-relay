@@ -131,7 +131,8 @@ func (l *Lifecycle) Start(ctx context.Context, profile profiles.Profile, request
 
 	startErr := l.startInTarget(startupCtx, profile, request.Name, target.PaneID)
 	if startErr != nil {
-		if herdr.IsRefused(startErr) || errors.Is(startErr, herdr.ErrNotStarted) {
+		if !errors.Is(startErr, herdr.ErrPartiallyApplied) &&
+			(herdr.IsRefused(startErr) || errors.Is(startErr, herdr.ErrNotStarted)) {
 			if forgetErr := l.profiles.Forget(target.PaneID); forgetErr != nil {
 				return result, partiallyApplied("agent start was refused but ownership intent cleanup was not durable", forgetErr)
 			}
@@ -182,7 +183,10 @@ func (l *Lifecycle) startInTarget(ctx context.Context, profile profiles.Profile,
 	for {
 		info, err := l.herdr.AgentGet(ctx, paneID)
 		if err == nil && (info.Running || info.Status != "") {
-			return l.herdr.RenameAgent(ctx, paneID, name)
+			if err := l.herdr.RenameAgent(ctx, paneID, name); err != nil {
+				return partiallyApplied("custom agent started before its rename failed", err)
+			}
+			return nil
 		}
 		select {
 		case <-ctx.Done():

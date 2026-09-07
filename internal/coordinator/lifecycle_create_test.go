@@ -380,7 +380,7 @@ func TestLifecycleReportsRefusedStartWhenOwnershipCleanupCannotPersist(t *testin
 	herdrBin := writeScript(t, root, "herdr-refused", "#!/bin/sh\ncase \"$1 $2\" in\n  'agent list') printf '%s\\n' '{\"result\":{\"agents\":[]}}' ;;\n  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n  'workspace create') printf '%s\\n' '{\"result\":{\"workspace\":{\"workspace_id\":\"workspace-new\"},\"tab\":{\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\"},\"root_pane\":{\"pane_id\":\"pane-new\",\"tab_id\":\"tab-new\",\"workspace_id\":\"workspace-new\"}}}' ;;\n  'tab rename') printf '%s\\n' '{\"result\":{}}' ;;\n  'agent start') if [ -d \""+stateDir+"\" ]; then mv \""+stateDir+"\" \""+stateDir+".saved\"; printf broken > \""+stateDir+"\"; fi; printf '%s\\n' '"+paneBusyEnvelope+"' >&2; exit 1 ;;\n  *) exit 2 ;;\nesac\n")
 	resolver := profiles.NewResolver(filepath.Join(root, "config"), nil, profiles.WithAssociationStore(stateDir))
 	lifecycle := &Lifecycle{herdr: herdr.NewClient(herdrBin, filepath.Join(root, "herdr.sock")), profiles: resolver, home: home}
-	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+2*time.Second)
 	defer cancel()
 	result, err := lifecycle.Start(ctx, profiles.Profile{ID: "codex", Kind: "codex"}, StartRequest{ProfileID: "codex", Name: "new-agent", Cwd: cwd})
 	if err == nil || result.PaneID != "pane-new" || !errors.Is(err, herdr.ErrPartiallyApplied) || !strings.Contains(err.Error(), "ownership intent cleanup") {

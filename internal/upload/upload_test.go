@@ -41,6 +41,9 @@ func newTestManager(t *testing.T, now *time.Time) *Manager {
 }
 
 func TestMutationGuardsRecheckAfterUploadLocks(t *testing.T) {
+	if err := runGuard(nil); err != nil {
+		t.Fatalf("nil mutation guard = %v", err)
+	}
 	promotedErr := errors.New("runtime promoted")
 	guard := func(promoted *atomic.Bool) func() error {
 		return func() error {
@@ -165,6 +168,16 @@ func TestMutationGuardsRecheckAfterUploadLocks(t *testing.T) {
 
 func TestMutationGuardsRejectEveryPreCommitBoundary(t *testing.T) {
 	promoted := errors.New("runtime promoted")
+	t.Run("begin admission", func(t *testing.T) {
+		now := time.Now()
+		manager := newTestManager(t, &now)
+		_, err := manager.BeginGuarded(BeginRequest{Target: uploadTarget(1), Files: []FileSpec{{Name: "note.txt", MediaType: "text/plain", Bytes: 1}}}, func() error {
+			return promoted
+		})
+		if !errors.Is(err, promoted) {
+			t.Fatalf("begin admission guard = %v", err)
+		}
+	})
 	t.Run("begin manager commit", func(t *testing.T) {
 		now := time.Now()
 		manager := newTestManager(t, &now)

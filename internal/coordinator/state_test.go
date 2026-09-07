@@ -517,6 +517,27 @@ func TestTopologyCommitPreservesCurrentStatusAndAttention(t *testing.T) {
 	}
 }
 
+func TestIncompleteEventTopologyPreservesAuthoritativeSessionOwnership(t *testing.T) {
+	s := NewState(testLogger())
+	s.CommitInventory([]*AgentState{{
+		PaneID: "p1", RawPaneID: "p1", TerminalID: "terminal-1", TabID: "tab-1",
+		WorkspaceID: "workspace-1", Agent: "codex", Status: "idle",
+		Session: "display title", SessionID: "native-session", AgentSessionID: "native-session",
+		SessionName: "display title", ProfileID: "personal",
+		ConversationHistoryAvailable: true,
+	}}, 0)
+	s.CommitTopology([]*AgentState{{
+		PaneID: "p1", RawPaneID: "p1", TerminalID: "terminal-1", TabID: "tab-1",
+		WorkspaceID: "workspace-1", Agent: "codex", Status: "working",
+	}}, nil, s.RevisionCounter())
+	current, _ := s.Agent("p1")
+	if current.Session != "display title" || current.SessionID != "native-session" ||
+		current.AgentSessionID != "native-session" || current.SessionName != "display title" ||
+		current.ProfileID != "personal" || !current.ConversationHistoryAvailable {
+		t.Fatalf("incomplete event erased authoritative identity: %+v", current)
+	}
+}
+
 func TestInflightPollCannotOverwriteNewerWorkspaceEvent(t *testing.T) {
 	s := NewState(testLogger())
 	s.CommitInventory([]*AgentState{{PaneID: "p1", Agent: "codex", Status: "working"}}, 0)

@@ -14,11 +14,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/activeruntime"
+	"github.com/0cv/herdr-mobile-relay/internal/readiness"
 	"github.com/0cv/herdr-mobile-relay/internal/release"
 )
 
@@ -34,6 +36,8 @@ var readinessHTTPClient = &http.Client{
 		return errors.New("readiness redirects are refused")
 	},
 }
+
+var errTopologyTransactionPending = errors.New("managed topology transaction pending")
 
 type Command struct {
 	Name string
@@ -310,7 +314,7 @@ func (s *Supervisor) runPair(ctx context.Context, reportRunning func(bool) error
 	}
 	relayCommand := s.config.Relay
 	if s.config.Managed {
-		relayCommand = commandForRuntime(relayCommand, s.config.ActiveRuntimePath, active)
+		relayCommand = commandForRuntime(relayCommand, s.config.ActiveRuntimePath, active, s.config.Managed)
 	}
 	relay, err := s.startChild(relayCommand, relayStdout, relayStderr)
 	if err != nil {
@@ -330,6 +334,7 @@ func (s *Supervisor) runPair(ctx context.Context, reportRunning func(bool) error
 
 	healthy := false
 	var healthySince time.Time
+	var topologyPendingSince time.Time
 	stableReported := false
 	startupTimer := time.NewTimer(s.config.StartupTimeout)
 	defer startupTimer.Stop()
@@ -381,10 +386,20 @@ func (s *Supervisor) runPair(ctx context.Context, reportRunning func(bool) error
 				return result
 			}
 			if healthErr != nil && healthy {
-				stopErr := s.stopChildren(relay, tunnel)
-				return cycleResult{reason: joinFailure("joint readiness failed: "+safeReason(healthErr.Error()), stopErr), unsafe: stopErr != nil}
+				if errors.Is(healthErr, errTopologyTransactionPending) {
+					if topologyPendingSince.IsZero() {
+						topologyPendingSince = time.Now()
+					} else if time.Since(topologyPendingSince) >= s.config.StartupTimeout {
+						stopErr := s.stopChildren(relay, tunnel)
+						return cycleResult{reason: joinFailure("managed topology transaction remained pending beyond recovery timeout", stopErr), unsafe: stopErr != nil}
+					}
+				} else {
+					stopErr := s.stopChildren(relay, tunnel)
+					return cycleResult{reason: joinFailure("joint readiness failed: "+safeReason(healthErr.Error()), stopErr), unsafe: stopErr != nil}
+				}
 			}
 			if healthErr == nil {
+				topologyPendingSince = time.Time{}
 				if !healthy {
 					healthy = true
 					healthySince = time.Now()
@@ -530,10 +545,11 @@ var runtimeEnvironmentKeys = map[string]bool{
 	"HERDR_RELAY_ACTIVE_GENERATION":  true,
 	"HERDR_RELAY_ACTIVE_RUNTIME":     true,
 	"HERDR_RELAY_EXPECTED_INVENTORY": true,
+	"HERDR_RELAY_MANAGED_DEPLOYMENT": true,
 	"HERDR_SOCKET_PATH":              true,
 }
 
-func commandForRuntime(command Command, activePath string, active activeruntime.Snapshot) Command {
+func commandForRuntime(command Command, activePath string, active activeruntime.Snapshot, managed bool) Command {
 	environment := make([]string, 0, len(command.Env)+len(runtimeEnvironmentKeys))
 	for _, entry := range command.Env {
 		key, _, found := strings.Cut(entry, "=")
@@ -545,6 +561,7 @@ func commandForRuntime(command Command, activePath string, active activeruntime.
 		"HERDR_RELAY_ACTIVE_GENERATION="+active.Generation,
 		"HERDR_RELAY_ACTIVE_RUNTIME="+activePath,
 		"HERDR_RELAY_EXPECTED_INVENTORY="+active.ExpectedInventoryPath,
+		"HERDR_RELAY_MANAGED_DEPLOYMENT="+strconv.FormatBool(managed),
 		"HERDR_SOCKET_PATH="+active.SocketPath,
 	)
 	sort.Strings(environment)
@@ -671,18 +688,38 @@ func checkJointReadinessMode(ctx context.Context, localURL, publicURL string, re
 }
 
 func checkJointReadinessExpectation(ctx context.Context, localURL, publicURL string, expected ReadinessExpectation) error {
-	local, err := readReadinessMode(ctx, localURL, expected.Managed)
-	if err != nil {
-		return fmt.Errorf("local readiness: %w", err)
+	local, localErr := readReadinessMode(ctx, localURL, expected.Managed)
+	if localErr != nil && !errors.Is(localErr, errTopologyTransactionPending) {
+		return fmt.Errorf("local readiness: %w", localErr)
 	}
-	public, err := readReadinessMode(ctx, publicURL, expected.Managed)
-	if err != nil {
-		return fmt.Errorf("public readiness: %w", err)
+	public, publicErr := readReadinessMode(ctx, publicURL, expected.Managed)
+	if publicErr != nil && !errors.Is(publicErr, errTopologyTransactionPending) {
+		return fmt.Errorf("public readiness: %w", publicErr)
 	}
-	if !sameReadinessIdentity(local, public) {
+	pending := errors.Is(localErr, errTopologyTransactionPending) || errors.Is(publicErr, errTopologyTransactionPending)
+	if (!pending && !sameReadinessIdentity(local, public)) || (pending && !sameRuntimeIdentity(local, public)) {
 		return errors.New("local and public readiness identities differ")
 	}
-	return verifyReadinessExpectation(local, expected)
+	if err := validateReadinessEndpoint(local, errors.Is(localErr, errTopologyTransactionPending), expected); err != nil {
+		return err
+	}
+	if err := validateReadinessEndpoint(public, errors.Is(publicErr, errTopologyTransactionPending), expected); err != nil {
+		return err
+	}
+	if pending {
+		return errTopologyTransactionPending
+	}
+	return nil
+}
+
+func validateReadinessEndpoint(identity readinessIdentity, pending bool, expected ReadinessExpectation) error {
+	if err := verifyReadinessIdentity(identity, expected); err != nil {
+		return err
+	}
+	if pending {
+		return nil
+	}
+	return validateReadinessMode(identity, expected.Managed)
 }
 
 func VerifyRunningReadiness(ctx context.Context, statePath, localURL, publicURL string, expected ReadinessExpectation) error {
@@ -719,10 +756,17 @@ func VerifyRunningReadiness(ctx context.Context, statePath, localURL, publicURL 
 }
 
 func verifyReadinessExpectation(local readinessIdentity, expected ReadinessExpectation) error {
+	if err := verifyReadinessIdentity(local, expected); err != nil {
+		return err
+	}
+	return validateReadinessMode(local, expected.Managed)
+}
+
+func verifyReadinessIdentity(local readinessIdentity, expected ReadinessExpectation) error {
 	if local.Instance != expected.Instance || local.ReleaseVersion != expected.ReleaseVersion || local.Revision != expected.Revision || local.BundleHash != expected.BundleHash || local.Generation != expected.Generation {
 		return errors.New("running relay identity does not match the expected instance, release, web bundle, and generation")
 	}
-	return validateReadinessMode(local, expected.Managed)
+	return nil
 }
 
 func validateReadinessMode(identity readinessIdentity, managed bool) error {
@@ -759,6 +803,14 @@ func sameReadinessIdentity(left, right readinessIdentity) bool {
 	return *left.ExpectedInventory == *right.ExpectedInventory
 }
 
+func sameRuntimeIdentity(left, right readinessIdentity) bool {
+	return left.Instance == right.Instance &&
+		left.ReleaseVersion == right.ReleaseVersion &&
+		left.Revision == right.Revision &&
+		left.BundleHash == right.BundleHash &&
+		left.Generation == right.Generation
+}
+
 func readReadiness(ctx context.Context, healthURL string) (readinessIdentity, error) {
 	return readReadinessMode(ctx, healthURL, true)
 }
@@ -773,15 +825,30 @@ func readReadinessMode(ctx context.Context, healthURL string, requireGeneration 
 		return readinessIdentity{}, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return readinessIdentity{}, fmt.Errorf("HTTP %d", response.StatusCode)
-	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxReadinessBytes+1))
 	if err != nil {
 		return readinessIdentity{}, err
 	}
 	if len(data) > maxReadinessBytes {
 		return readinessIdentity{}, errors.New("readiness response exceeds size limit")
+	}
+	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusServiceUnavailable && requireGeneration {
+			var pending readinessIdentity
+			if json.Unmarshal(data, &pending) == nil &&
+				pending.Status == "unavailable" &&
+				pending.Instance != "" &&
+				pending.ReleaseVersion != "" &&
+				pending.Revision != "" &&
+				pending.BundleHash != "" &&
+				pending.Generation != "" &&
+				pending.ExpectedInventory != nil &&
+				pending.ExpectedInventory.Generation == pending.Generation &&
+				pending.ExpectedInventory.State == string(readiness.StateTopologyTransactionPending) {
+				return pending, errTopologyTransactionPending
+			}
+		}
+		return readinessIdentity{}, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var identity readinessIdentity

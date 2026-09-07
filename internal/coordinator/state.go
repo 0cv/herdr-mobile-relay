@@ -409,6 +409,14 @@ func (s *State) commitTopologyLocked(agents []*AgentState, baseRev int64) {
 			continue
 		}
 		cp := *incoming
+		if cp.Session == "" && cp.SessionID == "" && existing.SessionID != "" {
+			cp.Session = existing.Session
+			cp.SessionID = existing.SessionID
+			cp.AgentSessionID = existing.AgentSessionID
+			cp.SessionName = existing.SessionName
+			cp.ProfileID = existing.ProfileID
+			cp.ConversationHistoryAvailable = existing.ConversationHistoryAvailable
+		}
 		cp.Status = existing.Status
 		if existing.Status == "blocked" {
 			copyBlockedDetails(&cp, existing)

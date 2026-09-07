@@ -249,7 +249,12 @@ func validateManagedTopologyDelta(target managedTopologyTarget, result *coordina
 
 	switch target.action {
 	case "agent_start":
-		if len(removed) != 0 || len(added) > 1 || result.OK && len(added) != 1 {
+		reconciledExisting := false
+		if result.OK && len(removed) == 0 && len(added) == 0 && result.PaneID != "" {
+			existing, exists := beforeByPane[result.PaneID]
+			reconciledExisting = exists && target.profileID != "" && existing.ProfileID == target.profileID
+		}
+		if len(removed) != 0 || len(added) > 1 || result.OK && len(added) != 1 && !reconciledExisting {
 			return errors.New("agent start produced an unexpected fleet delta")
 		}
 		for paneID, pane := range added {

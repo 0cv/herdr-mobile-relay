@@ -63,6 +63,9 @@ ENV_RESTORE_TEMP=
 TOKEN_RESTORE_TEMP=
 SERVICE_WAS_ACTIVE=false
 SERVICE_WAS_ENABLED=false
+LEGACY_WAS_ACTIVE=false
+LEGACY_WAS_ENABLED=false
+LEGACY_STOPPED=false
 service_transaction_changed=false
 definition_replaced=false
 rollback_failed=false
@@ -70,6 +73,7 @@ PREVIOUS_CLOUDFLARED_CONFIG=
 PREVIOUS_LOCAL_HEALTH=
 PREVIOUS_PUBLIC_HEALTH=
 PREVIOUS_IDENTITY=
+PREVIOUS_READINESS_CAPTURED=false
 
 restore_relay_config() {
     if [ "$TOKEN_EXISTED" = true ]; then
@@ -131,7 +135,7 @@ prove_previous_service_readiness() {
     local attempt
     local identity
 
-    [ "$SERVICE_WAS_ACTIVE" = true ] || return 0
+    [ "$PREVIOUS_READINESS_CAPTURED" = true ] || return 0
     (
         load_relay_env "$ENV_FILE"
         unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE HERDR_WEB_ROOT HERDR_RELAY_BIN
@@ -196,8 +200,20 @@ rollback_systemd_install() {
             }
         fi
     fi
+    if [ "$LEGACY_STOPPED" = true ]; then
+        if [ "$LEGACY_WAS_ENABLED" = true ]; then
+            systemctl --user enable "$LEGACY_LABEL" >/dev/null || return 1
+        fi
+        if [ "$LEGACY_WAS_ACTIVE" = true ]; then
+            systemctl --user restart "$LEGACY_LABEL" || return 1
+            systemctl --user is-active --quiet "$LEGACY_LABEL" >/dev/null 2>&1 || {
+                echo "Could not prove the restored legacy systemd service is active: $LEGACY_LABEL" >&2
+                return 1
+            }
+        fi
+    fi
     prove_previous_service_readiness || return 1
-    echo "Restored the previous systemd service environment, definition, state, and exact live identity." >&2
+    if [ "$PREVIOUS_READINESS_CAPTURED" = true ]; then echo "Restored the previous systemd service environment, definition, state, and exact live identity." >&2; else echo "Restored the previous systemd service environment, definition, state, and activation; prior live identity was unavailable." >&2; fi
 }
 
 cleanup_systemd_install() {
@@ -259,22 +275,52 @@ if [ -e "$UNIT_FILE" ] || [ -L "$UNIT_FILE" ]; then
 fi
 systemctl --user is-active --quiet "$LABEL" >/dev/null 2>&1 && SERVICE_WAS_ACTIVE=true
 systemctl --user is-enabled --quiet "$LABEL" >/dev/null 2>&1 && SERVICE_WAS_ENABLED=true
+if [ -e "$LEGACY_UNIT_FILE" ] || [ -L "$LEGACY_UNIT_FILE" ]; then
+    [ -f "$LEGACY_UNIT_FILE" ] && [ ! -L "$LEGACY_UNIT_FILE" ] || {
+        echo "Refusing unsafe legacy systemd definition: $LEGACY_UNIT_FILE" >&2
+        exit 1
+    }
+    if systemctl --user is-enabled --quiet "$LEGACY_LABEL" >/dev/null 2>&1; then
+        LEGACY_WAS_ENABLED=true
+    fi
+fi
+if systemctl --user is-active --quiet "$LEGACY_LABEL" >/dev/null 2>&1; then
+    [ -f "$LEGACY_UNIT_FILE" ] && [ ! -L "$LEGACY_UNIT_FILE" ] || {
+        echo "Refusing to replace an active legacy systemd service without its definition: $LEGACY_LABEL" >&2
+        exit 1
+    }
+    LEGACY_WAS_ACTIVE=true
+fi
 if [ "$SERVICE_WAS_ACTIVE" = true ]; then
     [ "$UNIT_EXISTED" = true ] || {
         echo "Refusing to replace an active systemd service without its definition: $LABEL" >&2
         exit 1
     }
-    previous_readiness="$(capture_previous_service_readiness)" || {
+fi
+if [ "$SERVICE_WAS_ACTIVE" = true ] || [ "$LEGACY_WAS_ACTIVE" = true ]; then
+    if previous_readiness="$(capture_previous_service_readiness)"; then
+        PREVIOUS_CLOUDFLARED_CONFIG="$(printf '%s\n' "$previous_readiness" | sed -n '1p')"
+        PREVIOUS_LOCAL_HEALTH="$(printf '%s\n' "$previous_readiness" | sed -n '2p')"
+        PREVIOUS_PUBLIC_HEALTH="$(printf '%s\n' "$previous_readiness" | sed -n '3p')"
+        PREVIOUS_IDENTITY="$(printf '%s\n' "$previous_readiness" | sed -n '4,6p')"
+        PREVIOUS_READINESS_CAPTURED=true
+    elif [ "$SERVICE_WAS_ACTIVE" = true ]; then
         echo "Could not snapshot the existing systemd service's exact local and public release identity." >&2
         exit 1
-    }
-    PREVIOUS_CLOUDFLARED_CONFIG="$(printf '%s\n' "$previous_readiness" | sed -n '1p')"
-    PREVIOUS_LOCAL_HEALTH="$(printf '%s\n' "$previous_readiness" | sed -n '2p')"
-    PREVIOUS_PUBLIC_HEALTH="$(printf '%s\n' "$previous_readiness" | sed -n '3p')"
-    PREVIOUS_IDENTITY="$(printf '%s\n' "$previous_readiness" | sed -n '4,6p')"
+    else
+        echo "Legacy systemd service readiness is unavailable; rollback can restore activation but cannot prove its prior live identity." >&2
+    fi
 fi
 
 service_transaction_changed=true
+if [ "$LEGACY_WAS_ACTIVE" = true ]; then
+    LEGACY_STOPPED=true
+    systemctl --user stop "$LEGACY_LABEL" || true
+    if systemctl --user is-active --quiet "$LEGACY_LABEL" >/dev/null 2>&1; then
+        echo "Could not stop the legacy systemd service before replacement: $LEGACY_LABEL" >&2
+        exit 1
+    fi
+fi
 mkdir -p "$ENV_DIR"
 ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
 load_relay_env "$ENV_FILE"

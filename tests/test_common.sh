@@ -1524,7 +1524,8 @@ uname() {
         *) command uname "$@" ;;
     esac
 }
-test "$(HERDR_RELEASE_ROOT="$VERIFIED_ROOT" VERIFIED_OS=Linux VERIFIED_ARCH=x86_64 verified_installed_release)" = "$VERIFIED_RELEASE"
+VERIFIED_RELEASE_CANONICAL="$(CDPATH='' cd "$VERIFIED_RELEASE" && pwd -P)"
+test "$(HERDR_RELEASE_ROOT="$VERIFIED_ROOT" VERIFIED_OS=Linux VERIFIED_ARCH=x86_64 verified_installed_release)" = "$VERIFIED_RELEASE_CANONICAL"
 if HERDR_RELEASE_ROOT="$VERIFIED_ROOT" VERIFIED_OS=Plan9 verified_installed_release >/dev/null 2>&1; then
     echo "installed release validation accepted an unsupported operating system" >&2
     exit 1

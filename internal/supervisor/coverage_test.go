@@ -543,8 +543,11 @@ func TestSupervisorHelpersCoverEveryResultShape(t *testing.T) {
 		t.Fatal("empty child set did not stop")
 	}
 	active := activeruntime.Snapshot{Generation: "g1", SocketPath: "/socket", ExpectedInventoryPath: "/inventory"}
-	command := commandForRuntime(Command{Env: []string{"PATH=/bin", "BROKEN", "HERDR_SOCKET_PATH=/old"}}, "/active", active)
-	if !strings.Contains(strings.Join(command.Env, "\n"), "PATH=/bin") || strings.Contains(strings.Join(command.Env, "\n"), "BROKEN") {
+	command := commandForRuntime(Command{Env: []string{"PATH=/bin", "BROKEN", "HERDR_SOCKET_PATH=/old", "HERDR_RELAY_MANAGED_DEPLOYMENT=false"}}, "/active", active, true)
+	environment := strings.Join(command.Env, "\n")
+	if !strings.Contains(environment, "PATH=/bin") || strings.Contains(environment, "BROKEN") ||
+		!strings.Contains(environment, "HERDR_RELAY_MANAGED_DEPLOYMENT=true") ||
+		strings.Contains(environment, "HERDR_RELAY_MANAGED_DEPLOYMENT=false") {
 		t.Fatalf("runtime environment = %v", command.Env)
 	}
 }
@@ -770,6 +773,85 @@ func TestJointReadinessExpectationPropagatesPublicFailureAndIdentityMismatch(t *
 	publicBody = strings.Replace(validBody, `"instance":"relay"`, `"instance":"other"`, 1)
 	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", expected); err == nil || !strings.Contains(err.Error(), "identities differ") {
 		t.Fatalf("expectation mismatch = %v", err)
+	}
+}
+
+func TestJointReadinessExpectationAcceptsOnlyExactPendingIdentity(t *testing.T) {
+	expected := ReadinessExpectation{Managed: true, Instance: "relay", ReleaseVersion: "1.2.3", Revision: "rev", BundleHash: "web", Generation: "g1"}
+	pendingBody := `{"status":"unavailable","instance":"relay","release_version":"1.2.3","revision":"rev","bundle_hash":"web","generation":"g1","expected_inventory":{"state":"topology_transaction_pending","generation":"g1"}}`
+	readyBody := `{"status":"ready","instance":"relay","release_version":"1.2.3","revision":"rev","bundle_hash":"web","generation":"g1","expected_inventory":{"ready":true,"state":"ready","generation":"g1","expected":1,"observed":1}}`
+	localBody := pendingBody
+	publicBody := pendingBody
+	originalClient := readinessHTTPClient
+	readinessHTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body := localBody
+		if request.URL.Scheme == "https" {
+			body = publicBody
+		}
+		status := http.StatusServiceUnavailable
+		if strings.Contains(body, `"status":"ready"`) {
+			status = http.StatusOK
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: request}, nil
+	})}
+	t.Cleanup(func() { readinessHTTPClient = originalClient })
+	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", expected); !errors.Is(err, errTopologyTransactionPending) {
+		t.Fatalf("exact pending readiness = %v, want topology transaction pending", err)
+	}
+	wrong := expected
+	wrong.Generation = "g2"
+	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", wrong); err == nil || errors.Is(err, errTopologyTransactionPending) {
+		t.Fatalf("wrong pending identity bypassed expectation: %v", err)
+	}
+	invalidReadyBody := strings.Replace(readyBody, `"observed":1`, `"observed":0`, 1)
+	localBody, publicBody = readyBody, invalidReadyBody
+	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", expected); err == nil {
+		t.Fatal("invalid public ready proof was accepted")
+	}
+	localBody = pendingBody
+	publicBody = readyBody
+	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", expected); !errors.Is(err, errTopologyTransactionPending) {
+		t.Fatalf("ready/pending transition = %v, want topology transaction pending", err)
+	}
+	publicBody = invalidReadyBody
+	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", expected); err == nil || errors.Is(err, errTopologyTransactionPending) {
+		t.Fatalf("invalid public proof bypassed validation during transition: %v", err)
+	}
+	localBody = readyBody
+	publicBody = strings.Replace(readyBody, `"expected":1,"observed":1`, `"expected":2,"observed":2`, 1)
+	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", expected); err == nil {
+		t.Fatal("divergent ready inventories were accepted")
+	}
+	localBody, publicBody = readyBody, readyBody
+	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", expected); err != nil {
+		t.Fatalf("matching ready inventories = %v", err)
+	}
+	localBody = pendingBody
+	publicBody = strings.Replace(readyBody, `"generation":"g1"`, `"generation":"g2"`, 1)
+	if err := checkJointReadinessExpectation(context.Background(), "http://127.0.0.1:8375/readyz", "https://relay.example/readyz", expected); err == nil || errors.Is(err, errTopologyTransactionPending) {
+		t.Fatalf("pending runtime mismatch bypassed joint identity: %v", err)
+	}
+
+	base := readinessIdentity{Instance: "relay", ReleaseVersion: "1.2.3", Revision: "rev", BundleHash: "web", Generation: "g1"}
+	if !sameRuntimeIdentity(base, base) {
+		t.Fatal("matching runtime identity was rejected")
+	}
+	for name, mutate := range map[string]func(*readinessIdentity){
+		"instance": func(identity *readinessIdentity) { identity.Instance = "other" },
+		"release":  func(identity *readinessIdentity) { identity.ReleaseVersion = "other" },
+		"revision": func(identity *readinessIdentity) { identity.Revision = "other" },
+		"bundle":   func(identity *readinessIdentity) { identity.BundleHash = "other" },
+		"generation": func(identity *readinessIdentity) {
+			identity.Generation = "other"
+		},
+	} {
+		t.Run("runtime mismatch "+name, func(t *testing.T) {
+			other := base
+			mutate(&other)
+			if sameRuntimeIdentity(base, other) {
+				t.Fatalf("%s mismatch was accepted", name)
+			}
+		})
 	}
 }
 

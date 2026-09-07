@@ -444,12 +444,12 @@ main() {
         [ "${#HERDR_EXPECTED_REVISION}" -eq 40 ] ||
             fatal "offline expected revision must be an exact lowercase commit"
         case "$HERDR_EXPECTED_REVISION" in
-            *[!0-9a-f]*) fatal "offline expected revision must be an exact lowercase commit" ;;
+            *[!0123456789abcdef]*) fatal "offline expected revision must be an exact lowercase commit" ;;
         esac
         [ "${#HERDR_EXPECTED_ARCHIVE_SHA256}" -eq 64 ] ||
             fatal "offline expected archive SHA-256 must be exact lowercase hex"
         case "$HERDR_EXPECTED_ARCHIVE_SHA256" in
-            *[!0-9a-f]*) fatal "offline expected archive SHA-256 must be exact lowercase hex" ;;
+            *[!0123456789abcdef]*) fatal "offline expected archive SHA-256 must be exact lowercase hex" ;;
         esac
         [ "${HERDR_RELEASE_ARCHIVE##*/}" = "$archive" ] ||
             fatal "offline release archive name does not match version and native target"

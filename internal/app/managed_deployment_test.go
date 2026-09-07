@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -68,6 +69,7 @@ func TestManagedTopologyDeltaAcceptsOnlyTheAuthorizedFleetChange(t *testing.T) {
 		{name: "invalid reconciled inventory", target: managedTopologyTarget{action: "agent_stop"}, result: completed("agent_stop", ""), after: []activeruntime.TopologyPane{{PaneID: "p", NativeSessionID: "", ProfileID: "p"}}},
 		{name: "unknown start may have no visible delta yet", target: managedTopologyTarget{action: "agent_start", profileID: "personal"}, result: &coordinator.CommandResult{Action: "agent_start", Phase: "dispatched_unknown"}, valid: true},
 		{name: "failed start with pane id may have no visible delta yet", target: managedTopologyTarget{action: "agent_start", profileID: "personal"}, result: &coordinator.CommandResult{Action: "agent_start", PaneID: "new", Phase: "failed"}, valid: true},
+		{name: "successful start may reconcile exact existing pane", target: managedTopologyTarget{action: "agent_start", profileID: "personal"}, result: completed("agent_start", "personal"), before: []activeruntime.TopologyPane{personal, emu}, after: []activeruntime.TopologyPane{personal, emu}, valid: true},
 		{name: "successful start requires one addition", target: managedTopologyTarget{action: "agent_start", profileID: "personal"}, result: completed("agent_start", "new")},
 		{name: "start rejects blank profile", target: managedTopologyTarget{action: "agent_start"}, result: completed("agent_start", "new"), after: []activeruntime.TopologyPane{started}},
 		{name: "start rejects wrong profile", target: managedTopologyTarget{action: "agent_start", profileID: "emu"}, result: completed("agent_start", "new"), after: []activeruntime.TopologyPane{started}},
@@ -610,7 +612,8 @@ printf '%%s\n' "$1" > '%s'
 		TopologyCommitHelper: helper, TopologyRemoteConfig: filepath.Join(base, "profiles.json"), TopologyLedgerRoot: filepath.Join(base, "ledger"),
 		TopologySessionMap: filepath.Join(base, "session-map.json"), TopologyShimDirectory: filepath.Join(base, "shims"), TopologyZDOTDir: filepath.Join(base, "zdotdir"),
 	}
-	server := New(cfg, "test", "revision", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var serverLog bytes.Buffer
+	server := New(cfg, "test", "revision", slog.New(slog.NewTextHandler(&serverLog, nil)))
 	if err := server.profiles.Remember("pane-1", "personal"); err != nil {
 		t.Fatal(err)
 	}
@@ -651,7 +654,7 @@ printf '%%s\n' "$1" > '%s'
 	result := readManagedMessage(t, connection, func(message map[string]any) bool { return message["request_id"] == "stop-1" })
 	if result["ok"] != true || result["phase"] != "completed" {
 		agent, _ := server.state.Agent("pane-1")
-		t.Fatalf("managed stop result = %#v readiness=%+v inventory=%+v agent=%+v", result, server.managedInventoryReadiness(), server.state.InventoryStatus(), agent)
+		t.Fatalf("managed stop result = %#v readiness=%+v inventory=%+v agent=%+v log=%s", result, server.managedInventoryReadiness(), server.state.InventoryStatus(), agent, serverLog.String())
 	}
 	checkpoint, err := os.ReadFile(checkpointPath)
 	if err != nil || string(checkpoint) != "acknowledge-empty\n" {
@@ -1560,12 +1563,15 @@ func TestServerReconcilesPersistedProfileOwnership(t *testing.T) {
 	first := newServer()
 	first.profiles.Remember("pane-personal", "personal")
 	agents := []*coordinator.AgentState{
-		{PaneID: "pane-personal", Agent: "copilot", Session: "session-personal"},
+		{PaneID: "pane-personal", Agent: "copilot", Session: "display-title", SessionID: "session-personal"},
 		{PaneID: "pane-unknown", Agent: "copilot"},
 	}
 	first.reconcileProfileOwnership(agents)
 	if agents[0].ProfileID != "personal" || agents[1].ProfileID != "" {
 		t.Fatalf("first ownership = %q, %q", agents[0].ProfileID, agents[1].ProfileID)
+	}
+	if agents[0].SessionID != "session-personal" || agents[0].Session != "display-title" {
+		t.Fatalf("ownership reconciliation rewrote resolved session identity: %+v", agents[0])
 	}
 	restarted := newServer()
 	reloaded := []*coordinator.AgentState{{PaneID: "pane-personal", Agent: "copilot"}}
@@ -1573,7 +1579,7 @@ func TestServerReconcilesPersistedProfileOwnership(t *testing.T) {
 	if reloaded[0].ProfileID != "" {
 		t.Fatalf("temporarily unverifiable ownership = %q", reloaded[0].ProfileID)
 	}
-	reloaded[0].Session = "session-personal"
+	reloaded[0].SessionID = "session-personal"
 	restarted.reconcileProfileOwnership(reloaded)
 	if reloaded[0].ProfileID != "personal" {
 		t.Fatalf("reloaded ownership = %q", reloaded[0].ProfileID)

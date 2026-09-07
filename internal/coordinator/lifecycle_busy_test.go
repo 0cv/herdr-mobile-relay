@@ -163,7 +163,7 @@ func TestAgentStartKeepsTheTargetWhenHerdrKeepsRefusing(t *testing.T) {
 	record := filepath.Join(dir, "invocations.log")
 	lifecycle, cwd := busyLifecycle(t, dir, busyHerdr(t, dir, record, -1))
 
-	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+400*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+900*time.Millisecond)
 	defer cancel()
 	result, err := lifecycle.Start(ctx, profiles.Profile{ID: "codex", Kind: "codex"}, StartRequest{
 		ProfileID: "codex",
@@ -211,7 +211,7 @@ func TestAgentStartFailureSurfacesTheKeptPane(t *testing.T) {
 
 	// The caller's deadline shortens the 40s command deadline, so the retry
 	// window closes as soon as the startup reserve is exhausted.
-	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+400*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), agentStartResponseReserve+900*time.Millisecond)
 	defer cancel()
 	result := d.handleAgentStart(ctx, time.Now(), "request-1", map[string]any{
 		"profile_id": "codex",

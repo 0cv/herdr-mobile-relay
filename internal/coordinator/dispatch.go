@@ -71,6 +71,7 @@ type Dispatcher struct {
 	broadcast        func(any)
 	wakePoll         func()
 	readMu           sync.Mutex
+	paneEffectLocks  [64]sync.Mutex
 	topologyMu       sync.Mutex
 	fleetEpoch       atomic.Uint64
 	reads            map[string]*paneRead
@@ -88,6 +89,16 @@ type Dispatcher struct {
 
 type receiptContextKey struct{}
 type admissionContextKey struct{}
+type resultFinalizerContextKey struct{}
+type resultCompleterContextKey struct{}
+
+func WithResultFinalizer(ctx context.Context, finalize func(context.Context, *CommandResult) *CommandResult) context.Context {
+	return context.WithValue(ctx, resultFinalizerContextKey{}, finalize)
+}
+
+func withResultCompleter(ctx context.Context, complete func(context.Context, *CommandResult) *CommandResult) context.Context {
+	return context.WithValue(ctx, resultCompleterContextKey{}, complete)
+}
 
 type paneSessionContextKey struct{}
 
@@ -730,6 +741,9 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		}
 	}
 
+	ctx = withResultCompleter(ctx, func(completeCtx context.Context, result *CommandResult) *CommandResult {
+		return d.completeAgentStart(completeCtx, requestID, request, result)
+	})
 	result := d.schedule(ctx, ScheduleOptions{
 		Command:     d.command(ctx, receivedAt, requestID, CommandStart, "", agentStartDeadline, request),
 		RelayLevel:  true,
@@ -767,7 +781,13 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 	if result.replayed {
 		return result
 	}
+	return result
+}
 
+func (d *Dispatcher) completeAgentStart(ctx context.Context, requestID string, request StartRequest, result *CommandResult) *CommandResult {
+	if result == nil || !result.OK {
+		return result
+	}
 	data, _ := result.Data.(StartResult)
 	if data.PaneID == "" {
 		if values, ok := result.Data.(map[string]any); ok {
@@ -776,13 +796,7 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 	}
 	if request.Prompt != "" && data.PaneID != "" {
 		generation, active := d.state.PaneSession(data.PaneID)
-		initialPromptCtx := context.WithValue(ctx, paneSessionContextKey{}, paneSessionAdmission{
-			generation:  uint64(generation),
-			active:      active,
-			allowAbsent: true,
-		})
-		promptResult := d.handlePrompt(initialPromptCtx, receivedAt, requestID+"-initial", data.PaneID, map[string]any{"text": request.Prompt})
-		if !promptResult.OK {
+		if err := d.sendInitialPrompt(ctx, data.PaneID, request.Prompt, uint64(generation), !active); err != nil {
 			result.Phase = "completed_with_warning"
 			result.Data = map[string]any{
 				"pane_id": data.PaneID,
@@ -790,11 +804,51 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 				"cwd":     request.Cwd,
 				"warning": "Agent started, but the initial prompt was not confirmed",
 			}
+		} else {
+			d.recordActivityWithExtract("submit_prompt", "sent", "Prompt sent", request.Prompt, data.PaneID, requestID+"-initial")
 		}
 	}
 	d.recordActivity("agent_start", "started", "Started "+request.Name, data.PaneID, requestID)
 	d.wake()
 	return result
+}
+
+func (d *Dispatcher) sendInitialPrompt(ctx context.Context, paneID, text string, generation uint64, allowAbsent bool) error {
+	unlock := d.lockPaneEffect(paneID)
+	defer unlock()
+	if err := d.paneSessionError(WorkerToken{PaneID: paneID, Generation: generation, AllowAbsent: allowAbsent}); err != nil {
+		return err
+	}
+	promptCtx, cancel := context.WithTimeout(ctx, commandDeadline)
+	defer cancel()
+	requiresEnter := false
+	if agent, ok := d.state.Agent(paneID); ok {
+		requiresEnter = isQoderAgent(agent.Agent)
+	}
+	if !requiresEnter {
+		return d.herdr.Prompt(promptCtx, paneID, text)
+	}
+	if err := d.herdr.SendText(promptCtx, paneID, text); err != nil {
+		return err
+	}
+	if d.state.Generation(paneID) != int64(generation) {
+		return partiallyApplied("prompt text was already delivered", ErrPaneReplaced)
+	}
+	if err := d.herdr.SendKeys(promptCtx, paneID, []string{"Enter"}); err != nil {
+		return partiallyApplied("prompt text was already delivered", err)
+	}
+	return nil
+}
+
+func (d *Dispatcher) lockPaneEffect(paneID string) func() {
+	var hash uint32 = 2166136261
+	for index := 0; index < len(paneID); index++ {
+		hash ^= uint32(paneID[index])
+		hash *= 16777619
+	}
+	lock := &d.paneEffectLocks[hash%uint32(len(d.paneEffectLocks))]
+	lock.Lock()
+	return lock.Unlock
 }
 
 func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requestID, paneID string) *CommandResult {
@@ -913,6 +967,10 @@ func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runn
 	guarded := EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if fenced := executionFenceResult(ctx); fenced != nil {
 			return EffectResult{Result: fenced}
+		}
+		if !options.RelayLevel {
+			unlock := d.lockPaneEffect(options.PaneID)
+			defer unlock()
 		}
 		return runner.Run(effectCtx, token)
 	})

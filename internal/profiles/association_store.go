@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -34,10 +35,16 @@ type pendingAssociation struct {
 	ProfileID string `json:"profile_id"`
 }
 
+type rejectedAssociation struct {
+	PaneID          string `json:"pane_id"`
+	NativeSessionID string `json:"native_session_id"`
+}
+
 type associationStore struct {
-	Version      int                  `json:"version"`
-	Associations []Association        `json:"associations"`
-	Pending      []pendingAssociation `json:"pending,omitempty"`
+	Version      int                   `json:"version"`
+	Associations []Association         `json:"associations"`
+	Pending      []pendingAssociation  `json:"pending,omitempty"`
+	Rejected     []rejectedAssociation `json:"rejected,omitempty"`
 }
 
 type associationFile interface {
@@ -115,6 +122,7 @@ func (r *Resolver) Reconcile(observed []Observation) (resultErr error) {
 	next := make(map[string]Association, len(r.associations))
 	verified := make(map[string]string, len(current))
 	untrusted := make(map[string]bool)
+	rejected := make(map[string]string)
 	pending := make(map[string]string, len(r.pending)+len(r.remembered))
 	for paneID, profileID := range r.pending {
 		if configured[profileID] {
@@ -138,16 +146,26 @@ func (r *Resolver) Reconcile(observed []Observation) (resultErr error) {
 				verified[paneID] = saved.ProfileID
 			} else {
 				untrusted[paneID] = true
+				rejected[paneID] = observation.NativeSessionID
+			}
+		}
+		if rejectedIdentity, wasRejected := r.rejected[paneID]; wasRejected {
+			untrusted[paneID] = true
+			rejected[paneID] = observation.NativeSessionID
+			if rejected[paneID] == "" {
+				rejected[paneID] = rejectedIdentity
 			}
 		}
 		if profileID := pending[paneID]; profileID != "" && r.remembered[paneID] == profileID && configured[profileID] && observation.NativeSessionID != "" {
 			next[paneID] = Association{PaneID: paneID, NativeSessionID: observation.NativeSessionID, ProfileID: profileID}
 			verified[paneID] = profileID
 			delete(pending, paneID)
+			delete(untrusted, paneID)
+			delete(rejected, paneID)
 		}
 	}
-	if (!sameAssociations(r.associations, next) || !samePending(r.pending, pending)) && r.associationDir != "" {
-		if err := writeAssociationState(r.associationDir, next, pending); err != nil {
+	if (!sameAssociations(r.associations, next) || !samePending(r.pending, pending) || !samePending(r.rejected, rejected)) && r.associationDir != "" {
+		if err := writeAssociationState(r.associationDir, next, pending, rejected); err != nil {
 			r.verified = make(map[string]string)
 			r.untrusted = untrusted
 			return fmt.Errorf("persist pane profile associations: %w", err)
@@ -161,6 +179,7 @@ func (r *Resolver) Reconcile(observed []Observation) (resultErr error) {
 	}
 	r.associations = next
 	r.pending = pending
+	r.rejected = rejected
 	r.verified = verified
 	r.untrusted = untrusted
 	r.remembered = remembered
@@ -235,8 +254,24 @@ func (r *Resolver) loadAssociationsLocked() error {
 		}
 		pending[association.PaneID] = association.ProfileID
 	}
+	rejected := make(map[string]string, len(store.Rejected))
+	for _, association := range store.Rejected {
+		if !validIdentifier(association.PaneID) || !validIdentifier(association.NativeSessionID) {
+			return fail(errors.New("pane profile association store contains an invalid rejected identity"))
+		}
+		association.PaneID = normalizeIdentifier(association.PaneID)
+		association.NativeSessionID = strings.TrimSpace(association.NativeSessionID)
+		if !validIdentifier(association.PaneID) || !validIdentifier(association.NativeSessionID) {
+			return fail(errors.New("pane profile association store contains an invalid rejected identity"))
+		}
+		if _, duplicate := rejected[association.PaneID]; duplicate {
+			return fail(errors.New("pane profile association store contains a duplicate rejected identity"))
+		}
+		rejected[association.PaneID] = association.NativeSessionID
+	}
 	r.associations = loaded
 	r.pending = pending
+	r.rejected = rejected
 	r.associationsRead = true
 	r.associationErr = nil
 	return nil
@@ -378,14 +413,14 @@ func writeAssociationStore(directory string, associations map[string]Association
 }
 
 func writeAssociationStoreWith(ops associationStoreIO, directory string, associations map[string]Association) error {
-	return writeAssociationStateWith(ops, directory, associations, nil)
+	return writeAssociationStateWith(ops, directory, associations, nil, nil)
 }
 
-func writeAssociationState(directory string, associations map[string]Association, pending map[string]string) error {
-	return writeAssociationStateWith(defaultAssociationStoreIO(), directory, associations, pending)
+func writeAssociationState(directory string, associations map[string]Association, pending, rejected map[string]string) error {
+	return writeAssociationStateWith(defaultAssociationStoreIO(), directory, associations, pending, rejected)
 }
 
-func writeAssociationStateWith(ops associationStoreIO, directory string, associations map[string]Association, pending map[string]string) error {
+func writeAssociationStateWith(ops associationStoreIO, directory string, associations map[string]Association, pending, rejected map[string]string) error {
 	if info, err := ops.lstat(directory); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("pane profile association directory must be a directory")
@@ -409,7 +444,14 @@ func writeAssociationStateWith(ops associationStoreIO, directory string, associa
 		pendingValues = append(pendingValues, pendingAssociation{PaneID: paneID, ProfileID: profileID})
 	}
 	sort.Slice(pendingValues, func(i, j int) bool { return pendingValues[i].PaneID < pendingValues[j].PaneID })
-	data, err := ops.marshal(associationStore{Version: 1, Associations: values, Pending: pendingValues})
+	rejectedValues := make([]rejectedAssociation, 0, len(rejected))
+	for paneID, nativeSessionID := range rejected {
+		rejectedValues = append(rejectedValues, rejectedAssociation{PaneID: paneID, NativeSessionID: nativeSessionID})
+	}
+	slices.SortFunc(rejectedValues, func(left, right rejectedAssociation) int {
+		return strings.Compare(left.PaneID, right.PaneID)
+	})
+	data, err := ops.marshal(associationStore{Version: 1, Associations: values, Pending: pendingValues, Rejected: rejectedValues})
 	if err != nil {
 		return err
 	}

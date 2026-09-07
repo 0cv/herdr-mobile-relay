@@ -403,7 +403,7 @@ def validate(root, changed, hits, statuses, inventory):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base", default="4eb61d54d455199d58a3f7257b9464920121cefb")
+    parser.add_argument("--base", default="c6e24cc3f627ecc791db39d77b177a754c46501e")
     parser.add_argument("--inventory", type=Path, default=Path("tests/shell-coverage-inventory.json"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]

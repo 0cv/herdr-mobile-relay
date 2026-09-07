@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 SERVICE_TARGET="gui/$(id -u)/$LABEL"
+LEGACY_SERVICE_TARGET="gui/$(id -u)/$LEGACY_LABEL"
 
 # shellcheck source=common.sh
 . "$SCRIPT_DIR/common.sh"
@@ -51,6 +52,8 @@ PLIST_TEMP=
 ENV_RESTORE_TEMP=
 TOKEN_RESTORE_TEMP=
 SERVICE_WAS_LOADED=false
+LEGACY_WAS_LOADED=false
+LEGACY_STOPPED=false
 service_transaction_changed=false
 definition_replaced=false
 rollback_failed=false
@@ -58,6 +61,7 @@ PREVIOUS_CLOUDFLARED_CONFIG=
 PREVIOUS_LOCAL_HEALTH=
 PREVIOUS_PUBLIC_HEALTH=
 PREVIOUS_IDENTITY=
+PREVIOUS_READINESS_CAPTURED=false
 
 restore_relay_config() {
     if [ "$TOKEN_EXISTED" = true ]; then
@@ -119,7 +123,7 @@ prove_previous_service_readiness() {
     local attempt
     local identity
 
-    [ "$SERVICE_WAS_LOADED" = true ] || return 0
+    [ "$PREVIOUS_READINESS_CAPTURED" = true ] || return 0
     (
         load_relay_env "$ENV_FILE"
         unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE HERDR_WEB_ROOT HERDR_RELAY_BIN
@@ -178,8 +182,15 @@ rollback_launchd_install() {
             fi
         fi
     fi
+    if [ "$LEGACY_STOPPED" = true ] && [ "$LEGACY_WAS_LOADED" = true ]; then
+        reload_launchd_service_definition "$LEGACY_PLIST" "$LEGACY_LABEL" || return 1
+        launchd_service_loaded "$LEGACY_SERVICE_TARGET" || {
+            echo "Could not prove the restored legacy launchd service is loaded: $LEGACY_SERVICE_TARGET" >&2
+            return 1
+        }
+    fi
     prove_previous_service_readiness || return 1
-    echo "Restored the previous launchd service environment, definition, state, and exact live identity." >&2
+    if [ "$PREVIOUS_READINESS_CAPTURED" = true ]; then echo "Restored the previous launchd service environment, definition, state, and exact live identity." >&2; else echo "Restored the previous launchd service environment, definition, state, and activation; prior live identity was unavailable." >&2; fi
 }
 
 cleanup_launchd_install() {
@@ -245,17 +256,54 @@ if launchd_service_loaded "$SERVICE_TARGET"; then
         echo "Refusing to replace a loaded launchd service without its definition: $SERVICE_TARGET" >&2
         exit 1
     }
-    previous_readiness="$(capture_previous_service_readiness)" || {
-        echo "Could not snapshot the existing launchd service's exact local and public release identity." >&2
+fi
+if [ -e "$LEGACY_PLIST" ] || [ -L "$LEGACY_PLIST" ]; then
+    [ -f "$LEGACY_PLIST" ] && [ ! -L "$LEGACY_PLIST" ] || {
+        echo "Refusing unsafe legacy launchd definition: $LEGACY_PLIST" >&2
         exit 1
     }
-    PREVIOUS_CLOUDFLARED_CONFIG="$(printf '%s\n' "$previous_readiness" | sed -n '1p')"
-    PREVIOUS_LOCAL_HEALTH="$(printf '%s\n' "$previous_readiness" | sed -n '2p')"
-    PREVIOUS_PUBLIC_HEALTH="$(printf '%s\n' "$previous_readiness" | sed -n '3p')"
-    PREVIOUS_IDENTITY="$(printf '%s\n' "$previous_readiness" | sed -n '4,6p')"
+fi
+if launchd_service_loaded "$LEGACY_SERVICE_TARGET"; then
+    [ -f "$LEGACY_PLIST" ] && [ ! -L "$LEGACY_PLIST" ] || {
+        echo "Refusing to replace a loaded legacy launchd service without its definition: $LEGACY_SERVICE_TARGET" >&2
+        exit 1
+    }
+    LEGACY_WAS_LOADED=true
+fi
+if [ "$SERVICE_WAS_LOADED" = true ] || [ "$LEGACY_WAS_LOADED" = true ]; then
+    if previous_readiness="$(capture_previous_service_readiness)"; then
+        PREVIOUS_CLOUDFLARED_CONFIG="$(printf '%s\n' "$previous_readiness" | sed -n '1p')"
+        PREVIOUS_LOCAL_HEALTH="$(printf '%s\n' "$previous_readiness" | sed -n '2p')"
+        PREVIOUS_PUBLIC_HEALTH="$(printf '%s\n' "$previous_readiness" | sed -n '3p')"
+        PREVIOUS_IDENTITY="$(printf '%s\n' "$previous_readiness" | sed -n '4,6p')"
+        PREVIOUS_READINESS_CAPTURED=true
+    elif [ "$SERVICE_WAS_LOADED" = true ]; then
+        echo "Could not snapshot the existing launchd service's exact local and public release identity." >&2
+        exit 1
+    else
+        echo "Legacy launchd service readiness is unavailable; rollback can restore activation but cannot prove its prior live identity." >&2
+    fi
 fi
 
 service_transaction_changed=true
+if [ "$LEGACY_WAS_LOADED" = true ]; then
+    LEGACY_STOPPED=true
+    launchctl bootout "gui/$(id -u)" "$LEGACY_PLIST" >/dev/null 2>&1 ||
+        launchctl bootout "$LEGACY_SERVICE_TARGET" >/dev/null 2>&1 ||
+        true
+    legacy_unloaded=false
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        if ! launchd_service_loaded "$LEGACY_SERVICE_TARGET"; then
+            legacy_unloaded=true
+            break
+        fi
+        sleep 1
+    done
+    if [ "$legacy_unloaded" != true ]; then
+        echo "Could not stop the legacy launchd service before replacement: $LEGACY_SERVICE_TARGET" >&2
+        exit 1
+    fi
+fi
 mkdir -p "$ENV_DIR"
 ensure_relay_env "$ENV_FILE" "$CLOUDFLARED_CONFIG"
 load_relay_env "$ENV_FILE"
@@ -316,7 +364,6 @@ if ! HEALTH="$(wait_for_installed_relay_ready "$CLOUDFLARED_CONFIG")"; then
     exit 1
 fi
 service_transaction_changed=false
-launchctl bootout "gui/$(id -u)" "$LEGACY_PLIST" >/dev/null 2>&1 || true
 rm -f "$LEGACY_PLIST"
 
 echo "Installed and started $LABEL"

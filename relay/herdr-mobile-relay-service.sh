@@ -80,7 +80,7 @@ record_trusted_bootstrap_failure() {
     record_bootstrap_failure "$reason"
 }
 
-CONFIGURED_STATE_ROOT="${HERDR_RELAY_SUPERVISOR_STATE_DIR:-$TRUSTED_STATE_ROOT}"
+CONFIGURED_STATE_ROOT="${HERDR_RELAY_SUPERVISOR_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay}"
 case "$CONFIGURED_STATE_ROOT" in
     /*) ;;
     *) record_trusted_bootstrap_failure "HERDR_RELAY_SUPERVISOR_STATE_DIR must be an absolute path" ;;

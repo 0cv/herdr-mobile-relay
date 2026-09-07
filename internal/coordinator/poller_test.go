@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,6 +100,40 @@ func TestPollerRunCoversWakeTimerAndCancellation(t *testing.T) {
 	}
 }
 
+func TestForegroundReconcileSerializesWithBackgroundPoll(t *testing.T) {
+	root := t.TempDir()
+	fakeHerdr := writeScript(t, root, "herdr", "#!/bin/sh\ncase \"$1 $2\" in\n  'agent list') printf '%s\\n' '{\"result\":{\"agents\":[]}}' ;;\n  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n  'tab list') printf '%s\\n' '{\"result\":{\"tabs\":[]}}' ;;\n  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n  *) exit 1 ;;\nesac\n")
+	poller := NewPoller(herdr.NewClient(fakeHerdr, filepath.Join(root, "herdr.sock")), testState(), time.Second, testLogger())
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var enrichments atomic.Int32
+	poller.SetEnrich(func(context.Context, []*AgentState) {
+		if enrichments.Add(1) == 1 {
+			close(firstEntered)
+			<-releaseFirst
+		}
+	})
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+	go func() { firstDone <- poller.poll(t.Context()) }()
+	<-firstEntered
+	go func() { secondDone <- poller.Reconcile(t.Context()) }()
+	time.Sleep(50 * time.Millisecond)
+	if got := enrichments.Load(); got != 1 {
+		t.Fatalf("concurrent poll entered enrichment %d times before the first completed", got)
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := enrichments.Load(); got != 2 {
+		t.Fatalf("serialized poll enrichments = %d, want 2", got)
+	}
+}
+
 func waitForPollerCommit(t *testing.T, commits <-chan struct{}) {
 	t.Helper()
 	select {
@@ -136,11 +171,10 @@ func TestRejectedPollCannotPublishPostCommitEnrichment(t *testing.T) {
 	}
 }
 
-func TestPollAndEventSerializeCommitThroughPostCommitPublication(t *testing.T) {
+func TestPollAndEventSerializeCommitWhileOnlyPollPublishesAuthoritativePostCommit(t *testing.T) {
 	state := testState()
 	poller := NewPoller(nil, state, time.Second, testLogger())
 	firstEntered := make(chan struct{})
-	secondEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	var orderMu sync.Mutex
 	var order []string
@@ -154,7 +188,6 @@ func TestPollAndEventSerializeCommitThroughPostCommitPublication(t *testing.T) {
 			<-releaseFirst
 			return
 		}
-		close(secondEntered)
 	})
 
 	token := state.BeginPoll()
@@ -169,19 +202,27 @@ func TestPollAndEventSerializeCommitThroughPostCommitPublication(t *testing.T) {
 		defer close(eventDone)
 		poller.commitEventTopology(context.Background(), herdr.TopologySnapshot{Panes: []herdr.Pane{{ID: "pane-new", Session: "session-new", Agent: "codex"}}}, state.RevisionCounter())
 	}()
-	select {
-	case <-secondEntered:
-		t.Fatal("newer event published while older poll publication was still in flight")
-	case <-time.After(50 * time.Millisecond):
-	}
+	time.Sleep(50 * time.Millisecond)
 	close(releaseFirst)
 	<-pollDone
 	<-eventDone
-	<-secondEntered
 	orderMu.Lock()
 	defer orderMu.Unlock()
-	if !reflect.DeepEqual(order, []string{"pane-old", "pane-new"}) {
+	if !reflect.DeepEqual(order, []string{"pane-old"}) {
 		t.Fatalf("publication order = %v", order)
+	}
+}
+
+func TestEventCommitCannotDriveAuthoritativeOwnershipReconciliation(t *testing.T) {
+	state := testState()
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	calls := 0
+	poller.SetAfterCommit(func(context.Context, []*AgentState) { calls++ })
+	poller.commitEventTopology(context.Background(), herdr.TopologySnapshot{
+		Panes: []herdr.Pane{{ID: "pane-event", Session: "session-event", Agent: "codex"}},
+	}, state.RevisionCounter())
+	if calls != 0 {
+		t.Fatalf("event-driven authoritative post-commit calls = %d, want 0", calls)
 	}
 }
 
