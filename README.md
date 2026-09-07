@@ -64,7 +64,7 @@ paths.
 - Monitor and control agents across several computers, grouped by status and
   Herdr workspace, with agents that need input pinned on top.
 - Answer approvals and structured plan questions from Codex, Claude Code,
-  Qoder, OpenCode, Oh My Pi, and Pi.
+  Hermes, Qoder, OpenCode, Oh My Pi, and Pi.
 - Send prompts, terminal keys, and slash commands; attach screenshots, photos,
   and documents in cancellable batches.
 - Read and search each agent's native conversation, including OpenCode and Oh
