@@ -130,6 +130,20 @@ func Run(
 		if err := pane.SendKeys(ctx, paneID, clearKeys); err != nil {
 			return Result{}, fmt.Errorf("clear agent composer: %w", err)
 		}
+		composerCleared = true
+		defer func() {
+			if !composerCleared {
+				return
+			}
+			if restoreErr := restoreComposerIfEmpty(ctx, pane, paneID, profile, composer); restoreErr != nil {
+				if err == nil {
+					result = Result{}
+					err = fmt.Errorf("restore agent composer: %w", restoreErr)
+					return
+				}
+				err = errors.Join(err, fmt.Errorf("restore agent composer: %w", restoreErr))
+			}
+		}()
 		if len(profile.ComposerClearKeys) > 0 {
 			clearedSnapshot, err := readPane(ctx, pane, paneID)
 			if err != nil {
@@ -140,22 +154,6 @@ func Run(
 				return Result{}, errors.New("verify agent composer clear: composer remains non-empty")
 			}
 		}
-		composerCleared = true
-		defer func() {
-			if !composerCleared {
-				return
-			}
-			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recoveryTimeout)
-			defer cancel()
-			if restoreErr := pane.SendText(restoreCtx, paneID, composer); restoreErr != nil {
-				if err == nil {
-					result = Result{}
-					err = fmt.Errorf("restore agent composer: %w", restoreErr)
-					return
-				}
-				err = errors.Join(err, fmt.Errorf("restore agent composer: %w", restoreErr))
-			}
-		}()
 	}
 
 	submitted := false
@@ -448,6 +446,20 @@ func readPane(ctx context.Context, pane Pane, paneID string) (string, error) {
 		return "", err
 	}
 	return string(read.Content), nil
+}
+
+func restoreComposerIfEmpty(ctx context.Context, pane Pane, paneID string, profile slashcmd.CopyProfile, composer string) error {
+	recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recoveryTimeout)
+	defer cancel()
+	snapshot, err := readPane(recoveryCtx, pane, paneID)
+	if err != nil {
+		return err
+	}
+	current, found := profile.ComposerText(snapshot)
+	if !found || current != "" {
+		return nil
+	}
+	return pane.SendText(recoveryCtx, paneID, composer)
 }
 
 func recoverPane(ctx context.Context, pane Pane, paneID string, profile slashcmd.CopyProfile) {

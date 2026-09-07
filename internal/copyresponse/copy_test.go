@@ -23,6 +23,7 @@ type fakePane struct {
 	onSendKeys  func()
 	onSendText  func(string) error
 	sendKeysErr error
+	readErrs    map[int]error
 }
 
 func (p *fakePane) ReadPane(ctx context.Context, _ string, _ int, _ string) (herdr.PaneRead, error) {
@@ -31,6 +32,9 @@ func (p *fakePane) ReadPane(ctx context.Context, _ string, _ int, _ string) (her
 	}
 	index := p.reads
 	p.reads++
+	if readErr := p.readErrs[index]; readErr != nil {
+		return herdr.PaneRead{}, readErr
+	}
 	if index >= len(p.snapshots) {
 		index = len(p.snapshots) - 1
 	}
@@ -1178,5 +1182,63 @@ func TestRunDoesNotRestoreHermesComposerAfterVerificationFailure(t *testing.T) {
 	}
 	if len(pane.texts) != 0 {
 		t.Fatalf("restoration after verification failure = %v, want no draft append", pane.texts)
+	}
+}
+
+func TestRunRestoresHermesComposerAfterClearVerificationReadFailure(t *testing.T) {
+	pane := &fakePane{
+		snapshots: []string{
+			"❯ draftcopy",
+			"❯ ",
+			"Copied assistant response #1 to clipboard\n❯ ",
+		},
+		readErrs: map[int]error{1: errors.New("transient verification read")},
+	}
+	profile, ok := slashcmd.CopyProfileFor("hermes", "")
+	if !ok {
+		t.Fatal("missing Hermes copy profile")
+	}
+	_, err := Run(
+		context.Background(),
+		"pane-hermes-transient-verification",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) { return []byte("before"), nil },
+		func(context.Context, []byte) error { return nil },
+		1,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "verify agent composer clear") {
+		t.Fatalf("Run() error = %v, want verification-read failure", err)
+	}
+	if !reflect.DeepEqual(pane.texts, []string{"draftcopy"}) {
+		t.Fatalf("draft restoration after transient read failure = %v", pane.texts)
+	}
+}
+
+func TestRunRestoresHermesComposerAfterClearVerificationCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pane := &fakePane{snapshots: []string{"❯ draftcopy", "❯ "}}
+	pane.onSendKeys = cancel
+	profile, ok := slashcmd.CopyProfileFor("hermes", "")
+	if !ok {
+		t.Fatal("missing Hermes copy profile")
+	}
+	_, err := Run(
+		ctx,
+		"pane-hermes-cancelled-verification",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) { return []byte("before"), nil },
+		func(context.Context, []byte) error { return nil },
+		1,
+		nil,
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context cancellation", err)
+	}
+	if !reflect.DeepEqual(pane.texts, []string{"draftcopy"}) {
+		t.Fatalf("draft restoration after cancelled verification = %v", pane.texts)
 	}
 }
