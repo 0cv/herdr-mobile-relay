@@ -13,14 +13,16 @@ type CopyProfile struct {
 	Composer            *regexp.Regexp
 	ComposerPlaceholder *regexp.Regexp
 	ComposerOptional    bool
+	ComposerClearKeys   []string
 	IdleLayout          *regexp.Regexp
 	SecondaryPath       string
 }
 
 var copyProfiles = map[string]CopyProfile{
 	"hermes": {
-		Confirmation: regexp.MustCompile(`(?im)copied\s+assistant\s+response\s+#(?P<index>[0-9]+)\s+to\s+clipboard`),
-		Composer:     regexp.MustCompile(`(?m)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?P<text>.*?)\s*$`),
+		Confirmation:      regexp.MustCompile(`(?im)copied\s+assistant\s+response\s+#(?P<index>[0-9]+)\s+to\s+clipboard`),
+		Composer:          regexp.MustCompile(`(?m)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?P<text>.*?)\s*$`),
+		ComposerClearKeys: []string{"Escape", "Escape"},
 		ComposerPlaceholder: regexp.MustCompile(
 			`(?im)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?:` +
 				`ask anything, or type / for commands(?:…|\.\.\.)|` +

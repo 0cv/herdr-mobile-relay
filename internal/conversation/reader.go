@@ -140,7 +140,7 @@ func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page,
 
 func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
 	if isHermesAgent(agent) {
-		return r.readHermesFor(cwd, sessionID, before, limit)
+		return r.readHermesFor(agent, cwd, sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "opencode" {
 		return r.readOpenCodeFor(cwd, sessionID, before, limit)
@@ -206,7 +206,11 @@ func unavailableCode(code, reason string) Page {
 // before any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 	sessionID = strings.TrimSpace(sessionID)
-	key := normalizedAgent(agent) + "\x00" + cwd + "\x00" + sessionID
+	agentKey := normalizedAgent(agent)
+	if isHermesAgent(agent) {
+		agentKey = "hermes"
+	}
+	key := agentKey + "\x00" + cwd + "\x00" + sessionID
 	for {
 		now := time.Now()
 		r.mu.Lock()

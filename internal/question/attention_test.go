@@ -178,6 +178,61 @@ func TestClassifyHermesApprovalWithLiveStatusLines(t *testing.T) {
 		t.Fatalf("classification = %+v, want approval despite live Hermes status lines", got)
 	}
 }
+func TestClassifyHermesCompactApprovalFooter(t *testing.T) {
+	got := Classify(hermesApprovalView+"\n⚠\n", "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want Hermes approval with compact footer", got)
+	}
+}
+
+func TestClassifyHermesLongCommandKeepsConsentIndices(t *testing.T) {
+	longCommand := strings.Replace(
+		hermesApprovalView,
+		"│   4. Deny                                                  │",
+		"│   4. Deny                                                  │\n│   5. Show full command                                      │",
+		1,
+	)
+	got := Classify(longCommand, "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want consent options without auxiliary view action", got)
+	}
+	auxiliaryFocused := strings.Replace(
+		strings.Replace(longCommand, "│ ❯ 1. Allow once                                            │", "│   1. Allow once                                            │", 1),
+		"│   5. Show full command                                      │",
+		"│ ❯ 5. Show full command                                      │",
+		1,
+	)
+	auxiliary := Classify(auxiliaryFocused, "hermes")
+	if auxiliary.Kind != AttentionApproval || auxiliary.ApprovalFocus != 4 {
+		t.Fatalf("auxiliary-focused classification = %+v, want native focus index 4", auxiliary)
+	}
+}
+
+func TestApprovalFingerprintIgnoresHermesLiveFooter(t *testing.T) {
+	first := Classify(hermesApprovalView+`
+  💻 chmod 777 /tmp/hermes-relay-approval-target-3  (  6.3s · ↓ 60 tok)
+ ⚕ gpt-5.6-luna │ 7.23K/272K │ [░░░░░░░░░░] 3% │ ◎ 73.7% │ ◷ 2.8s │ ↑ 218
+───────────────────────────────────────────────────────────────────────
+⚠ ❯
+───────────────────────────────────────────────────────────────────────
+`, "hermes")
+	second := Classify(strings.Replace(
+		hermesApprovalView+`
+  💻 chmod 777 /tmp/hermes-relay-approval-target-3  (  6.3s · ↓ 60 tok)
+ ⚕ gpt-5.6-luna │ 7.23K/272K │ [░░░░░░░░░░] 3% │ ◎ 73.7% │ ◷ 2.8s │ ↑ 218
+───────────────────────────────────────────────────────────────────────
+⚠ ❯
+───────────────────────────────────────────────────────────────────────
+	`, "6.3s", "6.4s", 1), "hermes")
+	if first.Kind != AttentionApproval || second.Kind != AttentionApproval {
+		t.Fatalf("approval classifications = %+v and %+v", first, second)
+	}
+	if ApprovalFingerprint(first) != ApprovalFingerprint(second) {
+		t.Fatal("Hermes live footer repaint changed the approval fingerprint")
+	}
+}
 
 func TestClassifyHermesIdlePlaceholdersAsChat(t *testing.T) {
 	placeholders := []string{

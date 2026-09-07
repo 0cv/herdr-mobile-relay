@@ -34,6 +34,7 @@ type hermesRow struct {
 	ToolCallID  string  `json:"tool_call_id"`
 	ToolCalls   string  `json:"tool_calls"`
 	ToolName    string  `json:"tool_name"`
+	DisplayKind string  `json:"display_kind"`
 	Timestamp   float64 `json:"timestamp"`
 	Total       int     `json:"message_total"`
 	CursorFound int     `json:"cursor_found"`
@@ -90,7 +91,7 @@ func (r *hermesReader) locate(cwd, sessionID string) Location {
 	return Location{}
 }
 
-func (r *hermesReader) read(sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
+func (r *hermesReader) readFrom(database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
 	if !safeSessionID(sessionID) {
 		return nil, false, false, hermesRow{}, "invalid_session"
 	}
@@ -100,44 +101,24 @@ func (r *hermesReader) read(sessionID, before string, limit int) ([]Entry, bool,
 			return nil, false, false, hermesRow{}, "invalid_cursor"
 		}
 	}
-	if limit < 1 {
-		limit = defaultPageSize
+	rows, hasMore, queryCode := r.query(database, sessionID, before, limit)
+	if queryCode != "" {
+		return nil, false, false, hermesRow{}, queryCode
 	}
-	if limit > maxPageSize {
-		limit = maxPageSize
+	if len(rows) == 0 || rows[0].SessionID != sessionID {
+		return nil, false, false, hermesRow{}, "invalid_session"
 	}
-	databases, code := r.databases()
-	if code != "" {
-		return nil, false, false, hermesRow{}, code
+	if before != "" && rows[0].CursorFound == 0 {
+		return nil, false, false, hermesRow{}, "invalid_cursor"
 	}
-	firstFailure := ""
-	for _, database := range databases {
-		rows, hasMore, queryCode := r.query(database, sessionID, before, limit)
-		if queryCode != "" {
-			if firstFailure == "" {
-				firstFailure = queryCode
-			}
-			continue
-		}
-		if len(rows) == 0 || rows[0].SessionID != sessionID {
-			continue
-		}
-		if before != "" && rows[0].CursorFound == 0 {
-			return nil, false, false, hermesRow{}, "invalid_cursor"
-		}
-		entries, corrupt := parseHermesRows(rows)
-		if len(entries) == 0 && rows[0].Total > 0 && corrupt {
-			return nil, false, true, rows[0], "source_corrupt"
-		}
-		if toolCorrupt := r.attachToolResults(database, sessionID, entries); toolCorrupt {
-			corrupt = true
-		}
-		return entries, hasMore, corrupt, rows[0], ""
+	entries, corrupt := parseHermesRows(rows)
+	if len(entries) == 0 && rows[0].Total > 0 && corrupt {
+		return nil, false, true, rows[0], "source_corrupt"
 	}
-	if firstFailure != "" {
-		return nil, false, false, hermesRow{}, firstFailure
+	if toolCorrupt := r.attachToolResults(database, sessionID, entries); toolCorrupt {
+		corrupt = true
 	}
-	return nil, false, false, hermesRow{}, "invalid_session"
+	return entries, hasMore, corrupt, rows[0], ""
 }
 
 func (r *hermesReader) query(database, sessionID, before string, limit int) ([]hermesRow, bool, string) {
@@ -148,6 +129,7 @@ func (r *hermesReader) query(database, sessionID, before string, limit int) ([]h
 		limit = maxPageSize
 	}
 	sessionHex := hex.EncodeToString([]byte(sessionID))
+	cursorCTE := "cursor AS (SELECT NULL AS logical_timestamp, NULL AS id WHERE 0)"
 	cursorFilter := ""
 	cursorFound := "1"
 	if before != "" {
@@ -155,43 +137,43 @@ func (r *hermesReader) query(database, sessionID, before string, limit int) ([]h
 		if err != nil || cursor <= 0 {
 			return nil, false, "invalid_cursor"
 		}
-		cursorFilter = fmt.Sprintf(" AND id < %d", cursor)
-		cursorFound = fmt.Sprintf(
-			"EXISTS(SELECT 1 FROM messages AS cursor WHERE cursor.session_id=CAST(X'%s' AS TEXT) AND cursor.id=%d AND cursor.role IN ('user','assistant') AND (cursor.active=1 OR cursor.compacted=1))",
-			sessionHex, cursor,
-		)
+		cursorCTE = fmt.Sprintf("cursor AS (SELECT logical_timestamp,id FROM displayed WHERE id=%d)", cursor)
+		cursorFilter = " AND EXISTS(SELECT 1 FROM cursor) AND " +
+			"(d.logical_timestamp < (SELECT logical_timestamp FROM cursor) OR " +
+			"(d.logical_timestamp = (SELECT logical_timestamp FROM cursor) AND d.id < (SELECT id FROM cursor)))"
+		cursorFound = "EXISTS(SELECT 1 FROM cursor)"
 	}
 	query := fmt.Sprintf(
 		`WITH visible AS (`+
 			`SELECT m.id,m.role,COALESCE(m.content,'') AS content,`+
 			`COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_calls,'') AS tool_calls,`+
-			`COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.timestamp,0) AS timestamp,`+
+			`COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.display_kind,'') AS display_kind,`+
+			`COALESCE(m.timestamp,0) AS logical_timestamp,`+
 			`ROW_NUMBER() OVER (`+
 			`PARTITION BY m.role,COALESCE(m.content,''),COALESCE(m.tool_call_id,''),`+
 			`COALESCE(m.tool_calls,''),COALESCE(m.tool_name,''),COALESCE(m.timestamp,0) `+
 			`ORDER BY m.active DESC,m.id DESC`+
 			`) AS generation `+
 			`FROM messages AS m `+
-			`WHERE m.session_id=CAST(X'%s' AS TEXT) AND (m.active=1 OR m.compacted=1)`+
-			`), selected AS (`+
-			`SELECT id,role,content,tool_call_id,tool_calls,tool_name,timestamp `+
-			`FROM visible WHERE generation=1 AND role IN ('user','assistant')%s `+
-			`ORDER BY id DESC LIMIT %d`+
+			`WHERE m.session_id=CAST(X'%s' AS TEXT) AND (m.active=1 OR m.compacted=1) `+
+			`AND COALESCE(m.display_kind,'') <> 'hidden'`+
+			`), displayed AS (`+
+			`SELECT id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp `+
+			`FROM visible WHERE generation=1 AND role IN ('user','assistant')`+
+			`), `+cursorCTE+`, selected AS (`+
+			`SELECT id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp `+
+			`FROM displayed AS d WHERE 1=1`+cursorFilter+
+			` ORDER BY logical_timestamp DESC,id DESC LIMIT %d`+
 			`) `+
 			`SELECT s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,`+
 			`COALESCE(sm.id,0) AS message_id,COALESCE(sm.role,'') AS role,`+
 			`hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,`+
 			`COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,`+
-			`COALESCE(sm.timestamp,0) AS timestamp,`+
-			`(SELECT COUNT(*) FROM (`+
-			`SELECT DISTINCT m.role,COALESCE(m.content,''),COALESCE(m.tool_call_id,''),`+
-			`COALESCE(m.tool_calls,''),COALESCE(m.tool_name,''),COALESCE(m.timestamp,0) `+
-			`FROM messages AS m WHERE m.session_id=s.id AND `+
-			`(m.active=1 OR m.compacted=1) AND m.role IN ('user','assistant')`+
-			`)) AS message_total,%s AS cursor_found `+
+			`COALESCE(sm.display_kind,'') AS display_kind,COALESCE(sm.logical_timestamp,0) AS timestamp,`+
+			`(SELECT COUNT(*) FROM displayed) AS message_total,%s AS cursor_found `+
 			`FROM sessions AS s LEFT JOIN selected AS sm ON 1=1 `+
-			`WHERE s.id=CAST(X'%s' AS TEXT) ORDER BY sm.id DESC;`,
-		sessionHex, cursorFilter, limit+1, cursorFound, sessionHex,
+			`WHERE s.id=CAST(X'%s' AS TEXT) ORDER BY sm.logical_timestamp DESC,sm.id DESC;`,
+		sessionHex, limit+1, cursorFound, sessionHex,
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), hermesQueryTimeout)
 	defer cancel()
@@ -281,7 +263,8 @@ func (r *hermesReader) queryToolRows(database, sessionID string, callIDs []strin
 		`SELECT COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_name,'') AS tool_name,`+
 			`hex(COALESCE(m.content,'')) AS content_hex FROM messages AS m `+
 			`WHERE m.session_id=CAST(X'%s' AS TEXT) AND m.role='tool' `+
-			`AND (m.active=1 OR m.compacted=1) AND m.tool_call_id IN (%s) ORDER BY m.id;`,
+			`AND (m.active=1 OR m.compacted=1) AND COALESCE(m.display_kind,'') <> 'hidden' `+
+			`AND m.tool_call_id IN (%s) ORDER BY m.id;`,
 		sessionHex, strings.Join(encodedIDs, ","),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), hermesQueryTimeout)
@@ -420,15 +403,31 @@ func isHermesAgent(agent string) bool {
 	}
 }
 
-func (r *Reader) readHermesFor(cwd, sessionID, before string, limit int) (Page, error) {
+func (r *Reader) readHermesFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
 	sessionID = strings.TrimSpace(sessionID)
+	if !safeSessionID(sessionID) {
+		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
+	}
+	if before != "" {
+		cursor, err := strconv.ParseInt(before, 10, 64)
+		if err != nil || cursor <= 0 {
+			return unavailableCode("invalid_cursor", "This conversation page cursor is invalid."), nil
+		}
+	}
 	if limit < 1 {
 		limit = defaultPageSize
 	}
 	if limit > maxPageSize {
 		limit = maxPageSize
 	}
-	entries, hasMore, corrupt, metadata, code := r.hermes.read(sessionID, before, limit)
+	location := r.Locate(agent, cwd, sessionID)
+	if location.Path == "" {
+		if _, code := r.hermes.databases(); code != "" {
+			return unavailableCode(code, "Hermes conversation history is unavailable."), nil
+		}
+		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+	}
+	entries, hasMore, corrupt, metadata, code := r.hermes.readFrom(location.Path, sessionID, before, limit)
 	if code != "" {
 		return unavailableCode(code, "Hermes conversation history is unavailable."), nil
 	}

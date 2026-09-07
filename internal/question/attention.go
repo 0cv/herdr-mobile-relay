@@ -92,7 +92,7 @@ var (
 			`type / to browse commands, or ctrl\+p for the palette` +
 			`)\s*$`,
 	)
-	hermesApprovalPromptPattern = regexp.MustCompile(`(?i)^\s*⚠\x{fe0f}?\s+[❯›>]\s*$`)
+	hermesApprovalPromptPattern = regexp.MustCompile(`(?i)^\s*⚠\x{fe0f}?(?:\s+[❯›>])?\s*$`)
 	hermesSpinnerLinePattern    = regexp.MustCompile(
 		`^\s*💻\s+.+\(\s*(?:\d+(?:\.\d+)?s|\d+m\d+s)(?:\s*·\s*[↓↑]\s+\S+\s+tok)?\)\s*$`,
 	)
@@ -134,7 +134,7 @@ func Classify(text, agent string) Classification {
 			}
 		}
 		if options, focus, command := liveApprovalDetails(text, agent); len(options) > 0 {
-			summaryLines := paneSummaryLines(text)
+			summaryLines := approvalSummaryLines(text, agent)
 			if command == "" {
 				command = approvalCommand(summaryLines)
 			}
@@ -164,6 +164,56 @@ func Classify(text, agent string) Classification {
 	}
 }
 
+func approvalSummaryLines(text, agent string) []string {
+	lines := paneSummaryLines(text)
+	if !strings.Contains(strings.ToLower(agent), "hermes") {
+		return lines
+	}
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if hermesApprovalChromeLine(line) {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	return filtered
+}
+
+func hermesApprovalChromeLine(line string) bool {
+	return hermesApprovalPromptPattern.MatchString(line) ||
+		hermesSpinnerLinePattern.MatchString(line) ||
+		hermesStatusLinePattern.MatchString(line)
+}
+
+func hermesApprovalAuxiliaryOption(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "show full command", "view full command":
+		return true
+	default:
+		return false
+	}
+}
+
+func hermesApprovalRows(rows []approvalMenuRow) ([]approvalMenuRow, int, bool) {
+	focus := 0
+	for index, row := range rows {
+		if row.focus {
+			// Keep the native row index even when a trailing auxiliary action
+			// is omitted from the consent choices. The dispatcher must still
+			// navigate away from that action before pressing Enter.
+			focus = index
+			break
+		}
+	}
+	for len(rows) > 0 && hermesApprovalAuxiliaryOption(rows[len(rows)-1].label) {
+		rows = rows[:len(rows)-1]
+	}
+	if len(rows) < 2 || !approvalLabels(rows) {
+		return nil, 0, false
+	}
+	return rows, focus, true
+}
+
 func liveApprovalDetails(text, agent string) ([]string, int, string) {
 	normalized := strings.ToLower(agent)
 	if strings.Contains(normalized, "opencode") {
@@ -183,7 +233,19 @@ func liveApprovalDetails(text, agent string) ([]string, int, string) {
 		menuLines[index] = cleanCodexLine(line)
 	}
 	rows := latestApprovalMenu(menuLines)
-	if len(rows) < 2 || !approvalLabels(rows) {
+	if len(rows) < 2 {
+		return nil, 0, ""
+	}
+	menuEnd := rows[len(rows)-1].line
+	isHermes := strings.Contains(normalized, "hermes")
+	focus := 0
+	if isHermes {
+		var ok bool
+		rows, focus, ok = hermesApprovalRows(rows)
+		if !ok {
+			return nil, 0, ""
+		}
+	} else if !approvalLabels(rows) {
 		return nil, 0, ""
 	}
 
@@ -200,16 +262,15 @@ func liveApprovalDetails(text, agent string) ([]string, int, string) {
 	if !approvalHeader(normalized, header) {
 		return nil, 0, ""
 	}
-	if newerOutputAfterMenu(menuLines, rows[len(rows)-1].line, normalized) {
+	if newerOutputAfterMenu(menuLines, menuEnd, normalized) {
 		return nil, 0, ""
 	}
 
 	options := make([]string, 0, len(rows))
-	focus := 0
-	for index, row := range rows {
+	for _, row := range rows {
 		options = append(options, row.label)
-		if row.focus {
-			focus = index
+		if !isHermes && row.focus {
+			focus = len(options) - 1
 		}
 	}
 	return options, focus, ""
@@ -249,11 +310,20 @@ func approvalDialogSource(text, agent string) string {
 	if len(rows) < 2 {
 		return ""
 	}
+	end := rows[len(rows)-1].line
+	if strings.Contains(normalized, "hermes") {
+		var ok bool
+		rows, _, ok = hermesApprovalRows(rows)
+		if !ok {
+			return ""
+		}
+		end = rows[len(rows)-1].line
+	}
 	headerStart := latestCompletedTurnLine(cleanLines(text)) + 1
 	if candidate := rows[0].line - 16; candidate > headerStart {
 		headerStart = candidate
 	}
-	return strings.Join(menuLines[headerStart:rows[len(rows)-1].line+1], "\n")
+	return strings.Join(menuLines[headerStart:end+1], "\n")
 }
 
 // The status block under a live dialog is at most this many non-empty lines.
@@ -571,10 +641,7 @@ func newerOutputAfterMenu(lines []string, lastMenuLine int, agent string) bool {
 			line == "" || chromePattern.MatchString(line) || approvalFooterPattern.MatchString(line) {
 			continue
 		}
-		if strings.Contains(agent, "hermes") &&
-			(hermesApprovalPromptPattern.MatchString(line) ||
-				hermesSpinnerLinePattern.MatchString(line) ||
-				hermesStatusLinePattern.MatchString(line)) {
+		if strings.Contains(agent, "hermes") && hermesApprovalChromeLine(line) {
 			continue
 		}
 		if strings.Contains(agent, "qoder") && qoderApprovalTailLine(line) {

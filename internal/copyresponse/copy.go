@@ -123,9 +123,6 @@ func Run(
 	}()
 	var composerCleared bool
 	if composerNeedsRestore {
-		if err := pane.SendKeys(ctx, paneID, []string{"Escape"}); err != nil {
-			return Result{}, fmt.Errorf("clear agent composer: %w", err)
-		}
 		composerCleared = true
 		defer func() {
 			if !composerCleared {
@@ -142,6 +139,23 @@ func Run(
 				err = errors.Join(err, fmt.Errorf("restore agent composer: %w", restoreErr))
 			}
 		}()
+		clearKeys := profile.ComposerClearKeys
+		if len(clearKeys) == 0 {
+			clearKeys = []string{"Escape"}
+		}
+		if err := pane.SendKeys(ctx, paneID, clearKeys); err != nil {
+			return Result{}, fmt.Errorf("clear agent composer: %w", err)
+		}
+		if len(profile.ComposerClearKeys) > 0 {
+			clearedSnapshot, err := readPane(ctx, pane, paneID)
+			if err != nil {
+				return Result{}, fmt.Errorf("verify agent composer clear: %w", err)
+			}
+			clearedText, found := profile.ComposerText(clearedSnapshot)
+			if !found || clearedText != "" {
+				return Result{}, errors.New("verify agent composer clear: composer remains non-empty")
+			}
+		}
 	}
 
 	submitted := false

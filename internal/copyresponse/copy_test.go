@@ -21,6 +21,7 @@ type fakePane struct {
 	texts      []string
 	keys       [][]string
 	onSendKeys func()
+	onSendText func(string) error
 }
 
 func (p *fakePane) ReadPane(ctx context.Context, _ string, _ int, _ string) (herdr.PaneRead, error) {
@@ -41,6 +42,11 @@ func (p *fakePane) ReadPane(ctx context.Context, _ string, _ int, _ string) (her
 func (p *fakePane) SendText(ctx context.Context, _ string, text string) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if p.onSendText != nil {
+		if err := p.onSendText(text); err != nil {
+			return err
+		}
 	}
 	p.texts = append(p.texts, text)
 	return nil
@@ -1063,5 +1069,59 @@ func TestRunAcceptsUncountedRepeatAfterConfirmationScrollsOut(t *testing.T) {
 	}
 	if !reflect.DeepEqual(pane.keys, [][]string{{"Enter"}}) {
 		t.Fatalf("keys = %v, want one command submission", pane.keys)
+	}
+}
+func TestRunClearsHermesComposerWithNativeSequence(t *testing.T) {
+	response := []byte("Hermes response")
+	pane := &fakePane{snapshots: []string{
+		"❯ draftcopy",
+		"❯ ",
+		"Copied assistant response #1 to clipboard\n❯ ",
+	}}
+	pane.onSendText = func(text string) error {
+		if text == "/copy" && pane.reads < 2 {
+			return errors.New("composer clear was not verified")
+		}
+		return nil
+	}
+	profile, ok := slashcmd.CopyProfileFor("hermes", "")
+	if !ok {
+		t.Fatal("missing Hermes copy profile")
+	}
+	reads := 0
+	var writes [][]byte
+	result, err := Run(
+		context.Background(),
+		"pane-hermes",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) {
+			reads++
+			if reads == 1 {
+				return []byte("before"), nil
+			}
+			return response, nil
+		},
+		func(_ context.Context, data []byte) error {
+			writes = append(writes, append([]byte(nil), data...))
+			return nil
+		},
+		1,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Text != string(response) || result.Source != "clipboard" {
+		t.Fatalf("Run() result = %+v, want Hermes response", result)
+	}
+	if !reflect.DeepEqual(pane.keys, [][]string{{"Escape", "Escape"}}) {
+		t.Fatalf("Hermes clear keys = %v, want double Escape", pane.keys)
+	}
+	if !reflect.DeepEqual(pane.texts, []string{"/copy", "draftcopy"}) {
+		t.Fatalf("Hermes text sequence = %v, want command then restored draft", pane.texts)
+	}
+	if len(writes) != 2 || string(writes[1]) != "before" {
+		t.Fatalf("clipboard writes = %q, want sentinel then original", writes)
 	}
 }

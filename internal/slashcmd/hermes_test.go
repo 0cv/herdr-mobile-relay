@@ -101,3 +101,20 @@ func TestHermesProjectSkillsUseGitRoot(t *testing.T) {
 		t.Fatal("Hermes discovered a subdirectory skill instead of the Git-root tree")
 	}
 }
+func TestHermesSkillDiscoveryUsesNativeSlugs(t *testing.T) {
+	isolateAgentEnv(t)
+	tempDir := t.TempDir()
+	writeSkill(t, filepath.Join(tempDir, ".hermes", "skills"), "Code Review", "Review code")
+	writeSkill(t, filepath.Join(tempDir, ".hermes", "skills"), "code_review", "Duplicate slug")
+
+	catalog := CatalogForProfile("hermes", "hermes", tempDir, "/nonexistent", nil, "", "", "")
+	count := 0
+	for _, command := range catalog.Commands {
+		if command.Command == "/code-review" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("Hermes native slug /code-review appears %d times, want one", count)
+	}
+}

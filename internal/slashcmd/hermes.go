@@ -38,7 +38,39 @@ var hermesBuiltins = []Command{
 	{"/quit", "Quit Hermes", "builtin", ""},
 }
 
-var hermesProfileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+var (
+	hermesProfileNamePattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	hermesSkillInvalidPattern = regexp.MustCompile(`[^a-z0-9-]`)
+	hermesSkillHyphenPattern  = regexp.MustCompile(`-{2,}`)
+)
+
+func hermesSkillSlug(name string) string {
+	name = strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(name), " ", "-"), "_", "-")
+	name = hermesSkillInvalidPattern.ReplaceAllString(name, "")
+	name = hermesSkillHyphenPattern.ReplaceAllString(name, "-")
+	return strings.Trim(name, "-")
+}
+
+func parseHermesSkillMetadata(metadata map[string]string, dirName, source string) *Command {
+	name := metadata["name"]
+	if name == "" {
+		name = dirName
+	}
+	slug := hermesSkillSlug(name)
+	if slug == "" || !commandNamePattern.MatchString(slug) || !userInvocable(metadata) {
+		return nil
+	}
+	description := metadata["description"]
+	if description == "" {
+		description = strings.ToUpper(slug[:1]) + slug[1:] + " skill"
+	}
+	return &Command{
+		Command:      "/" + slug,
+		Description:  compact(description, 240),
+		Source:       source,
+		ArgumentHint: compact(metadata["argument-hint"], 120),
+	}
+}
 
 func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	if ctx.SuppressNative {
@@ -182,7 +214,7 @@ func scanHermesSkillDirBudget(root, source, boundary string, budget *int) ([]Com
 			}
 			seenFiles[resolved] = true
 			*budget--
-			if cmd, _ := parseSkillMetadata(metadata, filepath.Base(dir), "", source); cmd != nil {
+			if cmd := parseHermesSkillMetadata(metadata, filepath.Base(dir), source); cmd != nil {
 				commands = append(commands, *cmd)
 			}
 			return
