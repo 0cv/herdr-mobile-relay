@@ -9,7 +9,7 @@ import (
 
 func TestCopyProfileForVerifiedAgents(t *testing.T) {
 	for _, agent := range []string{
-		"claude", "claude-code", "codex", "kimi", "omp", "pi", "pi-coding-agent", "qoder", "qodercli",
+		"hermes", "hermes-agent", "claude", "claude-code", "codex", "kimi", "omp", "pi", "pi-coding-agent", "qoder", "qodercli",
 	} {
 		profile, ok := CopyProfileFor("", agent)
 		if !ok || profile.Confirmation == nil || profile.Composer == nil {
@@ -38,6 +38,15 @@ func TestCopyProfileConfirmationCounts(t *testing.T) {
 	chars, lines, matched = kimi.ConfirmationCounts("Copied to clipboard (28 characters).")
 	if !matched || chars != 28 || lines != -1 {
 		t.Fatalf("Kimi ConfirmationCounts() = (%d, %d, %v), want (28, -1, true)", chars, lines, matched)
+	}
+
+	hermes, ok := CopyProfileFor("hermes", "")
+	if !ok {
+		t.Fatal("missing Hermes copy profile")
+	}
+	chars, lines, matched = hermes.ConfirmationCounts("  Copied assistant response #2 to clipboard")
+	if !matched || chars != -1 || lines != -1 {
+		t.Fatalf("Hermes ConfirmationCounts() = (%d, %d, %v), want (-1, -1, true)", chars, lines, matched)
 	}
 
 	codex, ok := CopyProfileFor("codex", "")
@@ -162,6 +171,34 @@ func TestCopyProfileComposerRecognizesIdlePlaceholders(t *testing.T) {
 	}
 	if got, found := kimi.ComposerText(string(content)); got != "/copy" || !found {
 		t.Fatalf("Kimi ComposerText() = (%q, %v), want (/copy, true)", got, found)
+	}
+}
+
+func TestHermesCopyProfileRecognizesAllIdlePlaceholders(t *testing.T) {
+	profile, ok := CopyProfileFor("hermes", "")
+	if !ok {
+		t.Fatal("missing Hermes copy profile")
+	}
+	placeholders := []string{
+		"Ask anything, or type / for commands…",
+		"Summarize what's in this folder",
+		"Draft a reply to the last email in my inbox",
+		"Plan a feature, then build it step by step",
+		"Find and fix a failing test",
+		"Research this topic and write me a brief",
+		"What changed in this repo recently?",
+		"Turn these notes into a to-do list",
+		"Explain this error and how to fix it",
+		"Set a reminder or schedule a recurring task",
+		"Type / to browse commands, or Ctrl+P for the palette",
+	}
+	for _, placeholder := range placeholders {
+		t.Run(placeholder, func(t *testing.T) {
+			got, found := profile.ComposerText("❯ " + placeholder + "\n")
+			if got != "" || !found {
+				t.Fatalf("ComposerText() = (%q, %v), want an empty draft for %q", got, found, placeholder)
+			}
+		})
 	}
 }
 

@@ -17,11 +17,13 @@ func testReader(t *testing.T) (*Reader, string) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("PI_CODING_AGENT_DIR", "")
+	t.Setenv("HERMES_HOME", "")
 	t.Setenv(agentroots.ClaudeListEnv, "")
 	t.Setenv(agentroots.QoderListEnv, "")
 	t.Setenv(agentroots.CodexListEnv, "")
 	t.Setenv(agentroots.PiListEnv, "")
 	t.Setenv(agentroots.OMPListEnv, "")
+	t.Setenv(agentroots.HermesListEnv, "")
 	home := t.TempDir()
 	return NewReader(home), home
 }

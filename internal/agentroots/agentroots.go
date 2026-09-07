@@ -55,6 +55,7 @@ const (
 	OMPListEnv      = "HERDR_OMP_CONFIG_DIRS"
 	OpenCodeListEnv = "HERDR_OPENCODE_DATA_DIRS"
 	OMOListEnv      = "HERDR_OMO_CONFIG_DIRS"
+	HermesListEnv   = "HERDR_HERMES_DATA_DIRS"
 )
 
 // Claude reports the transcript roots for Claude Code, honouring
@@ -98,6 +99,25 @@ func OpenCodeDBs(home string) []string {
 	paths := make([]string, 0, len(roots))
 	for _, root := range roots {
 		paths = append(paths, filepath.Join(root, "opencode.db"))
+	}
+	return paths
+}
+
+// HermesData reports the directories containing Hermes Agent state databases.
+// Hermes stores its canonical session history in state.db under HERMES_HOME,
+// defaulting to ~/.hermes.
+func HermesData(home string) []string {
+	return resolve(home, HermesListEnv, "HERMES_HOME", filepath.Join(home, ".hermes"), "")
+}
+
+// HermesDBs reports the fixed state database filename under each Hermes data
+// directory. Callers must still re-check containment and regular-file status
+// immediately before opening one.
+func HermesDBs(home string) []string {
+	roots := HermesData(home)
+	paths := make([]string, 0, len(roots))
+	for _, root := range roots {
+		paths = append(paths, filepath.Join(root, "state.db"))
 	}
 	return paths
 }

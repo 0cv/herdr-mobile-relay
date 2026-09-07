@@ -15,9 +15,11 @@ func isolateAgentEnv(t *testing.T) {
 		"HERDR_CLAUDE_CONFIG_DIRS",
 		"HERDR_QODER_CONFIG_DIRS",
 		"HERDR_CODEX_CONFIG_DIRS",
+		"HERDR_HERMES_DATA_DIRS",
 		"CLAUDE_CONFIG_DIR",
 		"CODEX_HOME",
 		"KIMI_CODE_HOME",
+		"HERMES_HOME",
 	} {
 		t.Setenv(name, "")
 	}
