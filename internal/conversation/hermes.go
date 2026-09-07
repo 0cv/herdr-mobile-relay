@@ -129,7 +129,7 @@ func (r *hermesReader) query(database, sessionID, before string, limit int) ([]h
 		limit = maxPageSize
 	}
 	sessionHex := hex.EncodeToString([]byte(sessionID))
-	cursorCTE := "cursor AS (SELECT NULL AS logical_timestamp, NULL AS id WHERE 0)"
+	cursorCTE := "cursor AS (SELECT NULL AS logical_id WHERE 0)"
 	cursorFilter := ""
 	cursorFound := "1"
 	if before != "" {
@@ -137,42 +137,51 @@ func (r *hermesReader) query(database, sessionID, before string, limit int) ([]h
 		if err != nil || cursor <= 0 {
 			return nil, false, "invalid_cursor"
 		}
-		cursorCTE = fmt.Sprintf("cursor AS (SELECT logical_timestamp,id FROM displayed WHERE id=%d)", cursor)
+		// Resolve an old physical row, including an archived compaction
+		// generation, to its stable logical message before selecting rows.
+		cursorCTE = fmt.Sprintf(
+			"cursor AS (SELECT logical_id FROM visible WHERE id=%d AND role IN ('user','assistant') LIMIT 1)",
+			cursor,
+		)
 		cursorFilter = " AND EXISTS(SELECT 1 FROM cursor) AND " +
-			"(d.logical_timestamp < (SELECT logical_timestamp FROM cursor) OR " +
-			"(d.logical_timestamp = (SELECT logical_timestamp FROM cursor) AND d.id < (SELECT id FROM cursor)))"
+			"d.logical_id < (SELECT logical_id FROM cursor)"
 		cursorFound = "EXISTS(SELECT 1 FROM cursor)"
 	}
 	query := fmt.Sprintf(
-		`WITH visible AS (`+
-			`SELECT m.id,m.role,COALESCE(m.content,'') AS content,`+
+		`WITH raw AS (`+
+			`SELECT m.id,m.role,m.active,m.compacted,COALESCE(m.content,'') AS content,`+
 			`COALESCE(m.tool_call_id,'') AS tool_call_id,COALESCE(m.tool_calls,'') AS tool_calls,`+
 			`COALESCE(m.tool_name,'') AS tool_name,COALESCE(m.display_kind,'') AS display_kind,`+
-			`COALESCE(m.timestamp,0) AS logical_timestamp,`+
-			`ROW_NUMBER() OVER (`+
-			`PARTITION BY m.role,COALESCE(m.content,''),COALESCE(m.tool_call_id,''),`+
-			`COALESCE(m.tool_calls,''),COALESCE(m.tool_name,''),COALESCE(m.timestamp,0) `+
-			`ORDER BY m.active DESC,m.id DESC`+
-			`) AS generation `+
+			`COALESCE(m.timestamp,0) AS logical_timestamp `+
 			`FROM messages AS m `+
 			`WHERE m.session_id=CAST(X'%s' AS TEXT) AND (m.active=1 OR m.compacted=1) `+
 			`AND COALESCE(m.display_kind,'') <> 'hidden'`+
+			`), visible AS (`+
+			`SELECT raw.*,`+
+			`MIN(id) OVER (`+
+			`PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp`+
+			`) AS logical_id,`+
+			`ROW_NUMBER() OVER (`+
+			`PARTITION BY role,content,tool_call_id,tool_calls,tool_name,logical_timestamp `+
+			`ORDER BY active DESC,id DESC`+
+			`) AS generation `+
+			`FROM raw`+
 			`), displayed AS (`+
-			`SELECT id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp `+
+			`SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp `+
 			`FROM visible WHERE generation=1 AND role IN ('user','assistant')`+
 			`), `+cursorCTE+`, selected AS (`+
-			`SELECT id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp `+
+			`SELECT id,logical_id,role,content,tool_call_id,tool_calls,tool_name,display_kind,logical_timestamp `+
 			`FROM displayed AS d WHERE 1=1`+cursorFilter+
-			` ORDER BY logical_timestamp DESC,id DESC LIMIT %d`+
+			` ORDER BY logical_id DESC LIMIT %d`+
 			`) `+
 			`SELECT s.id AS session_id,COALESCE(s.cwd,'') AS cwd,COALESCE(s.title,'') AS title,`+
-			`COALESCE(sm.id,0) AS message_id,COALESCE(sm.role,'') AS role,`+
+			`COALESCE(sm.logical_id,0) AS message_id,COALESCE(sm.role,'') AS role,`+
 			`hex(COALESCE(sm.content,'')) AS content_hex,COALESCE(sm.tool_call_id,'') AS tool_call_id,`+
 			`COALESCE(sm.tool_calls,'') AS tool_calls,COALESCE(sm.tool_name,'') AS tool_name,`+
 			`COALESCE(sm.display_kind,'') AS display_kind,COALESCE(sm.logical_timestamp,0) AS timestamp,`+
 			`(SELECT COUNT(*) FROM displayed) AS message_total,%s AS cursor_found `+
 			`FROM sessions AS s LEFT JOIN selected AS sm ON 1=1 `+
-			`WHERE s.id=CAST(X'%s' AS TEXT) ORDER BY sm.logical_timestamp DESC,sm.id DESC;`,
+			`WHERE s.id=CAST(X'%s' AS TEXT) ORDER BY sm.logical_id DESC;`,
 		sessionHex, limit+1, cursorFound, sessionHex,
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), hermesQueryTimeout)

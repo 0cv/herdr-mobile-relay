@@ -16,12 +16,13 @@ import (
 )
 
 type fakePane struct {
-	snapshots  []string
-	reads      int
-	texts      []string
-	keys       [][]string
-	onSendKeys func()
-	onSendText func(string) error
+	snapshots   []string
+	reads       int
+	texts       []string
+	keys        [][]string
+	onSendKeys  func()
+	onSendText  func(string) error
+	sendKeysErr error
 }
 
 func (p *fakePane) ReadPane(ctx context.Context, _ string, _ int, _ string) (herdr.PaneRead, error) {
@@ -59,6 +60,9 @@ func (p *fakePane) SendKeys(ctx context.Context, _ string, keys []string) error 
 	p.keys = append(p.keys, append([]string(nil), keys...))
 	if p.onSendKeys != nil {
 		p.onSendKeys()
+	}
+	if p.sendKeysErr != nil {
+		return p.sendKeysErr
 	}
 	return nil
 }
@@ -1123,5 +1127,56 @@ func TestRunClearsHermesComposerWithNativeSequence(t *testing.T) {
 	}
 	if len(writes) != 2 || string(writes[1]) != "before" {
 		t.Fatalf("clipboard writes = %q, want sentinel then original", writes)
+	}
+}
+
+func TestRunDoesNotRestoreHermesComposerAfterRejectedClear(t *testing.T) {
+	pane := &fakePane{
+		snapshots:   []string{"❯ draftcopy"},
+		sendKeysErr: errors.New("key injection rejected"),
+	}
+	profile, ok := slashcmd.CopyProfileFor("hermes", "")
+	if !ok {
+		t.Fatal("missing Hermes copy profile")
+	}
+	_, err := Run(
+		context.Background(),
+		"pane-hermes-rejected-clear",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) { return []byte("before"), nil },
+		func(context.Context, []byte) error { return nil },
+		1,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "clear agent composer") {
+		t.Fatalf("Run() error = %v, want rejected composer clear", err)
+	}
+	if len(pane.texts) != 0 {
+		t.Fatalf("restoration after rejected clear = %v, want no draft append", pane.texts)
+	}
+}
+
+func TestRunDoesNotRestoreHermesComposerAfterVerificationFailure(t *testing.T) {
+	pane := &fakePane{snapshots: []string{"❯ draftcopy", "❯ draftcopy"}}
+	profile, ok := slashcmd.CopyProfileFor("hermes", "")
+	if !ok {
+		t.Fatal("missing Hermes copy profile")
+	}
+	_, err := Run(
+		context.Background(),
+		"pane-hermes-unverified-clear",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) { return []byte("before"), nil },
+		func(context.Context, []byte) error { return nil },
+		1,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "composer remains non-empty") {
+		t.Fatalf("Run() error = %v, want nonempty composer verification failure", err)
+	}
+	if len(pane.texts) != 0 {
+		t.Fatalf("restoration after verification failure = %v, want no draft append", pane.texts)
 	}
 }

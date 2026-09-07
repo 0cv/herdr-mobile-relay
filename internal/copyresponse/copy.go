@@ -123,22 +123,6 @@ func Run(
 	}()
 	var composerCleared bool
 	if composerNeedsRestore {
-		composerCleared = true
-		defer func() {
-			if !composerCleared {
-				return
-			}
-			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recoveryTimeout)
-			defer cancel()
-			if restoreErr := pane.SendText(restoreCtx, paneID, composer); restoreErr != nil {
-				if err == nil {
-					result = Result{}
-					err = fmt.Errorf("restore agent composer: %w", restoreErr)
-					return
-				}
-				err = errors.Join(err, fmt.Errorf("restore agent composer: %w", restoreErr))
-			}
-		}()
 		clearKeys := profile.ComposerClearKeys
 		if len(clearKeys) == 0 {
 			clearKeys = []string{"Escape"}
@@ -156,6 +140,22 @@ func Run(
 				return Result{}, errors.New("verify agent composer clear: composer remains non-empty")
 			}
 		}
+		composerCleared = true
+		defer func() {
+			if !composerCleared {
+				return
+			}
+			restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recoveryTimeout)
+			defer cancel()
+			if restoreErr := pane.SendText(restoreCtx, paneID, composer); restoreErr != nil {
+				if err == nil {
+					result = Result{}
+					err = fmt.Errorf("restore agent composer: %w", restoreErr)
+					return
+				}
+				err = errors.Join(err, fmt.Errorf("restore agent composer: %w", restoreErr))
+			}
+		}()
 	}
 
 	submitted := false

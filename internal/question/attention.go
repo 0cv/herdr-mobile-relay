@@ -96,7 +96,7 @@ var (
 	hermesSpinnerLinePattern    = regexp.MustCompile(
 		`^\s*💻\s+.+\(\s*(?:\d+(?:\.\d+)?s|\d+m\d+s)(?:\s*·\s*[↓↑]\s+\S+\s+tok)?\)\s*$`,
 	)
-	hermesStatusLinePattern = regexp.MustCompile(`^\s*⚕\s+\S+\s+│.*$`)
+	hermesStatusLinePattern = regexp.MustCompile(`^\s*⚕\s+\S+(?:\s+(?:│|·)\s*.*)?\s*$`)
 	statusFooterPattern     = regexp.MustCompile(
 		`(?i)(?:\bcontext\s+\d+%\s+used\b|\bctx\s*:?\s*(?:\d+%|-+)|` +
 			`\?\s+for\s+shortcuts|\b(?:manual|plan)\s+mode\b|` +
@@ -165,16 +165,30 @@ func Classify(text, agent string) Classification {
 }
 
 func approvalSummaryLines(text, agent string) []string {
-	lines := paneSummaryLines(text)
-	if !strings.Contains(strings.ToLower(agent), "hermes") {
-		return lines
+	normalized := strings.ToLower(agent)
+	if !strings.Contains(normalized, "hermes") {
+		return paneSummaryLines(text)
 	}
-	filtered := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if hermesApprovalChromeLine(line) {
+	// Remove volatile Hermes chrome before applying the summary tail limit. A
+	// repaint must not evict stable dialog content from the fingerprint inputs.
+	filtered := make([]string, 0)
+	for _, line := range cleanLines(text) {
+		if line == "" || chromePattern.MatchString(line) ||
+			promptSkipPattern.MatchString(line) || hermesApprovalChromeLine(line) {
 			continue
 		}
+		if match := menuPattern.FindStringSubmatch(line); match != nil {
+			label := compact(match[3], 500)
+			if hermesApprovalAuxiliaryOption(label) {
+				continue
+			}
+			// Menu focus and the native number-column padding are presentation.
+			line = strings.TrimSpace(match[2] + ". " + label)
+		}
 		filtered = append(filtered, line)
+	}
+	if len(filtered) > 12 {
+		filtered = filtered[len(filtered)-12:]
 	}
 	return filtered
 }
@@ -182,7 +196,8 @@ func approvalSummaryLines(text, agent string) []string {
 func hermesApprovalChromeLine(line string) bool {
 	return hermesApprovalPromptPattern.MatchString(line) ||
 		hermesSpinnerLinePattern.MatchString(line) ||
-		hermesStatusLinePattern.MatchString(line)
+		hermesStatusLinePattern.MatchString(line) ||
+		approvalFooterPattern.MatchString(line)
 }
 
 func hermesApprovalAuxiliaryOption(label string) bool {

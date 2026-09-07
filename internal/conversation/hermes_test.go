@@ -186,9 +186,10 @@ func TestHermesReaderPreservesCompactedLogicalOrder(t *testing.T) {
 	messageSQL := fmt.Sprintf(`
 INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
  ('%s','assistant','A',100,0,1),
- ('%s','assistant','B',200,0,1),
- ('%s','assistant','C',300,1,0),
- ('%s','assistant','A',100,0,1);`, sessionID, sessionID, sessionID, sessionID)
+ ('%s','assistant','B',100,0,1),
+ ('%s','assistant','C',100,1,0),
+ ('%s','assistant','A',100,1,0),
+ ('%s','assistant','B',100,1,0);`, sessionID, sessionID, sessionID, sessionID, sessionID)
 	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Compacted order", messageSQL)
 	t.Setenv(agentroots.HermesListEnv, root)
 	t.Setenv("HERMES_HOME", "")
@@ -226,6 +227,58 @@ INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
 	}
 	if len(oldest.Entries) != 1 || oldest.Entries[0].Text != "A" || oldest.HasMore {
 		t.Fatalf("Hermes oldest compacted page = %#v", oldest)
+	}
+}
+
+func TestHermesReaderResolvesArchivedCursorAfterCompaction(t *testing.T) {
+	sqlite, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	root := t.TempDir()
+	cwd := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "20260812_125000_abcdef"
+	database := filepath.Join(root, "state.db")
+	messageSQL := fmt.Sprintf(`
+INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
+ ('%s','assistant','A',100,1,0),
+ ('%s','assistant','B',200,1,0);`, sessionID, sessionID)
+	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Cursor compaction", messageSQL)
+	t.Setenv(agentroots.HermesListEnv, root)
+	t.Setenv("HERMES_HOME", "")
+	reader := NewReader(t.TempDir())
+	reader.hermes.binary = sqlite
+
+	latest, err := reader.ReadFor("hermes", cwd, sessionID, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(latest.Entries) != 1 || latest.Entries[0].Text != "B" ||
+		latest.Entries[0].ID != "2" || !latest.HasMore {
+		t.Fatalf("Hermes initial page = %#v", latest)
+	}
+
+	command := exec.Command(sqlite, database)
+	command.Stdin = strings.NewReader(fmt.Sprintf(`
+BEGIN;
+UPDATE messages SET active=0,compacted=1 WHERE session_id='%s' AND active=1;
+INSERT INTO messages(session_id,role,content,timestamp,active,compacted)
+VALUES('%s','assistant','B',200,1,0);
+COMMIT;`, sessionID, sessionID))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("compact Hermes database: %v: %s", err, output)
+	}
+
+	older, err := reader.ReadFor("hermes-agent", cwd, sessionID, latest.Entries[0].ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !older.Available || older.ReasonCode != "" || len(older.Entries) != 1 ||
+		older.Entries[0].Text != "A" || older.Entries[0].ID != "1" || older.HasMore {
+		t.Fatalf("Hermes archived cursor page = %#v", older)
 	}
 }
 

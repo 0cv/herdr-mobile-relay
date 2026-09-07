@@ -186,6 +186,51 @@ func TestClassifyHermesCompactApprovalFooter(t *testing.T) {
 	}
 }
 
+func TestClassifyHermesCompactApprovalLayout(t *testing.T) {
+	content := hermesApprovalView + `
+⚕ gpt-5.6-luna · 3% · 00:10
+↑/↓ to select, Enter to confirm  (294s)
+⚠
+`
+	got := Classify(content, "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want Hermes approval with compact status chrome", got)
+	}
+}
+
+func TestApprovalFingerprintNormalizesHermesInteractionChrome(t *testing.T) {
+	first := Classify(hermesApprovalView+`
+⚕ gpt-5.6-luna · 3% · 00:10
+↑/↓ to select, Enter to confirm  (294s)
+⚠
+`, "hermes")
+	movedView := strings.Replace(
+		hermesApprovalView,
+		"│ ❯ 1. Allow once                                            │",
+		"│   1. Allow once                                            │",
+		1,
+	)
+	movedView = strings.Replace(
+		movedView,
+		"│   2. Allow for this session                                │",
+		"│ ❯ 2. Allow for this session                                │",
+		1,
+	)
+	second := Classify(movedView+`
+⚕ gpt-5.6-luna · 3% · 00:10
+↑/↓ to select, Enter to confirm  (293s)
+⚠
+`, "hermes")
+	if first.Kind != AttentionApproval || second.Kind != AttentionApproval ||
+		first.Prompt != second.Prompt || first.Command != second.Command {
+		t.Fatalf("Hermes identity inputs changed: first=%+v second=%+v", first, second)
+	}
+	if ApprovalFingerprint(first) != ApprovalFingerprint(second) {
+		t.Fatal("Hermes interaction chrome changed the approval fingerprint")
+	}
+}
+
 func TestClassifyHermesLongCommandKeepsConsentIndices(t *testing.T) {
 	longCommand := strings.Replace(
 		hermesApprovalView,
