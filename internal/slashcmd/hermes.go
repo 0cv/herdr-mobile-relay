@@ -1,7 +1,10 @@
 package slashcmd
 
 import (
+	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 type hermesProvider struct{}
@@ -35,7 +38,15 @@ var hermesBuiltins = []Command{
 	{"/quit", "Quit Hermes", "builtin", ""},
 }
 
+var hermesProfileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
 func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
+	if ctx.SuppressNative {
+		builtins := make([]Command, len(hermesBuiltins))
+		copy(builtins, hermesBuiltins)
+		return builtins, false
+	}
+
 	commands := make([]Command, 0, len(hermesBuiltins))
 	commands = append(commands, hermesBuiltins...)
 	seen := make(map[string]bool, len(hermesBuiltins))
@@ -46,10 +57,15 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 	truncated := false
 	budget := maxWalkFiles
 
-	// 1. Scan project-level skills: .hermes/skills/
+	// Hermes resolves project skills from the nearest trusted Git root, not
+	// from the process working directory.
 	if ctx.Cwd != "" {
-		projectSkills := filepath.Join(ctx.Cwd, ".hermes", "skills")
-		cmds, _, trunc := scanSkillDirBudget(projectSkills, "project", &budget)
+		projectRoot := ctx.Cwd
+		if gitRoot := findGitRoot(ctx.Cwd); gitRoot != "" {
+			projectRoot = gitRoot
+		}
+		projectSkills := filepath.Join(projectRoot, ".hermes", "skills")
+		cmds, trunc := scanHermesSkillDirBudget(projectSkills, "project", projectRoot, &budget)
 		for _, cmd := range cmds {
 			if !seen[cmd.Command] {
 				seen[cmd.Command] = true
@@ -59,10 +75,11 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		truncated = truncated || trunc
 	}
 
-	// 2. Scan user-level skills: ~/.hermes/skills/
-	if ctx.Home != "" {
-		personalSkills := filepath.Join(ctx.Home, ".hermes", "skills")
-		cmds, _, trunc := scanSkillDirBudget(personalSkills, "personal", &budget)
+	// Hermes keeps the active profile's skills under its Hermes home. An
+	// explicit HERMES_HOME wins; otherwise honor the sticky profile selection.
+	if home := hermesHome(ctx); home != "" {
+		personalSkills := filepath.Join(home, "skills")
+		cmds, trunc := scanHermesSkillDirBudget(personalSkills, "personal", "", &budget)
 		for _, cmd := range cmds {
 			if !seen[cmd.Command] {
 				seen[cmd.Command] = true
@@ -72,7 +89,7 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		truncated = truncated || trunc
 	}
 
-	// 3. Any additional configured skill dirs from agent-profiles.ini
+	// Additional configured skill dirs from agent-profiles.ini.
 	if len(ctx.SkillDirs) > 0 {
 		format := ctx.CommandFormat
 		if format == "" {
@@ -88,6 +105,109 @@ func (p *hermesProvider) Discover(ctx DiscoverContext) ([]Command, bool) {
 		truncated = truncated || trunc
 	}
 
+	return commands, truncated
+}
+
+func hermesHome(ctx DiscoverContext) string {
+	envHome := strings.TrimSpace(os.Getenv("HERMES_HOME"))
+	if ctx.Home == "" && envHome == "" {
+		return ""
+	}
+	defaultHome := filepath.Join(ctx.Home, ".hermes")
+	if envHome != "" {
+		envHome = expandTilde(envHome, ctx.Home)
+		if filepath.IsAbs(envHome) {
+			return filepath.Clean(envHome)
+		}
+	}
+	if ctx.Home == "" || !filepath.IsAbs(defaultHome) {
+		return ""
+	}
+
+	data, err := os.ReadFile(filepath.Join(defaultHome, "active_profile"))
+	if err != nil {
+		return defaultHome
+	}
+	profile := strings.ToLower(strings.TrimSpace(string(data)))
+	if profile == "" || profile == "default" || !hermesProfileNamePattern.MatchString(profile) {
+		return defaultHome
+	}
+	profileHome := filepath.Join(defaultHome, "profiles", profile)
+	info, err := os.Stat(profileHome)
+	if err != nil || !info.IsDir() {
+		return defaultHome
+	}
+	return profileHome
+}
+
+func scanHermesSkillDirBudget(root, source, boundary string, budget *int) ([]Command, bool) {
+	if root == "" || *budget <= 0 {
+		return nil, *budget <= 0
+	}
+	var commands []Command
+	seenFiles := make(map[string]bool)
+	seenDirs := make(map[string]bool)
+	truncated := false
+
+	var scan func(string)
+	scan = func(dir string) {
+		if *budget <= 0 {
+			truncated = true
+			return
+		}
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			return
+		}
+		realDir := dir
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			realDir = resolved
+		}
+		realDir = filepath.Clean(realDir)
+		if boundary != "" && !pathWithin(realDir, boundary) {
+			return
+		}
+		if seenDirs[realDir] {
+			return
+		}
+		seenDirs[realDir] = true
+
+		skillFile := filepath.Join(dir, "SKILL.md")
+		if skillInfo, err := os.Stat(skillFile); err == nil && skillInfo.Mode().IsRegular() {
+			metadata, resolved, ok := scopedSkillMetadata(
+				filepath.Dir(dir), filepath.Base(dir), source, boundary,
+			)
+			if !ok || seenFiles[resolved] {
+				return
+			}
+			seenFiles[resolved] = true
+			*budget--
+			if cmd, _ := parseSkillMetadata(metadata, filepath.Base(dir), "", source); cmd != nil {
+				commands = append(commands, *cmd)
+			}
+			return
+		}
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			if *budget <= 0 {
+				truncated = true
+				return
+			}
+			if strings.HasPrefix(entry.Name(), ".") || entry.Name() == "node_modules" {
+				continue
+			}
+			child := filepath.Join(dir, entry.Name())
+			if entryIsDir(entry, child) {
+				scan(child)
+			}
+		}
+	}
+
+	scan(root)
 	return commands, truncated
 }
 

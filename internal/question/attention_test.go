@@ -140,6 +140,57 @@ func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 	}
 }
 
+func TestClassifyHermesApprovalWithNativeComposerFooter(t *testing.T) {
+	got := Classify(hermesApprovalView+"\n⚠ ❯\n", "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want Hermes approval despite native composer footer", got)
+	}
+	stale := Classify(hermesApprovalView+"\n⚠ ❯ newer output\n", "hermes")
+	if stale.Kind == AttentionApproval {
+		t.Fatalf("classification = %+v, want stale Hermes approval rejected", stale)
+	}
+}
+func TestClassifyHermesApprovalWithLiveStatusLines(t *testing.T) {
+	content := hermesApprovalView + `
+  💻 chmod 777 /tmp/hermes-relay-approval-target-3  (  6.3s · ↓ 60 tok)
+ ⚕ gpt-5.6-luna │ 7.23K/272K │ [░░░░░░░░░░] 3% │ ◎ 73.7% │ ◷ 2.8s │ ↑ 218
+─────────────────────────────────────────────────────────────────────────
+⚠ ❯
+─────────────────────────────────────────────────────────────────────────
+`
+	got := Classify(content, "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want approval despite live Hermes status lines", got)
+	}
+}
+
+
+func TestClassifyHermesIdlePlaceholdersAsChat(t *testing.T) {
+	placeholders := []string{
+		"Ask anything, or type / for commands…",
+		"Summarize what's in this folder",
+		"Draft a reply to the last email in my inbox",
+		"Plan a feature, then build it step by step",
+		"Find and fix a failing test",
+		"Research this topic and write me a brief",
+		"What changed in this repo recently?",
+		"Turn these notes into a to-do list",
+		"Explain this error and how to fix it",
+		"Set a reminder or schedule a recurring task",
+		"Type / to browse commands, or Ctrl+P for the palette",
+	}
+	for _, placeholder := range placeholders {
+		t.Run(placeholder, func(t *testing.T) {
+			got := Classify("Completed response\n\n❯ "+placeholder+"\n", "hermes")
+			if got.Kind != AttentionChat {
+				t.Fatalf("classification = %+v, want chat for Hermes placeholder %q", got, placeholder)
+			}
+		})
+	}
+}
+
 func TestClassifyOMPPlanApprovalFocus(t *testing.T) {
 	first := Classify(ompPlanApprovalView, "omp")
 	if first.Kind != AttentionApproval || first.ApprovalFocus != 0 {

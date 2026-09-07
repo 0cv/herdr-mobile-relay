@@ -195,6 +195,7 @@ func TestExplicitSuppressionSkipsNativeDiscovery(t *testing.T) {
 		{"pi", len(piBuiltins), filepath.Join(".pi", "agent", "skills")},
 		{"omp", len(ompBuiltins), filepath.Join(".omp", "agent", "skills")},
 		{"kimi", len(kimiBuiltins), filepath.Join(".kimi", "skills")},
+		{"hermes", len(hermesBuiltins), filepath.Join(".hermes", "skills")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.profile, func(t *testing.T) {

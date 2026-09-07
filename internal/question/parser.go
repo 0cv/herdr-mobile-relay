@@ -226,6 +226,15 @@ func PaneSummary(text string) string {
 	return strings.Join(paneSummaryLines(text), "\n")
 }
 
+func latestCompletedTurnLine(lines []string) int {
+	for index := len(lines) - 1; index >= 0; index-- {
+		if turnDurationPattern.MatchString(strings.TrimSpace(lines[index])) {
+			return index
+		}
+	}
+	return -1
+}
+
 // LatestCompletedResponse returns the complete latest Codex or Claude response
 // bounded by the agent's response marker and completed-turn duration line.
 // Unlike PaneSummary, it intentionally does not impose a display-line limit;

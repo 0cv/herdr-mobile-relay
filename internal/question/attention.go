@@ -76,8 +76,28 @@ var (
 			`(?:esc|escape)\s+(?:to\s+)?(?:cancel|reject|deny|exit)|` +
 			`(?:↑/↓|up/down).*(?:navigate|select)|tab\s+to\s+(?:edit|amend))`,
 	)
-	normalPromptPattern = regexp.MustCompile(`(?i)^\s*(?:[a-z0-9_-]+\s+)?[❯›>]\s*(?:$|(?:ask|describe|type|send|use)\b.*)$`)
-	statusFooterPattern = regexp.MustCompile(
+	normalPromptPattern      = regexp.MustCompile(`(?i)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?:$|(?:ask|describe|type|send|use)\b.*)$`)
+	hermesPlaceholderPattern = regexp.MustCompile(
+		`(?i)^\s*(?:(?:\[[a-z0-9_-]+\]|[a-z0-9_-]+)\s+)?[❯›>]\s*(?:` +
+			`ask anything, or type / for commands(?:…|\.\.\.)|` +
+			`summarize what's in this folder|` +
+			`draft a reply to the last email in my inbox|` +
+			`plan a feature, then build it step by step|` +
+			`find and fix a failing test|` +
+			`research this topic and write me a brief|` +
+			`what changed in this repo recently\?|` +
+			`turn these notes into a to-do list|` +
+			`explain this error and how to fix it|` +
+			`set a reminder or schedule a recurring task|` +
+			`type / to browse commands, or ctrl\+p for the palette` +
+			`)\s*$`,
+	)
+	hermesApprovalPromptPattern = regexp.MustCompile(`(?i)^\s*⚠\x{fe0f}?\s+[❯›>]\s*$`)
+	hermesSpinnerLinePattern = regexp.MustCompile(
+		`^\s*💻\s+.+\(\s*(?:\d+(?:\.\d+)?s|\d+m\d+s)(?:\s*·\s*[↓↑]\s+\S+\s+tok)?\)\s*$`,
+	)
+	hermesStatusLinePattern = regexp.MustCompile(`^\s*⚕\s+\S+\s+│.*$`)
+	statusFooterPattern         = regexp.MustCompile(
 		`(?i)(?:\bcontext\s+\d+%\s+used\b|\bctx\s*:?\s*(?:\d+%|-+)|` +
 			`\?\s+for\s+shortcuts|\b(?:manual|plan)\s+mode\b|` +
 			`\b(?:shift\+tab|ctrl\+|cmd\+)|\b\d+\s+agents?\b)`,
@@ -520,19 +540,40 @@ func approvalLabels(rows []approvalMenuRow) bool {
 	negative := regexp.MustCompile(`\b(?:no|deny|reject|cancel|exit)\b`).MatchString(last)
 	return positive && negative
 }
-
-func latestCompletedTurnLine(lines []string) int {
-	for index := len(lines) - 1; index >= 0; index-- {
-		if turnDurationPattern.MatchString(lines[index]) {
+// Hermes keeps the guard explanation below the numbered choices inside the
+// same bordered panel. Treat that bounded tail as dialog content, not newer
+// output; anything after its closing border still has to be recognized as
+// stable spinner/status chrome.
+func hermesApprovalTailEnd(lines []string, lastMenuLine int) int {
+	const maxTailLines = 8
+	limit := lastMenuLine + 1 + maxTailLines
+	if limit > len(lines) {
+		limit = len(lines)
+	}
+	for index := lastMenuLine + 1; index < limit; index++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[index]), "╰") &&
+			chromePattern.MatchString(lines[index]) {
 			return index
 		}
 	}
-	return -1
+	return lastMenuLine
 }
 
 func newerOutputAfterMenu(lines []string, lastMenuLine int, agent string) bool {
-	for _, line := range lines[lastMenuLine+1:] {
-		if line == "" || chromePattern.MatchString(line) || approvalFooterPattern.MatchString(line) {
+	hermesTailEnd := lastMenuLine
+	if strings.Contains(agent, "hermes") {
+		hermesTailEnd = hermesApprovalTailEnd(lines, lastMenuLine)
+	}
+	for index := lastMenuLine + 1; index < len(lines); index++ {
+		line := lines[index]
+		if index <= hermesTailEnd ||
+			line == "" || chromePattern.MatchString(line) || approvalFooterPattern.MatchString(line) {
+			continue
+		}
+		if strings.Contains(agent, "hermes") &&
+			(hermesApprovalPromptPattern.MatchString(line) ||
+				hermesSpinnerLinePattern.MatchString(line) ||
+				hermesStatusLinePattern.MatchString(line)) {
 			continue
 		}
 		if strings.Contains(agent, "qoder") && qoderApprovalTailLine(line) {
@@ -569,7 +610,8 @@ func normalInputPrompt(text, agent string) bool {
 		return true
 	}
 	for index := len(lines) - 1; index >= 0 && index >= len(lines)-10; index-- {
-		if !normalPromptPattern.MatchString(lines[index]) {
+		if !normalPromptPattern.MatchString(lines[index]) &&
+			(!strings.Contains(normalized, "hermes") || !hermesPlaceholderPattern.MatchString(lines[index])) {
 			continue
 		}
 		validTail := true
