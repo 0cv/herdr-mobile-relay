@@ -382,12 +382,12 @@ func (d *Dispatcher) HandleTopologyAdmitted(
 	ctx = context.WithValue(ctx, admissionContextKey{}, signal)
 	fleetEpoch := d.fleetEpoch.Load()
 	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
 	if fenced := executionFenceResult(ctx); fenced != nil {
 		signal()
 		return fenced
 	}
+	d.topologyMu.Lock()
+	defer d.topologyMu.Unlock()
 	if d.fleetEpoch.Load() != fleetEpoch {
 		signal()
 		return d.topologyConflict(requestID, action, "")

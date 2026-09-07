@@ -2418,7 +2418,12 @@ func (s *Server) webBundleIdentityReady() bool {
 }
 
 func (s *Server) managedInventoryReadiness() readiness.Result {
-	s.managedTopologyMu.RLock()
+	if !s.managedTopologyMu.TryRLock() {
+		return readiness.Result{
+			State:      readiness.StateTopologyTransactionPending,
+			Generation: s.cfg.ActiveGeneration,
+		}
+	}
 	defer s.managedTopologyMu.RUnlock()
 	return s.managedInventoryReadinessUnlocked()
 }

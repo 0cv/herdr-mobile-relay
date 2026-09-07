@@ -1409,6 +1409,55 @@ func TestManagedReadinessRequiresExactGenerationInventory(t *testing.T) {
 	if err := os.WriteFile(marker, []byte(`{"schema_version":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("readiness responds during topology fence", func(t *testing.T) {
+		server.managedTopologyMu.Lock()
+		locked := true
+		defer func() {
+			if locked {
+				server.managedTopologyMu.Unlock()
+			}
+		}()
+
+		type endpointResult struct {
+			name string
+			code int
+			body string
+		}
+		responses := make(chan endpointResult, 2)
+		for name, handler := range map[string]http.HandlerFunc{
+			"healthz": server.handleHealthz,
+			"readyz":  server.handleReadyz,
+		} {
+			go func() {
+				response := httptest.NewRecorder()
+				handler(response, httptest.NewRequest(http.MethodGet, "/"+name, nil))
+				responses <- endpointResult{name: name, code: response.Code, body: response.Body.String()}
+			}()
+		}
+
+		for range 2 {
+			select {
+			case response := <-responses:
+				switch response.name {
+				case "readyz":
+					if response.code != http.StatusServiceUnavailable || !strings.Contains(response.body, `"state":"topology_transaction_pending"`) {
+						t.Fatalf("readyz during topology fence = %d %s", response.code, response.body)
+					}
+				case "healthz":
+					if response.code != http.StatusOK || !strings.Contains(response.body, `"readiness":"blocked"`) ||
+						!strings.Contains(response.body, `"state":"topology_transaction_pending"`) {
+						t.Fatalf("healthz during topology fence = %d %s", response.code, response.body)
+					}
+				}
+			case <-time.After(500 * time.Millisecond):
+				server.managedTopologyMu.Unlock()
+				locked = false
+				t.Fatal("readiness endpoint blocked behind the topology fence")
+			}
+		}
+		server.managedTopologyMu.Unlock()
+		locked = false
+	})
 	if result := fence(); result == nil || result.Data.(map[string]any)["state"] != readiness.StateTopologyTransactionPending {
 		t.Fatalf("unresolved topology transaction fence = %+v", result)
 	}

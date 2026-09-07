@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,6 +67,91 @@ func TestExecutionFenceRunsAtWorkerAndTopologyExecutionBoundaries(t *testing.T) 
 	dispatcher.topologyMu.Unlock()
 	if result := <-topologyDone; result.Error != "generation changed" || topologyRan.Load() {
 		t.Fatalf("fenced topology result = %+v, ran=%t", result, topologyRan.Load())
+	}
+}
+
+func TestTopologyAdmissionAcquiresExecutionFenceBeforeTopologyLock(t *testing.T) {
+	dispatcher := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+	t.Cleanup(func() { _ = dispatcher.Close(context.Background()) })
+
+	serialization := make(chan struct{}, 1)
+	serialization <- struct{}{}
+	releaseSerialization := func() {
+		select {
+		case serialization <- struct{}{}:
+		default:
+		}
+	}
+
+	var agentFenceOnce sync.Once
+	agentCtx := WithExecutionFence(context.Background(), func() *CommandResult {
+		agentFenceOnce.Do(func() { <-serialization })
+		return nil
+	})
+	if result := executionFenceResult(agentCtx); result != nil {
+		t.Fatalf("agent execution fence = %+v", result)
+	}
+
+	workspaceFenceEntered := make(chan struct{})
+	var workspaceFenceOnce sync.Once
+	workspaceCtx := WithExecutionFence(context.Background(), func() *CommandResult {
+		workspaceFenceOnce.Do(func() {
+			close(workspaceFenceEntered)
+			<-serialization
+		})
+		return nil
+	})
+	admitted := make(chan struct{})
+	var workspaceRan atomic.Bool
+	workspaceDone := make(chan *CommandResult, 1)
+	go func() {
+		result := dispatcher.HandleTopologyAdmitted(
+			workspaceCtx,
+			"workspace", "workspace_rename",
+			func() { close(admitted) },
+			func(context.Context) *CommandResult {
+				workspaceRan.Store(true)
+				return completed("workspace", "workspace_rename", "", nil)
+			},
+		)
+		releaseSerialization()
+		workspaceDone <- result
+	}()
+	<-admitted
+	<-workspaceFenceEntered
+
+	agentDone := make(chan EffectResult, 1)
+	go func() {
+		result := dispatcher.topologyEffect(
+			agentCtx,
+			"agent", CommandStart, "pane-1",
+			EffectFunc(func(context.Context, WorkerToken) EffectResult {
+				return EffectResult{Result: completed("agent", string(CommandStart), "pane-1", nil)}
+			}),
+		).Run(context.Background(), WorkerToken{})
+		releaseSerialization()
+		agentDone <- result
+	}()
+
+	select {
+	case result := <-agentDone:
+		if result.Result == nil || !result.Result.OK {
+			t.Fatalf("agent topology result = %+v", result)
+		}
+	case <-time.After(500 * time.Millisecond):
+		releaseSerialization()
+		<-agentDone
+		<-workspaceDone
+		t.Fatal("workspace and agent topology paths deadlocked")
+	}
+
+	select {
+	case result := <-workspaceDone:
+		if result.Error != "Agent topology changed before execution; refresh and retry" || workspaceRan.Load() {
+			t.Fatalf("workspace topology result = %+v, ran=%t", result, workspaceRan.Load())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("workspace topology path did not resume after the agent completed")
 	}
 }
 

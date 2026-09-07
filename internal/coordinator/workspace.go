@@ -312,11 +312,11 @@ func (d *Dispatcher) lockTopology(ctx context.Context) func() {
 func (d *Dispatcher) topologyEffect(requestCtx context.Context, requestID string, kind CommandKind, paneID string, runner EffectRunner) EffectRunner {
 	fleetEpoch := d.fleetEpoch.Load()
 	return EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
-		d.topologyMu.Lock()
-		defer d.topologyMu.Unlock()
 		if fenced := executionFenceResult(requestCtx); fenced != nil {
 			return EffectResult{Result: fenced}
 		}
+		d.topologyMu.Lock()
+		defer d.topologyMu.Unlock()
 		if d.fleetEpoch.Load() != fleetEpoch {
 			return EffectResult{Result: d.topologyConflict(requestID, string(kind), paneID)}
 		}
