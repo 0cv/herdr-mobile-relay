@@ -20,9 +20,9 @@ func TestDefaultCandidatesFiltered(t *testing.T) {
 	}
 }
 
-func TestDefaultCandidatesIncludePiOhMyPiAndKimi(t *testing.T) {
+func TestDefaultCandidatesIncludePiOhMyPiKimiAndHermes(t *testing.T) {
 	binDir := t.TempDir()
-	for _, name := range []string{"pi", "omp", "kimi"} {
+	for _, name := range []string{"pi", "omp", "kimi", "hermes"} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -34,6 +34,7 @@ func TestDefaultCandidatesIncludePiOhMyPiAndKimi(t *testing.T) {
 		{ID: "pi", Label: "Pi", Kind: "pi"},
 		{ID: "omp", Label: "Oh My Pi", Kind: "omp"},
 		{ID: "kimi", Label: "Kimi", Kind: "kimi"},
+		{ID: "hermes", Label: "Hermes", Kind: "hermes"},
 	} {
 		var got *Profile
 		for index := range profiles {

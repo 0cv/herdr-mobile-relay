@@ -81,6 +81,20 @@ const ompPlanApprovalView = `
 ╰────────────────────────────────────────────────────────────╯
 `
 
+const hermesApprovalView = `
+╭────────────────────────────────────────────────────────────╮
+│ ⚠️  Dangerous Command                                      │
+│                                                            │
+│ shell command via -c/-lc flag                              │
+│ rm -rf /tmp/build-cache                                    │
+│                                                            │
+│ ❯ 1. Allow once                                            │
+│   2. Allow for this session                                │
+│   3. Add to permanent allowlist                            │
+│   4. Deny                                                  │
+╰────────────────────────────────────────────────────────────╯
+`
+
 const ompToolApprovalView = `
 ╭─ Allow tool: bash ─────────────────────────────────────────────────────╮
 │                                                                        │
@@ -117,6 +131,7 @@ func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 		want    []string
 	}{
 		{"codex tool", "codex", codexApprovalView, []string{"Approve", "Reject"}},
+		{"hermes dangerous command", "hermes", hermesApprovalView, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}},
 		{"codex subagents", "codex", codexSubagentApprovalView, []string{"Approve all pending", "Configure individually", "Exit (cancel subagents)"}},
 		{"claude proceed", "claude", claudeApprovalView, []string{"Yes", "Yes, and remember this choice", "No"}},
 		{"claude boxed proceed", "claude", claudeBoxedApprovalView, []string{"Yes", "Yes, and remember this choice", "No"}},
@@ -133,6 +148,156 @@ func TestClassifyLiveApprovalsByAgent(t *testing.T) {
 			got := Classify(test.content, test.agent)
 			if got.Kind != AttentionApproval || !reflect.DeepEqual(got.Options, test.want) {
 				t.Fatalf("classification = %+v, want approval options %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestClassifyHermesApprovalWithNativeComposerFooter(t *testing.T) {
+	got := Classify(hermesApprovalView+"\n⚠ ❯\n", "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want Hermes approval despite native composer footer", got)
+	}
+	stale := Classify(hermesApprovalView+"\n⚠ ❯ newer output\n", "hermes")
+	if stale.Kind == AttentionApproval {
+		t.Fatalf("classification = %+v, want stale Hermes approval rejected", stale)
+	}
+}
+func TestClassifyHermesApprovalWithLiveStatusLines(t *testing.T) {
+	content := hermesApprovalView + `
+  💻 chmod 777 /tmp/hermes-relay-approval-target-3  (  6.3s · ↓ 60 tok)
+ ⚕ gpt-5.6-luna │ 7.23K/272K │ [░░░░░░░░░░] 3% │ ◎ 73.7% │ ◷ 2.8s │ ↑ 218
+─────────────────────────────────────────────────────────────────────────
+⚠ ❯
+─────────────────────────────────────────────────────────────────────────
+`
+	got := Classify(content, "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want approval despite live Hermes status lines", got)
+	}
+}
+func TestClassifyHermesCompactApprovalFooter(t *testing.T) {
+	got := Classify(hermesApprovalView+"\n⚠\n", "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want Hermes approval with compact footer", got)
+	}
+}
+
+func TestClassifyHermesCompactApprovalLayout(t *testing.T) {
+	content := hermesApprovalView + `
+⚕ gpt-5.6-luna · 3% · 00:10
+↑/↓ to select, Enter to confirm  (294s)
+⚠
+`
+	got := Classify(content, "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want Hermes approval with compact status chrome", got)
+	}
+}
+
+func TestApprovalFingerprintNormalizesHermesInteractionChrome(t *testing.T) {
+	first := Classify(hermesApprovalView+`
+⚕ gpt-5.6-luna · 3% · 00:10
+↑/↓ to select, Enter to confirm  (294s)
+⚠
+`, "hermes")
+	movedView := strings.Replace(
+		hermesApprovalView,
+		"│ ❯ 1. Allow once                                            │",
+		"│   1. Allow once                                            │",
+		1,
+	)
+	movedView = strings.Replace(
+		movedView,
+		"│   2. Allow for this session                                │",
+		"│ ❯ 2. Allow for this session                                │",
+		1,
+	)
+	second := Classify(movedView+`
+⚕ gpt-5.6-luna · 3% · 00:10
+↑/↓ to select, Enter to confirm  (293s)
+⚠
+`, "hermes")
+	if first.Kind != AttentionApproval || second.Kind != AttentionApproval ||
+		first.Prompt != second.Prompt || first.Command != second.Command {
+		t.Fatalf("Hermes identity inputs changed: first=%+v second=%+v", first, second)
+	}
+	if ApprovalFingerprint(first) != ApprovalFingerprint(second) {
+		t.Fatal("Hermes interaction chrome changed the approval fingerprint")
+	}
+}
+
+func TestClassifyHermesLongCommandKeepsConsentIndices(t *testing.T) {
+	longCommand := strings.Replace(
+		hermesApprovalView,
+		"│   4. Deny                                                  │",
+		"│   4. Deny                                                  │\n│   5. Show full command                                      │",
+		1,
+	)
+	got := Classify(longCommand, "hermes")
+	if got.Kind != AttentionApproval ||
+		!reflect.DeepEqual(got.Options, []string{"Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"}) {
+		t.Fatalf("classification = %+v, want consent options without auxiliary view action", got)
+	}
+	auxiliaryFocused := strings.Replace(
+		strings.Replace(longCommand, "│ ❯ 1. Allow once                                            │", "│   1. Allow once                                            │", 1),
+		"│   5. Show full command                                      │",
+		"│ ❯ 5. Show full command                                      │",
+		1,
+	)
+	auxiliary := Classify(auxiliaryFocused, "hermes")
+	if auxiliary.Kind != AttentionApproval || auxiliary.ApprovalFocus != 4 {
+		t.Fatalf("auxiliary-focused classification = %+v, want native focus index 4", auxiliary)
+	}
+}
+
+func TestApprovalFingerprintIgnoresHermesLiveFooter(t *testing.T) {
+	first := Classify(hermesApprovalView+`
+  💻 chmod 777 /tmp/hermes-relay-approval-target-3  (  6.3s · ↓ 60 tok)
+ ⚕ gpt-5.6-luna │ 7.23K/272K │ [░░░░░░░░░░] 3% │ ◎ 73.7% │ ◷ 2.8s │ ↑ 218
+───────────────────────────────────────────────────────────────────────
+⚠ ❯
+───────────────────────────────────────────────────────────────────────
+`, "hermes")
+	second := Classify(strings.Replace(
+		hermesApprovalView+`
+  💻 chmod 777 /tmp/hermes-relay-approval-target-3  (  6.3s · ↓ 60 tok)
+ ⚕ gpt-5.6-luna │ 7.23K/272K │ [░░░░░░░░░░] 3% │ ◎ 73.7% │ ◷ 2.8s │ ↑ 218
+───────────────────────────────────────────────────────────────────────
+⚠ ❯
+───────────────────────────────────────────────────────────────────────
+	`, "6.3s", "6.4s", 1), "hermes")
+	if first.Kind != AttentionApproval || second.Kind != AttentionApproval {
+		t.Fatalf("approval classifications = %+v and %+v", first, second)
+	}
+	if ApprovalFingerprint(first) != ApprovalFingerprint(second) {
+		t.Fatal("Hermes live footer repaint changed the approval fingerprint")
+	}
+}
+
+func TestClassifyHermesIdlePlaceholdersAsChat(t *testing.T) {
+	placeholders := []string{
+		"Ask anything, or type / for commands…",
+		"Summarize what's in this folder",
+		"Draft a reply to the last email in my inbox",
+		"Plan a feature, then build it step by step",
+		"Find and fix a failing test",
+		"Research this topic and write me a brief",
+		"What changed in this repo recently?",
+		"Turn these notes into a to-do list",
+		"Explain this error and how to fix it",
+		"Set a reminder or schedule a recurring task",
+		"Type / to browse commands, or Ctrl+P for the palette",
+	}
+	for _, placeholder := range placeholders {
+		t.Run(placeholder, func(t *testing.T) {
+			got := Classify("Completed response\n\n❯ "+placeholder+"\n", "hermes")
+			if got.Kind != AttentionChat {
+				t.Fatalf("classification = %+v, want chat for Hermes placeholder %q", got, placeholder)
 			}
 		})
 	}

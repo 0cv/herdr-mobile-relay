@@ -106,7 +106,8 @@ func Supports(agent string) bool {
 		strings.Contains(agent, "codex") ||
 		ompAskAgent(agent) ||
 		strings.Contains(agent, "opencode") ||
-		strings.Contains(agent, "qoder")
+		strings.Contains(agent, "qoder") ||
+		strings.Contains(agent, "hermes")
 }
 
 func ompAskAgent(agent string) bool {
@@ -223,6 +224,15 @@ func ApprovalDetails(text string) (string, string, []string) {
 
 func PaneSummary(text string) string {
 	return strings.Join(paneSummaryLines(text), "\n")
+}
+
+func latestCompletedTurnLine(lines []string) int {
+	for index := len(lines) - 1; index >= 0; index-- {
+		if turnDurationPattern.MatchString(strings.TrimSpace(lines[index])) {
+			return index
+		}
+	}
+	return -1
 }
 
 // LatestCompletedResponse returns the complete latest Codex or Claude response

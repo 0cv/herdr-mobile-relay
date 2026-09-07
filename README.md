@@ -6,7 +6,7 @@ Control [Herdr](https://herdr.dev) agents from your phone. Each Linux or macOS
 computer runs its own relay; the phone connects to them and merges every agent
 into one installable web app.
 
-**Current version:** [`0.20.8`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.20.8) · [Changelog](CHANGELOG.md)
+**Current version:** [`0.20.9`](https://github.com/0cv/herdr-mobile-relay/releases/tag/v0.20.9) · [Changelog](CHANGELOG.md)
 
 
 > [!IMPORTANT]
@@ -64,11 +64,12 @@ paths.
 - Monitor and control agents across several computers, grouped by status and
   Herdr workspace, with agents that need input pinned on top.
 - Answer approvals and structured plan questions from Codex, Claude Code,
-  Qoder, OpenCode, Oh My Pi, and Pi.
+  Hermes, Qoder, OpenCode, Oh My Pi, and Pi.
 - Send prompts, terminal keys, and slash commands; attach screenshots, photos,
   and documents in cancellable batches.
-- Read and search each agent's native conversation, including OpenCode and Oh
-  My OpenCode plans; inspect workspace files, images, and Git diffs read-only.
+- Read and search each agent's native conversation, including Hermes, OpenCode
+  and Oh My OpenCode plans; inspect workspace files, images, and Git diffs
+  read-only.
 - Manage workspaces and Git worktrees; start, rename, clear, and stop agents.
 - Have the relay read responses aloud, even with the screen off.
 - Pair every phone as its own named device — controller or read-only reader —

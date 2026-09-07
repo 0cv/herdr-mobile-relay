@@ -72,6 +72,7 @@ type Reader struct {
 	locating  map[string]chan struct{}
 	omoCache  map[string]omoCacheEntry
 	openCode  *openCodeReader
+	hermes    *hermesReader
 }
 
 type locationCacheEntry struct {
@@ -83,16 +84,18 @@ type locationCacheEntry struct {
 // configured root that contains it. Session-title resolution consumes the same
 // location so it cannot read a different copy of the session.
 type Location struct {
-	Path string
-	Root string
+	Path  string
+	Root  string
+	Title string
 }
 
 // NewReader keeps a bounded tuple-to-location cache. Sharing one Reader between
+// the conversation and session packages makes their root selection identical.
 func NewReader(home string) *Reader {
 	return &Reader{
 		home: home, locations: make(map[string]locationCacheEntry),
 		locating: make(map[string]chan struct{}), omoCache: make(map[string]omoCacheEntry),
-		openCode: newOpenCodeReader(home),
+		openCode: newOpenCodeReader(home), hermes: newHermesReader(home),
 	}
 }
 
@@ -109,7 +112,8 @@ func (r *Reader) ompRoots() []string { return agentroots.OMP(r.home) }
 func Supported(agent string) bool {
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode", "qoder", "qodercli", "codex", "openaicodex",
-		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode":
+		"pi", "picodingagent", "omp", "ohmypi", "opencode", "omo", "ohmyopencode",
+		"hermes", "hermesagent":
 		return true
 	default:
 		return false
@@ -135,6 +139,9 @@ func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page,
 }
 
 func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
+	if isHermesAgent(agent) {
+		return r.readHermesFor(agent, cwd, sessionID, before, limit)
+	}
 	if normalizedAgent(agent) == "opencode" {
 		return r.readOpenCodeFor(cwd, sessionID, before, limit)
 	}
@@ -199,7 +206,11 @@ func unavailableCode(code, reason string) Page {
 // before any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 	sessionID = strings.TrimSpace(sessionID)
-	key := normalizedAgent(agent) + "\x00" + cwd + "\x00" + sessionID
+	agentKey := normalizedAgent(agent)
+	if isHermesAgent(agent) {
+		agentKey = "hermes"
+	}
+	key := agentKey + "\x00" + cwd + "\x00" + sessionID
 	for {
 		now := time.Now()
 		r.mu.Lock()
@@ -263,6 +274,8 @@ func (r *Reader) locate(agent, cwd, sessionID string) Location {
 		return resolvePathOrSession(r.piRoots(), sessionID, "_")
 	case "omp", "ohmypi":
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
+	case "hermes", "hermesagent":
+		return r.hermes.locate(cwd, sessionID)
 	default:
 		return Location{}
 	}
