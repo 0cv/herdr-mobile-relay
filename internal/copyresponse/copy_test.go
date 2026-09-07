@@ -114,6 +114,58 @@ func TestRunCopiesConfirmedResponseAndRestoresClipboard(t *testing.T) {
 		t.Fatalf("clipboard writes = %q, want sentinel then original", writes)
 	}
 }
+
+func TestRunGuardedStopsEveryPaneMutationAfterPromotion(t *testing.T) {
+	promoted := errors.New("managed runtime promoted")
+	blocked := false
+	pane := &fakePane{
+		snapshots: []string{"❯ ", "❯ /copy"},
+		onSendText: func(string) error {
+			blocked = true
+			return nil
+		},
+	}
+	profile, ok := slashcmd.CopyProfileFor("claude", "")
+	if !ok {
+		t.Fatal("missing Claude copy profile")
+	}
+	_, err := RunGuarded(
+		context.Background(),
+		"pane-1",
+		profile,
+		pane,
+		func(context.Context) ([]byte, error) { return []byte("before"), nil },
+		func(context.Context, []byte) error { return nil },
+		1,
+		nil,
+		func() error {
+			if blocked {
+				return promoted
+			}
+			return nil
+		},
+	)
+	if !errors.Is(err, promoted) {
+		t.Fatalf("RunGuarded() error = %v, want promotion error", err)
+	}
+	if !reflect.DeepEqual(pane.texts, []string{"/copy"}) || len(pane.keys) != 0 {
+		t.Fatalf("post-promotion pane mutations: texts=%v keys=%v", pane.texts, pane.keys)
+	}
+}
+
+func TestGuardedPaneChecksEachMutationImmediatelyBeforeDispatch(t *testing.T) {
+	blocked := errors.New("blocked")
+	pane := &fakePane{}
+	guarded := guardedPane{Pane: pane, guard: func() error { return blocked }}
+	if err := guarded.SendText(context.Background(), "pane", "text"); !errors.Is(err, blocked) || len(pane.texts) != 0 {
+		t.Fatalf("guarded text = (%v, %v)", err, pane.texts)
+	}
+	guarded.guard = func() error { return nil }
+	if err := guarded.SendKeys(context.Background(), "pane", []string{"Enter"}); err != nil || len(pane.keys) != 1 {
+		t.Fatalf("guarded keys = (%v, %v)", err, pane.keys)
+	}
+}
+
 func TestRunContinuesWhenInitialClipboardReadFails(t *testing.T) {
 	response := []byte("first line\nsecond")
 	pane := &fakePane{snapshots: []string{

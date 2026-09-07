@@ -1,12 +1,14 @@
 package coordinator
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
@@ -159,5 +161,42 @@ func TestTextFormatDisplayReadNeverHarvestsScrollback(t *testing.T) {
 	}
 	if strings.Count(string(invocations), "--source visible --format text") != 4 {
 		t.Fatalf("text-format reads did not all use the visible screen: %s", invocations)
+	}
+}
+
+func TestReadPaneNeverAcknowledgesOrPersistsTriage(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeScript(t, dir, "herdr-read", "#!/bin/sh\nprintf 'content\\n'\n")
+	state := NewState(testLogger())
+	if err := state.EnableTriagePersistence(dir); err != nil {
+		t.Fatal(err)
+	}
+	state.CommitInventory([]*AgentState{{
+		PaneID: "pane-1", RawPaneID: "pane-1", TerminalID: "terminal-1", SessionID: "session-1", Agent: "codex", Status: "working",
+	}}, state.RevisionCounter())
+	state.CommitEvent("pane-1", "idle", time.Now().UnixMilli()+1)
+	if got := state.DisplayedStatus("pane-1"); got != "done" {
+		t.Fatalf("pre-read status = %q, want done", got)
+	}
+	triagePath := filepath.Join(dir, triageStateFilename)
+	before, err := os.ReadFile(triagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+	t.Cleanup(func() { _ = dispatcher.Close(context.Background()) })
+	response := dispatcher.HandleReadPane(context.Background(), map[string]any{"request_id": "reader-read", "pane_id": "pane-1", "format": "text"})
+	if response["content"] != "content\n" {
+		t.Fatalf("read response = %#v", response)
+	}
+	after, err := os.ReadFile(triagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("read changed triage bytes: before=%s after=%s", before, after)
+	}
+	if got := state.DisplayedStatus("pane-1"); got != "done" {
+		t.Fatalf("read acknowledged controller-visible completion as %q", got)
 	}
 }

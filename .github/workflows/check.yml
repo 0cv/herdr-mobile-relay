@@ -22,6 +22,7 @@ jobs:
         run: test -z "$(gofmt -l $(find . -name '*.go' -not -path './frontend/node_modules/*'))"
       - run: go vet ./...
       - run: go test ./...
+      - run: scripts/check-changed-go-coverage.sh
 
   # The race detector more than doubles the Go suite, and the shell suites are
   # unrelated to it. Both used to sit behind `go test` in one serial job and
@@ -52,7 +53,7 @@ jobs:
         with:
           go-version: 1.27.0
           cache: true
-      - run: make shell-check production-path-audit
+      - run: make shell-check changed-shell-coverage production-path-audit
 
   frontend:
     name: Frontend and mobile browsers (Bun 1.4)

@@ -158,17 +158,26 @@ rewrite_service_release_paths() {
     local service_wrapper="$2"
     local work_dir="$3"
     local env_file="$4"
+    local service_temp
 
     [ -f "$service_file" ] && [ -x "$service_wrapper" ] || return 1
     case "$PLATFORM" in
         Linux)
-            sed -i "s|^ExecStart=.*|ExecStart=$service_wrapper|" "$service_file"
-            sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$work_dir|" "$service_file"
-            sed -i "s|^Environment=HERDR_RELAY_ENV=.*|Environment=HERDR_RELAY_ENV=$env_file|" \
-                "$service_file"
-            grep -Fx "ExecStart=$service_wrapper" "$service_file" >/dev/null &&
-                grep -Fx "WorkingDirectory=$work_dir" "$service_file" >/dev/null &&
-                grep -Fx "Environment=HERDR_RELAY_ENV=$env_file" "$service_file" >/dev/null
+            service_temp="$(mktemp "$(dirname "$service_file")/.herdr-service.XXXXXX")" || return 1
+            if ! awk -v wrapper="$service_wrapper" -v work="$work_dir" -v env_file="$env_file" '
+                /^ExecStart=/ { print "ExecStart=" wrapper; next }
+                /^WorkingDirectory=/ { print "WorkingDirectory=" work; next }
+                /^Environment=HERDR_RELAY_ENV=/ { print "Environment=HERDR_RELAY_ENV=" env_file; next }
+                { print }
+            ' "$service_file" > "$service_temp" ||
+               ! grep -Fx "ExecStart=$service_wrapper" "$service_temp" >/dev/null ||
+               ! grep -Fx "WorkingDirectory=$work_dir" "$service_temp" >/dev/null ||
+               ! grep -Fx "Environment=HERDR_RELAY_ENV=$env_file" "$service_temp" >/dev/null; then
+                rm -f "$service_temp"
+                return 1
+            fi
+            chmod --reference="$service_file" "$service_temp" 2>/dev/null || chmod 600 "$service_temp"
+            mv -f "$service_temp" "$service_file"
             ;;
         Darwin)
             update_launchd_release_paths \
@@ -178,7 +187,13 @@ rewrite_service_release_paths() {
     esac
 }
 
+TARGET_CONFIG_PARENT=$(dirname "$TARGET_CONFIG_ROOT")
+mkdir -p "$TARGET_CONFIG_PARENT"
 CONFIG_BACKUP=
+CONFIG_QUARANTINE=
+CONFIG_RESTORE_STAGE=
+MIGRATION_STAGE=
+RELEASE_DOWNLOAD_DIR=
 target_config_existed=false
 if [ -e "$TARGET_CONFIG_ROOT" ]; then
     [ -d "$TARGET_CONFIG_ROOT" ] && [ ! -L "$TARGET_CONFIG_ROOT" ] || {
@@ -191,35 +206,71 @@ if [ -e "$TARGET_CONFIG_ROOT" ]; then
     }
     target_config_existed=true
 fi
-CONFIG_BACKUP=$(mktemp -d "${TMPDIR:-/tmp}/herdr-plugin-config.XXXXXX")
+CONFIG_BACKUP=$(mktemp -d "$TARGET_CONFIG_PARENT/.herdr-plugin-config-backup.XXXXXX")
+chmod 700 "$CONFIG_BACKUP"
 if [ "$target_config_existed" = true ]; then
     cp -pR "$TARGET_CONFIG_ROOT/." "$CONFIG_BACKUP/"
 fi
 
+symlink_free_config_tree() {
+    local root="$1"
+    [ -d "$root" ] && [ ! -L "$root" ] &&
+        [ -z "$(find "$root" -type l -print -quit)" ]
+}
+
 restore_target_config() {
+    local target_moved=false
+
     if [ -L "$TARGET_CONFIG_ROOT" ]; then
         echo "herdr-mobile-relay: refusing to restore through a symlinked config root" >&2
         return 1
     fi
-    rm -rf "$TARGET_CONFIG_ROOT"
+    CONFIG_RESTORE_STAGE=$(mktemp -d "$TARGET_CONFIG_PARENT/.herdr-plugin-config-restore.XXXXXX") || return 1
+    chmod 700 "$CONFIG_RESTORE_STAGE" || return 1
     if [ "$target_config_existed" = true ]; then
-        mkdir -p "$TARGET_CONFIG_ROOT"
-        cp -pR "$CONFIG_BACKUP/." "$TARGET_CONFIG_ROOT/"
+        cp -pR "$CONFIG_BACKUP/." "$CONFIG_RESTORE_STAGE/" || return 1
+        symlink_free_config_tree "$CONFIG_RESTORE_STAGE" || return 1
     fi
+
+    CONFIG_QUARANTINE=$(mktemp -d "$TARGET_CONFIG_PARENT/.herdr-plugin-config-quarantine.XXXXXX") || return 1
+    rmdir "$CONFIG_QUARANTINE" || return 1
+    if [ -e "$TARGET_CONFIG_ROOT" ] || [ -L "$TARGET_CONFIG_ROOT" ]; then
+        mv "$TARGET_CONFIG_ROOT" "$CONFIG_QUARANTINE" || return 1
+        target_moved=true
+    fi
+    if [ "$target_config_existed" = true ]; then
+        if ! mv "$CONFIG_RESTORE_STAGE" "$TARGET_CONFIG_ROOT"; then
+            [ "$target_moved" = false ] || mv "$CONFIG_QUARANTINE" "$TARGET_CONFIG_ROOT"
+            return 1
+        fi
+        CONFIG_RESTORE_STAGE=
+    else
+        rmdir "$CONFIG_RESTORE_STAGE" || return 1
+        CONFIG_RESTORE_STAGE=
+    fi
+    [ "$target_moved" = false ] || rm -rf "$CONFIG_QUARANTINE"
+    CONFIG_QUARANTINE=
 }
 
 copy_migration_entry() {
     local source_path="$1"
     local target_name="$2"
-    local target_path="$TARGET_CONFIG_ROOT/$target_name"
+    local target_path="$MIGRATION_STAGE/$target_name"
 
     [ -e "$source_path" ] || return 0
-    [ ! -L "$source_path" ] || {
+    [ ! -L "$source_path" ] &&
+        { [ -f "$source_path" ] || [ -d "$source_path" ]; } &&
+        { [ ! -d "$source_path" ] || [ -z "$(find "$source_path" -type l -print -quit)" ]; } || {
         echo "herdr-mobile-relay: refusing symlinked migration source: $source_path" >&2
         return 1
     }
     rm -rf "$target_path"
-    cp -pR "$source_path" "$target_path"
+    cp -pR "$source_path" "$target_path" || return 1
+    if [ -d "$target_path" ]; then
+        [ -z "$(find "$target_path" -type l -print -quit)" ] || return 1
+    else
+        [ -f "$target_path" ] && [ ! -L "$target_path" ]
+    fi
 }
 
 rewrite_path_prefix() {
@@ -243,14 +294,18 @@ migrate_source_config() {
     local source_env="$1"
     local source_root
     local cloudflared_config
+    local migration_quarantine
 
     source_root="$(dirname "$source_env")"
     if [ "$(canonical_file_path "$source_env")" = "$(canonical_file_path "$TARGET_ENV")" ]; then
         return
     fi
     echo "herdr-mobile-relay: migrating service state into persistent plugin config..." >&2
-    mkdir -p "$TARGET_CONFIG_ROOT"
-    chmod 700 "$TARGET_CONFIG_ROOT"
+    MIGRATION_STAGE=$(mktemp -d "$TARGET_CONFIG_PARENT/.herdr-plugin-config-migration.XXXXXX")
+    chmod 700 "$MIGRATION_STAGE"
+    if [ "$target_config_existed" = true ]; then
+        cp -pR "$TARGET_CONFIG_ROOT/." "$MIGRATION_STAGE/"
+    fi
     copy_migration_entry "$source_env" relay.env
     copy_migration_entry "$source_root/device-auth" device-auth
     copy_migration_entry "$source_root/push" push
@@ -260,19 +315,40 @@ migrate_source_config() {
     copy_migration_entry "$source_root/cloudflared" cloudflared
     copy_migration_entry "$source_root/update-state.json" update-state.json
     copy_migration_entry "$source_root/app-deploy-state.json" app-deploy-state.json
-    rewrite_path_prefix "$TARGET_CONFIG_ROOT/stable-setup.json" \
+    copy_migration_entry "$source_root/pane-profile-associations.json" pane-profile-associations.json
+    symlink_free_config_tree "$MIGRATION_STAGE" || {
+        echo "herdr-mobile-relay: staged migration contains a symlink" >&2
+        return 1
+    }
+    rewrite_path_prefix "$MIGRATION_STAGE/stable-setup.json" \
         "$source_env" "$TARGET_ENV"
-    rewrite_path_prefix "$TARGET_CONFIG_ROOT/stable-setup.json" \
+    rewrite_path_prefix "$MIGRATION_STAGE/stable-setup.json" \
         "$source_root" "$TARGET_CONFIG_ROOT"
-    rewrite_path_prefix "$TARGET_CONFIG_ROOT/cloudflared/config.yml" \
+    rewrite_path_prefix "$MIGRATION_STAGE/cloudflared/config.yml" \
         "$source_root" "$TARGET_CONFIG_ROOT"
 
-    cloudflared_config="$(env_file_value "$TARGET_ENV" CLOUDFLARED_CONFIG)"
+    cloudflared_config="$(env_file_value "$MIGRATION_STAGE/relay.env" CLOUDFLARED_CONFIG)"
     if [ "$cloudflared_config" = "$source_root/cloudflared/config.yml" ]; then
-        set_env_value_atomic "$TARGET_ENV" CLOUDFLARED_CONFIG \
+        set_env_value_atomic "$MIGRATION_STAGE/relay.env" CLOUDFLARED_CONFIG \
             "$TARGET_CONFIG_ROOT/cloudflared/config.yml"
     fi
-    chmod 600 "$TARGET_ENV"
+    sanitize_relay_runtime_env "$MIGRATION_STAGE/relay.env"
+    chmod 600 "$MIGRATION_STAGE/relay.env"
+    symlink_free_config_tree "$MIGRATION_STAGE" || return 1
+
+    migration_quarantine=$(mktemp -d "$TARGET_CONFIG_PARENT/.herdr-plugin-config-migration-old.XXXXXX")
+    rmdir "$migration_quarantine"
+    if [ -e "$TARGET_CONFIG_ROOT" ] || [ -L "$TARGET_CONFIG_ROOT" ]; then
+        mv "$TARGET_CONFIG_ROOT" "$migration_quarantine"
+    else
+        migration_quarantine=
+    fi
+    if ! mv "$MIGRATION_STAGE" "$TARGET_CONFIG_ROOT"; then
+        [ -z "$migration_quarantine" ] || mv "$migration_quarantine" "$TARGET_CONFIG_ROOT"
+        return 1
+    fi
+    MIGRATION_STAGE=
+    [ -z "$migration_quarantine" ] || rm -rf "$migration_quarantine"
 }
 
 if [ -n "$SERVICE_BACKUP" ]; then
@@ -326,14 +402,72 @@ if [ -L "$INSTALL_ROOT/current" ]; then
     esac
     if [ -d "$previous_candidate" ]; then
         PREVIOUS_RELEASE=$(CDPATH='' cd "$previous_candidate" && pwd -P)
+        releases_root=$(CDPATH='' cd "$INSTALL_ROOT/releases" 2>/dev/null && pwd -P || true)
+        if [ -n "$releases_root" ]; then
+            case "$PREVIOUS_RELEASE" in
+                "$releases_root"/*) ;;
+                *) PREVIOUS_RELEASE= ;;
+            esac
+        else
+            PREVIOUS_RELEASE=
+        fi
         previous_manifest="$PREVIOUS_RELEASE/release-manifest.json"
-        if [ -f "$previous_manifest" ]; then
+        if [ -n "$PREVIOUS_RELEASE" ] && [ -f "$previous_manifest" ] && [ ! -L "$previous_manifest" ] &&
+           [ -x "$PREVIOUS_RELEASE/herdr-mobile-relay" ] && [ ! -L "$PREVIOUS_RELEASE/herdr-mobile-relay" ] &&
+           "$PREVIOUS_RELEASE/herdr-mobile-relay" verify-release "$PREVIOUS_RELEASE" >/dev/null; then
             PREVIOUS_VERSION=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$previous_manifest" | head -1)
             PREVIOUS_REVISION=$(sed -n 's/^[[:space:]]*"revision":[[:space:]]*"\([^"]*\)".*/\1/p' "$previous_manifest" | head -1)
             PREVIOUS_WEB_HASH=$(sed -n 's/^[[:space:]]*"web_hash":[[:space:]]*"\([^"]*\)".*/\1/p' "$previous_manifest" | head -1)
+        else
+            PREVIOUS_RELEASE=
         fi
     fi
 fi
+
+SUPERVISOR_STATE_PATH=
+SUPERVISOR_STATE_BACKUP=
+supervisor_state_existed=false
+snapshot_supervisor_state() {
+    local state_env="${SOURCE_ENV:-$TARGET_ENV}"
+    local state_root
+
+    state_root="$(env_file_value "$state_env" HERDR_RELAY_SUPERVISOR_STATE_DIR)"
+    state_root="${state_root:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-mobile-relay}"
+    case "$state_root" in
+        /*) ;;
+        *) echo "herdr-mobile-relay: supervisor state directory must be absolute" >&2; return 1 ;;
+    esac
+    SUPERVISOR_STATE_PATH="$state_root/supervisor.json"
+    if [ -e "$SUPERVISOR_STATE_PATH" ] || [ -L "$SUPERVISOR_STATE_PATH" ]; then
+        [ -f "$SUPERVISOR_STATE_PATH" ] && [ ! -L "$SUPERVISOR_STATE_PATH" ] || {
+            echo "herdr-mobile-relay: supervisor state is not a safe regular file" >&2
+            return 1
+        }
+        SUPERVISOR_STATE_BACKUP=$(mktemp "${TMPDIR:-/tmp}/herdr-supervisor-state.XXXXXX")
+        cp -p "$SUPERVISOR_STATE_PATH" "$SUPERVISOR_STATE_BACKUP"
+        supervisor_state_existed=true
+    fi
+}
+
+restore_or_reset_supervisor_state() {
+    local state_directory
+    local state_temp
+
+    [ -n "$SUPERVISOR_STATE_PATH" ] || return 0
+    if [ -n "$PREVIOUS_RELEASE" ] &&
+       "$PREVIOUS_RELEASE/herdr-mobile-relay" supervisor-reset "$SUPERVISOR_STATE_PATH" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "$supervisor_state_existed" = true ]; then
+        state_directory=$(dirname "$SUPERVISOR_STATE_PATH")
+        mkdir -p "$state_directory" || return 1
+        state_temp=$(mktemp "$state_directory/.supervisor-rollback.XXXXXX") || return 1
+        cp -p "$SUPERVISOR_STATE_BACKUP" "$state_temp" || return 1
+        mv -f "$state_temp" "$SUPERVISOR_STATE_PATH" || return 1
+    else
+        rm -f "$SUPERVISOR_STATE_PATH" || return 1
+    fi
+}
 
 rollback_armed=false
 rollback_plugin_migration() {
@@ -341,7 +475,7 @@ rollback_plugin_migration() {
     echo "herdr-mobile-relay: replacement failed; restoring previous service..." >&2
 
     if [ -n "$PREVIOUS_RELEASE" ] && [ -d "$PREVIOUS_RELEASE" ]; then
-        "$INSTALL_ROOT/current/herdr-mobile-relay" \
+        "$PREVIOUS_RELEASE/herdr-mobile-relay" \
             activate-release "$INSTALL_ROOT" "$PREVIOUS_RELEASE" || return 1
     elif [ "$current_was_present" = false ]; then
         rm -f "$INSTALL_ROOT/current"
@@ -352,6 +486,7 @@ rollback_plugin_migration() {
         mv -f "$restore_temp" "$SERVICE_FILE" || return 1
     fi
     restore_target_config || return 1
+    restore_or_reset_supervisor_state || return 1
 
     if [ "$recover_broken_service" = true ] &&
        [ "$service_cutover_started" = true ]; then
@@ -383,14 +518,18 @@ rollback_plugin_migration() {
     rollback_env="${SOURCE_ENV:-$ENV_FILE}"
     rollback_port="$(env_file_value "$rollback_env" HERDR_RELAY_PORT)"
     rollback_port="${rollback_port:-8375}"
-    if [ -n "$PREVIOUS_VERSION" ] && [ -n "$PREVIOUS_REVISION" ] && [ -n "$PREVIOUS_WEB_HASH" ]; then
-        wait_for_relay_release_health \
-            "$rollback_port" 30 1 \
-            "$PREVIOUS_VERSION" "$PREVIOUS_REVISION" "$PREVIOUS_WEB_HASH" \
-            >/dev/null || return 1
-    else
-        wait_for_relay_health "$rollback_port" 30 1 >/dev/null || return 1
-    fi
+    [ -n "$PREVIOUS_VERSION" ] && [ -n "$PREVIOUS_REVISION" ] && [ -n "$PREVIOUS_WEB_HASH" ] || return 1
+    (
+        load_relay_env "$rollback_env"
+        unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE HERDR_WEB_ROOT HERDR_RELAY_BIN
+        HERDR_RELEASE_ROOT="$INSTALL_ROOT"
+        rollback_readiness_config="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
+        wait_for_installed_relay_ready "$rollback_readiness_config" 30 1
+    ) >/dev/null || return 1
+    wait_for_relay_release_health \
+        "$rollback_port" 30 1 \
+        "$PREVIOUS_VERSION" "$PREVIOUS_REVISION" "$PREVIOUS_WEB_HASH" \
+        >/dev/null || return 1
     case "$PLATFORM" in
         Linux) systemctl --user is-active --quiet herdr-mobile-relay.service || return 1 ;;
         Darwin)
@@ -404,15 +543,26 @@ rollback_plugin_migration() {
 cleanup_plugin_build() {
     status=$?
     trap - EXIT
+    rollback_failed=false
     if [ "$status" -ne 0 ] && [ "$rollback_armed" = true ]; then
         if ! rollback_plugin_migration; then
+            rollback_failed=true
             echo "herdr-mobile-relay: ERROR: automatic rollback also failed" >&2
         fi
     fi
-    if [ -n "$SERVICE_BACKUP" ]; then
-        rm -f "$SERVICE_BACKUP"
+    if [ "$rollback_failed" = false ]; then
+        [ -z "$SERVICE_BACKUP" ] || rm -f "$SERVICE_BACKUP"
+        [ -z "$SUPERVISOR_STATE_BACKUP" ] || rm -f "$SUPERVISOR_STATE_BACKUP"
+        [ -z "$CONFIG_RESTORE_STAGE" ] || rm -rf "$CONFIG_RESTORE_STAGE"
+        [ -z "$CONFIG_QUARANTINE" ] || rm -rf "$CONFIG_QUARANTINE"
+        [ -z "$MIGRATION_STAGE" ] || rm -rf "$MIGRATION_STAGE"
+        rm -rf "$CONFIG_BACKUP"
+    else
+        echo "herdr-mobile-relay: rollback recovery data retained at $CONFIG_BACKUP" >&2
+        [ -z "$SERVICE_BACKUP" ] || echo "herdr-mobile-relay: service backup retained at $SERVICE_BACKUP" >&2
+        [ -z "$CONFIG_QUARANTINE" ] || echo "herdr-mobile-relay: config quarantine retained at $CONFIG_QUARANTINE" >&2
     fi
-    rm -rf "$CONFIG_BACKUP"
+    [ -z "$RELEASE_DOWNLOAD_DIR" ] || rm -rf "$RELEASE_DOWNLOAD_DIR"
     exit "$status"
 }
 trap cleanup_plugin_build EXIT
@@ -423,6 +573,118 @@ trap cleanup_plugin_build EXIT
 gh_release_token() {
     command -v gh >/dev/null 2>&1 || return 1
     gh auth token --hostname github.com 2>/dev/null
+}
+
+release_asset_url() {
+    local release_json="$1"
+    local asset_name="$2"
+
+    printf '%s' "$release_json" |
+        tr -d '\n\r\t ' |
+        sed 's/"url":"/\
+"url":"/g' |
+        awk -v name="\"name\":\"$asset_name\"" '
+            index($0, name) == 0 { next }
+            {
+                line = $0
+                sub(/^"url":"/, "", line)
+                sub(/".*$/, "", line)
+                print line
+                exit
+            }
+        '
+}
+
+release_tag_revision() {
+    printf '%s' "$1" |
+        tr -d '\n\r\t ' |
+        sed 's/"sha":"/\
+"sha":"/' |
+        sed -n 's/^"sha":"\([0-9a-fA-F][0-9a-fA-F]*\)".*/\1/p' |
+        head -1
+}
+
+release_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+authenticated_release_curl() {
+    local accept="$1"
+    shift
+
+    case "$INSTALL_TOKEN" in
+        ''|*[!A-Za-z0-9_.-]*)
+            echo "herdr-mobile-relay: GitHub release token contains unsupported characters" >&2
+            return 1
+            ;;
+    esac
+    env -u GH_TOKEN -u GITHUB_TOKEN -u HERDR_GITHUB_TOKEN_FILE \
+        curl --config /dev/fd/3 "$@" 3<<EOF
+header = "Authorization: token ${INSTALL_TOKEN}"
+header = "Accept: ${accept}"
+EOF
+}
+
+prepare_authenticated_offline_release() {
+    local repository="${RELEASE_REPOSITORY:-0cv/herdr-mobile-relay}"
+    local release_os
+    local release_arch
+    local archive_name
+    local commit_json_path
+    local release_json_path
+    local commit_json
+    local release_json
+    local archive_url
+    local checksums_url
+
+    command -v curl >/dev/null 2>&1 || {
+        echo "herdr-mobile-relay: curl is required for authenticated release downloads" >&2
+        return 1
+    }
+    case "$PLATFORM" in
+        Darwin) release_os=darwin ;;
+        Linux) release_os=linux ;;
+        *) echo "herdr-mobile-relay: unsupported release platform: $PLATFORM" >&2; return 1 ;;
+    esac
+    case "$(uname -m)" in
+        x86_64|amd64) release_arch=amd64 ;;
+        arm64|aarch64) release_arch=arm64 ;;
+        *) echo "herdr-mobile-relay: unsupported release architecture: $(uname -m)" >&2; return 1 ;;
+    esac
+    archive_name="herdr-mobile-relay_${VERSION}_${release_os}_${release_arch}.tar.gz"
+    RELEASE_DOWNLOAD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/herdr-plugin-release.XXXXXX")" || return 1
+    chmod 700 "$RELEASE_DOWNLOAD_DIR"
+    commit_json_path="$RELEASE_DOWNLOAD_DIR/commit.json"
+    release_json_path="$RELEASE_DOWNLOAD_DIR/release.json"
+    OFFLINE_RELEASE_ARCHIVE="$RELEASE_DOWNLOAD_DIR/$archive_name"
+    OFFLINE_RELEASE_CHECKSUMS="$RELEASE_DOWNLOAD_DIR/checksums.txt"
+
+    authenticated_release_curl application/vnd.github+json \
+        --fail --show-error --silent --location --connect-timeout 10 --max-time 120 \
+        --output "$commit_json_path" --url "https://api.github.com/repos/$repository/commits/v$VERSION" || return 1
+    authenticated_release_curl application/vnd.github+json \
+        --fail --show-error --silent --location --connect-timeout 10 --max-time 120 \
+        --output "$release_json_path" --url "https://api.github.com/repos/$repository/releases/tags/v$VERSION" || return 1
+    commit_json="$(awk '{ printf "%s", $0 }' "$commit_json_path")"
+    release_json="$(awk '{ printf "%s", $0 }' "$release_json_path")"
+    OFFLINE_EXPECTED_REVISION="$(release_tag_revision "$commit_json")"
+    archive_url="$(release_asset_url "$release_json" "$archive_name")"
+    checksums_url="$(release_asset_url "$release_json" checksums.txt)"
+    [ -n "$OFFLINE_EXPECTED_REVISION" ] && [ -n "$archive_url" ] && [ -n "$checksums_url" ] || {
+        echo "herdr-mobile-relay: authenticated release metadata is incomplete" >&2
+        return 1
+    }
+    authenticated_release_curl application/octet-stream \
+        --fail --show-error --silent --location --connect-timeout 10 --max-time 120 \
+        --output "$OFFLINE_RELEASE_CHECKSUMS" --url "$checksums_url" || return 1
+    authenticated_release_curl application/octet-stream \
+        --fail --show-error --silent --location --connect-timeout 10 --max-time 120 \
+        --output "$OFFLINE_RELEASE_ARCHIVE" --url "$archive_url" || return 1
+    OFFLINE_EXPECTED_ARCHIVE_SHA256="$(release_sha256 "$OFFLINE_RELEASE_ARCHIVE")"
 }
 
 release_api_available_without_token() {
@@ -456,30 +718,8 @@ explain_missing_release_auth() {
     echo "Alternatively, set GH_TOKEN to a token with Contents read access." >&2
 }
 
-
-
 INSTALL_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
-if [ -z "$INSTALL_TOKEN" ]; then
-    for TOKEN_ENV in "$TARGET_ENV" "${SOURCE_ENV:-}"; do
-        [ -n "$TOKEN_ENV" ] && [ -f "$TOKEN_ENV" ] || continue
-        configured_token_file="$(env_file_value "$TOKEN_ENV" HERDR_GITHUB_TOKEN_FILE)"
-        expected_token_file="$(dirname "$TOKEN_ENV")/github-token"
-        if [ "$configured_token_file" = "$expected_token_file" ] &&
-           [ -f "$configured_token_file" ] &&
-           [ ! -L "$configured_token_file" ]; then
-            case "$(ls -ld "$configured_token_file" | awk '{print $1}')" in
-                -rw-------*) ;;
-                *) configured_token_file= ;;
-            esac
-        else
-            configured_token_file=
-        fi
-        if [ -n "$configured_token_file" ]; then
-            IFS= read -r INSTALL_TOKEN < "$configured_token_file" || true
-            [ -z "$INSTALL_TOKEN" ] || break
-        fi
-    done
-fi
+unset GH_TOKEN GITHUB_TOKEN HERDR_GITHUB_TOKEN_FILE HERDR_WEB_ROOT HERDR_RELAY_BIN
 if [ -z "$INSTALL_TOKEN" ] &&
    [ -n "$RELEASE_REPOSITORY" ] &&
    [ "$RELEASE_REPOSITORY" != "0cv/herdr-mobile-relay" ]; then
@@ -492,16 +732,34 @@ if [ -z "$INSTALL_TOKEN" ] &&
     explain_missing_release_auth
     exit 1
 fi
+OFFLINE_RELEASE_ARCHIVE=
+OFFLINE_RELEASE_CHECKSUMS=
+OFFLINE_EXPECTED_REVISION=
+OFFLINE_EXPECTED_ARCHIVE_SHA256=
+if [ -n "$INSTALL_TOKEN" ]; then
+    prepare_authenticated_offline_release || {
+        echo "herdr-mobile-relay: could not stage the authenticated release for credential-free installation" >&2
+        exit 1
+    }
+fi
+unset INSTALL_TOKEN
 
-
+snapshot_supervisor_state
 rollback_armed=true
 migrate_source_config "${SOURCE_ENV:-$TARGET_ENV}"
+sanitize_relay_runtime_env "$TARGET_ENV"
 
 echo "herdr-mobile-relay: installing verified release $VERSION..." >&2
-if [ -n "$INSTALL_TOKEN" ]; then
-    GH_TOKEN="$INSTALL_TOKEN" sh "$INSTALLER" "$VERSION"
+if [ -n "$OFFLINE_RELEASE_ARCHIVE" ]; then
+    env -u GH_TOKEN -u GITHUB_TOKEN -u HERDR_GITHUB_TOKEN_FILE \
+        HERDR_RELEASE_ARCHIVE="$OFFLINE_RELEASE_ARCHIVE" \
+        HERDR_RELEASE_CHECKSUMS="$OFFLINE_RELEASE_CHECKSUMS" \
+        HERDR_EXPECTED_REVISION="$OFFLINE_EXPECTED_REVISION" \
+        HERDR_EXPECTED_ARCHIVE_SHA256="$OFFLINE_EXPECTED_ARCHIVE_SHA256" \
+        sh "$INSTALLER" "$VERSION"
 else
-    sh "$INSTALLER" "$VERSION"
+    env -u GH_TOKEN -u GITHUB_TOKEN -u HERDR_GITHUB_TOKEN_FILE \
+        sh "$INSTALLER" "$VERSION"
 fi
 "$INSTALL_ROOT/current/herdr-mobile-relay" verify-release "$INSTALL_ROOT/current" >/dev/null
 MANIFEST="$INSTALL_ROOT/current/release-manifest.json"
@@ -512,12 +770,16 @@ WEB_HASH=$(sed -n 's/^[[:space:]]*"web_hash":[[:space:]]*"\([^"]*\)".*/\1/p' "$M
     exit 1
 }
 
-# Store the repository credential separately; the service receives only its
-# path, so the relay, cloudflared, and agent subprocesses never inherit it.
-if [ -n "$INSTALL_TOKEN" ]; then
-    GH_TOKEN="$INSTALL_TOKEN" ensure_relay_env "$TARGET_ENV"
-fi
-unset INSTALL_TOKEN
+ensure_relay_env "$TARGET_ENV"
+
+verify_current_service_ready() {
+    (
+        load_relay_env "$TARGET_ENV"
+        HERDR_RELEASE_ROOT="$INSTALL_ROOT"
+        readiness_config="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config-herdr-mobile-relay.yml}"
+        wait_for_installed_relay_ready "$readiness_config" 30 1
+    )
+}
 
 # Cut over an existing service to the new release root.
 SERVICE_WRAPPER="$INSTALL_ROOT/current/relay/herdr-mobile-relay-service.sh"
@@ -571,12 +833,9 @@ case "$PLATFORM" in
 esac
 
 if [ "$service_restarted" = true ]; then
-    PORT="$(env_file_value "$TARGET_ENV" HERDR_RELAY_PORT)"
-    PORT="${PORT:-8375}"
-    echo "herdr-mobile-relay: verifying replacement service identity..." >&2
-    if ! wait_for_relay_release_health \
-        "$PORT" 30 1 "$VERSION" "$REVISION" "$WEB_HASH" >/dev/null; then
-        echo "herdr-mobile-relay: replacement service did not report the expected release identity" >&2
+    echo "herdr-mobile-relay: verifying exact replacement service readiness..." >&2
+    if ! verify_current_service_ready >/dev/null; then
+        echo "herdr-mobile-relay: replacement service did not prove its live supervisor, public route, release identity, and exact inventory" >&2
         exit 1
     fi
     case "$PLATFORM" in

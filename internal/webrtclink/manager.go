@@ -112,6 +112,9 @@ type Options struct {
 	OnLocalCandidate func(SessionKey, Candidate)
 	// Serve runs one logical connection for its whole lifetime.
 	Serve func(context.Context, transport.FrameConn)
+	// loopbackOnly makes in-process transport tests independent of whichever
+	// physical and tunnel interfaces happen to be active on the host.
+	loopbackOnly bool
 }
 
 // Manager owns the process-wide WebRTC listener and every direct session on it.
@@ -119,10 +122,11 @@ type Options struct {
 // relay advertises (host address plus any mapped address) is valid for every
 // client regardless of how many are connected.
 type Manager struct {
-	logger      *slog.Logger
-	serve       func(context.Context, transport.FrameConn)
-	onLocal     func(SessionKey, Candidate)
-	maxSessions int
+	logger       *slog.Logger
+	serve        func(context.Context, transport.FrameConn)
+	onLocal      func(SessionKey, Candidate)
+	maxSessions  int
+	loopbackOnly bool
 
 	udp *net.UDPConn
 	// mux is a universal mux so address discovery reuses the one ICE socket:
@@ -182,15 +186,16 @@ func New(opts Options) (*Manager, error) {
 	close(gated.open)
 
 	m := &Manager{
-		logger:      logger,
-		serve:       opts.Serve,
-		onLocal:     opts.OnLocalCandidate,
-		maxSessions: maxSessions,
-		udp:         udp,
-		mux:         mux,
-		nat1To1:     append([]string(nil), opts.NAT1To1IPs...),
-		stunServers: append([]string(nil), opts.STUNServers...),
-		sessions:    make(map[SessionKey]*session),
+		logger:       logger,
+		serve:        opts.Serve,
+		onLocal:      opts.OnLocalCandidate,
+		maxSessions:  maxSessions,
+		loopbackOnly: opts.loopbackOnly,
+		udp:          udp,
+		mux:          mux,
+		nat1To1:      append([]string(nil), opts.NAT1To1IPs...),
+		stunServers:  append([]string(nil), opts.STUNServers...),
+		sessions:     make(map[SessionKey]*session),
 	}
 	m.api = m.newAPILocked()
 	m.baseCtx, m.cancel = context.WithCancel(context.Background())
@@ -215,6 +220,10 @@ func (m *Manager) newAPILocked() *webrtc.API {
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6})
 	settings.DisableActiveTCP(true)
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	if m.loopbackOnly {
+		settings.SetIncludeLoopbackCandidate(true)
+		settings.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
+	}
 	if ips := m.natIPsLocked(); len(ips) > 0 {
 		settings.SetNAT1To1IPs(ips, webrtc.ICECandidateTypeSrflx)
 	}

@@ -35,14 +35,12 @@ func (d *Dispatcher) HandleWorkspaceCreate(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
+	defer d.lockTopology(ctx)()
 	created, err := d.herdr.WorkspaceCreate(commandCtx, resolved, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
-	d.topologyChanged()
+	d.fleetChanged()
 	d.recordActivity(action, "created", "Created workspace "+label, "", requestID)
 	return completed(requestID, action, "", map[string]any{
 		"workspace_id": created.WorkspaceID,
@@ -68,9 +66,7 @@ func (d *Dispatcher) HandleWorkspaceRename(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
+	defer d.lockTopology(ctx)()
 	if err := d.herdr.WorkspaceRename(commandCtx, workspace.ID, label); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -94,9 +90,7 @@ func (d *Dispatcher) HandleWorkspaceReorder(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
+	defer d.lockTopology(ctx)()
 	if err := d.herdr.WorkspaceMove(commandCtx, workspace.ID, *insertIndex); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -135,9 +129,7 @@ func (d *Dispatcher) HandleWorkspaceReorderBlock(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
+	defer d.lockTopology(ctx)()
 	if err := d.herdr.WorkspaceMoveBlock(commandCtx, workspaceIDs, beforeWorkspaceID); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
@@ -160,13 +152,14 @@ func (d *Dispatcher) HandleWorkspaceClose(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
+	defer d.lockTopology(ctx)()
+	if denied := d.denyUnknownWorkspaceProfileOwnership(requestID, action, workspace.ID); denied != nil {
+		return denied
+	}
 	if err := d.herdr.WorkspaceClose(commandCtx, workspace.ID); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
-	d.topologyChanged()
+	d.fleetChanged()
 	d.recordActivity(action, "closed", "Closed workspace "+workspace.Label, "", requestID)
 	return completed(requestID, action, "", map[string]any{"workspace_id": workspace.ID})
 }
@@ -213,14 +206,12 @@ func (d *Dispatcher) HandleWorktreeCreate(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
 	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
+	defer d.lockTopology(ctx)()
 	created, err := d.herdr.WorktreeCreate(commandCtx, workspace.ID, branch, base, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
-	d.topologyChanged()
+	d.fleetChanged()
 	d.recordActivity(action, "created", "Created worktree "+branch, "", requestID)
 	return completed(requestID, action, "", created)
 }
@@ -245,14 +236,12 @@ func (d *Dispatcher) HandleWorktreeOpen(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
 	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
+	defer d.lockTopology(ctx)()
 	opened, err := d.herdr.WorktreeOpen(commandCtx, workspace.ID, path, branch, label)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
-	d.topologyChanged()
+	d.fleetChanged()
 	d.recordActivity(action, "opened", "Opened worktree "+opened.Worktree.Label, "", requestID)
 	return completed(requestID, action, "", opened)
 }
@@ -272,14 +261,15 @@ func (d *Dispatcher) HandleWorktreeRemove(
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, worktreeCommandDeadline)
 	defer cancel()
-	d.admitTopology(ctx)
-	d.topologyMu.Lock()
-	defer d.topologyMu.Unlock()
+	defer d.lockTopology(ctx)()
+	if denied := d.denyUnknownWorkspaceProfileOwnership(requestID, action, workspace.ID); denied != nil {
+		return denied
+	}
 	removed, err := d.herdr.WorktreeRemove(commandCtx, workspace.ID, force)
 	if err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
-	d.topologyChanged()
+	d.fleetChanged()
 	d.recordActivity(action, "removed", "Removed worktree "+workspace.Label, "", requestID)
 	return completed(requestID, action, "", removed)
 }
@@ -303,6 +293,66 @@ func (d *Dispatcher) topologyChanged() {
 	if d.wakePoll != nil {
 		d.wakePoll()
 	}
+}
+
+func (d *Dispatcher) fleetChanged() {
+	d.fleetEpoch.Add(1)
+	d.topologyChanged()
+}
+
+func (d *Dispatcher) lockTopology(ctx context.Context) func() {
+	if held, _ := ctx.Value(topologyLockHeldKey{}).(bool); held {
+		return func() {}
+	}
+	d.admitTopology(ctx)
+	d.topologyMu.Lock()
+	return d.topologyMu.Unlock
+}
+
+func (d *Dispatcher) topologyEffect(requestCtx context.Context, requestID string, kind CommandKind, paneID string, runner EffectRunner) EffectRunner {
+	fleetEpoch := d.fleetEpoch.Load()
+	finalize, managed := requestCtx.Value(resultFinalizerContextKey{}).(func(context.Context, *CommandResult) *CommandResult)
+	complete, hasCompleter := requestCtx.Value(resultCompleterContextKey{}).(func(context.Context, *CommandResult) *CommandResult)
+	return EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if fenced := executionFenceResult(requestCtx); fenced != nil {
+			return EffectResult{Result: fenced}
+		}
+		result := func() EffectResult {
+			d.topologyMu.Lock()
+			defer d.topologyMu.Unlock()
+			if d.fleetEpoch.Load() != fleetEpoch {
+				return EffectResult{Result: d.topologyConflict(requestID, string(kind), paneID)}
+			}
+			result := runner.Run(effectCtx, token)
+			changed := result.BumpGeneration
+			if result.Result != nil {
+				changed = changed || result.Result.Phase == "dispatched_unknown"
+				if kind == CommandStart {
+					changed = changed || result.Result.OK || result.Result.PaneID != ""
+				}
+			}
+			if changed && !managed {
+				d.fleetChanged()
+			}
+			return result
+		}()
+		if managed {
+			result.Result = finalize(requestCtx, result.Result)
+			result.TopologyFinalized = commandResultOK(result.Result)
+		}
+		if hasCompleter {
+			result.Result = complete(requestCtx, result.Result)
+		}
+		return result
+	})
+}
+
+func commandResultOK(result *CommandResult) bool {
+	return result != nil && result.OK
+}
+
+func (d *Dispatcher) topologyConflict(requestID, action, paneID string) *CommandResult {
+	return &CommandResult{RequestID: requestID, Action: action, OK: false, Phase: "not_started", Error: "Agent topology changed before execution; refresh and retry", PaneID: paneID}
 }
 
 // admitTopology unblocks the hub's global ordered ingress before the caller

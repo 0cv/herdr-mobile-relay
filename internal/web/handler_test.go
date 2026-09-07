@@ -447,14 +447,47 @@ func TestWebRootSymlinkEscapeIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	h, err := NewHandler(root)
+	if err == nil || h != nil || !strings.Contains(err.Error(), "non-regular file") {
+		t.Fatalf("symlinked web bundle = (%v, %v), want rejected bundle", h, err)
+	}
+}
+
+func TestNewHandlerRejectsEmptyBundleIdentity(t *testing.T) {
+	h, err := NewHandler(t.TempDir())
+	if err == nil || h != nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty web bundle = (%v, %v), want rejected bundle", h, err)
+	}
+}
+
+func TestWebBundleIdentitySupportsLegacyVersionAndRejectsUnreadableMetadata(t *testing.T) {
+	legacy := setupTestWebRoot(t)
+	if err := os.WriteFile(filepath.Join(legacy, "version.json"), []byte(`{"version":"legacy","revision":"r1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHandler(legacy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close()
-	req := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("symlink escape status = %d, want 404", w.Code)
+	if handler.BundleVersion() != "legacy" || handler.BundleRevision() != "r1" {
+		t.Fatalf("legacy bundle identity = (%q, %q)", handler.BundleVersion(), handler.BundleRevision())
+	}
+	if err := handler.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	invalid := setupTestWebRoot(t)
+	if err := os.WriteFile(filepath.Join(invalid, "version.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if handler, err := NewHandler(invalid); err == nil || handler != nil || !strings.Contains(err.Error(), "parse web bundle version") {
+		t.Fatalf("invalid bundle metadata = (%v, %v)", handler, err)
+	}
+
+	unreadable := setupTestWebRoot(t)
+	if err := os.Mkdir(filepath.Join(unreadable, "version.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if handler, err := NewHandler(unreadable); err == nil || handler != nil || !strings.Contains(err.Error(), "read web bundle version") {
+		t.Fatalf("unreadable bundle metadata = (%v, %v)", handler, err)
 	}
 }

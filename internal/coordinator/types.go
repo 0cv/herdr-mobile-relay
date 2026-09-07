@@ -86,8 +86,9 @@ func (f EffectFunc) Run(ctx context.Context, token WorkerToken) EffectResult {
 }
 
 type EffectResult struct {
-	Result         *CommandResult
-	BumpGeneration bool
+	Result            *CommandResult
+	BumpGeneration    bool
+	TopologyFinalized bool
 }
 
 var (

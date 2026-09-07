@@ -27,7 +27,27 @@ func TestCustomAgentTimeoutAfterPaneRunIsDispatchedUnknown(t *testing.T) {
 	if !errors.Is(err, herdr.ErrDispatchedUnknown) {
 		t.Fatalf("custom agent timeout = %v, want dispatched_unknown", err)
 	}
+
 	if errors.Is(err, herdr.ErrNotStarted) {
 		t.Fatalf("custom agent timeout was also classified not_started: %v", err)
+	}
+}
+
+func TestCustomAgentRenameFailureIsPartiallyApplied(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeScript(t, dir, "herdr", "#!/bin/sh\n"+
+		"case \"$1 $2\" in\n"+
+		"  'pane run') printf '{\"result\":{}}\\n' ;;\n"+
+		"  'agent get') printf '{\"result\":{\"pane_id\":\"pane-1\",\"running\":true}}\\n' ;;\n"+
+		"  'agent rename') exit 1 ;;\n"+
+		"  *) exit 2 ;;\n"+
+		"esac\n")
+	lifecycle := &Lifecycle{herdr: herdr.NewClient(bin, filepath.Join(dir, "sock"))}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := lifecycle.startInTarget(ctx, profiles.Profile{Argv: []string{"custom-agent"}}, "agent", "pane-1")
+	if !errors.Is(err, herdr.ErrPartiallyApplied) || !errors.Is(err, herdr.ErrDispatchedUnknown) {
+		t.Fatalf("custom rename failure = %v, want partially applied dispatched-unknown", err)
 	}
 }

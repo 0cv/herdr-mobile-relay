@@ -12,6 +12,7 @@ func TestLoadDefaults(t *testing.T) {
 	os.Unsetenv("HERDR_RELAY_HOST")
 	os.Unsetenv("HERDR_RELAY_PORT")
 	os.Unsetenv("HERDR_RELAY_TOKEN")
+	os.Unsetenv("HERDR_RELAY_MANAGED_DEPLOYMENT")
 
 	cfg, err := Load()
 	if err != nil {
@@ -28,6 +29,70 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.PollInterval != 2.0 {
 		t.Errorf("poll interval = %f, want 2.0", cfg.PollInterval)
+	}
+	if cfg.ManagedDeployment {
+		t.Error("managed deployment = true, want false when the setting is absent")
+	}
+}
+
+func TestLoadManagedDeployment(t *testing.T) {
+	root := t.TempDir()
+	activePath := filepath.Join(root, "active-runtime.json")
+	sessionRoot := filepath.Join(root, "sessions", "generation-1")
+	t.Setenv("HERDR_RELAY_MANAGED_DEPLOYMENT", "true")
+	t.Setenv("HERDR_RELAY_ACTIVE_RUNTIME", activePath)
+	t.Setenv("HERDR_SOCKET_PATH", filepath.Join(sessionRoot, "herdr.sock"))
+	t.Setenv("HERDR_RELAY_EXPECTED_INVENTORY", filepath.Join(sessionRoot, "expected-inventory.json"))
+	t.Setenv("HERDR_RELAY_ACTIVE_GENERATION", "generation-1")
+	t.Setenv("HERDR_RELAY_TOPOLOGY_COMMIT_HELPER", filepath.Join(root, "OuroWorkbenchRemote"))
+	t.Setenv("OURO_REMOTE_CONFIG", filepath.Join(root, "profiles.json"))
+	t.Setenv("OURO_LEDGER_ROOT", filepath.Join(root, "ledger"))
+	t.Setenv("OURO_SESSION_MAP", filepath.Join(root, "session-map.json"))
+	t.Setenv("OURO_SHIM_DIRECTORY", filepath.Join(root, "shims"))
+	t.Setenv("OURO_ZDOTDIR", filepath.Join(root, "zdotdir"))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ManagedDeployment {
+		t.Fatal("managed deployment setting was ignored")
+	}
+	if cfg.ActiveRuntimePath != activePath || cfg.ExpectedInventoryPath != filepath.Join(sessionRoot, "expected-inventory.json") || cfg.ActiveGeneration != "generation-1" {
+		t.Fatalf("managed inventory config = %q, %q", cfg.ExpectedInventoryPath, cfg.ActiveGeneration)
+	}
+	if cfg.TopologyCommitHelper != filepath.Join(root, "OuroWorkbenchRemote") || cfg.TopologyRemoteConfig != filepath.Join(root, "profiles.json") || cfg.TopologyLedgerRoot != filepath.Join(root, "ledger") || cfg.TopologySessionMap != filepath.Join(root, "session-map.json") || cfg.TopologyShimDirectory != filepath.Join(root, "shims") || cfg.TopologyZDOTDir != filepath.Join(root, "zdotdir") {
+		t.Fatalf("managed topology checkpoint config = %+v", cfg)
+	}
+}
+
+func TestLoadManagedDeploymentRequiresActiveRuntimePointer(t *testing.T) {
+	t.Setenv("HERDR_RELAY_MANAGED_DEPLOYMENT", "true")
+	t.Setenv("HERDR_RELAY_ACTIVE_RUNTIME", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "active runtime") {
+		t.Fatalf("missing active runtime error = %v", err)
+	}
+}
+
+func TestLoadManagedDeploymentAcceptsCanonicalFalse(t *testing.T) {
+	t.Setenv("HERDR_RELAY_MANAGED_DEPLOYMENT", "false")
+	t.Setenv("HERDR_RELAY_ACTIVE_RUNTIME", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ManagedDeployment {
+		t.Fatal("canonical false enabled managed deployment")
+	}
+}
+
+func TestLoadManagedDeploymentRejectsNonCanonicalBoolean(t *testing.T) {
+	for _, value := range []string{"", "1", "TRUE", "yes", "tru"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("HERDR_RELAY_MANAGED_DEPLOYMENT", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HERDR_RELAY_MANAGED_DEPLOYMENT") {
+				t.Fatalf("non-canonical managed deployment value %q error = %v", value, err)
+			}
+		})
 	}
 }
 

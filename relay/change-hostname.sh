@@ -97,13 +97,17 @@ fi
 # A local resolver may retain the NXDOMAIN from before the route was created.
 # Prefer a fresh public DNS answer for both edge checks; older curl builds that
 # lack DNS-over-HTTPS keep the system-resolver behavior.
-PUBLIC_CURL_ARGS=()
+PUBLIC_DOH_URL=""
 if curl --help all 2>/dev/null | grep -q -- '--doh-url'; then
-    PUBLIC_CURL_ARGS=(--doh-url "${HERDR_DOH_URL:-https://cloudflare-dns.com/dns-query}")
+    PUBLIC_DOH_URL="${HERDR_DOH_URL:-https://cloudflare-dns.com/dns-query}"
 fi
 
 public_curl() {
-    curl "${PUBLIC_CURL_ARGS[@]}" "$@"
+    if [ -n "$PUBLIC_DOH_URL" ]; then
+        curl --doh-url "$PUBLIC_DOH_URL" "$@"
+    else
+        curl "$@"
+    fi
 }
 
 
@@ -179,7 +183,10 @@ fi
 # ingress moves the tunnel replies 404, which is exactly the proof needed.
 printf '▸ Waiting for the edge to answer %s' "$NEW_HOSTNAME"
 DNS_DEADLINE=$((SECONDS + ${HERDR_STABLE_DNS_TIMEOUT:-60}))
-while ! public_curl -sS --max-time 5 -o /dev/null "https://$NEW_HOSTNAME/healthz" 2>/dev/null; do
+while :; do
+    if public_curl -sS --max-time 5 -o /dev/null "https://$NEW_HOSTNAME/healthz" 2>/dev/null; then
+        break
+    fi
     if [ "$SECONDS" -ge "$DNS_DEADLINE" ]; then
         echo ""
         echo "✗ $NEW_HOSTNAME does not resolve to Cloudflare yet." >&2

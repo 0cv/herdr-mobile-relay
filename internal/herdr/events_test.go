@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
@@ -96,6 +97,15 @@ func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
 	defer stream.Close()
 	if snapshot.Protocol != 19 || len(snapshot.Agents) != 1 {
 		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if len(buffered) == 0 {
+		eventCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		event, nextErr := stream.Next(eventCtx)
+		if nextErr != nil {
+			t.Fatalf("event after snapshot = %v", nextErr)
+		}
+		buffered = append(buffered, event)
 	}
 	if len(buffered) != 1 || buffered[0].Event != "pane.closed" {
 		t.Fatalf("buffered events = %#v", buffered)

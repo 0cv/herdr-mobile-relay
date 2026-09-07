@@ -23,20 +23,30 @@ const (
 )
 
 type Config struct {
-	Host           string
-	Port           int
-	PluginPort     int
-	Token          string
-	InstanceID     string
-	AllowedOrigins []string
-	WebRoot        string
-	HerdrBin       string
-	SocketPath     string
-	PollInterval   float64
-	RuntimeDir     string
-	LogFormat      string
-	ReleaseRoot    string
-	ServiceName    string
+	Host                  string
+	Port                  int
+	PluginPort            int
+	Token                 string
+	InstanceID            string
+	AllowedOrigins        []string
+	WebRoot               string
+	HerdrBin              string
+	SocketPath            string
+	PollInterval          float64
+	RuntimeDir            string
+	LogFormat             string
+	ReleaseRoot           string
+	ServiceName           string
+	ManagedDeployment     bool
+	ActiveRuntimePath     string
+	ExpectedInventoryPath string
+	ActiveGeneration      string
+	TopologyCommitHelper  string
+	TopologyRemoteConfig  string
+	TopologyLedgerRoot    string
+	TopologySessionMap    string
+	TopologyShimDirectory string
+	TopologyZDOTDir       string
 
 	// GatewayURL is the configured tie-break leader, kept equal to
 	// GatewayURLs[0] so readers that only know one gateway keep working. The
@@ -62,18 +72,32 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
+	managedDeployment, err := envCanonicalBool("HERDR_RELAY_MANAGED_DEPLOYMENT", false)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{
-		Host:         envOr("HERDR_RELAY_HOST", "127.0.0.1"),
-		Port:         envIntOr("HERDR_RELAY_PORT", 8375),
-		PluginPort:   envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
-		Token:        os.Getenv("HERDR_RELAY_TOKEN"),
-		InstanceID:   os.Getenv("HERDR_RELAY_INSTANCE_ID"),
-		WebRoot:      os.Getenv("HERDR_WEB_ROOT"),
-		HerdrBin:     os.Getenv("HERDR_BIN"),
-		SocketPath:   os.Getenv("HERDR_SOCKET_PATH"),
-		PollInterval: envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
-		LogFormat:    envOr("HERDR_RELAY_LOG_FORMAT", "text"),
-		ServiceName:  envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+		Host:                  envOr("HERDR_RELAY_HOST", "127.0.0.1"),
+		Port:                  envIntOr("HERDR_RELAY_PORT", 8375),
+		PluginPort:            envIntOr("HERDR_RELAY_PLUGIN_PORT", 8376),
+		Token:                 os.Getenv("HERDR_RELAY_TOKEN"),
+		InstanceID:            os.Getenv("HERDR_RELAY_INSTANCE_ID"),
+		WebRoot:               os.Getenv("HERDR_WEB_ROOT"),
+		HerdrBin:              os.Getenv("HERDR_BIN"),
+		SocketPath:            os.Getenv("HERDR_SOCKET_PATH"),
+		PollInterval:          envFloatOr("HERDR_RELAY_POLL_INTERVAL", 2.0),
+		LogFormat:             envOr("HERDR_RELAY_LOG_FORMAT", "text"),
+		ServiceName:           envOr("HERDR_RELAY_SERVICE_NAME", defaultServiceName()),
+		ManagedDeployment:     managedDeployment,
+		ActiveRuntimePath:     os.Getenv("HERDR_RELAY_ACTIVE_RUNTIME"),
+		ExpectedInventoryPath: os.Getenv("HERDR_RELAY_EXPECTED_INVENTORY"),
+		ActiveGeneration:      os.Getenv("HERDR_RELAY_ACTIVE_GENERATION"),
+		TopologyCommitHelper:  os.Getenv("HERDR_RELAY_TOPOLOGY_COMMIT_HELPER"),
+		TopologyRemoteConfig:  os.Getenv("OURO_REMOTE_CONFIG"),
+		TopologyLedgerRoot:    os.Getenv("OURO_LEDGER_ROOT"),
+		TopologySessionMap:    os.Getenv("OURO_SESSION_MAP"),
+		TopologyShimDirectory: os.Getenv("OURO_SHIM_DIRECTORY"),
+		TopologyZDOTDir:       os.Getenv("OURO_ZDOTDIR"),
 
 		WebRTCUDPPort:       envIntOr("HERDR_WEBRTC_UDP_PORT", 0),
 		ForceRelayTransport: envBoolOr("HERDR_TRANSPORT_FORCE_RELAY", false),
@@ -153,6 +177,9 @@ func (c *Config) validate() error {
 	}
 	if len(c.GatewayURLs) > 0 && c.Token == "" {
 		return fmt.Errorf("gateway url requires a relay key: the gateway path derives its credentials from it")
+	}
+	if c.ManagedDeployment && (!filepath.IsAbs(c.ActiveRuntimePath) || filepath.Clean(c.ActiveRuntimePath) != c.ActiveRuntimePath) {
+		return errors.New("managed deployment requires an absolute normalized active runtime path")
 	}
 	return nil
 }
@@ -295,6 +322,21 @@ func envBoolOr(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+func envCanonicalBool(key string, fallback bool) (bool, error) {
+	value, present := os.LookupEnv(key)
+	if !present {
+		return fallback, nil
+	}
+	switch value {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be exactly true or false", key)
+	}
 }
 
 func envFloatOr(key string, fallback float64) float64 {

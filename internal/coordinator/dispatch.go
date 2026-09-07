@@ -17,13 +17,14 @@ import (
 )
 
 const (
-	commandDeadline    = 12 * time.Second
-	approvalDeadline   = 9 * time.Second
-	questionDeadline   = 16 * time.Second
-	agentStartDeadline = 40 * time.Second
-	maxTabInsertIndex  = 10_000
-	promptMaxChars     = 100000
-	secretMaxRunes     = 256
+	commandDeadline              = 12 * time.Second
+	approvalDeadline             = 9 * time.Second
+	questionDeadline             = 16 * time.Second
+	agentStartDeadline           = 40 * time.Second
+	maxTabInsertIndex            = 10_000
+	promptMaxChars               = 100000
+	secretMaxRunes               = 256
+	unknownProfileOwnershipError = "Agent profile ownership is unknown"
 )
 
 type CommandResult struct {
@@ -35,6 +36,24 @@ type CommandResult struct {
 	PaneID    string `json:"pane_id,omitempty"`
 	Data      any    `json:"data,omitempty"`
 	replayed  bool
+}
+
+type executionFenceKey struct{}
+type topologyLockHeldKey struct{}
+
+// WithExecutionFence binds a final pre-effect validation to coordinated work.
+// The dispatcher evaluates it only after the operation reaches the worker or
+// topology lock, immediately before any Herdr mutation can run.
+func WithExecutionFence(ctx context.Context, fence func() *CommandResult) context.Context {
+	return context.WithValue(ctx, executionFenceKey{}, fence)
+}
+
+func executionFenceResult(ctx context.Context) *CommandResult {
+	fence, _ := ctx.Value(executionFenceKey{}).(func() *CommandResult)
+	if fence == nil {
+		return nil
+	}
+	return fence()
 }
 
 type Dispatcher struct {
@@ -52,7 +71,9 @@ type Dispatcher struct {
 	broadcast        func(any)
 	wakePoll         func()
 	readMu           sync.Mutex
+	paneEffectLocks  [64]sync.Mutex
 	topologyMu       sync.Mutex
+	fleetEpoch       atomic.Uint64
 	reads            map[string]*paneRead
 	watcherMu        sync.Mutex
 	watcherCtx       context.Context
@@ -68,6 +89,16 @@ type Dispatcher struct {
 
 type receiptContextKey struct{}
 type admissionContextKey struct{}
+type resultFinalizerContextKey struct{}
+type resultCompleterContextKey struct{}
+
+func WithResultFinalizer(ctx context.Context, finalize func(context.Context, *CommandResult) *CommandResult) context.Context {
+	return context.WithValue(ctx, resultFinalizerContextKey{}, finalize)
+}
+
+func withResultCompleter(ctx context.Context, complete func(context.Context, *CommandResult) *CommandResult) context.Context {
+	return context.WithValue(ctx, resultCompleterContextKey{}, complete)
+}
 
 type paneSessionContextKey struct{}
 
@@ -258,6 +289,11 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	}
 
 	d.logger.Debug("dispatching command", "action", action, "request_id", requestID, "pane_id", paneID)
+	if action == "agent_stop" || action == "agent_clear" || action == "agent_restart" {
+		if denied := d.denyUnknownProfileOwnership(requestID, action, paneID); denied != nil {
+			return denied
+		}
+	}
 
 	switch action {
 	case "submit_prompt":
@@ -295,6 +331,33 @@ func (d *Dispatcher) Handle(ctx context.Context, message map[string]any) *Comman
 	}
 }
 
+func (d *Dispatcher) denyUnknownProfileOwnership(requestID, action, paneID string) *CommandResult {
+	if d.profiles == nil || paneID == "" {
+		return nil
+	}
+	agent, exists, ready := d.state.AgentAtReadyInventory(paneID)
+	if ready && (!exists || d.profiles.ResolvePaneSession(paneID, agent.SessionID, agent.Agent) != "") {
+		return nil
+	}
+	return d.fail(requestID, action, paneID, unknownProfileOwnershipError)
+}
+
+func (d *Dispatcher) denyUnknownWorkspaceProfileOwnership(requestID, action, workspaceID string) *CommandResult {
+	if d.profiles == nil || workspaceID == "" {
+		return nil
+	}
+	agents, ready := d.state.SnapshotAtReadyInventory()
+	if !ready {
+		return d.fail(requestID, action, "", unknownProfileOwnershipError)
+	}
+	for _, agent := range agents {
+		if agent.WorkspaceID == workspaceID && d.profiles.ResolvePaneSession(agent.PaneID, agent.SessionID, agent.Agent) == "" {
+			return d.fail(requestID, action, agent.PaneID, unknownProfileOwnershipError)
+		}
+	}
+	return nil
+}
+
 func (d *Dispatcher) HandleAdmitted(
 	ctx context.Context,
 	message map[string]any,
@@ -319,6 +382,7 @@ func (d *Dispatcher) HandleAdmitted(
 // failures, read-only paths).
 func (d *Dispatcher) HandleTopologyAdmitted(
 	ctx context.Context,
+	requestID, action string,
 	admitted func(),
 	handle func(context.Context) *CommandResult,
 ) *CommandResult {
@@ -327,6 +391,19 @@ func (d *Dispatcher) HandleTopologyAdmitted(
 		once.Do(admitted)
 	}
 	ctx = context.WithValue(ctx, admissionContextKey{}, signal)
+	fleetEpoch := d.fleetEpoch.Load()
+	d.admitTopology(ctx)
+	if fenced := executionFenceResult(ctx); fenced != nil {
+		signal()
+		return fenced
+	}
+	d.topologyMu.Lock()
+	defer d.topologyMu.Unlock()
+	if d.fleetEpoch.Load() != fleetEpoch {
+		signal()
+		return d.topologyConflict(requestID, action, "")
+	}
+	ctx = context.WithValue(ctx, topologyLockHeldKey{}, true)
 	result := handle(ctx)
 	signal()
 	return result
@@ -530,22 +607,28 @@ func (d *Dispatcher) handleStop(ctx context.Context, receivedAt time.Time, reque
 		Command:     d.command(ctx, receivedAt, requestID, CommandStop, paneID, commandDeadline, nil),
 		LedgerKey:   "stop\x00" + paneID + "\x00" + requestID,
 		PayloadHash: hashPayload(struct{}{}),
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+	}, d.topologyEffect(ctx, requestID, CommandStop, paneID, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "agent_stop"); stale != nil {
 			return EffectResult{Result: stale}
+		}
+		if denied := d.denyUnknownProfileOwnership(requestID, "agent_stop", paneID); denied != nil {
+			return EffectResult{Result: denied}
 		}
 		if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
 			return EffectResult{Result: d.failErr(requestID, "agent_stop", paneID, err)}
 		}
-		return EffectResult{Result: completed(requestID, "agent_stop", paneID, nil), BumpGeneration: true}
-	}))
-	if result.OK && !result.replayed {
-		d.state.BumpGeneration(paneID)
-		d.state.MarkTopologyChanged()
 		if d.profiles != nil {
-			d.profiles.Forget(paneID)
+			if err := d.profiles.Forget(paneID); err != nil {
+				return EffectResult{Result: d.failErr(requestID, "agent_stop", paneID, partiallyApplied("pane stopped before ownership removal was durably recorded", err)), BumpGeneration: true}
+			}
 		}
-		d.recordActivity("agent_stop", "sent", "Stopped agent", paneID, requestID)
+		return EffectResult{Result: completed(requestID, "agent_stop", paneID, nil), BumpGeneration: true}
+	})))
+	if !result.replayed && (result.OK || result.Phase == "dispatched_unknown") {
+		d.state.BumpGeneration(paneID)
+		if result.OK {
+			d.recordActivity("agent_stop", "sent", "Stopped agent", paneID, requestID)
+		}
 		d.wake()
 	}
 	return result
@@ -658,12 +741,15 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 		}
 	}
 
+	ctx = withResultCompleter(ctx, func(completeCtx context.Context, result *CommandResult) *CommandResult {
+		return d.completeAgentStart(completeCtx, requestID, request, result)
+	})
 	result := d.schedule(ctx, ScheduleOptions{
 		Command:     d.command(ctx, receivedAt, requestID, CommandStart, "", agentStartDeadline, request),
 		RelayLevel:  true,
 		LedgerKey:   ledgerKey,
 		PayloadHash: payloadHash,
-	}, EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
+	}, d.topologyEffect(ctx, requestID, CommandStart, "", EffectFunc(func(effectCtx context.Context, _ WorkerToken) EffectResult {
 		var started StartResult
 		var err error
 		if d.lifecycle != nil {
@@ -683,12 +769,11 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 			return EffectResult{Result: d.failErr(requestID, "agent_start", started.PaneID, err)}
 		}
 		return EffectResult{Result: completed(requestID, "agent_start", started.PaneID, started)}
-	}))
+	})))
 	if !result.OK {
 		if result.PaneID != "" {
 			// A target survived the failure. Publish the topology so the empty
 			// pane appears on the phone and a retry can start into it.
-			d.state.MarkTopologyChanged()
 			d.wake()
 		}
 		return result
@@ -696,7 +781,13 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 	if result.replayed {
 		return result
 	}
+	return result
+}
 
+func (d *Dispatcher) completeAgentStart(ctx context.Context, requestID string, request StartRequest, result *CommandResult) *CommandResult {
+	if result == nil || !result.OK {
+		return result
+	}
 	data, _ := result.Data.(StartResult)
 	if data.PaneID == "" {
 		if values, ok := result.Data.(map[string]any); ok {
@@ -705,13 +796,7 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 	}
 	if request.Prompt != "" && data.PaneID != "" {
 		generation, active := d.state.PaneSession(data.PaneID)
-		initialPromptCtx := context.WithValue(ctx, paneSessionContextKey{}, paneSessionAdmission{
-			generation:  uint64(generation),
-			active:      active,
-			allowAbsent: true,
-		})
-		promptResult := d.handlePrompt(initialPromptCtx, receivedAt, requestID+"-initial", data.PaneID, map[string]any{"text": request.Prompt})
-		if !promptResult.OK {
+		if err := d.sendInitialPrompt(ctx, data.PaneID, request.Prompt, uint64(generation), !active); err != nil {
 			result.Phase = "completed_with_warning"
 			result.Data = map[string]any{
 				"pane_id": data.PaneID,
@@ -719,12 +804,51 @@ func (d *Dispatcher) handleAgentStart(ctx context.Context, receivedAt time.Time,
 				"cwd":     request.Cwd,
 				"warning": "Agent started, but the initial prompt was not confirmed",
 			}
+		} else {
+			d.recordActivityWithExtract("submit_prompt", "sent", "Prompt sent", request.Prompt, data.PaneID, requestID+"-initial")
 		}
 	}
 	d.recordActivity("agent_start", "started", "Started "+request.Name, data.PaneID, requestID)
-	d.state.MarkTopologyChanged()
 	d.wake()
 	return result
+}
+
+func (d *Dispatcher) sendInitialPrompt(ctx context.Context, paneID, text string, generation uint64, allowAbsent bool) error {
+	unlock := d.lockPaneEffect(paneID)
+	defer unlock()
+	if err := d.paneSessionError(WorkerToken{PaneID: paneID, Generation: generation, AllowAbsent: allowAbsent}); err != nil {
+		return err
+	}
+	promptCtx, cancel := context.WithTimeout(ctx, commandDeadline)
+	defer cancel()
+	requiresEnter := false
+	if agent, ok := d.state.Agent(paneID); ok {
+		requiresEnter = isQoderAgent(agent.Agent)
+	}
+	if !requiresEnter {
+		return d.herdr.Prompt(promptCtx, paneID, text)
+	}
+	if err := d.herdr.SendText(promptCtx, paneID, text); err != nil {
+		return err
+	}
+	if d.state.Generation(paneID) != int64(generation) {
+		return partiallyApplied("prompt text was already delivered", ErrPaneReplaced)
+	}
+	if err := d.herdr.SendKeys(promptCtx, paneID, []string{"Enter"}); err != nil {
+		return partiallyApplied("prompt text was already delivered", err)
+	}
+	return nil
+}
+
+func (d *Dispatcher) lockPaneEffect(paneID string) func() {
+	var hash uint32 = 2166136261
+	for index := 0; index < len(paneID); index++ {
+		hash ^= uint32(paneID[index])
+		hash *= 16777619
+	}
+	lock := &d.paneEffectLocks[hash%uint32(len(d.paneEffectLocks))]
+	lock.Lock()
+	return lock.Unlock
 }
 
 func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requestID, paneID string) *CommandResult {
@@ -739,18 +863,21 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 		// Direct unit-test fallback still preserves serialization.
 		return d.schedule(ctx, ScheduleOptions{
 			Command: d.command(ctx, receivedAt, requestID, CommandClear, paneID, agentStartDeadline, nil),
-		}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		}, d.topologyEffect(ctx, requestID, CommandClear, paneID, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 			if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
 				return EffectResult{Result: stale}
+			}
+			if denied := d.denyUnknownProfileOwnership(requestID, "agent_clear", paneID); denied != nil {
+				return EffectResult{Result: denied}
 			}
 			if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
 				return EffectResult{Result: d.failErr(requestID, "agent_clear", paneID, err)}
 			}
 			return EffectResult{Result: completed(requestID, "agent_clear", paneID, nil), BumpGeneration: true}
-		}))
+		})))
 	}
 
-	profileID := d.profiles.ResolvePane(paneID, agent.Agent)
+	profileID := d.profiles.ResolvePaneSession(paneID, agent.SessionID, agent.Agent)
 	profile, exists := d.profiles.Profile(profileID)
 	if !exists {
 		return d.fail(requestID, "agent_clear", paneID, "This agent does not match an available launch profile")
@@ -765,9 +892,12 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 	result := d.schedule(ctx, ScheduleOptions{
 		Command:   d.command(ctx, receivedAt, requestID, CommandClear, paneID, agentStartDeadline, request),
 		LedgerKey: "clear\x00" + paneID + "\x00" + requestID,
-	}, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+	}, d.topologyEffect(ctx, requestID, CommandClear, paneID, EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
 		if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
 			return EffectResult{Result: stale}
+		}
+		if denied := d.denyUnknownProfileOwnership(requestID, "agent_clear", paneID); denied != nil {
+			return EffectResult{Result: denied}
 		}
 		replacement, err := d.lifecycle.Start(effectCtx, profile, request)
 		if err != nil {
@@ -777,19 +907,25 @@ func (d *Dispatcher) handleClear(ctx context.Context, receivedAt time.Time, requ
 		if stale := d.paneSessionCurrent(token, requestID, "agent_clear"); stale != nil {
 			return EffectResult{Result: stale}
 		}
+		if denied := d.denyUnknownProfileOwnership(requestID, "agent_clear", paneID); denied != nil {
+			return EffectResult{Result: denied}
+		}
 		if err := d.herdr.StopPane(effectCtx, paneID); err != nil {
 			data["warning"] = "Replacement started, but the old pane could not be closed"
 			result := completed(requestID, "agent_clear", paneID, data)
 			result.Phase = "completed_with_warning"
 			return EffectResult{Result: result, BumpGeneration: true}
 		}
+		if err := d.profiles.Forget(paneID); err != nil {
+			return EffectResult{Result: d.failErr(requestID, "agent_clear", paneID, partiallyApplied("replacement started and old pane stopped before ownership removal was durably recorded", err)), BumpGeneration: true}
+		}
 		return EffectResult{Result: completed(requestID, "agent_clear", paneID, data), BumpGeneration: true}
-	}))
-	if result.OK && !result.replayed {
+	})))
+	if !result.replayed && (result.OK || result.Phase == "dispatched_unknown") {
 		d.state.BumpGeneration(paneID)
-		d.state.MarkTopologyChanged()
-		d.profiles.Forget(paneID)
-		d.recordActivity("agent_clear", "cleared", "Cleared agent", paneID, requestID)
+		if result.OK {
+			d.recordActivity("agent_clear", "cleared", "Cleared agent", paneID, requestID)
+		}
 		d.wake()
 	}
 	return result
@@ -828,7 +964,17 @@ func (d *Dispatcher) schedule(ctx context.Context, options ScheduleOptions, runn
 		options.AllowAbsent = admission.allowAbsent
 	}
 	admitted, _ := ctx.Value(admissionContextKey{}).(func())
-	result, err := d.scheduler.ExecuteAdmitted(ctx, options, runner, admitted)
+	guarded := EffectFunc(func(effectCtx context.Context, token WorkerToken) EffectResult {
+		if fenced := executionFenceResult(ctx); fenced != nil {
+			return EffectResult{Result: fenced}
+		}
+		if !options.RelayLevel {
+			unlock := d.lockPaneEffect(options.PaneID)
+			defer unlock()
+		}
+		return runner.Run(effectCtx, token)
+	})
+	result, err := d.scheduler.ExecuteAdmitted(ctx, options, guarded, admitted)
 	switch {
 	case err == nil && result != nil:
 		return result
@@ -1096,7 +1242,6 @@ func (d *Dispatcher) HandleReadPane(ctx context.Context, message map[string]any)
 	if paneID == "" {
 		return map[string]any{"type": "pane_content", "pane_id": "", "content": "", "format": "text"}
 	}
-	d.handleAcknowledge(stringValue(message, "request_id"), paneID)
 	lines := intValue(message["lines"], 30)
 	if lines < 1 {
 		lines = 1

@@ -27,6 +27,19 @@ func TestStrictPaneReadSchema(t *testing.T) {
 	}
 }
 
+func TestIntegrationStatusDefaultsToEmptySuccess(t *testing.T) {
+	store := &stateStore{path: filepath.Join(t.TempDir(), "scenario.json")}
+	if output, err := execute(store, Scenario{}, []string{"integration", "status"}); err != nil || output != "" {
+		t.Fatalf("integration status = %q, %v; want empty success", output, err)
+	}
+	if _, err := execute(store, Scenario{}, []string{"integration", "status", "unexpected"}); err == nil {
+		t.Fatal("integration status accepted an unexpected argument")
+	}
+	if output, err := execute(store, Scenario{}, []string{"agent", "list"}); err != nil || output == "" {
+		t.Fatalf("agent list after integration fallback = %q, %v; want an envelope", output, err)
+	}
+}
+
 func TestOperationRecordIsCreatedAtStartAndCompletedInPlace(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "operations.jsonl")
 	t.Setenv("FAKE_HERDR_OPERATIONS", path)

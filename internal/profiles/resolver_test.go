@@ -206,6 +206,126 @@ func TestCommandConfig(t *testing.T) {
 	}
 }
 
+func TestINIReadFailureIsReported(t *testing.T) {
+	configHome := t.TempDir()
+	iniPath := filepath.Join(configHome, "herdr", "agent-profiles.ini")
+	if err := os.MkdirAll(iniPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewResolver(configHome, nil).ProfilesWithError(); err == nil {
+		t.Fatal("INI read failure was ignored")
+	}
+}
+
+func TestAssociationOperationsRejectInvalidInputAndCorruptState(t *testing.T) {
+	configHome, _ := configuredCustomProfiles(t)
+	resolver := NewResolver(configHome, nil)
+	if err := resolver.Remember("", "personal"); err == nil {
+		t.Fatal("empty pane was remembered")
+	}
+	if err := resolver.Remember("pane", ""); err == nil {
+		t.Fatal("empty profile was remembered")
+	}
+	if err := resolver.Forget(""); err == nil {
+		t.Fatal("empty pane was forgotten")
+	}
+
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, associationStoreName), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	corruptRemember := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	if err := corruptRemember.Remember("pane", "personal"); err == nil {
+		t.Fatal("remember ignored corrupt ownership state")
+	}
+	corruptForget := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	corruptForget.remembered["pane"] = "personal"
+	corruptForget.verified["pane"] = "personal"
+	if err := corruptForget.Forget("pane"); err == nil {
+		t.Fatal("forget ignored corrupt ownership state")
+	}
+	if corruptForget.remembered["pane"] != "" || corruptForget.verified["pane"] != "" || !corruptForget.forgotten["pane"] {
+		t.Fatal("failed forget did not fail closed in memory")
+	}
+	corruptPreflight := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	if err := corruptPreflight.PreflightAssociationPersistence(); err == nil {
+		t.Fatal("preflight ignored corrupt ownership state")
+	}
+}
+
+func TestAssociationPreflightReportsWriteFailureAndForgetNoopSkipsWrite(t *testing.T) {
+	configHome, _ := configuredCustomProfiles(t)
+	if err := NewResolver(configHome, nil).PreflightAssociationPersistence(); err != nil {
+		t.Fatalf("preflight without a store: %v", err)
+	}
+	stateDir := t.TempDir()
+	resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	if err := resolver.PreflightAssociationPersistence(); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolver.Forget("absent"); err != nil {
+		t.Fatalf("absent ownership forget: %v", err)
+	}
+	if err := os.RemoveAll(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolver.PreflightAssociationPersistence(); err == nil {
+		t.Fatal("preflight write failure was ignored")
+	}
+}
+
+func TestAssociationRememberAndForgetReportWriteFailures(t *testing.T) {
+	configHome, _ := configuredCustomProfiles(t)
+	stateDir := t.TempDir()
+	resolver := NewResolver(configHome, nil, WithAssociationStore(stateDir))
+	if err := resolver.Remember("owned", "personal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolver.Reconcile([]Observation{{PaneID: "owned", NativeSessionID: "session"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolver.Remember("new", "emu"); err == nil {
+		t.Fatal("remember write failure was ignored")
+	}
+	if err := resolver.Forget("owned"); err == nil {
+		t.Fatal("forget write failure was ignored")
+	}
+}
+
+func TestResolvePaneSessionFailsClosedForEveryOwnershipGuard(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Resolver)
+	}{
+		{name: "forgotten", mutate: func(resolver *Resolver) { resolver.forgotten["pane"] = true }},
+		{name: "untrusted", mutate: func(resolver *Resolver) { resolver.untrusted["pane"] = true }},
+		{name: "association error", mutate: func(resolver *Resolver) { resolver.associationErr = os.ErrPermission }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resolver := NewResolver(t.TempDir(), nil)
+			test.mutate(resolver)
+			if got := resolver.ResolvePaneSession("pane", "session", "copilot"); got != "" {
+				t.Fatalf("guarded session resolved to %q", got)
+			}
+		})
+	}
+	resolver := NewResolver(t.TempDir(), nil)
+	resolver.remembered["pane"] = "personal"
+	if got := resolver.ResolvePaneSession("pane", "session", "copilot"); got != "personal" {
+		t.Fatalf("remembered session = %q, want personal", got)
+	}
+}
+
 func profileLabel(profiles []Profile, id string) string {
 	for _, profile := range profiles {
 		if profile.ID == id {

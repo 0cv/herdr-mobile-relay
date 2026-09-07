@@ -202,6 +202,11 @@ func execute(store *stateStore, scenario Scenario, args []string) (string, error
 	}
 
 	switch group + " " + command {
+	case "integration status":
+		if err := exactLen(rest, 0); err != nil {
+			return "", err
+		}
+		return "", nil
 	case "agent list":
 		if err := exactLen(rest, 0); err != nil {
 			return "", err

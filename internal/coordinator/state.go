@@ -28,6 +28,7 @@ type AgentState struct {
 	TabOrder                     int                    `json:"tab_order,omitempty"`
 	WorkspaceID                  string                 `json:"workspace_id"`
 	Agent                        string                 `json:"agent"`
+	ProfileID                    string                 `json:"profile_id,omitempty"`
 	Name                         string                 `json:"name"`
 	Status                       string                 `json:"status"`
 	Focused                      bool                   `json:"_focused"`
@@ -199,6 +200,38 @@ func (s *State) InventoryReady() bool {
 	return s.inventoryReady
 }
 
+func (s *State) AgentAtReadyInventory(paneID string) (*AgentState, bool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.inventoryReady {
+		return nil, false, false
+	}
+	agent, exists := s.agents[paneID]
+	if !exists {
+		return nil, false, true
+	}
+	copy := *agent
+	copy.StateRevision = s.revision[paneID]
+	copy.Generation = s.generation[paneID]
+	return &copy, true, true
+}
+
+func (s *State) SnapshotAtReadyInventory() ([]*AgentState, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if !s.inventoryReady {
+		return nil, false
+	}
+	result := make([]*AgentState, 0, len(s.agents))
+	for _, agent := range s.agents {
+		copy := *agent
+		copy.StateRevision = s.revision[copy.PaneID]
+		copy.Generation = s.generation[copy.PaneID]
+		result = append(result, &copy)
+	}
+	return result, true
+}
+
 func (s *State) MarkInventoryFailure(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -328,6 +361,9 @@ func (s *State) CompletionCurrent(paneID string, revision int64) bool {
 func (s *State) MarkTopologyChanged() {
 	s.mu.Lock()
 	s.topologyGen++
+	s.inventoryReady = false
+	s.inventoryErrorCode = ""
+	s.inventoryMessage = ""
 	s.mu.Unlock()
 }
 
@@ -373,6 +409,14 @@ func (s *State) commitTopologyLocked(agents []*AgentState, baseRev int64) {
 			continue
 		}
 		cp := *incoming
+		if cp.Session == "" && cp.SessionID == "" && existing.SessionID != "" {
+			cp.Session = existing.Session
+			cp.SessionID = existing.SessionID
+			cp.AgentSessionID = existing.AgentSessionID
+			cp.SessionName = existing.SessionName
+			cp.ProfileID = existing.ProfileID
+			cp.ConversationHistoryAvailable = existing.ConversationHistoryAvailable
+		}
 		cp.Status = existing.Status
 		if existing.Status == "blocked" {
 			copyBlockedDetails(&cp, existing)
@@ -399,6 +443,18 @@ func (s *State) CommitPoll(
 	workspaceChanged = s.commitWorkspacesLocked(workspaces)
 	s.commitInventoryLocked(agents, token.BaseRevision)
 	return workspaceChanged, true
+}
+
+func (s *State) CommitProfileOwnership(agents []*AgentState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, incoming := range agents {
+		current := s.agents[incoming.PaneID]
+		if current == nil || current.SessionID != incoming.SessionID || paneSessionReplaced(current, incoming) {
+			continue
+		}
+		current.ProfileID = incoming.ProfileID
+	}
 }
 
 func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
@@ -483,7 +539,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 			default:
 				cp.UpdatedAt = time.Now().UnixMilli()
 			}
-		} else if existing.Status == cp.Status && existing.Name == cp.Name && existing.Cwd == cp.Cwd && existing.Agent == cp.Agent &&
+		} else if existing.Status == cp.Status && existing.Name == cp.Name && existing.Cwd == cp.Cwd && existing.Agent == cp.Agent && existing.ProfileID == cp.ProfileID &&
 			existing.ActivitySeq == cp.ActivitySeq &&
 			existing.PaneRevision == cp.PaneRevision && existing.ScrollMaxOffset == cp.ScrollMaxOffset && existing.ForegroundCwd == cp.ForegroundCwd {
 			cp.UpdatedAt = existing.UpdatedAt
@@ -500,7 +556,7 @@ func (s *State) commitInventoryLocked(agents []*AgentState, baseRev int64) {
 		attentionChanged := !blockedDetailsEqual(existing, &cp)
 
 		if !exists || existing.Status != cp.Status || existing.Name != cp.Name || existing.Cwd != cp.Cwd ||
-			existing.Agent != cp.Agent || existing.ActivitySeq != cp.ActivitySeq ||
+			existing.Agent != cp.Agent || existing.ProfileID != cp.ProfileID || existing.ActivitySeq != cp.ActivitySeq ||
 			attentionChanged {
 			s.contentRev[incoming.PaneID]++
 		}

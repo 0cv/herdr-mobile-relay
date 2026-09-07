@@ -2,6 +2,8 @@ package profiles
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -52,17 +54,28 @@ type IntegrationStatuser interface {
 }
 
 type Resolver struct {
-	mu         sync.Mutex
-	cached     []Profile
-	expires    time.Time
-	configHome string
-	herdr      IntegrationStatuser
-	remembered map[string]string
-	aliases    map[string]string
-	skillDirs  map[string][]string
-	formats    map[string]string
-	warned     map[string]bool
-	versions   map[string]cachedVersion
+	mu                  sync.Mutex
+	cached              []Profile
+	expires             time.Time
+	configHome          string
+	herdr               IntegrationStatuser
+	remembered          map[string]string
+	aliases             map[string]string
+	skillDirs           map[string][]string
+	formats             map[string]string
+	knownProfileIDs     map[string]bool
+	knownIntegrationIDs map[string]bool
+	warned              map[string]bool
+	versions            map[string]cachedVersion
+	associationDir      string
+	associations        map[string]Association
+	pending             map[string]string
+	verified            map[string]string
+	forgotten           map[string]bool
+	untrusted           map[string]bool
+	rejected            map[string]string
+	associationsRead    bool
+	associationErr      error
 }
 
 type cachedVersion struct {
@@ -72,38 +85,64 @@ type cachedVersion struct {
 
 var semanticVersionPattern = regexp.MustCompile(`\b[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\b`)
 
-func NewResolver(configHome string, herdr IntegrationStatuser) *Resolver {
-	return &Resolver{
-		configHome: configHome,
-		herdr:      herdr,
-		remembered: make(map[string]string),
-		aliases:    cloneAliases(defaultAliases),
-		skillDirs:  cloneStringSlices(defaultSkillDirs),
-		formats:    cloneStrings(defaultCommandFormats),
-		warned:     make(map[string]bool),
-		versions:   make(map[string]cachedVersion),
+type Option func(*Resolver)
+
+func WithAssociationStore(directory string) Option {
+	return func(resolver *Resolver) {
+		resolver.associationDir = directory
 	}
 }
 
+func NewResolver(configHome string, herdr IntegrationStatuser, options ...Option) *Resolver {
+	resolver := &Resolver{
+		configHome:   configHome,
+		herdr:        herdr,
+		remembered:   make(map[string]string),
+		associations: make(map[string]Association),
+		pending:      make(map[string]string),
+		verified:     make(map[string]string),
+		forgotten:    make(map[string]bool),
+		untrusted:    make(map[string]bool),
+		rejected:     make(map[string]string),
+		aliases:      cloneAliases(defaultAliases),
+		skillDirs:    cloneStringSlices(defaultSkillDirs),
+		formats:      cloneStrings(defaultCommandFormats),
+		warned:       make(map[string]bool),
+		versions:     make(map[string]cachedVersion),
+	}
+	for _, option := range options {
+		option(resolver)
+	}
+	return resolver
+}
+
 func (r *Resolver) Profiles() []Profile {
+	profiles, _ := r.ProfilesWithError()
+	return profiles
+}
+
+func (r *Resolver) ProfilesWithError() ([]Profile, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.cached != nil && time.Now().Before(r.expires) {
-		return cloneProfiles(r.cached)
+		return cloneProfiles(r.cached), nil
 	}
 
-	profiles := r.discover()
+	profiles, err := r.discover()
+	if err != nil {
+		return cloneProfiles(r.cached), err
+	}
 	r.cached = profiles
 	r.expires = time.Now().Add(5 * time.Minute)
-	return cloneProfiles(profiles)
+	return cloneProfiles(profiles), nil
 }
 
-func (r *Resolver) discover() []Profile {
-	configured, replace, aliases, skillDirs, formats := r.loadINI()
-	r.aliases = aliases
-	r.skillDirs = skillDirs
-	r.formats = formats
+func (r *Resolver) discover() ([]Profile, error) {
+	configured, replace, aliases, skillDirs, formats, err := r.loadINI()
+	if err != nil {
+		return nil, err
+	}
 
 	seen := make(map[string]bool)
 	configuredIDs := make(map[string]bool, len(configured))
@@ -119,7 +158,9 @@ func (r *Resolver) discover() []Profile {
 	if len(candidates) == 0 {
 		candidates = append([]Profile(nil), defaultCandidates...)
 	}
+	knownProfileIDs := make(map[string]bool, len(candidates))
 	for _, p := range candidates {
+		knownProfileIDs[p.ID] = true
 		path, ok := binaryPath(p.ID)
 		if !ok {
 			if configuredIDs[p.ID] {
@@ -138,7 +179,14 @@ func (r *Resolver) discover() []Profile {
 	}
 
 	if !replace {
-		for _, p := range r.discoverIntegrations() {
+		integrations, integrationErr := r.discoverIntegrations()
+		if integrationErr != nil {
+			return nil, fmt.Errorf("discover Herdr integrations: %w", integrationErr)
+		}
+		knownIntegrationIDs := make(map[string]bool, len(integrations))
+		for _, p := range integrations {
+			knownProfileIDs[p.ID] = true
+			knownIntegrationIDs[p.ID] = true
 			if !seen[p.ID] {
 				if path, ok := binaryPath(p.ID); ok {
 					p.Argv = []string{path}
@@ -148,9 +196,16 @@ func (r *Resolver) discover() []Profile {
 				result = append(result, p)
 			}
 		}
+		r.knownIntegrationIDs = knownIntegrationIDs
+	} else {
+		r.knownIntegrationIDs = nil
 	}
+	r.aliases = aliases
+	r.skillDirs = skillDirs
+	r.formats = formats
+	r.knownProfileIDs = knownProfileIDs
 
-	return result
+	return result, nil
 }
 
 func (r *Resolver) loadINI() (
@@ -159,18 +214,24 @@ func (r *Resolver) loadINI() (
 	aliases map[string]string,
 	skillDirs map[string][]string,
 	formats map[string]string,
+	err error,
 ) {
 	aliases = cloneAliases(defaultAliases)
 	skillDirs = cloneStringSlices(defaultSkillDirs)
 	formats = cloneStrings(defaultCommandFormats)
 	iniPath := filepath.Join(r.configHome, "herdr", "agent-profiles.ini")
-	data, err := os.ReadFile(iniPath)
-	if err != nil {
+	data, readErr := os.ReadFile(iniPath)
+	if errors.Is(readErr, os.ErrNotExist) {
+		return
+	}
+	if readErr != nil {
+		err = fmt.Errorf("read agent profiles: %w", readErr)
 		return
 	}
 
-	ini, err := config.ParseINI(strings.NewReader(string(data)))
-	if err != nil {
+	ini, parseErr := config.ParseINI(strings.NewReader(string(data)))
+	if parseErr != nil {
+		err = fmt.Errorf("parse agent profiles: %w", parseErr)
 		return
 	}
 
@@ -234,15 +295,15 @@ var integrationLabels = map[string]string{
 	"qodercli": "Qoder",
 }
 
-func (r *Resolver) discoverIntegrations() []Profile {
+func (r *Resolver) discoverIntegrations() ([]Profile, error) {
 	if r.herdr == nil {
-		return nil
+		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	out, err := r.herdr.IntegrationStatus(ctx)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	var result []Profile
@@ -255,7 +316,7 @@ func (r *Resolver) discoverIntegrations() []Profile {
 		if len(parts) != 2 {
 			continue
 		}
-		id := strings.TrimSpace(parts[0])
+		id := strings.ToLower(strings.TrimSpace(parts[0]))
 		rest := strings.TrimSpace(parts[1])
 		if !strings.HasPrefix(rest, "current") && !strings.HasPrefix(rest, "outdated") {
 			continue
@@ -266,7 +327,7 @@ func (r *Resolver) discoverIntegrations() []Profile {
 		}
 		result = append(result, Profile{ID: id, Label: label, Kind: id})
 	}
-	return result
+	return result, nil
 }
 
 func (r *Resolver) ProfileIDForAgent(agent string) string {
@@ -299,31 +360,166 @@ func (r *Resolver) Profile(id string) (Profile, bool) {
 	return Profile{}, false
 }
 
-func (r *Resolver) Remember(paneID, profileID string) {
+func (r *Resolver) Remember(paneID, profileID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.remembered[strings.ToLower(strings.TrimSpace(paneID))] = profileID
+	paneID = normalizeIdentifier(paneID)
+	profileID = normalizeIdentifier(profileID)
+	if !validIdentifier(paneID) || !validIdentifier(profileID) {
+		return errors.New("pane profile association contains an invalid identifier")
+	}
+	if err := r.loadAssociationsLocked(); err != nil {
+		return err
+	}
+	nextPending := clonePending(r.pending)
+	nextRejected := cloneStrings(r.rejected)
+	nextPending[paneID] = profileID
+	delete(nextRejected, paneID)
+	if r.associationDir != "" && (!samePending(r.pending, nextPending) || !samePending(r.rejected, nextRejected)) {
+		if err := writeAssociationState(r.associationDir, r.associations, nextPending, nextRejected); err != nil {
+			delete(r.remembered, paneID)
+			delete(r.verified, paneID)
+			return fmt.Errorf("persist pane profile start intent: %w", err)
+		}
+	}
+	r.pending = nextPending
+	r.rejected = nextRejected
+	r.remembered[paneID] = profileID
+	delete(r.forgotten, paneID)
+	delete(r.untrusted, paneID)
+	return nil
 }
 
-func (r *Resolver) Forget(paneID string) {
+// PreflightAssociationPersistence proves that the current ownership state can
+// be durably rewritten before a caller creates any topology that depends on a
+// later pane-specific ownership intent.
+func (r *Resolver) PreflightAssociationPersistence() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.remembered, strings.ToLower(strings.TrimSpace(paneID)))
+	if err := r.loadAssociationsLocked(); err != nil {
+		return err
+	}
+	if r.associationDir == "" {
+		return nil
+	}
+	if err := writeAssociationState(r.associationDir, r.associations, r.pending, r.rejected); err != nil {
+		return fmt.Errorf("preflight pane profile association persistence: %w", err)
+	}
+	return nil
+}
+
+func (r *Resolver) Forget(paneID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	paneID = normalizeIdentifier(paneID)
+	if !validIdentifier(paneID) {
+		return errors.New("pane profile association contains an invalid identifier")
+	}
+	if err := r.loadAssociationsLocked(); err != nil {
+		delete(r.remembered, paneID)
+		delete(r.verified, paneID)
+		r.forgotten[paneID] = true
+		return err
+	}
+	nextAssociations := cloneAssociations(r.associations)
+	nextPending := clonePending(r.pending)
+	nextRejected := cloneStrings(r.rejected)
+	delete(nextAssociations, paneID)
+	delete(nextPending, paneID)
+	delete(nextRejected, paneID)
+	if r.associationDir != "" && (!sameAssociations(r.associations, nextAssociations) || !samePending(r.pending, nextPending) || !samePending(r.rejected, nextRejected)) {
+		if err := writeAssociationState(r.associationDir, nextAssociations, nextPending, nextRejected); err != nil {
+			delete(r.remembered, paneID)
+			delete(r.verified, paneID)
+			r.forgotten[paneID] = true
+			return fmt.Errorf("persist pane profile stop intent: %w", err)
+		}
+	}
+	r.associations = nextAssociations
+	r.pending = nextPending
+	r.rejected = nextRejected
+	delete(r.remembered, paneID)
+	delete(r.verified, paneID)
+	r.forgotten[paneID] = true
+	return nil
 }
 
 func (r *Resolver) ResolvePane(paneID, reportedAgent string) string {
 	r.mu.Lock()
-	if id := r.remembered[strings.ToLower(strings.TrimSpace(paneID))]; id != "" {
+	paneID = normalizeIdentifier(paneID)
+	if r.loadAssociationsLocked() != nil {
+		r.mu.Unlock()
+		return ""
+	}
+	if r.forgotten[paneID] || r.untrusted[paneID] || r.rejected[paneID] != "" {
+		r.mu.Unlock()
+		return ""
+	}
+	if id := r.remembered[paneID]; id != "" {
 		r.mu.Unlock()
 		return id
+	}
+	if id := r.verified[paneID]; id != "" {
+		r.mu.Unlock()
+		return id
+	}
+	if _, pending := r.pending[paneID]; pending {
+		r.mu.Unlock()
+		return ""
+	}
+	if _, unverified := r.associations[paneID]; unverified {
+		r.mu.Unlock()
+		return ""
 	}
 	r.mu.Unlock()
 	return r.ProfileIDForAgent(reportedAgent)
 }
 
+func (r *Resolver) ResolvePaneSession(paneID, nativeSessionID, reportedAgent string) string {
+	r.mu.Lock()
+	paneID = normalizeIdentifier(paneID)
+	nativeSessionID = strings.TrimSpace(nativeSessionID)
+	if r.loadAssociationsLocked() != nil {
+		r.mu.Unlock()
+		return ""
+	}
+	if r.forgotten[paneID] || r.untrusted[paneID] || r.rejected[paneID] != "" {
+		r.mu.Unlock()
+		return ""
+	}
+	if id := r.remembered[paneID]; id != "" {
+		r.mu.Unlock()
+		return id
+	}
+	if _, pending := r.pending[paneID]; pending {
+		r.mu.Unlock()
+		return ""
+	}
+	if association, exists := r.associations[paneID]; exists {
+		if nativeSessionID != "" && association.NativeSessionID == nativeSessionID && r.verified[paneID] == association.ProfileID {
+			r.mu.Unlock()
+			return association.ProfileID
+		}
+		r.mu.Unlock()
+		return ""
+	}
+	r.mu.Unlock()
+	return r.ProfileIDForAgent(reportedAgent)
+}
+
+func (r *Resolver) Invalidate() {
+	r.mu.Lock()
+	r.invalidateLocked()
+	r.mu.Unlock()
+}
+
+func (r *Resolver) invalidateLocked() {
+	r.verified = make(map[string]string)
+	r.remembered = make(map[string]string)
+}
+
 func (r *Resolver) Reload() {
 	r.mu.Lock()
-	r.cached = nil
 	r.expires = time.Time{}
 	r.versions = make(map[string]cachedVersion)
 	r.mu.Unlock()

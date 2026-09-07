@@ -33,6 +33,20 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func TestManagerProductionAPILeavesTestLoopbackOverrideDisabled(t *testing.T) {
+	manager, err := New(Options{
+		Logger: quietLogger(),
+		Serve:  func(context.Context, transport.FrameConn) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	if manager.loopbackOnly {
+		t.Fatal("production manager enabled the test-only loopback filter")
+	}
+}
+
 // gate defers signaling work until the peer it targets is able to accept it,
 // which is what a real signaling channel does with trickled candidates.
 type gate struct {
@@ -86,6 +100,8 @@ func newBrowserPeer(t *testing.T, label string) *browserPeer {
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6})
 	settings.DisableActiveTCP(true)
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	settings.SetIncludeLoopbackCandidate(true)
+	settings.SetIPFilter(func(ip net.IP) bool { return ip.IsLoopback() })
 
 	pc, err := webrtc.NewAPI(webrtc.WithSettingEngine(settings)).NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -169,6 +185,7 @@ func newHarness(t *testing.T, maxSessions int, mappedIPs []string) *harness {
 			h.served <- conn
 			<-ctx.Done()
 		},
+		loopbackOnly: true,
 	})
 	if err != nil {
 		t.Fatalf("new manager: %v", err)

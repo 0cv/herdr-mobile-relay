@@ -38,10 +38,12 @@ type ApiError struct {
 }
 
 const (
-	ErrorInvalidRequest       = "invalid_request"
-	ErrorUnknownAction        = "unknown_action"
-	ErrorIncompatibleProtocol = "incompatible_protocol"
-	ErrorReaderDenied         = "reader_denied"
+	ErrorInvalidRequest         = "invalid_request"
+	ErrorUnknownAction          = "unknown_action"
+	ErrorIncompatibleProtocol   = "incompatible_protocol"
+	ErrorReaderDenied           = "reader_denied"
+	ErrorManagedDeployment      = "managed_deployment_policy"
+	ErrorManagedRuntimeNotReady = "managed_runtime_not_ready"
 )
 
 type ActionReceipt struct {

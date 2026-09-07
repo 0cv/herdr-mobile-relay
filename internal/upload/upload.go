@@ -330,6 +330,15 @@ func (m *Manager) Close() error {
 }
 
 func (m *Manager) Begin(request BeginRequest) (BeginResult, error) {
+	return m.BeginGuarded(request, nil)
+}
+
+// BeginGuarded rechecks guard after the session registry lock and before
+// creating upload state on disk.
+func (m *Manager) BeginGuarded(request BeginRequest, guard func() error) (BeginResult, error) {
+	if err := runGuard(guard); err != nil {
+		return BeginResult{}, err
+	}
 	m.Cleanup()
 	owner := strings.TrimSpace(request.Owner)
 	if owner == "" {
@@ -365,6 +374,10 @@ func (m *Manager) Begin(request BeginRequest) (BeginResult, error) {
 	current.mu.Lock()
 	defer current.mu.Unlock()
 	m.mu.Lock()
+	if err := runGuard(guard); err != nil {
+		m.mu.Unlock()
+		return BeginResult{}, err
+	}
 	if len(m.sessions) >= m.maxSessions {
 		m.mu.Unlock()
 		return BeginResult{}, failure("upload_session_limit", map[string]any{"max_sessions": m.maxSessions})
@@ -387,6 +400,10 @@ func (m *Manager) Begin(request BeginRequest) (BeginResult, error) {
 	m.mu.Unlock()
 
 	directory := "sessions/" + id
+	if err := runGuard(guard); err != nil {
+		m.discardSession(current, false)
+		return BeginResult{}, err
+	}
 	if err := m.root.Mkdir(directory, 0o700); err != nil {
 		m.discardSession(current, false)
 		return BeginResult{}, failure("upload_staging_failed", nil)
@@ -407,11 +424,20 @@ func (m *Manager) Begin(request BeginRequest) (BeginResult, error) {
 }
 
 func (m *Manager) Chunk(request ChunkRequest) (ChunkResult, error) {
+	return m.ChunkGuarded(request, nil)
+}
+
+// ChunkGuarded rechecks guard after acquiring the upload session lock and
+// before writing staged bytes.
+func (m *Manager) ChunkGuarded(request ChunkRequest, guard func() error) (ChunkResult, error) {
 	current, err := m.lockSession(request.UploadID, request.Target)
 	if err != nil {
 		return ChunkResult{}, err
 	}
 	defer current.mu.Unlock()
+	if err := runGuard(guard); err != nil {
+		return ChunkResult{}, err
+	}
 	fail := func(err error) (ChunkResult, error) {
 		m.discardSession(current, true)
 		return ChunkResult{}, err
@@ -431,6 +457,9 @@ func (m *Manager) Chunk(request ChunkRequest) (ChunkResult, error) {
 	if item.received > item.spec.Bytes-int64(len(request.Data)) {
 		return fail(failure("upload_file_too_large", map[string]any{"expected_bytes": item.spec.Bytes}))
 	}
+	if err := runGuard(guard); err != nil {
+		return ChunkResult{}, err
+	}
 	if _, err := item.file.Write(request.Data); err != nil {
 		return fail(failure("upload_staging_failed", nil))
 	}
@@ -446,11 +475,19 @@ func (m *Manager) Chunk(request ChunkRequest) (ChunkResult, error) {
 }
 
 func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
+	return m.FinishGuarded(request, nil)
+}
+
+// FinishGuarded rechecks guard after each lock that can delay publication.
+func (m *Manager) FinishGuarded(request FinishRequest, guard func() error) (FinishResult, error) {
 	current, err := m.lockSession(request.UploadID, request.Target)
 	if err != nil {
 		return FinishResult{}, err
 	}
 	defer current.mu.Unlock()
+	if err := runGuard(guard); err != nil {
+		return FinishResult{}, err
+	}
 	fail := func(err error) (FinishResult, error) {
 		m.discardSession(current, true)
 		return FinishResult{}, err
@@ -484,6 +521,9 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 
 	m.attachmentMu.Lock()
 	defer m.attachmentMu.Unlock()
+	if err := runGuard(guard); err != nil {
+		return FinishResult{}, err
+	}
 	expires := m.now().Add(m.attachTTL)
 	result := FinishResult{Attachments: make([]Attachment, 0, len(current.files))}
 	created := make([]string, 0, len(current.files))
@@ -564,6 +604,13 @@ func (m *Manager) Finish(request FinishRequest) (FinishResult, error) {
 	}
 	m.discardSession(current, true)
 	return result, nil
+}
+
+func runGuard(guard func() error) error {
+	if guard == nil {
+		return nil
+	}
+	return guard()
 }
 
 func (m *Manager) Cancel(target protocol.TargetRef, uploadID string) error {

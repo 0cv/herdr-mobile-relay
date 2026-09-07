@@ -1,0 +1,6261 @@
+{
+  "base": "c6e24cc3f627ecc791db39d77b177a754c46501e",
+  "commands": [
+    [
+      "bash",
+      "tests/test_install.sh"
+    ],
+    [
+      "bash",
+      "tests/test_common.sh"
+    ],
+    [
+      "bash",
+      "tests/test_credential_hygiene.sh"
+    ],
+    [
+      "bash",
+      "tests/test_supervisor_service.sh"
+    ],
+    [
+      "bash",
+      "tests/test_changed_shell_hostname.sh"
+    ],
+    [
+      "bash",
+      "tests/test_changed_shell_plugin.sh"
+    ],
+    [
+      "bash",
+      "tests/test_plugin_build.sh"
+    ],
+    [
+      "bash",
+      "tests/test_uninstall.sh"
+    ],
+    [
+      "bash",
+      "tests/test_changed_shell_install.sh"
+    ],
+    [
+      "bash",
+      "tests/test_release_scripts.sh"
+    ]
+  ],
+  "nonExecutable": {
+    "install.sh": [
+      "75",
+      "88",
+      "91-94",
+      "99-104",
+      "109-110",
+      "113",
+      "127-128",
+      "132",
+      "137",
+      "173",
+      "178-179",
+      "274",
+      "284",
+      "286",
+      "289",
+      "291",
+      "294",
+      "300-301",
+      "333",
+      "336",
+      "340",
+      "345",
+      "437",
+      "439",
+      "448",
+      "453",
+      "473",
+      "475",
+      "491",
+      "497"
+    ],
+    "relay/change-hostname.sh": [
+      "108",
+      "110",
+      "189"
+    ],
+    "relay/common.sh": [
+      "29",
+      "36",
+      "41",
+      "46",
+      "48",
+      "52",
+      "56",
+      "61",
+      "66",
+      "71",
+      "73-74",
+      "741",
+      "751-756",
+      "782-783",
+      "800-801",
+      "854",
+      "867",
+      "869",
+      "871",
+      "876",
+      "878",
+      "880-884",
+      "886",
+      "890-892",
+      "894",
+      "896-897",
+      "902",
+      "905-906",
+      "909-911",
+      "923",
+      "930",
+      "936",
+      "938",
+      "941",
+      "943-946",
+      "1014",
+      "1022",
+      "1026",
+      "1028",
+      "1030",
+      "1032",
+      "1034",
+      "1044-1045"
+    ],
+    "relay/herdr-mobile-relay-service.sh": [
+      "33",
+      "37-38",
+      "41-42",
+      "46-47",
+      "50",
+      "55",
+      "58",
+      "61-62",
+      "65-67",
+      "69",
+      "79",
+      "81",
+      "85",
+      "87",
+      "94",
+      "101",
+      "103",
+      "105-106",
+      "111-112",
+      "114-115",
+      "123",
+      "127",
+      "132",
+      "134-136",
+      "144",
+      "149",
+      "152-161",
+      "163",
+      "165-166",
+      "168-169",
+      "171-174"
+    ],
+    "relay/install-service.sh": [
+      "19",
+      "21",
+      "28-29",
+      "44",
+      "65-66",
+      "73",
+      "75",
+      "82",
+      "84-87",
+      "93",
+      "95",
+      "104",
+      "111",
+      "116",
+      "119-122",
+      "125",
+      "127",
+      "136",
+      "138",
+      "141-143",
+      "145",
+      "154",
+      "158",
+      "163-164",
+      "169",
+      "175",
+      "179-180",
+      "182-184",
+      "190-191",
+      "194-196",
+      "208-210",
+      "218",
+      "220",
+      "222",
+      "227",
+      "237",
+      "248",
+      "252",
+      "258-259",
+      "264-265",
+      "270",
+      "272",
+      "283",
+      "285-287",
+      "299",
+      "301",
+      "305-306",
+      "315",
+      "317",
+      "354-355",
+      "365",
+      "368"
+    ],
+    "relay/install-systemd-user-service.sh": [
+      "18",
+      "20",
+      "27-28",
+      "54",
+      "77-78",
+      "85",
+      "87",
+      "94",
+      "96-99",
+      "105",
+      "107",
+      "116",
+      "123",
+      "128",
+      "131-134",
+      "137",
+      "139",
+      "148",
+      "150",
+      "153-155",
+      "157",
+      "166-167",
+      "173",
+      "177-178",
+      "180",
+      "187-188",
+      "193-194",
+      "200-202",
+      "206",
+      "212-214",
+      "217-219",
+      "231-233",
+      "241",
+      "243",
+      "245",
+      "250",
+      "255",
+      "260",
+      "265-266",
+      "271",
+      "275",
+      "282",
+      "285",
+      "291",
+      "293",
+      "298-299",
+      "310",
+      "312-314",
+      "322-323",
+      "332",
+      "341-342",
+      "351",
+      "363-364",
+      "368",
+      "372",
+      "377"
+    ],
+    "relay/plugin-build.sh": [
+      "168-172",
+      "178",
+      "215",
+      "219-220",
+      "223",
+      "233-234",
+      "240",
+      "245",
+      "247",
+      "271",
+      "273",
+      "308",
+      "322",
+      "338",
+      "343",
+      "345",
+      "349",
+      "408",
+      "410-411",
+      "413",
+      "421",
+      "430",
+      "433",
+      "437",
+      "439",
+      "445",
+      "449-452",
+      "455",
+      "460",
+      "467",
+      "469-471",
+      "522",
+      "530-531",
+      "560",
+      "578",
+      "581",
+      "585",
+      "587-598",
+      "602",
+      "605-607",
+      "610",
+      "612-615",
+      "618",
+      "620",
+      "623-624",
+      "626-632",
+      "643",
+      "647",
+      "652",
+      "657",
+      "665",
+      "667",
+      "670",
+      "680",
+      "682",
+      "685",
+      "688-689",
+      "743-744",
+      "755-759",
+      "761-762",
+      "774-776",
+      "781-782"
+    ],
+    "relay/service.sh": [
+      "13",
+      "27",
+      "32-33",
+      "37",
+      "45",
+      "51"
+    ],
+    "relay/uninstall.sh": [
+      "55",
+      "62",
+      "69",
+      "71",
+      "74",
+      "76",
+      "82-83",
+      "156"
+    ],
+    "scripts/package-release.sh": [
+      "28",
+      "30",
+      "33-34",
+      "38",
+      "42",
+      "46",
+      "50",
+      "54",
+      "78",
+      "82",
+      "84",
+      "87-91",
+      "100",
+      "103-107"
+    ]
+  },
+  "functions": [
+    {
+      "file": "install.sh",
+      "name": "authenticated_curl",
+      "evidence": "install.sh:95"
+    },
+    {
+      "file": "install.sh",
+      "name": "fetch",
+      "evidence": "install.sh:106"
+    },
+    {
+      "file": "install.sh",
+      "name": "fetch_json",
+      "evidence": "install.sh:124"
+    },
+    {
+      "file": "install.sh",
+      "name": "install_sentinel_is_valid",
+      "evidence": "install.sh:275"
+    },
+    {
+      "file": "install.sh",
+      "name": "main",
+      "evidence": "install.sh:391"
+    },
+    {
+      "file": "install.sh",
+      "name": "offline_release_requested",
+      "evidence": "install.sh:174"
+    },
+    {
+      "file": "install.sh",
+      "name": "on_install_exit",
+      "evidence": "install.sh:72"
+    },
+    {
+      "file": "install.sh",
+      "name": "validate_github_fetch_token",
+      "evidence": "install.sh:89"
+    },
+    {
+      "file": "install.sh",
+      "name": "write_install_sentinel",
+      "evidence": "install.sh:303"
+    },
+    {
+      "file": "relay/change-hostname.sh",
+      "name": "public_curl",
+      "evidence": "relay/change-hostname.sh:106"
+    },
+    {
+      "file": "relay/common.sh",
+      "name": "ensure_relay_env",
+      "evidence": "relay/common.sh:776"
+    },
+    {
+      "file": "relay/common.sh",
+      "name": "relay_env_file",
+      "evidence": "relay/common.sh:121"
+    },
+    {
+      "file": "relay/common.sh",
+      "name": "relay_release_identity_at_endpoints",
+      "evidence": "relay/common.sh:1015"
+    },
+    {
+      "file": "relay/common.sh",
+      "name": "sanitize_relay_runtime_env",
+      "evidence": "relay/common.sh:742"
+    },
+    {
+      "file": "relay/common.sh",
+      "name": "verified_installed_release",
+      "evidence": "relay/common.sh:30"
+    },
+    {
+      "file": "relay/common.sh",
+      "name": "wait_for_installed_relay_ready",
+      "evidence": "relay/common.sh:912"
+    },
+    {
+      "file": "relay/common.sh",
+      "name": "wait_for_supervised_release",
+      "evidence": "relay/common.sh:855"
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "name": "record_bootstrap_failure",
+      "evidence": "relay/herdr-mobile-relay-service.sh:48"
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "name": "record_trusted_bootstrap_failure",
+      "evidence": "relay/herdr-mobile-relay-service.sh:70"
+    },
+    {
+      "file": "relay/install-service.sh",
+      "name": "capture_previous_service_readiness",
+      "evidence": "relay/install-service.sh:88"
+    },
+    {
+      "file": "relay/install-service.sh",
+      "name": "cleanup_launchd_install",
+      "evidence": "relay/install-service.sh:197"
+    },
+    {
+      "file": "relay/install-service.sh",
+      "name": "prove_previous_service_readiness",
+      "evidence": "relay/install-service.sh:123"
+    },
+    {
+      "file": "relay/install-service.sh",
+      "name": "restore_relay_config",
+      "evidence": "relay/install-service.sh:67"
+    },
+    {
+      "file": "relay/install-service.sh",
+      "name": "rollback_launchd_install",
+      "evidence": "relay/install-service.sh:144"
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "name": "capture_previous_service_readiness",
+      "evidence": "relay/install-systemd-user-service.sh:100"
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "name": "cleanup_systemd_install",
+      "evidence": "relay/install-systemd-user-service.sh:220"
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "name": "prove_previous_service_readiness",
+      "evidence": "relay/install-systemd-user-service.sh:135"
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "name": "restore_relay_config",
+      "evidence": "relay/install-systemd-user-service.sh:79"
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "name": "rollback_systemd_install",
+      "evidence": "relay/install-systemd-user-service.sh:156"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "authenticated_release_curl",
+      "evidence": "relay/plugin-build.sh:616"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "cleanup_plugin_build",
+      "evidence": "relay/plugin-build.sh:544"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "copy_migration_entry",
+      "evidence": "relay/plugin-build.sh:256"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "migrate_source_config",
+      "evidence": "relay/plugin-build.sh:294"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "prepare_authenticated_offline_release",
+      "evidence": "relay/plugin-build.sh:633"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "release_asset_url",
+      "evidence": "relay/plugin-build.sh:579"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "release_sha256",
+      "evidence": "relay/plugin-build.sh:608"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "release_tag_revision",
+      "evidence": "relay/plugin-build.sh:599"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "restore_or_reset_supervisor_state",
+      "evidence": "relay/plugin-build.sh:453"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "restore_target_config",
+      "evidence": "relay/plugin-build.sh:222"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "rewrite_service_release_paths",
+      "evidence": "relay/plugin-build.sh:157"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "rollback_plugin_migration",
+      "evidence": "relay/plugin-build.sh:474"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "snapshot_supervisor_state",
+      "evidence": "relay/plugin-build.sh:431"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "symlink_free_config_tree",
+      "evidence": "relay/plugin-build.sh:216"
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "name": "verify_current_service_ready",
+      "evidence": "relay/plugin-build.sh:777"
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "name": "owned_install_sentinel_is_valid",
+      "evidence": "relay/uninstall.sh:56"
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "name": "safe_remove_dir",
+      "evidence": "relay/uninstall.sh:136"
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "name": "verify_removal_target",
+      "evidence": "relay/uninstall.sh:88"
+    }
+  ],
+  "decisions": [
+    {
+      "file": "install.sh",
+      "line": 73,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:74"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 89,
+      "outcomes": [
+        {
+          "name": "case-arm-90",
+          "evidence": "install.sh:90"
+        },
+        {
+          "name": "implicit-no-match",
+          "evidence": "install.sh:95"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 107,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:108"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 116,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 125,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:126"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 135,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 174,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 175,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 176,
+      "outcomes": [
+        {
+          "name": "revision-input-considered",
+          "evidence": "install.sh:176"
+        },
+        {
+          "name": "digest-input-considered",
+          "evidence": "install.sh:177"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 177,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 278,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:279"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 279,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 280,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 282,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 288,
+      "outcomes": [
+        {
+          "name": "case-arm-289",
+          "evidence": "install.sh:292"
+        },
+        {
+          "name": "case-arm-290",
+          "evidence": "install.sh:290"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 292,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:293"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 293,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:292"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 295,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:296"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 296,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 297,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:298"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 298,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:299"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 299,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:298"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 306,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 308,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:309"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 331,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 333,
+      "outcomes": [
+        {
+          "name": "write-failure",
+          "evidence": "install.sh:337"
+        },
+        {
+          "name": "write-success",
+          "evidence": "install.sh:341"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 341,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 347,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:348"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 427,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 430,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:431"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 431,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 432,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 433,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 434,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 436,
+      "outcomes": [
+        {
+          "name": "case-arm-437",
+          "evidence": "install.sh:440"
+        },
+        {
+          "name": "case-arm-438",
+          "evidence": "install.sh:438"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 440,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 442,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 444,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 446,
+      "outcomes": [
+        {
+          "name": "case-arm-447",
+          "evidence": "install.sh:447"
+        },
+        {
+          "name": "alternate-path-2",
+          "evidence": "install.sh:446"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 449,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 451,
+      "outcomes": [
+        {
+          "name": "case-arm-452",
+          "evidence": "install.sh:452"
+        },
+        {
+          "name": "alternate-path-2",
+          "evidence": "install.sh:451"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 454,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 457,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 459,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 460,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 461,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 468,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:469"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 472,
+      "outcomes": [
+        {
+          "name": "case-arm-473",
+          "evidence": "install.sh:476"
+        },
+        {
+          "name": "case-arm-474",
+          "evidence": "install.sh:474"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 477,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 480,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:481"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 485,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 486,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 487,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:488"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 489,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:490"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 493,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:494"
+        }
+      ]
+    },
+    {
+      "file": "install.sh",
+      "line": 495,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "install.sh:496"
+        }
+      ]
+    },
+    {
+      "file": "relay/change-hostname.sh",
+      "line": 106,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/change-hostname.sh",
+      "line": 186,
+      "outcomes": [
+        {
+          "name": "loop-entered",
+          "evidence": "relay/change-hostname.sh:187"
+        }
+      ],
+      "impossible": [
+        {
+          "name": "condition-false",
+          "reason": "The ':' builtin is invariantly successful; the bounded loop exits through its explicit break or timeout path."
+        }
+      ]
+    },
+    {
+      "file": "relay/change-hostname.sh",
+      "line": 187,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/change-hostname.sh:188"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 38,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 42,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:43"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 43,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:44"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 44,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:45"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 45,
+      "outcomes": [
+        {
+          "name": "case-arm-46",
+          "evidence": "relay/common.sh:49"
+        },
+        {
+          "name": "case-arm-47",
+          "evidence": "relay/common.sh:47"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 49,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 53,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 57,
+      "outcomes": [
+        {
+          "name": "case-arm-58",
+          "evidence": "relay/common.sh:58"
+        },
+        {
+          "name": "case-arm-59",
+          "evidence": "relay/common.sh:59"
+        },
+        {
+          "name": "case-arm-60",
+          "evidence": "relay/common.sh:60"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 62,
+      "outcomes": [
+        {
+          "name": "case-arm-63",
+          "evidence": "relay/common.sh:63"
+        },
+        {
+          "name": "case-arm-64",
+          "evidence": "relay/common.sh:64"
+        },
+        {
+          "name": "case-arm-65",
+          "evidence": "relay/common.sh:65"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 68,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 747,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:748"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 748,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 749,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:750"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 750,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:749"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 760,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:761"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 779,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 868,
+      "outcomes": [
+        {
+          "name": "case-arm-869",
+          "evidence": "relay/common.sh:872"
+        },
+        {
+          "name": "case-arm-870",
+          "evidence": "relay/common.sh:870"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 872,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 873,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 874,
+      "outcomes": [
+        {
+          "name": "case-arm-875",
+          "evidence": "relay/common.sh:875"
+        },
+        {
+          "name": "alternate-path-2",
+          "evidence": "relay/common.sh:874"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 877,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 885,
+      "outcomes": [
+        {
+          "name": "case-arm-886",
+          "evidence": "relay/common.sh:887"
+        },
+        {
+          "name": "case-arm-892",
+          "evidence": "relay/common.sh:893"
+        },
+        {
+          "name": "case-arm-895",
+          "evidence": "relay/common.sh:895"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 887,
+      "outcomes": [
+        {
+          "name": "case-arm-888",
+          "evidence": "relay/common.sh:888"
+        },
+        {
+          "name": "case-arm-889",
+          "evidence": "relay/common.sh:889"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 893,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 898,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 899,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:900"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 903,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:904"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 907,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 926,
+      "outcomes": [
+        {
+          "name": "case-arm-927",
+          "evidence": "relay/common.sh:927"
+        },
+        {
+          "name": "case-arm-928",
+          "evidence": "relay/common.sh:928"
+        },
+        {
+          "name": "case-arm-929",
+          "evidence": "relay/common.sh:929"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 931,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:932"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 933,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:934"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 939,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:940"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 1023,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 1027,
+      "outcomes": [
+        {
+          "name": "case-arm-1028",
+          "evidence": "relay/common.sh:1031"
+        },
+        {
+          "name": "case-arm-1029",
+          "evidence": "relay/common.sh:1029"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 1031,
+      "outcomes": [
+        {
+          "name": "case-arm-1032",
+          "evidence": "relay/common.sh:1035"
+        },
+        {
+          "name": "case-arm-1033",
+          "evidence": "relay/common.sh:1033"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 1035,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:1036"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 1036,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:1037"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 1040,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:1041"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 1041,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:1042"
+        }
+      ]
+    },
+    {
+      "file": "relay/common.sh",
+      "line": 1042,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/common.sh:1043"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 30,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:31"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 36,
+      "outcomes": [
+        {
+          "name": "case-arm-37",
+          "evidence": "relay/herdr-mobile-relay-service.sh:43"
+        },
+        {
+          "name": "case-arm-38",
+          "evidence": "relay/herdr-mobile-relay-service.sh:39"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 52,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:53"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 56,
+      "outcomes": [
+        {
+          "name": "case-arm-57",
+          "evidence": "relay/herdr-mobile-relay-service.sh:57"
+        },
+        {
+          "name": "case-arm-58",
+          "evidence": "relay/herdr-mobile-relay-service.sh:59"
+        },
+        {
+          "name": "case-arm-62",
+          "evidence": "relay/herdr-mobile-relay-service.sh:63"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 75,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 84,
+      "outcomes": [
+        {
+          "name": "case-arm-85",
+          "evidence": "relay/herdr-mobile-relay-service.sh:88"
+        },
+        {
+          "name": "case-arm-86",
+          "evidence": "relay/herdr-mobile-relay-service.sh:86"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 88,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 89,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 92,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:93"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 98,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 99,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:100"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 102,
+      "outcomes": [
+        {
+          "name": "case-arm-103",
+          "evidence": "relay/herdr-mobile-relay-service.sh:104"
+        },
+        {
+          "name": "implicit-no-match",
+          "evidence": "relay/herdr-mobile-relay-service.sh:109"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 110,
+      "outcomes": [
+        {
+          "name": "case-arm-111",
+          "evidence": "relay/herdr-mobile-relay-service.sh:116"
+        },
+        {
+          "name": "case-arm-112",
+          "evidence": "relay/herdr-mobile-relay-service.sh:113"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 118,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:119"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 121,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:122"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 125,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:126"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 129,
+      "outcomes": [
+        {
+          "name": "case-arm-130",
+          "evidence": "relay/herdr-mobile-relay-service.sh:130"
+        },
+        {
+          "name": "case-arm-131",
+          "evidence": "relay/herdr-mobile-relay-service.sh:131"
+        },
+        {
+          "name": "case-arm-132",
+          "evidence": "relay/herdr-mobile-relay-service.sh:133"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 138,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:139"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 140,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:141"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 147,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/herdr-mobile-relay-service.sh:148"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 162,
+      "outcomes": [
+        {
+          "name": "case-arm-163",
+          "evidence": "relay/herdr-mobile-relay-service.sh:164"
+        },
+        {
+          "name": "case-arm-172",
+          "evidence": "relay/herdr-mobile-relay-service.sh:175"
+        }
+      ]
+    },
+    {
+      "file": "relay/herdr-mobile-relay-service.sh",
+      "line": 164,
+      "outcomes": [
+        {
+          "name": "case-arm-165",
+          "evidence": "relay/herdr-mobile-relay-service.sh:170"
+        },
+        {
+          "name": "case-arm-166",
+          "evidence": "relay/herdr-mobile-relay-service.sh:167"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 17,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 24,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 25,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 67,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 68,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:69"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 69,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:70"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 70,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:71"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 71,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:72"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 74,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:76"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 76,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 77,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:78"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 78,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:79"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 79,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:80"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 80,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:81"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 83,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:81"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 94,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:96"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 100,
+      "outcomes": [
+        {
+          "name": "case-arm-97",
+          "evidence": "relay/install-service.sh:101"
+        },
+        {
+          "name": "case-arm-98",
+          "evidence": "relay/install-service.sh:102"
+        },
+        {
+          "name": "case-arm-99",
+          "evidence": "relay/install-service.sh:103"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 107,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:108"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 109,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:110"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 112,
+      "outcomes": [
+        {
+          "name": "case-arm-109",
+          "evidence": "relay/install-service.sh:113"
+        },
+        {
+          "name": "case-arm-110",
+          "evidence": "relay/install-service.sh:114"
+        },
+        {
+          "name": "case-arm-111",
+          "evidence": "relay/install-service.sh:115"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 117,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:118"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 126,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 131,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:132"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 132,
+      "outcomes": [
+        {
+          "name": "iteration-entered",
+          "evidence": "relay/install-service.sh:133"
+        },
+        {
+          "name": "literal-list-exhausted",
+          "evidence": "relay/install-service.sh:139"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 133,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:134"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 134,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:135"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 137,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 147,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:148"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 148,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:149"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 149,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 150,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:151"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 151,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:152"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 155,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:156"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 159,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:160"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 160,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:161"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 165,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 166,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:167"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 170,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 171,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:172"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 172,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:173"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 176,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:177"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 181,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:178"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 185,
+      "outcomes": [
+        {
+          "name": "legacy-restore-required",
+          "evidence": "relay/install-service.sh:186"
+        },
+        {
+          "name": "legacy-restore-not-required",
+          "evidence": "relay/install-service.sh:192"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 186,
+      "outcomes": [
+        {
+          "name": "reload-succeeded",
+          "evidence": "relay/install-service.sh:187"
+        },
+        {
+          "name": "reload-failed",
+          "evidence": "relay/install-service.sh:186"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 187,
+      "outcomes": [
+        {
+          "name": "legacy-loaded",
+          "evidence": "relay/install-service.sh:192"
+        },
+        {
+          "name": "legacy-not-loaded",
+          "evidence": "relay/install-service.sh:188"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 192,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:193"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 193,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 199,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:200"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 200,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:201"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 203,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 204,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 206,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:207"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 211,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:212"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 212,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:213"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 213,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:214"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 214,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:215"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 215,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 216,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 217,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 223,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 224,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 233,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 234,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 244,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 245,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 253,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:254"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 255,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 260,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 261,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 266,
+      "outcomes": [
+        {
+          "name": "legacy-loaded",
+          "evidence": "relay/install-service.sh:271"
+        },
+        {
+          "name": "legacy-not-loaded",
+          "evidence": "relay/install-service.sh:273"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 267,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 273,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 274,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 280,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 289,
+      "outcomes": [
+        {
+          "name": "legacy-stop-required",
+          "evidence": "relay/install-service.sh:290"
+        },
+        {
+          "name": "legacy-stop-not-required",
+          "evidence": "relay/install-service.sh:307"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 291,
+      "outcomes": [
+        {
+          "name": "primary-bootout-succeeded",
+          "status": 0
+        },
+        {
+          "name": "fallback-bootout-attempted",
+          "evidence": "relay/install-service.sh:292"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 292,
+      "outcomes": [
+        {
+          "name": "fallback-bootout-failed",
+          "status": "nonzero"
+        },
+        {
+          "name": "fallback-bootout-completed",
+          "evidence": "relay/install-service.sh:293"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 295,
+      "outcomes": [
+        {
+          "name": "loop-body",
+          "evidence": "relay/install-service.sh:296"
+        },
+        {
+          "name": "loop-complete",
+          "evidence": "relay/install-service.sh:302"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 296,
+      "outcomes": [
+        {
+          "name": "legacy-unloaded",
+          "evidence": "relay/install-service.sh:297"
+        },
+        {
+          "name": "legacy-still-loaded",
+          "evidence": "relay/install-service.sh:300"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 302,
+      "outcomes": [
+        {
+          "name": "unload-timeout",
+          "evidence": "relay/install-service.sh:303"
+        },
+        {
+          "name": "legacy-unloaded",
+          "evidence": "relay/install-service.sh:307"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 311,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 351,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:352"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-service.sh",
+      "line": 362,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-service.sh:363"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 16,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 23,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 24,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 79,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 80,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:81"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 81,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:82"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 82,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:83"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 83,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:84"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 86,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:88"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 88,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 89,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:90"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 90,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:91"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 91,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:92"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 92,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:93"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 95,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:93"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 106,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:108"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 112,
+      "outcomes": [
+        {
+          "name": "case-arm-109",
+          "evidence": "relay/install-systemd-user-service.sh:113"
+        },
+        {
+          "name": "case-arm-110",
+          "evidence": "relay/install-systemd-user-service.sh:114"
+        },
+        {
+          "name": "case-arm-111",
+          "evidence": "relay/install-systemd-user-service.sh:115"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 119,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:120"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 121,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:122"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 124,
+      "outcomes": [
+        {
+          "name": "case-arm-121",
+          "evidence": "relay/install-systemd-user-service.sh:125"
+        },
+        {
+          "name": "case-arm-122",
+          "evidence": "relay/install-systemd-user-service.sh:126"
+        },
+        {
+          "name": "case-arm-123",
+          "evidence": "relay/install-systemd-user-service.sh:127"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 129,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:130"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 138,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 143,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:144"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 144,
+      "outcomes": [
+        {
+          "name": "iteration-entered",
+          "evidence": "relay/install-systemd-user-service.sh:145"
+        },
+        {
+          "name": "literal-list-exhausted",
+          "evidence": "relay/install-systemd-user-service.sh:151"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 145,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:146"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 146,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:147"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 149,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 159,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:160"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 160,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:161"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 161,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:162"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 162,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 163,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:164"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 168,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 169,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:170"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 170,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:171"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 174,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:175"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 179,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:181"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 181,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:182"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 182,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 183,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:184"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 184,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:185"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 189,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 190,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:191"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 195,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:196"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 196,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:197"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 197,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:198"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 203,
+      "outcomes": [
+        {
+          "name": "legacy-restore-required",
+          "evidence": "relay/install-systemd-user-service.sh:204"
+        },
+        {
+          "name": "legacy-restore-not-required",
+          "evidence": "relay/install-systemd-user-service.sh:215"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 204,
+      "outcomes": [
+        {
+          "name": "legacy-enable-required",
+          "evidence": "relay/install-systemd-user-service.sh:205"
+        },
+        {
+          "name": "legacy-enable-not-required",
+          "evidence": "relay/install-systemd-user-service.sh:207"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 205,
+      "outcomes": [
+        {
+          "name": "enable-succeeded",
+          "evidence": "relay/install-systemd-user-service.sh:207"
+        },
+        {
+          "name": "enable-failed",
+          "evidence": "relay/install-systemd-user-service.sh:205"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 207,
+      "outcomes": [
+        {
+          "name": "legacy-restart-required",
+          "evidence": "relay/install-systemd-user-service.sh:208"
+        },
+        {
+          "name": "legacy-restart-not-required",
+          "evidence": "relay/install-systemd-user-service.sh:215"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 208,
+      "outcomes": [
+        {
+          "name": "restart-succeeded",
+          "evidence": "relay/install-systemd-user-service.sh:209"
+        },
+        {
+          "name": "restart-failed",
+          "evidence": "relay/install-systemd-user-service.sh:208"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 209,
+      "outcomes": [
+        {
+          "name": "legacy-active",
+          "evidence": "relay/install-systemd-user-service.sh:215"
+        },
+        {
+          "name": "legacy-not-active",
+          "evidence": "relay/install-systemd-user-service.sh:210"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 215,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:216"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 216,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 222,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:223"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 223,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:224"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 226,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 227,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 229,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:230"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 234,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:235"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 235,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:236"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 236,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:237"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 237,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:238"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 238,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 239,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 240,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 246,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 247,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 256,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 257,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 267,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 268,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 276,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 277,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 278,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 279,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 283,
+      "outcomes": [
+        {
+          "name": "legacy-enabled",
+          "evidence": "relay/install-systemd-user-service.sh:284"
+        },
+        {
+          "name": "legacy-disabled",
+          "evidence": "relay/install-systemd-user-service.sh:287"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 287,
+      "outcomes": [
+        {
+          "name": "legacy-active",
+          "evidence": "relay/install-systemd-user-service.sh:292"
+        },
+        {
+          "name": "legacy-inactive",
+          "evidence": "relay/install-systemd-user-service.sh:294"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 288,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 294,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:295"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 295,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 300,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 301,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 307,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 316,
+      "outcomes": [
+        {
+          "name": "legacy-stop-required",
+          "evidence": "relay/install-systemd-user-service.sh:317"
+        },
+        {
+          "name": "legacy-stop-not-required",
+          "evidence": "relay/install-systemd-user-service.sh:324"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 318,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:319"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 319,
+      "outcomes": [
+        {
+          "name": "legacy-still-active",
+          "evidence": "relay/install-systemd-user-service.sh:320"
+        },
+        {
+          "name": "legacy-stopped",
+          "evidence": "relay/install-systemd-user-service.sh:324"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 328,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 358,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 359,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:360"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 360,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:361"
+        }
+      ]
+    },
+    {
+      "file": "relay/install-systemd-user-service.sh",
+      "line": 374,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/install-systemd-user-service.sh:375"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 166,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 167,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 173,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 174,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 175,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:176"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 179,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 217,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:218"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 218,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:217"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 228,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:229"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 229,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:230"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 231,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 232,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:231"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 235,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:236"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 236,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:237"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 237,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 238,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:239"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 241,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 242,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:243"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 243,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 248,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:249"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 251,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 261,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:262"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 262,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 263,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 268,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:269"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 269,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 270,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:269"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 272,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:270"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 306,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:307"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 319,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:320"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 337,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:336"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 341,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 346,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:347"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 347,
+      "outcomes": [
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:348"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 351,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 405,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 406,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 407,
+      "outcomes": [
+        {
+          "name": "case-arm-408",
+          "evidence": "relay/plugin-build.sh:412"
+        },
+        {
+          "name": "case-arm-409",
+          "evidence": "relay/plugin-build.sh:409"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 415,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 416,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:417"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 436,
+      "outcomes": [
+        {
+          "name": "case-arm-437",
+          "evidence": "relay/plugin-build.sh:440"
+        },
+        {
+          "name": "case-arm-438",
+          "evidence": "relay/plugin-build.sh:438"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 441,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 442,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 456,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:457"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 457,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:458"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 461,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 463,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:464"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 464,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:465"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 465,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:466"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 466,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:465"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 468,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:466"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 489,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:488"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 521,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 528,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:529"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 532,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:533"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 553,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 554,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 555,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 556,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:557"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 557,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:558"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 558,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 562,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 563,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 565,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 608,
+      "outcomes": [
+        {
+          "name": "sha256sum",
+          "evidence": "relay/plugin-build.sh:609"
+        },
+        {
+          "name": "shasum",
+          "evidence": "relay/plugin-build.sh:611"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 619,
+      "outcomes": [
+        {
+          "name": "case-arm-620",
+          "evidence": "relay/plugin-build.sh:621"
+        },
+        {
+          "name": "implicit-no-match",
+          "evidence": "relay/plugin-build.sh:625"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 644,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 648,
+      "outcomes": [
+        {
+          "name": "case-arm-649",
+          "evidence": "relay/plugin-build.sh:649"
+        },
+        {
+          "name": "case-arm-650",
+          "evidence": "relay/plugin-build.sh:650"
+        },
+        {
+          "name": "case-arm-651",
+          "evidence": "relay/plugin-build.sh:651"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 653,
+      "outcomes": [
+        {
+          "name": "case-arm-654",
+          "evidence": "relay/plugin-build.sh:654"
+        },
+        {
+          "name": "case-arm-655",
+          "evidence": "relay/plugin-build.sh:655"
+        },
+        {
+          "name": "case-arm-656",
+          "evidence": "relay/plugin-build.sh:656"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 659,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 668,
+      "outcomes": [
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:669"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 671,
+      "outcomes": [
+        {
+          "name": "release-download-failed",
+          "evidence": "relay/plugin-build.sh:671"
+        },
+        {
+          "name": "release-download-completed",
+          "evidence": "relay/plugin-build.sh:672"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 677,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 683,
+      "outcomes": [
+        {
+          "name": "checksums-download-failed",
+          "evidence": "relay/plugin-build.sh:683"
+        },
+        {
+          "name": "checksums-download-completed",
+          "evidence": "relay/plugin-build.sh:684"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 686,
+      "outcomes": [
+        {
+          "name": "archive-download-failed",
+          "evidence": "relay/plugin-build.sh:686"
+        },
+        {
+          "name": "archive-download-completed",
+          "evidence": "relay/plugin-build.sh:687"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 739,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:740"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 740,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:741"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 753,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:754"
+        }
+      ]
+    },
+    {
+      "file": "relay/plugin-build.sh",
+      "line": 837,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/plugin-build.sh:838"
+        }
+      ]
+    },
+    {
+      "file": "relay/service.sh",
+      "line": 13,
+      "outcomes": [
+        {
+          "name": "accepted-action",
+          "evidence": "relay/service.sh:21"
+        },
+        {
+          "name": "rejected-action",
+          "evidence": "relay/service.sh:16"
+        }
+      ]
+    },
+    {
+      "file": "relay/service.sh",
+      "line": 27,
+      "outcomes": [
+        {
+          "name": "reset",
+          "evidence": "relay/service.sh:28"
+        },
+        {
+          "name": "different-darwin-action",
+          "evidence": "relay/service.sh:34"
+        }
+      ]
+    },
+    {
+      "file": "relay/service.sh",
+      "line": 33,
+      "outcomes": [
+        {
+          "name": "logs",
+          "evidence": "relay/service.sh:34"
+        },
+        {
+          "name": "different-darwin-action",
+          "evidence": "relay/service.sh:28"
+        }
+      ]
+    },
+    {
+      "file": "relay/service.sh",
+      "line": 45,
+      "outcomes": [
+        {
+          "name": "reset",
+          "evidence": "relay/service.sh:46"
+        },
+        {
+          "name": "different-linux-action",
+          "evidence": "relay/service.sh:52"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 63,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/uninstall.sh:64"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 64,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 65,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 67,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 73,
+      "outcomes": [
+        {
+          "name": "case-arm-74",
+          "evidence": "relay/uninstall.sh:77"
+        },
+        {
+          "name": "case-arm-75",
+          "evidence": "relay/uninstall.sh:75"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 77,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/uninstall.sh:78"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 78,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 79,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/uninstall.sh:80"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 80,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/uninstall.sh:81"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 81,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/uninstall.sh:80"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 113,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/uninstall.sh:114"
+        }
+      ]
+    },
+    {
+      "file": "relay/uninstall.sh",
+      "line": 154,
+      "outcomes": [
+        {
+          "name": "status-0",
+          "status": 0
+        },
+        {
+          "name": "alternate-control-path",
+          "evidence": "relay/uninstall.sh:155"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 25,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 29,
+      "outcomes": [
+        {
+          "name": "case-arm-30",
+          "evidence": "scripts/package-release.sh:31"
+        },
+        {
+          "name": "alternate-path-2",
+          "evidence": "scripts/package-release.sh:29"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 35,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 39,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 43,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 47,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 51,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 75,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    },
+    {
+      "file": "scripts/package-release.sh",
+      "line": 79,
+      "outcomes": [
+        {
+          "name": "status-zero",
+          "status": 0
+        },
+        {
+          "name": "status-nonzero",
+          "status": "nonzero"
+        }
+      ]
+    }
+  ]
+}

@@ -32,6 +32,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/slashcmd"
 	"github.com/0cv/herdr-mobile-relay/internal/speech"
 	"github.com/0cv/herdr-mobile-relay/internal/transport"
+	"github.com/0cv/herdr-mobile-relay/internal/web"
 	"github.com/coder/websocket"
 )
 
@@ -456,8 +457,12 @@ func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
 
 	reader := conversation.NewReader(home)
 	location := reader.Locate("omp", "/work", sessionID)
-	if location.Path != path {
-		t.Fatalf("location = %#v, want profile transcript %q", location, path)
+	canonicalPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.Path != canonicalPath {
+		t.Fatalf("location = %#v, want profile transcript %q", location, canonicalPath)
 	}
 	if got := locatedAgentDir(home, "omp", location); got != profile {
 		t.Fatalf("agent dir = %q, want active profile %q", got, profile)
@@ -734,7 +739,42 @@ func TestCopyResponseError(t *testing.T) {
 		})
 	}
 }
+
+func TestCopyAgentResponseRejectsStaleInventoryAfterPollFailure(t *testing.T) {
+	s := testServer()
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane", Agent: "claude", Status: "idle", SessionID: "session", PaneRevision: 1,
+	}}, s.state.RevisionCounter())
+	s.state.MarkInventoryFailure(errors.New("poll failed"))
+	s.clipboardRead = func(context.Context) ([]byte, error) { return nil, nil }
+	s.clipboardWrite = func(context.Context, []byte) error { return nil }
+	runnerCalled := false
+	s.copyRunner = func(
+		context.Context,
+		string,
+		slashcmd.CopyProfile,
+		copyresponse.Pane,
+		copyresponse.ClipboardReader,
+		copyresponse.ClipboardWriter,
+		int64,
+		copyresponse.RevisionReader,
+		copyresponse.MutationGuard,
+	) (copyresponse.Result, error) {
+		runnerCalled = true
+		return copyresponse.Result{}, nil
+	}
+
+	result := sendCopyRequest(t, openCopyTestClient(t, s), "copy-stale", "pane")
+	if result["phase"] != "failed" || runnerCalled {
+		t.Fatalf("stale-inventory copy result = %#v, runner called=%t", result, runnerCalled)
+	}
+}
+
 func openCopyTestClient(t *testing.T, s *Server) *websocket.Conn {
+	return openCopyTestClientWithFence(t, s, nil)
+}
+
+func openCopyTestClientWithFence(t *testing.T, s *Server, fence *managedCommandFence) *websocket.Conn {
 	t.Helper()
 	s.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
 		defer admitted()
@@ -743,7 +783,7 @@ func openCopyTestClient(t *testing.T, s *Server) *websocket.Conn {
 		}
 		requestID, _ := message["request_id"].(string)
 		paneID, _ := message["pane_id"].(string)
-		s.copyAgentResponse(client, requestID, paneID)
+		s.copyAgentResponse(client, requestID, paneID, fence)
 	})
 	server := httptest.NewServer(http.HandlerFunc(s.hub.HandleWebSocket))
 	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
@@ -759,6 +799,90 @@ func openCopyTestClient(t *testing.T, s *Server) *websocket.Conn {
 		server.Close()
 	})
 	return conn
+}
+
+func TestCopyAgentResponseUsesDefaultRunnerAndReportsALateManagedBlock(t *testing.T) {
+	newServer := func() *Server {
+		server := testServer()
+		server.state.CommitInventory([]*coordinator.AgentState{{PaneID: "pane", Agent: "claude", Status: "idle", PaneRevision: 1}}, server.state.RevisionCounter())
+		server.profiles.Remember("pane", "claude")
+		server.clipboardRead = func(context.Context) ([]byte, error) { return []byte("before"), nil }
+		server.clipboardWrite = func(context.Context, []byte) error { return nil }
+		return server
+	}
+	server := newServer()
+	server.copyRunner = nil
+	result := sendCopyRequest(t, openCopyTestClient(t, server), "default-runner", "pane")
+	if result["phase"] != "failed" {
+		t.Fatalf("default copy runner result = %#v", result)
+	}
+
+	server = newServer()
+	blocked := &coordinator.CommandResult{Action: "copy_agent_response", Phase: "not_started", Error: "Managed runtime changed before execution"}
+	fence := newManagedCommandFence(func() *coordinator.CommandResult { return nil })
+	server.copyRunner = func(
+		context.Context,
+		string,
+		slashcmd.CopyProfile,
+		copyresponse.Pane,
+		copyresponse.ClipboardReader,
+		copyresponse.ClipboardWriter,
+		int64,
+		copyresponse.RevisionReader,
+		copyresponse.MutationGuard,
+	) (copyresponse.Result, error) {
+		fence.mu.Lock()
+		fence.blocked = blocked
+		fence.mu.Unlock()
+		return copyresponse.Result{}, errors.New("blocked")
+	}
+	result = sendCopyRequest(t, openCopyTestClientWithFence(t, server, fence), "late-block", "pane")
+	if result["phase"] != "not_started" || result["error"] != blocked.Error {
+		t.Fatalf("late managed copy block = %#v", result)
+	}
+}
+
+func TestPaneSizeLeaseResultPrefersManagedBlockThenErrorThenSuccess(t *testing.T) {
+	server := testServer()
+	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		defer admitted()
+		requestID, _ := message["request_id"].(string)
+		switch requestID {
+		case "blocked":
+			fence := newManagedCommandFence(func() *coordinator.CommandResult { return nil })
+			fence.blocked = &coordinator.CommandResult{RequestID: requestID, Action: "lease_pane_size", Phase: "not_started", Error: "Managed runtime changed before execution"}
+			server.sendPaneSizeLeaseResult(client, requestID, "pane", 80, 24, errors.New("lower-priority"), fence)
+		case "error":
+			server.sendPaneSizeLeaseResult(client, requestID, "pane", 0, 0, errors.New("resize failed"), nil)
+		default:
+			server.sendPaneSizeLeaseResult(client, requestID, "pane", 80, 24, nil, nil)
+		}
+	})
+	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
+	defer httpServer.Close()
+	connection, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = connection.CloseNow()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.hub.Shutdown(ctx)
+	}()
+	for _, requestID := range []string{"blocked", "error", "success"} {
+		payload, marshalErr := json.Marshal(map[string]any{"request_id": requestID})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := connection.Write(t.Context(), websocket.MessageText, payload); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		result := readManagedMessage(t, connection, func(message map[string]any) bool { return message["request_id"] == requestID })
+		if requestID == "success" && result["ok"] != true {
+			t.Fatalf("pane size success = %#v", result)
+		}
+	}
 }
 
 func sendCopyRequest(t *testing.T, conn *websocket.Conn, requestID, paneID string) map[string]any {
@@ -1145,7 +1269,9 @@ func TestCopyAgentResponseValidatesPaneState(t *testing.T) {
 		wantErr string
 	}{
 		{name: "missing pane id", wantErr: "Agent is required"},
-		{name: "missing pane", paneID: "missing", wantErr: "Agent pane not found"},
+		{name: "missing pane", paneID: "missing", setup: func(s *Server) {
+			s.state.CommitInventory(nil, s.state.RevisionCounter())
+		}, wantErr: "Agent pane not found"},
 		{
 			name:   "clipboard unavailable",
 			paneID: "pane-1",
@@ -1210,6 +1336,7 @@ func TestCopyAgentResponseRejectsReplacedPane(t *testing.T) {
 		_ copyresponse.ClipboardWriter,
 		_ int64,
 		_ copyresponse.RevisionReader,
+		_ copyresponse.MutationGuard,
 	) (copyresponse.Result, error) {
 		s.state.BumpGeneration(paneID)
 		return copyresponse.Result{Text: "response", Source: "clipboard", Chars: 8, Lines: 1}, nil
@@ -1238,6 +1365,7 @@ func TestCopyAgentResponseReturnsCopiedData(t *testing.T) {
 		copyresponse.ClipboardWriter,
 		int64,
 		copyresponse.RevisionReader,
+		copyresponse.MutationGuard,
 	) (copyresponse.Result, error) {
 		return copyresponse.Result{Text: "response", Source: "clipboard", Chars: 8, Lines: 1}, nil
 	}
@@ -1255,6 +1383,7 @@ func TestHealthz(t *testing.T) {
 	s := testServer()
 	s.ready = true
 	s.state.CommitInventory(nil, 0)
+	attachTestWebBundle(t, s)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	w := httptest.NewRecorder()
 
@@ -1294,6 +1423,16 @@ func TestHealthz(t *testing.T) {
 func TestReadyzNotReady(t *testing.T) {
 	s := testServer()
 	s.ready = false
+	webRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(webRoot, "index.html"), []byte("ready fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := web.NewHandler(webRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+	s.webH = handler
 	req := httptest.NewRequest("GET", "/readyz", nil)
 	w := httptest.NewRecorder()
 
@@ -1307,6 +1446,74 @@ func TestReadyzNotReady(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["status"] != "unavailable" {
 		t.Errorf("status = %v, want unavailable", resp["status"])
+	}
+	if resp["bundle_hash"] != handler.BundleHash() || resp["bundle_hash"] == "" {
+		t.Errorf("bundle_hash = %v, want %s", resp["bundle_hash"], handler.BundleHash())
+	}
+}
+
+func TestReadyzReadyForOrdinaryDeployment(t *testing.T) {
+	s := testServer()
+	s.ready = true
+	s.state.CommitInventory(nil, s.state.RevisionCounter())
+	w := httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest("GET", "/readyz", nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"bundle_hash":""`) {
+		t.Fatalf("ordinary readiness accepted a missing web bundle = %d %s", w.Code, w.Body.String())
+	}
+
+	attachTestWebBundle(t, s)
+	w = httptest.NewRecorder()
+	s.handleReadyz(w, httptest.NewRequest("GET", "/readyz", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"status":"ready"`) {
+		t.Fatalf("ordinary readiness = %d %s", w.Code, w.Body.String())
+	}
+}
+
+func attachTestWebBundle(t *testing.T, server *Server) *web.Handler {
+	t.Helper()
+	root := t.TempDir()
+	version := fmt.Sprintf(`{"release_version":%q,"revision":%q}`, server.version, server.revision)
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("ready fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "version.json"), []byte(version), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := web.NewHandler(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handler.Close() })
+	server.webH = handler
+	return handler
+}
+
+func TestWebBundleIdentityRejectsVersionAndRevisionDrift(t *testing.T) {
+	server := testServer()
+	attachTestWebBundle(t, server)
+	if !server.webBundleIdentityReady() {
+		t.Fatal("matching web bundle identity was rejected")
+	}
+	version := server.version
+	revision := server.revision
+	server.version = "other-version"
+	if server.webBundleIdentityReady() {
+		t.Fatal("mismatched web bundle version was accepted")
+	}
+	server.version = version
+	server.revision = "other-revision"
+	if server.webBundleIdentityReady() {
+		t.Fatal("mismatched web bundle revision was accepted")
+	}
+	server.revision = revision
+	server.ready = true
+	server.state.CommitInventory(nil, server.state.RevisionCounter())
+	server.version = "other-version"
+	response := httptest.NewRecorder()
+	server.handleHealthz(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if !strings.Contains(response.Body.String(), `"readiness":"degraded"`) {
+		t.Fatalf("health did not expose bundle drift: %s", response.Body.String())
 	}
 }
 
@@ -1414,6 +1621,45 @@ func TestServerRunAndShutdown(t *testing.T) {
 	pid, err := os.ReadFile(filepath.Join(cfg.RuntimeDir, "relay.pid"))
 	if err != nil || strings.TrimSpace(string(pid)) != strconv.Itoa(os.Getpid()) {
 		t.Fatalf("relay.pid = %q, %v; want this process id", pid, err)
+	}
+
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "router-pane", TerminalID: "router-terminal", SessionID: "router-session", Agent: "claude", Status: "idle",
+	}}, s.state.RevisionCounter())
+	s.profiles.Remember("router-pane", "claude")
+	agent, ok := s.state.Agent("router-pane")
+	if !ok {
+		t.Fatal("router fixture agent was not committed")
+	}
+	connection, _, err := websocket.Dial(context.Background(), "ws://127.0.0.1:18999/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.CloseNow()
+	target := map[string]any{
+		"server_session_id": "primary", "pane_id": agent.PaneID, "terminal_id": agent.TerminalID,
+		"generation": agent.Generation, "agent_session_id": agent.SessionID,
+	}
+	for _, message := range []map[string]any{
+		{"type": "upload_begin", "request_id": "route-upload-begin", "protocol": protocol.Version, "target": target},
+		{"type": "upload_chunk", "request_id": "route-upload-chunk", "protocol": protocol.Version, "target": target, "upload_id": "missing"},
+		{"type": "upload_finish", "request_id": "route-upload-finish", "protocol": protocol.Version, "target": target, "upload_id": "missing"},
+		{"type": "list_slash_commands", "request_id": "route-slash", "protocol": protocol.Version, "pane_id": agent.PaneID},
+		{"type": "copy_agent_response", "request_id": "route-copy", "protocol": protocol.Version, "pane_id": agent.PaneID},
+		{"type": "lease_pane_size", "request_id": "route-lease", "protocol": protocol.Version, "pane_id": agent.PaneID, "columns": 80},
+	} {
+		payload, marshalErr := json.Marshal(message)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := connection.Write(t.Context(), websocket.MessageText, payload); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		requestID := message["request_id"]
+		readManagedMessage(t, connection, func(response map[string]any) bool { return response["request_id"] == requestID })
+	}
+	if err := connection.CloseNow(); err != nil {
+		t.Fatal(err)
 	}
 
 	cancel()

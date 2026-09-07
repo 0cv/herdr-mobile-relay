@@ -70,6 +70,23 @@ func TestStartAgentParsesHerdr075NestedResult(t *testing.T) {
 	}
 }
 
+func TestStartAgentTreatsUnreadableSuccessfulResponseAsDispatchedUnknown(t *testing.T) {
+	for _, response := range []string{"not-json", `{"ok":true}`} {
+		client := NewClient(writeResultScript(t, response), filepath.Join(t.TempDir(), "herdr.sock"))
+		_, err := client.StartAgent(context.Background(), "project-codex", "codex", "pane-request", 30_000)
+		if !errors.Is(err, ErrDispatchedUnknown) || errors.Is(err, ErrNotStarted) {
+			t.Fatalf("StartAgent response %q error = %v, want dispatched unknown", response, err)
+		}
+	}
+}
+
+func TestStartAgentTreatsSuccessfulResponseWithoutAnyPaneIdentityAsDispatchedUnknown(t *testing.T) {
+	client := NewClient(writeResultScript(t, `{"result":{}}`), filepath.Join(t.TempDir(), "herdr.sock"))
+	if _, err := client.StartAgent(context.Background(), "project-codex", "codex", "", 30_000); !errors.Is(err, ErrDispatchedUnknown) {
+		t.Fatalf("empty StartAgent identity error = %v", err)
+	}
+}
+
 func TestCreateWithoutRootPaneIsUnsafeToRetry(t *testing.T) {
 	bin := writeResultScript(t, `{"result":{"type":"tab_created","tab":{"tab_id":"tab-2","workspace_id":"workspace-1"}}}`)
 	client := NewClient(bin, filepath.Join(t.TempDir(), "herdr.sock"))

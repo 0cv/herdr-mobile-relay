@@ -6,6 +6,7 @@ package coordinator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,6 +103,98 @@ func TestAgentStartRetryDoesNotResubmitInitialPrompt(t *testing.T) {
 	}
 }
 
+func TestAgentStartRetryReplaysInitialPromptWarning(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "starts.log")
+	bin := writeScript(t, dir, "herdr", `#!/bin/sh
+printf '%s\n' "$*" >> "`+record+`"
+case "$1 $2" in
+  "agent start") printf '%s\n' '{"result":{"pane_id":"pane-new"}}' ;;
+  "agent prompt") exit 1 ;;
+  *) printf '%s\n' '{"result":{}}' ;;
+esac
+`)
+	d := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), NewState(testLogger()), nil, testLogger())
+	message := map[string]any{
+		"action": "agent_start", "request_id": "same-warning",
+		"profile_id": "claude", "name": "proj", "cwd": "/tmp", "prompt": "hello",
+	}
+	first := d.Handle(context.Background(), message)
+	second := d.Handle(context.Background(), message)
+	if first.Phase != "completed_with_warning" || second.Phase != "completed_with_warning" {
+		t.Fatalf("start warning results = %+v, %+v", first, second)
+	}
+	data, _ := os.ReadFile(record)
+	if starts := strings.Count(string(data), "--kind"); starts != 1 {
+		t.Fatalf("start invocations = %d, want 1\n%s", starts, data)
+	}
+	if prompts := strings.Count(string(data), "agent prompt"); prompts != 1 {
+		t.Fatalf("initial prompt invocations = %d, want 1\n%s", prompts, data)
+	}
+}
+
+func TestSendInitialPromptCoversQoderDeliveryOutcomes(t *testing.T) {
+	newDispatcher := func(t *testing.T, script string) (*Dispatcher, string) {
+		t.Helper()
+		dir := t.TempDir()
+		bin := writeScript(t, dir, "herdr", script)
+		state := NewState(testLogger())
+		state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "qodercli", Status: "idle"}}, 0)
+		return NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger()), dir
+	}
+
+	t.Run("success", func(t *testing.T) {
+		dispatcher, _ := newDispatcher(t, "#!/bin/sh\nprintf '%s\\n' '{\"result\":{}}'\n")
+		generation, _ := dispatcher.state.PaneSession("pane-1")
+		if err := dispatcher.sendInitialPrompt(t.Context(), "pane-1", "hello", uint64(generation), false); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("send text failure", func(t *testing.T) {
+		dispatcher, _ := newDispatcher(t, "#!/bin/sh\ncase \"$1 $2\" in\n  'pane send-text') exit 1 ;;\n  *) printf '%s\\n' '{\"result\":{}}' ;;\nesac\n")
+		generation, _ := dispatcher.state.PaneSession("pane-1")
+		if err := dispatcher.sendInitialPrompt(t.Context(), "pane-1", "hello", uint64(generation), false); err == nil {
+			t.Fatal("send-text failure was hidden")
+		}
+	})
+	t.Run("send keys failure", func(t *testing.T) {
+		dispatcher, _ := newDispatcher(t, "#!/bin/sh\ncase \"$1 $2\" in\n  'pane send-keys') exit 1 ;;\n  *) printf '%s\\n' '{\"result\":{}}' ;;\nesac\n")
+		generation, _ := dispatcher.state.PaneSession("pane-1")
+		if err := dispatcher.sendInitialPrompt(t.Context(), "pane-1", "hello", uint64(generation), false); err == nil || !strings.Contains(err.Error(), "prompt text was already delivered") {
+			t.Fatalf("send-keys failure = %v", err)
+		}
+	})
+	t.Run("pane replacement after text", func(t *testing.T) {
+		markerDir := t.TempDir()
+		entered := filepath.Join(markerDir, "entered")
+		release := filepath.Join(markerDir, "release")
+		script := fmt.Sprintf("#!/bin/sh\ncase \"$1 $2\" in\n  'pane send-text') touch %q; while [ ! -f %q ]; do sleep 0.01; done ;;\nesac\nprintf '%%s\\n' '{\"result\":{}}'\n", entered, release)
+		dispatcher, _ := newDispatcher(t, script)
+		generation, _ := dispatcher.state.PaneSession("pane-1")
+		result := make(chan error, 1)
+		go func() {
+			result <- dispatcher.sendInitialPrompt(t.Context(), "pane-1", "hello", uint64(generation), false)
+		}()
+		deadline := time.Now().Add(time.Second)
+		for {
+			if _, err := os.Stat(entered); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("send-text command did not start")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		dispatcher.state.BumpGeneration("pane-1")
+		if err := os.WriteFile(release, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-result; err == nil || !strings.Contains(err.Error(), "prompt text was already delivered") {
+			t.Fatalf("pane replacement result = %v", err)
+		}
+	})
+}
+
 func TestLedgerReplayReturnsConfirmationWatchPhase(t *testing.T) {
 	scheduler := NewScheduler(1, testLogger())
 	t.Cleanup(func() {
@@ -155,6 +249,214 @@ func TestLedgerReplayReturnsConfirmationWatchPhase(t *testing.T) {
 	}
 	if scheduler.UpdateLedgerPhase(ledgerKey, 1, "unconfirmed") {
 		t.Fatal("stale-generation phase update was applied")
+	}
+}
+
+func TestCoalescedWaitersReceiveOnlyTheFinalizedResult(t *testing.T) {
+	scheduler := NewScheduler(1, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := scheduler.Close(ctx); err != nil {
+			t.Errorf("close scheduler: %v", err)
+		}
+	})
+	dispatcher := &Dispatcher{scheduler: scheduler, state: NewState(testLogger())}
+	effectStarted := make(chan struct{})
+	releaseEffect := make(chan struct{})
+	finalizerStarted := make(chan struct{})
+	releaseFinalizer := make(chan struct{})
+	var runs atomic.Int32
+	var finalizations atomic.Int32
+	ctx := WithResultFinalizer(context.Background(), func(_ context.Context, result *CommandResult) *CommandResult {
+		finalizations.Add(1)
+		close(finalizerStarted)
+		<-releaseFinalizer
+		result.Phase = "checkpointed"
+		return result
+	})
+	options := func(requestID string) ScheduleOptions {
+		now := time.Now()
+		return ScheduleOptions{
+			Command:    Command{ID: scheduler.NextCommandID(), RequestID: requestID, ReceivedAt: now, Deadline: now.Add(time.Second), Kind: CommandStart},
+			RelayLevel: true, LedgerKey: "start\x00same", PayloadHash: "same",
+		}
+	}
+	runner := EffectFunc(func(context.Context, WorkerToken) EffectResult {
+		runs.Add(1)
+		close(effectStarted)
+		<-releaseEffect
+		return EffectResult{Result: completed("first", "agent_start", "pane-1", nil)}
+	})
+	results := make(chan *CommandResult, 2)
+	topologyRunner := dispatcher.topologyEffect(ctx, "first", CommandStart, "", runner)
+	go func() { results <- dispatcher.schedule(ctx, options("first"), topologyRunner) }()
+	<-effectStarted
+	go func() { results <- dispatcher.schedule(ctx, options("second"), topologyRunner) }()
+	close(releaseEffect)
+	<-finalizerStarted
+	select {
+	case result := <-results:
+		t.Fatalf("coalesced waiter returned before finalization: %+v", result)
+	default:
+	}
+	close(releaseFinalizer)
+	first, second := <-results, <-results
+	if first.Phase != "checkpointed" || second.Phase != "checkpointed" || runs.Load() != 1 || finalizations.Load() != 1 {
+		t.Fatalf("coalesced results = (%+v, %+v), runs=%d finalizations=%d", first, second, runs.Load(), finalizations.Load())
+	}
+}
+
+func TestCoalescedStopSurvivesItsOwnFinalizedTopologyRemoval(t *testing.T) {
+	scheduler := NewScheduler(1, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := scheduler.Close(ctx); err != nil {
+			t.Errorf("close scheduler: %v", err)
+		}
+	})
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
+	dispatcher := &Dispatcher{scheduler: scheduler, state: state, logger: testLogger()}
+	scheduler.testCoalesced = make(chan struct{}, 1)
+	if !scheduler.ApplyTopology(map[string]bool{"pane-1": true}, map[string]uint64{"pane-1": 0}) {
+		t.Fatal("initial topology was not applied")
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx := WithResultFinalizer(context.Background(), func(_ context.Context, result *CommandResult) *CommandResult {
+		state.BumpGeneration("pane-1")
+		if !scheduler.ApplyTopology(map[string]bool{}) {
+			t.Fatal("finalized topology was not applied")
+		}
+		return result
+	})
+	options := func(requestID string) ScheduleOptions {
+		now := time.Now()
+		return ScheduleOptions{
+			Command: Command{
+				ID: scheduler.NextCommandID(), RequestID: requestID, ReceivedAt: now,
+				Deadline: now.Add(time.Second), Kind: CommandStop, PaneID: "pane-1",
+			},
+			LedgerKey: "stop\x00pane-1", PayloadHash: "same",
+		}
+	}
+	runner := EffectFunc(func(context.Context, WorkerToken) EffectResult {
+		close(started)
+		<-release
+		return EffectResult{Result: completed("first", "agent_stop", "pane-1", nil), BumpGeneration: true}
+	})
+	results := make(chan *CommandResult, 2)
+	topologyRunner := dispatcher.topologyEffect(ctx, "first", CommandStop, "pane-1", runner)
+	go func() { results <- dispatcher.schedule(ctx, options("first"), topologyRunner) }()
+	<-started
+	go func() { results <- dispatcher.schedule(ctx, options("second"), topologyRunner) }()
+	select {
+	case <-scheduler.testCoalesced:
+	case <-time.After(time.Second):
+		t.Fatal("second stop request did not coalesce")
+	}
+	close(release)
+	first, second := <-results, <-results
+	if !first.OK || !second.OK || first.Phase != "completed" || second.Phase != "completed" {
+		t.Fatalf("coalesced stop results = (%+v, %+v)", first, second)
+	}
+	replay := dispatcher.schedule(ctx, options("third"), topologyRunner)
+	if !replay.OK || replay.Phase != "completed" || !replay.replayed {
+		t.Fatalf("stop replay = %+v, want cached finalized success", replay)
+	}
+}
+
+func TestInitialPromptSharesPaneEffectSerialization(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "commands.log")
+	bin := recordingHerdr(t, dir, record, `{"result":{}}`)
+	state := NewState(testLogger())
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Agent: "claude", Status: "idle"}}, 0)
+	dispatcher := NewDispatcher(herdr.NewClient(bin, filepath.Join(dir, "sock")), state, nil, testLogger())
+
+	unlock := dispatcher.lockPaneEffect("pane-1")
+	done := make(chan *CommandResult, 1)
+	go func() {
+		done <- dispatcher.handlePrompt(t.Context(), time.Now(), "prompt-1", "pane-1", map[string]any{"text": "existing"})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if data, _ := os.ReadFile(record); len(data) != 0 {
+		t.Fatalf("scheduled prompt bypassed pane serialization: %s", data)
+	}
+	unlock()
+	if result := <-done; result == nil || !result.OK {
+		t.Fatalf("scheduled prompt result = %+v", result)
+	}
+
+	unlock = dispatcher.lockPaneEffect("pane-1")
+	generation, _ := dispatcher.state.PaneSession("pane-1")
+	initialDone := make(chan error, 1)
+	go func() {
+		initialDone <- dispatcher.sendInitialPrompt(t.Context(), "pane-1", "initial", uint64(generation), false)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	data, _ := os.ReadFile(record)
+	if strings.Count(string(data), "agent prompt") != 1 {
+		t.Fatalf("initial prompt bypassed pane serialization: %s", data)
+	}
+	unlock()
+	if err := <-initialDone; err != nil {
+		t.Fatal(err)
+	}
+
+	unlock = dispatcher.lockPaneEffect("pane-1")
+	staleGeneration, _ := dispatcher.state.PaneSession("pane-1")
+	staleDone := make(chan error, 1)
+	go func() {
+		staleDone <- dispatcher.sendInitialPrompt(t.Context(), "pane-1", "stale", uint64(staleGeneration), false)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	dispatcher.state.BumpGeneration("pane-1")
+	unlock()
+	if err := <-staleDone; !errors.Is(err, ErrPaneReplaced) {
+		t.Fatalf("stale initial prompt result = %v, want pane replacement", err)
+	}
+	data, _ = os.ReadFile(record)
+	if strings.Count(string(data), "agent prompt") != 2 {
+		t.Fatalf("stale initial prompt reached replacement pane: %s", data)
+	}
+}
+
+func TestTopologyInvalidatesOnlyOlderUnprotectedLedgerEntries(t *testing.T) {
+	inflight := &scheduledOperation{operation: 7}
+	slot := &PaneSlot{Generation: 2, InFlight: &InFlightOperation{OperationID: 7}}
+	tests := []struct {
+		name  string
+		entry *ledgerEntry
+		slot  *PaneSlot
+		want  bool
+	}{
+		{name: "different pane", entry: &ledgerEntry{paneID: "other", generation: 1}, slot: slot},
+		{name: "current generation", entry: &ledgerEntry{paneID: "pane-1", generation: 2}, slot: slot},
+		{name: "completed old entry", entry: &ledgerEntry{paneID: "pane-1", generation: 1}, slot: slot, want: true},
+		{name: "old entry without inflight", entry: &ledgerEntry{paneID: "pane-1", generation: 1, operation: inflight}, slot: &PaneSlot{Generation: 2}, want: true},
+		{name: "different inflight operation", entry: &ledgerEntry{paneID: "pane-1", generation: 1, operation: &scheduledOperation{operation: 8}}, slot: slot, want: true},
+		{name: "protected inflight operation", entry: &ledgerEntry{paneID: "pane-1", generation: 1, operation: inflight}, slot: slot},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := topologyInvalidatesLedgerEntry(test.entry, "pane-1", test.slot); got != test.want {
+				t.Fatalf("topologyInvalidatesLedgerEntry() = %t, want %t", got, test.want)
+			}
+		})
+	}
+	ledger := map[string]*ledgerEntry{
+		"keep":   {paneID: "pane-1", generation: 1, operation: inflight},
+		"delete": {paneID: "pane-1", generation: 1},
+	}
+	pruneInvalidatedLedgerEntries(ledger, "pane-1", slot)
+	if len(ledger) != 1 || ledger["keep"] == nil {
+		t.Fatalf("pruned ledger = %+v, want only protected in-flight entry", ledger)
+	}
+	if commandResultOK(nil) || commandResultOK(&CommandResult{}) || !commandResultOK(&CommandResult{OK: true}) {
+		t.Fatal("commandResultOK did not distinguish nil, failed, and successful results")
 	}
 }
 
@@ -215,7 +517,14 @@ func TestTabRenameAcceptsNaturalLabel(t *testing.T) {
 }
 
 func TestTabReorderUsesHerdrSocketAPI(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	// t.TempDir includes the test name and can exceed macOS's Unix-socket path
+	// limit. Keep the socket fixture deliberately short.
+	dir, err := os.MkdirTemp("/tmp", "hmr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socketPath := filepath.Join(dir, "h.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatal(err)

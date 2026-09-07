@@ -49,6 +49,30 @@ type Result struct {
 type RevisionReader func(context.Context, string) (int64, error)
 type ClipboardReader func(context.Context) ([]byte, error)
 type ClipboardWriter func(context.Context, []byte) error
+type MutationGuard func() error
+
+type guardedPane struct {
+	Pane
+	guard MutationGuard
+}
+
+func (p guardedPane) SendText(ctx context.Context, paneID, text string) error {
+	if p.guard != nil {
+		if err := p.guard(); err != nil {
+			return err
+		}
+	}
+	return p.Pane.SendText(ctx, paneID, text)
+}
+
+func (p guardedPane) SendKeys(ctx context.Context, paneID string, keys []string) error {
+	if p.guard != nil {
+		if err := p.guard(); err != nil {
+			return err
+		}
+	}
+	return p.Pane.SendKeys(ctx, paneID, keys)
+}
 
 func Run(
 	ctx context.Context,
@@ -60,6 +84,20 @@ func Run(
 	initialRevision int64,
 	currentRevision RevisionReader,
 ) (result Result, err error) {
+	return RunGuarded(ctx, paneID, profile, pane, readClipboard, writeClipboard, initialRevision, currentRevision, nil)
+}
+
+func RunGuarded(
+	ctx context.Context,
+	paneID string,
+	profile slashcmd.CopyProfile,
+	pane Pane,
+	readClipboard ClipboardReader,
+	writeClipboard ClipboardWriter,
+	initialRevision int64,
+	currentRevision RevisionReader,
+	guard MutationGuard,
+) (result Result, err error) {
 	if paneID == "" {
 		return Result{}, errors.New("pane is required")
 	}
@@ -69,6 +107,7 @@ func Run(
 	if profile.Confirmation == nil || profile.Composer == nil {
 		return Result{}, errors.New("agent copy profile is unavailable")
 	}
+	pane = guardedPane{Pane: pane, guard: guard}
 
 	initialSnapshot, err := readPane(ctx, pane, paneID)
 	if err != nil {

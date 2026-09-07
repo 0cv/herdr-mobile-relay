@@ -161,6 +161,7 @@ type Scheduler struct {
 	metrics   SchedulerMetrics
 
 	generationCurrent func(string, uint64) bool
+	testCoalesced     chan struct{}
 }
 
 func NewScheduler(capacity int, logger *slog.Logger) *Scheduler {
@@ -511,6 +512,9 @@ func (s *Scheduler) run() {
 			if !stale && s.generationCurrent != nil {
 				stale = !s.generationCurrent(op.options.PaneID, slot.InFlight.Generation)
 			}
+			if event.result.TopologyFinalized {
+				stale = false
+			}
 			if event.result.BumpGeneration && !stale {
 				slot.Generation++
 				for key, entry := range ledger {
@@ -522,7 +526,8 @@ func (s *Scheduler) run() {
 				}
 			}
 			slot.InFlight = nil
-			if len(slot.Queue) == 0 && event.result.BumpGeneration && !stale && event.result.Result != nil && event.result.Result.Phase == "closed" {
+			if len(slot.Queue) == 0 && event.result.BumpGeneration && !stale && event.result.Result != nil &&
+				(event.result.Result.Phase == "closed" || event.result.TopologyFinalized && !knownActive[op.options.PaneID]) {
 				delete(slots, op.options.PaneID)
 			}
 			if stale {
@@ -591,11 +596,7 @@ func (s *Scheduler) run() {
 				s.replyStale(op, ledger)
 			}
 			slot.Queue = nil
-			for key, entry := range ledger {
-				if entry.paneID == paneID && entry.generation < slot.Generation {
-					delete(ledger, key)
-				}
-			}
+			pruneInvalidatedLedgerEntries(ledger, paneID, slot)
 		}
 		for paneID, generation := range update.generations {
 			slot := slots[paneID]
@@ -617,11 +618,7 @@ func (s *Scheduler) run() {
 				s.replyStale(op, ledger)
 			}
 			slot.Queue = nil
-			for key, entry := range ledger {
-				if entry.paneID == paneID && entry.generation < slot.Generation {
-					delete(ledger, key)
-				}
-			}
+			pruneInvalidatedLedgerEntries(ledger, paneID, slot)
 		}
 		knownActive = update.active
 		close(update.response)
@@ -716,6 +713,9 @@ func (s *Scheduler) run() {
 						op.waiters[index].replayed = true
 					}
 					existing.operation.waiters = append(existing.operation.waiters, op.waiters...)
+					if s.testCoalesced != nil {
+						s.testCoalesced <- struct{}{}
+					}
 					continue
 				}
 				ledger[key] = &ledgerEntry{
@@ -871,6 +871,24 @@ func (s *Scheduler) start(op *scheduledOperation, generation uint64) context.Can
 		s.completions <- completionEvent{operation: op, result: result}
 	}()
 	return cancel
+}
+
+func topologyInvalidatesLedgerEntry(entry *ledgerEntry, paneID string, slot *PaneSlot) bool {
+	if entry.paneID != paneID || entry.generation >= slot.Generation {
+		return false
+	}
+	if entry.operation == nil || slot.InFlight == nil {
+		return true
+	}
+	return entry.operation.operation != slot.InFlight.OperationID
+}
+
+func pruneInvalidatedLedgerEntries(ledger map[string]*ledgerEntry, paneID string, slot *PaneSlot) {
+	for key, entry := range ledger {
+		if topologyInvalidatesLedgerEntry(entry, paneID, slot) {
+			delete(ledger, key)
+		}
+	}
 }
 
 func (s *Scheduler) removeQueued(op *scheduledOperation, slots map[string]*PaneSlot, relayQueue *[]*scheduledOperation) bool {
