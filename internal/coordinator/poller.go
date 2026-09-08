@@ -26,6 +26,7 @@ type Poller struct {
 	logger              *slog.Logger
 	interval            time.Duration
 	wakeup              chan struct{}
+	eventReconnectWait  func(context.Context) bool
 	onChange            func(agents []*AgentState)
 	onWorkspaceChange   func(workspaces []herdr.Workspace)
 	onStatus            func(status map[string]any)
@@ -34,13 +35,9 @@ type Poller struct {
 	topologyRetries     int
 	consecutiveFailures atomic.Int32
 	eventsActive        atomic.Bool
-	// broadcastMu serializes snapshot broadcasts from the reconcile poll and
-	// the event stream, and guards the dedupe state below. Snapshots are read
-	// inside the lock so a slow commit path can never publish an older
-	// topology after a newer one already went out.
-	broadcastMu        sync.Mutex
-	lastAgentsJSON     []byte
-	lastWorkspacesJSON []byte
+	broadcastMu         sync.Mutex
+	lastAgentsJSON      []byte
+	lastWorkspacesJSON  []byte
 }
 
 func NewPoller(client *herdr.Client, state *State, interval time.Duration, logger *slog.Logger) *Poller {
@@ -49,12 +46,13 @@ func NewPoller(client *herdr.Client, state *State, interval time.Duration, logge
 		hostname = hostname[:idx]
 	}
 	return &Poller{
-		client:   client,
-		state:    state,
-		logger:   logger,
-		interval: interval,
-		wakeup:   make(chan struct{}, 1),
-		hostname: hostname,
+		client:             client,
+		state:              state,
+		interval:           interval,
+		wakeup:             make(chan struct{}, 1),
+		eventReconnectWait: waitForEventReconnect,
+		logger:             logger,
+		hostname:           hostname,
 	}
 }
 
@@ -266,7 +264,7 @@ func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
 			// is back, so let it run at the configured interval again.
 			p.eventsActive.Store(false)
 			p.logger.Warn("Herdr events stream unavailable", "error", err)
-			if !waitForEventReconnect(ctx) {
+			if !p.eventReconnectWait(ctx) {
 				return
 			}
 			continue
@@ -299,7 +297,7 @@ func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
 		}
 		p.eventsActive.Store(false)
 		_ = stream.Close()
-		if !waitForEventReconnect(ctx) {
+		if !p.eventReconnectWait(ctx) {
 			return
 		}
 	}

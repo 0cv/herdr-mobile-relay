@@ -109,7 +109,7 @@ export default async function setup() {
     readFile(join(captureRoot, 'omp-plan-approval.ansi'), 'utf8'),
     readFile(join(captureRoot, 'omp-partial-ask.ansi'), 'utf8'),
   ]);
-  await writeFile(scenarioPath, JSON.stringify({
+  const scenario = {
     panes: [
       {
         pane_id: 'qoder-approval', terminal_id: 'terminal-qoder-approval', agent: 'qodercli', name: 'qoder-approval',
@@ -242,7 +242,123 @@ export default async function setup() {
       'omp-plan-approval': ompPlanApproval,
       'omp-partial-ask': ompPartialAsk,
     },
-  }));
+  };
+  await writeFile(scenarioPath, JSON.stringify(scenario));
+  const socketPath = join(runtime, 'herdr.sock');
+  const workspace = {
+    workspace_id: 'workspace-1',
+    number: 1,
+    label: 'Captured',
+    pane_count: scenario.panes.length,
+    tab_count: scenario.tabs.length,
+    cwd: '/tmp',
+  };
+  const socketServer = createServer((connection) => {
+    connection.setEncoding('utf8');
+    let pending = '';
+    const handle = (line: string) => {
+      let request: { id?: string; method?: string; params?: Record<string, unknown> };
+      try {
+        request = JSON.parse(line) as typeof request;
+      } catch {
+        connection.end();
+        return;
+      }
+      const id = request.id || '';
+      if (request.method === 'events.subscribe') {
+        connection.write(JSON.stringify({ id, result: { type: 'subscription_started' } }) + '\n');
+        return;
+      }
+      let response: Record<string, unknown>;
+      switch (request.method) {
+        case 'ping':
+          response = {
+            id,
+            result: {
+              type: 'pong',
+              version: '0.9.0',
+              protocol: 1,
+              capabilities: {
+                endpoint_protocol_generation: 1,
+                surface_interest: true,
+                health_check: true,
+              },
+            },
+          };
+          break;
+        case 'agent.list':
+          response = { id, result: { type: 'agent_list', agents: scenario.panes } };
+          break;
+        case 'pane.list':
+          response = { id, result: { type: 'pane_list', panes: scenario.panes } };
+          break;
+        case 'workspace.list':
+          response = { id, result: { type: 'workspace_list', workspaces: [workspace] } };
+          break;
+        case 'tab.list':
+          response = { id, result: { type: 'tab_list', tabs: scenario.tabs } };
+          break;
+        case 'session.snapshot':
+          response = {
+            id,
+            result: {
+              type: 'session_snapshot',
+              snapshot: {
+                version: '0.9.0',
+                protocol: 1,
+                workspaces: [workspace],
+                tabs: scenario.tabs,
+                panes: scenario.panes,
+                agents: scenario.panes,
+                focused_workspace_id: 'workspace-1',
+              },
+            },
+          };
+          break;
+        case 'pane.read':
+          response = {
+            id,
+            error: { code: 'unknown_method', message: 'attention fixture uses CLI pane reads' },
+          };
+          break;
+        case 'workspace.move_block':
+          response = Array.isArray(request.params?.workspace_ids) && request.params.workspace_ids.length > 0
+            ? { id, result: { type: 'workspace_list', workspaces: [workspace] } }
+            : { id, error: { code: 'workspace_move_block_failed', message: 'empty selection' } };
+          break;
+        case 'workspace.move':
+          response = { id, result: { type: 'workspace_list', workspaces: [workspace] } };
+          break;
+        case 'tab.move':
+          response = { id, result: { type: 'tab_list', tabs: scenario.tabs } };
+          break;
+        case 'workspace.close':
+          response = { id, result: { type: 'ok' } };
+          break;
+        default:
+          response = { id, error: { code: 'unknown_method', message: 'unknown method' } };
+          break;
+      }
+      connection.end(JSON.stringify(response) + '\n');
+    };
+    connection.on('data', (chunk: string) => {
+      pending += chunk;
+      let newline = pending.indexOf('\n');
+      while (newline >= 0) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        handle(line);
+        newline = pending.indexOf('\n');
+      }
+    });
+  });
+  await new Promise<void>((resolveSocket, rejectSocket) => {
+    socketServer.once('error', rejectSocket);
+    socketServer.listen(socketPath, resolveSocket);
+  });
+  const closeSocket = async () => {
+    await new Promise<void>((resolveSocket) => socketServer.close(() => resolveSocket()));
+  };
 
   build(fakeBin, './cmd/fake-herdr', cache);
   build(relayBin, './cmd/herdr-mobile-relay', cache);
@@ -261,7 +377,7 @@ export default async function setup() {
       HERDR_RELAY_POLL_INTERVAL: '0.2',
       HERDR_BIN: fakeBin,
       HERDR_WEB_ROOT: webRoot,
-      HERDR_SOCKET_PATH: join(runtime, 'herdr.sock'),
+      HERDR_SOCKET_PATH: socketPath,
       FAKE_HERDR_SCENARIO: scenarioPath,
       FAKE_HERDR_OPERATIONS: operationsPath,
       XDG_CONFIG_HOME: join(runtime, 'config'),
@@ -277,6 +393,7 @@ export default async function setup() {
     await waitForHealth(`http://127.0.0.1:${port}`, () => output);
   } catch (error) {
     await stopRelay(relay);
+    await closeSocket();
     await rm(runtime, { recursive: true, force: true });
     throw error;
   }
@@ -286,6 +403,7 @@ export default async function setup() {
 
   return async () => {
     await stopRelay(relay);
+    await closeSocket();
     await rm(runtime, { recursive: true, force: true });
   };
 }

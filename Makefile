@@ -16,7 +16,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
 
 help:
 	@echo "Common targets:"
@@ -37,6 +37,11 @@ help:
 	@echo "  make service-logs               Tail relay service logs"
 	@echo "  make service-uninstall          Stop/remove the relay service"
 	@echo "  make speech-voices              Cache the neural voices that read responses aloud"
+	@echo "  make mobile-ci-check            Check the host-only installed-PWA harness"
+	@echo "  make mobile-cache-recovery MOBILE_ARGS=...  Check cached stylesheet recovery with a bundle set"
+	@echo "  make mobile-ci-run MOBILE_ARGS=...  Run a configured device scenario"
+	@echo "  make mobile-android MOBILE_ARGS=... Run the installed Android suite"
+	@echo "  make mobile-ios MOBILE_ARGS=...    Run the installed iOS suite"
 	@echo "  make gateway                    Build the self-hostable blind gateway binary"
 	@echo "  make check                      Run backend and frontend checks"
 
@@ -199,3 +204,26 @@ web-deploy: web-bundle-check
 
 web-preview:
 	npx --yes wrangler@$(WRANGLER_VERSION) pages dev web
+
+mobile-ci-check:
+	bun install --frozen-lockfile --cwd tests/mobile
+	bun run --cwd tests/mobile lint
+	bun run --cwd tests/mobile check
+	bun run --cwd tests/mobile test:unit
+	go test ./tests/mobile/fixture
+	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/mobile-ci.yml .github/workflows/release.yml
+
+mobile-cache-recovery:
+	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
+	bun run --cwd tests/mobile test:cache-recovery -- $(MOBILE_ARGS)
+
+mobile-ci-run:
+	bun run --cwd tests/mobile run -- $(MOBILE_ARGS)
+
+mobile-android:
+	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
+	MOBILE_PLATFORM=android $(MAKE) mobile-ci-run MOBILE_ARGS="$(MOBILE_ARGS)"
+
+mobile-ios:
+	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)
+	MOBILE_PLATFORM=ios $(MAKE) mobile-ci-run MOBILE_ARGS="$(MOBILE_ARGS)"

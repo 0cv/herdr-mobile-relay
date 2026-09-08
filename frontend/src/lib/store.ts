@@ -93,6 +93,7 @@ import type {
   DirectoryListing,
   QuestionDraft,
   QuestionInteraction,
+  HerdrStatus,
   RelayConfig,
   RelayConnectionView,
   RelaySpeechVoice,
@@ -210,6 +211,36 @@ function normalizeAgentInventory(
     stale: inventory.stale === true,
   };
 }
+function normalizeHerdrStatus(value: unknown): HerdrStatus {
+  const status = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const features: Record<string, HerdrStatus['features'][string]> = {};
+  const rawFeatures = status.features && typeof status.features === 'object' && !Array.isArray(status.features)
+    ? status.features as Record<string, unknown>
+    : {};
+  for (const [name, rawFeature] of Object.entries(rawFeatures).slice(0, 64)) {
+    if (!rawFeature || typeof rawFeature !== 'object' || Array.isArray(rawFeature)) continue;
+    const feature = rawFeature as Record<string, unknown>;
+    const state = String(feature.state || '');
+    if (!['supported', 'unsupported', 'unknown'].includes(state)) continue;
+    features[name.slice(0, 96)] = {
+      state: state as HerdrStatus['features'][string]['state'],
+      reason: String(feature.reason || '').slice(0, 160),
+    };
+  }
+  const endpoint = Number(status.endpoint_protocol_generation);
+  return {
+    installed_client_version: String(status.installed_client_version || '').slice(0, 64),
+    server_version: String(status.server_version || '').slice(0, 64),
+    server_protocol: Number.isSafeInteger(Number(status.server_protocol)) ? Number(status.server_protocol) : 0,
+    server_protocol_known: status.server_protocol_known === true,
+    endpoint_protocol_generation: Number.isSafeInteger(endpoint) && endpoint > 0 ? endpoint : null,
+    generation: Number.isSafeInteger(Number(status.generation)) ? Number(status.generation) : 0,
+    features,
+  };
+}
+
 function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const state = value as Record<string, unknown>;
@@ -725,6 +756,7 @@ class RelayStore {
       inventory: normalizeAgentInventory(null),
       pushStatus: '',
       vapidPublicKey: '',
+      herdrStatus: normalizeHerdrStatus(null),
     };
   }
 
@@ -1123,6 +1155,7 @@ class RelayStore {
       observeAppUpstreamVersion(connection.update.upstream_version);
       connection.gatewayAvailableVersion = connection.update.available_version || connection.releaseVersion;
       this.syncUpdateRestartReconnect(relayId, connection);
+      connection.herdrStatus = normalizeHerdrStatus(message.herdr_status);
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
@@ -1159,6 +1192,16 @@ class RelayStore {
       if (connection.capabilities.includes('device_management')) {
         void this.refreshDevices(relayId);
       }
+      return;
+    }
+    if (message.type === 'herdr_status' && connection) {
+      const status = normalizeHerdrStatus(message.status);
+      if (status.generation <= connection.herdrStatus.generation) return;
+      connection.herdrStatus = status;
+      if (Array.isArray(message.capabilities)) {
+        connection.capabilities = message.capabilities.filter(Boolean);
+      }
+      this.emitConnections();
       return;
     }
     if (message.type === 'inventory_status' && connection) {
@@ -1892,11 +1935,20 @@ class RelayStore {
     return result;
   }
 
-  async closeWorkspace(workspace: RelayWorkspace): Promise<CommandResult> {
+  async closeWorkspace(
+    workspace: RelayWorkspace,
+    options: { closeGroup?: boolean; expectedWorkspaceIds?: string[] } = {},
+  ): Promise<CommandResult> {
     this.workspaceManagementAvailable(workspace.relay_id);
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'workspace_close', workspace_id: workspace.workspace_id,
-    }, 30_000);
+    const payload: Record<string, unknown> = {
+      type: 'workspace_close',
+      workspace_id: workspace.workspace_id,
+    };
+    if (options.closeGroup === true) {
+      payload.close_group = true;
+      payload.expected_workspace_ids = options.expectedWorkspaceIds || [];
+    }
+    const result = await this.sendCommand(workspace.relay_id, payload, 30_000);
     this.requestAgents();
     return result;
   }

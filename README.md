@@ -19,7 +19,13 @@ into one installable web app.
 
 ## Get started in two minutes
 
-Requirements: Herdr 0.7.5 or newer, Git, and `curl`.
+Requirements: Herdr 0.7.5 or newer, Git, and `curl`. Herdr 0.9.0 is
+recommended for the complete live JSON inventory and workspace-management
+surface; the relay does not treat that recommendation as a new minimum.
+
+The relay reports the installed Herdr client version separately from the
+running local server version and protocol. A server upgrade can enable or
+disable individual actions without changing the relay release.
 
 ```bash
 herdr plugin install 0cv/herdr-mobile-relay

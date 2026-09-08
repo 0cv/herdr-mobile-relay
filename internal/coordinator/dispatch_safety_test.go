@@ -347,6 +347,59 @@ func TestServerNotRunningIsSafeRetry(t *testing.T) {
 	}
 }
 
+func TestProtocolMismatchIsActionableAndNotRetryable(t *testing.T) {
+	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := d.Close(ctx); err != nil {
+			t.Fatalf("close dispatcher: %v", err)
+		}
+	})
+
+	result := d.failErr(
+		"request-1",
+		"submit_prompt",
+		"pane-1",
+		&herdr.OutcomeError{Started: true, Err: &herdr.CLIError{
+			Code: "protocol_mismatch", Message: "server protocol 7 is not supported",
+		}},
+	)
+	if result.Phase != "not_started" || result.Error != herdr.RefusalMessage("protocol_mismatch") {
+		t.Fatalf("result = %+v, want controlled pre-dispatch refusal", result)
+	}
+	data, _ := result.Data.(map[string]any)
+	if data["code"] != "protocol_mismatch" || data["dispatched_unknown"] == true {
+		t.Fatalf("data = %+v, want exact refusal code without uncertainty", result.Data)
+	}
+	if herdr.IsTransientRefused(&herdr.CLIError{Code: "protocol_mismatch"}) {
+		t.Fatal("protocol mismatch entered the transient retry class")
+	}
+}
+
+func TestPartiallyAppliedOutranksProtocolMismatch(t *testing.T) {
+	d := NewDispatcher(nil, NewState(testLogger()), nil, testLogger())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := d.Close(ctx); err != nil {
+			t.Fatalf("close dispatcher: %v", err)
+		}
+	})
+	result := d.failErr(
+		"request-1",
+		"answer_question",
+		"pane-1",
+		partiallyApplied(
+			"earlier question input was already applied",
+			&herdr.OutcomeError{Started: true, Err: &herdr.CLIError{Code: "protocol_mismatch"}},
+		),
+	)
+	if result.Phase != "dispatched_unknown" || result.Data.(map[string]any)["dispatched_unknown"] != true {
+		t.Fatalf("result = %+v, want uncertain partial outcome", result)
+	}
+}
+
 // A later step failing with server_not_running must never be advertised as safe
 // to retry once an earlier step already reached the agent: retrying would
 // duplicate the input that landed.

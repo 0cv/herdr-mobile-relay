@@ -135,6 +135,10 @@ Open **Workspaces** from the folder button in the header to:
   linked worktree;
 - close a linked-worktree workspace without deleting its checkout, or remove
   the checkout while retaining its Git branch.
+- closing a repository workspace with linked worktrees first offers **Close
+  Workspace Group**. The second dialog lists the current group and must be
+  confirmed separately; it closes panes in those workspaces but never removes
+  Git checkouts or branches.
 
 Linked worktrees are nested below their repository workspace on both the home
 screen and the Workspaces page, drawn as a tree with connector rails that
@@ -149,6 +153,26 @@ Normal worktree removal refuses a dirty checkout. **Force Remove** is offered
 only after that refusal and requires a second confirmation because it discards
 uncommitted checkout changes. Creating a worktree uses Herdr's configured
 worktree directory; the phone cannot provide an arbitrary checkout path.
+
+The separate **Remove Worktree** action is the destructive checkout operation.
+It retains the Git branch and is subject to the dirty-checkout and force-remove
+rules above. Closing a workspace and removing its worktree are never the same
+operation.
+
+## Herdr compatibility
+
+Settings reports the installed Herdr client version separately from the running
+server version and protocol. It also reports the generation of the relay's
+stable JSON endpoint contract and the reason each feature is supported,
+unsupported, or still unknown. An endpoint generation is not a claim that all
+optional features are available.
+
+Agent, pane, workspace, and tab inventory uses Herdr's JSON operations. The
+mobile terminal remains a separate binary-stream compatibility path, so a
+server can support inventory and workspace controls while its terminal
+transport is unavailable. The event stream is subscribed before each snapshot;
+after a reconnect the relay takes a fresh snapshot rather than replaying every
+notification missed while disconnected.
 
 **Inspect Workspace** is read-only and is available only when the connected
 relay advertises workspace inspection and the agent reports a working

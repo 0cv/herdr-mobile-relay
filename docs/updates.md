@@ -130,6 +130,15 @@ terminal titles are unavailable or disabled. That accuracy flows straight to
 the phone, which keys completion notifications and history capture off those
 status transitions.
 
+## Installed-PWA upgrade coverage
+
+The installed-device suite in `docs/mobile-device-ci.md` checks the executing
+phone build, not only `/version.json`, while preserving real encrypted relay
+credentials and preferences. It uses historical old bundles, a deterministic
+HTTPS fixture, bounded asset faults, and native Home Screen relaunches. A green
+simulator run does not replace the separate physical-device and deployed-origin
+signoff for a user-facing release.
+
 ## Troubleshooting
 
 - **Update operation failed with `read canonical release: HTTP 403`:** an older

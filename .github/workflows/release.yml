@@ -7,7 +7,7 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -109,9 +109,25 @@ jobs:
             dist/release/checksums.txt "$version" "$GITHUB_SHA" \
             "${target%_*}/${target#*_}"
 
+  mobile:
+    needs: build
+    uses: ./.github/workflows/mobile-ci.yml
+    with:
+      artifact_run_id: ${{ github.run_id }}
+      artifact_name: release-bundles
+      candidate_commit: ${{ github.sha }}
+      platform: all
+      suite: release
+    permissions:
+      actions: read
+      contents: read
+
   publish:
-    needs: [verify, build, native-smoke]
+    needs: [verify, build, native-smoke, mobile]
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:

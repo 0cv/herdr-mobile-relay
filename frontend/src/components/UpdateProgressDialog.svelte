@@ -59,11 +59,24 @@
 
   let busyRelayId = $state('');
   let now = $state(Date.now());
+  let assetUnavailable = $state(typeof document !== 'undefined' && (
+    document.documentElement.dataset.herdrLoadFailed === '1'
+      || document.documentElement.dataset.herdrLoadTimedOut === '1'
+  ));
 
   onMount(() => {
     restoreUpdateProgress();
+    const onRequiredAssetFailure = () => {
+      if (document.documentElement.dataset.herdrLoadFailed === '1' || document.documentElement.dataset.herdrLoadTimedOut === '1') {
+        assetUnavailable = true;
+      }
+    };
+    window.addEventListener('herdr-required-assets', onRequiredAssetFailure);
     const timer = window.setInterval(() => { now = Date.now(); }, 1_000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('herdr-required-assets', onRequiredAssetFailure);
+    };
   });
 
   const rows = $derived.by(() => {
@@ -336,7 +349,7 @@
 
 <AppDialog
   id="update-progress-dialog"
-  open={Boolean($plan)}
+  open={Boolean($plan) && !assetUnavailable}
   {title}
   description={$plan
     ? `${completedItems} of ${totalItems} update items complete for v${$plan.targetVersion}.`

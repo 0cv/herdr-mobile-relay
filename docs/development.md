@@ -64,6 +64,35 @@ Packaged users need no toolchain at all.
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
 failure injection, and process-control traces for black-box tests.
 
+Installed-PWA device CI is documented in `docs/mobile-device-ci.md`. Its host-only
+check does not replace the real Android Home Screen or iOS Home Screen runs;
+macOS/Xcode is required for iOS, and each destructive device action requires a
+run-owned disposable emulator or simulator marker.
+
+## Herdr compatibility checks
+
+The relay's minimum supported Herdr client is 0.7.5; 0.9.0 is the recommended
+client for the full JSON inventory and workspace-management surface. The
+installed client version is only one input: startup and the refresh loop ping
+the running server and record its server version, protocol, endpoint generation,
+and individual feature evidence. A stable endpoint generation does not imply
+that every optional operation is supported.
+
+Ordinary agent, pane, workspace, and tab inventory uses JSON operations. The
+mobile terminal remains a separate binary transport, so terminal compatibility
+must not be inferred from inventory compatibility. Event clients subscribe
+before taking a snapshot; reconnects refresh the snapshot and do not replay all
+notifications missed while disconnected.
+
+Workspace group close is a single explicit close operation over the current
+workspace membership. It closes panes but never removes Git checkouts or
+branches. Worktree removal remains a separate destructive operation with its
+own dirty-checkout confirmation.
+
+Use the fake Herdr binary or a temporary Unix socket fixture for tests. Do not
+run production Herdr commands or mutate production state while checking these
+paths.
+
 ## Phone-side crash diagnostics
 
 The production frontend installs raw DOM handlers before Svelte mounts. An

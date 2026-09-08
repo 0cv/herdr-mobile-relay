@@ -255,6 +255,25 @@ describe('release updates', () => {
     expect(pendingRelayUpdate('fedora')).toBeNull();
   });
 
+  it('records the known historical phone-accounting gap without inventing acknowledgement', () => {
+    sessionStorage.setItem('herdr_update_progress', JSON.stringify({
+      targetVersion: '0.20.11',
+      relayIds: ['alpha'],
+      startedRelayIds: [],
+      relayStartedAt: {},
+      appRelayId: '',
+      startedAt: Date.now(),
+    }));
+    restoreUpdateProgress();
+    expect(get(updateProgressPlan)).toMatchObject({
+      relayIds: ['alpha'],
+      phoneAppRequired: false,
+      phoneAcknowledged: false,
+      phoneTarget: null,
+    });
+    expect(acknowledgePhoneUpdate()).toBe(false);
+  });
+
   it('tracks the phone independently from its deployment owner', () => {
     beginUpdateProgress('1.2.3', ['fedora', 'mac'], 'fedora', 'fedora', {
       phoneAppRequired: true,

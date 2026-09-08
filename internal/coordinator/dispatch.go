@@ -874,7 +874,13 @@ func (d *Dispatcher) failErr(requestID, action, paneID string, err error) *Comma
 	// advertised as safe to retry and duplicate the input that landed.
 	case herdr.IsRefused(err):
 		phase = "not_started"
-		public = "Command was not sent; retry is safe"
+		code := herdr.RefusalCode(err)
+		if herdr.IsTransientRefused(err) {
+			public = "Command was not sent; retry is safe"
+		} else {
+			public = herdr.RefusalMessage(code)
+			data = map[string]any{"code": code}
+		}
 	case errors.Is(err, herdr.ErrCreatedTargetUnknown):
 		phase = "dispatched_unknown"
 		public = "Herdr may have created an empty target; review Herdr before retrying"

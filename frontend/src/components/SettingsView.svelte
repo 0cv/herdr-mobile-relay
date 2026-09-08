@@ -7,6 +7,8 @@
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import {
+    APP_ASSET_VERSION,
+    APP_BUILD_ID,
     APP_VERSION,
     canInviteFrom,
     HOME_LAYOUTS,
@@ -85,6 +87,19 @@
     setUpdateProgressError,
   } from '$lib/updates';
   import type { AppUpdateStatus, RelayConfig, RelayConnectionView, RelaySpeechVoice } from '$lib/types';
+
+function herdrWarnings(features: Record<string, { state: string; reason: string }> | undefined): string {
+  return Object.entries(features || {})
+    .filter(([, feature]) => feature.state !== 'supported')
+    .map(([name, feature]) => {
+      const label = name === 'workspace.move_block' ? 'Workspace group reorder' : name;
+      const message = feature.state === 'unsupported'
+        ? feature.reason === 'method_not_supported' ? 'Server upgrade needed' : 'Server feature unavailable'
+        : 'Could not check';
+      return `${label}: ${message}`;
+    })
+    .join(' · ');
+}
 
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
@@ -588,7 +603,12 @@
   }
 </script>
 
-<main class="page settings-page" aria-labelledby="settings-title">
+<main
+  class="page settings-page"
+  aria-labelledby="settings-title"
+  data-app-assets={APP_ASSET_VERSION}
+  data-app-build={APP_BUILD_ID}
+>
   <h2 id="settings-title">Settings</h2>
 
   <Card>
@@ -615,6 +635,8 @@
         {@const currentRelay = connection?.relay || relay}
         {@const gateways = currentRelay.gatewayUrls || []}
         {@const connectionPath = relayPathLabel(connection, currentRelay)}
+        {@const herdr = connection?.herdrStatus}
+        {@const herdrFeatureWarnings = herdrWarnings(herdr?.features)}
         <article class="relay-row">
           <span
             class={`status-dot status-${connectionStatus === 'connected' && connection?.inventory.state === 'ready' ? 'success' : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'warning' : 'danger'}`}
@@ -658,6 +680,18 @@
               </small>
             {/if}
             {#if version}<small class:warning={version.tone === 'warning'} title={version.title}>{version.label}</small>{/if}
+            <small>
+              <span>Herdr client: {herdr?.installed_client_version || 'unknown'}</span>
+              <span>
+                Herdr server: {herdr?.server_version || 'unavailable/unknown'}
+                {#if herdr?.server_protocol_known} · protocol {herdr.server_protocol}{/if}
+                {#if herdr?.endpoint_protocol_generation} · endpoint generation {herdr.endpoint_protocol_generation}{/if}
+              </span>
+            </small>
+            <small>Herdr 0.9.0 recommended.</small>
+            {#if herdrFeatureWarnings}
+              <small class="warning" role="status">{herdrFeatureWarnings}</small>
+            {/if}
             <small class:warning={update.warning} role="status">{update.label}</small>
             {#if update.detail}<small class:warning={update.warning} title={update.detail}>{update.detail}</small>{/if}
           </div>

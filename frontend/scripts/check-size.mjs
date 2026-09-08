@@ -71,9 +71,8 @@ import { constants, gzipSync } from 'node:zlib';
 // of bytes per build: a release sitting on the limit fails the next one.
 // Raised from 158 KiB for the verified phone-build acknowledgement, bounded
 // reload recovery, and public release descriptor checks in 0.20.10.
-// Add a small fixed allowance for the load-failure and hung-metadata recovery
-// guards; keep the ceiling close enough to catch accidental bootstrap growth.
-const limitKiB = 160;
+// Raised from 160 KiB with approval for live Herdr compatibility evidence and workspace-group consent UI.
+const limitKiB = 162;
 const limit = limitKiB * 1024 + 256;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));

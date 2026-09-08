@@ -63,6 +63,7 @@
     delete dataset.herdrLoadTimedOut;
     dataset.herdrLoadFailed = '1';
     if (firstFailure) window.dispatchEvent(new Event('herdr-required-assets'));
+    document.querySelector('#update-progress-dialog')?.close();
     showRecovery(detail, true);
   }
 

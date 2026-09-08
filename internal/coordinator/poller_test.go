@@ -1,6 +1,12 @@
 package coordinator
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -118,5 +124,116 @@ func TestHydrateWorkspaceCwdsKeepsShellOnlyWorkspaceLaunchable(t *testing.T) {
 	}})
 	if workspaces[0].Cwd != "/home/user/project" {
 		t.Fatalf("workspace cwd = %q", workspaces[0].Cwd)
+	}
+}
+
+func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		defer listener.Close()
+		subscriptions := 0
+		snapshots := 0
+		for range 4 {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				serverDone <- acceptErr
+				return
+			}
+			func() {
+				defer conn.Close()
+				var request struct {
+					ID     string `json:"id"`
+					Method string `json:"method"`
+				}
+				if decodeErr := json.NewDecoder(bufio.NewReader(conn)).Decode(&request); decodeErr != nil {
+					serverDone <- decodeErr
+					return
+				}
+				switch request.Method {
+				case "events.subscribe":
+					subscriptions++
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"id": request.ID, "result": map[string]any{"type": "subscription_started"},
+					})
+					if subscriptions == 1 {
+						_ = json.NewEncoder(conn).Encode(map[string]any{
+							"event": "workspace.created",
+							"data": map[string]any{
+								"workspace": map[string]any{"workspace_id": "w2", "label": "Buffered"},
+							},
+						})
+					}
+				case "session.snapshot":
+					snapshots++
+					workspaces := []any{
+						map[string]any{"workspace_id": "w1", "label": "Project"},
+					}
+					if snapshots == 2 {
+						workspaces = append(workspaces,
+							map[string]any{"workspace_id": "w3", "label": "Created Offline"},
+						)
+					}
+					_ = json.NewEncoder(conn).Encode(map[string]any{
+						"id": request.ID,
+						"result": map[string]any{
+							"type":     "session_snapshot",
+							"snapshot": map[string]any{"workspaces": workspaces},
+						},
+					})
+				default:
+					serverDone <- fmt.Errorf("unexpected event method %q", request.Method)
+				}
+			}()
+		}
+		serverDone <- nil
+	}()
+
+	state := testState()
+	poller := NewPoller(herdr.NewClient("missing-herdr", socketPath), state, time.Second, testLogger())
+	reconnects := 0
+	poller.eventReconnectWait = func(context.Context) bool {
+		reconnects++
+		return reconnects == 1
+	}
+	updates := make(chan []herdr.Workspace, 8)
+	poller.SetOnWorkspaceChange(func(workspaces []herdr.Workspace) {
+		updates <- append([]herdr.Workspace(nil), workspaces...)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan struct{})
+	go func() {
+		poller.RunEvents(ctx, herdr.NewEventClient(socketPath))
+		close(runDone)
+	}()
+
+	var final []herdr.Workspace
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for final == nil {
+		select {
+		case workspaces := <-updates:
+			if len(workspaces) == 2 && workspaces[1].ID == "w3" {
+				final = workspaces
+			}
+		case <-deadline.C:
+			t.Fatal("event reconnect did not converge on the current snapshot")
+		}
+	}
+	<-runDone
+	if len(final) != 2 || final[0].ID != "w1" || final[1].ID != "w3" {
+		t.Fatalf("final workspaces = %+v, want w1 and w3", final)
+	}
+	if reconnects != 2 {
+		t.Fatalf("reconnect waits = %d, want 2", reconnects)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
 	}
 }

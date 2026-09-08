@@ -15,6 +15,8 @@ const (
 	worktreeCommandDeadline  = 60 * time.Second
 	workspaceLabelMaxRunes   = 128
 	worktreeValueMaxRunes    = 512
+	maxWorkspaceGroupIDs     = 256
+	maxWorkspaceIDRunes      = 256
 )
 
 func (d *Dispatcher) HandleWorkspaceCreate(
@@ -152,23 +154,170 @@ func (d *Dispatcher) HandleWorkspaceReorderBlock(
 func (d *Dispatcher) HandleWorkspaceClose(
 	ctx context.Context,
 	requestID, workspaceID string,
+	closeGroup bool,
+	expectedWorkspaceIDs []string,
 ) *CommandResult {
 	const action = "workspace_close"
-	workspace, result := d.workspaceTarget(requestID, action, workspaceID)
-	if result != nil {
-		return result
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return d.fail(requestID, action, "", "Workspace is required")
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, workspaceCommandDeadline)
 	defer cancel()
 	d.admitTopology(ctx)
 	d.topologyMu.Lock()
 	defer d.topologyMu.Unlock()
-	if err := d.herdr.WorkspaceClose(commandCtx, workspace.ID); err != nil {
+
+	authoritative, err := d.herdr.WorkspaceList(commandCtx)
+	if err != nil {
+		return d.workspaceCloseRefusal(
+			requestID,
+			action,
+			"workspace_group_validation_unavailable",
+			nil,
+		)
+	}
+	current, ok := workspaceByID(authoritative, workspaceID)
+	if !ok {
+		if closeGroup {
+			return d.workspaceCloseRefusal(requestID, action, "workspace_group_changed", nil)
+		}
+		return d.fail(requestID, action, "", "Workspace is unavailable")
+	}
+	groupIDs, primaryID := workspaceGroupIDs(authoritative, current)
+	if !validWorkspaceGroupIDs(groupIDs, primaryID) {
+		return d.workspaceCloseRefusal(
+			requestID,
+			action,
+			"workspace_group_validation_unavailable",
+			nil,
+		)
+	}
+	if !closeGroup && current.Worktree != nil && !current.Worktree.IsLinkedWorktree && len(groupIDs) > 1 {
+		return d.workspaceCloseRefusal(requestID, action, "workspace_group_close_required", groupIDs)
+	}
+	if closeGroup {
+		if current.Worktree != nil && current.Worktree.IsLinkedWorktree {
+			return d.workspaceCloseRefusal(requestID, action, "workspace_group_primary_required", groupIDs)
+		}
+		if !validExpectedWorkspaceIDs(expectedWorkspaceIDs, primaryID) {
+			return d.workspaceCloseRefusal(requestID, action, "workspace_group_consent_invalid", groupIDs)
+		}
+		if !sameWorkspaceIDSet(expectedWorkspaceIDs, groupIDs) {
+			return d.workspaceCloseRefusal(requestID, action, "workspace_group_changed", groupIDs)
+		}
+	}
+	affectedIDs := []string{current.ID}
+	if closeGroup {
+		affectedIDs = append([]string(nil), groupIDs...)
+	}
+	if err := d.herdr.WorkspaceClose(commandCtx, current.ID, closeGroup); err != nil {
 		return d.failTopologyErr(requestID, action, "", err)
 	}
 	d.topologyChanged()
-	d.recordActivity(action, "closed", "Closed workspace "+workspace.Label, "", requestID)
-	return completed(requestID, action, "", map[string]any{"workspace_id": workspace.ID})
+	d.recordActivity(action, "closed", "Closed workspace "+current.Label, "", requestID)
+	return completed(requestID, action, "", map[string]any{
+		"workspace_id":  current.ID,
+		"close_group":   closeGroup,
+		"workspace_ids": affectedIDs,
+	})
+}
+
+func workspaceByID(workspaces []herdr.Workspace, workspaceID string) (herdr.Workspace, bool) {
+	for _, workspace := range workspaces {
+		if workspace.ID == workspaceID {
+			return workspace, true
+		}
+	}
+	return herdr.Workspace{}, false
+}
+
+func (d *Dispatcher) workspaceCloseRefusal(
+	requestID, action, code string, workspaceIDs []string,
+) *CommandResult {
+	public := herdr.RefusalMessage(code)
+	if code == "workspace_group_consent_invalid" {
+		public = "Workspace group confirmation is invalid; confirm again"
+	}
+	data := map[string]any{"code": code}
+	if len(workspaceIDs) > 0 {
+		data["workspace_ids"] = workspaceIDs
+	}
+	d.recordActivity(action, "failed", strings.ReplaceAll(action, "_", " ")+" failed: "+public, "", requestID)
+	return &CommandResult{
+		RequestID: requestID,
+		Action:    action,
+		OK:        false,
+		Phase:     "not_started",
+		Error:     public,
+		Data:      data,
+	}
+}
+
+func workspaceGroupIDs(workspaces []herdr.Workspace, selected herdr.Workspace) ([]string, string) {
+	if selected.Worktree == nil || selected.Worktree.RepoKey == "" {
+		return []string{selected.ID}, selected.ID
+	}
+	repoKey := selected.Worktree.RepoKey
+	primaryID := selected.ID
+	for _, workspace := range workspaces {
+		if workspace.Worktree == nil || workspace.Worktree.RepoKey != repoKey {
+			continue
+		}
+		if !workspace.Worktree.IsLinkedWorktree {
+			primaryID = workspace.ID
+			break
+		}
+	}
+	group := make([]string, 0, len(workspaces))
+	for _, workspace := range workspaces {
+		if workspace.Worktree != nil && workspace.Worktree.RepoKey == repoKey {
+			group = append(group, workspace.ID)
+		}
+	}
+	if len(group) == 0 {
+		return []string{selected.ID}, primaryID
+	}
+	return group, primaryID
+}
+
+func validWorkspaceGroupIDs(ids []string, primaryID string) bool {
+	if len(ids) == 0 || len(ids) > maxWorkspaceGroupIDs || primaryID == "" {
+		return false
+	}
+	seen := make(map[string]struct{}, len(ids))
+	for _, workspaceID := range ids {
+		if utf8.RuneCountInString(workspaceID) > maxWorkspaceIDRunes ||
+			workspaceID == "" || workspaceID != strings.TrimSpace(workspaceID) {
+			return false
+		}
+		if _, ok := seen[workspaceID]; ok {
+			return false
+		}
+		seen[workspaceID] = struct{}{}
+	}
+	_, ok := seen[primaryID]
+	return ok
+}
+
+func validExpectedWorkspaceIDs(expected []string, primaryID string) bool {
+	return validWorkspaceGroupIDs(expected, primaryID)
+}
+
+func sameWorkspaceIDSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, workspaceID := range left {
+		seen[workspaceID] = struct{}{}
+	}
+	for _, workspaceID := range right {
+		if _, ok := seen[workspaceID]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Dispatcher) HandleWorktreeList(
@@ -352,6 +501,15 @@ func (d *Dispatcher) failTopologyErr(requestID, action, paneID string, err error
 	case errors.As(err, &cliErr) && topologyRefusalCode(cliErr.Code):
 		phase = "not_started"
 		public = strings.TrimSpace(cliErr.Message)
+		switch cliErr.Code {
+		case "protocol_mismatch", "workspace_group_close_required", "workspace_group_changed",
+			"workspace_group_primary_required", "workspace_group_consent_invalid",
+			"workspace_group_validation_unavailable":
+			public = herdr.RefusalMessage(cliErr.Code)
+			if cliErr.Code == "workspace_group_consent_invalid" {
+				public = "Workspace group confirmation is invalid; confirm again"
+			}
+		}
 		if public == "" {
 			public = "Herdr refused the command"
 		}
@@ -380,7 +538,10 @@ func (d *Dispatcher) failTopologyErr(requestID, action, paneID string, err error
 func topologyRefusalCode(code string) bool {
 	switch code {
 	case "invalid_request", "workspace_not_found", "worktree_not_found", "not_git_worktree",
-		"linked_worktree_source", "worktree_operation_in_progress":
+		"linked_worktree_source", "worktree_operation_in_progress", "protocol_mismatch",
+		"workspace_group_close_required", "workspace_group_changed",
+		"workspace_group_primary_required", "workspace_group_consent_invalid",
+		"workspace_group_validation_unavailable":
 		return true
 	default:
 		return false

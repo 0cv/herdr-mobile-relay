@@ -384,6 +384,23 @@ export interface RelaySpeechVoice {
   engine: string;
 }
 
+export type HerdrFeatureState = 'supported' | 'unsupported' | 'unknown';
+
+export interface HerdrFeatureStatus {
+  state: HerdrFeatureState;
+  reason: string;
+}
+
+export interface HerdrStatus {
+  installed_client_version: string;
+  server_version: string;
+  server_protocol: number;
+  server_protocol_known: boolean;
+  endpoint_protocol_generation: number | null;
+  generation: number;
+  features: Record<string, HerdrFeatureStatus>;
+}
+
 export interface RelayConnectionView {
   relay: RelayConfig;
   status: RelayStatus;
@@ -412,6 +429,7 @@ export interface RelayConnectionView {
   appDeploy: AppDeploymentStatus;
   inventory: AgentInventoryStatus;
   capabilities: string[];
+  herdrStatus: HerdrStatus;
   /** The relay refused this device's credential; pairing again is the only fix. */
   authRejected: boolean;
   /**

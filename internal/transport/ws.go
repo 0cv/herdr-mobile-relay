@@ -464,7 +464,8 @@ func encodeMessage(message any) ([]byte, string, bool, error) {
 		return nil, "", false, err
 	}
 	kind := messageType(data)
-	replaceable := kind == "agents" || kind == "inventory_status" || kind == "update_status" || kind == "app_deploy_status"
+	replaceable := kind == "agents" || kind == "inventory_status" || kind == "update_status" ||
+		kind == "app_deploy_status" || kind == "herdr_status"
 	return data, kind, replaceable, nil
 }
 

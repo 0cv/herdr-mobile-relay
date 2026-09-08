@@ -190,7 +190,7 @@ func (l *Lifecycle) startKindAgent(ctx context.Context, kind, name, paneID strin
 	delay := agentStartRetryInitial
 	for {
 		_, err := l.herdr.StartAgent(ctx, name, kind, paneID, remainingTimeoutMS(ctx))
-		if err == nil || !herdr.IsRefused(err) {
+		if err == nil || !herdr.IsTransientRefused(err) {
 			return err
 		}
 		timer := time.NewTimer(delay)

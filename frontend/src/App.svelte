@@ -29,7 +29,7 @@
     displayName,
     hostLabel,
   } from '$lib/agents';
-  import { APP_VERSION } from '$lib/config';
+  import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from '$lib/config';
   import { initializePreferences } from '$lib/preferences';
   import { initializeSpeech, stopSpeech } from '$lib/speech';
   import { initializePush, notificationsEnabled, pushOptedIn, showPageNotification } from '$lib/push';
@@ -534,7 +534,12 @@
 </script>
 
 <div class="app-shell">
-  <header class="app-header" class:home-header={$currentView.view === 'agents'}>
+  <header
+    class="app-header"
+    class:home-header={$currentView.view === 'agents'}
+    data-app-assets={APP_ASSET_VERSION}
+    data-app-build={APP_BUILD_ID}
+  >
     {#if $currentView.view !== 'agents'}
       <Button variant="ghost" size="icon" aria-label="Back" onclick={closeCurrentView}>
         <svg class="back-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">

@@ -103,6 +103,38 @@ describe('settings relay status', () => {
     await waitFor(() => expect(screen.getByText('Push: synced')).toBeInTheDocument());
   });
 
+  it('shows installed client and running server compatibility separately', async () => {
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config',
+      protocol: 3,
+      capabilities: ['workspace_management'],
+      herdr_status: {
+        installed_client_version: '0.9.0',
+        server_version: '0.8.0',
+        server_protocol: 7,
+        server_protocol_known: true,
+        endpoint_protocol_generation: 3,
+        generation: 2,
+        features: {
+          'workspace.move_block': {
+            state: 'unsupported',
+            reason: 'method_not_supported',
+            generation: 2,
+          },
+        },
+      },
+      agent_profiles: [],
+    });
+    expect(await screen.findByText('Herdr client: 0.9.0')).toBeInTheDocument();
+    expect(screen.getByText(/Herdr server: 0\.8\.0/)).toBeInTheDocument();
+    expect(screen.getByText(/protocol 7/)).toBeInTheDocument();
+    expect(screen.getByText('Herdr 0.9.0 recommended.')).toBeInTheDocument();
+    expect(screen.getByText('Workspace group reorder: Server upgrade needed')).toBeInTheDocument();
+  });
+
   it('shows every potential gateway in priority order', () => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);

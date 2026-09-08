@@ -567,43 +567,23 @@ func (s *Server) Run(ctx context.Context) error {
 	// The handshake has no "profiles loading" state. Resolve integrations
 	// before accepting the first WebSocket.
 	_ = s.profiles.Profiles()
-
+	s.herdrC.SetCapabilityChangeCallback(func(status herdr.ServerStatus) {
+		s.hub.Broadcast(map[string]any{
+			"type":         "herdr_status",
+			"status":       herdrStatusPayload(status),
+			"capabilities": s.effectiveCapabilities(),
+		})
+	})
 	s.hub.SetOnConnect(func(client *transport.ClientConn) {
 		vapidPublicKey := ""
 		if s.pushM != nil {
 			vapidPublicKey = s.pushM.VAPIDPublicKey()
 		}
 		inventory := s.committedInventoryStatus()
-		capabilities := append([]string(nil), protocol.Capabilities...)
-		if s.pushM != nil {
-			capabilities = append(capabilities, "typed_push", "push_policy")
-		}
-		if s.clipboardRead != nil {
-			capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
-		}
+		capabilities := s.effectiveCapabilities()
 		speechStatus := s.speechStatus()
 		speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
-		if len(speechLanguages) > 0 {
-			capabilities = append(capabilities, protocol.SpeechSynthesisCapability)
-		}
-		if speechStatus.ManagementSupported {
-			capabilities = append(capabilities, protocol.SpeechVoiceManagementCapability)
-		}
-		if s.herdrC.SupportsRealtimePane(client.Context()) {
-			capabilities = append(capabilities, "pane_realtime_delta", "tab_reorder")
-		}
-		if s.herdrC.SupportsWorkspaceMoveBlock() {
-			capabilities = append(capabilities, "workspace_reorder_block")
-		}
-		if s.appDeployM.State().Configured {
-			capabilities = append(capabilities, "app_deploy")
-		}
-		if s.hybrid.directEnabled() {
-			capabilities = append(capabilities, "webrtc_direct")
-		}
-		if s.deviceAuth != nil {
-			capabilities = append(capabilities, "device_management")
-		}
+		herdrStatus := herdrStatusPayload(s.herdrC.CapabilityStatus())
 		s.hub.Send(client, protocol.PushConfig{
 			Type:            "push_config",
 			VAPIDPublicKey:  vapidPublicKey,
@@ -616,6 +596,7 @@ func (s *Server) Run(ctx context.Context) error {
 			Update:          s.updateM.State(),
 			AppDeploy:       s.appDeployM.State(),
 			Capabilities:    capabilities,
+			HerdrStatus:     herdrStatus,
 			SpeechLanguages: speechLanguages,
 			Inventory:       inventory,
 			AgentProfiles:   s.profiles.Profiles(),
@@ -969,7 +950,13 @@ func (s *Server) Run(ctx context.Context) error {
 					}
 					return s.dispatcher.HandleWorkspaceReorder(handlerCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
 				case "workspace_close":
-					return s.dispatcher.HandleWorkspaceClose(handlerCtx, inbound.RequestID, inbound.WorkspaceID)
+					return s.dispatcher.HandleWorkspaceClose(
+						handlerCtx,
+						inbound.RequestID,
+						inbound.WorkspaceID,
+						inbound.CloseGroup,
+						inbound.ExpectedWorkspaceIDs,
+					)
 				case "worktree_list":
 					return s.dispatcher.HandleWorktreeList(handlerCtx, inbound.RequestID, inbound.WorkspaceID)
 				case "worktree_create":
@@ -1412,11 +1399,17 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	startBackground(func() { s.pushM.Run(ctx) })
 	startBackground(func() { s.poller.Run(ctx) })
+	startBackground(func() { s.herdrC.RunCapabilityRefresh(ctx, 30*time.Second) })
+	s.hybrid = s.startHybridTransport(ctx)
 	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
-	// Herdr builds without workspace.move_block also reject a
-	// workspace.reordered subscription, which would fail the whole
-	// events.subscribe and degrade realtime updates to polling.
-	eventClient.SetWorkspaceReorderedProbe(s.herdrC.SupportsWorkspaceMoveBlock)
+	eventClient.SetWorkspaceReorderedCapability(
+		s.herdrC.ShouldAttemptWorkspaceReordered,
+		s.herdrC.NoteWorkspaceReorderedSupported,
+		s.herdrC.NoteWorkspaceReorderedUnsupported,
+	)
+	eventClient.SetWorkspaceReorderedReset(func() {
+		s.herdrC.InvalidateLiveCapabilities()
+	})
 	startBackground(func() { s.poller.RunEvents(ctx, eventClient) })
 	startBackground(func() { s.captureHistoryLoop(ctx) })
 	startBackground(func() { s.paneSizeM.Run(ctx) })
@@ -1435,7 +1428,6 @@ func (s *Server) Run(ctx context.Context) error {
 	startBackground(func() { s.writeSupportLoop(ctx) })
 	startBackground(func() { s.watchJobStates(ctx) })
 	startBackground(func() { s.updateCheckLoop(ctx) })
-	s.hybrid = s.startHybridTransport(ctx)
 	if s.hybrid != nil {
 		s.hybrid.run(ctx, startBackground)
 	}
@@ -1496,6 +1488,64 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = s.webH.Close()
 	}
 	return runErr
+}
+
+func (s *Server) effectiveCapabilities() []string {
+	capabilities := append([]string(nil), protocol.Capabilities...)
+	if s.pushM != nil {
+		capabilities = append(capabilities, "typed_push", "push_policy")
+	}
+	if s.clipboardRead != nil {
+		capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
+	}
+	speechStatus := s.speechStatus()
+	if len(s.rememberSpeechLanguages(speechStatus.Languages)) > 0 {
+		capabilities = append(capabilities, protocol.SpeechSynthesisCapability)
+	}
+	if speechStatus.ManagementSupported {
+		capabilities = append(capabilities, protocol.SpeechVoiceManagementCapability)
+	}
+	if s.herdrC.SupportsPaneRead() {
+		capabilities = append(capabilities, "pane_realtime_delta")
+	}
+	if s.herdrC.SupportsTabMove() {
+		capabilities = append(capabilities, "tab_reorder")
+	}
+	if s.herdrC.SupportsWorkspaceMoveBlock() {
+		capabilities = append(capabilities, "workspace_reorder_block")
+	}
+	if s.appDeployM.State().Configured {
+		capabilities = append(capabilities, "app_deploy")
+	}
+	if s.hybrid != nil && s.hybrid.directEnabled() {
+		capabilities = append(capabilities, "webrtc_direct")
+	}
+	if s.deviceAuth != nil {
+		capabilities = append(capabilities, "device_management")
+	}
+	return capabilities
+}
+
+func herdrStatusPayload(status herdr.ServerStatus) protocol.HerdrStatus {
+	features := make(map[string]protocol.HerdrFeatureStatus, len(status.Features))
+	for name, feature := range status.Features {
+		features[name] = protocol.HerdrFeatureStatus{
+			State:      string(feature.State),
+			Reason:     feature.Reason,
+			Generation: feature.Generation,
+		}
+	}
+	return protocol.HerdrStatus{
+		InstalledClientVersion:     status.InstalledClientVersion,
+		ServerVersion:              status.ServerVersion,
+		ServerProtocol:             status.ServerProtocol,
+		ServerProtocolKnown:        status.ServerProtocolKnown,
+		EndpointProtocolGeneration: status.EndpointProtocolGeneration,
+		SurfaceInterest:            status.SurfaceInterest,
+		HealthCheck:                status.HealthCheck,
+		Generation:                 status.Generation,
+		Features:                   features,
+	}
 }
 
 func canonicalHTTPPath(raw string) bool {
@@ -3028,6 +3078,9 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	if force, ok := message["force"].(bool); ok {
 		details["force"] = force
 	}
+	if closeGroup, ok := message["close_group"].(bool); ok {
+		details["close_group"] = closeGroup
+	}
 	workspaceIDs := make([]string, 0, 8)
 	switch values := message["workspace_ids"].(type) {
 	case []any:
@@ -3052,6 +3105,9 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	}
 	if len(workspaceIDs) > 0 {
 		details["workspace_ids"] = workspaceIDs
+	}
+	if expectedWorkspaceIDs := auditWorkspaceIDList(message["expected_workspace_ids"]); len(expectedWorkspaceIDs) > 0 {
+		details["expected_workspace_ids"] = expectedWorkspaceIDs
 	}
 	keys := make([]string, 0, 16)
 	switch values := message["keys"].(type) {
@@ -3102,6 +3158,31 @@ func auditWriteDetails(message map[string]any) map[string]any {
 		details["selected_indices"] = indices
 	}
 	return details
+}
+
+func auditWorkspaceIDList(value any) []string {
+	ids := make([]string, 0, 8)
+	switch values := value.(type) {
+	case []any:
+		for _, item := range values {
+			if id, ok := item.(string); ok && id != "" {
+				ids = append(ids, boundedAuditString(id, 160))
+			}
+			if len(ids) == 32 {
+				break
+			}
+		}
+	case []string:
+		for _, id := range values {
+			if id != "" {
+				ids = append(ids, boundedAuditString(id, 160))
+			}
+			if len(ids) == 32 {
+				break
+			}
+		}
+	}
+	return ids
 }
 
 func boundedAuditString(value string, limit int) string {

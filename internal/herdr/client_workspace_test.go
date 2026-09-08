@@ -1,16 +1,36 @@
 package herdr
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
-	"os"
+	"net"
 	"path/filepath"
 	"testing"
 )
 
 func TestWorkspaceListKeepsWorktreeMetadata(t *testing.T) {
-	bin := writeResultScript(t, `{"result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","number":1,"label":"Project","pane_count":1,"tab_count":1,"active_tab_id":"t1","agent_status":"idle","worktree":{"repo_key":"repo","repo_name":"project","repo_root":"/home/user/project","checkout_path":"/home/user/project","is_linked_worktree":false}}]}}`)
-	client := NewClient(bin, filepath.Join(t.TempDir(), "herdr.sock"))
+	socketPath, done := startUnaryTestSocket(t, "workspace.list", map[string]any{
+		"type": "workspace_list",
+		"workspaces": []any{map[string]any{
+			"workspace_id":  "w1",
+			"number":        1,
+			"label":         "Project",
+			"pane_count":    1,
+			"tab_count":     1,
+			"active_tab_id": "t1",
+			"agent_status":  "idle",
+			"worktree": map[string]any{
+				"repo_key":           "repo",
+				"repo_name":          "project",
+				"repo_root":          "/home/user/project",
+				"checkout_path":      "/home/user/project",
+				"is_linked_worktree": false,
+			},
+		}},
+	})
+	client := NewClient(filepath.Join(t.TempDir(), "missing-herdr"), socketPath)
 
 	workspaces, err := client.WorkspaceList(context.Background())
 	if err != nil {
@@ -21,6 +41,9 @@ func TestWorkspaceListKeepsWorktreeMetadata(t *testing.T) {
 	}
 	if workspaces[0].Worktree.RepoName != "project" || workspaces[0].Worktree.IsLinkedWorktree {
 		t.Fatalf("worktree metadata = %#v", workspaces[0].Worktree)
+	}
+	if socketErr := <-done; socketErr != nil {
+		t.Fatal(socketErr)
 	}
 }
 
@@ -54,15 +77,106 @@ func TestWorktreeCreateParsesWorkspaceAndRootPane(t *testing.T) {
 	}
 }
 
-func TestSupportsWorkspaceMoveBlockReadsBundledSchema(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "herdr")
-	schema := `{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}},{"properties":{"method":{"const":"workspace.move_block"}}}]}}}`
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+schema+"'\n"), 0o755); err != nil {
+func TestSupportsWorkspaceMoveBlockUsesLiveServerProbe(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	client := NewClient(path, filepath.Join(t.TempDir(), "herdr.sock"))
+	done := make(chan error, 1)
+	go func() {
+		defer listener.Close()
+		for range 3 {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			var request struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+			}
+			decodeErr := json.NewDecoder(bufio.NewReader(conn)).Decode(&request)
+			if decodeErr != nil {
+				_ = conn.Close()
+				done <- decodeErr
+				return
+			}
+			var response map[string]any
+			switch request.Method {
+			case "ping":
+				response = map[string]any{
+					"id": request.ID,
+					"result": map[string]any{
+						"type": "pong", "version": "0.9.0", "protocol": 1,
+					},
+				}
+			case "workspace.move_block":
+				response = map[string]any{
+					"id": request.ID,
+					"error": map[string]any{
+						"code": "workspace_move_block_failed", "message": "empty selection",
+					},
+				}
+			default:
+				response = map[string]any{
+					"id":    request.ID,
+					"error": map[string]any{"code": "unknown_method", "message": "unknown"},
+				}
+			}
+			if encodeErr := json.NewEncoder(conn).Encode(response); encodeErr != nil {
+				_ = conn.Close()
+				done <- encodeErr
+				return
+			}
+			_ = conn.Close()
+		}
+		done <- nil
+	}()
+	client := NewClient(filepath.Join(t.TempDir(), "missing-herdr"), socketPath)
+	client.RefreshCapabilities(context.Background())
 	if !client.SupportsWorkspaceMoveBlock() {
-		t.Fatal("workspace.move_block was not detected")
+		t.Fatal("live workspace.move_block refusal did not prove support")
+	}
+	if socketErr := <-done; socketErr != nil {
+		t.Fatal(socketErr)
+	}
+}
+
+func TestWorkspaceCloseEOFIsDispatchedUnknownWithoutRetry(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	requests := make(chan string, 2)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		var request struct {
+			Method string `json:"method"`
+		}
+		if json.NewDecoder(bufio.NewReader(conn)).Decode(&request) == nil {
+			requests <- request.Method
+		}
+	}()
+
+	client := NewClient("missing-herdr", socketPath)
+	err = client.WorkspaceClose(context.Background(), "w1", true)
+	if err == nil || !errors.Is(err, ErrDispatchedUnknown) || errors.Is(err, ErrNotStarted) {
+		t.Fatalf("WorkspaceClose() error = %v, want one dispatched-unknown mutation", err)
+	}
+	if method := <-requests; method != "workspace.close" {
+		t.Fatalf("request method = %q, want workspace.close", method)
+	}
+	select {
+	case method := <-requests:
+		t.Fatalf("WorkspaceClose() retried after EOF with %q", method)
+	default:
 	}
 }
 

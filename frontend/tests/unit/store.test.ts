@@ -104,6 +104,57 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
   });
 
+  it('applies live Herdr status updates without accepting stale generations', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 3,
+      host: 'fedora',
+      capabilities: ['workspace_management', 'pane_realtime_delta'],
+      herdr_status: {
+        generation: 4,
+        installed_client_version: '0.9.0',
+        server_version: '0.8.0',
+        server_protocol: 1,
+        server_protocol_known: true,
+        features: {
+          'pane.read': { state: 'supported', reason: 'ping', generation: 4 },
+        },
+      },
+      agent_profiles: [],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    socket.message({
+      type: 'herdr_status',
+      status: {
+        generation: 3,
+        server_version: 'old',
+        features: {
+          'pane.read': { state: 'unsupported', reason: 'method_not_supported', generation: 3 },
+        },
+      },
+      capabilities: ['workspace_management'],
+    });
+    expect(relayStore.connection(relayId)?.herdrStatus.server_version).toBe('0.8.0');
+    expect(relayStore.connection(relayId)?.capabilities).toContain('pane_realtime_delta');
+    socket.message({
+      type: 'herdr_status',
+      status: {
+        generation: 5,
+        server_version: '0.9.0',
+        server_protocol: 2,
+        server_protocol_known: true,
+        features: {
+          'pane.read': { state: 'unsupported', reason: 'method_not_supported', generation: 5 },
+        },
+      },
+      capabilities: ['workspace_management'],
+    });
+    expect(relayStore.connection(relayId)?.herdrStatus.server_version).toBe('0.9.0');
+    expect(relayStore.connection(relayId)?.capabilities).toEqual(['workspace_management']);
+  });
+
   it('stores empty workspaces and sends workspace and worktree commands', async () => {
     const socket = MockWebSocket.instances.at(-1)!;
     socket.open();

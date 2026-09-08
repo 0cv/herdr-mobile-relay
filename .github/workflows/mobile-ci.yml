@@ -1,0 +1,440 @@
+name: mobile-device-ci
+
+on:
+  workflow_call:
+    inputs:
+      artifact_run_id:
+        description: Calling workflow run containing the exact release artifact
+        required: true
+        type: string
+      artifact_name:
+        description: Exact artifact name produced by the calling workflow
+        required: false
+        default: release-bundles
+        type: string
+      candidate_commit:
+        description: Commit whose packaged bytes are being tested
+        required: false
+        default: ''
+        type: string
+      platform:
+        description: Device platform to exercise
+        required: false
+        default: all
+        type: string
+      suite:
+        description: Mobile scenario depth
+        required: false
+        default: release
+        type: string
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: Successful check workflow run containing release-bundles
+        required: true
+        type: string
+      platform:
+        description: Device platform to exercise
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - android
+          - ios
+      suite:
+        description: Mobile scenario depth
+        required: true
+        default: release
+        type: choice
+        options:
+          - smoke
+          - release
+  workflow_run:
+    workflows:
+      - check
+    types:
+      - completed
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: mobile-device-ci-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      inputs.artifact_run_id != '' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      device_matrix: ${{ steps.matrix.outputs.device_matrix }}
+      device_count: ${{ steps.matrix.outputs.device_count }}
+      candidate_web_hash: ${{ steps.artifact_identity.outputs.web_hash }}
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          fetch-depth: 1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+          cache: true
+      - name: Verify mobile toolchain declarations
+        run: |
+          jq -e '
+            .schema == 1 and
+            .node == "24.12.0" and
+            .bun == "1.4.0" and
+            .appium == "3.1.1" and
+            .drivers.uiautomator2 == "8.2.2" and
+            .drivers.xcuitest == "12.10.0"
+          ' tests/mobile/toolchains.json >/dev/null
+          test "$(bun --version)" = 1.4.0
+      - name: Select requested device matrix
+        id: matrix
+        env:
+          REQUESTED_PLATFORM: ${{ inputs.platform || 'all' }}
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_PLATFORM" in
+            all)
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"},{"platform":"ios","runner":"macos-15","baseline":"0.20.8"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
+              ;;
+            android)
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"}]}'
+              ;;
+            ios)
+              matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.8"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
+              ;;
+            *)
+              echo "unsupported platform: $REQUESTED_PLATFORM" >&2
+              exit 2
+              ;;
+          esac
+          echo "device_matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "device_count=$(jq '.include | length' <<<"$matrix")" >> "$GITHUB_OUTPUT"
+      - name: Install mobile harness dependencies
+        run: bun install --frozen-lockfile --cwd tests/mobile
+      - name: Install frontend build dependencies
+        run: bun install --frozen-lockfile --cwd frontend
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: mobile-playwright-${{ runner.os }}-${{ hashFiles('frontend/bun.lock') }}
+      - name: Install host browser for cache integration
+        run: cd frontend && bun x playwright install --with-deps chromium
+      - name: Prepare current-code bundle pair
+        env:
+          CANDIDATE_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+        run: |
+          bun run --cwd tests/mobile prepare:current -- \
+            --output "$GITHUB_WORKSPACE/dist/mobile-current" \
+            --revision "$CANDIDATE_REVISION"
+      - name: Verify cached stylesheet recovery
+        run: |
+          bun run --cwd tests/mobile test:cache-recovery -- \
+            --bundle-set "$GITHUB_WORKSPACE/dist/mobile-current/bundle-set.json"
+      - name: Download exact release artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact_name || 'release-bundles' }}
+          path: dist/release
+          github-token: ${{ github.token }}
+          run-id: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.artifact_run_id }}
+      - name: Prepare and verify Android bundle set
+        env:
+          CANDIDATE_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version' web/version.json)"
+          assets="$(jq -r '.assets' web/version.json)"
+          archive="herdr-mobile-relay_${version}_linux_amd64.tar.gz"
+          test -f "dist/release/$archive"
+          hash="$(awk -v name="$archive" '$2 == name { print $1 }' dist/release/checksums.txt)"
+          test "${#hash}" -eq 64
+          bun run --cwd tests/mobile prepare:bundle -- \
+            --candidate "$GITHUB_WORKSPACE/dist/release/$archive" \
+            --candidate-version "$version" \
+            --candidate-assets "$assets" \
+            --candidate-revision "$CANDIDATE_REVISION" \
+            --candidate-sha256 "$hash" \
+            --output "$GITHUB_WORKSPACE/dist/mobile-android" \
+            --baseline 0.20.8 \
+            --baseline 0.20.9 \
+            --baseline 0.20.10
+      - name: Prepare and verify iOS bundle set
+        env:
+          CANDIDATE_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version' web/version.json)"
+          assets="$(jq -r '.assets' web/version.json)"
+          archive="herdr-mobile-relay_${version}_darwin_arm64.tar.gz"
+          test -f "dist/release/$archive"
+          hash="$(awk -v name="$archive" '$2 == name { print $1 }' dist/release/checksums.txt)"
+          test "${#hash}" -eq 64
+          bun run --cwd tests/mobile prepare:bundle -- \
+            --candidate "$GITHUB_WORKSPACE/dist/release/$archive" \
+            --candidate-version "$version" \
+            --candidate-assets "$assets" \
+            --candidate-revision "$CANDIDATE_REVISION" \
+            --candidate-sha256 "$hash" \
+            --output "$GITHUB_WORKSPACE/dist/mobile-ios" \
+            --baseline 0.20.8 \
+            --baseline 0.20.9 \
+            --baseline 0.20.10
+          test "$(jq -r '.candidate.identity.webHash' dist/mobile-android/bundle-set.json)" = "$(jq -r '.candidate.identity.webHash' dist/mobile-ios/bundle-set.json)"
+      - name: Record validated candidate identity
+        id: artifact_identity
+        run: |
+          web_hash="$(jq -r '.candidate.identity.webHash' dist/mobile-android/bundle-set.json)"
+          test "${#web_hash}" -eq 64
+          echo "web_hash=$web_hash" >> "$GITHUB_OUTPUT"
+      - name: Publish verified bundle sets
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-bundles-android
+          path: dist/mobile-android
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-bundles-ios
+          path: dist/mobile-ios
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile-bundles-current
+          path: dist/mobile-current
+          if-no-files-found: error
+          retention-days: 3
+
+  device:
+    needs: prepare
+    if: needs.prepare.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.device_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      MOBILE_PLATFORM: ${{ matrix.platform }}
+      APPIUM_URL: http://127.0.0.1:4723
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          fetch-depth: 1
+      - name: Initialize private runner paths
+        env:
+          WORKFLOW_SUITE: ${{ inputs.suite || 'release' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          private="$RUNNER_TEMP/herdr-mobile-private"
+          output="$RUNNER_TEMP/herdr-mobile-output"
+          mkdir -p "$private" "$output"
+          printf 'MOBILE_SUITE=%s\n' "$WORKFLOW_SUITE" >> "$GITHUB_ENV"
+          printf 'MOBILE_PRIVATE=%s\n' "$private" >> "$GITHUB_ENV"
+          printf 'MOBILE_OUTPUT=%s\n' "$output" >> "$GITHUB_ENV"
+          printf 'MOBILE_FIXTURE_BINARY=%s\n' "$RUNNER_TEMP/herdr-mobile-fixture" >> "$GITHUB_ENV"
+          printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
+          printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.12.0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.0'
+          cache: true
+      - name: Install mobile harness dependencies
+        run: bun install --frozen-lockfile --cwd tests/mobile
+      - name: Download verified bundle set
+        uses: actions/download-artifact@v4
+        with:
+          name: mobile-bundles-${{ matrix.platform }}
+          path: mobile-bundles
+      - name: Download current-code bundle pair
+        uses: actions/download-artifact@v4
+        with:
+          name: mobile-bundles-current
+          path: mobile-bundles-current
+      - name: Build fixture
+        run: go build -trimpath -o "$MOBILE_FIXTURE_BINARY" ./tests/mobile/fixture
+      - name: Create and boot Android emulator
+        if: matrix.platform == 'android'
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis_playstore;x86_64"
+          avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo no | avdmanager create avd --force --name "$avd_name" --package "system-images;android-35;google_apis_playstore;x86_64" --device pixel_7
+          printf 'ANDROID_AVD_NAME=%s\n' "$avd_name" >> "$GITHUB_ENV"
+          emulator -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 &
+          for attempt in $(seq 1 180); do
+            serial=""
+            while IFS= read -r candidate_serial; do
+              [ -n "$candidate_serial" ] || continue
+              if console_response="$(adb -s "$candidate_serial" emu avd name 2>/dev/null)"; then
+                response_file="$RUNNER_TEMP/android-avd-${candidate_serial}.txt"
+                printf '%s' "$console_response" >"$response_file"
+                actual_avd="$(bun tests/mobile/parse-avd.ts "$response_file")"
+              else
+                actual_avd=""
+              fi
+              if [ "$actual_avd" = "$avd_name" ]; then serial="$candidate_serial"; break; fi
+            done < <(adb devices | awk '$2 == "device" && $1 ~ /^emulator-[0-9]+$/ { print $1 }')
+            if [ -n "$serial" ]; then
+              adb -s "$serial" wait-for-device
+              boot="$(adb -s "$serial" shell getprop sys.boot_completed | tr -d '\r')"
+              if [ "$boot" = 1 ]; then
+                printf 'ANDROID_SERIAL=%s\n' "$serial" >> "$GITHUB_ENV"
+                printf 'android:%s\n' "$serial" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
+                adb -s "$serial" shell settings put global window_animation_scale 0
+                adb -s "$serial" shell settings put global transition_animation_scale 0
+                adb -s "$serial" shell settings put global animator_duration_scale 0
+                adb -s "$serial" shell dumpsys package com.android.chrome | grep -m1 versionName >"$RUNNER_TEMP/android-chrome-version.txt"
+                break
+              fi
+            fi
+            if [ "$attempt" -eq 180 ]; then
+              sed -n '1,160p' "$RUNNER_TEMP/emulator.log" >&2 || true
+              exit 1
+            fi
+            sleep 2
+          done
+      - name: Create and boot iOS simulator
+        if: matrix.platform == 'ios'
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+          defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool NO
+          runtime="$(xcrun simctl list runtimes | grep -E '^iOS 18\.5 ' | grep -v unavailable | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+' | head -n1)"
+          device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 16 \(/ { print $2; exit }')"
+          test -n "$runtime"
+          test -n "$device_type"
+          device_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          udid="$(xcrun simctl create "$device_name" "$device_type" "$runtime")"
+          printf 'IOS_SIMULATOR_UDID=%s\n' "$udid" >> "$GITHUB_ENV"
+          printf 'ios:%s\n' "$udid" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl list apps "$udid" >"$RUNNER_TEMP/ios-apps-before.txt"
+      - name: Install pinned Appium and platform driver
+        run: |
+          set -euo pipefail
+          npm install --global appium@3.1.1
+          if [ "$MOBILE_PLATFORM" = android ]; then
+            appium driver install uiautomator2@8.2.2
+          else
+            appium driver install xcuitest@12.10.0
+          fi
+          appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
+      - name: Start Appium
+        run: |
+          set -euo pipefail
+          appium --address 127.0.0.1 --port 4723 --base-path / >"$RUNNER_TEMP/appium.log" 2>&1 &
+          printf 'APPIUM_PID=%s\n' "$!" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:4723/status >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          sed -n '1,160p' "$RUNNER_TEMP/appium.log" >&2
+          exit 1
+      - name: Run installed-PWA upgrade scenarios
+        run: |
+          set -euo pipefail
+          bun run --cwd tests/mobile run -- \
+            --bundle-set "$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json" \
+            --baseline "${{ matrix.baseline }}" \
+            --suite "$MOBILE_SUITE" \
+            --output "$MOBILE_OUTPUT" \
+            --private-output "$MOBILE_PRIVATE"
+      - name: Run current-code updater fault scenario
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "$MOBILE_SUITE" = release ]; then
+            mkdir -p "$MOBILE_OUTPUT/current" "$MOBILE_PRIVATE/current"
+            MOBILE_RESET_DEVICE=1 bun run --cwd tests/mobile run -- \
+              --bundle-set "$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json" \
+              --baseline current-code-baseline \
+              --suite release \
+              --output "$MOBILE_OUTPUT/current" \
+              --private-output "$MOBILE_PRIVATE/current"
+          fi
+      - name: Sanitize bounded diagnostics
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$MOBILE_OUTPUT"
+          if [ -f "$RUNNER_TEMP/appium.log" ]; then
+            bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const input = await readFile(process.argv[2], "utf8"); await writeFile(process.argv[3], redactText(input).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
+          fi
+          if [ -f "$RUNNER_TEMP/emulator.log" ]; then
+            head -c 104857600 "$RUNNER_TEMP/emulator.log" >"$MOBILE_OUTPUT/emulator.log" || true
+          fi
+          if [ -f "$RUNNER_TEMP/xcode-version.txt" ]; then cp "$RUNNER_TEMP/xcode-version.txt" "$MOBILE_OUTPUT/xcode-version.txt"; fi
+          if [ -f "$RUNNER_TEMP/ios-apps-before.txt" ]; then cp "$RUNNER_TEMP/ios-apps-before.txt" "$MOBILE_OUTPUT/ios-apps-before.txt"; fi
+          if [ -f "$RUNNER_TEMP/appium-drivers.txt" ]; then cp "$RUNNER_TEMP/appium-drivers.txt" "$MOBILE_OUTPUT/appium-drivers.txt"; fi
+          if [ -f "$RUNNER_TEMP/android-chrome-version.txt" ]; then cp "$RUNNER_TEMP/android-chrome-version.txt" "$MOBILE_OUTPUT/android-chrome-version.txt"; fi
+      - name: Upload mobile evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-evidence-${{ matrix.platform }}-${{ matrix.baseline }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/herdr-mobile-output
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Stop owned mobile processes and devices
+        if: always()
+        run: |
+          set +e
+          if [ -n "${APPIUM_PID:-}" ]; then kill "$APPIUM_PID" 2>/dev/null || true; fi
+          if [ -x "${MOBILE_FIXTURE_BINARY:-}" ]; then pkill -TERM -f "$MOBILE_FIXTURE_BINARY" 2>/dev/null || true; fi
+          if [ "$MOBILE_PLATFORM" = android ]; then
+            if [ -n "${ANDROID_SERIAL:-}" ]; then adb -s "$ANDROID_SERIAL" emu kill 2>/dev/null || true; fi
+            if [ -n "${ANDROID_AVD_NAME:-}" ]; then avdmanager delete avd -n "$ANDROID_AVD_NAME" 2>/dev/null || true; fi
+          elif [ -n "${IOS_SIMULATOR_UDID:-}" ]; then
+            xcrun simctl shutdown "$IOS_SIMULATOR_UDID" 2>/dev/null || true
+            xcrun simctl delete "$IOS_SIMULATOR_UDID" 2>/dev/null || true
+          fi
+          rm -rf "${MOBILE_PRIVATE:-}" "${APPIUM_HOME:-}" "${MOBILE_FIXTURE_BINARY:-}" "${MOBILE_DEVICE_OWNERSHIP_FILE:-}"
+
+  gate:
+    needs: [prepare, device]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Reject skipped or incomplete device coverage
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          DEVICE_RESULT: ${{ needs.device.result }}
+          EXPECTED_DEVICES: ${{ needs.prepare.outputs.device_count }}
+          ARTIFACT_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.artifact_run_id }}
+          CANDIDATE_COMMIT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+        run: |
+          set -euo pipefail
+          test "$PREPARE_RESULT" = success
+          test "$DEVICE_RESULT" = success
+          test "${EXPECTED_DEVICES:-0}" -gt 0
+          test -n "$ARTIFACT_RUN_ID"
+          test -n "$CANDIDATE_COMMIT"
+          test "${#CANDIDATE_WEB_HASH}" -eq 64

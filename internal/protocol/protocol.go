@@ -177,66 +177,68 @@ var actionCatalog = map[string]ActionMetadata{
 }
 
 type Inbound struct {
-	Type                string          `json:"type"`
-	Protocol            int             `json:"protocol"`
-	RequestID           string          `json:"request_id,omitempty"`
-	Target              *TargetRef      `json:"target,omitempty"`
-	ActionID            string          `json:"action_id,omitempty"`
-	ServerSessionID     string          `json:"server_session_id,omitempty"`
-	SessionID           string          `json:"session_id,omitempty"`
-	PaneID              string          `json:"pane_id,omitempty"`
-	Text                string          `json:"text,omitempty"`
-	Name                string          `json:"name,omitempty"`
-	DeviceID            string          `json:"device_id,omitempty"`
-	Role                string          `json:"role,omitempty"`
-	Locale              string          `json:"locale,omitempty"`
-	ProfileID           string          `json:"profile_id,omitempty"`
-	Label               string          `json:"label,omitempty"`
-	WorkspaceID         string          `json:"workspace_id,omitempty"`
-	WorkspaceIDs        []string        `json:"workspace_ids,omitempty"`
-	BeforeWorkspaceID   string          `json:"before_workspace_id,omitempty"`
-	Branch              string          `json:"branch,omitempty"`
-	Base                string          `json:"base,omitempty"`
-	Force               bool            `json:"force,omitempty"`
-	Cwd                 string          `json:"cwd,omitempty"`
-	Prompt              string          `json:"prompt,omitempty"`
-	EventID             string          `json:"event_id,omitempty"`
-	ApprovalFingerprint string          `json:"approval_fingerprint,omitempty"`
-	Choice              string          `json:"choice,omitempty"`
-	InteractionID       string          `json:"interaction_id,omitempty"`
-	InsertIndex         *int            `json:"insert_index,omitempty"`
-	Index               *int            `json:"index,omitempty"`
-	Total               *int            `json:"total,omitempty"`
-	Keys                []string        `json:"keys,omitempty"`
-	SelectedIndices     []int           `json:"selected_indices,omitempty"`
-	OtherSelected       bool            `json:"other_selected,omitempty"`
-	OtherText           string          `json:"other_text,omitempty"`
-	Direction           string          `json:"direction,omitempty"`
-	Lines               int             `json:"lines,omitempty"`
-	Before              string          `json:"before,omitempty"`
-	Limit               int             `json:"limit,omitempty"`
-	Columns             int             `json:"columns,omitempty"`
-	Rows                int             `json:"rows,omitempty"`
-	Format              string          `json:"format,omitempty"`
-	Path                string          `json:"path,omitempty"`
-	Filename            string          `json:"filename,omitempty"`
-	MIME                string          `json:"mime,omitempty"`
-	Data                string          `json:"data,omitempty"`
-	ClientID            string          `json:"client_id,omitempty"`
-	ReplaceEndpoints    []string        `json:"replace_endpoints,omitempty"`
-	NotifyFinished      bool            `json:"notify_finished,omitempty"`
-	Endpoints           []string        `json:"endpoints,omitempty"`
-	Origin              string          `json:"origin,omitempty"`
-	ExpectedOrigin      string          `json:"expected_origin,omitempty"`
-	ExpectedVersion     string          `json:"expected_version,omitempty"`
-	ExpectedRevision    string          `json:"expected_revision,omitempty"`
-	Subscription        json.RawMessage `json:"subscription,omitempty"`
-	Policy              json.RawMessage `json:"policy,omitempty"`
-	EventRef            string          `json:"event_ref,omitempty"`
-	SnoozeUntil         string          `json:"snooze_until,omitempty"`
-	Snoozed             bool            `json:"snoozed,omitempty"`
-	Visible             bool            `json:"visible,omitempty"`
-	Unlocked            bool            `json:"unlocked,omitempty"`
+	Type                 string          `json:"type"`
+	Protocol             int             `json:"protocol"`
+	RequestID            string          `json:"request_id,omitempty"`
+	Target               *TargetRef      `json:"target,omitempty"`
+	ActionID             string          `json:"action_id,omitempty"`
+	ServerSessionID      string          `json:"server_session_id,omitempty"`
+	SessionID            string          `json:"session_id,omitempty"`
+	PaneID               string          `json:"pane_id,omitempty"`
+	Text                 string          `json:"text,omitempty"`
+	Name                 string          `json:"name,omitempty"`
+	DeviceID             string          `json:"device_id,omitempty"`
+	Role                 string          `json:"role,omitempty"`
+	Locale               string          `json:"locale,omitempty"`
+	ProfileID            string          `json:"profile_id,omitempty"`
+	Label                string          `json:"label,omitempty"`
+	WorkspaceID          string          `json:"workspace_id,omitempty"`
+	WorkspaceIDs         []string        `json:"workspace_ids,omitempty"`
+	ExpectedWorkspaceIDs []string        `json:"expected_workspace_ids,omitempty"`
+	CloseGroup           bool            `json:"close_group,omitempty"`
+	BeforeWorkspaceID    string          `json:"before_workspace_id,omitempty"`
+	Branch               string          `json:"branch,omitempty"`
+	Base                 string          `json:"base,omitempty"`
+	Force                bool            `json:"force,omitempty"`
+	Cwd                  string          `json:"cwd,omitempty"`
+	Prompt               string          `json:"prompt,omitempty"`
+	EventID              string          `json:"event_id,omitempty"`
+	ApprovalFingerprint  string          `json:"approval_fingerprint,omitempty"`
+	Choice               string          `json:"choice,omitempty"`
+	InteractionID        string          `json:"interaction_id,omitempty"`
+	InsertIndex          *int            `json:"insert_index,omitempty"`
+	Index                *int            `json:"index,omitempty"`
+	Total                *int            `json:"total,omitempty"`
+	Keys                 []string        `json:"keys,omitempty"`
+	SelectedIndices      []int           `json:"selected_indices,omitempty"`
+	OtherSelected        bool            `json:"other_selected,omitempty"`
+	OtherText            string          `json:"other_text,omitempty"`
+	Direction            string          `json:"direction,omitempty"`
+	Lines                int             `json:"lines,omitempty"`
+	Before               string          `json:"before,omitempty"`
+	Limit                int             `json:"limit,omitempty"`
+	Columns              int             `json:"columns,omitempty"`
+	Rows                 int             `json:"rows,omitempty"`
+	Format               string          `json:"format,omitempty"`
+	Path                 string          `json:"path,omitempty"`
+	Filename             string          `json:"filename,omitempty"`
+	MIME                 string          `json:"mime,omitempty"`
+	Data                 string          `json:"data,omitempty"`
+	ClientID             string          `json:"client_id,omitempty"`
+	ReplaceEndpoints     []string        `json:"replace_endpoints,omitempty"`
+	NotifyFinished       bool            `json:"notify_finished,omitempty"`
+	Endpoints            []string        `json:"endpoints,omitempty"`
+	Origin               string          `json:"origin,omitempty"`
+	ExpectedOrigin       string          `json:"expected_origin,omitempty"`
+	ExpectedVersion      string          `json:"expected_version,omitempty"`
+	ExpectedRevision     string          `json:"expected_revision,omitempty"`
+	Subscription         json.RawMessage `json:"subscription,omitempty"`
+	Policy               json.RawMessage `json:"policy,omitempty"`
+	EventRef             string          `json:"event_ref,omitempty"`
+	SnoozeUntil          string          `json:"snooze_until,omitempty"`
+	Snoozed              bool            `json:"snoozed,omitempty"`
+	Visible              bool            `json:"visible,omitempty"`
+	Unlocked             bool            `json:"unlocked,omitempty"`
 }
 
 func DecodeMap(raw map[string]any) (Inbound, error) {
@@ -432,20 +434,39 @@ func DecodeFailureResponse(raw map[string]any) map[string]any {
 	return ErrorResponse(requestID, NewApiError(ErrorInvalidRequest, nil))
 }
 
+type HerdrFeatureStatus struct {
+	State      string `json:"state"`
+	Reason     string `json:"reason"`
+	Generation uint64 `json:"generation"`
+}
+
+type HerdrStatus struct {
+	InstalledClientVersion     string                        `json:"installed_client_version,omitempty"`
+	ServerVersion              string                        `json:"server_version,omitempty"`
+	ServerProtocol             int                           `json:"server_protocol,omitempty"`
+	ServerProtocolKnown        bool                          `json:"server_protocol_known"`
+	EndpointProtocolGeneration *int                          `json:"endpoint_protocol_generation,omitempty"`
+	SurfaceInterest            *bool                         `json:"surface_interest,omitempty"`
+	HealthCheck                *bool                         `json:"health_check,omitempty"`
+	Generation                 uint64                        `json:"generation"`
+	Features                   map[string]HerdrFeatureStatus `json:"features"`
+}
+
 type PushConfig struct {
 	Type           string `json:"type"`
 	VAPIDPublicKey string `json:"vapid_public_key"`
 	Host           string `json:"host"`
 	// Home lets the phone print a checkout as "~/code/app" instead of the
 	// computer's absolute path, which rarely fits a phone row.
-	Home           string   `json:"home"`
-	Protocol       int      `json:"protocol"`
-	Version        string   `json:"version"`
-	ReleaseVersion string   `json:"release_version"`
-	Revision       string   `json:"revision"`
-	Update         any      `json:"update"`
-	AppDeploy      any      `json:"app_deploy"`
-	Capabilities   []string `json:"capabilities"`
+	Home           string      `json:"home"`
+	Protocol       int         `json:"protocol"`
+	Version        string      `json:"version"`
+	ReleaseVersion string      `json:"release_version"`
+	Revision       string      `json:"revision"`
+	Update         any         `json:"update"`
+	AppDeploy      any         `json:"app_deploy"`
+	Capabilities   []string    `json:"capabilities"`
+	HerdrStatus    HerdrStatus `json:"herdr_status"`
 	// SpeechLanguages lists the languages this host has a voice for, so the
 	// phone offers only what the relay can actually read aloud.
 	SpeechLanguages []string `json:"speech_languages,omitempty"`
