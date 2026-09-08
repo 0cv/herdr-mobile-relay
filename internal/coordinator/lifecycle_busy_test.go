@@ -62,6 +62,7 @@ func busyLifecycle(t *testing.T, dir, bin string) (*Lifecycle, string) {
 		t.Fatalf("create path directory: %v", err)
 	}
 	writeScript(t, pathDir, "codex", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	socketPath := filepath.Join(dir, "herdr.sock")
 	startInventorySocket(t, socketPath, nil)
 	return &Lifecycle{
