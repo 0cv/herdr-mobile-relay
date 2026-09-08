@@ -267,6 +267,7 @@ jobs:
           printf 'MOBILE_FIXTURE_BINARY=%s\n' "$RUNNER_TEMP/herdr-mobile-fixture" >> "$GITHUB_ENV"
           printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
           printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
+          printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -398,9 +399,11 @@ jobs:
             appium driver install uiautomator2@8.2.2
           else
             appium driver install xcuitest@12.10.0
-            # node-devicectl 2.x imports this package from the Appium home.
-            npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
           fi
+          # io.appium.settings and node-devicectl resolve this package from the
+          # shared Appium home. Keep it explicit because the driver packages do
+          # not always install the transitive dependency at that level.
+          npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
           appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
       - name: Start Appium
         run: |
