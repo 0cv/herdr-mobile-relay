@@ -27,6 +27,11 @@ on:
         required: false
         default: release
         type: string
+      baseline_set:
+        description: Baseline coverage (`all` or `latest`)
+        required: false
+        default: all
+        type: string
   workflow_dispatch:
     inputs:
       artifact_run_id:
@@ -50,28 +55,25 @@ on:
         options:
           - smoke
           - release
-  workflow_run:
-    workflows:
-      - check
-    types:
-      - completed
+      baseline_set:
+        description: Baseline coverage
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - latest
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: mobile-device-ci-${{ github.event.workflow_run.head_branch || github.ref }}
+  group: mobile-device-ci-${{ github.ref }}-${{ inputs.suite || 'release' }}-${{ inputs.baseline_set || 'all' }}
   cancel-in-progress: false
 
 jobs:
   prepare:
-    if: >-
-      inputs.artifact_run_id != '' ||
-      (github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.head_branch == 'main' &&
-       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -82,7 +84,7 @@ jobs:
       - name: Check out the release commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          ref: ${{ inputs.candidate_commit || github.sha }}
           fetch-depth: 1
       - uses: oven-sh/setup-bun@v2
         with:
@@ -106,20 +108,30 @@ jobs:
         id: matrix
         env:
           REQUESTED_PLATFORM: ${{ inputs.platform || 'all' }}
+          REQUESTED_BASELINE_SET: ${{ inputs.baseline_set || 'all' }}
         run: |
           set -euo pipefail
-          case "$REQUESTED_PLATFORM" in
-            all)
+          case "$REQUESTED_PLATFORM/$REQUESTED_BASELINE_SET" in
+            all/all)
               matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"},{"platform":"ios","runner":"macos-15","baseline":"0.20.8"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
               ;;
-            android)
+            all/latest)
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
+              ;;
+            android/all)
               matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"}]}'
               ;;
-            ios)
+            android/latest)
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"}]}'
+              ;;
+            ios/all)
               matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.8"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
               ;;
+            ios/latest)
+              matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
+              ;;
             *)
-              echo "unsupported platform: $REQUESTED_PLATFORM" >&2
+              echo "unsupported platform/baseline set: $REQUESTED_PLATFORM/$REQUESTED_BASELINE_SET" >&2
               exit 2
               ;;
           esac
@@ -137,7 +149,7 @@ jobs:
         run: cd frontend && bun x playwright install --with-deps chromium
       - name: Prepare current-code bundle pair
         env:
-          CANDIDATE_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          CANDIDATE_REVISION: ${{ inputs.candidate_commit || github.sha }}
         run: |
           bun run --cwd tests/mobile prepare:current -- \
             --output "$GITHUB_WORKSPACE/dist/mobile-current" \
@@ -152,10 +164,10 @@ jobs:
           name: ${{ inputs.artifact_name || 'release-bundles' }}
           path: dist/release
           github-token: ${{ github.token }}
-          run-id: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.artifact_run_id }}
+          run-id: ${{ inputs.artifact_run_id }}
       - name: Prepare and verify Android bundle set
         env:
-          CANDIDATE_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          CANDIDATE_REVISION: ${{ inputs.candidate_commit || github.sha }}
         run: |
           set -euo pipefail
           version="$(jq -r '.version' web/version.json)"
@@ -176,7 +188,7 @@ jobs:
             --baseline 0.20.10
       - name: Prepare and verify iOS bundle set
         env:
-          CANDIDATE_REVISION: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          CANDIDATE_REVISION: ${{ inputs.candidate_commit || github.sha }}
         run: |
           set -euo pipefail
           version="$(jq -r '.version' web/version.json)"
@@ -237,7 +249,7 @@ jobs:
       - name: Check out the release commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          ref: ${{ inputs.candidate_commit || github.sha }}
           fetch-depth: 1
       - name: Initialize private runner paths
         env:
@@ -434,8 +446,8 @@ jobs:
           PREPARE_RESULT: ${{ needs.prepare.result }}
           DEVICE_RESULT: ${{ needs.device.result }}
           EXPECTED_DEVICES: ${{ needs.prepare.outputs.device_count }}
-          ARTIFACT_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.artifact_run_id }}
-          CANDIDATE_COMMIT: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.candidate_commit || github.sha }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit || github.sha }}
           CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
         run: |
           set -euo pipefail

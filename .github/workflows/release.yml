@@ -118,6 +118,7 @@ jobs:
       candidate_commit: ${{ github.sha }}
       platform: all
       suite: release
+      baseline_set: all
     permissions:
       actions: read
       contents: read

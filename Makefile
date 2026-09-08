@@ -211,7 +211,7 @@ mobile-ci-check:
 	bun run --cwd tests/mobile check
 	bun run --cwd tests/mobile test:unit
 	go test ./tests/mobile/fixture
-	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/mobile-ci.yml .github/workflows/release.yml
+	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/check.yml .github/workflows/mobile-ci.yml .github/workflows/release.yml
 
 mobile-cache-recovery:
 	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)

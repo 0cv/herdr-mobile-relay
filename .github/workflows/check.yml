@@ -5,6 +5,9 @@ on:
     branches: [main, dev]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   go:
     name: Go quality
@@ -144,3 +147,21 @@ jobs:
             "dist/release/herdr-mobile-relay_${version}_${{ matrix.target }}.tar.gz" \
             dist/release/checksums.txt "$version" "$GITHUB_SHA" \
             "${target%_*}/${target#*_}"
+
+  mobile:
+    name: Mobile device CI
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main')
+    needs: release
+    uses: ./.github/workflows/mobile-ci.yml
+    with:
+      artifact_run_id: ${{ github.run_id }}
+      artifact_name: release-bundles
+      candidate_commit: ${{ github.sha }}
+      platform: all
+      suite: ${{ github.event_name == 'push' && 'smoke' || 'release' }}
+      baseline_set: ${{ github.event_name == 'push' && 'latest' || 'all' }}
+    permissions:
+      actions: read
+      contents: read
