@@ -268,7 +268,8 @@ jobs:
           printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
           printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
           printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
-          printf 'IOS_WDA_BOOTSTRAP_PATH=%s/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
+          printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
+          printf 'IOS_WDA_AGENT_PATH=%s/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -421,13 +422,9 @@ jobs:
             COMPILER_INDEX_STORE_ENABLE=NO \
             APPIUM_XCODEBUILD_WDA_MARKER=1 \
             2>&1 | tee "$RUNNER_TEMP/wda-build.log"
-          xctestrun="$(find "$IOS_WDA_DERIVED_DATA_PATH/Build/Products" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' -print -quit)"
+          xctestrun="$(find "$IOS_WDA_BOOTSTRAP_PATH" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' -print -quit)"
           test -n "$xctestrun"
-          # Appium's useXctestrunFile capability expects the xctestrun beside
-          # the WDA project, while Xcode emits it under derived data. Keep the
-          # source tree disposable and copy only this generated runner manifest.
-          cp "$xctestrun" "$IOS_WDA_BOOTSTRAP_PATH/"
-          test -f "$IOS_WDA_BOOTSTRAP_PATH/$(basename "$xctestrun")"
+          test -f "$IOS_WDA_AGENT_PATH"
       - name: Start Appium
         run: |
           set -euo pipefail

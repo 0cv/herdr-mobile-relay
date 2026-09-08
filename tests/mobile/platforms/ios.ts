@@ -57,6 +57,7 @@ export class IOSPlatform implements MobilePlatform {
           ? {
             'appium:useXctestrunFile': true,
             'appium:bootstrapPath': process.env.IOS_WDA_BOOTSTRAP_PATH,
+            'appium:agentPath': process.env.IOS_WDA_AGENT_PATH,
             'appium:derivedDataPath': process.env.IOS_WDA_DERIVED_DATA_PATH,
           }
           : {}),
