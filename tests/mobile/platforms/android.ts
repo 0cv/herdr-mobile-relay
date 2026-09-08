@@ -410,13 +410,17 @@ export class AndroidPlatform implements MobilePlatform {
     ], 20_000);
 
     // Also exercise the actual fixture HTTPS endpoint before the certificate
-    // file is removed. The trusted-credentials list alone does not prove that
-    // Chrome can build the chain used by the mobile harness.
-    await command(adb, androidOpenUrlArgs(this.serial, `${this.origin}/version.json`), 30_000);
+    // file is removed. Navigate through the existing WebDriver Chrome target;
+    // an adb VIEW intent can open a second tab while Chromedriver remains
+    // attached to the old target and falsely report a new-tab URL.
+    const webContext = (await this.driver.contexts()).find((context) => context !== 'NATIVE_APP');
+    if (!webContext) throw new Error('ANDROID_CERTIFICATE: Chrome web context is unavailable');
+    await this.driver.switchContext(webContext);
+    await this.driver.navigate(`${this.origin}/version.json`);
     await delay(1_000);
-    await this.attachToInstalledView();
+    const currentUrl = await this.driver.currentUrl();
     const source = await this.driver.pageSource();
-    if (/ERR_CERT|NET::ERR|privacy error|not private/iu.test(source)) {
+    if (!currentUrl.startsWith(`${this.origin}/`) || /ERR_CERT|NET::ERR|privacy error|not private/iu.test(source)) {
       throw new Error('ANDROID_CERTIFICATE: fixture HTTPS endpoint is not trusted');
     }
   }
