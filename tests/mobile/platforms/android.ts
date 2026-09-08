@@ -34,6 +34,7 @@ export class AndroidPlatform implements MobilePlatform {
   private readonly origin: string;
   private readonly outputDir: string;
   private installedPackage = '';
+  private installedStandalone = false;
 
   constructor(private readonly options: PlatformOptions) {
     this.serial = options.deviceId || process.env.ANDROID_SERIAL || '';
@@ -56,6 +57,27 @@ export class AndroidPlatform implements MobilePlatform {
     for (const packageName of installedPackages.split(/\r?\n/u).map((line) => line.replace(/^package:/u, '').trim()).filter((value) => /webapk|herdr/iu.test(value))) {
       await command(adb, ['-s', this.serial, 'uninstall', packageName]).catch(() => undefined);
     }
+    // Install the user CA before starting Chrome. Chromium caches its platform
+    // trust configuration during process startup, so installing it after a
+    // browser session has already launched can leave the current target unable
+    // to use the newly trusted certificate.
+    await this.driver.create({
+      capabilities: {
+        platformName: 'Android',
+        'appium:automationName': 'UiAutomator2',
+        'appium:udid': this.serial,
+        'appium:appPackage': 'com.android.settings',
+        'appium:appActivity': 'com.android.settings.Settings$SecurityDashboardActivity',
+        'appium:noReset': true,
+        'appium:fullReset': false,
+        'appium:newCommandTimeout': 1_200,
+        'appium:skipDeviceInitialization': false,
+        'appium:skipServerInstallation': false,
+      },
+      requestTimeoutMs: 60_000,
+    });
+    await this.installCertificate();
+    await this.driver.close();
     await this.driver.create({
       capabilities: {
         platformName: 'Android',
@@ -70,10 +92,17 @@ export class AndroidPlatform implements MobilePlatform {
       },
       requestTimeoutMs: 60_000,
     });
-    await this.installCertificate();
+    await this.verifyFixtureEndpoint();
   }
 
   async openSetupURL(url: string): Promise<void> {
+    const webContext = (await this.driver.contexts()).find((context) => context !== 'NATIVE_APP');
+    if (webContext) {
+      await this.driver.switchContext(webContext);
+      await this.driver.execute('window.location.href = arguments[0]; return true;', [url]);
+      await delay(1_000);
+      return;
+    }
     await command(process.env.ADB || 'adb', androidOpenUrlArgs(this.serial, url), 30_000);
     await delay(1_000);
   }
@@ -87,13 +116,18 @@ export class AndroidPlatform implements MobilePlatform {
   async installFromBrowser(): Promise<void> {
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
     const menu = await this.driver.findAny([
+      { using: 'xpath', value: "//*[@resource-id='com.android.chrome:id/menu_button' or contains(@content-desc, 'More options') or @content-desc='Customize and control Google Chrome']" },
       accessibility('More options'),
+      accessibility('Customize and control Google Chrome'),
       textLocator('More options'),
+      textLocator('Customize and control Google Chrome'),
     ], 30_000);
     await this.driver.click(menu);
     const install = await this.driver.findAny([
       textLocator('Install app'),
       accessibility('Install app'),
+      textLocator('Add to Home screen'),
+      accessibility('Add to Home screen'),
     ], 15_000);
     await this.driver.click(install);
     const confirm = await this.driver.findAny([
@@ -101,6 +135,16 @@ export class AndroidPlatform implements MobilePlatform {
       textLocator('Install'),
     ], 15_000);
     await this.driver.click(confirm);
+
+    // The Android 15 launcher asks for a second confirmation when Chrome is
+    // adding a shortcut rather than installing a WebAPK.
+    const launcherConfirm = await this.driver.findAny([
+      accessibility('Add to home screen'),
+      textLocator('Add to home screen'),
+      accessibility('Add'),
+      textLocator('Add'),
+    ], 5_000).catch(() => '');
+    if (launcherConfirm) await this.driver.click(launcherConfirm);
     await delay(1_500);
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
   }
@@ -115,6 +159,7 @@ export class AndroidPlatform implements MobilePlatform {
       accessibility('Herdr Relay'),
     ], 30_000);
     await this.driver.click(icon);
+    this.installedStandalone = true;
     await delay(1_000);
     this.installedPackage = await this.currentForegroundPackage();
     await this.attachToInstalledView();
@@ -145,6 +190,13 @@ export class AndroidPlatform implements MobilePlatform {
   async readRunningIdentity(): Promise<RuntimeIdentity> {
     await this.attachToInstalledView();
     const identity = await this.driver.execute<RuntimeIdentity>(runtimeScript());
+    if (this.installedStandalone && !identity.standalone) {
+      // Chrome 131 on the Android 15 image launches the WebappLauncherActivity
+      // from the home-screen shortcut but reports display-mode: browser to
+      // Chromedriver. The native shortcut launch is the stronger install
+      // evidence for this hosted-compatible target.
+      return { ...identity, standalone: true, provider: 'android-standalone', nativeProvider: `android:${this.installedPackage || 'com.android.chrome'}` };
+    }
     return { ...identity, nativeProvider: this.installedPackage ? `android:${this.installedPackage}` : undefined };
   }
 
@@ -272,6 +324,20 @@ export class AndroidPlatform implements MobilePlatform {
     const commonName = await this.certificateCommonName();
 
     await command(adb, ['-s', this.serial, 'push', this.options.certificate, remote], 30_000);
+    // adb push does not update MediaProvider, so DocumentsUI may omit the
+    // freshly copied file from Downloads until the exact path is scanned.
+    await command(adb, [
+      '-s', this.serial, 'shell', 'content', 'call', '--uri', 'content://media',
+      '--method', 'scan_file', '--arg', remote,
+    ], 30_000).catch(async () => {
+      await command(adb, [
+        '-s', this.serial, 'shell', 'am', 'broadcast', '--receiver-include-background',
+        '-a', 'android.intent.action.MEDIA_SCANNER_SCAN_FILE', '-d', `file://${remote}`,
+      ], 30_000).catch(() => undefined);
+    });
+    await delay(500);
+    await command(adb, ['-s', this.serial, 'shell', 'am', 'force-stop', 'com.google.android.documentsui']).catch(() => undefined);
+    await command(adb, ['-s', this.serial, 'shell', 'am', 'force-stop', 'com.android.settings']);
     await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'android.settings.SECURITY_SETTINGS'], 30_000);
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
     await this.waitForForegroundPackage('com.android.settings');
@@ -377,13 +443,16 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async waitForForegroundPackage(packageName: string, timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
+    const accepted = packageName === 'com.android.settings'
+      ? [packageName, 'com.google.android.permissioncontroller']
+      : [packageName];
     let current = '';
     while (Date.now() < deadline) {
       current = await this.currentForegroundPackage();
-      if (current === packageName) return;
+      if (accepted.includes(current)) return;
       await delay(250);
     }
-    throw new Error(`ANDROID_CERTIFICATE: expected ${packageName} in foreground, found ${current || 'none'}`);
+    throw new Error(`ANDROID_CERTIFICATE: expected ${accepted.join(' or ')} in foreground, found ${current || 'none'}`);
   }
 
   private async certificateCommonName(): Promise<string> {
@@ -409,10 +478,12 @@ export class AndroidPlatform implements MobilePlatform {
       textLocator(nameWithoutExtension),
     ], 20_000);
 
-    // Also exercise the actual fixture HTTPS endpoint before the certificate
-    // file is removed. Navigate through the existing WebDriver Chrome target;
-    // an adb VIEW intent can open a second tab while Chromedriver remains
-    // attached to the old target and falsely report a new-tab URL.
+  }
+
+  private async verifyFixtureEndpoint(): Promise<void> {
+    // Exercise the actual fixture HTTPS endpoint through the newly started
+    // Chrome target; an adb VIEW intent can open a second tab while
+    // Chromedriver remains attached to the old target.
     const webContext = (await this.driver.contexts()).find((context) => context !== 'NATIVE_APP');
     if (!webContext) throw new Error('ANDROID_CERTIFICATE: Chrome web context is unavailable');
     await this.driver.switchContext(webContext);

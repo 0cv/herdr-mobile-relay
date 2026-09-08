@@ -593,7 +593,7 @@ func (r *scriptedRelay) snapshot() map[string]any {
 }
 
 func (r *scriptedRelay) dropConnections() {
-	r.hub.CloseAll()
+	r.hub.DropConnections()
 }
 
 func (r *scriptedRelay) close(ctx context.Context) error {

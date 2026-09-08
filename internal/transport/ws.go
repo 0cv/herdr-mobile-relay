@@ -571,6 +571,28 @@ func (h *Hub) SetE2EEAuthResolver(resolver E2EEAuthResolver) {
 	h.mu.Unlock()
 }
 
+// DropConnections closes current clients without making the hub unavailable to
+// subsequent connections. It is used by restart/reconnect fixtures that need
+// to exercise the client's reconnect path rather than shut down the relay.
+func (h *Hub) DropConnections() {
+	h.mu.RLock()
+	clients := make([]*ClientConn, 0, len(h.clients))
+	for _, client := range h.clients {
+		clients = append(clients, client)
+	}
+	pending := make([]FrameConn, 0, len(h.pending))
+	for conn := range h.pending {
+		pending = append(pending, conn)
+	}
+	h.mu.RUnlock()
+	for _, conn := range pending {
+		conn.CloseNow()
+	}
+	for _, client := range clients {
+		client.conn.Close(CloseGoingAway, "connection dropped")
+	}
+}
+
 func (h *Hub) CloseAll() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
