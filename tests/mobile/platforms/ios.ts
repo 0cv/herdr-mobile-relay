@@ -100,8 +100,18 @@ export class IOSPlatform implements MobilePlatform {
       accessibility('Share'),
       accessibility('Share button'),
       textLocator('Share'),
-    ], 30_000);
-    await this.driver.click(share);
+    ], 5_000).catch(() => '');
+    if (share) {
+      await this.driver.click(share);
+    } else {
+      // Safari's bottom toolbar is visible in the simulator but is not
+      // consistently exposed to WDA's accessibility tree on hosted runners.
+      // Tap its stable proportional position as a fallback, then continue
+      // using semantic locators for the action sheet.
+      const size = await this.driver.windowSize().catch(() => ({ width: 402, height: 874 }));
+      await this.driver.mobile('tap', { x: size.width / 2, y: size.height * 0.91 });
+      await delay(500);
+    }
     const add = await this.driver.findAny([
       textLocator('Add to Home Screen'),
       accessibility('Add to Home Screen'),

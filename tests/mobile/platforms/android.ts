@@ -421,6 +421,6 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async currentForegroundPackage(): Promise<string> {
     const output = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities']);
-    return output.match(/mResumedActivity: ActivityRecord\{[^}]+\s([A-Za-z0-9_.]+)\//)?.[1] || '';
+    return output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s([A-Za-z0-9_.]+)\//)?.[1] || '';
   }
 }
