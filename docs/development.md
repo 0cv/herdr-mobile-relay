@@ -79,10 +79,16 @@ and individual feature evidence. A stable endpoint generation does not imply
 that every optional operation is supported.
 
 Ordinary agent, pane, workspace, and tab inventory uses JSON operations. The
-mobile terminal remains a separate binary transport, so terminal compatibility
-must not be inferred from inventory compatibility. Event clients subscribe
-before taking a snapshot; reconnects refresh the snapshot and do not replay all
-notifications missed while disconnected.
+mobile terminal reads pane snapshots through `pane.read`, with a CLI fallback;
+it does not attach through Herdr's separate binary direct-terminal transport.
+Unprobed or unadvertised optional features are not compatibility failures.
+Settings warns only for unsupported features and unsuccessful checks, not
+`not_checked` or `not_advertised` evidence. Terminal-read support is checked at
+startup and after reconnects using an empty explicit pane ID: Herdr's
+`pane_not_found` refusal confirms the method without reading, scrolling, or
+resizing a live pane. Pending reconnect checks are labeled as rechecks, not
+failures. Event clients subscribe before taking a snapshot; reconnects refresh
+the snapshot and do not replay all notifications missed while disconnected.
 
 Workspace group close is a single explicit close operation over the current
 workspace membership. It closes panes but never removes Git checkouts or

@@ -15,13 +15,17 @@ verification fails.
 Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit.
 
-## Upgrading to v0.20.11
+## Upgrading to v0.21.0
 
-Version 0.20.11 includes the verified phone-update flow from 0.20.10 and fixes
-completion when an older cached manifest bootstrap is still present. A relay deployment
-can publish the hosted app, but the update screen remains incomplete until the
-new phone bundle initializes and reports its verified build identity. Relay-only
-updates do not claim to have updated the phone.
+Version 0.21.0 adds live Herdr compatibility reporting, JSON-backed workspace
+and linked-worktree management, and verified Android/iOS installed-PWA device
+coverage. Settings distinguishes the installed Herdr client from the running
+server and reports affected feature support instead of treating one mismatch
+as a total connection failure.
+
+A relay deployment can publish the hosted app, but the update screen remains
+incomplete until the new phone bundle initializes and reports its verified build
+identity. Relay-only updates do not claim to have updated the phone.
 
 Phone acknowledgement also requires the integrity-checked stylesheet to have
 loaded. This uses the browser's stylesheet state, not a readiness flag from

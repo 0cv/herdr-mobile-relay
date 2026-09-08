@@ -135,6 +135,87 @@ describe('settings relay status', () => {
     expect(screen.getByText('Workspace group reorder: Server upgrade needed')).toBeInTheDocument();
   });
 
+  it('does not warn for unprobed or unadvertised optional Herdr features', async () => {
+    render(SettingsView);
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+    socket.server({
+      type: 'push_config',
+      protocol: 3,
+      capabilities: [],
+      herdr_status: {
+        server_version: '0.9.0',
+        server_protocol_known: false,
+        generation: 1,
+        features: {
+          ordinary_json: { state: 'supported', reason: 'ping', generation: 1 },
+          direct_terminal: { state: 'unknown', reason: 'not_checked', generation: 1 },
+          'pane.read': { state: 'unknown', reason: 'not_checked', generation: 1 },
+          'client_shell.endpoint': { state: 'unknown', reason: 'not_advertised', generation: 1 },
+        },
+      },
+      agent_profiles: [],
+    });
+    expect(await screen.findByText(/Herdr server: 0\.9\.0/)).toBeInTheDocument();
+    expect(screen.queryByText(/Could not check|Server upgrade needed|Server feature unavailable/)).not.toBeInTheDocument();
+
+    // A real read failure must appear without remounting Settings, and a later
+    // successful observation must remove it rather than leave a stale warning.
+    socket.server({
+      type: 'herdr_status',
+      status: {
+        server_version: '0.9.0',
+        server_protocol_known: false,
+        generation: 2,
+        features: {
+          'pane.read': { state: 'unknown', reason: 'timeout', generation: 2 },
+        },
+      },
+    });
+    expect(await screen.findByText('Terminal reads: Could not check')).toBeInTheDocument();
+    socket.server({
+      type: 'herdr_status',
+      status: {
+        server_version: '0.9.0',
+        server_protocol_known: false,
+        generation: 3,
+        features: {
+          'pane.read': { state: 'supported', reason: 'operation_succeeded', generation: 3 },
+        },
+      },
+    });
+    await waitFor(() => expect(screen.queryByText('Terminal reads: Could not check')).not.toBeInTheDocument());
+  });
+
+  it.each([
+    ['server_unavailable', 'Could not check'],
+    ['malformed_ping', 'Could not check'],
+    ['probe_failed', 'Could not check'],
+    ['reconnect_required', 'Rechecking after Herdr reconnect'],
+  ])(
+    'keeps Herdr check outcomes visible: %s',
+    async (reason, message) => {
+      render(SettingsView);
+      const socket = MockWebSocket.instances[0];
+      socket.open();
+      socket.server({
+        type: 'push_config',
+        protocol: 3,
+        capabilities: [],
+        herdr_status: {
+          server_protocol_known: false,
+          generation: 1,
+          features: {
+            ordinary_json: { state: 'unknown', reason, generation: 1 },
+            direct_terminal: { state: 'unknown', reason: 'not_checked', generation: 1 },
+          },
+        },
+        agent_profiles: [],
+      });
+      expect(await screen.findByText(`Herdr API: ${message}`)).toBeInTheDocument();
+    },
+  );
+
   it('shows every potential gateway in priority order', () => {
     relayStore.destroy();
     relayStore.relayConfigs.set([]);

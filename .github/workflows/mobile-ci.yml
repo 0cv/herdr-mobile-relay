@@ -68,7 +68,10 @@ jobs:
   prepare:
     if: >-
       inputs.artifact_run_id != '' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -348,7 +351,11 @@ jobs:
       - name: Start Appium
         run: |
           set -euo pipefail
-          appium --address 127.0.0.1 --port 4723 --base-path / >"$RUNNER_TEMP/appium.log" 2>&1 &
+          appium_args=(--address 127.0.0.1 --port 4723 --base-path /)
+          if [ "$MOBILE_PLATFORM" = android ]; then
+            appium_args+=(--allow-insecure=uiautomator2:chromedriver_autodownload)
+          fi
+          appium "${appium_args[@]}" >"$RUNNER_TEMP/appium.log" 2>&1 &
           printf 'APPIUM_PID=%s\n' "$!" >> "$GITHUB_ENV"
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:4723/status >/dev/null; then exit 0; fi

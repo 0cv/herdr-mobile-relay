@@ -152,7 +152,7 @@ test('WebDriver runtime script returns an identity from function-body execution'
       : selector.startsWith('script')
         ? { getAttribute: () => '/assets/app-abc.js' }
         : { sheet: {}, getAttribute: () => '/assets/app-abc.css' },
-    querySelectorAll: () => [],
+    querySelectorAll: () => [{ textContent: 'Relay version 0.20.11 Phone app version 0.20.10' }],
     documentElement: { dataset: { appAssets: '364', appBuild: 'abcdef0123456789', herdrCssReady: '1' } },
     getElementById: () => ({ childNodes: [{}] }),
   };
@@ -169,7 +169,7 @@ test('WebDriver runtime script returns an identity from function-body execution'
   const identity = new Function('document', 'window', 'navigator', 'performance', 'location', 'XMLHttpRequest', runtimeScript())(
     document, window, navigator, performance, location, XMLHttpRequest,
   ) as RuntimeIdentity;
-  assert.equal(identity.version, '0.20.11');
+  assert.equal(identity.version, '0.20.10');
   assert.equal(identity.assets, 364);
   assert.equal(identity.buildFromApplication, true);
   assert.equal(identity.applicationInitialized, true);

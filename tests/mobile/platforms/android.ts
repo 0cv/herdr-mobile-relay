@@ -1,5 +1,6 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { X509Certificate } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { assertStandalone, type RuntimeIdentity } from '../support/oracle';
 import { command, commandOutput } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
@@ -11,6 +12,7 @@ import {
   css,
   delay,
   textLocator,
+  type Locator,
 } from '../support/webdriver';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
 
@@ -65,7 +67,6 @@ export class AndroidPlatform implements MobilePlatform {
         'appium:newCommandTimeout': 1_200,
         'appium:skipDeviceInitialization': false,
         'appium:skipServerInstallation': false,
-        'appium:chromedriverAutodownload': true,
       },
       requestTimeoutMs: 60_000,
     });
@@ -267,31 +268,111 @@ export class AndroidPlatform implements MobilePlatform {
   private async installCertificate(): Promise<void> {
     const adb = process.env.ADB || 'adb';
     const remote = '/sdcard/Download/herdr-mobile-ci-ca.crt';
+    const remoteName = basename(remote);
+    const commonName = await this.certificateCommonName();
+
     await command(adb, ['-s', this.serial, 'push', this.options.certificate, remote], 30_000);
-    await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'android.credentials.INSTALL', '-t', 'application/x-x509-ca-cert', '-d', `file://${remote}`]);
+    await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'android.settings.SECURITY_SETTINGS'], 30_000);
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
     await delay(1_000);
-    const continueButton = await this.driver.findAny([
-      accessibility('Continue'),
-      textLocator('Continue'),
+
+    // Android 11+ only permits CA installation when the user starts it from
+    // Settings. The generic credential intent is deliberately rejected and
+    // cannot select the file pushed above on the Android 35 image.
+    await this.clickNative([
+      accessibility('More security settings'),
+      accessibility('More security & privacy'),
+      accessibility('More security and privacy'),
+      textLocator('More security settings'),
+      textLocator('More security & privacy'),
+      textLocator('More security and privacy'),
+    ], 'More security settings');
+    await this.clickNative([
+      accessibility('Encryption & credentials'),
+      textLocator('Encryption & credentials'),
+      textLocator('Encryption & Credentials'),
+    ], 'Encryption & credentials');
+    await this.clickNative([
+      accessibility('Install a certificate'),
+      accessibility('Install from device storage'),
+      accessibility('Install from storage'),
+      textLocator('Install a certificate'),
+      textLocator('Install from device storage'),
+      textLocator('Install from storage'),
+    ], 'Install a certificate');
+    await this.clickNative([
+      accessibility('CA certificate'),
       textLocator('CA certificate'),
-    ], 15_000).catch(() => '');
-    if (continueButton) await this.driver.click(continueButton);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const confirm = await this.driver.findAny([
-        accessibility('OK'),
-        textLocator('OK'),
-        textLocator('Install anyway'),
-      ], 5_000).catch(() => '');
-      if (!confirm) break;
-      await this.driver.click(confirm);
+      textLocator('CA Certificate'),
+    ], 'CA certificate');
+    await this.clickNative([
+      accessibility('Install anyway'),
+      textLocator('Install anyway'),
+    ], 'Install anyway');
+
+    // The supported flow now opens DocumentsUI. Explicitly open Downloads and
+    // choose the pushed file; do not continue after a missing control.
+    await this.clickNative([
+      accessibility('Show roots'),
+      accessibility('Open navigation drawer'),
+      accessibility('Open navigation'),
+    ], 'certificate picker navigation');
+    await this.clickNative([
+      accessibility('Downloads'),
+      textLocator('Downloads'),
+    ], 'Downloads');
+    await this.clickNative([
+      accessibility(remoteName),
+      textLocator(remoteName),
+    ], remoteName);
+    // Android 15 installs a CA certificate immediately after the file is
+    // selected; there is no certificate-name dialog or Done button.
+    await delay(1_000);
+    await this.verifyCertificate(remoteName, commonName);
+    await command(adb, ['-s', this.serial, 'shell', 'rm', '-f', remote], 30_000);
+  }
+
+  private async clickNative(locators: Locator[], description: string, timeoutMs = 30_000): Promise<void> {
+    try {
+      const element = await this.driver.findAny(locators, timeoutMs);
+      await this.driver.click(element);
+    } catch (error) {
+      throw new Error(`ANDROID_CERTIFICATE: ${description}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
-    const done = await this.driver.findAny([
-      accessibility('Done'),
-      textLocator('Done'),
-    ], 15_000).catch(() => '');
-    if (done) await this.driver.click(done);
-    await command(adb, ['-s', this.serial, 'shell', 'rm', '-f', remote]).catch(() => undefined);
+  }
+
+  private async certificateCommonName(): Promise<string> {
+    const certificate = new X509Certificate(await readFile(this.options.certificate));
+    const commonName = certificate.subject.match(/CN\s*=\s*([^,\n/]+)/u)?.[1]?.trim();
+    if (!commonName) throw new Error('ANDROID_CERTIFICATE: supplied certificate has no common name');
+    return commonName;
+  }
+
+  private async verifyCertificate(certificateName: string, commonName: string): Promise<void> {
+    const adb = process.env.ADB || 'adb';
+    await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'com.android.settings.TRUSTED_CREDENTIALS_USER'], 30_000);
+    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await delay(1_000);
+    const nameWithoutExtension = certificateName.replace(/\.[^.]+$/u, '');
+    await this.driver.findAny([
+      accessibility(commonName),
+      textLocator(commonName),
+      accessibility(certificateName),
+      textLocator(certificateName),
+      accessibility(nameWithoutExtension),
+      textLocator(nameWithoutExtension),
+    ], 20_000);
+
+    // Also exercise the actual fixture HTTPS endpoint before the certificate
+    // file is removed. The trusted-credentials list alone does not prove that
+    // Chrome can build the chain used by the mobile harness.
+    await command(adb, androidOpenUrlArgs(this.serial, `${this.origin}/version.json`), 30_000);
+    await delay(1_000);
+    await this.attachToInstalledView();
+    const source = await this.driver.pageSource();
+    if (/ERR_CERT|NET::ERR|privacy error|not private/iu.test(source)) {
+      throw new Error('ANDROID_CERTIFICATE: fixture HTTPS endpoint is not trusted');
+    }
   }
 
   private async currentForegroundPackage(): Promise<string> {

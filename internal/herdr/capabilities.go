@@ -270,6 +270,12 @@ func (m *capabilityManager) refresh(ctx context.Context) ServerStatus {
 		tabState, tabReason := probeTabMove(ctx, m.client.api)
 		next.Features[FeatureTabMove] = FeatureEvidence{State: tabState, Reason: tabReason}
 	}
+	if paneFeature, ok := m.reusableFeature(FeaturePaneRead, identity); ok {
+		next.Features[FeaturePaneRead] = paneFeature
+	} else {
+		paneState, paneReason := probePaneRead(ctx, m.client.api)
+		next.Features[FeaturePaneRead] = FeatureEvidence{State: paneState, Reason: paneReason}
+	}
 	m.applyRefresh(sequence, epoch, identity, next)
 	return m.snapshot()
 }
@@ -288,7 +294,7 @@ func (m *capabilityManager) applyRefresh(sequence, epoch uint64, identity string
 		m.serverIdentity == "" && m.status.ServerVersion == "") {
 		for name, feature := range m.status.Features {
 			switch name {
-			case FeatureJSONAvailability, FeatureEndpoint, FeatureWorkspaceMoveBlock, FeatureTabMove:
+			case FeatureJSONAvailability, FeatureEndpoint, FeatureWorkspaceMoveBlock, FeatureTabMove, FeaturePaneRead:
 				continue
 			default:
 				status.Features[name] = feature
@@ -507,6 +513,35 @@ func probeTabMove(ctx context.Context, api *socketAPIClient) (FeatureState, stri
 	if errors.As(err, &cliErr) && cliErr != nil {
 		switch cliErr.Code {
 		case "tab_not_found":
+			return FeatureSupported, "recognized_validation_refusal"
+		case "unknown_method", "method_not_found", "unsupported_method":
+			return FeatureUnsupported, "method_not_supported"
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) || !wrote {
+		return FeatureUnknown, capabilityTransportReason(wrote, err)
+	}
+	return FeatureUnknown, "probe_failed"
+}
+
+func probePaneRead(ctx context.Context, api *socketAPIClient) (FeatureState, string) {
+	// An empty explicit ID cannot target a real pane. Its validation refusal
+	// proves method support without reading output, scrolling, or resizing a
+	// user's terminal, including when the server has no panes yet.
+	_, wrote, err := api.requestUnary(ctx, "pane.read", map[string]any{
+		"pane_id":    "",
+		"source":     "visible",
+		"lines":      1,
+		"format":     "ansi",
+		"strip_ansi": false,
+	})
+	if err == nil {
+		return FeatureUnknown, "unexpected_probe_success"
+	}
+	var cliErr *CLIError
+	if errors.As(err, &cliErr) && cliErr != nil {
+		switch cliErr.Code {
+		case "pane_not_found":
 			return FeatureSupported, "recognized_validation_refusal"
 		case "unknown_method", "method_not_found", "unsupported_method":
 			return FeatureUnsupported, "method_not_supported"

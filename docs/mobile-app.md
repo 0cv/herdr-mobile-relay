@@ -137,8 +137,9 @@ Open **Workspaces** from the folder button in the header to:
   the checkout while retaining its Git branch.
 - closing a repository workspace with linked worktrees first offers **Close
   Workspace Group**. The second dialog lists the current group and must be
-  confirmed separately; it closes panes in those workspaces but never removes
-  Git checkouts or branches.
+  confirmed separately; Herdr closes the group that is open when the operation
+  runs, so membership can change after confirmation. It never removes Git
+  checkouts or branches.
 
 Linked worktrees are nested below their repository workspace on both the home
 screen and the Workspaces page, drawn as a tree with connector rails that
@@ -212,6 +213,10 @@ repaint, and scrollback cannot be erased afterwards. Leave it off unless you
 mostly drive full-screen TUIs from the phone. While the height is leased, the
 on-screen keyboard never shrinks it — the lease keeps the resting height and
 re-measures when the keyboard closes.
+
+Herdr 0.9.0's independent client views do not replace this option: the relay
+still reads pane snapshots and resizes the shared PTY, rather than attaching as
+a native Herdr terminal client. Clients sharing a tab still share its size.
 
 Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
 1,000 is the default and the ceiling on the gateway-relayed path; direct

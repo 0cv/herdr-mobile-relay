@@ -58,10 +58,10 @@ export function runtimeScript(): string {
     const buildEntry = /^\\/builds\\/[^/]+\\/index\\.html$/.test(location.pathname)
       ? location.pathname
       : '';
-    const versionText = [...document.querySelectorAll('main, p, small')]
-      .map((node) => node.textContent || '')
-      .find((text) => /Phone app version\\s+\\d+\\.\\d+\\.\\d+/.test(text)) || '';
-    const version = versionText.match(/(\\d+\\.\\d+\\.\\d+)/)?.[1] || String(metadata.release_version || metadata.version || '');
+    const versionMatch = [...document.querySelectorAll('main, p, small')]
+      .map((node) => (node.textContent || '').match(/Phone app version\\s+(\\d+\\.\\d+\\.\\d+)/))
+      .find((match) => match);
+    const version = versionMatch?.[1] || String(metadata.release_version || metadata.version || '');
     const identityNode = document.querySelector('[data-app-assets]');
     const assetsText = identityNode?.getAttribute('data-app-assets') || document.documentElement.dataset.appAssets || '';
     const buildText = identityNode?.getAttribute('data-app-build') || document.documentElement.dataset.appBuild || '';

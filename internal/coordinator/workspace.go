@@ -197,6 +197,9 @@ func (d *Dispatcher) HandleWorkspaceClose(
 		return d.workspaceCloseRefusal(requestID, action, "workspace_group_close_required", groupIDs)
 	}
 	if closeGroup {
+		// These IDs are a relay-level confirmation check only. Herdr 0.9.0
+		// closes the group that exists when its close_group mutation executes;
+		// membership added after this list cannot be excluded atomically.
 		if current.Worktree != nil && current.Worktree.IsLinkedWorktree {
 			return d.workspaceCloseRefusal(requestID, action, "workspace_group_primary_required", groupIDs)
 		}

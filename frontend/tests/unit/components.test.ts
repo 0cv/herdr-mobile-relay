@@ -567,7 +567,7 @@ describe('accessible Svelte interactions', () => {
       await user.click(within(firstDialog).getByRole('button', { name: 'Close Workspace' }));
       await vi.waitFor(() => expect(screen.getByRole('dialog', { name: 'Close Project group?' })).toBeInTheDocument());
       const groupDialog = screen.getByRole('dialog', { name: 'Close Project group?' });
-      expect(groupDialog).toHaveTextContent('All running panes in these workspaces will close. Git checkouts and branches are not removed.');
+      expect(groupDialog).toHaveTextContent('All running panes in the currently open group will close. Group membership can change until the command runs. Git checkouts and branches are not removed.');
       expect(within(groupDialog).getByRole('list')).toHaveTextContent('Project');
       expect(within(groupDialog).getByRole('list')).toHaveTextContent('Fix');
       expect(close).toHaveBeenCalledTimes(1);
@@ -577,6 +577,59 @@ describe('accessible Svelte interactions', () => {
         closeGroup: true,
         expectedWorkspaceIds: ['w1', 'w2'],
       });
+    } finally {
+      close.mockRestore();
+      relayStore.workspaces.set([]);
+      relayStore.connections.set(new Map());
+      relayStore.relayConfigs.set([]);
+    }
+  });
+
+  it('does not route a delayed workspace refusal to the selected sibling relay', async () => {
+    const user = userEvent.setup();
+    const workspace = (relayId: string, relayLabel: string, id: string, label: string, linked: boolean): RelayWorkspace => ({
+      relay_id: relayId, relay_label: relayLabel, workspace_id: id, number: linked ? 2 : 1, label,
+      focused: false, pane_count: 1, tab_count: 1, active_tab_id: '', agent_status: '',
+      cwd: `/repos/${relayId}/${id}`,
+      worktree: {
+        repo_key: 'repo', repo_name: 'project', repo_root: `/repos/${relayId}/project`,
+        checkout_path: `/repos/${relayId}/${id}`, is_linked_worktree: linked,
+      },
+    });
+    const alphaPrimary = workspace('alpha', 'Alpha', 'w1', 'Alpha Project', false);
+    const alphaChild = workspace('alpha', 'Alpha', 'w2', 'Alpha Fix', true);
+    const betaPrimary = workspace('beta', 'Beta', 'w1', 'Beta Project', false);
+    const betaChild = workspace('beta', 'Beta', 'w2', 'Beta Fix', true);
+    const connection = {
+      status: 'connected', inventory: { state: 'ready' },
+      capabilities: ['workspace_management', 'worktree_management'],
+    } as unknown as RelayConnectionView;
+    relayStore.relayConfigs.set([
+      { id: 'alpha', label: 'Alpha', url: 'wss://alpha', token: '' },
+      { id: 'beta', label: 'Beta', url: 'wss://beta', token: '' },
+    ]);
+    relayStore.connections.set(new Map([
+      ['alpha', connection as never],
+      ['beta', connection as never],
+    ]));
+    relayStore.workspaces.set([alphaPrimary, alphaChild, betaPrimary, betaChild]);
+    let rejectClose!: (reason?: unknown) => void;
+    const pending = new Promise<CommandResult>((_resolve, reject) => { rejectClose = reject; });
+    const close = vi.spyOn(relayStore, 'closeWorkspace').mockReturnValue(pending);
+    try {
+      render(WorkspaceManager);
+      await vi.waitFor(() => expect(screen.getAllByRole('button', { name: 'Close' }).length).toBeGreaterThan(0));
+      await user.click(screen.getAllByRole('button', { name: 'Close' })[0]);
+      const dialog = screen.getByRole('dialog', { name: 'Close Alpha Project?' });
+      await user.click(within(dialog).getByRole('button', { name: 'Close Workspace' }));
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Computer' }), 'beta');
+      rejectClose(Object.assign(new CommandError('Close the workspace group explicitly'), {
+        data: { code: 'workspace_group_close_required', workspace_ids: ['w1', 'w2'] },
+      }));
+      await expect(pending).rejects.toThrow('Close the workspace group explicitly');
+      await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: 'Close Beta Project group?' })).not.toBeInTheDocument());
     } finally {
       close.mockRestore();
       relayStore.workspaces.set([]);

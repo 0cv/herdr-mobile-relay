@@ -651,9 +651,10 @@ func (c *Client) readPane(ctx context.Context, paneID string, lines int, format,
 		format = "text"
 	}
 	epoch := c.capabilityEpoch()
-	if content, err := c.api.readPane(ctx, paneID, lines, format, source); err == nil {
-		c.noteFeatureSupportedAt(epoch, FeaturePaneRead, "operation_succeeded")
-		return content, nil
+	read, err := c.api.readPane(ctx, paneID, lines, format, source)
+	c.noteSocketFeature(epoch, FeaturePaneRead, err)
+	if err == nil {
+		return read, nil
 	}
 	content, err := c.runCommand(ctx,
 		"pane", "read", paneID,
@@ -674,7 +675,9 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 	if format != "ansi" {
 		format = "text"
 	}
+	epoch := c.capabilityEpoch()
 	read, err := c.api.readPane(ctx, paneID, lines, format, "visible")
+	c.noteSocketFeature(epoch, FeaturePaneRead, err)
 	if err != nil {
 		return nil, err
 	}

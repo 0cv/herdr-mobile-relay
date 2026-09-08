@@ -88,18 +88,33 @@
   } from '$lib/updates';
   import type { AppUpdateStatus, RelayConfig, RelayConnectionView, RelaySpeechVoice } from '$lib/types';
 
-function herdrWarnings(features: Record<string, { state: string; reason: string }> | undefined): string {
-  return Object.entries(features || {})
-    .filter(([, feature]) => feature.state !== 'supported')
-    .map(([name, feature]) => {
-      const label = name === 'workspace.move_block' ? 'Workspace group reorder' : name;
-      const message = feature.state === 'unsupported'
-        ? feature.reason === 'method_not_supported' ? 'Server upgrade needed' : 'Server feature unavailable'
-        : 'Could not check';
-      return `${label}: ${message}`;
-    })
-    .join(' · ');
-}
+  function herdrWarnings(features: Record<string, { state: string; reason: string }> | undefined): string {
+    const labels: Record<string, string> = {
+      ordinary_json: 'Herdr API',
+      'workspace.move_block': 'Workspace group reorder',
+      'workspace.reordered': 'Workspace reorder events',
+      'pane.read': 'Terminal reads',
+      'tab.move': 'Tab reorder',
+      'client_shell.endpoint': 'Client endpoint',
+      direct_terminal: 'Direct terminal',
+    };
+    return Object.entries(features || {})
+      .filter(([, feature]) => {
+        if (feature.state === 'supported') return false;
+        // Optional features may not be probed until used, or advertised at all.
+        // Neither is evidence of a failed check or an incompatible server.
+        return feature.state !== 'unknown'
+          || !['not_checked', 'not_advertised'].includes(feature.reason);
+      })
+      .map(([name, feature]) => {
+        const label = labels[name] || name;
+        const message = feature.state === 'unsupported'
+          ? feature.reason === 'method_not_supported' ? 'Server upgrade needed' : 'Server feature unavailable'
+          : feature.reason === 'reconnect_required' ? 'Rechecking after Herdr reconnect' : 'Could not check';
+        return `${label}: ${message}`;
+      })
+      .join(' · ');
+  }
 
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
@@ -690,7 +705,7 @@ function herdrWarnings(features: Record<string, { state: string; reason: string 
             </small>
             <small>Herdr 0.9.0 recommended.</small>
             {#if herdrFeatureWarnings}
-              <small class="warning" role="status">{herdrFeatureWarnings}</small>
+              <small class="warning herdr-feature-warning" role="status">{herdrFeatureWarnings}</small>
             {/if}
             <small class:warning={update.warning} role="status">{update.label}</small>
             {#if update.detail}<small class:warning={update.warning} title={update.detail}>{update.detail}</small>{/if}

@@ -19,11 +19,11 @@ The candidate must be a release archive with its checksum and release manifest. 
 ```sh
 bun install --frozen-lockfile --cwd tests/mobile
 bun run --cwd tests/mobile prepare:bundle -- \
-  --candidate "$PWD/dist/release/herdr-mobile-relay_0.20.11_linux_amd64.tar.gz" \
-  --candidate-version 0.20.11 \
-  --candidate-assets 364 \
+  --candidate "$PWD/dist/release/herdr-mobile-relay_0.21.0_linux_amd64.tar.gz" \
+  --candidate-version 0.21.0 \
+  --candidate-assets 367 \
   --candidate-revision "$(git rev-parse HEAD)" \
-  --candidate-sha256 "$(awk '$2 == "herdr-mobile-relay_0.20.11_linux_amd64.tar.gz" { print $1 }' dist/release/checksums.txt)" \
+  --candidate-sha256 "$(awk '$2 == "herdr-mobile-relay_0.21.0_linux_amd64.tar.gz" { print $1 }' dist/release/checksums.txt)" \
   --output "$PWD/run-artifacts/mobile" \
   --baseline 0.20.8 --baseline 0.20.9 --baseline 0.20.10
 ```

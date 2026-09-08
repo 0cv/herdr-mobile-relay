@@ -227,6 +227,10 @@ func startInventorySocket(t *testing.T, socketPath, scenario string) net.Listene
 						sendError("unknown_method", "scenario content uses the CLI fixture")
 						break
 					}
+					if request.Params.PaneID == "" {
+						sendError("pane_not_found", "pane  not found")
+						break
+					}
 					content := fixture.Content[request.Params.PaneID]
 					if content == "" {
 						content = "blackbox fixture pane"

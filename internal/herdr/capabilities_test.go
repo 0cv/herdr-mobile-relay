@@ -22,6 +22,7 @@ func TestCapabilityRefreshTracksLiveServerSeparatelyFromInstalledClient(t *testi
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
 		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		{"error": map[string]any{"code": "tab_not_found", "message": "tab  not found"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
 		{"error": map[string]any{"code": "unknown_method", "message": "unsupported"}},
 	})
@@ -53,6 +54,7 @@ func TestCapabilityRefreshLeavesGenericProbeFailureUnknown(t *testing.T) {
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
 		{"error": map[string]any{"code": "invalid_request", "message": "not a capability probe"}},
 		{"error": map[string]any{"code": "tab_not_found", "message": "tab  not found"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
 	})
 	defer listener.Close()
 
@@ -93,6 +95,7 @@ func TestCapabilityProbeRejectsUnrelatedSuccessfulResult(t *testing.T) {
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
 		{"type": "unrelated_result"},
 		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
 	})
 	defer listener.Close()
 
@@ -110,6 +113,7 @@ func TestCapabilityRefreshDiscoversTabMoveFromValidationRefusal(t *testing.T) {
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
 		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
 	})
 	defer listener.Close()
 
@@ -127,9 +131,11 @@ func TestCapabilitySameVersionRestartClearsLearnedEvidence(t *testing.T) {
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
 		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
 		{"type": "pong", "version": "0.9.0", "protocol": 1},
 		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "unknown_method", "message": "unsupported"}},
 	})
 	defer listener.Close()
 
@@ -159,7 +165,7 @@ func TestCapabilityRefreshDropsStaleInFlightResultAfterInvalidation(t *testing.T
 	serverErr := make(chan error, 1)
 	go func() {
 		defer listener.Close()
-		for _, method := range []string{"ping", "workspace.move_block", "tab.move"} {
+		for _, method := range []string{"ping", "workspace.move_block", "tab.move", "pane.read"} {
 			conn, acceptErr := listener.AcceptUnix()
 			if acceptErr != nil {
 				serverErr <- acceptErr
@@ -189,8 +195,10 @@ func TestCapabilityRefreshDropsStaleInFlightResultAfterInvalidation(t *testing.T
 				response["result"] = map[string]any{"type": "pong", "version": "0.9.0", "protocol": 1}
 			} else if method == "workspace.move_block" {
 				response["error"] = map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}
-			} else {
+			} else if method == "tab.move" {
 				response["error"] = map[string]any{"code": "tab_not_found", "message": "empty tab"}
+			} else {
+				response["error"] = map[string]any{"code": "pane_not_found", "message": "empty pane"}
 			}
 			if encodeErr := json.NewEncoder(conn).Encode(response); encodeErr != nil {
 				_ = conn.Close()
@@ -245,9 +253,11 @@ func TestCapabilityPingIdentityChangeRejectsOlderOperationEvidence(t *testing.T)
 		{"type": "pong", "version": "0.8.0", "protocol": 1},
 		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "pane_not_found", "message": "empty pane"}},
 		{"type": "pong", "version": "0.9.0", "protocol": 2},
 		{"error": map[string]any{"code": "workspace_move_block_failed", "message": "empty selection"}},
 		{"error": map[string]any{"code": "tab_not_found", "message": "empty tab"}},
+		{"error": map[string]any{"code": "unknown_method", "message": "unsupported"}},
 	})
 	defer listener.Close()
 	client := NewClient("/missing/review-herdr", path)

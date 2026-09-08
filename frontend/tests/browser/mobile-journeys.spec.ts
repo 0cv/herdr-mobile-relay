@@ -1091,6 +1091,56 @@ test('keeps an opened workspace expanded across tab navigation and inventory ref
   await expect(workspace.getByRole('button', { name: 'Open Mobile app on Fedora' })).toBeVisible();
 });
 
+test('rechecks Herdr terminal compatibility and wraps actual failures on mobile', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    herdr_status: {
+      server_version: '0.9.0',
+      generation: 1,
+      features: {
+        direct_terminal: { state: 'unknown', reason: 'not_checked', generation: 1 },
+        'pane.read': { state: 'unknown', reason: 'reconnect_required', generation: 1 },
+        'client_shell.endpoint': { state: 'unknown', reason: 'not_advertised', generation: 1 },
+      },
+    },
+  });
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await expect(page.getByText(/Herdr server: 0\.9\.0/)).toBeVisible();
+  await expect(page.getByText('Terminal reads: Rechecking after Herdr reconnect')).toBeVisible();
+  await expect(page.getByText(/Could not check|Server upgrade needed|Server feature unavailable/)).toHaveCount(0);
+
+  await server(page, 0, {
+    type: 'herdr_status',
+    status: {
+      server_version: '0.9.0',
+      generation: 2,
+      features: {
+        direct_terminal: { state: 'unknown', reason: 'not_checked', generation: 2 },
+        'pane.read': { state: 'unknown', reason: 'timeout', generation: 2 },
+        'workspace.move_block': { state: 'unsupported', reason: 'method_not_supported', generation: 2 },
+      },
+    },
+  });
+  const warning = page.getByRole('status').filter({ hasText: 'Terminal reads: Could not check' });
+  await expect(warning).toHaveText('Terminal reads: Could not check · Workspace group reorder: Server upgrade needed');
+  await expect(warning).toHaveCSS('white-space', 'normal');
+  expect(await warning.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+
+  await server(page, 0, {
+    type: 'herdr_status',
+    status: {
+      server_version: '0.9.0',
+      generation: 3,
+      features: {
+        'pane.read': { state: 'supported', reason: 'recognized_validation_refusal', generation: 3 },
+        'workspace.move_block': { state: 'supported', reason: 'recognized_validation_refusal', generation: 3 },
+      },
+    },
+  });
+  await expect(page.locator('.herdr-feature-warning')).toHaveCount(0);
+});
+
 test('reconnects and blocks mutations for an incompatible relay protocol', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);

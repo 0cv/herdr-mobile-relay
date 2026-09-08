@@ -1397,10 +1397,10 @@ func (s *Server) Run(ctx context.Context) error {
 			work()
 		}()
 	}
+	s.hybrid = s.startHybridTransport(ctx)
 	startBackground(func() { s.pushM.Run(ctx) })
 	startBackground(func() { s.poller.Run(ctx) })
 	startBackground(func() { s.herdrC.RunCapabilityRefresh(ctx, 30*time.Second) })
-	s.hybrid = s.startHybridTransport(ctx)
 	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
 	eventClient.SetWorkspaceReorderedCapability(
 		s.herdrC.ShouldAttemptWorkspaceReordered,

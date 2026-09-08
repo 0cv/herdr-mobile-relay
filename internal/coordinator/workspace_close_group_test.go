@@ -124,6 +124,9 @@ func TestWorkspaceCloseGroupTargetsPrimaryOnce(t *testing.T) {
 	if request.Params["workspace_id"] != "primary" || request.Params["close_group"] != true {
 		t.Fatalf("request = %+v", request)
 	}
+	if _, ok := request.Params["expected_workspace_ids"]; ok {
+		t.Fatalf("workspace.close sent speculative expected workspace ids: %+v", request.Params)
+	}
 	assertNoCloseRequest(t, requests)
 	data := result.Data.(map[string]any)
 	if data["close_group"] != true {

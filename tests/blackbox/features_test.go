@@ -83,6 +83,47 @@ func TestOnConnectHandshake(t *testing.T) {
 	}
 }
 
+func TestTerminalReadCapabilityIsCheckedWithoutOpenPanes(t *testing.T) {
+	env := setupEnvWithScenario(t, `{"panes":[],"tabs":[],"workspaces":[]}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	// Do not send a pane read: startup and the event bootstrap recheck must
+	// resolve the status themselves, even for an empty Herdr session.
+	for {
+		message := readNextJSON(t, conn, ctx)
+		var status map[string]any
+		switch message["type"] {
+		case "push_config":
+			status, _ = message["herdr_status"].(map[string]any)
+		case "herdr_status":
+			status, _ = message["status"].(map[string]any)
+		default:
+			continue
+		}
+		features, _ := status["features"].(map[string]any)
+		paneRead, _ := features["pane.read"].(map[string]any)
+		if paneRead["state"] != "supported" {
+			continue
+		}
+		if paneRead["reason"] != "recognized_validation_refusal" {
+			t.Fatalf("pane.read evidence = %+v, want a non-targeting capability check", paneRead)
+		}
+		capabilities, _ := message["capabilities"].([]any)
+		for _, capability := range capabilities {
+			if capability == "pane_realtime_delta" {
+				return
+			}
+		}
+		t.Fatalf("pane.read support did not enable realtime terminal updates: %v", capabilities)
+	}
+}
+
 func TestInstallUpdateBootstrapDoesNotRequireProtocolV2(t *testing.T) {
 	env := setupEnv(t)
 
