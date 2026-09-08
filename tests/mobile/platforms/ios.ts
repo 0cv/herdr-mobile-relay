@@ -61,6 +61,21 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async openSetupURL(url: string): Promise<void> {
+    const safariContext = (await this.driver.contexts().catch(() => []))
+      .find((context) => /^WEBVIEW_/u.test(context));
+    if (safariContext) {
+      try {
+        // Keep Appium attached to the same Safari page. Using simctl alone can
+        // leave the Web Inspector session on its initial about:blank page.
+        await this.driver.switchContext(safariContext);
+        await this.driver.navigate(url);
+        await delay(1_500);
+        await this.driver.switchContext('NATIVE_APP');
+        return;
+      } catch {
+        await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+      }
+    }
     await command('xcrun', ['simctl', 'openurl', this.udid, url], 30_000);
     await delay(1_500);
   }

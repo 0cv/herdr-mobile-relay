@@ -302,10 +302,20 @@ jobs:
           # Keep avdmanager and emulator on the same explicit, disposable path.
           # Hosted images can expose different Android home defaults to the two
           # tools, which otherwise leaves the emulator unable to find the AVD.
+          android_user_home="$RUNNER_TEMP/android-user"
           avd_home="$RUNNER_TEMP/android-avd"
-          mkdir -p "$avd_home"
+          mkdir -p "$android_user_home" "$avd_home"
+          export ANDROID_USER_HOME="$android_user_home"
+          export ANDROID_EMULATOR_HOME="$android_user_home"
           export ANDROID_AVD_HOME="$avd_home"
+          printf 'ANDROID_USER_HOME=%s\n' "$ANDROID_USER_HOME" >> "$GITHUB_ENV"
+          printf 'ANDROID_EMULATOR_HOME=%s\n' "$ANDROID_EMULATOR_HOME" >> "$GITHUB_ENV"
           printf 'ANDROID_AVD_HOME=%s\n' "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm
+            test -r /dev/kvm
+            test -w /dev/kvm
+          fi
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis_playstore;x86_64"
           avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
