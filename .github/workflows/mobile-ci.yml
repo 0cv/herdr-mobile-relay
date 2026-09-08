@@ -311,6 +311,17 @@ jobs:
           printf 'ANDROID_USER_HOME=%s\n' "$ANDROID_USER_HOME" >> "$GITHUB_ENV"
           printf 'ANDROID_EMULATOR_HOME=%s\n' "$ANDROID_EMULATOR_HOME" >> "$GITHUB_ENV"
           printf 'ANDROID_AVD_HOME=%s\n' "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          # The emulator and the ADB server must use the same disposable host key.
+          # ANDROID_USER_HOME does not relocate ADB's default $HOME/.android key.
+          adb_key="$android_user_home/adbkey"
+          adb keygen "$adb_key"
+          mkdir -p "$HOME/.android"
+          cp "$adb_key" "$HOME/.android/adbkey"
+          cp "$adb_key.pub" "$HOME/.android/adbkey.pub"
+          export ADB_VENDOR_KEYS="$adb_key"
+          printf 'ADB_VENDOR_KEYS=%s\n' "$ADB_VENDOR_KEYS" >> "$GITHUB_ENV"
+          adb kill-server >/dev/null 2>&1 || true
+          adb start-server >/dev/null
           if [ -e /dev/kvm ]; then
             sudo chmod a+rw /dev/kvm
             test -r /dev/kvm

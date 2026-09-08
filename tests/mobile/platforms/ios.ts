@@ -53,10 +53,15 @@ export class IOSPlatform implements MobilePlatform {
         'appium:includeSafariInWebviews': true,
         'appium:autoWebview': false,
         'appium:usePrebuiltWDA': false,
+        // A fresh hosted runner may need several minutes to build and launch WDA.
+        'appium:showXcodeLog': true,
+        'appium:wdaLaunchTimeout': 300_000,
+        'appium:wdaStartupRetries': 1,
+        'appium:wdaStartupRetryInterval': 10_000,
       },
       // The first XCUITest session builds WebDriverAgent on the hosted runner.
       // Keep the client request alive for that one-time build.
-      requestTimeoutMs: 300_000,
+      requestTimeoutMs: 360_000,
     });
   }
 
