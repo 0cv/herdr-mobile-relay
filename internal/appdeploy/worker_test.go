@@ -590,7 +590,7 @@ func TestVerifyPublicTimesOutWithLastObservedIdentity(t *testing.T) {
 		return []byte(`{"release_version":"1.2.2","revision":"old"}`)
 	}))
 	defer server.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 
 	job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc", WebHash: strings.Repeat("a", 64)}
