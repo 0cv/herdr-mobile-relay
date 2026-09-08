@@ -284,11 +284,11 @@ export async function checkAppUpdate(
 }
 
 function requiredAssetPending(): boolean {
-  const dataset = document.documentElement.dataset;
-  return !dataset.herdrLoadFailed && Boolean(
-    document.querySelector('link[rel="stylesheet"][href*="/assets/app-"]')
-      && !dataset.herdrCssReady,
-  );
+  // A cached bootstrap can omit its readiness flag even after the new CSS
+  // loads. The browser attaches a sheet only after accepting the resource,
+  // including its integrity check, so use that result for acknowledgement.
+  const stylesheet = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="/assets/app-"]');
+  return !document.documentElement.dataset.herdrLoadFailed && Boolean(stylesheet && !stylesheet.sheet);
 }
 
 export function initializeAppUpdates(): () => void {

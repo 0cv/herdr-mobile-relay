@@ -303,7 +303,7 @@ describe('release updates', () => {
     expect(get(updateProgressPlan)).toMatchObject({ phoneState: 'failed', phoneAcknowledged: false, phoneError: 'integrity check failed' });
   });
 
-  it('waits for the required stylesheet before acknowledging a phone update', () => {
+  it('does not trust a bootstrap readiness hint for an unloaded stylesheet', () => {
     queueUpdateProgressForReload(APP_VERSION, [], {
       version: APP_VERSION,
       assets: APP_ASSET_VERSION,
@@ -314,9 +314,8 @@ describe('release updates', () => {
     stylesheet.href = '/assets/app-test.css';
     document.head.append(stylesheet);
 
-    expect(acknowledgePhoneUpdate()).toBe(false);
     document.documentElement.dataset.herdrCssReady = '1';
-    expect(acknowledgePhoneUpdate()).toBe(true);
+    expect(acknowledgePhoneUpdate()).toBe(false);
     stylesheet.remove();
   });
 

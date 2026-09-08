@@ -3,6 +3,15 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.20.11] - 2026-09-08
+
+### Fixed
+
+- Complete phone update progress when the new app and stylesheet have loaded
+  alongside an older cached manifest bootstrap, instead of remaining at 95%.
+
 ## [0.20.10] - 2026-09-07
 
 ### Fixed
@@ -1421,6 +1430,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.11...HEAD
+[0.20.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.10...v0.20.11
 [0.20.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.9...v0.20.10
 [0.20.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.8...v0.20.9
 [0.20.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.7...v0.20.8

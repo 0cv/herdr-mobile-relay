@@ -15,12 +15,18 @@ verification fails.
 Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit.
 
-## Upgrading to v0.20.10
+## Upgrading to v0.20.11
 
-Version 0.20.10 treats the phone app as its own update item. A relay deployment
+Version 0.20.11 includes the verified phone-update flow from 0.20.10 and fixes
+completion when an older cached manifest bootstrap is still present. A relay deployment
 can publish the hosted app, but the update screen remains incomplete until the
 new phone bundle initializes and reports its verified build identity. Relay-only
 updates do not claim to have updated the phone.
+
+Phone acknowledgement also requires the integrity-checked stylesheet to have
+loaded. This uses the browser's stylesheet state, not a readiness flag from
+the separately cached manifest bootstrap, so a cached older bootstrap cannot leave a
+successfully loaded phone app stuck at an incomplete progress value.
 
 Hosted releases use a build-specific entry and content-addressed JavaScript and
 CSS with integrity metadata. `/` and `/index.html` remain same-origin bootstrap
