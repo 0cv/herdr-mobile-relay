@@ -274,7 +274,8 @@ export class AndroidPlatform implements MobilePlatform {
     await command(adb, ['-s', this.serial, 'push', this.options.certificate, remote], 30_000);
     await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'android.settings.SECURITY_SETTINGS'], 30_000);
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-    await delay(1_000);
+    await this.waitForForegroundPackage('com.android.settings');
+    await delay(500);
 
     // Android 11+ only permits CA installation when the user starts it from
     // Settings. The generic credential intent is deliberately rejected and
@@ -334,11 +335,53 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async clickNative(locators: Locator[], description: string, timeoutMs = 30_000): Promise<void> {
     try {
-      const element = await this.driver.findAny(locators, timeoutMs);
+      const element = await this.findNative(locators, timeoutMs);
       await this.driver.click(element);
     } catch (error) {
       throw new Error(`ANDROID_CERTIFICATE: ${description}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
+  }
+
+  private async findNative(locators: Locator[], timeoutMs: number): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    let lastError = '';
+    let scrolls = 0;
+    const size = await this.driver.windowSize().catch(() => ({ width: 1_080, height: 2_400 }));
+    while (Date.now() < deadline) {
+      try {
+        return await this.driver.findAny(locators, Math.min(2_000, Math.max(1, deadline - Date.now())));
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      if (scrolls >= 8) {
+        await delay(250);
+        continue;
+      }
+      await this.driver.mobile('scrollGesture', {
+        left: 0,
+        top: 100,
+        width: size.width,
+        height: Math.max(1, size.height - 200),
+        direction: 'down',
+        percent: 0.75,
+      }).catch((error) => {
+        lastError = error instanceof Error ? error.message : String(error);
+      });
+      scrolls += 1;
+      await delay(250);
+    }
+    throw new Error(`APPIUM_NATIVE: ${lastError}`);
+  }
+
+  private async waitForForegroundPackage(packageName: string, timeoutMs = 30_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let current = '';
+    while (Date.now() < deadline) {
+      current = await this.currentForegroundPackage();
+      if (current === packageName) return;
+      await delay(250);
+    }
+    throw new Error(`ANDROID_CERTIFICATE: expected ${packageName} in foreground, found ${current || 'none'}`);
   }
 
   private async certificateCommonName(): Promise<string> {
@@ -352,7 +395,8 @@ export class AndroidPlatform implements MobilePlatform {
     const adb = process.env.ADB || 'adb';
     await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'com.android.settings.TRUSTED_CREDENTIALS_USER'], 30_000);
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-    await delay(1_000);
+    await this.waitForForegroundPackage('com.android.settings');
+    await delay(500);
     const nameWithoutExtension = certificateName.replace(/\.[^.]+$/u, '');
     await this.driver.findAny([
       accessibility(commonName),

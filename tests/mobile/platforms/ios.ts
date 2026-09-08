@@ -53,11 +53,6 @@ export class IOSPlatform implements MobilePlatform {
         'appium:includeSafariInWebviews': true,
         'appium:autoWebview': false,
         'appium:usePrebuiltWDA': false,
-        // Build WDA in a separate xcodebuild process before launching the
-        // test runner. This avoids the hosted Xcode 16.4 combined
-        // build-for-testing/test-without-building path occasionally hanging
-        // after reporting TEST BUILD SUCCEEDED.
-        'appium:prebuildWDA': true,
         ...(process.env.IOS_WDA_DERIVED_DATA_PATH
           ? { 'appium:derivedDataPath': process.env.IOS_WDA_DERIVED_DATA_PATH }
           : {}),

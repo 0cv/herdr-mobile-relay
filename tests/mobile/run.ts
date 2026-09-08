@@ -483,6 +483,7 @@ async function main(): Promise<void> {
     platform = platformFor(platformOptions);
     result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; });
   } catch (error) {
+    await platform?.captureSanitizedEvidence('failure').catch(() => undefined);
     const message = error instanceof Error ? error.message : String(error);
     const product = /(RUNTIME_|PREMATURE_|PHONE_COMPLETION_|PHONE_PLAN_|CREDENTIAL_|PREFERENCE_|INVITATION_|RELOAD_|UNEXPECTED_|STANDALONE_|ORIGIN_|APP_NOT_INITIALIZED|REQUIRED_ASSET|BASELINE_)/u.test(message);
     result = {

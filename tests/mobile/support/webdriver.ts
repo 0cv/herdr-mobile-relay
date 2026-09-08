@@ -116,6 +116,10 @@ export class AppiumClient {
     return this.command<string>('/screenshot', 'GET');
   }
 
+  async windowSize(): Promise<{ width: number; height: number }> {
+    return this.command<{ width: number; height: number }>('/window/size', 'GET');
+  }
+
   async back(): Promise<void> {
     await this.command('/back', 'POST');
   }
