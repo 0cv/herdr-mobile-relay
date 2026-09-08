@@ -1278,12 +1278,14 @@ test('loads a deployed phone app and preserves pending relay updates', async ({ 
   });
   const reloadRequest = page.waitForRequest((request) =>
     new URL(request.url()).searchParams.has('herdr_reload'));
+  const reloadNavigation = page.waitForNavigation({ waitUntil: 'domcontentloaded' });
   await dialog.getByRole('button', { name: 'Load Update', exact: true }).click();
 
   const reloadUrl = new URL((await reloadRequest).url());
   expect(reloadUrl.pathname).toBe('/index.html');
   expect(reloadUrl.searchParams.get('herdr_reload'))
     .toMatch(new RegExp(`^${APP_RELEASE.replaceAll('.', '\\.')}-\\d+$`));
+  await reloadNavigation;
   await page.waitForFunction(() =>
     !(window as unknown as { __herdrPreReload?: boolean }).__herdrPreReload);
   await expect.poll(() => {
