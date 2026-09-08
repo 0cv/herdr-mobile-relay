@@ -268,6 +268,7 @@ jobs:
           printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
           printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
           printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
+          printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
@@ -405,6 +406,22 @@ jobs:
           # not always install the transitive dependency at that level.
           npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
           appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
+      - name: Prebuild WebDriverAgent
+        if: matrix.platform == 'ios'
+        run: |
+          set -euo pipefail
+          wda_project="$APPIUM_HOME/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj"
+          xcodebuild build-for-testing \
+            -project "$wda_project" \
+            -scheme WebDriverAgentRunner \
+            -derivedDataPath "$IOS_WDA_DERIVED_DATA_PATH" \
+            -destination "id=$IOS_SIMULATOR_UDID" \
+            IPHONEOS_DEPLOYMENT_TARGET=18.5 \
+            GCC_TREAT_WARNINGS_AS_ERRORS=0 \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            APPIUM_XCODEBUILD_WDA_MARKER=1 \
+            2>&1 | tee "$RUNNER_TEMP/wda-build.log"
+          test -n "$(find "$IOS_WDA_BOOTSTRAP_PATH" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' -print -quit)"
       - name: Start Appium
         run: |
           set -euo pipefail
@@ -449,6 +466,9 @@ jobs:
           mkdir -p "$MOBILE_OUTPUT"
           if [ -f "$RUNNER_TEMP/appium.log" ]; then
             bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
+          fi
+          if [ -f "$RUNNER_TEMP/wda-build.log" ]; then
+            head -c 104857600 "$RUNNER_TEMP/wda-build.log" >"$MOBILE_OUTPUT/wda-build.log" || true
           fi
           if [ -f "$RUNNER_TEMP/emulator.log" ]; then
             head -c 104857600 "$RUNNER_TEMP/emulator.log" >"$MOBILE_OUTPUT/emulator.log" || true

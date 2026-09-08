@@ -308,7 +308,9 @@ export class AndroidPlatform implements MobilePlatform {
     ], 'CA certificate');
     await this.clickNative([
       accessibility('Install anyway'),
+      accessibility('INSTALL ANYWAY'),
       textLocator('Install anyway'),
+      textLocator('INSTALL ANYWAY'),
     ], 'Install anyway');
 
     // The supported flow now opens DocumentsUI. Explicitly open Downloads and

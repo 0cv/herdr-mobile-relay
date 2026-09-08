@@ -53,8 +53,11 @@ export class IOSPlatform implements MobilePlatform {
         'appium:includeSafariInWebviews': true,
         'appium:autoWebview': false,
         'appium:usePrebuiltWDA': false,
-        ...(process.env.IOS_WDA_DERIVED_DATA_PATH
-          ? { 'appium:derivedDataPath': process.env.IOS_WDA_DERIVED_DATA_PATH }
+        ...(process.env.IOS_WDA_BOOTSTRAP_PATH
+          ? {
+            'appium:useXctestrunFile': true,
+            'appium:bootstrapPath': process.env.IOS_WDA_BOOTSTRAP_PATH,
+          }
           : {}),
         // A fresh hosted runner may need several minutes to build and launch WDA.
         'appium:showXcodeLog': true,
