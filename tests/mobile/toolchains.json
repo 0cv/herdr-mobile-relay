@@ -5,6 +5,7 @@
   "node": "24.12.0",
   "bun": "1.4.0",
   "appium": "3.1.1",
+  "appiumLogger": "2.0.4",
   "drivers": {
     "uiautomator2": "8.2.2",
     "xcuitest": "12.10.0"

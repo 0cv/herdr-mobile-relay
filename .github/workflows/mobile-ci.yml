@@ -100,6 +100,7 @@ jobs:
             .node == "24.12.0" and
             .bun == "1.4.0" and
             .appium == "3.1.1" and
+            .appiumLogger == "2.0.4" and
             .drivers.uiautomator2 == "8.2.2" and
             .drivers.xcuitest == "12.10.0"
           ' tests/mobile/toolchains.json >/dev/null
@@ -297,6 +298,7 @@ jobs:
         if: matrix.platform == 'android'
         run: |
           set -euo pipefail
+          export PATH="$ANDROID_HOME/emulator:$PATH"
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis_playstore;x86_64"
           avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
@@ -361,6 +363,8 @@ jobs:
             appium driver install uiautomator2@8.2.2
           else
             appium driver install xcuitest@12.10.0
+            # node-devicectl 2.x imports this package from the Appium home.
+            npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
           fi
           appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
       - name: Start Appium
