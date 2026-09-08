@@ -152,12 +152,7 @@ export class AndroidPlatform implements MobilePlatform {
   async launchInstalledApp(): Promise<void> {
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
-    const icon = await this.driver.findAny([
-      textLocator('Herdr Mobile Relay'),
-      accessibility('Herdr Mobile Relay'),
-      textLocator('Herdr Relay'),
-      accessibility('Herdr Relay'),
-    ], 30_000);
+    const icon = await this.findLauncherIcon();
     await this.driver.click(icon);
     this.installedStandalone = true;
     await delay(1_000);
@@ -169,6 +164,37 @@ export class AndroidPlatform implements MobilePlatform {
     const identity = await this.readRunningIdentity();
     assertStandalone(identity, origin);
     return identity;
+  }
+
+  private async findLauncherIcon(): Promise<string> {
+    const locators = [
+      textLocator('Herdr Mobile Relay'),
+      accessibility('Herdr Mobile Relay'),
+      textLocator('Herdr Relay'),
+      accessibility('Herdr Relay'),
+    ];
+    try {
+      // A shortcut installation normally places the icon on the current home
+      // screen. A WebAPK, however, can be registered in the launcher app
+      // drawer without being pinned to that screen (notably on hosted Android
+      // 15 images), so inspect both launcher surfaces before failing.
+      return await this.driver.findAny(locators, 5_000);
+    } catch (homeError) {
+      const size = await this.driver.windowSize().catch(() => ({ width: 1_080, height: 2_400 }));
+      await this.driver.mobile('swipeGesture', {
+        left: 0,
+        top: 100,
+        width: size.width,
+        height: Math.max(1, size.height - 200),
+        direction: 'up',
+        percent: 0.75,
+      }).catch(() => undefined);
+      try {
+        return await this.driver.findAny(locators, 30_000);
+      } catch (drawerError) {
+        throw new Error(`ANDROID_LAUNCHER: home screen and app drawer did not expose Herdr Relay (${drawerError instanceof Error ? drawerError.message : String(homeError)})`, { cause: drawerError });
+      }
+    }
   }
 
   async attachToInstalledView(): Promise<void> {
