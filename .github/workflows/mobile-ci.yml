@@ -299,12 +299,22 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$ANDROID_HOME/emulator:$PATH"
+          # Keep avdmanager and emulator on the same explicit, disposable path.
+          # Hosted images can expose different Android home defaults to the two
+          # tools, which otherwise leaves the emulator unable to find the AVD.
+          avd_home="$RUNNER_TEMP/android-avd"
+          mkdir -p "$avd_home"
+          export ANDROID_AVD_HOME="$avd_home"
+          printf 'ANDROID_AVD_HOME=%s\n' "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis_playstore;x86_64"
           avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo no | avdmanager create avd --force --name "$avd_name" --package "system-images;android-35;google_apis_playstore;x86_64" --device pixel_7
+          avdmanager list avd
           printf 'ANDROID_AVD_NAME=%s\n' "$avd_name" >> "$GITHUB_ENV"
           emulator -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 &
+          emulator_pid=$!
+          printf 'ANDROID_EMULATOR_PID=%s\n' "$emulator_pid" >> "$GITHUB_ENV"
           for attempt in $(seq 1 180); do
             serial=""
             while IFS= read -r candidate_serial; do
@@ -330,6 +340,10 @@ jobs:
                 adb -s "$serial" shell dumpsys package com.android.chrome | grep -m1 versionName >"$RUNNER_TEMP/android-chrome-version.txt"
                 break
               fi
+            fi
+            if ! kill -0 "$emulator_pid" 2>/dev/null; then
+              sed -n '1,160p' "$RUNNER_TEMP/emulator.log" >&2 || true
+              exit 1
             fi
             if [ "$attempt" -eq 180 ]; then
               sed -n '1,160p' "$RUNNER_TEMP/emulator.log" >&2 || true
@@ -410,7 +424,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$MOBILE_OUTPUT"
           if [ -f "$RUNNER_TEMP/appium.log" ]; then
-            bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const input = await readFile(process.argv[2], "utf8"); await writeFile(process.argv[3], redactText(input).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
+            bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
           fi
           if [ -f "$RUNNER_TEMP/emulator.log" ]; then
             head -c 104857600 "$RUNNER_TEMP/emulator.log" >"$MOBILE_OUTPUT/emulator.log" || true
@@ -419,6 +433,9 @@ jobs:
           if [ -f "$RUNNER_TEMP/ios-apps-before.txt" ]; then cp "$RUNNER_TEMP/ios-apps-before.txt" "$MOBILE_OUTPUT/ios-apps-before.txt"; fi
           if [ -f "$RUNNER_TEMP/appium-drivers.txt" ]; then cp "$RUNNER_TEMP/appium-drivers.txt" "$MOBILE_OUTPUT/appium-drivers.txt"; fi
           if [ -f "$RUNNER_TEMP/android-chrome-version.txt" ]; then cp "$RUNNER_TEMP/android-chrome-version.txt" "$MOBILE_OUTPUT/android-chrome-version.txt"; fi
+          if [ -f "$MOBILE_OUTPUT/mobile-result.json" ]; then
+            cat "$MOBILE_OUTPUT/mobile-result.json"
+          fi
       - name: Upload mobile evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -440,7 +457,7 @@ jobs:
             xcrun simctl shutdown "$IOS_SIMULATOR_UDID" 2>/dev/null || true
             xcrun simctl delete "$IOS_SIMULATOR_UDID" 2>/dev/null || true
           fi
-          rm -rf "${MOBILE_PRIVATE:-}" "${APPIUM_HOME:-}" "${MOBILE_FIXTURE_BINARY:-}" "${MOBILE_DEVICE_OWNERSHIP_FILE:-}"
+          rm -rf "${MOBILE_PRIVATE:-}" "${APPIUM_HOME:-}" "${MOBILE_FIXTURE_BINARY:-}" "${MOBILE_DEVICE_OWNERSHIP_FILE:-}" || true
 
   gate:
     needs: [prepare, device]
