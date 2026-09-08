@@ -23,6 +23,11 @@ export const HANDLED_NOTIFICATION_ACTIONS_KEY = 'herdr_handled_notification_acti
 export const APP_PROTOCOL_VERSION = __APP_PROTOCOL_VERSION__;
 export const APP_VERSION = __APP_VERSION__;
 export const APP_ASSET_VERSION = __APP_ASSET_VERSION__;
+// The release plugin replaces this marker with the digest-derived build
+// identity after Rollup has emitted the bundle. Keeping it in the running app
+// lets update progress acknowledge the bytes that actually initialized, not
+// merely a version.json response.
+export const APP_BUILD_ID = __APP_BUILD_ID__;
 export const SERVICE_WORKER_URL = __SERVICE_WORKER_URL__;
 export const THEMES = ['dark', 'light', 'nord', 'solarized', 'rose', 'latte'] as const;
 export type Theme = (typeof THEMES)[number];
@@ -370,4 +375,5 @@ export function importQuickSetup(
 declare const __APP_PROTOCOL_VERSION__: number;
 declare const __APP_VERSION__: string;
 declare const __APP_ASSET_VERSION__: number;
+declare const __APP_BUILD_ID__: string;
 declare const __SERVICE_WORKER_URL__: string;

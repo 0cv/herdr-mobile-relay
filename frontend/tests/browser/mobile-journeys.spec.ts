@@ -425,7 +425,15 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
 }
 
 async function socketCount(page: Page) {
-  return page.evaluate(() => (window as any).__relaySockets.length as number);
+  try {
+    return await page.evaluate(() => (window as any).__relaySockets.length as number);
+  } catch (error) {
+    // WebKit can tear down the old document between page.reload() and the
+    // first poll against the new one. Let expect.poll observe the replacement
+    // context instead of turning that expected navigation into a test failure.
+    if (error instanceof Error && error.message.includes('Execution context was destroyed')) return 0;
+    throw error;
+  }
 }
 
 async function server(page: Page, index: number, message: unknown) {
@@ -913,7 +921,7 @@ test('keeps an iOS setup link unredeemed for Home Screen installation', async ({
   // a Safari tab that dialled would spend it before the Home Screen app opens.
   await expect(page.getByRole('status').filter({ hasText: 'Add Herdr to the iPhone or iPad Home Screen' })).toBeVisible();
   await expect(page.getByRole('status').filter({ hasText: 'This browser tab keeps the setup link unused' })).toBeVisible();
-  expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('setup.webmanifest');
+  expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('/setup.webmanifest');
   expect(await page.evaluate(() => location.hash)).toBe(setupHash);
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem('herdr_relays') || '[]')[0]))
     .toMatchObject({
@@ -957,7 +965,7 @@ test('imports quick setup and merges agents from multiple relays', async ({ page
       token: '0123456789abcdef0123456789abcdef',
     });
   expect(await page.evaluate(() => location.hash)).toBe('');
-  expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('manifest.webmanifest');
+  expect(await page.locator('link[rel="manifest"]').getAttribute('href')).toBe('/manifest.webmanifest');
 
   await page.evaluate(() => {
     location.hash = '#setup=abcdef0123456789abcdef0123456789&label=Mac&relay=wss%3A%2F%2Fmac.example';
@@ -1286,7 +1294,9 @@ test('loads a deployed phone app and preserves pending relay updates', async ({ 
   expect(plan).toMatchObject({
     targetVersion: APP_RELEASE,
     relayIds: ['fedora'],
-    startedRelayIds: [],
+    startedRelayIds: ['fedora'],
+    phoneAppRequired: true,
+    phoneAcknowledged: false,
   });
 
   await setAutoCommands(page, false);
@@ -1296,6 +1306,19 @@ test('loads a deployed phone app and preserves pending relay updates', async ({ 
     capabilities: ['directory_browser', 'self_update'],
     update: availableUpdate,
   });
+  await expect.poll(async () => (await commandsForSocket(page, 0)).some(
+    (command) => command.type === 'check_update' || command.type === 'install_update',
+  )).toBe(true);
+  const checkUpdate = (await commandsForSocket(page, 0)).find((command) => command.type === 'check_update');
+  if (checkUpdate) {
+    await server(page, 0, {
+      type: 'command_result',
+      request_id: checkUpdate.request_id,
+      ok: true,
+      phase: 'completed',
+      data: { update: availableUpdate },
+    });
+  }
   await expect.poll(async () => (await commandsForSocket(page, 0)).some(
     (command) => command.type === 'install_update',
   )).toBe(true);

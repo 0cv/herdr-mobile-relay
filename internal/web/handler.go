@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"mime"
@@ -24,16 +25,24 @@ var allowedAssets = map[string]bool{
 	"notification-icons.js": true,
 	"sw.js":                 true,
 	"version.json":          true,
-	"assets/app.js":         true,
-	"assets/app.css":        true,
+	"release.json":          true,
+	"herdr-bootstrap.js":    true,
+	// Legacy stable asset names remain readable during the cutover. New
+	// bundles are admitted through the descriptor below.
+	"assets/app.js":  true,
+	"assets/app.css": true,
 }
 
 type Handler struct {
-	root           *os.Root
-	files          fs.FS
-	bundleHash     string
-	bundleVersion  string
-	bundleRevision string
+	root             *os.Root
+	files            fs.FS
+	bundleHash       string
+	bundleVersion    string
+	bundleRevision   string
+	bundleBuild      string
+	entryPath        string
+	descriptorLoaded bool
+	webFiles         map[string]bool
 }
 
 func NewHandler(webRoot string) (*Handler, error) {
@@ -41,8 +50,12 @@ func NewHandler(webRoot string) (*Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open web root %s: %w", webRoot, err)
 	}
-	handler := &Handler{root: root, files: root.FS()}
+	handler := &Handler{root: root, files: root.FS(), webFiles: make(map[string]bool)}
 	handler.loadIdentity()
+	if err := handler.loadWebDescriptor(); err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("load web release descriptor: %w", err)
+	}
 	return handler, nil
 }
 
@@ -57,13 +70,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if requestPath == "index.html" && h.entryPath != "" {
+		target := *r.URL
+		target.Path = "/" + h.entryPath
+		setSecurityHeaders(w)
+		w.Header().Set("Cache-Control", "no-cache, no-store")
+		http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+		return
+	}
 	if requestPath == "index.html" && r.URL.Path == "/" && r.URL.Query().Has("herdr_reload") {
 		target := *r.URL
 		target.Path = "/index.html"
 		http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
 		return
 	}
-	if !isAllowedAsset(requestPath) {
+	if !h.isAllowedAsset(requestPath) {
 		// Extensionless paths are SPA routes. Asset-looking paths remain 404.
 		if path.Ext(requestPath) != "" {
 			http.NotFound(w, r)
@@ -85,7 +106,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setSecurityHeaders(w)
-	setCacheHeaders(w, requestPath)
+	setCacheHeaders(w, requestPath, h.immutableAsset(requestPath))
 	if hasCompressed {
 		w.Header().Set("Vary", "Accept-Encoding")
 	}
@@ -137,11 +158,26 @@ func canonicalAssetPath(raw string) (string, bool) {
 	return cleaned, true
 }
 
-func isAllowedAsset(asset string) bool {
-	return allowedAssets[asset] ||
-		isAttachmentHashWorker(asset) ||
+func (h *Handler) isAllowedAsset(asset string) bool {
+	if h.webFiles[asset] {
+		return true
+	}
+	if allowedAssets[asset] {
+		// A verified release must not silently keep serving the old stable
+		// application names. They are retained only so a legacy release tree
+		// remains usable while it is being replaced.
+		if h.descriptorLoaded && (asset == "assets/app.js" || asset == "assets/app.css") {
+			return false
+		}
+		return true
+	}
+	return isAttachmentHashWorker(asset) ||
 		strings.HasPrefix(asset, "icons/") ||
 		strings.HasPrefix(asset, "fonts/")
+}
+
+func (h *Handler) immutableAsset(asset string) bool {
+	return h.webFiles[asset]
 }
 
 func isAttachmentHashWorker(asset string) bool {
@@ -226,8 +262,18 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' https: wss:; img-src 'self' blob: data:; media-src blob:; style-src 'self'; style-src-attr 'unsafe-inline'; script-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 }
 
-func setCacheHeaders(w http.ResponseWriter, _ string) {
-	w.Header().Set("Cache-Control", "no-cache")
+func setCacheHeaders(w http.ResponseWriter, asset string, immutable bool) {
+	if immutable {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		return
+	}
+	switch asset {
+	case "index.html", "herdr-bootstrap.js", "manifest-loader.js", "manifest.webmanifest",
+		"setup.webmanifest", "sw.js", "version.json", "release.json":
+		w.Header().Set("Cache-Control", "no-cache, no-store")
+	default:
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 }
 
 func (h *Handler) readCompressed(asset string) ([]byte, bool) {
@@ -247,6 +293,7 @@ func (h *Handler) loadIdentity() {
 			Version        string `json:"version"`
 			ReleaseVersion string `json:"release_version"`
 			Revision       string `json:"revision"`
+			Build          string `json:"build"`
 		}
 		if json.Unmarshal(versionData, &version) == nil {
 			h.bundleVersion = version.ReleaseVersion
@@ -254,6 +301,7 @@ func (h *Handler) loadIdentity() {
 				h.bundleVersion = version.Version
 			}
 			h.bundleRevision = version.Revision
+			h.bundleBuild = version.Build
 		}
 	}
 	if bundleHash, err := relayrelease.WebHashFS(h.files); err == nil {
@@ -261,7 +309,27 @@ func (h *Handler) loadIdentity() {
 	}
 }
 
+func (h *Handler) loadWebDescriptor() error {
+	descriptor, err := relayrelease.VerifyWebDescriptor(h.files, "")
+	if errors.Is(err, relayrelease.ErrWebDescriptorMissing) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	h.entryPath = strings.TrimPrefix(descriptor.Entry, "/")
+	for _, file := range descriptor.Files {
+		h.webFiles[file.Path] = true
+	}
+	h.descriptorLoaded = true
+	if h.bundleBuild == "" {
+		h.bundleBuild = descriptor.Build
+	}
+	return nil
+}
+
 func (h *Handler) Close() error           { return h.root.Close() }
 func (h *Handler) BundleHash() string     { return h.bundleHash }
 func (h *Handler) BundleVersion() string  { return h.bundleVersion }
 func (h *Handler) BundleRevision() string { return h.bundleRevision }
+func (h *Handler) BundleBuild() string    { return h.bundleBuild }

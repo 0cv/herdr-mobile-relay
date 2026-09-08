@@ -57,7 +57,9 @@ alsa-lib, per passportxyz/passport's fedora-install-playwright-deps.sh).
 Publishing the hosted web app (`make web-deploy`,
 `make web-preview`) shells out to `npx wrangler`, which requires Node.js 22 or
 newer on that computer only; CI and the relay's deploy action are exercised on
-Node.js 26. Packaged users need no toolchain at all.
+Node.js 26. `make web-deploy` then runs the public bundle verifier against
+`WEB_ORIGIN` (the Pages domain by default; override it for a custom domain).
+Packaged users need no toolchain at all.
 
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
 failure injection, and process-control traces for black-box tests.

@@ -129,6 +129,9 @@ func Verify(root, expectedTarget string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
+	if _, err := VerifyWebDescriptor(os.DirFS(filepath.Join(root, "web")), manifest.Version); err != nil && !errors.Is(err, ErrWebDescriptorMissing) {
+		return Manifest{}, fmt.Errorf("verify web release descriptor: %w", err)
+	}
 	for _, required := range []string{
 		"herdr-mobile-relay",
 		"web/index.html",

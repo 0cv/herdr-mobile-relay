@@ -15,6 +15,26 @@ verification fails.
 Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit.
 
+## Upgrading to v0.20.10
+
+Version 0.20.10 treats the phone app as its own update item. A relay deployment
+can publish the hosted app, but the update screen remains incomplete until the
+new phone bundle initializes and reports its verified build identity. Relay-only
+updates do not claim to have updated the phone.
+
+Hosted releases use a build-specific entry and content-addressed JavaScript and
+CSS with integrity metadata. `/` and `/index.html` remain same-origin bootstrap
+URLs, so an installed app keeps its manifest identity, storage, pairings, and
+preferences while it crosses the cutover. Pending progress survives a restart;
+a failed or exhausted automatic reload is shown as an actionable phone-load
+failure rather than retried indefinitely.
+
+If the app cannot load the new bundle, leave the pending update item in place
+and use **Load Update** once more from the existing app. If the bounded recovery
+is exhausted, inspect the displayed version/build identity and deployment
+status; do not clear browser data or reinstall, because those actions discard
+the credentials and preferences the recovery is designed to preserve.
+
 ## Upgrading from v0.19.1
 
 Version 0.20.0 replaces E2EE v1 and the shared relay key with E2EE v2 and

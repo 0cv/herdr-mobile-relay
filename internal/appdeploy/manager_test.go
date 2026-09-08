@@ -28,9 +28,7 @@ func TestManagerRejectsPhoneOverrides(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(webRoot, "version.json"), []byte(`{"release_version":"1.2.3","revision":"abc"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeWebReleaseFixture(t, webRoot)
 	webHash, err := release.WebHashFS(os.DirFS(webRoot))
 	if err != nil {
 		t.Fatal(err)

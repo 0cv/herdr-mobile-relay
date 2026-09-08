@@ -352,7 +352,14 @@
       clearPendingRelayUpdate(relayId);
       relayStore.showToast(`${connection.relay.label} updated to v${pending.version}.`);
       if (relayServesCurrentOrigin(connection.relay.url)) {
-        void reloadUpdatedSameOriginApp(pending.version);
+        const target = $appUpdates.deployedVersion === pending.version
+          ? {
+            version: pending.version,
+            assets: $appUpdates.deployedAssets,
+            build: $appUpdates.deployedBuild || '',
+          }
+          : null;
+        void reloadUpdatedSameOriginApp(pending.version, target);
       }
     }
   });
@@ -372,7 +379,14 @@
       const identity = `${deployment.target_version}:${deployment.target_revision}`;
       if (awaitedDeployments.has(identity)) continue;
       awaitedDeployments.add(identity);
-      void reloadUpdatedSameOriginApp(deployment.target_version);
+      const target = $appUpdates.deployedVersion === deployment.target_version
+        ? {
+          version: deployment.target_version,
+          assets: $appUpdates.deployedAssets,
+          build: $appUpdates.deployedBuild || '',
+        }
+        : null;
+      void reloadUpdatedSameOriginApp(deployment.target_version, target);
     }
   });
 

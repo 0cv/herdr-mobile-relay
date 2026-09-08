@@ -1,12 +1,14 @@
 import { get } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { APP_ASSET_VERSION, APP_VERSION } from '$lib/config';
+import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from '$lib/config';
 import {
+  acknowledgePhoneUpdate,
   appUpdateAvailable,
   beginUpdateProgress,
   appUpdateStatus,
   cacheBustedAppUrl,
   checkAppUpdate,
+  initializeAppUpdates,
   clearPendingRelayUpdate,
   clearUpdateProgress,
   newerBundle,
@@ -15,13 +17,17 @@ import {
   normalizeReloadedAppUrl,
   normalizeRelayUpdate,
   markUpdateProgressRelayStarted,
+  queueUpdateProgressForReload,
   observeAppUpstreamVersion,
   pendingRelayUpdate,
+  phoneTargetMatchesCurrent,
   rememberPendingRelayUpdate,
   relayNeedsManualBootstrap,
   reloadUpdatedSameOriginApp,
   semverTuple,
   restoreUpdateProgress,
+  setPhoneUpdateError,
+  setPhoneUpdateTarget,
   setUpdateProgressError,
   waitForDeployedApp,
   updateProgressPlan,
@@ -31,6 +37,9 @@ describe('release updates', () => {
   afterEach(() => {
     sessionStorage.clear();
     clearUpdateProgress();
+    delete document.documentElement.dataset.herdrLoadFailed;
+    delete document.documentElement.dataset.herdrLoadTimedOut;
+    delete document.documentElement.dataset.herdrCssReady;
     vi.restoreAllMocks();
   });
 
@@ -50,10 +59,12 @@ describe('release updates', () => {
     expect(appUpdateAvailable({ version: `${major}.${minor + 1}.${patch}`, assets: 0 })).toBe(true);
   });
 
-  it('newerBundle compares version first then assets', () => {
+  it('newerBundle compares version, assets, and same-version build identity', () => {
     expect(newerBundle({ version: '0.9.0', assets: 0 }, { version: '0.8.0', assets: 99 })).toBe(true);
     expect(newerBundle({ version: '0.8.0', assets: 5 }, { version: '0.8.0', assets: 4 })).toBe(true);
     expect(newerBundle({ version: '0.8.0', assets: 4 }, { version: '0.8.0', assets: 4 })).toBe(false);
+    expect(newerBundle({ version: '0.8.0', assets: 4, build: 'new' }, { version: '0.8.0', assets: 4, build: 'old' })).toBe(true);
+    expect(newerBundle({ version: '0.8.0', assets: 4, build: 'same' }, { version: '0.8.0', assets: 4, build: 'same' })).toBe(false);
     expect(newerBundle({ version: '0.7.0', assets: 99 }, { version: '0.8.0', assets: 0 })).toBe(false);
   });
   it('routes legacy app deployment owners through the one-time Terminal bootstrap', () => {
@@ -149,6 +160,19 @@ describe('release updates', () => {
     });
   });
 
+  it('offers a reload for a distinct same-version build', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: APP_VERSION, assets: APP_ASSET_VERSION, build: 'different-build' }),
+    });
+
+    expect(await checkAppUpdate(fetcher, 127)).toMatchObject({
+      state: 'reload-ready',
+      deployedVersion: APP_VERSION,
+      deployedBuild: 'different-build',
+    });
+  });
+
   it('only offers reload after the app origin has published the upstream bundle', async () => {
     const [major, minor, patch] = semverTuple(APP_VERSION)!;
     const available = `${major}.${minor + 1}.${patch}`;
@@ -197,6 +221,10 @@ describe('release updates', () => {
     redirected.pathname = '/';
     expect(normalizeReloadedAppUrl(redirected.toString()))
       .toBe('https://app.example.test/?setup=preserved#settings');
+    const canonicalEntry = new URL(next);
+    canonicalEntry.pathname = '/builds/0.20.10-363-build/';
+    expect(normalizeReloadedAppUrl(canonicalEntry.toString()))
+      .toBe('https://app.example.test/?setup=preserved#settings');
     expect(normalizeReloadedAppUrl('https://app.example.test/index.html#settings')).toBeNull();
   });
 
@@ -225,6 +253,86 @@ describe('release updates', () => {
     });
     clearPendingRelayUpdate('fedora');
     expect(pendingRelayUpdate('fedora')).toBeNull();
+  });
+
+  it('tracks the phone independently from its deployment owner', () => {
+    beginUpdateProgress('1.2.3', ['fedora', 'mac'], 'fedora', 'fedora', {
+      phoneAppRequired: true,
+      phoneTarget: { version: '1.2.3', assets: 7, build: 'new-build' },
+      phoneState: 'publishing',
+    });
+    expect(get(updateProgressPlan)).toMatchObject({
+      appRelayId: 'fedora',
+      phoneAppRequired: true,
+      phoneTarget: { version: '1.2.3', assets: 7, build: 'new-build' },
+      phoneState: 'publishing',
+      phoneAcknowledged: false,
+    });
+
+    updateProgressPlan.set(null);
+    restoreUpdateProgress();
+    expect(get(updateProgressPlan)).toMatchObject({ phoneAppRequired: true, phoneState: 'publishing' });
+
+    beginUpdateProgress('1.2.3', ['fedora'], 'fedora');
+    expect(get(updateProgressPlan)).toMatchObject({ phoneAppRequired: false, phoneTarget: null });
+  });
+
+  it('accepts a compatible newer running app for an older phone target', () => {
+    expect(phoneTargetMatchesCurrent({ version: '0.0.1', assets: 1, build: '' })).toBe(true);
+    expect(phoneTargetMatchesCurrent({ version: APP_VERSION, assets: APP_ASSET_VERSION - 1, build: '' })).toBe(true);
+    expect(phoneTargetMatchesCurrent({ version: APP_VERSION, assets: APP_ASSET_VERSION, build: '' })).toBe(false);
+  });
+
+  it('acknowledges only the exact running phone build', () => {
+    queueUpdateProgressForReload(APP_VERSION, [], {
+      version: APP_VERSION,
+      assets: APP_ASSET_VERSION,
+      build: APP_BUILD_ID,
+    });
+    expect(acknowledgePhoneUpdate()).toBe(true);
+    expect(get(updateProgressPlan)).toMatchObject({ phoneState: 'loaded', phoneAcknowledged: true });
+
+    queueUpdateProgressForReload(APP_VERSION, [], {
+      version: APP_VERSION,
+      assets: APP_ASSET_VERSION,
+      build: 'different-build',
+    });
+    expect(acknowledgePhoneUpdate()).toBe(false);
+    setPhoneUpdateTarget({ version: APP_VERSION, assets: APP_ASSET_VERSION, build: 'different-build' });
+    setPhoneUpdateError(new Error('integrity check failed'));
+    expect(get(updateProgressPlan)).toMatchObject({ phoneState: 'failed', phoneAcknowledged: false, phoneError: 'integrity check failed' });
+  });
+
+  it('waits for the required stylesheet before acknowledging a phone update', () => {
+    queueUpdateProgressForReload(APP_VERSION, [], {
+      version: APP_VERSION,
+      assets: APP_ASSET_VERSION,
+      build: APP_BUILD_ID,
+    });
+    const stylesheet = document.createElement('link');
+    stylesheet.rel = 'stylesheet';
+    stylesheet.href = '/assets/app-test.css';
+    document.head.append(stylesheet);
+
+    expect(acknowledgePhoneUpdate()).toBe(false);
+    document.documentElement.dataset.herdrCssReady = '1';
+    expect(acknowledgePhoneUpdate()).toBe(true);
+    stylesheet.remove();
+  });
+
+  it('does not acknowledge a phone update after a required stylesheet failure', () => {
+    queueUpdateProgressForReload(APP_VERSION, [], {
+      version: APP_VERSION,
+      assets: APP_ASSET_VERSION,
+      build: APP_BUILD_ID,
+    });
+    document.documentElement.dataset.herdrLoadFailed = '1';
+
+    expect(acknowledgePhoneUpdate()).toBe(false);
+    expect(get(updateProgressPlan)).toMatchObject({ phoneState: 'loading', phoneAcknowledged: false });
+    const stop = initializeAppUpdates();
+    stop();
+    expect(get(updateProgressPlan)).toMatchObject({ phoneState: 'failed', phoneAcknowledged: false });
   });
 
   it('persists fleet update progress across reloads with per-relay start times', () => {
@@ -276,6 +384,175 @@ describe('release updates', () => {
     expect(fetcher).not.toHaveBeenCalled();
 
     vi.unstubAllGlobals();
+  });
+
+  it('accepts a newer asset revision without requiring its unrelated build identity', async () => {
+    const target = {
+      version: APP_VERSION,
+      assets: APP_ASSET_VERSION,
+      build: 'old-build',
+    };
+    const deployed = {
+      ok: true,
+      json: async () => ({
+        version: APP_VERSION,
+        assets: APP_ASSET_VERSION + 1,
+        build: 'new-build',
+      }),
+    };
+    const fetcher = vi.fn().mockResolvedValue(deployed);
+
+    const status = await waitForDeployedApp(APP_VERSION, {
+      fetcher,
+      target,
+      attempts: 1,
+      intervalMs: 0,
+    });
+
+    expect(status).toMatchObject({
+      deployedAssets: APP_ASSET_VERSION + 1,
+      deployedBuild: 'new-build',
+    });
+  });
+
+  it('revalidates the final metadata response before publishing a reload target', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const targetVersion = `${major}.${minor + 1}.${patch}`;
+    const target = { version: targetVersion, assets: 12, build: 'target-build' };
+    const response = (version: string, assets: number, build: string) => ({
+      ok: true,
+      json: async () => ({ version, assets, build }),
+    });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response(targetVersion, target.assets, target.build))
+      .mockResolvedValueOnce(response(APP_VERSION, APP_ASSET_VERSION, APP_BUILD_ID))
+      .mockResolvedValueOnce(response(targetVersion, target.assets, target.build))
+      .mockResolvedValueOnce(response(targetVersion, target.assets, target.build));
+
+    const status = await waitForDeployedApp(targetVersion, {
+      fetcher,
+      target,
+      attempts: 2,
+      intervalMs: 0,
+      sleep: vi.fn().mockResolvedValue(undefined),
+    });
+
+    expect(status).toMatchObject({ deployedVersion: targetVersion, deployedBuild: target.build });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not restore a stale verification snapshot over a newer app check', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const targetVersion = `${major}.${minor + 1}.${patch}`;
+    const response = (version: string) => ({
+      ok: true,
+      json: async () => ({ version, assets: APP_ASSET_VERSION, build: APP_BUILD_ID }),
+    });
+    let releaseFinal: (value: ReturnType<typeof response>) => void = () => {};
+    const finalResponse = new Promise<ReturnType<typeof response>>((resolve) => { releaseFinal = resolve; });
+    const verificationFetcher = vi.fn()
+      .mockResolvedValueOnce(response(targetVersion))
+      .mockImplementationOnce(() => finalResponse);
+    const verification = waitForDeployedApp(targetVersion, {
+      fetcher: verificationFetcher,
+      target: { version: targetVersion, assets: APP_ASSET_VERSION, build: APP_BUILD_ID },
+      attempts: 1,
+      intervalMs: 0,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const checkFetcher = vi.fn().mockResolvedValue(response(APP_VERSION));
+    await checkAppUpdate(checkFetcher, 123);
+    releaseFinal(response(APP_VERSION));
+    await verification;
+
+    expect(get(appUpdateStatus).checkedAt).toBe(123);
+    expect(get(appUpdateStatus).state).not.toBe('checking');
+  });
+
+  it('does not restore a stale verification snapshot after its deadline', async () => {
+    const [major, minor, patch] = semverTuple(APP_VERSION)!;
+    const targetVersion = `${major}.${minor + 1}.${patch}`;
+    const response = (version: string) => ({
+      ok: true,
+      json: async () => ({ version, assets: APP_ASSET_VERSION, build: APP_BUILD_ID }),
+    });
+    const verificationFetcher = vi.fn()
+      .mockResolvedValueOnce(response(targetVersion))
+      .mockImplementationOnce(() => new Promise(() => {}));
+    const verification = waitForDeployedApp(targetVersion, {
+      fetcher: verificationFetcher,
+      target: { version: targetVersion, assets: APP_ASSET_VERSION, build: APP_BUILD_ID },
+      attempts: 1,
+      intervalMs: 0,
+      deadlineMs: 25,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const checkFetcher = vi.fn().mockResolvedValue(response(APP_VERSION));
+    await checkAppUpdate(checkFetcher, 456);
+    await verification;
+
+    expect(get(appUpdateStatus).checkedAt).toBe(456);
+    expect(get(appUpdateStatus).state).not.toBe('checking');
+  });
+
+  it('does not downgrade a persisted phone target from a stale response', () => {
+    queueUpdateProgressForReload('1.2.3', [], { version: '1.2.3', assets: 12, build: 'target-build' });
+    setPhoneUpdateTarget({ version: '1.2.2', assets: 99, build: 'stale-build' });
+    expect(get(updateProgressPlan)?.phoneTarget).toEqual({
+      version: '1.2.3',
+      assets: 12,
+      build: 'target-build',
+    });
+  });
+
+  it('fails an exhausted phone load from persisted state without relay events', () => {
+    sessionStorage.setItem('herdr_update_progress', JSON.stringify({
+      targetVersion: '1.2.3',
+      relayIds: [],
+      startedRelayIds: [],
+      relayStartedAt: {},
+      appRelayId: '',
+      phoneAppRequired: true,
+      phoneTarget: { version: '1.2.3', assets: 12, build: 'target-build' },
+      phoneState: 'loading',
+      phoneAcknowledged: false,
+      phoneReloadAttempts: 2,
+      phoneError: '',
+      errors: {},
+      startedAt: Date.now(),
+    }));
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    const stop = initializeAppUpdates();
+    stop();
+
+    expect(get(updateProgressPlan)).toMatchObject({
+      phoneState: 'failed',
+      phoneAcknowledged: false,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts a hung metadata request at the verification deadline', async () => {
+    let signal: AbortSignal | undefined;
+    const fetcher = vi.fn((_url: string, init?: RequestInit) => {
+      signal = init?.signal || undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    const status = await waitForDeployedApp(APP_VERSION, {
+      fetcher,
+      attempts: 100,
+      intervalMs: 0,
+      deadlineMs: 10,
+    });
+
+    expect(status).toBeNull();
+    expect(signal?.aborted).toBe(true);
   });
 
   it('waits for the deployed origin bundle to converge before reloading', async () => {

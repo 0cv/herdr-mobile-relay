@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { constants, gzipSync } from 'node:zlib';
 
@@ -69,10 +69,23 @@ import { constants, gzipSync } from 'node:zlib';
 // lands the 0.20.6 payload exactly on the old ceiling. Script and stylesheet
 // names carry a content hash, so index.html's compressed size drifts a couple
 // of bytes per build: a release sitting on the limit fails the next one.
-const limitKiB = 158;
-const limit = limitKiB * 1024;
+// Raised from 158 KiB for the verified phone-build acknowledgement, bounded
+// reload recovery, and public release descriptor checks in 0.20.10.
+// Add a small fixed allowance for the load-failure and hung-metadata recovery
+// guards; keep the ceiling close enough to catch accidental bootstrap growth.
+const limitKiB = 160;
+const limit = limitKiB * 1024 + 256;
 const root = resolve(process.argv[2] || 'dist');
-const files = ['index.html', 'assets/app.js', 'assets/app.css'];
+const assetNames = await readdir(join(root, 'assets'));
+const appScript = assetNames.find((name) => /^app-[a-f0-9]{64}\.js$/.test(name));
+const appStyle = assetNames.find((name) => /^app-[a-f0-9]{64}\.css$/.test(name));
+if (!appScript || !appStyle) throw new Error('content-addressed app assets are missing');
+const descriptor = JSON.parse(await readFile(join(root, 'release.json'), 'utf8'));
+const entry = descriptor?.files?.entry?.path;
+if (typeof entry !== 'string' || !entry.startsWith('builds/') || !entry.endsWith('/index.html')) {
+  throw new Error('release.json does not describe a build-specific entry');
+}
+const files = ['index.html', 'herdr-bootstrap.js', entry, `assets/${appScript}`, `assets/${appStyle}`];
 let totalRaw = 0;
 let totalGzip = 0;
 let totalBrotli = 0;

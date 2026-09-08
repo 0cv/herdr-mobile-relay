@@ -1,7 +1,11 @@
 package appdeploy
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +23,139 @@ import (
 	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/release"
+	"github.com/andybalholm/brotli"
 )
+
+func writeWebReleaseFixture(t *testing.T, root string) {
+	t.Helper()
+	const version = "1.2.3"
+	const revision = "abc"
+	const build = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	javascriptPath := "assets/app-" + digestFixture([]byte("console.log('fixture');\n")) + ".js"
+	stylesheetPath := "assets/app-" + digestFixture([]byte("body { color: black; }\n")) + ".css"
+	javascript := []byte("console.log('fixture');\n")
+	stylesheet := []byte("body { color: black; }\n")
+	entryPath := "builds/1.2.3-1-aaaaaaaaaaaaaaaa/index.html"
+	entry := []byte(`<!doctype html><html><head><link rel="stylesheet" href="/` + stylesheetPath + `" integrity="` + integrityFixture(stylesheet) + `" crossorigin="anonymous"></head><body><script src="/` + javascriptPath + `" integrity="` + integrityFixture(javascript) + `" crossorigin="anonymous"></script></body></html>`)
+	files := map[string][]byte{
+		javascriptPath: javascript,
+		stylesheetPath: stylesheet,
+		entryPath:      entry,
+	}
+	for filename, data := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, filename)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, filename), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	descriptor := release.WebDescriptor{
+		Schema:  release.WebDescriptorSchema,
+		Version: version,
+		Assets:  1,
+		Build:   build,
+		Entry:   "/" + entryPath,
+		Files: map[string]release.WebDescriptorFile{
+			"entry":      {Path: entryPath, SHA256: digestFixture(entry), Integrity: integrityFixture(entry)},
+			"javascript": {Path: javascriptPath, SHA256: digestFixture(javascript), Integrity: integrityFixture(javascript)},
+			"stylesheet": {Path: stylesheetPath, SHA256: digestFixture(stylesheet), Integrity: integrityFixture(stylesheet)},
+		},
+	}
+	writeJSONFixture(t, filepath.Join(root, "release.json"), descriptor)
+	writeJSONFixture(t, filepath.Join(root, "version.json"), map[string]any{
+		"version":         version,
+		"release_version": version,
+		"revision":        revision,
+		"assets":          1,
+		"build":           build,
+		"entry":           "/" + entryPath,
+		"script":          "/" + javascriptPath,
+		"style":           "/" + stylesheetPath,
+		"script_sha256":   digestFixture(javascript),
+		"style_sha256":    digestFixture(stylesheet),
+	})
+}
+
+func addFixtureBrotliDigests(t *testing.T, root string) {
+	t.Helper()
+	descriptor, err := release.LoadWebDescriptor(os.DirFS(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"entry", "javascript", "stylesheet"} {
+		file := descriptor.Files[name]
+		data, err := os.ReadFile(filepath.Join(root, file.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var compressed bytes.Buffer
+		encoder := brotli.NewWriterLevel(&compressed, 11)
+		if _, err := encoder.Write(data); err != nil {
+			t.Fatal(err)
+		}
+		if err := encoder.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, file.Path+".br"), compressed.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		file.BrotliSHA256 = digestFixture(compressed.Bytes())
+		file.BrotliIntegrity = integrityFixture(compressed.Bytes())
+		descriptor.Files[name] = file
+	}
+	writeJSONFixture(t, filepath.Join(root, "release.json"), descriptor)
+}
+
+func digestFixture(data []byte) string {
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
+}
+
+func integrityFixture(data []byte) string {
+	digest := sha256.Sum256(data)
+	return "sha256-" + base64.StdEncoding.EncodeToString(digest[:])
+}
+
+func writeJSONFixture(t *testing.T, filename string, value any) {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func webFixtureHandler(root string, versionBody func() []byte) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		filename := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(request.URL.Path, "/")))
+		data, err := os.ReadFile(filename)
+		if err != nil {
+			http.NotFound(writer, request)
+			return
+		}
+		if request.URL.Path == "/version.json" && versionBody != nil {
+			data = versionBody()
+		}
+		if request.Header.Get("Accept-Encoding") == "br" && request.URL.Path != "/version.json" {
+			var compressed bytes.Buffer
+			encoder := brotli.NewWriterLevel(&compressed, 11)
+			if _, err := encoder.Write(data); err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := encoder.Close(); err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writer.Header().Set("Content-Encoding", "br")
+			data = compressed.Bytes()
+		}
+		_, _ = writer.Write(data)
+	}
+}
 
 func TestValidateRejectsOverridesAndUnpinnedIdentity(t *testing.T) {
 	root := t.TempDir()
@@ -36,9 +172,7 @@ func TestValidateRejectsOverridesAndUnpinnedIdentity(t *testing.T) {
 	if err := os.MkdirAll(web, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(web, "version.json"), []byte(`{"release_version":"1.2.3","revision":"abc"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeWebReleaseFixture(t, web)
 	job := Job{
 		RuntimeDir: root,
 		WebRoot:    web,
@@ -85,14 +219,12 @@ func TestRunRejectsWebBundleThatDoesNotMatchReleaseManifest(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(web, "version.json"), []byte(`{"release_version":"1.2.3","revision":"abc"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeWebReleaseFixture(t, web)
 	webHash, err := release.WebHashFS(os.DirFS(web))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(web, "index.html"), []byte("tampered"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(web, "builds/1.2.3-1-aaaaaaaaaaaaaaaa/index.html"), []byte("tampered"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	job := Job{
@@ -159,9 +291,7 @@ func TestRunPinsWranglerToRelayOwnedWorkingDirectory(t *testing.T) {
 	if err := os.WriteFile(npx, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(web, "version.json"), []byte(`{"release_version":"1.2.3","revision":"abc"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeWebReleaseFixture(t, web)
 	webHash, err := release.WebHashFS(os.DirFS(web))
 	if err != nil {
 		t.Fatal(err)
@@ -422,52 +552,48 @@ func TestUnquoteShellWord(t *testing.T) {
 	}
 }
 
-func TestVerifyPublicRetriesUntilExpectedIdentityIsPublished(t *testing.T) {
-	var requests atomic.Int32
+func TestVerifyPublicRetriesUntilExpectedBundleIsPublished(t *testing.T) {
+	root := t.TempDir()
+	writeWebReleaseFixture(t, root)
+	var versionRequests atomic.Int32
 	cacheBusters := make(chan string, 2)
-	cacheControls := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		attempt := requests.Add(1)
-		cacheBusters <- request.URL.Query().Get("herdr_deploy_check")
-		cacheControls <- request.Header.Get("Cache-Control")
-		writer.Header().Set("Content-Type", "application/json")
-		if attempt == 1 {
-			_, _ = writer.Write([]byte(`{"release_version":"1.2.2","revision":"old"}`))
-			return
+		if request.URL.Path == "/version.json" && request.Header.Get("Accept-Encoding") == "identity" {
+			cacheBusters <- request.URL.Query().Get("herdr_deploy_check")
+			if versionRequests.Add(1) == 1 {
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"release_version":"1.2.2","revision":"old"}`))
+				return
+			}
 		}
-		_, _ = writer.Write([]byte(`{"release_version":"1.2.3","revision":"abc"}`))
+		webFixtureHandler(root, nil)(writer, request)
 	}))
 	defer server.Close()
 
-	job := Job{Origin: server.URL, Version: "1.2.3", Revision: "abc"}
-	err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration { return 0 })
-	if err != nil {
+	job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc", WebHash: strings.Repeat("a", 64)}
+	if err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration { return 0 }); err != nil {
 		t.Fatal(err)
 	}
-	if requests.Load() != 2 {
-		t.Fatalf("requests = %d, want 2", requests.Load())
+	if versionRequests.Load() != 2 {
+		t.Fatalf("version requests = %d, want 2", versionRequests.Load())
 	}
 	firstCacheBust, secondCacheBust := <-cacheBusters, <-cacheBusters
 	if firstCacheBust == "" || secondCacheBust == "" || firstCacheBust == secondCacheBust {
 		t.Fatalf("cache busters = %q, %q", firstCacheBust, secondCacheBust)
 	}
-	for range 2 {
-		if cacheControl := <-cacheControls; cacheControl != "no-cache, no-store" {
-			t.Fatalf("Cache-Control = %q", cacheControl)
-		}
-	}
 }
 
 func TestVerifyPublicTimesOutWithLastObservedIdentity(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"release_version":"1.2.2","revision":"old"}`))
+	root := t.TempDir()
+	writeWebReleaseFixture(t, root)
+	server := httptest.NewServer(webFixtureHandler(root, func() []byte {
+		return []byte(`{"release_version":"1.2.2","revision":"old"}`)
 	}))
 	defer server.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
-	job := Job{Origin: server.URL, Version: "1.2.3", Revision: "abc"}
+	job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc", WebHash: strings.Repeat("a", 64)}
 	err := verifyPublicWith(ctx, job, server.Client(), func(int) time.Duration { return time.Minute })
 	if err == nil || !strings.Contains(err.Error(), "before timeout") ||
 		!strings.Contains(err.Error(), "got 1.2.2 (old)") {
@@ -476,6 +602,8 @@ func TestVerifyPublicTimesOutWithLastObservedIdentity(t *testing.T) {
 }
 
 func TestVerifyPublicDoesNotRetryPermanentHTTPFailure(t *testing.T) {
+	root := t.TempDir()
+	writeWebReleaseFixture(t, root)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
@@ -483,7 +611,7 @@ func TestVerifyPublicDoesNotRetryPermanentHTTPFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	job := Job{Origin: server.URL, Version: "1.2.3", Revision: "abc"}
+	job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc"}
 	err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration {
 		t.Fatal("permanent failure was retried")
 		return 0
@@ -493,5 +621,139 @@ func TestVerifyPublicDoesNotRetryPermanentHTTPFailure(t *testing.T) {
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestVerifyPublicBundleChecksIdentityAndBrotliRepresentations(t *testing.T) {
+	root := t.TempDir()
+	writeWebReleaseFixture(t, root)
+	server := httptest.NewServer(webFixtureHandler(root, nil))
+	defer server.Close()
+
+	job := Job{
+		Origin:   server.URL,
+		WebRoot:  root,
+		Version:  "1.2.3",
+		Revision: "abc",
+		WebHash:  strings.Repeat("a", 64),
+	}
+	if err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration { return 0 }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyPublicAllowsIdentityFallbackForBrotliProbe(t *testing.T) {
+	root := t.TempDir()
+	writeWebReleaseFixture(t, root)
+	addFixtureBrotliDigests(t, root)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		// A valid origin may ignore Accept-Encoding: br and return the identity
+		// representation. The verifier must compare decoded bytes, not CDN
+		// compressor output.
+		identityRequest := request.Clone(request.Context())
+		identityRequest.Header.Set("Accept-Encoding", "identity")
+		webFixtureHandler(root, nil)(writer, identityRequest)
+	}))
+	defer server.Close()
+
+	job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc"}
+	if err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration { return 0 }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyPublicBundlePinsTheLocallyVerifiedDescriptor(t *testing.T) {
+	targetRoot := t.TempDir()
+	publicRoot := t.TempDir()
+	writeWebReleaseFixture(t, targetRoot)
+	writeWebReleaseFixture(t, publicRoot)
+	localDescriptor, err := release.LoadWebDescriptor(os.DirFS(targetRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	localDescriptor.Build = strings.Repeat("b", 64)
+	writeJSONFixture(t, filepath.Join(targetRoot, "release.json"), localDescriptor)
+	server := httptest.NewServer(webFixtureHandler(publicRoot, nil))
+	defer server.Close()
+
+	job := Job{Origin: server.URL, WebRoot: targetRoot, Version: "1.2.3", Revision: "abc"}
+	retryable, err := checkPublicBundle(t.Context(), job, server.Client(), time.Now().UnixNano(), 0)
+	if !retryable || err == nil || !strings.Contains(err.Error(), "does not match the verified local target") {
+		t.Fatalf("checkPublicBundle() = %v, %v", retryable, err)
+	}
+}
+
+func TestVerifyPublicBundleChecksCompressedVersionMetadata(t *testing.T) {
+	root := t.TempDir()
+	writeWebReleaseFixture(t, root)
+	var compressedRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/version.json" {
+			data, err := os.ReadFile(filepath.Join(root, "version.json"))
+			if err != nil {
+				http.Error(writer, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if request.Header.Get("Accept-Encoding") == "br" {
+				compressedRequests.Add(1)
+				var metadata map[string]any
+				if err := json.Unmarshal(data, &metadata); err != nil {
+					http.Error(writer, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				metadata["build"] = strings.Repeat("b", 64)
+				data, err = json.Marshal(metadata)
+				if err != nil {
+					http.Error(writer, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				var compressed bytes.Buffer
+				encoder := brotli.NewWriterLevel(&compressed, 11)
+				_, _ = encoder.Write(data)
+				_ = encoder.Close()
+				writer.Header().Set("Content-Encoding", "br")
+				_, _ = writer.Write(compressed.Bytes())
+				return
+			}
+			_, _ = writer.Write(data)
+			return
+		}
+		webFixtureHandler(root, nil)(writer, request)
+	}))
+	defer server.Close()
+
+	job := Job{Origin: server.URL, WebRoot: root, Version: "1.2.3", Revision: "abc"}
+	retryable, err := checkPublicBundle(t.Context(), job, server.Client(), time.Now().UnixNano(), 0)
+	if !retryable || err == nil || !strings.Contains(err.Error(), "compressed web bundle identity") {
+		t.Fatalf("checkPublicBundle() = %v, %v", retryable, err)
+	}
+	if compressedRequests.Load() != 1 {
+		t.Fatalf("compressed version requests = %d, want 1", compressedRequests.Load())
+	}
+}
+
+func TestVerifyPublicBundleRejectsCrossOriginRedirect(t *testing.T) {
+	root := t.TempDir()
+	writeWebReleaseFixture(t, root)
+	upstream := httptest.NewServer(http.NotFoundHandler())
+	defer upstream.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, upstream.URL+request.URL.Path, http.StatusFound)
+	}))
+	defer server.Close()
+
+	job := Job{
+		Origin:   server.URL,
+		WebRoot:  root,
+		Version:  "1.2.3",
+		Revision: "abc",
+		WebHash:  strings.Repeat("a", 64),
+	}
+	err := verifyPublicWith(t.Context(), job, server.Client(), func(int) time.Duration {
+		t.Fatal("cross-origin redirect was retried")
+		return 0
+	})
+	if !errors.Is(err, errPublicOriginRedirect) {
+		t.Fatalf("verifyPublicWith() error = %v", err)
 	}
 }

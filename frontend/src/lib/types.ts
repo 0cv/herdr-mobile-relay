@@ -487,8 +487,14 @@ export interface AppUpdateStatus {
   state: 'checking' | 'current' | 'reload-ready' | 'deployment-required' | 'failed';
   currentVersion: string;
   currentAssets: number;
+  /** Digest-derived identity of the bytes that initialized this document. */
+  currentBuild?: string;
   deployedVersion: string;
   deployedAssets: number;
+  deployedBuild?: string;
+  deployedEntry?: string;
+  deployedScript?: string;
+  deployedStyle?: string;
   upstreamVersion: string;
   upstreamAssets: number;
   checkedAt: number;

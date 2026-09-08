@@ -3,7 +3,14 @@ include .env
 export
 endif
 
-WEB_PROJECT ?= herdr-mobile-relay
+WEB_PROJECT ?= herdr-0cv
+WEB_ORIGIN ?= https://$(WEB_PROJECT).pages.dev
+ifeq ($(origin WEB_PROJECT),file)
+ifeq ($(WEB_PROJECT),herdr-mobile-relay)
+$(warning WEB_PROJECT=herdr-mobile-relay is the retired default; using herdr-0cv)
+WEB_PROJECT := herdr-0cv
+endif
+endif
 WEB_BRANCH ?= main
 WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
@@ -18,7 +25,8 @@ help:
 	@echo "  make stable-setup               Provision/resume a stable tunnel, service, and verified QR"
 	@echo "  make stable-teardown            Remove only resources recorded by the stable wizard"
 	@echo "  make setup                      Prepare config and check prerequisites without installing"
-	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages (WEB_PROJECT=$(WEB_PROJECT))"
+	@echo "  make web-deploy                 Deploy ./web to Cloudflare Pages and verify the public bundle"
+	@echo "    WEB_ORIGIN=https://...        Public origin to verify after deployment"
 	@echo "  make web-release                Replace ./web with a verified frontend release build"
 	@echo "  make service-install            Install/start the relay service for this platform"
 	@echo "  make setup-link                 Print the phone setup link and QR code for a stable relay"
@@ -187,6 +195,7 @@ web-release-check: web-bundle-check
 
 web-deploy: web-bundle-check
 	npx --yes wrangler@$(WRANGLER_VERSION) pages deploy web --project-name "$(WEB_PROJECT)" --branch "$(WEB_BRANCH)" --skip-caching
+	go run ./cmd/herdr-mobile-relay verify-public --web-root web --origin "$(WEB_ORIGIN)"
 
 web-preview:
 	npx --yes wrangler@$(WRANGLER_VERSION) pages dev web

@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
+	github.com/andybalholm/brotli v1.1.0
 	github.com/coder/websocket v1.8.15
 	github.com/pion/ice/v4 v4.4.1
 	github.com/pion/webrtc/v4 v4.2.18

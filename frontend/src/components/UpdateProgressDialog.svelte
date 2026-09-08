@@ -10,9 +10,11 @@
     MANAGED_UPDATE_COMMAND,
     markUpdateProgressRelayStarted,
     newerVersion,
+    phoneTargetMatchesCurrent,
     relayNeedsManualBootstrap,
     restoreUpdateProgress,
     setUpdateProgressError,
+    updateProgressRelayStartedThisSession,
     updateProgressPlan,
     type UpdateProgressPlan,
   } from '$lib/updates';
@@ -91,6 +93,10 @@
     rows.some((row) => row.tone === 'danger')
       || phoneApp?.tone === 'danger',
   ));
+  const relayActive = $derived(Boolean(
+    busyRelayId || rows.some((row) => row.tone === 'active'),
+  ));
+  const relayFailed = $derived(rows.some((row) => row.tone === 'danger'));
   const failureDetail = $derived(
     phoneApp?.tone === 'danger'
       ? phoneApp.detail
@@ -110,11 +116,11 @@
 
   $effect(() => {
     const currentPlan = $plan;
-    if (!currentPlan || active || failed || complete || busyRelayId) return;
+    if (!currentPlan || relayActive || relayFailed || complete) return;
     const next = rows.find((row) => (
       row.tone === 'pending'
       && row.canStart
-      && !currentPlan.startedRelayIds.includes(row.id)
+      && (!currentPlan.startedRelayIds.includes(row.id) || !updateProgressRelayStartedThisSession(row.id))
     ));
     if (next) void startRelayUpdate(next);
   });
@@ -211,11 +217,19 @@
       const status = activeRelayStatus(update.state);
       return { ...base, ...status, canStart: false, manual: false };
     }
-    if (started && update.state === 'available' && update.available_version === currentPlan.targetVersion && update.can_install) {
-      return { ...base, label: 'Starting update…', detail: 'Sending the verified target to this relay.', tone: 'active', score: .05, canStart: false, manual: false };
-    }
     if (update.state === 'available' && update.available_version === currentPlan.targetVersion && update.can_install) {
-      return { ...base, label: `Ready for v${currentPlan.targetVersion}`, detail: started ? 'Ready to retry from this phone.' : 'Start this relay when the current relay is ready.', tone: 'pending', score: 0, canStart: true, manual: false };
+      if (started && updateProgressRelayStartedThisSession(relayId)) {
+        return { ...base, label: 'Starting update…', detail: 'Sending the verified target to this relay.', tone: 'active', score: .05, canStart: false, manual: false };
+      }
+      return {
+        ...base,
+        label: started ? `Ready to retry v${currentPlan.targetVersion}` : `Ready for v${currentPlan.targetVersion}`,
+        detail: started ? 'The previous phone session did not finish sending this update; retrying is safe.' : 'Start this relay when the current relay is ready.',
+        tone: 'pending',
+        score: started ? .05 : 0,
+        canStart: true,
+        manual: false,
+      };
     }
     if (update.state === 'available') {
       return { ...base, label: 'Different update advertised', detail: update.reason || `This relay does not currently offer v${currentPlan.targetVersion}.`, tone: 'danger', score: 0, canStart: false, manual: false };
@@ -248,14 +262,19 @@
     currentConnections: Map<string, RelayConnectionView>,
     currentApp: typeof $appUpdate,
   ): AppProgress | null {
-    if (!currentPlan?.appRelayId) return null;
-    if (currentApp.currentVersion === currentPlan.targetVersion || newerVersion(currentApp.currentVersion, currentPlan.targetVersion)) {
-      return { label: `Phone app v${currentApp.currentVersion} loaded`, detail: 'This screen resumed after the app update.', tone: 'success', score: 1 };
+    if (!currentPlan?.phoneAppRequired) return null;
+    const target = currentPlan.phoneTarget;
+    const acknowledged = currentPlan.phoneAcknowledged && phoneTargetMatchesCurrent(target);
+    if (acknowledged) {
+      return { label: `Phone app v${currentApp.currentVersion} loaded`, detail: 'The new bundle initialized and acknowledged its verified build identity.', tone: 'success', score: 1 };
     }
-    if (currentPlan.errors[currentPlan.appRelayId]) {
+    if (currentPlan.phoneState === 'failed' || currentPlan.phoneError) {
+      return { label: 'Phone app failed to load', detail: currentPlan.phoneError || 'The new bundle did not acknowledge its expected build identity.', tone: 'danger', score: 0 };
+    }
+    if (currentPlan.appRelayId && currentPlan.errors[currentPlan.appRelayId]) {
       return { label: 'Phone app deployment could not start', detail: currentPlan.errors[currentPlan.appRelayId], tone: 'danger', score: 0 };
     }
-    const owner = currentConnections.get(currentPlan.appRelayId);
+    const owner = currentPlan.appRelayId ? currentConnections.get(currentPlan.appRelayId) : undefined;
     if (owner?.appDeploy.state === 'failed') {
       return { label: 'Phone app deployment failed', detail: owner.appDeploy.error || 'The public app could not be verified.', tone: 'danger', score: 0 };
     }
@@ -263,9 +282,9 @@
       return { label: 'Phone app deployment failed', detail: owner.update.error || 'The update stopped before publishing the app.', tone: 'danger', score: 0 };
     }
     if (owner?.appDeploy.state === 'succeeded' || currentApp.deployedVersion === currentPlan.targetVersion) {
-      return { label: 'Loading updated phone app…', detail: 'The verified bundle is public. This page will reload once.', tone: 'active', score: .85 };
+      return { label: 'Loading updated phone app…', detail: 'The verified bundle is public. This page will acknowledge it only after initialization.', tone: 'active', score: .85 };
     }
-    return { label: 'Publishing phone app…', detail: 'Cloudflare Pages can take up to two minutes to converge.', tone: 'active', score: .4 };
+    return { label: 'Publishing phone app…', detail: 'The release is being published before the phone can load it.', tone: 'active', score: .4 };
   }
 
   function relaySteps(row: RelayProgressRow, currentPlan: UpdateProgressPlan): string[] {

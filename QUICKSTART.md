@@ -103,8 +103,9 @@ changes, the full action list, teardown, and uninstall.
 - **Temporary URL fails:** rerun Quick Start for a fresh hostname.
 - **Gateway registration times out:** check `HERDR_GATEWAY_URL` and outbound
   HTTPS access; `curl -s localhost:8375/healthz` reports `gateway.registered`.
-- **App stays disconnected:** reopen the full link including `#setup=...`.
+- **App still shows the previous release after the relay updates:** open Settings,
+  choose **Check for Updates**, then **Load Update**. A separately hosted app
+  must be published by its configured deployment-owner relay first.
 - **Need the stable QR again:** invoke `setup-link`.
-- **Stable setup stops:** rerun the exact command it prints; setup is resumable.
 
 [README.md](README.md) indexes the rest of the documentation.

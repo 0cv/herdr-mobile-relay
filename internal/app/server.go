@@ -2245,6 +2245,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp["bundle_hash"] = s.webH.BundleHash()
 		resp["bundle_version"] = s.webH.BundleVersion()
 		resp["bundle_revision"] = s.webH.BundleRevision()
+		resp["bundle_build"] = s.webH.BundleBuild()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

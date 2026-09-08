@@ -95,11 +95,14 @@
       relayId: string;
       targetVersion: string;
       appRelayId: string;
+      phoneAppRequired: boolean;
+      phoneTarget: { version: string; assets: number; build: string } | null;
       description: string;
     }
     | {
       kind: 'reload_app';
       targetVersion: string;
+      phoneTarget: { version: string; assets: number; build: string } | null;
       description: string;
     };
   let { readOnlyRelayIds = new Set<string>() }: { readOnlyRelayIds?: Set<string> } = $props();
@@ -112,6 +115,13 @@
   const pushPolicies = relayStore.pushPolicies;
   const pushTests = relayStore.pushTests;
   const appUpdate = appUpdateStatus;
+  function appPhoneTarget(version: string) {
+    return {
+      version,
+      assets: $appUpdate.deployedVersion === version ? $appUpdate.deployedAssets : 0,
+      build: $appUpdate.deployedVersion === version ? ($appUpdate.deployedBuild || '') : '',
+    };
+  }
   let previousAppUpdate = $state<AppUpdateStatus | null>(null);
   let checkingUpdates = $state(false);
   const appUpdateChecking = $derived(checkingUpdates || $appUpdate.state === 'checking');
@@ -197,6 +207,11 @@
       return {
         kind: 'reload_app',
         targetVersion: $appUpdate.deployedVersion,
+        phoneTarget: {
+          version: $appUpdate.deployedVersion,
+          assets: $appUpdate.deployedAssets,
+          build: $appUpdate.deployedBuild || '',
+        },
         description: `Load the verified phone app v${$appUpdate.deployedVersion}.`,
       };
     }
@@ -211,6 +226,8 @@
           relayId: owner.relay.id,
           targetVersion,
           appRelayId: owner.relay.id,
+          phoneAppRequired: true,
+          phoneTarget: appPhoneTarget(targetVersion),
           description: `Publish the phone app from ${owner.relay.label}, then continue with any remaining relay updates.`,
         };
       }
@@ -220,6 +237,8 @@
         relayId: owner.relay.id,
         targetVersion,
         appRelayId: owner.relay.id,
+        phoneAppRequired: true,
+        phoneTarget: appPhoneTarget(targetVersion),
         description: `Publish the phone app first, then update ${owner.relay.label} and continue with the remaining relays.`,
       };
     }
@@ -239,6 +258,8 @@
       relayId: selected.relay.id,
       targetVersion: selected.connection.update.available_version,
       appRelayId: '',
+      phoneAppRequired: false,
+      phoneTarget: null,
       description: `Update ${selected.relay.label} first, then continue safely with each remaining relay.`,
     };
   });
@@ -450,8 +471,8 @@
     if (!action || action.kind !== 'reload_app' && isReadOnlyRelay(action.relayId)) return;
     if (action.kind === 'reload_app') {
       const relayIds = relayRows.filter(({ relay }) => !isReadOnlyRelay(relay.id)).map(({ relay }) => relay.id);
-      if (relayIds.length) queueUpdateProgressForReload(action.targetVersion, relayIds);
-      reloadApp(action.targetVersion);
+      queueUpdateProgressForReload(action.targetVersion, relayIds, action.phoneTarget);
+      reloadApp(action.targetVersion, action.phoneTarget);
       return;
     }
     const relayIds = [
@@ -460,7 +481,11 @@
         .map(({ relay }) => relay.id)
         .filter((relayId) => relayId !== action.relayId && !isReadOnlyRelay(relayId)),
     ];
-    beginUpdateProgress(action.targetVersion, relayIds, action.relayId, action.appRelayId);
+    beginUpdateProgress(action.targetVersion, relayIds, action.relayId, action.appRelayId, {
+      phoneAppRequired: action.phoneAppRequired,
+      phoneTarget: action.phoneTarget,
+      phoneState: action.phoneAppRequired ? 'publishing' : 'loaded',
+    });
     busyRelayId = action.relayId;
     try {
       if (action.kind === 'deploy_app') {

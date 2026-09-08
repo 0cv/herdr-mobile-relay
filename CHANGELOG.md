@@ -3,6 +3,18 @@
 Notable user-facing changes to Herdr Mobile Relay are documented here. The
 project follows [Semantic Versioning](https://semver.org/).
 
+## [0.20.10] - 2026-09-07
+
+### Fixed
+
+- Track the phone app as a separate update item and require the newly loaded
+  build identity before reporting a fleet update complete.
+- Publish build-specific web entries with content-addressed JavaScript and CSS,
+  integrity metadata, bounded public verification, and same-origin recovery for
+  existing installed apps.
+- Bound automatic phone reload recovery and preserve pending update progress when
+  a navigation or asset delivery fails.
+
 ## [0.20.9] - 2026-09-07
 
 ### Added
@@ -1409,6 +1421,7 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
+[0.20.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.9...v0.20.10
 [0.20.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.8...v0.20.9
 [0.20.8]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.7...v0.20.8
 [0.20.7]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.6...v0.20.7
