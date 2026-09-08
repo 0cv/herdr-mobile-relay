@@ -424,7 +424,7 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/wda-build.log"
           xctestrun="$(find "$IOS_WDA_BOOTSTRAP_PATH" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' -print -quit)"
           test -n "$xctestrun"
-          test -f "$IOS_WDA_AGENT_PATH"
+          test -d "$IOS_WDA_AGENT_PATH"
       - name: Start Appium
         run: |
           set -euo pipefail
