@@ -290,6 +290,9 @@ jobs:
           path: mobile-bundles-current
       - name: Build fixture
         run: go build -trimpath -o "$MOBILE_FIXTURE_BINARY" ./tests/mobile/fixture
+      - name: Set up Android SDK
+        if: matrix.platform == 'android'
+        uses: android-actions/setup-android@v3
       - name: Create and boot Android emulator
         if: matrix.platform == 'android'
         run: |
@@ -349,7 +352,7 @@ jobs:
           printf 'ios:%s\n' "$udid" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
-          xcrun simctl list apps "$udid" >"$RUNNER_TEMP/ios-apps-before.txt"
+          xcrun simctl listapps "$udid" >"$RUNNER_TEMP/ios-apps-before.txt"
       - name: Install pinned Appium and platform driver
         run: |
           set -euo pipefail
