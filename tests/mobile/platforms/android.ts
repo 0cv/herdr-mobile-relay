@@ -416,7 +416,7 @@ export class AndroidPlatform implements MobilePlatform {
     const webContext = (await this.driver.contexts()).find((context) => context !== 'NATIVE_APP');
     if (!webContext) throw new Error('ANDROID_CERTIFICATE: Chrome web context is unavailable');
     await this.driver.switchContext(webContext);
-    await this.driver.navigate(`${this.origin}/version.json`);
+    await this.driver.execute('window.location.href = arguments[0]; return true;', [`${this.origin}/version.json`]);
     await delay(1_000);
     const currentUrl = await this.driver.currentUrl();
     const source = await this.driver.pageSource();
