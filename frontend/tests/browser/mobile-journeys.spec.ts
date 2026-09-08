@@ -444,6 +444,15 @@ async function commands(page: Page) {
   return page.evaluate(() => (window as any).__relayCommands as Record<string, unknown>[]);
 }
 
+async function updateProgressPlan(page: Page): Promise<Record<string, unknown> | null> {
+  try {
+    return await page.evaluate(() => JSON.parse(sessionStorage.getItem('herdr_update_progress') || 'null'));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Execution context was destroyed')) return null;
+    throw error;
+  }
+}
+
 async function commandsForSocket(page: Page, index: number) {
   return page.evaluate((socketIndex) => {
     const harnessWindow = window as unknown as {
@@ -1288,17 +1297,14 @@ test('loads a deployed phone app and preserves pending relay updates', async ({ 
   await reloadNavigation;
   await page.waitForFunction(() =>
     !(window as unknown as { __herdrPreReload?: boolean }).__herdrPreReload);
-  await expect.poll(() => {
-    const current = new URL(page.url());
-    return `${current.pathname}${current.searchParams.has('herdr_reload') ? '?reloading' : ''}`;
-  }).toBe('/');
-  const plan = await page.evaluate(() => JSON.parse(sessionStorage.getItem('herdr_update_progress') || 'null'));
-  expect(plan).toMatchObject({
+  await expect.poll(() => updateProgressPlan(page)).toMatchObject({
     targetVersion: APP_RELEASE,
     relayIds: ['fedora'],
     startedRelayIds: ['fedora'],
     phoneAppRequired: true,
     phoneAcknowledged: false,
+    phoneReloadAttempts: 2,
+    phoneState: 'failed',
   });
 
   await setAutoCommands(page, false);
