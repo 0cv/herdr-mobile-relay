@@ -40,6 +40,7 @@ runs:
         printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
         printf 'IOS_WDA_PREBUILT_PATH=%s/Build/Products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
         printf 'IOS_WDA_AGENT_PATH=%s/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
+      shell: bash
     - uses: oven-sh/setup-bun@v2
       with:
         bun-version: 1.4.0
@@ -143,6 +144,7 @@ runs:
           fi
           sleep 2
         done
+      shell: bash
     - name: Install pinned Android Chrome and Trichrome Library
       if: inputs.platform == 'android'
       run: |
