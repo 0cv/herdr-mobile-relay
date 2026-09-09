@@ -139,6 +139,8 @@ function isTimeoutError(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ETIMEDOUT');
 }
 
+const lookupSliceMs = 1_000;
+
 export class AppiumClient {
   private sessionId = '';
   private readonly baseUrl: string;
@@ -306,7 +308,7 @@ export class AppiumClient {
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
       if (remaining <= 1) break;
-      const sliceMs = Math.min(250, remaining);
+      const sliceMs = Math.min(lookupSliceMs, remaining);
       const startedAt = Date.now();
       try {
         const element = await this.findOnce(locator, sliceMs);
@@ -551,7 +553,7 @@ export class AppiumClient {
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
       if (remaining <= 1) break;
-      const sliceMs = Math.min(250, remaining);
+      const sliceMs = Math.min(lookupSliceMs, remaining);
       const startedAt = Date.now();
       try {
         const element = await this.findOnce(locator, sliceMs);
