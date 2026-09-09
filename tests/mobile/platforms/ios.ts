@@ -176,6 +176,11 @@ export class IOSPlatform implements MobilePlatform {
   async launchInstalledApp(): Promise<void> {
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
     await this.driver.mobile('pressButton', { name: 'home' });
+    // After adding a Home Screen web app, Safari may have been terminated by
+    // the system. WDA still has Safari as its AUT and can reject SpringBoard
+    // gestures until the native home process is explicitly foregrounded.
+    await this.driver.mobile('activateApp', { bundleId: 'com.apple.springboard' }).catch(() => undefined);
+    await delay(750);
     for (let page = 0; page < 8; page += 1) {
       await this.driver.mobile('swipe', { direction: 'right' }).catch(() => undefined);
     }
