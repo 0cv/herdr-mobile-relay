@@ -841,7 +841,7 @@ export class AndroidPlatform implements MobilePlatform {
       const remaining = deadline - Date.now();
       if (remaining <= 1) break;
       try {
-        const element = await this.findNative(locators, Math.min(2_000, remaining));
+        const element = await this.findNative(locators, remaining);
         const clickRemaining = deadline - Date.now();
         if (clickRemaining <= 1) break;
         await this.driver.click(element, clickRemaining);
