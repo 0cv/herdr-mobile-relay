@@ -228,10 +228,27 @@ export class IOSPlatform implements MobilePlatform {
     await this.attachToInstalledView();
     const currentUrl = await this.driver.currentUrl().catch(() => '');
     if (currentUrl.includes('#settings')) await this.clickWebText('Back');
-    await this.attachToInstalledView();
-    const agent = await this.driver.find(css(`button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`), 30_000);
-    await this.driver.click(agent);
-    await delay(1_000);
+    const deadline = Date.now() + 30_000;
+    let lastError = '';
+    while (Date.now() < deadline) {
+      try {
+        await this.attachToInstalledView();
+        const agent = await this.driver.find(css(`button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`), 2_000);
+        // The card remains in the DOM while the relay's inventory reconnects,
+        // but its button is disabled until that inventory is ready.
+        if ((await this.driver.attribute(agent, 'disabled')) !== null) {
+          lastError = `agent ${relayName} is waiting for inventory`;
+        } else {
+          await this.driver.click(agent);
+          await delay(1_000);
+          return;
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      await delay(250);
+    }
+    throw new Error(`APPIUM_AGENT: ${relayName}: ${lastError}`);
   }
 
   async backgroundApp(): Promise<void> {
