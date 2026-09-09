@@ -438,7 +438,31 @@ export class AndroidPlatform implements MobilePlatform {
         if ((await this.driver.attribute(agent, 'disabled')) !== null) {
           lastError = `agent ${relayName} is waiting for inventory`;
         } else {
-          await this.driver.click(agent);
+          try {
+            await this.driver.click(agent);
+          } catch (error) {
+            // Chrome 131 can report a visible card button as not interactable
+            // after a standalone relaunch. Dispatch the same DOM click only
+            // after confirming that the matching, enabled button is visible.
+            const selector = `button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`;
+            const result = await this.driver.execute<{ clicked: boolean; reason?: string }>(
+              `return (() => {
+                const buttons = [...document.querySelectorAll(arguments[0])];
+                const button = buttons.find((candidate) => {
+                  const rect = candidate.getBoundingClientRect();
+                  const style = getComputedStyle(candidate);
+                  return !candidate.disabled && rect.width > 0 && rect.height > 0
+                    && style.display !== 'none' && style.visibility !== 'hidden';
+                });
+                if (!button) return { clicked: false, reason: 'no visible enabled agent button' };
+                button.scrollIntoView({ block: 'center', inline: 'center' });
+                button.click();
+                return { clicked: true };
+              })();`,
+              [selector],
+            );
+            if (!result.clicked) throw error;
+          }
           await delay(1_000);
           return;
         }
@@ -636,12 +660,19 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async clickNative(locators: Locator[], description: string, timeoutMs = 30_000): Promise<void> {
-    try {
-      const element = await this.findNative(locators, timeoutMs);
-      await this.driver.click(element);
-    } catch (error) {
-      throw new Error(`ANDROID_CERTIFICATE: ${description}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    const deadline = Date.now() + timeoutMs;
+    let lastError = '';
+    while (Date.now() < deadline) {
+      try {
+        const element = await this.findNative(locators, Math.min(2_000, Math.max(1, deadline - Date.now())));
+        await this.driver.click(element);
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      await delay(250);
     }
+    throw new Error(`ANDROID_CERTIFICATE: ${description}: ${lastError}`);
   }
 
   private async findNative(locators: Locator[], timeoutMs: number): Promise<string> {
@@ -718,16 +749,25 @@ export class AndroidPlatform implements MobilePlatform {
     // Exercise the actual fixture HTTPS endpoint through the newly started
     // Chrome target; an adb VIEW intent can open a second tab while
     // Chromedriver remains attached to the old target.
-    const webContext = (await this.driver.contexts()).find((context) => context !== 'NATIVE_APP');
-    if (!webContext) throw new Error('ANDROID_CERTIFICATE: Chrome web context is unavailable');
-    await this.driver.switchContext(webContext);
-    await this.driver.execute('window.location.href = arguments[0]; return true;', [`${this.origin}/version.json`]);
-    await delay(1_000);
-    const currentUrl = await this.driver.currentUrl();
-    const source = await this.driver.pageSource();
-    if (!currentUrl.startsWith(`${this.origin}/`) || /ERR_CERT|NET::ERR|privacy error|not private/iu.test(source)) {
-      throw new Error('ANDROID_CERTIFICATE: fixture HTTPS endpoint is not trusted');
+    const deadline = Date.now() + 30_000;
+    let lastUrl = '';
+    let lastSource = '';
+    while (Date.now() < deadline) {
+      try {
+        const webContext = (await this.driver.contexts()).find((context) => context !== 'NATIVE_APP');
+        if (!webContext) throw new Error('Chrome web context is unavailable');
+        await this.driver.switchContext(webContext);
+        await this.driver.execute('window.location.href = arguments[0]; return true;', [`${this.origin}/version.json`]);
+        await delay(750);
+        lastUrl = await this.driver.currentUrl();
+        lastSource = await this.driver.pageSource();
+        if (lastUrl.startsWith(`${this.origin}/`) && !/ERR_CERT|NET::ERR|privacy error|not private/iu.test(lastSource)) return;
+      } catch (error) {
+        lastSource = error instanceof Error ? error.message : String(error);
+      }
+      await delay(250);
     }
+    throw new Error(`ANDROID_CERTIFICATE: fixture HTTPS endpoint is not trusted (${lastUrl || lastSource.slice(0, 200)})`);
   }
 
   private async currentForegroundPackage(): Promise<string> {

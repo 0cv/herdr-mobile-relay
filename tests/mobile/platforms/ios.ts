@@ -67,6 +67,7 @@ export class IOSPlatform implements MobilePlatform {
         'appium:fullReset': false,
         'appium:newCommandTimeout': 1_200,
         'appium:includeSafariInWebviews': true,
+        'appium:additionalWebviewBundleIds': ['com.apple.webapp'],
         'appium:autoWebview': false,
         // Allow Web Inspector time to publish a page after simctl openurl.
         'appium:webviewConnectTimeout': 15_000,
@@ -93,7 +94,19 @@ export class IOSPlatform implements MobilePlatform {
     // Open the URL before asking Appium for WEBVIEW contexts. A Safari browser
     // session starts on about:blank, and querying WebKit before navigation can
     // make hosted XCUITest report a fatal remote-debugger failure.
-    await command('xcrun', ['simctl', 'openurl', this.udid, url], 30_000);
+    const deadline = Date.now() + 30_000;
+    let lastError = '';
+    while (Date.now() < deadline) {
+      try {
+        await command('xcrun', ['simctl', 'openurl', this.udid, url], 30_000);
+        lastError = '';
+        break;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        await delay(1_000);
+      }
+    }
+    if (lastError) throw new Error(`IOS_NAVIGATION: could not open setup URL: ${lastError}`);
     await delay(1_500);
     const safariContext = (await this.driver.contexts().catch(() => []))
       .find((context) => /^WEBVIEW_/u.test(context));
@@ -176,6 +189,12 @@ export class IOSPlatform implements MobilePlatform {
       if (icon) {
         await this.driver.click(icon);
         if (await this.waitForInstalledProvider(5_000)) {
+          // SpringBoard can leave Safari marked active in Web Inspector even
+          // though the web app is visibly foregrounded. Re-activate the
+          // provider before asking XCUITest for web contexts so it selects the
+          // installed Home Screen app rather than the setup Safari tab.
+          await this.driver.mobile('activateApp', { bundleId: this.installedBundleId }).catch(() => undefined);
+          await delay(750);
           await this.attachToInstalledView();
           return;
         }
@@ -239,7 +258,32 @@ export class IOSPlatform implements MobilePlatform {
         if ((await this.driver.attribute(agent, 'disabled')) !== null) {
           lastError = `agent ${relayName} is waiting for inventory`;
         } else {
-          await this.driver.click(agent);
+          try {
+            await this.driver.click(agent);
+          } catch (error) {
+            // Chrome-backed web views can report a visible card button as not
+            // interactable after a standalone relaunch. Dispatch the same DOM
+            // click only after confirming that the matching enabled button is
+            // visible.
+            const selector = `button.agent-open[aria-label="Open mobile-ci on ${relayName}"]`;
+            const result = await this.driver.execute<{ clicked: boolean; reason?: string }>(
+              `return (() => {
+                const buttons = [...document.querySelectorAll(arguments[0])];
+                const button = buttons.find((candidate) => {
+                  const rect = candidate.getBoundingClientRect();
+                  const style = getComputedStyle(candidate);
+                  return !candidate.disabled && rect.width > 0 && rect.height > 0
+                    && style.display !== 'none' && style.visibility !== 'hidden';
+                });
+                if (!button) return { clicked: false, reason: 'no visible enabled agent button' };
+                button.scrollIntoView({ block: 'center', inline: 'center' });
+                button.click();
+                return { clicked: true };
+              })();`,
+              [selector],
+            );
+            if (!result.clicked) throw error;
+          }
           await delay(1_000);
           return;
         }
