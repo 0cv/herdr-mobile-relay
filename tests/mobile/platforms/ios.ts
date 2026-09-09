@@ -163,15 +163,30 @@ export class IOSPlatform implements MobilePlatform {
   async launchInstalledApp(): Promise<void> {
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
     await this.driver.mobile('pressButton', { name: 'home' });
-    const icon = await this.driver.findAny([
-      accessibility('Herdr Mobile Relay'),
-      textLocator('Herdr Mobile Relay'),
-      accessibility('Herdr Relay'),
-      textLocator('Herdr Relay'),
-    ], 30_000);
-    await this.driver.click(icon);
-    await this.identifyInstalledProvider();
-    await this.attachToInstalledView();
+    for (let page = 0; page < 8; page += 1) {
+      await this.driver.mobile('swipe', { direction: 'right' }).catch(() => undefined);
+    }
+
+    // SpringBoard exposes icons from every Home Screen page through WDA. A
+    // global lookup can therefore return an off-screen icon whose click is a
+    // no-op. Normalize to the first page, then swipe page-by-page and require
+    // a hittable match before tapping it.
+    for (let page = 0; page < 8; page += 1) {
+      const icon = await this.findHittableHomeIcon();
+      if (icon) {
+        await this.driver.click(icon);
+        if (await this.waitForInstalledProvider(5_000)) {
+          await this.attachToInstalledView();
+          return;
+        }
+        await this.driver.mobile('pressButton', { name: 'home' }).catch(() => undefined);
+      }
+      if (page < 7) {
+        await this.driver.mobile('swipe', { direction: 'left' });
+        await delay(500);
+      }
+    }
+    throw new Error('IOS_CONTEXT: native launch did not identify the installed provider');
   }
 
   async assertStandalone(origin: string): Promise<RuntimeIdentity> {
@@ -350,18 +365,41 @@ export class IOSPlatform implements MobilePlatform {
     throw new Error(`IOS_SHARE: ${description}: ${lastError}`);
   }
 
-  private async identifyInstalledProvider(): Promise<void> {
-    const deadline = Date.now() + 30_000;
+  private async findHittableHomeIcon(): Promise<string> {
+    const locators = [
+      accessibility('Herdr Mobile Relay'),
+      textLocator('Herdr Mobile Relay'),
+      accessibility('Herdr Relay'),
+      textLocator('Herdr Relay'),
+      {
+        using: 'xpath',
+        value: "//*[@name='Home screen icons']//*[contains(@name, 'Herdr Mobile Relay') or contains(@name, 'Herdr Relay') or contains(@label, 'Herdr Mobile Relay') or contains(@label, 'Herdr Relay')]",
+      },
+    ];
+    for (const locator of locators) {
+      const elements = await this.driver.findAll(locator).catch(() => []);
+      for (const element of elements) {
+        const hittable = await this.driver.attribute(element, 'hittable').catch(() => null);
+        if (hittable === 'true') return element;
+        const visible = await this.driver.attribute(element, 'visible').catch(() => null);
+        if (hittable === null && visible === 'true') return element;
+      }
+    }
+    return '';
+  }
+
+  private async waitForInstalledProvider(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
       const appInfo = await this.driver.mobile('activeAppInfo').catch(() => null) as Record<string, unknown> | null;
       const bundleId = String(appInfo?.bundleId || appInfo?.bundleID || '');
       if (bundleId && !/springboard|safari/iu.test(bundleId)) {
         this.installedBundleId = bundleId;
-        return;
+        return true;
       }
       await delay(250);
     }
-    throw new Error('IOS_CONTEXT: native launch did not identify the installed provider');
+    return false;
   }
 }

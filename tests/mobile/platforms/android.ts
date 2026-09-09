@@ -225,6 +225,10 @@ export class AndroidPlatform implements MobilePlatform {
       // with HOME.
       await this.confirmLauncherShortcut();
     }
+    // Do not proceed merely because the launcher overlay disappeared. Chrome
+    // publishes the signed ShortcutInfo asynchronously, and that record is
+    // the durable install evidence when no WebAPK package or icon exists.
+    await this.waitForChromeShortcut(30_000);
     await delay(1_500);
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
   }
@@ -263,21 +267,48 @@ export class AndroidPlatform implements MobilePlatform {
   private async confirmLauncherShortcut(): Promise<boolean> {
     const adb = process.env.ADB || 'adb';
     const dumpPath = `/sdcard/herdr-mobile-ci-ui-${process.pid}.xml`;
-    const deadline = Date.now() + 8_000;
+    const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
+      let xml = '';
       try {
         await command(adb, ['-s', this.serial, 'shell', 'uiautomator', 'dump', dumpPath], 10_000);
-        const xml = await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', dumpPath], 10_000);
-        const nodes = xml.match(/<node\b[^>]*\/>/gu) || [];
-        for (const node of nodes) {
-          if (!/add to home screen/iu.test(node)) continue;
-          const bounds = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/u);
-          if (!bounds) continue;
-          const [, left, top, right, bottom] = bounds;
+        xml = await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', dumpPath], 10_000);
+      } catch {
+        // The hierarchy may be unavailable while the launcher window is
+        // changing. Activity inspection below is an independent fallback.
+      }
+      const nodes = xml.match(/<node\b[^>]*\/>/gu) || [];
+      for (const node of nodes) {
+        if (!/add to home screen/iu.test(node)) continue;
+        const bounds = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/u);
+        if (!bounds) continue;
+        const [, left, top, right, bottom] = bounds;
+        await command(adb, [
+          '-s', this.serial, 'shell', 'input', 'tap',
+          String(Math.round((Number(left) + Number(right)) / 2)),
+          String(Math.round((Number(top) + Number(bottom)) / 2)),
+        ], 10_000);
+        return true;
+      }
+
+      try {
+        // Some hosted Android images expose AddItemActivity before its
+        // accessibility tree is ready. If it is the top activity, the Android
+        // 15 launcher confirmation button is consistently the lower-right
+        // action; use the device-reported display size rather than a fixed
+        // pixel coordinate.
+        const activities = await commandOutput(adb, [
+          '-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities',
+        ], 10_000);
+        if (/\.dragndrop\.AddItemActivity\b/u.test(activities)) {
+          const size = await commandOutput(adb, ['-s', this.serial, 'shell', 'wm', 'size'], 10_000);
+          const match = [...size.matchAll(/(\d+)x(\d+)/gu)].at(-1);
+          const width = Number(match?.[1] || 1_080);
+          const height = Number(match?.[2] || 2_400);
           await command(adb, [
             '-s', this.serial, 'shell', 'input', 'tap',
-            String(Math.round((Number(left) + Number(right)) / 2)),
-            String(Math.round((Number(top) + Number(bottom)) / 2)),
+            String(Math.round(width * 0.78)),
+            String(Math.round(height * 0.94)),
           ], 10_000);
           return true;
         }
@@ -292,9 +323,14 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async launchChromeShortcut(): Promise<void> {
+    const shortcut = await this.waitForChromeShortcut(30_000);
+    await command(process.env.ADB || 'adb', androidChromeShortcutArgs(this.serial, shortcut), 30_000);
+  }
+
+  private async waitForChromeShortcut(timeoutMs: number): Promise<AndroidChromeShortcut> {
     const adb = process.env.ADB || 'adb';
-    const deadline = Date.now() + 30_000;
-    let lastError = '';
+    const deadline = Date.now() + timeoutMs;
+    let lastError = 'Chrome did not publish a matching Herdr Relay ShortcutInfo';
     while (Date.now() < deadline) {
       try {
         const output = await commandOutput(adb, [
@@ -312,11 +348,7 @@ export class AndroidPlatform implements MobilePlatform {
             return false;
           }
         });
-        if (shortcut) {
-          await command(adb, androidChromeShortcutArgs(this.serial, shortcut), 30_000);
-          return;
-        }
-        lastError = 'Chrome did not publish a matching Herdr Relay ShortcutInfo';
+        if (shortcut) return shortcut;
       } catch (error) {
         lastError = error instanceof Error ? error.message : String(error);
       }
