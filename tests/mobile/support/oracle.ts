@@ -125,23 +125,42 @@ function ownershipError(code: string, detail: string): QualificationFatalError {
   return qualificationFatal(code, detail, 'ownership');
 }
 
-export function isRuntimeIdentityNotReady(identity: RuntimeIdentity): boolean {
-  return identity.applicationInitialized !== true
-    && (!identity.standalone || identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider);
+export function isRuntimeIdentityNotReady(identity: RuntimeIdentity, expectedOrigin: string): boolean {
+  if (identity.origin !== expectedOrigin || identity.standalone !== true || identity.applicationInitialized === true) return false;
+  const ios = identity.provider === 'ios-home-screen';
+  const expectedProvider = ios ? 'ios-home-screen' : 'android-standalone';
+  if (identity.provider !== expectedProvider
+    || typeof identity.nativeProvider !== 'string'
+    || typeof identity.nativePid !== 'string'
+    || identity.nativePid.length === 0) return false;
+  if (ios) return identity.nativeProvider === 'ios:com.apple.webapp';
+  return /^android:(?:com\.android\.chrome|org\.chromium\.webapk(?:\.[A-Za-z0-9_.-]+)?|com\.google\.android\.webapk(?:\.[A-Za-z0-9_.-]+)?)$/u.test(identity.nativeProvider)
+    && typeof identity.nativeActivity === 'string'
+    && identity.nativeActivity.length > 0
+    && /(?:^|[.$])(?:Webapp|WebApk)[A-Za-z0-9_.-]*Activity$/u.test(identity.nativeActivity);
 }
 
 export function assertStandaloneOwnership(identity: RuntimeIdentity, expectedOrigin: string): void {
-  if (!identity.standalone) throw ownershipError('STANDALONE_REQUIRED', 'the observed document is not in standalone display mode');
+  if (identity.standalone !== true) throw ownershipError('STANDALONE_REQUIRED', 'the observed document is not in standalone display mode');
   if (identity.origin !== expectedOrigin) throw ownershipError('ORIGIN_MISMATCH', `${identity.origin} is not ${expectedOrigin}`);
   if (identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider) {
     throw ownershipError('STANDALONE_PROVIDER_REQUIRED', 'the observed document is not an installed standalone web app with a native provider');
   }
   const ios = identity.provider === 'ios-home-screen';
-  const providerPrefix = ios ? 'ios:' : 'android:';
-  if (!identity.nativeProvider.startsWith(providerPrefix)) {
-    throw ownershipError('STANDALONE_PROVIDER_REQUIRED', `native provider ${identity.nativeProvider} does not match ${ios ? 'iOS' : 'Android'}`);
+  if (ios) {
+    if (identity.nativeProvider !== 'ios:com.apple.webapp') {
+      throw ownershipError('STANDALONE_PROVIDER_REQUIRED', `native provider ${identity.nativeProvider} is not ios:com.apple.webapp`);
+    }
+  } else if (identity.provider === 'android-standalone') {
+    if (!/^android:(?:com\.android\.chrome|org\.chromium\.webapk(?:\.[A-Za-z0-9_.-]+)?|com\.google\.android\.webapk(?:\.[A-Za-z0-9_.-]+)?)$/u.test(identity.nativeProvider)) {
+      throw ownershipError('STANDALONE_PROVIDER_REQUIRED', `native provider ${identity.nativeProvider} is not an allowed Android installed provider`);
+    }
+  } else {
+    throw ownershipError('STANDALONE_PROVIDER_REQUIRED', `runtime provider ${identity.provider} is not an installed mobile provider`);
   }
-  if (!identity.nativePid || (!ios && !identity.nativeActivity)) {
+  if (typeof identity.nativePid !== 'string' || identity.nativePid.length === 0
+    || (!ios && (typeof identity.nativeActivity !== 'string' || identity.nativeActivity.length === 0
+      || !/(?:^|[.$])(?:Webapp|WebApk)[A-Za-z0-9_.-]*Activity$/u.test(identity.nativeActivity)))) {
     throw ownershipError(
       'STANDALONE_PROVIDER_REQUIRED',
       ios
@@ -153,11 +172,11 @@ export function assertStandaloneOwnership(identity: RuntimeIdentity, expectedOri
 
 export function assertStandalone(identity: RuntimeIdentity, expectedOrigin: string): void {
   assertStandaloneOwnership(identity, expectedOrigin);
-  if (!identity.applicationInitialized) throw oracleError('APP_NOT_INITIALIZED', 'the installed document did not initialize the application');
+  if (identity.applicationInitialized !== true) throw oracleError('APP_NOT_INITIALIZED', 'the installed document did not initialize the application');
 }
 
 export function assertRequiredAssets(identity: RuntimeIdentity): void {
-  if (!identity.requiredAssetsReady) throw oracleError('REQUIRED_ASSET_FAILURE', 'the application stylesheet or entry did not finish successfully');
+  if (identity.requiredAssetsReady !== true) throw oracleError('REQUIRED_ASSET_FAILURE', 'the application stylesheet or entry did not finish successfully');
   if (!identity.script || !identity.style) throw oracleError('RUNTIME_ASSET_IDENTITY_MISSING', 'the running document has no application script and stylesheet');
 }
 

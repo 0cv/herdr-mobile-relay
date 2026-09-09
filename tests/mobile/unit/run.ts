@@ -42,6 +42,7 @@ import {
   assertStandalone,
   assertStandaloneOwnership,
   assertUpgradeDidNotComplete,
+  isRuntimeIdentityNotReady,
   isQualificationFatal,
   QualificationFailureLatch,
   type RuntimeIdentity,
@@ -148,6 +149,7 @@ test('iOS standalone ownership accepts bundle and pid evidence without Android a
     requiredAssetsReady: true, applicationInitialized: true,
   };
   assert.doesNotThrow(() => assertStandaloneOwnership(identity, 'https://fixture.example'));
+  assert.throws(() => assertStandaloneOwnership({ ...identity, nativeProvider: 'ios:com.apple.mobilesafari' }, 'https://fixture.example'), /STANDALONE_PROVIDER_REQUIRED/);
 });
 
 test('evidence validation enforces matrix identity and platform-specific native proof', async () => {
@@ -155,19 +157,25 @@ test('evidence validation enforces matrix identity and platform-specific native 
   const sourceCommit = 'a'.repeat(40);
   const headSha = 'b'.repeat(40);
   const webHash = 'c'.repeat(64);
+  const expectedBaselineIdentity = {
+    version: '0.20.10', assets: 363, build: 'old-build', entry: '/old/index.html',
+    script: '/assets/old.js', style: '/assets/old.css', webHash: 'd'.repeat(64),
+  };
+  const expectedCandidateIdentity = {
+    version: '0.21.0', assets: 364, build: 'new-build', entry: '/new/index.html',
+    script: '/assets/new.js', style: '/assets/new.css', webHash,
+  };
   const result = {
     schema: 1, result: 'passed', suite: 'release', platform: 'ios', baseline: '0.20.10', candidate: 'candidate-0.20.10',
-    source_commit: sourceCommit, source_run_head_sha: headSha, candidate_web_hash: webHash,
+    origin: 'https://fixture.test', source_commit: sourceCommit, source_run_head_sha: headSha, candidate_web_hash: webHash,
     initial_identity: {
       standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
-      url: 'https://fixture.test/old', origin: 'https://fixture.test', version: '0.20.10', assets: 363,
-      entry: '/old/index.html', script: '/assets/old.js', style: '/assets/old.css',
+      url: 'https://fixture.test/old', origin: 'https://fixture.test', ...expectedBaselineIdentity,
       requiredAssetsReady: true, applicationInitialized: true,
     },
     final_identity: {
       standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
-      url: 'https://fixture.test/new', origin: 'https://fixture.test', version: '0.21.0', assets: 364,
-      entry: '/new/index.html', script: '/assets/new.js', style: '/assets/new.css',
+      url: 'https://fixture.test/new', origin: 'https://fixture.test', ...expectedCandidateIdentity,
       requiredAssetsReady: true, applicationInitialized: true,
     },
     credential_preserved: true,
@@ -180,6 +188,7 @@ test('evidence validation enforces matrix identity and platform-specific native 
     oracle_controls: [],
     phone_completion: { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true },
     faults_exercised: ['corrupt:/assets/new.js'],
+    fault_identity: { id: 'id', generation: 'generation', kind: 'corrupt', path: '/assets/new.js' },
     fixture_requests: [{ release: 'candidate', path: '/assets/new.js', fault: 'corrupt', fault_id: 'id', fault_generation: 'generation' }],
   };
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify(result));
@@ -187,8 +196,44 @@ test('evidence validation enforces matrix identity and platform-specific native 
     directory: root,
     matrix: [{ platform: 'ios', baseline: '0.20.10', scenario: 'historical' }],
     suite: 'release', candidateCommit: sourceCommit, sourceRunHeadSha: headSha, candidateWebHash: webHash,
+    candidateIdentity: expectedCandidateIdentity,
+    baselineIdentities: [{ name: '0.20.10', identity: expectedBaselineIdentity }],
   };
   await validateMobileEvidence(options);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({
+    ...result,
+    fixture_requests: [...result.fixture_requests, { ...result.fixture_requests[0] }],
+  }));
+  await validateMobileEvidence(options);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, phone_completion: { ...result.phone_completion, rawPlanPresent: false } }));
+  await assert.rejects(validateMobileEvidence(options), /raw phone-plan/);
+  const historicalBaselineIdentity = {
+    ...expectedBaselineIdentity, version: '0.20.8', assets: 361, build: 'historical-build',
+    entry: '/historical/index.html', script: '/assets/historical.js', style: '/assets/historical.css', webHash: 'e'.repeat(64),
+  };
+  const historicalResult = {
+    ...result,
+    baseline: '0.20.8',
+    initial_identity: { ...result.initial_identity, ...historicalBaselineIdentity },
+    oracle_controls: ['HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:0.20.8'],
+    phone_completion: { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false },
+  };
+  const historicalOptions = {
+    ...options,
+    matrix: [{ platform: 'ios', baseline: '0.20.8', scenario: 'historical' }],
+    baselineIdentities: [{ name: '0.20.8', identity: historicalBaselineIdentity }],
+  };
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify(historicalResult));
+  await validateMobileEvidence(historicalOptions);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...historicalResult, phone_completion: { ...historicalResult.phone_completion, rawPlanPresent: false } }));
+  await validateMobileEvidence(historicalOptions);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, origin: 'http://fixture.test' }));
+  await assert.rejects(validateMobileEvidence(options), /HTTPS origin/);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, final_identity: { ...result.final_identity, build: 'wrong-build' } }));
+  await assert.rejects(validateMobileEvidence(options), /final identity\.build/);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, fault_identity: { ...result.fault_identity, id: 'other' } }));
+  await assert.rejects(validateMobileEvidence(options), /unrelated id/);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify(result));
   await assert.rejects(validateMobileEvidence({ ...options, candidateWebHash: 'd'.repeat(64) }), /wrong candidate web hash/);
   await mkdir(join(root, 'duplicate'), { recursive: true });
   await writeFile(join(root, 'duplicate', 'mobile-result.json'), JSON.stringify(result));
@@ -459,6 +504,104 @@ test('Android Chrome DevTools readiness recognizes the published socket', async 
   assert.equal(hasAndroidChromeDevToolsSocket('00000000 00000002 00010000 0001 01 12345 @webview_devtools_remote_42\n'), false);
 });
 
+test('Android installed attachment selects the owned standalone window instead of a browser window', async () => {
+  const platform = new AndroidPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', deviceId: 'emulator-5554',
+    budget: new PhaseBudget('android-attachment-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
+  });
+  (platform as any).installedTarget = {
+    packageName: 'com.android.chrome', activity: 'WebappLauncherActivity',
+    shortcut: { id: 'id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay', url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac' },
+  };
+  (platform as any).isInstalledTargetForeground = async () => true;
+  const driver = platform.driver as any;
+  let selectedWindow = '';
+  driver.contexts = async () => ['NATIVE_APP', 'CHROMIUM'];
+  driver.contextMetadataRaw = async () => [];
+  driver.switchContext = async () => undefined;
+  driver.windowHandles = async () => ['browser-window', 'installed-window'];
+  driver.switchWindow = async (handle: string) => { selectedWindow = handle; };
+  driver.currentUrl = async () => 'https://fixture.test/';
+  driver.execute = async () => selectedWindow === 'installed-window'
+    ? { origin: 'https://fixture.test', standalone: true, provider: 'android-standalone' }
+    : { origin: 'https://fixture.test', standalone: false, provider: 'browser' };
+  await platform.attachToInstalledView();
+  assert.equal((platform as any).selectedInstalledWindow, 'installed-window');
+});
+
+test('Android fixture verification keeps the HTTP status separate from the Appium response status', async () => {
+  const platform = new AndroidPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', deviceId: 'emulator-5554',
+    budget: new PhaseBudget('android-fixture-test', { timeoutMs: 15_000, recoveryLimit: 1 }),
+  });
+  const transport = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/session') return new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 });
+    if (path.endsWith('/contexts')) return new Response(JSON.stringify({ value: ['NATIVE_APP', 'CHROMIUM'] }), { status: 200 });
+    if (path.endsWith('/execute/sync')) {
+      const script = JSON.parse(String(init?.body || '{}')).script as string;
+      if (script.includes('status: response.status')) {
+        return new Response(JSON.stringify({ value: { error: 'unknown error', message: 'Matched JSONWP error code 200 to UnknownError' } }), { status: 500 });
+      }
+      return new Response(JSON.stringify({ value: {
+        httpStatus: 200,
+        url: 'https://fixture.test/version.json',
+        body: JSON.stringify({ version: '0.20.10', assets: 363 }),
+      } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ value: null }), { status: 200 });
+  };
+  const driver = new AppiumClient('http://fake.test', 100, transport);
+  await driver.create({ capabilities: {} });
+  (platform as any).driver = driver;
+  driver.setBudget((platform as any).budget);
+  await (platform as any).verifyFixtureEndpoint();
+});
+
+test('Android fixture verification rejects unsafe HTTP response identities without losing the reason', async () => {
+  const cases = [
+    {
+      observed: { httpStatus: 200, url: 'https://other.test/version.json', body: JSON.stringify({ version: '0.20.10', assets: 363 }) },
+      error: /status=200 url=https:\/\/other\.test/,
+      advanceMs: 351,
+    },
+    {
+      observed: { httpStatus: 200, url: 'https://fixture.test/version.json', body: '{not-json' },
+      error: /Unexpected|JSON|fixture HTTPS response identity was not trusted/,
+      advanceMs: 351,
+    },
+    {
+      observed: { httpStatus: 503, url: 'https://fixture.test/version.json', body: JSON.stringify({ version: '0.20.10', assets: 363 }) },
+      error: /status=503/,
+      advanceMs: 351,
+    },
+    {
+      observed: { httpStatus: 200, url: 'https://fixture.test/version.json', body: 'ERR_CERT_AUTHORITY_INVALID' },
+      error: /CERT|fixture HTTPS response identity was not trusted/,
+      advanceMs: 351,
+    },
+  ];
+  for (const [index, scenario] of cases.entries()) {
+    const clock = { value: 0 };
+    const platform = new AndroidPlatform({
+      origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+      certificate: '', setupUrl: '', deviceId: 'emulator-5554',
+      budget: new PhaseBudget(`android-fixture-rejection-${index}`, { timeoutMs: 350, recoveryLimit: 1, now: () => clock.value }),
+    });
+    const driver = platform.driver as any;
+    driver.contexts = async () => ['NATIVE_APP', 'CHROMIUM'];
+    driver.switchContext = async () => undefined;
+    driver.navigate = async () => undefined;
+    driver.execute = async () => {
+      clock.value += scenario.advanceMs;
+      return scenario.observed;
+    };
+    await assert.rejects(() => (platform as any).verifyFixtureEndpoint(), scenario.error);
+  }
+});
+
 test('Android Chrome shortcut output preserves the signed launch fields', async () => {
   const shortcuts = parseAndroidChromeShortcuts(`ShortcutInfo {id=shortcut-id, flags=0x28a
   shortLabel=Herdr Relay, resId=0[null]
@@ -525,6 +668,19 @@ test('WebDriver runtime script returns an identity from function-body execution'
   assert.equal(identity.applicationInitialized, true);
 });
 
+test('runtime readiness only permits an owned same-origin loading document', async () => {
+  const identity: RuntimeIdentity = {
+    url: 'https://localhost/', origin: 'https://localhost', standalone: true, provider: 'android-standalone',
+    nativeProvider: 'android:com.android.chrome', nativeActivity: 'WebappLauncherActivity', nativePid: '1',
+    version: '0.20.10', assets: 363, build: '', entry: '/index.html', script: '/assets/app.js', style: '/assets/app.css',
+    requiredAssetsReady: false, applicationInitialized: false,
+  };
+  assert.equal(isRuntimeIdentityNotReady(identity, 'https://localhost'), true);
+  assert.equal(isRuntimeIdentityNotReady({ ...identity, provider: 'browser', nativeProvider: undefined }, 'https://localhost'), false);
+  assert.equal(isRuntimeIdentityNotReady({ ...identity, origin: 'https://other.test' }, 'https://localhost'), false);
+  assert.equal(isRuntimeIdentityNotReady({ ...identity, applicationInitialized: true }, 'https://localhost'), false);
+});
+
 test('standalone oracle requires native provider evidence', async () => {
   const identity: RuntimeIdentity = {
     url: 'https://localhost/', origin: 'https://localhost', standalone: true, provider: 'android-standalone',
@@ -534,6 +690,9 @@ test('standalone oracle requires native provider evidence', async () => {
   };
   assert.throws(() => assertStandalone(identity, 'https://localhost'), /STANDALONE_PROVIDER_REQUIRED/);
   assert.doesNotThrow(() => assertStandalone({ ...identity, nativeProvider: 'android:org.chromium.webapk' }, 'https://localhost'));
+  assert.doesNotThrow(() => assertStandalone({
+    ...identity, nativeProvider: 'android:com.android.chrome', nativeActivity: 'org.chromium.chrome.browser.webapps.WebappLauncherActivity',
+  }, 'https://localhost'));
 });
 
 test('runtime oracle requires loaded target assets and identity', async () => {
@@ -937,6 +1096,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
   });
   (ios as any).driver = {
     findAnyOnce: async () => { throw fatal; },
+    findAll: async () => { throw fatal; },
     mobile: async () => { iosScrolls += 1; },
   };
   await assert.rejects(() => (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Missing' }], 'Missing', 100), (error: unknown) => error === fatal);
@@ -946,7 +1106,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
 test('native lookup scrolls between single-pass locator rounds', async () => {
   const android = new AndroidPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
-    certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-scroll-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+    certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-scroll-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   let androidLookups = 0;
   let androidScrolls = 0;
@@ -959,12 +1119,12 @@ test('native lookup scrolls between single-pass locator rounds', async () => {
     },
     mobile: async () => { androidScrolls += 1; },
   };
-  assert.equal(await (android as any).findNative([{ using: 'accessibility id', value: 'Target' }], 500), 'android-target');
+  assert.equal(await (android as any).findNative([{ using: 'accessibility id', value: 'Target' }], 20_000), 'android-target');
   assert.equal(androidScrolls, 1);
 
   const ios = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
-    certificate: '', setupUrl: '', deviceId: 'simulator-1', budget: new PhaseBudget('ios-scroll-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+    certificate: '', setupUrl: '', deviceId: 'simulator-1', budget: new PhaseBudget('ios-scroll-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   let iosLookups = 0;
   let iosScrolls = 0;
@@ -974,10 +1134,130 @@ test('native lookup scrolls between single-pass locator rounds', async () => {
       if (iosLookups > 1) return 'ios-target';
       throw new Error('element not found');
     },
+    pageSource: async () => `<XCUIElementTypeCollectionView x="0" y="100" width="393" height="600" visible="true"/><XCUIElementTypeOther value="${iosScrolls * 50}%" name="Vertical scroll bar, 2 pages" visible="true"/>`,
+    findAll: async (locator: { value: string }) => {
+      if (locator.value === 'Target') {
+        iosLookups += 1;
+        return iosLookups > 1 ? ['ios-target'] : [];
+      }
+      return ['ios-container'];
+    },
+    elementRect: async (element: string) => element === 'ios-container'
+      ? { x: 0, y: 100, width: 393, height: 600 }
+      : { x: 100, y: 700, width: 100, height: 40 },
+    attribute: async () => 'true',
     mobile: async () => { iosScrolls += 1; },
   };
-  assert.equal(await (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Target' }], 'Target', 500), 'ios-target');
+  assert.equal(await (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Target' }], 'Target', 20_000), 'ios-target');
   assert.equal(iosScrolls, 1);
+});
+
+test('iOS native scrolling rejects a hidden match when the hierarchy shows no progress', async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-scroll-'));
+  const platform = new IOSPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
+    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    budget: new PhaseBudget('ios-no-progress-test', { timeoutMs: 20_000, recoveryLimit: 1 }),
+  });
+  const driver = platform.driver as any;
+  const source = '<XCUIElementTypeScrollView x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeButton name="Add to Home Screen" visible="false" enabled="true"/></XCUIElementTypeScrollView>';
+  let gestures = 0;
+  driver.findAnyOnce = async () => 'target';
+  driver.pageSource = async () => source;
+  driver.findAll = async (locator: { value: string }) => locator.value.includes('Add to Home Screen') ? ['target'] : ['container'];
+  driver.elementRect = async (element: string) => element === 'container'
+    ? { x: 0, y: 100, width: 393, height: 600 }
+    : { x: 100, y: 700, width: 100, height: 40 };
+  driver.attribute = async (element: string, name: string) => element === 'target' && name === 'visible' ? 'false' : 'true';
+  driver.mobile = async () => { gestures += 1; };
+  await assert.rejects(
+    () => (platform as any).findNativeScrollable([{ using: 'accessibility id', value: 'Add to Home Screen' }], 'Add to Home Screen', 10_000),
+    /made no verified progress/,
+  );
+  assert.equal(gestures, 1);
+});
+
+test('iOS installation scrolls the evidenced action list before clicking ready controls', async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-install-'));
+  const platform = new IOSPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
+    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    budget: new PhaseBudget('ios-install-scroll-test', { timeoutMs: 120_000, recoveryLimit: 1 }),
+  });
+  let sheetOpen = false;
+  let scrolls = 0;
+  let addHomeClicked = false;
+  const scrollArguments: Array<Record<string, unknown>> = [];
+  const clicks: string[] = [];
+  const source = () => sheetOpen
+    ? `<XCUIElementTypeScrollView x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeButton name="Add to Home Screen" visible="${scrolls >= 2 ? 'true' : 'false'}" enabled="true"/></XCUIElementTypeScrollView><XCUIElementTypeOther name="Vertical scroll bar, 2 pages" value="${scrolls * 50}%" visible="true"/>`
+    : '<XCUIElementTypeButton name="Share" label="Share" enabled="true" visible="true" bounds="[166,774][227,818]"/>';
+  const element = (id: string) => ({ 'element-6066-11e4-a52e-4f735466cecf': id });
+  const absent = () => new Response(JSON.stringify({ value: { error: 'no such element', message: 'No such element' } }), { status: 404 });
+  const driver = new AppiumClient('http://fake.test', 100, async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, any> : {};
+    if (path === '/session') return new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 });
+    if (path.endsWith('/context')) return new Response(JSON.stringify({ value: null }), { status: 200 });
+    if (path.endsWith('/source')) return new Response(JSON.stringify({ value: source() }), { status: 200 });
+    if (path.endsWith('/screenshot')) return new Response(JSON.stringify({ value: '' }), { status: 200 });
+    if (path.endsWith('/execute/sync')) {
+      if (body.script === 'mobile: activeAppInfo') return new Response(JSON.stringify({ value: { bundleId: 'com.apple.mobilesafari', pid: '42' } }), { status: 200 });
+      if (body.script === 'mobile: tap') {
+        sheetOpen = true;
+        return new Response(JSON.stringify({ value: null }), { status: 200 });
+      }
+      if (body.script === 'mobile: scroll') {
+        scrolls += 1;
+        scrollArguments.push(body.args);
+        return new Response(JSON.stringify({ value: null }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ value: null }), { status: 200 });
+    }
+    if (path.endsWith('/elements')) {
+      const value = String(body.value || '');
+      const matches = value.includes('Add to Home Screen') && scrolls >= 1 ? [element('hidden-add'), element('add-home')]
+        : value.includes('XCUIElementTypeScrollView') ? [element('container')] : [];
+      return new Response(JSON.stringify({ value: matches }), { status: 200 });
+    }
+    if (path.endsWith('/element') && init?.method === 'POST') {
+      const value = String(body.value || '');
+      if (value.includes('Add to Home Screen') && sheetOpen && scrolls >= 1) return new Response(JSON.stringify({ value: element('add-home') }), { status: 200 });
+      if (value.includes('Open as Web App') && addHomeClicked) return new Response(JSON.stringify({ value: element('open-webapp') }), { status: 200 });
+      if (value === 'Add') return new Response(JSON.stringify({ value: element('add-button') }), { status: 200 });
+      return absent();
+    }
+    if (path.includes('/attribute/')) {
+      const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
+      const attribute = path.split('/attribute/')[1];
+      if (attribute === 'visible' && (id === 'hidden-add' || id === 'add-home')) {
+        return new Response(JSON.stringify({ value: id === 'add-home' && scrolls >= 2 ? 'true' : 'false' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ value: 'true' }), { status: 200 });
+    }
+    if (path.endsWith('/rect')) {
+      const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
+      return new Response(JSON.stringify({ value: id === 'container' ? { x: 0, y: 100, width: 393, height: 600 } : { x: 100, y: 700, width: 100, height: 40 } }), { status: 200 });
+    }
+    if (path.endsWith('/click')) {
+      const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
+      clicks.push(id);
+      if (id === 'add-home') addHomeClicked = true;
+      return new Response(JSON.stringify({ value: null }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ value: null }), { status: 200 });
+  });
+  await driver.create({ capabilities: {} });
+  (platform as any).driver = driver;
+  driver.setBudget((platform as any).budget);
+  await platform.installFromBrowser();
+  assert.equal(scrolls, 2);
+  assert.deepEqual(scrollArguments, [
+    { element: 'container', direction: 'up', distance: 0.75 },
+    { element: 'container', direction: 'up', distance: 0.75 },
+  ]);
+  assert.deepEqual(clicks, ['add-home', 'open-webapp', 'add-button']);
+  assert.equal(driver.snapshot().unusable, false);
 });
 
 test('Android context metadata keeps the recorded response beside canonical context IDs', async () => {
@@ -1026,6 +1306,40 @@ test('iOS openurl failures distinguish transient, terminal, and timeout outcomes
   assert.equal(iosOpenURLFailureKind(new Error('LaunchServices temporarily unavailable')), 'transient');
   assert.equal(iosOpenURLFailureKind(new Error('invalid simulator device')), 'terminal');
   assert.equal(iosOpenURLFailureKind(new Error('ETIMEDOUT')), 'timeout');
+});
+
+test('iOS WebKit discovery retries until Safari publishes a delayed page', async () => {
+  const platform = new IOSPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    budget: new PhaseBudget('ios-discovery-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
+  });
+  let discoveries = 0;
+  const contexts: string[] = [];
+  const driver = new AppiumClient('http://fake.test', 100, async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    const body = String(init?.body || '');
+    if (path === '/session') return new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 });
+    if (path.endsWith('/execute/sync')) {
+      discoveries += 1;
+      const value = discoveries < 9 ? [] : [{ id: 'WEBVIEW_1', bundleId: 'com.apple.mobilesafari', url: 'https://fixture.test/', raw: {} }];
+      return new Response(JSON.stringify({ value }), { status: 200 });
+    }
+    if (path.endsWith('/context')) {
+      contexts.push(JSON.parse(body).name);
+      return new Response(JSON.stringify({ value: null }), { status: 200 });
+    }
+    if (path.endsWith('/url') && init?.method === 'GET') {
+      return new Response(JSON.stringify({ value: 'https://fixture.test/' }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ value: null }), { status: 200 });
+  });
+  await driver.create({ capabilities: {} });
+  (platform as any).driver = driver;
+  driver.setBudget((platform as any).budget);
+  await (platform as any).waitForSafariFixturePage('https://fixture.test/setup', 25_000, (platform as any).budget);
+  assert.ok(discoveries >= 9);
+  assert.deepEqual(contexts, ['WEBVIEW_1', 'NATIVE_APP']);
 });
 
 test('iOS installed-page candidates distinguish Safari from SafariViewService', async () => {

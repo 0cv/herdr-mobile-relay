@@ -224,6 +224,10 @@ jobs:
       smoke_matrix: ${{ steps.matrix.outputs.smoke_matrix }}
       candidate_web_hash: ${{ steps.artifact_identity.outputs.web_hash }}
       synthetic_web_hash: ${{ steps.artifact_identity.outputs.synthetic_web_hash }}
+      candidate_identity: ${{ steps.artifact_identity.outputs.identity }}
+      synthetic_candidate_identity: ${{ steps.artifact_identity.outputs.synthetic_identity }}
+      baseline_identities: ${{ steps.artifact_identity.outputs.baseline_identities }}
+      synthetic_baseline_identity: ${{ steps.artifact_identity.outputs.synthetic_baseline_identity }}
     steps:
       - name: Check out the verified source commit
         uses: actions/checkout@v4
@@ -383,10 +387,18 @@ jobs:
         run: |
           web_hash="$(jq -r '.candidate.identity.webHash' dist/mobile-android/bundle-set.json)"
           synthetic_web_hash="$(jq -r '.candidate.identity.webHash' dist/mobile-current/bundle-set.json)"
+          candidate_identity="$(jq -c '.candidate.identity' dist/mobile-android/bundle-set.json)"
+          synthetic_identity="$(jq -c '.candidate.identity' dist/mobile-current/bundle-set.json)"
+          baseline_identities="$(jq -c '[.baselines[] | {name, identity}]' dist/mobile-android/bundle-set.json)"
+          synthetic_baseline_identity="$(jq -c '.baselines[0].identity' dist/mobile-current/bundle-set.json)"
           test "${#web_hash}" -eq 64
           test "${#synthetic_web_hash}" -eq 64
           echo "web_hash=$web_hash" >> "$GITHUB_OUTPUT"
           echo "synthetic_web_hash=$synthetic_web_hash" >> "$GITHUB_OUTPUT"
+          echo "identity=$candidate_identity" >> "$GITHUB_OUTPUT"
+          echo "synthetic_identity=$synthetic_identity" >> "$GITHUB_OUTPUT"
+          echo "baseline_identities=$baseline_identities" >> "$GITHUB_OUTPUT"
+          echo "synthetic_baseline_identity=$synthetic_baseline_identity" >> "$GITHUB_OUTPUT"
       - name: Publish verified bundle sets
         uses: actions/upload-artifact@v4
         with:
@@ -469,6 +481,8 @@ jobs:
           CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
           SOURCE_RUN_HEAD_SHA: ${{ needs.provenance.outputs.head_sha }}
           CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+          CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
+          BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
         run: |
           bun tests/mobile/validate-evidence.ts \
             --directory smoke-evidence \
@@ -476,7 +490,9 @@ jobs:
             --suite smoke \
             --candidate-commit "$CANDIDATE_COMMIT" \
             --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
-            --candidate-web-hash "$CANDIDATE_WEB_HASH"
+            --candidate-web-hash "$CANDIDATE_WEB_HASH" \
+            --candidate-identity "$CANDIDATE_IDENTITY" \
+            --baseline-identities "$BASELINE_IDENTITIES"
 
   release_smoke:
     name: Controlled release scenario (${{ matrix.platform }})
@@ -539,6 +555,8 @@ jobs:
           CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
           SOURCE_RUN_HEAD_SHA: ${{ needs.provenance.outputs.head_sha }}
           CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+          CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
+          BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
         run: |
           bun tests/mobile/validate-evidence.ts \
             --directory release-evidence \
@@ -546,7 +564,9 @@ jobs:
             --suite release \
             --candidate-commit "$CANDIDATE_COMMIT" \
             --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
-            --candidate-web-hash "$CANDIDATE_WEB_HASH"
+            --candidate-web-hash "$CANDIDATE_WEB_HASH" \
+            --candidate-identity "$CANDIDATE_IDENTITY" \
+            --baseline-identities "$BASELINE_IDENTITIES"
 
   device:
     needs: [provenance, prepare, smoke, smoke_evidence, release_smoke, release_evidence]
@@ -958,6 +978,10 @@ jobs:
           SOURCE_RUN_HEAD_SHA: ${{ needs.provenance.outputs.head_sha }}
           CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
           SYNTHETIC_WEB_HASH: ${{ needs.prepare.outputs.synthetic_web_hash }}
+          CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.candidate_identity }}
+          SYNTHETIC_CANDIDATE_IDENTITY: ${{ needs.prepare.outputs.synthetic_candidate_identity }}
+          BASELINE_IDENTITIES: ${{ needs.prepare.outputs.baseline_identities }}
+          SYNTHETIC_BASELINE_IDENTITY: ${{ needs.prepare.outputs.synthetic_baseline_identity }}
           EXPECTED_SUITE: ${{ inputs.suite || 'release' }}
         run: |
           bun tests/mobile/validate-evidence.ts \
@@ -967,4 +991,8 @@ jobs:
             --candidate-commit "$CANDIDATE_COMMIT" \
             --source-run-head-sha "$SOURCE_RUN_HEAD_SHA" \
             --candidate-web-hash "$CANDIDATE_WEB_HASH" \
-            --synthetic-web-hash "$SYNTHETIC_WEB_HASH"
+            --synthetic-web-hash "$SYNTHETIC_WEB_HASH" \
+            --candidate-identity "$CANDIDATE_IDENTITY" \
+            --synthetic-candidate-identity "$SYNTHETIC_CANDIDATE_IDENTITY" \
+            --baseline-identities "$BASELINE_IDENTITIES" \
+            --synthetic-baseline-identity "$SYNTHETIC_BASELINE_IDENTITY"

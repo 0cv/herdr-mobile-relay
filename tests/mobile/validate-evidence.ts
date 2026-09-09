@@ -1,4 +1,9 @@
-import { validateMobileEvidence, type EvidenceMatrixEntry } from './support/evidence';
+import {
+  validateMobileEvidence,
+  type EvidenceBundleIdentity,
+  type EvidenceExpectedBundle,
+  type EvidenceMatrixEntry,
+} from './support/evidence';
 
 function option(name: string): string {
   const index = process.argv.indexOf(name);
@@ -18,6 +23,14 @@ function matrix(value: string): EvidenceMatrixEntry[] {
   }));
 }
 
+function json<T>(name: string): T {
+  try {
+    return JSON.parse(option(name)) as T;
+  } catch (error) {
+    throw new Error(`${name} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
+}
+
 validateMobileEvidence({
   directory: option('--directory'),
   matrix: matrix(option('--matrix')),
@@ -25,7 +38,15 @@ validateMobileEvidence({
   candidateCommit: option('--candidate-commit'),
   sourceRunHeadSha: option('--source-run-head-sha'),
   candidateWebHash: option('--candidate-web-hash'),
+  candidateIdentity: json<EvidenceBundleIdentity>('--candidate-identity'),
+  baselineIdentities: json<EvidenceExpectedBundle[]>('--baseline-identities'),
   syntheticWebHash: process.argv.includes('--synthetic-web-hash') ? option('--synthetic-web-hash') : undefined,
+  syntheticCandidateIdentity: process.argv.includes('--synthetic-candidate-identity')
+    ? json<EvidenceBundleIdentity>('--synthetic-candidate-identity')
+    : undefined,
+  syntheticBaselineIdentity: process.argv.includes('--synthetic-baseline-identity')
+    ? json<EvidenceBundleIdentity>('--synthetic-baseline-identity')
+    : undefined,
 }).catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;

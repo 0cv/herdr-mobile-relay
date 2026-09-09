@@ -81,6 +81,7 @@ interface RunResult {
   suite: string;
   baseline: string;
   candidate: string;
+  origin?: string;
   source_commit: string;
   source_run_head_sha?: string;
   candidate_web_hash: string;
@@ -93,6 +94,7 @@ interface RunResult {
   lifecycle_launch_count?: number;
   fixture_requests?: FixtureRequest[];
   faults_exercised?: string[];
+  fault_identity?: { id: string; generation: string; kind: string; path: string };
   oracle_controls?: string[];
   phone_completion?: UpdateCompletionEvidence;
   qualification_failure?: QualificationFailureSnapshot;
@@ -362,8 +364,9 @@ async function waitForCandidate(
       const identity = await platform.readRunningIdentity();
       qualification.observe({ identity });
       if (identity.navigationId) navigationIds.add(identity.navigationId);
-      if (isRuntimeIdentityNotReady(identity)) {
-        lastError = 'RUNTIME_NOT_READY: installed document has not initialized its standalone provider';
+      assertStandaloneOwnership(identity, origin);
+      if (isRuntimeIdentityNotReady(identity, origin)) {
+        lastError = 'RUNTIME_NOT_READY: installed document has not initialized its application';
         await delay(500, budget);
         continue;
       }
@@ -420,6 +423,7 @@ async function runUpgradeScenario(
   assertDistinctUpgrade(baseline, bundleSet.candidate);
   const navigationIds = new Set<string>();
   const faultsExercised: string[] = [];
+  let faultIdentity: RunResult['fault_identity'];
   const oracleControls = new Set<string>();
   const initialIdentity: RuntimeIdentity = await (async () => {
     setStage('device');
@@ -465,6 +469,7 @@ async function runUpgradeScenario(
     await control(info, '/fault', 'POST', {
       id: faultId, generation: faultGeneration, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
     });
+    faultIdentity = { id: faultId, generation: faultGeneration, kind: faultKind, path: faultPath };
     faultsExercised.push(`${faultKind}:${faultPath}`);
   }
   await control(info, '/activate', 'POST', { release: 'candidate' });
@@ -575,7 +580,7 @@ async function runUpgradeScenario(
   if (lifecycleLaunchCount > 2) throw new Error(`RELOAD_BOUND_EXCEEDED: ${lifecycleLaunchCount} lifecycle launches exceed 2`);
   return {
     schema: 1, result: 'passed', platform: platform.name, suite,
-    baseline: baseline.name, candidate: bundleSet.candidate.name,
+    baseline: baseline.name, candidate: bundleSet.candidate.name, origin: info.app_url,
     source_commit: bundleSet.candidate.provenance.sourceCommit,
     source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,
     candidate_web_hash: bundleSet.candidate.identity.webHash,
@@ -584,6 +589,7 @@ async function runUpgradeScenario(
     reload_count: reloadCount, lifecycle_launch_count: lifecycleLaunchCount,
     fixture_requests: (await fixtureState(info)).requests,
     faults_exercised: faultsExercised,
+    fault_identity: faultIdentity,
     oracle_controls: [...oracleControls].sort(),
     phone_completion: phoneCompletion,
   };

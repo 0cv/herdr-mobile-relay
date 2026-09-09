@@ -1,9 +1,15 @@
 import { X509Certificate } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { assertStandalone, type RuntimeIdentity } from '../support/oracle';
+import {
+  assertStandalone,
+  isQualificationFatal,
+  qualificationFatal,
+  type QualificationFatalError,
+  type RuntimeIdentity,
+} from '../support/oracle';
 import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
-import { PhaseBudget } from '../support/budget';
+import { PhaseBudget, PhaseBudgetError } from '../support/budget';
 import { command, commandOutput } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
 import {
@@ -29,7 +35,7 @@ function androidShellQuote(value: string): string {
 const ANDROID_NATIVE_IDLE_TIMEOUT_MS = 500;
 const ANDROID_NATIVE_SELECTOR_TIMEOUT_MS = 0;
 const ANDROID_NATIVE_LOOKUP_ROUND_MS = 5_000;
-const ANDROID_NATIVE_SCROLL_COMMAND_MS = 4_000;
+const ANDROID_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const ANDROID_NATIVE_SCROLL_LIMIT = 8;
 const CHROME_WEBAPP_ACTION = 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP';
 const CHROME_WEBAPP_COMPONENT = 'com.android.chrome/org.chromium.chrome.browser.webapps.WebappLauncherActivity';
@@ -141,6 +147,9 @@ export class AndroidPlatform implements MobilePlatform {
   private readonly diagnostics: DiagnosticRecorder;
   private installedPackage = '';
   private installedTarget?: { packageName: string; activity: string; shortcut: AndroidChromeShortcut };
+  private selectedInstalledWindow = '';
+  private selectedInstalledWindowValid = false;
+  private ownershipFailure?: QualificationFatalError;
   private lastIdentity?: RuntimeIdentity;
   private lastUrl = '';
   private keyboardDraft = '';
@@ -271,6 +280,8 @@ export class AndroidPlatform implements MobilePlatform {
 
   async launchInstalledApp(): Promise<void> {
     await requireOwnedDevice('android', this.serial);
+    this.selectedInstalledWindow = '';
+    this.selectedInstalledWindowValid = false;
     const shortcut = await this.waitForChromeShortcut(30_000);
     this.installedTarget = {
       packageName: 'com.android.chrome',
@@ -423,6 +434,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async attachToInstalledView(timeoutMs = 30_000): Promise<void> {
+    this.assertOwnershipClear();
     if (!this.installedTarget) throw new Error('ANDROID_CONTEXT: no native installed-app launch has been verified');
     const phase = this.budget.phaseView('android-attachment', timeoutMs);
     let lastError = '';
@@ -436,15 +448,19 @@ export class AndroidPlatform implements MobilePlatform {
       }
       let contextIds: string[];
       try {
-        contextIds = (await this.driver.contexts(Math.max(1, phase.remainingMs))).filter((context) => context !== 'NATIVE_APP');
+        const contextsTimeout = phase.remainingMs;
+        if (contextsTimeout < minimumDriverRequestMs) break;
+        contextIds = (await this.driver.contexts(contextsTimeout)).filter((context) => context !== 'NATIVE_APP');
       } catch (error) {
-        if (isFatalDriverError(error)) throw error;
+        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
         await delay(250, phase);
         continue;
       }
       phase.assertAvailable('record Android context metadata');
-      const metadata = await this.driver.contextMetadataRaw(Math.max(1, phase.remainingMs)).catch((error: unknown) => {
+      const metadataTimeout = phase.remainingMs;
+      if (metadataTimeout < minimumDriverRequestMs) break;
+      const metadata = await this.driver.contextMetadataRaw(metadataTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
         this.diagnostics.record({ phase: 'android-attachment', operation: 'context-metadata', detail: error instanceof Error ? error.message : String(error) });
         return undefined;
@@ -459,25 +475,60 @@ export class AndroidPlatform implements MobilePlatform {
       }
       for (const contextId of contextIds) {
         phase.assertAvailable('select installed Chromium context');
-        const timeoutMs = Math.max(1, phase.remainingMs);
-        await this.driver.switchContext(contextId, timeoutMs);
-        const handles = await this.driver.windowHandles(Math.max(1, phase.remainingMs));
-        const windows = handles.length ? handles : [''];
-        for (const handle of windows) {
-          const windowTimeoutMs = Math.max(1, phase.remainingMs);
-          if (handle) await this.driver.switchWindow(handle, windowTimeoutMs);
-          const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
-          this.lastUrl = url;
-          const foregroundTimeout = Math.min(5_000, phase.remainingMs);
-          if (foregroundTimeout >= minimumDriverRequestMs && this.isExpectedOrigin(url) && await this.isInstalledTargetForeground(foregroundTimeout, phase)) return;
+        try {
+          const contextTimeout = phase.remainingMs;
+          if (contextTimeout < minimumDriverRequestMs) break;
+          await this.driver.switchContext(contextId, contextTimeout);
+          const handlesTimeout = phase.remainingMs;
+          if (handlesTimeout < minimumDriverRequestMs) break;
+          const handles = await this.driver.windowHandles(handlesTimeout);
+          const windows = handles.length ? handles : [''];
+          windows.sort((left, right) => Number(right === this.selectedInstalledWindow && this.selectedInstalledWindowValid)
+            - Number(left === this.selectedInstalledWindow && this.selectedInstalledWindowValid));
+          for (const handle of windows) {
+            const windowTimeoutMs = phase.remainingMs;
+            if (windowTimeoutMs < minimumDriverRequestMs) break;
+            if (handle) await this.driver.switchWindow(handle, windowTimeoutMs);
+            const urlTimeout = phase.remainingMs;
+            if (urlTimeout < minimumDriverRequestMs) break;
+            const url = await this.driver.currentUrl(urlTimeout);
+            this.lastUrl = url;
+            if (!this.isExpectedOrigin(url)) {
+              if (this.selectedInstalledWindowValid) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', `document origin ${url} is not ${this.origin}`);
+              lastError = `window ${handle || 'current'} has origin ${url || 'unknown'}`;
+              continue;
+            }
+            const proofTimeout = phase.remainingMs;
+            if (proofTimeout < minimumDriverRequestMs) break;
+            const proof = await this.installedDocumentState(proofTimeout);
+            if (!this.isExpectedOrigin(proof.origin)) {
+              if (this.selectedInstalledWindowValid) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', `document origin ${proof.origin} is not ${this.origin}`);
+              lastError = `window ${handle || 'current'} has origin ${proof.origin || 'unknown'}`;
+              continue;
+            }
+            if (proof.standalone !== true || proof.provider !== 'android-standalone') {
+              if (this.selectedInstalledWindowValid) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', `window ${handle || 'current'} is not the installed standalone document`);
+              lastError = `window ${handle || 'current'} is ${proof.provider || 'unknown'} and standalone=${proof.standalone}`;
+              continue;
+            }
+            this.selectedInstalledWindow = handle;
+            this.selectedInstalledWindowValid = true;
+            return;
+          }
+        } catch (error) {
+          if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
+          lastError = error instanceof Error ? error.message : String(error);
         }
       }
-      lastError = `no installed Chromium window for ${this.origin}`;
-      await delay(250, phase);
+      lastError ||= `no installed Chromium window for ${this.origin}`;
+      const waitMs = Math.min(250, Math.max(0, phase.remainingMs - minimumDriverRequestMs));
+      if (waitMs < minimumDriverRequestMs) break;
+      await delay(waitMs, phase);
     }
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
+    this.budget.assertAvailable('discover installed page');
     throw new Error(`ANDROID_CONTEXT: no installed web context for ${this.origin}: ${lastError}`);
   }
 
@@ -486,8 +537,6 @@ export class AndroidPlatform implements MobilePlatform {
     const identity = await this.driver.execute<RuntimeIdentity>(runtimeScript());
     this.lastIdentity = {
       ...identity,
-      standalone: identity.standalone || Boolean(this.installedTarget && await this.isInstalledTargetForeground()),
-      provider: identity.standalone ? identity.provider : 'android-standalone',
       nativeProvider: this.installedPackage ? `android:${this.installedPackage}` : undefined,
       nativeActivity: this.lastForeground?.activity,
       nativePid: this.lastForeground?.pid,
@@ -720,6 +769,9 @@ export class AndroidPlatform implements MobilePlatform {
         shortcutId: this.installedTarget.shortcut.id,
         scope: this.installedTarget.shortcut.scope,
       } : undefined,
+      selectedInstalledWindow: this.selectedInstalledWindow,
+      selectedInstalledWindowValid: this.selectedInstalledWindowValid,
+      ownershipFailure: this.ownershipFailure?.snapshot(),
       lastUrl: this.lastUrl,
       lastIdentity: this.lastIdentity,
       lastCompletion: this.lastCompletion,
@@ -995,7 +1047,7 @@ export class AndroidPlatform implements MobilePlatform {
       }
       const afterLookup = deadline - Date.now();
       if (afterLookup < minimumDriverRequestMs || scrolls >= ANDROID_NATIVE_SCROLL_LIMIT) break;
-      if (this.driver instanceof AppiumClient && afterLookup < ANDROID_NATIVE_SCROLL_COMMAND_MS) break;
+      if (afterLookup < ANDROID_NATIVE_SCROLL_COMMAND_MS) break;
       const scrollTimeout = Math.min(ANDROID_NATIVE_SCROLL_COMMAND_MS, afterLookup);
       if (scrollTimeout < minimumDriverRequestMs) break;
       try {
@@ -1081,32 +1133,59 @@ export class AndroidPlatform implements MobilePlatform {
   private async verifyFixtureEndpoint(): Promise<void> {
     const phase = this.budget.phaseView('android-certificate', 30_000);
     let lastError = '';
+    const probeScript = `return fetch(location.href, { cache: 'no-store' }).then(async response => ({
+      httpStatus: response.status,
+      url: response.url,
+      body: (await response.text()).slice(0, 8192),
+    }));`;
     while (!phase.exhausted) {
-      phase.assertAvailable('verify fixture certificate');
       try {
-        const webContext = (await this.driver.contexts()).find((context) => context !== 'NATIVE_APP');
+        phase.assertAvailable('verify fixture certificate');
+        const contextsTimeout = phase.remainingMs;
+        if (contextsTimeout < minimumDriverRequestMs) break;
+        const webContext = (await this.driver.contexts(contextsTimeout)).find((context) => context !== 'NATIVE_APP');
         if (!webContext) throw new Error('Chrome web context is unavailable');
-        await this.driver.switchContext(webContext);
-        await this.driver.navigate(`${this.origin}/version.json`);
-        const observed = await this.driver.execute<{ status: number; url: string; body: string }>(`return fetch(location.href, { cache: 'no-store' }).then(async response => ({
-          status: response.status,
-          url: response.url,
-          body: (await response.text()).slice(0, 8192),
-        }));`);
-        const metadata = JSON.parse(observed.body) as Record<string, unknown>;
-        if (observed.status === 200 && this.isExpectedOrigin(observed.url)
-          && typeof metadata.version === 'string'
-          && Number.isInteger(Number(metadata.assets))
-          && Number(metadata.assets) > 0
-          && !/ERR_CERT|NET::ERR|privacy error|not private/iu.test(observed.body)) return;
-        lastError = `status=${observed.status} url=${observed.url} body=${observed.body.slice(0, 200)}`;
+        const contextTimeout = phase.remainingMs;
+        if (contextTimeout < minimumDriverRequestMs) break;
+        await this.driver.switchContext(webContext, contextTimeout);
+        const navigationTimeout = phase.remainingMs;
+        if (navigationTimeout < minimumDriverRequestMs) break;
+        await this.driver.navigate(`${this.origin}/version.json`, navigationTimeout);
+        const executeTimeout = phase.remainingMs;
+        if (executeTimeout < minimumDriverRequestMs) break;
+        const observed = await this.driver.execute<{ httpStatus: number; url: string; body: string }>(probeScript, [], executeTimeout);
+        const responseDetail = `status=${observed.httpStatus} url=${observed.url} body=${observed.body.slice(0, 200)}`;
+        if (/ERR_CERT|NET::ERR|privacy error|not private/iu.test(observed.body)) {
+          lastError = responseDetail;
+        } else {
+          const metadata = JSON.parse(observed.body) as Record<string, unknown>;
+          if (observed.httpStatus === 200 && this.isExpectedOrigin(observed.url)
+            && typeof metadata.version === 'string'
+            && Number.isInteger(Number(metadata.assets))
+            && Number(metadata.assets) > 0) return;
+          lastError = responseDetail;
+        }
       } catch (error) {
+        if (error instanceof PhaseBudgetError) {
+          if (lastError) break;
+          throw error;
+        }
         if (isFatalDriverError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!isCommandAdmissionError(error) || !lastError) lastError = detail;
+        if (isCommandAdmissionError(error) || phase.exhausted) break;
       }
-      await delay(250, phase);
+      if (phase.exhausted) break;
+      const waitMs = Math.min(250, Math.max(0, phase.remainingMs - minimumDriverRequestMs));
+      if (waitMs < minimumDriverRequestMs) break;
+      try {
+        await delay(waitMs, phase);
+      } catch (error) {
+        if (phase.exhausted) break;
+        throw error;
+      }
     }
-    throw new Error(`ANDROID_CERTIFICATE: fixture HTTPS response identity was not trusted (${lastError})`);
+    throw new Error(`ANDROID_CERTIFICATE: fixture HTTPS response identity was not trusted (${lastError || 'no response observed'})`);
   }
 
   private async foregroundEvidence(timeoutMs = 10_000, budget?: PhaseBudget): Promise<{ packageName: string; activity: string; pid: string; raw: string }> {
@@ -1133,7 +1212,7 @@ export class AndroidPlatform implements MobilePlatform {
       || /webapk/iu.test(foreground.packageName);
     if (!packageMatches) return false;
     if (foreground.activity === this.installedTarget.activity) return true;
-    return /Webapp|WebApk/iu.test(foreground.activity) && !/ChromeTabbedActivity|LauncherActivity$/u.test(foreground.activity);
+    return /(?:^|[.$])(?:Webapp|WebApk)[A-Za-z0-9_.-]*Activity$/u.test(foreground.activity);
   }
 
   private async waitForInstalledTarget(timeoutMs: number, launchError?: unknown): Promise<void> {
@@ -1163,6 +1242,23 @@ export class AndroidPlatform implements MobilePlatform {
     } catch {
       return false;
     }
+  }
+
+  private async installedDocumentState(timeoutMs: number): Promise<{ origin: string; standalone: boolean; provider: string }> {
+    return this.driver.execute<{ origin: string; standalone: boolean; provider: string }>(`return {
+      origin: location.origin,
+      standalone: window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,
+      provider: window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true ? 'android-standalone' : 'browser',
+    };`, [], timeoutMs);
+  }
+
+  private assertOwnershipClear(): void {
+    if (this.ownershipFailure) throw this.ownershipFailure;
+  }
+
+  private failOwnership(code: string, detail: string): never {
+    this.ownershipFailure ||= qualificationFatal(code, detail, 'ownership');
+    throw this.ownershipFailure;
   }
 
   private async currentForegroundPackage(timeoutMs = 10_000, budget?: PhaseBudget): Promise<string> {

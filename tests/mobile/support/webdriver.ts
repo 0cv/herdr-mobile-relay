@@ -148,7 +148,7 @@ export const driverRequestAllowanceMs = {
   lookup: 1_000,
   attribute: 750,
   click: 1_000,
-  gesture: 4_000,
+  gesture: 5_000,
   navigation: 5_000,
   source: 5_000,
 } as const;
