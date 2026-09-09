@@ -17,6 +17,8 @@ export interface RuntimeIdentity {
   script: string;
   style: string;
   requiredAssetsReady: boolean;
+  requiredAssetFailure?: boolean;
+  failureUiVisible?: boolean;
   applicationInitialized: boolean;
 }
 

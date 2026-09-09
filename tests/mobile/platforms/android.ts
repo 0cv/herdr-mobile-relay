@@ -10,7 +10,6 @@ import {
   accessibility,
   accessibilityPrefix,
   AppiumClient,
-  type ContextMetadata,
   buttonText,
   css,
   delay,
@@ -81,6 +80,27 @@ export function androidOpenUrlArgs(serial: string, url: string): string[] {
     .map(androidShellQuote)
     .join(' ');
   return ['-s', serial, 'shell', remoteCommand];
+}
+
+export function hasAndroidChromeDevToolsSocket(output: string): boolean {
+  return /(?:^|\s)@?chrome_devtools_remote(?:_\d+)?(?:\s|$)/u.test(output);
+}
+
+export function androidChromeCapabilities(serial: string, attachToRunningApp = false): Record<string, unknown> {
+  const chromeOptions: Record<string, unknown> = { androidPackage: 'com.android.chrome' };
+  if (attachToRunningApp) chromeOptions.androidUseRunningApp = true;
+  return {
+    platformName: 'Android',
+    browserName: 'Chrome',
+    'appium:automationName': 'UiAutomator2',
+    'appium:udid': serial,
+    'appium:noReset': true,
+    'appium:fullReset': false,
+    'appium:newCommandTimeout': 1_200,
+    'appium:skipDeviceInitialization': false,
+    'appium:skipServerInstallation': false,
+    'goog:chromeOptions': chromeOptions,
+  };
 }
 
 export function androidChromeShortcutArgs(serial: string, shortcut: AndroidChromeShortcut): string[] {
@@ -163,26 +183,7 @@ export class AndroidPlatform implements MobilePlatform {
     });
     await this.installCertificate();
     await this.driver.close();
-    await this.driver.create({
-      capabilities: {
-        platformName: 'Android',
-        browserName: 'Chrome',
-        'appium:automationName': 'UiAutomator2',
-        'appium:udid': this.serial,
-        'appium:noReset': true,
-        'appium:fullReset': false,
-        'appium:newCommandTimeout': 1_200,
-        'appium:skipDeviceInitialization': false,
-        'appium:skipServerInstallation': false,
-        'appium:androidUseRunningApp': true,
-        'goog:chromeOptions': {
-          androidPackage: 'com.android.chrome',
-          androidUseRunningApp: true,
-        },
-      },
-      requestTimeoutMs: 60_000,
-      budget: this.budget,
-    });
+    await this.createChromeSession(false);
     await this.verifyFixtureEndpoint();
   }
 
@@ -276,6 +277,9 @@ export class AndroidPlatform implements MobilePlatform {
       }
     }
     await this.waitForInstalledTarget(30_000, launchError);
+    await this.waitForChromeDevTools(30_000);
+    await this.driver.close();
+    await this.createChromeSession(true);
     await this.attachToInstalledView();
   }
 
@@ -420,27 +424,37 @@ export class AndroidPlatform implements MobilePlatform {
         await delay(250, phase);
         continue;
       }
-      let contexts;
+      let contextIds: string[];
       try {
-        contexts = await this.driver.contextMetadata();
+        contextIds = (await this.driver.contexts(Math.max(1, phase.remainingMs))).filter((context) => context !== 'NATIVE_APP');
       } catch (error) {
-        this.diagnostics.record({ phase: 'android-attachment', operation: 'context-metadata', detail: error instanceof Error ? error.message : String(error) });
-        contexts = (await this.driver.contexts()).map((id): ContextMetadata => ({ id, raw: { id } }));
-      }
-      const chromium = contexts.filter((context) => context.id !== 'NATIVE_APP');
-      if (!chromium.length) {
-        lastError = 'Chromium context metadata is unavailable';
+        lastError = error instanceof Error ? error.message : String(error);
         await delay(250, phase);
         continue;
       }
-      for (const context of chromium) {
-        if (context.url && !this.isExpectedOrigin(context.url)) continue;
-        await this.driver.switchContext(context.id);
-        const handles = await this.driver.windowHandles();
+      phase.assertAvailable('record Android context metadata');
+      const metadata = await this.driver.contextMetadataRaw(Math.max(1, phase.remainingMs)).catch((error: unknown) => {
+        this.diagnostics.record({ phase: 'android-attachment', operation: 'context-metadata', detail: error instanceof Error ? error.message : String(error) });
+        return undefined;
+      });
+      if (metadata !== undefined) {
+        this.diagnostics.record({ phase: 'android-attachment', operation: 'context-metadata-observed', detail: metadata });
+      }
+      if (!contextIds.length) {
+        lastError = 'Chromium context IDs are unavailable';
+        await delay(250, phase);
+        continue;
+      }
+      for (const contextId of contextIds) {
+        phase.assertAvailable('select installed Chromium context');
+        const timeoutMs = Math.max(1, phase.remainingMs);
+        await this.driver.switchContext(contextId, timeoutMs);
+        const handles = await this.driver.windowHandles(Math.max(1, phase.remainingMs));
         const windows = handles.length ? handles : [''];
         for (const handle of windows) {
-          if (handle) await this.driver.switchWindow(handle);
-          const url = await this.driver.currentUrl();
+          const windowTimeoutMs = Math.max(1, phase.remainingMs);
+          if (handle) await this.driver.switchWindow(handle, windowTimeoutMs);
+          const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
           this.lastUrl = url;
           if (this.isExpectedOrigin(url) && await this.isInstalledTargetForeground()) return;
         }
@@ -667,6 +681,35 @@ export class AndroidPlatform implements MobilePlatform {
 
   async stopOwnedResources(): Promise<void> {
     await this.driver.close();
+  }
+
+  private async createChromeSession(attachToRunningApp: boolean): Promise<void> {
+    await this.driver.create({
+      capabilities: androidChromeCapabilities(this.serial, attachToRunningApp),
+      requestTimeoutMs: 60_000,
+      budget: this.budget,
+    });
+  }
+
+  private async waitForChromeDevTools(timeoutMs: number): Promise<void> {
+    const phase = this.budget.phaseView('android-devtools', timeoutMs);
+    const adb = process.env.ADB || 'adb';
+    let last = '';
+    while (!phase.exhausted) {
+      phase.assertAvailable('discover Chrome DevTools socket');
+      try {
+        const sockets = await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', '/proc/net/unix'], 5_000, {
+          budget: phase,
+          label: 'discover Chrome DevTools socket',
+        });
+        if (hasAndroidChromeDevToolsSocket(sockets)) return;
+        last = 'chrome_devtools_remote socket is not published';
+      } catch (error) {
+        last = error instanceof Error ? error.message : String(error);
+      }
+      await delay(250, phase);
+    }
+    throw new Error(`ANDROID_CONTEXT: Chrome DevTools was not ready (${last})`);
   }
 
   private async installCertificate(): Promise<void> {

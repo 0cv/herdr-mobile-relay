@@ -13,9 +13,44 @@ import {
   css,
   delay,
   textLocator,
+  type ContextMetadata,
   type Locator,
+  WebDriverError,
 } from '../support/webdriver';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
+
+export function isIOSSafariBrowserBundle(bundleId?: string): boolean {
+  return bundleId?.toLowerCase() === 'com.apple.mobilesafari';
+}
+
+export function isIOSSafariViewServiceBundle(bundleId?: string): boolean {
+  return bundleId?.toLowerCase() === 'com.apple.safariviewservice';
+}
+
+export function isIOSStaleContextError(error: unknown): boolean {
+  if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such (?:window|context|frame)|(?:window|context|webview|page|target).*(?:not found|does not exist|is gone|closed|detached)|(?:stale|invalid).*(?:context|window|webview|page|target)/iu.test(message);
+}
+
+function isFatalDriverError(error: unknown): boolean {
+  if (error instanceof WebDriverError) return error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE';
+  const message = error instanceof Error ? error.message : String(error);
+  return /APPIUM_(?:TIMEOUT|SESSION_UNUSABLE)/u.test(message);
+}
+
+export function iosInstalledContextRejection(context: ContextMetadata, origin: string): string {
+  if (context.id === 'NATIVE_APP') return 'native context is not a web page';
+  if (isIOSSafariBrowserBundle(context.bundleId)) return 'Safari browser context is not the installed provider';
+  if (context.url) {
+    try {
+      if (new URL(context.url).origin !== new URL(origin).origin) return `origin ${new URL(context.url).origin} is not ${new URL(origin).origin}`;
+    } catch {
+      return `context URL is invalid: ${context.url}`;
+    }
+  }
+  return '';
+}
 
 function iosLabelContains(value: string): Locator {
   return {
@@ -120,7 +155,7 @@ export class IOSPlatform implements MobilePlatform {
     if (lastError) throw new Error(`IOS_NAVIGATION: could not open setup URL: ${lastError}`);
     await delay(1_500);
     const safariContext = (await this.driver.contextMetadata())
-      .find((context) => this.isSafariBundle(context.bundleId) && (!context.url || this.isExpectedOrigin(context.url)))?.id;
+      .find((context) => isIOSSafariBrowserBundle(context.bundleId) && (!context.url || this.isExpectedOrigin(context.url)))?.id;
     if (!safariContext) return;
     await this.driver.switchContext(safariContext);
     await this.driver.navigate(url);
@@ -220,55 +255,78 @@ export class IOSPlatform implements MobilePlatform {
       phase.assertAvailable('discover installed page');
       if (this.selectedInstalledContext) {
         try {
-          await this.driver.switchContext('NATIVE_APP');
-          await this.requireInstalledProviderForeground();
-          await this.driver.switchContext(this.selectedInstalledContext);
-          const url = await this.driver.currentUrl();
+          phase.assertAvailable('validate cached installed page');
+          await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
+          await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
+          await this.driver.switchContext(this.selectedInstalledContext, Math.max(1, phase.remainingMs));
+          const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
           this.lastUrl = url;
-          if (this.isExpectedOrigin(url)) {
-            await this.validateInstalledDocument();
-            return;
-          }
-          this.selectedInstalledContext = '';
+          if (!this.isExpectedOrigin(url)) throw new Error(`IOS_CONTEXT: cached document origin ${url} is not ${this.origin}`);
+          await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
+          return;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           this.diagnostics.record({ phase: 'ios-attachment', operation: 'cached-context', detail });
-          throw new Error(`IOS_CONTEXT: cached installed-page selection failed: ${detail}`, { cause: error });
+          if (!isIOSStaleContextError(error)) throw error;
+          this.selectedInstalledContext = '';
+          lastError = `cached context: ${detail}`;
         }
       }
-      const contexts = (await this.driver.contextMetadata())
-        .filter((context) => context.id !== 'NATIVE_APP')
-        .filter((context) => !this.isSafariBundle(context.bundleId));
+      phase.assertAvailable('discover installed page metadata');
+      const contexts = await this.driver.contextMetadata(Math.max(1, phase.remainingMs));
+      let candidateError: unknown;
       if (!contexts.length) {
         lastError = 'installed page metadata is unavailable';
       } else {
         for (const context of contexts) {
-          if (context.url && !this.isExpectedOrigin(context.url)) continue;
-          await this.driver.switchContext('NATIVE_APP');
-          await this.requireInstalledProviderForeground();
-          await this.driver.switchContext(context.id);
-          const handles = await this.driver.windowHandles().catch(() => []);
-          const windows = handles.length ? handles : [''];
-          for (const handle of windows) {
-            if (handle) await this.driver.switchWindow(handle);
-            const url = await this.driver.currentUrl();
+          phase.assertAvailable('select installed page');
+          const rejection = iosInstalledContextRejection(context, this.origin);
+          this.diagnostics.record({
+            phase: 'ios-attachment',
+            operation: 'context-candidate',
+            context: context.id,
+            detail: { bundleId: context.bundleId, url: context.url, title: context.title, raw: context.raw, rejection: rejection || undefined },
+          });
+          if (rejection) continue;
+          try {
+            phase.assertAvailable('validate installed page provider');
+            await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
+            await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
+            await this.driver.switchContext(context.id, Math.max(1, phase.remainingMs));
+            const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
             this.lastUrl = url;
-            if (!this.isExpectedOrigin(url)) continue;
-            await this.validateInstalledDocument();
+            if (!this.isExpectedOrigin(url)) throw new Error(`IOS_CONTEXT: document origin ${url} is not ${this.origin}`);
+            await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
             this.selectedInstalledContext = context.id;
             return;
+          } catch (error) {
+            if (isFatalDriverError(error)) throw error;
+            const detail = error instanceof Error ? error.message : String(error);
+            this.diagnostics.record({ phase: 'ios-attachment', operation: 'context-rejected', context: context.id, detail });
+            lastError = `${context.id}: ${detail}`;
+            if (!isIOSStaleContextError(error)) candidateError ||= error;
           }
         }
-        lastError = `no installed page for ${this.origin}`;
+        if (!lastError) lastError = `no installed page for ${this.origin}`;
       }
+      if (candidateError) throw candidateError;
       if (this.installedBundleId) {
         phase.recovery('reactivate installed provider');
-        await this.driver.switchContext('NATIVE_APP');
-        await this.driver.mobile('activateApp', { bundleId: this.installedBundleId });
+        phase.assertAvailable('reactivate installed provider');
+        await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
+        await this.driver.mobile('activateApp', { bundleId: this.installedBundleId }, Math.max(1, phase.remainingMs));
       }
-      await delay(250, phase);
+      try {
+        await delay(250, phase);
+      } catch (error) {
+        if (phase.exhausted) {
+          this.budget.assertAvailable('discover installed page');
+          break;
+        }
+        throw error;
+      }
     }
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    this.budget.assertAvailable('discover installed page');
     throw new Error(`IOS_CONTEXT: no installed Home Screen web context for ${this.origin}: ${lastError}`);
   }
 
@@ -532,15 +590,28 @@ export class IOSPlatform implements MobilePlatform {
     const phase = this.budget.phaseView('ios-provider', timeoutMs);
     while (!phase.exhausted) {
       phase.assertAvailable('discover installed provider');
-      await this.driver.switchContext('NATIVE_APP');
-      const appInfo = await this.driver.activeAppInfo();
+      await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
+      const appInfo = await this.driver.activeAppInfo(Math.max(1, phase.remainingMs));
       const bundleId = String(appInfo?.bundleId || appInfo?.bundleID || '');
-      if (bundleId && !this.isSafariBundle(bundleId) && !/springboard/iu.test(bundleId)) {
+      if (bundleId && !isIOSSafariBrowserBundle(bundleId) && !isIOSSafariViewServiceBundle(bundleId) && !/springboard/iu.test(bundleId)) {
         this.installedBundleId = bundleId;
         return true;
       }
-      await delay(250, phase);
+      if (phase.exhausted) {
+        this.budget.assertAvailable('discover installed provider');
+        return false;
+      }
+      try {
+        await delay(250, phase);
+      } catch (error) {
+        if (phase.exhausted) {
+          this.budget.assertAvailable('discover installed provider');
+          return false;
+        }
+        throw error;
+      }
     }
+    this.budget.assertAvailable('discover installed provider');
     return false;
   }
 
@@ -556,26 +627,22 @@ export class IOSPlatform implements MobilePlatform {
     if (!/springboard/iu.test(active)) throw new Error(`IOS_NATIVE: SpringBoard is not foreground (${active || 'unknown'})`);
   }
 
-  private async requireInstalledProviderForeground(): Promise<void> {
+  private async requireInstalledProviderForeground(timeoutMs?: number): Promise<void> {
     if (!this.installedBundleId) throw new Error('IOS_CONTEXT: installed provider identity is unavailable');
-    const info = await this.driver.activeAppInfo();
+    const info = await this.driver.activeAppInfo(timeoutMs);
     const active = String(info?.bundleId || info?.bundleID || '');
     this.lastNativeActivity = String(info?.activity || info?.appActivity || '');
     this.lastNativePid = String(info?.pid || '');
     if (active !== this.installedBundleId) throw new Error(`IOS_CONTEXT: installed provider ${this.installedBundleId} is not foreground (${active || 'unknown'})`);
   }
 
-  private async validateInstalledDocument(): Promise<void> {
+  private async validateInstalledDocument(timeoutMs?: number): Promise<void> {
     const document = await this.driver.execute<{ origin: string; standalone: boolean }>(`return {
       origin: location.origin,
       standalone: window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,
-    };`);
+    };`, [], timeoutMs);
     if (document.origin !== this.origin) throw new Error(`IOS_CONTEXT: document origin ${document.origin} is not ${this.origin}`);
     if (!document.standalone) throw new Error('IOS_CONTEXT: selected page is not standalone');
-  }
-
-  private isSafariBundle(bundleId?: string): boolean {
-    return Boolean(bundleId && /safari|safariviewservice/iu.test(bundleId));
   }
 
   private isExpectedOrigin(value: string): boolean {

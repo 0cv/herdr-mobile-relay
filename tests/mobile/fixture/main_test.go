@@ -138,13 +138,45 @@ func TestReleaseRouterPersistentFaultRequiresExplicitClear(t *testing.T) {
 	if len(requests) != 4 || requests[0].FaultID != "candidate-style" || requests[0].FaultGeneration != "generation-1" {
 		t.Fatalf("requests = %#v", requests)
 	}
-	if err := router.clearFault("candidate-style", "", ""); err != nil {
+	if err := router.clearFault("candidate-style", "wrong-generation", "", ""); err == nil {
+		t.Fatal("cleared a fault from the wrong generation")
+	}
+	if err := router.clearFault("candidate-style", "generation-1", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app.css", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("cleared fault response = %d", response.Code)
+	}
+}
+
+func TestReleaseRouterFaultExpiryInvalidatesFixture(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if err := router.addFault(responseFault{ID: "short-lived", Generation: "generation-1", Method: http.MethodGet, Path: "/assets/app.js", Kind: "missing", Remaining: -1, LifetimeMs: 1}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expired fault status = %d, body = %q", response.Code, response.Body.String())
+	}
+	if !router.invalidated || router.invalidationReason == "" {
+		t.Fatalf("router was not invalidated: %#v", router)
+	}
+	active := router.activeFaults()
+	if len(active) != 1 || active[0].ID != "short-lived" {
+		t.Fatalf("expired fault was removed: %#v", active)
+	}
+	second := httptest.NewRecorder()
+	router.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/", nil))
+	if second.Code != http.StatusServiceUnavailable {
+		t.Fatalf("invalidated fixture served a healthy response: %d", second.Code)
 	}
 }
 

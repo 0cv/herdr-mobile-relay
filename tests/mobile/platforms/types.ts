@@ -94,6 +94,9 @@ export function runtimeScript(): string {
       requiredAssetsReady: document.documentElement.dataset.herdrLoadFailed !== '1'
         && document.documentElement.dataset.herdrLoadTimedOut !== '1'
         && Boolean(style?.sheet || document.documentElement.dataset.herdrCssReady === '1'),
+      requiredAssetFailure: document.documentElement.dataset.herdrLoadFailed === '1'
+        || document.documentElement.dataset.herdrLoadTimedOut === '1',
+      failureUiVisible: /Herdr could not load|Try again|Phone app failed to load/u.test(document.body?.innerText || ''),
       applicationInitialized: Boolean(document.getElementById('app')?.childNodes.length),
     };
   })()`;

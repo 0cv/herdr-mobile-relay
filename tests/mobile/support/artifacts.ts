@@ -279,6 +279,13 @@ async function prepareArchive(archive: string, destination: string, expectedHash
   return webRoot;
 }
 
+async function compactArchiveDestination(destination: string): Promise<void> {
+  for (const entry of await readdir(destination)) {
+    if (entry === 'web' || entry === 'release-manifest.json') continue;
+    await rm(join(destination, entry), { recursive: true, force: true });
+  }
+}
+
 export interface PrepareBundleOptions {
   allowDirectory?: boolean;
 }
@@ -310,6 +317,7 @@ export async function prepareBundle(
       || (expected.webHash && manifest.web_hash !== expected.webHash)) {
       throw new Error(`ARTIFACT_MANIFEST: ${name} provenance does not match the pinned manifest`);
     }
+    await compactArchiveDestination(destination);
   }
   const identity = await validateWebRoot(root, expected);
   if (!archiveSha256 && expected.archiveSha256) archiveSha256 = expected.archiveSha256;

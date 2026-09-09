@@ -61,7 +61,9 @@ interface FixtureState {
   active_release: string;
   app_url: string;
   requests: FixtureRequest[];
-  faults?: Array<{ id: string; generation: string; path: string; kind: string; remaining: number }>;
+  faults?: Array<{ id: string; generation: string; method: string; path: string; kind: string; remaining: number }>;
+  invalidated?: boolean;
+  invalidation_reason?: string;
   relays: FixtureRelayState[];
 }
 
@@ -73,6 +75,7 @@ interface RunResult {
   baseline: string;
   candidate: string;
   source_commit: string;
+  source_run_head_sha?: string;
   candidate_web_hash: string;
   initial_identity?: RuntimeIdentity;
   final_identity?: RuntimeIdentity;
@@ -195,14 +198,39 @@ function authEvidence(state: FixtureState): RelayAuthEvidence {
   };
 }
 
-async function waitForFault(info: FixtureInfo, path: string, kind: string, faultId?: string, budget?: PhaseBudget): Promise<void> {
+async function waitForFault(
+  info: FixtureInfo,
+  path: string,
+  kind: string,
+  faultId: string,
+  faultGeneration: string,
+  budget?: PhaseBudget,
+): Promise<void> {
   const deadline = Date.now() + Math.min(30_000, budget?.remainingMs ?? 30_000);
   while (Date.now() < deadline) {
     const state = await fixtureState(info);
-    if (state.requests.some((request) => request.path === path && request.fault === kind && (!faultId || request.fault_id === faultId))) return;
+    if (state.invalidated) throw new Error(`FIXTURE_FAULT_EXPIRED: ${state.invalidation_reason || 'fault lifetime expired'}`);
+    if (state.requests.some((request) => request.path === path
+      && request.fault === kind
+      && request.fault_id === faultId
+      && request.fault_generation === faultGeneration)) return;
     await delay(250, budget);
   }
   throw new Error(`FIXTURE_FAULT: ${kind} for ${path} was not consumed`);
+}
+
+function assertFaultActive(state: FixtureState, path: string, kind: string, faultId: string, faultGeneration: string): void {
+  if (state.invalidated) throw new Error(`FIXTURE_FAULT_EXPIRED: ${state.invalidation_reason || 'fault lifetime expired'}`);
+  const request = state.requests.find((candidate) => candidate.path === path
+    && candidate.fault === kind
+    && candidate.fault_id === faultId
+    && candidate.fault_generation === faultGeneration);
+  if (!request) throw new Error(`FIXTURE_FAULT_GENERATION: consumed ${kind} fault ${faultId} was not recorded with its generation`);
+  const fault = state.faults?.find((candidate) => candidate.id === faultId
+    && candidate.generation === faultGeneration
+    && candidate.path === path
+    && candidate.kind === kind);
+  if (!fault || fault.remaining === 0) throw new Error(`FIXTURE_FAULT_GENERATION: active ${kind} fault ${faultId} is not present`);
 }
 
 async function reconnectAllRelays(info: FixtureInfo, before: RelayAuthEvidence, budget?: PhaseBudget): Promise<RelayAuthEvidence> {
@@ -256,20 +284,27 @@ async function waitForPhoneCompletion(
   throw new Error(`PHONE_COMPLETION_MISSING: ${lastError}`);
 }
 
-async function assertCandidateNotReady(
+async function assertCandidateFailureObserved(
   platform: MobilePlatform,
   expected: BundleSet['candidate']['identity'],
   origin: string,
-): Promise<void> {
+  baseline: BundleSet['baselines'][number],
+  controls: Set<string>,
+): Promise<UpdateCompletionEvidence> {
   const identity = await platform.readRunningIdentity();
-  try {
-    assertStandalone(identity, origin);
-    assertRunningIdentity(identity, expected);
-  } catch (error) {
-    if (error instanceof Error && /^(APP_NOT_INITIALIZED|RUNTIME_|REQUIRED_ASSET|STANDALONE_)/u.test(error.message)) return;
-    throw error;
+  if (!identity.standalone) throw new Error('STANDALONE_REQUIRED: failed candidate is not in the installed standalone provider');
+  if (identity.origin !== origin) throw new Error(`ORIGIN_MISMATCH: failed candidate document is ${identity.origin}, not ${origin}`);
+  if (!identity.nativeProvider) throw new Error('STANDALONE_PROVIDER_REQUIRED: failed candidate has no installed native provider');
+  if (identity.entry !== expected.entry || identity.script !== expected.script || identity.style !== expected.style) {
+    throw new Error(`UPGRADE_FAILURE_TARGET_MISMATCH: observed ${identity.entry}/${identity.script}/${identity.style}`);
   }
-  throw new Error('PREMATURE_PHONE_COMPLETION: corrupt candidate response appeared initialized');
+  if (identity.requiredAssetsReady || identity.requiredAssetFailure !== true) {
+    throw new Error('REQUIRED_ASSET_FAILURE_MISSING: candidate fault did not produce a required-asset failure');
+  }
+  if (identity.failureUiVisible !== true) throw new Error('FAILURE_UI_MISSING: candidate fault did not expose the failure recovery UI');
+  const completion = await platform.readUpdateCompletion();
+  if (phonePlanContract(baseline, completion, controls)) assertPhoneUpdateNotAcknowledged(completion);
+  return completion;
 }
 
 async function waitForCandidate(
@@ -365,13 +400,14 @@ async function runUpgrade(
     : bundleSet.candidate.identity.script;
   const faultKind = bundleSet.candidate.name === 'current-code-target' ? 'missing' : 'corrupt';
   const faultId = `candidate-${bundleSet.candidate.name}-${faultKind}`;
+  const faultGeneration = `${faultId}-${Date.now()}`;
   if (suite === 'release') {
     const beforeActivation = await fixtureState(info);
     if (beforeActivation.requests.some((request) => request.release === 'candidate' && request.path === faultPath && !request.fault)) {
       throw new Error(`FIXTURE_FAULT: candidate asset was fetched before fault ${faultPath}`);
     }
     await control(info, '/fault', 'POST', {
-      id: faultId, generation: faultId, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
+      id: faultId, generation: faultGeneration, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
     });
     faultsExercised.push(`${faultKind}:${faultPath}`);
   }
@@ -381,13 +417,15 @@ async function runUpgrade(
   await platform.clickWebText('Load Update');
   await platform.clickDialogText('update-herdr-dialog', 'Load Update');
   if (suite === 'release') {
-    await waitForFault(info, faultPath, faultKind, faultId, budget);
-    await assertCandidateNotReady(platform, bundleSet.candidate.identity, info.app_url);
-    const faultCompletion = await platform.readUpdateCompletion();
-    if (phonePlanContract(baseline, faultCompletion, oracleControls)) {
-      assertPhoneUpdateNotAcknowledged(faultCompletion);
+    await waitForFault(info, faultPath, faultKind, faultId, faultGeneration, budget);
+    const faultState = await fixtureState(info);
+    assertFaultActive(faultState, faultPath, faultKind, faultId, faultGeneration);
+    await assertCandidateFailureObserved(platform, bundleSet.candidate.identity, info.app_url, baseline, oracleControls);
+    await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
+    const clearedState = await fixtureState(info);
+    if (clearedState.invalidated || clearedState.faults?.some((fault) => fault.id === faultId)) {
+      throw new Error(`FIXTURE_FAULT_CLEAR: fault ${faultId} was not explicitly cleared`);
     }
-    await control(info, '/fault/clear', 'POST', { id: faultId });
     await platform.clickWebText('Try again');
   }
   await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
@@ -445,6 +483,7 @@ async function runUpgrade(
     schema: 1, result: 'passed', platform: platform.name, suite,
     baseline: baseline.name, candidate: bundleSet.candidate.name,
     source_commit: bundleSet.candidate.provenance.sourceCommit,
+    source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,
     candidate_web_hash: bundleSet.candidate.identity.webHash,
     initial_identity: initialIdentity, final_identity: finalIdentity,
     credential_preserved: true, credential_evidence: finalAuth, preference_preserved: true,
@@ -518,6 +557,7 @@ async function main(): Promise<void> {
       platform: process.env.MOBILE_PLATFORM || 'unknown', suite,
       baseline: bundleSet.baselines[0]?.name || '', candidate: bundleSet.candidate.name,
       source_commit: bundleSet.candidate.provenance.sourceCommit,
+      source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,
       candidate_web_hash: bundleSet.candidate.identity.webHash,
       reload_count: 0, failure_stage: stage, failure: message,
       evidence: platform?.evidenceSnapshot(),

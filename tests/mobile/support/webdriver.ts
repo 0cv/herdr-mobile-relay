@@ -87,6 +87,12 @@ export class WebDriverError extends Error {
 
 export type FetchTransport = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+function isTimeoutError(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'TimeoutError') return true;
+  if (error && typeof error === 'object' && 'name' in error && (error as { name?: unknown }).name === 'TimeoutError') return true;
+  return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ETIMEDOUT');
+}
+
 export class AppiumClient {
   private sessionId = '';
   private readonly baseUrl: string;
@@ -120,6 +126,17 @@ export class AppiumClient {
   }
 
   async create(options: SessionOptions): Promise<Record<string, unknown>> {
+    if (this.unusable) {
+      throw new WebDriverError({
+        code: 'APPIUM_SESSION_UNUSABLE',
+        message: 'the previous session operation timed out; bounded teardown is required before replacement',
+        path: '/session',
+        method: 'POST',
+        durationMs: 0,
+        selectedContext: this.selectedContext,
+        selectedWindow: this.selectedWindow,
+      });
+    }
     options.budget?.assertAvailable('create session');
     if (options.budget) this.setBudget(options.budget);
     const response = await this.request<{ value: Record<string, unknown>; sessionId?: string }>('/session', 'POST', {
@@ -146,12 +163,16 @@ export class AppiumClient {
     await this.request(`/session/${encodeURIComponent(session)}`, 'DELETE', undefined, this.requestTimeoutMs, false).catch(() => undefined);
   }
 
-  async contexts(): Promise<string[]> {
-    return this.command<string[]>('/contexts', 'GET');
+  async contexts(timeoutMs?: number): Promise<string[]> {
+    return this.command<string[]>('/contexts', 'GET', undefined, timeoutMs);
   }
 
-  async contextMetadata(): Promise<ContextMetadata[]> {
-    const value = await this.mobile('getContexts');
+  async contextMetadataRaw(timeoutMs?: number): Promise<unknown> {
+    return this.mobile('getContexts', {}, timeoutMs);
+  }
+
+  async contextMetadata(timeoutMs?: number): Promise<ContextMetadata[]> {
+    const value = await this.contextMetadataRaw(timeoutMs);
     const entries = Array.isArray(value)
       ? value
       : value && typeof value === 'object' && Array.isArray((value as any).contexts)
@@ -174,38 +195,38 @@ export class AppiumClient {
     });
   }
 
-  async switchContext(name: string): Promise<void> {
-    await this.command('/context', 'POST', { name });
+  async switchContext(name: string, timeoutMs?: number): Promise<void> {
+    await this.command('/context', 'POST', { name }, timeoutMs);
     this.selectedContext = name;
   }
 
-  async currentUrl(): Promise<string> {
-    return this.command<string>('/url', 'GET');
+  async currentUrl(timeoutMs?: number): Promise<string> {
+    return this.command<string>('/url', 'GET', undefined, timeoutMs);
   }
 
-  async navigate(url: string): Promise<void> {
-    await this.command('/url', 'POST', { url });
+  async navigate(url: string, timeoutMs?: number): Promise<void> {
+    await this.command('/url', 'POST', { url }, timeoutMs);
   }
 
-  async pageSource(): Promise<string> {
-    return this.command<string>('/source', 'GET');
+  async pageSource(timeoutMs?: number): Promise<string> {
+    return this.command<string>('/source', 'GET', undefined, timeoutMs);
   }
 
-  async windowHandles(): Promise<string[]> {
-    return this.command<string[]>('/window/handles', 'GET');
+  async windowHandles(timeoutMs?: number): Promise<string[]> {
+    return this.command<string[]>('/window/handles', 'GET', undefined, timeoutMs);
   }
 
-  async currentWindow(): Promise<string> {
-    return this.command<string>('/window', 'GET');
+  async currentWindow(timeoutMs?: number): Promise<string> {
+    return this.command<string>('/window', 'GET', undefined, timeoutMs);
   }
 
-  async switchWindow(handle: string): Promise<void> {
-    await this.command('/window', 'POST', { handle });
+  async switchWindow(handle: string, timeoutMs?: number): Promise<void> {
+    await this.command('/window', 'POST', { handle }, timeoutMs);
     this.selectedWindow = handle;
   }
 
-  async activeAppInfo(): Promise<Record<string, unknown> | null> {
-    const value = await this.mobile('activeAppInfo');
+  async activeAppInfo(timeoutMs?: number): Promise<Record<string, unknown> | null> {
+    const value = await this.mobile('activeAppInfo', {}, timeoutMs);
     return value && typeof value === 'object' ? value as Record<string, unknown> : null;
   }
 
@@ -216,11 +237,13 @@ export class AppiumClient {
     while (Date.now() < deadline) {
       budget.assertAvailable(`find ${locator.using}`);
       try {
-        const value = await this.command<Record<string, string>>('/element', 'POST', locator);
+        const requestTimeoutMs = Math.max(1, Math.min(deadline - Date.now(), budget.remainingMs));
+        const value = await this.command<Record<string, string>>('/element', 'POST', locator, requestTimeoutMs);
         const element = value['element-6066-11e4-a52e-4f735466cecf'] || value.ELEMENT;
         if (element) return element;
         lastError = 'element response did not contain an id';
       } catch (error) {
+        if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       await delay(250, budget);
@@ -228,63 +251,63 @@ export class AppiumClient {
     throw new Error(`APPIUM_ELEMENT: ${locator.using}=${redactText(locator.value)}: ${lastError}`);
   }
 
-  async findAll(locator: Locator): Promise<string[]> {
-    const values = await this.command<Record<string, string>[]>('/elements', 'POST', locator);
+  async findAll(locator: Locator, timeoutMs = this.requestTimeoutMs): Promise<string[]> {
+    const values = await this.command<Record<string, string>[]>('/elements', 'POST', locator, timeoutMs);
     return values.map((value) => value['element-6066-11e4-a52e-4f735466cecf'] || value.ELEMENT).filter(Boolean);
   }
 
-  async click(element: string): Promise<void> {
-    await this.command(`/element/${encodeURIComponent(element)}/click`, 'POST');
+  async click(element: string, timeoutMs?: number): Promise<void> {
+    await this.command(`/element/${encodeURIComponent(element)}/click`, 'POST', undefined, timeoutMs);
   }
 
-  async sendKeys(element: string, text: string): Promise<void> {
+  async sendKeys(element: string, text: string, timeoutMs?: number): Promise<void> {
     await this.command(`/element/${encodeURIComponent(element)}/value`, 'POST', {
       text,
       value: [...text],
-    });
+    }, timeoutMs);
   }
 
-  async text(element: string): Promise<string> {
-    return this.command<string>(`/element/${encodeURIComponent(element)}/text`, 'GET');
+  async text(element: string, timeoutMs?: number): Promise<string> {
+    return this.command<string>(`/element/${encodeURIComponent(element)}/text`, 'GET', undefined, timeoutMs);
   }
 
-  async attribute(element: string, name: string): Promise<string | null> {
-    return this.command<string | null>(`/element/${encodeURIComponent(element)}/attribute/${encodeURIComponent(name)}`, 'GET');
+  async attribute(element: string, name: string, timeoutMs?: number): Promise<string | null> {
+    return this.command<string | null>(`/element/${encodeURIComponent(element)}/attribute/${encodeURIComponent(name)}`, 'GET', undefined, timeoutMs);
   }
 
-  async elementRect(element: string): Promise<{ x: number; y: number; width: number; height: number }> {
-    return this.command(`/element/${encodeURIComponent(element)}/rect`, 'GET');
+  async elementRect(element: string, timeoutMs?: number): Promise<{ x: number; y: number; width: number; height: number }> {
+    return this.command(`/element/${encodeURIComponent(element)}/rect`, 'GET', undefined, timeoutMs);
   }
 
-  async execute<T = unknown>(script: string, args: unknown[] = []): Promise<T> {
-    return this.command<T>('/execute/sync', 'POST', { script, args });
+  async execute<T = unknown>(script: string, args: unknown[] = [], timeoutMs?: number): Promise<T> {
+    return this.command<T>('/execute/sync', 'POST', { script, args }, timeoutMs);
   }
 
-  async screenshot(): Promise<string> {
-    return this.command<string>('/screenshot', 'GET');
+  async screenshot(timeoutMs?: number): Promise<string> {
+    return this.command<string>('/screenshot', 'GET', undefined, timeoutMs);
   }
 
-  async windowSize(): Promise<{ width: number; height: number }> {
-    const rect = await this.command<{ width: number; height: number }>('/window/rect', 'GET');
+  async windowSize(timeoutMs?: number): Promise<{ width: number; height: number }> {
+    const rect = await this.command<{ width: number; height: number }>('/window/rect', 'GET', undefined, timeoutMs);
     return { width: rect.width, height: rect.height };
   }
 
-  async back(): Promise<void> {
-    await this.command('/back', 'POST');
+  async back(timeoutMs?: number): Promise<void> {
+    await this.command('/back', 'POST', undefined, timeoutMs);
   }
 
-  async performActions(actions: unknown[]): Promise<void> {
-    await this.command('/actions', 'POST', { actions });
+  async performActions(actions: unknown[], timeoutMs?: number): Promise<void> {
+    await this.command('/actions', 'POST', { actions }, timeoutMs);
   }
 
-  async mobile(command: string, args: Record<string, unknown> = {}): Promise<unknown> {
-    return this.command('/execute/sync', 'POST', { script: `mobile: ${command}`, args });
+  async mobile(command: string, args: Record<string, unknown> = {}, timeoutMs?: number): Promise<unknown> {
+    return this.command('/execute/sync', 'POST', { script: `mobile: ${command}`, args }, timeoutMs);
   }
 
-  async command<T = unknown>(path: string, method: string, body?: unknown): Promise<T> {
+  async command<T = unknown>(path: string, method: string, body?: unknown, timeoutMs?: number): Promise<T> {
     this.assertUsable(path);
     try {
-      const response = await this.request<T>(this.sessionPath(path), method, body);
+      const response = await this.request<T>(this.sessionPath(path), method, body, timeoutMs);
       return response.value as T;
     } catch (error) {
       if (error instanceof WebDriverError && error.timedOut && path !== '/status') this.unusable = true;
@@ -325,20 +348,35 @@ export class AppiumClient {
     if (checkSession) this.assertUsable(path);
     const operation = `${method} ${path}`;
     this.budget?.assertAvailable(operation);
-    const requestTimeoutMs = Math.max(1, Math.min(timeoutMs, this.budget?.remainingMs ?? timeoutMs));
+    const operationTimeoutMs = timeoutMs ?? this.requestTimeoutMs;
+    const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, this.budget?.remainingMs ?? operationTimeoutMs));
     const startedAt = Date.now();
-    let response: Response;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new DOMException(`${operation} timed out`, 'TimeoutError');
+        controller.abort(error);
+        reject(error);
+      }, requestTimeoutMs);
+    });
+    let response: Response | undefined;
+    let text: string;
     try {
-      response = await this.transport(`${this.baseUrl}${path}`, {
-        method,
-        headers: body === undefined ? undefined : { 'content-type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(requestTimeoutMs),
-      });
+      response = await Promise.race([
+        this.transport(`${this.baseUrl}${path}`, {
+          method,
+          headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller.signal,
+        }),
+        timeoutPromise,
+      ]);
+      text = await Promise.race([response.text(), timeoutPromise]);
     } catch (error) {
-      const timedOut = error instanceof DOMException && error.name === 'TimeoutError'
-        || this.budget?.exhausted === true;
-      if (timedOut && checkSession) this.unusable = true;
+      const timedOut = isTimeoutError(error) || controller.signal.aborted || this.budget?.exhausted === true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (timedOut) this.unusable = true;
       const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, timedOut, error instanceof Error ? error.message : String(error));
       throw new WebDriverError({
         code: timedOut ? 'APPIUM_TIMEOUT' : 'APPIUM_HTTP',
@@ -349,10 +387,12 @@ export class AppiumClient {
         timedOut,
         selectedContext: this.selectedContext,
         selectedWindow: this.selectedWindow,
+        status: response?.status,
         cause: error,
       });
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
-    const text = await response.text();
     let parsed: WebDriverResponse<T>;
     try {
       parsed = JSON.parse(text) as WebDriverResponse<T>;
@@ -415,8 +455,10 @@ export class AppiumClient {
       for (const locator of locators) {
         budget.assertAvailable(`find ${locator.using}`);
         try {
-          return await this.find(locator, Math.min(750, Math.max(1, budget.remainingMs)));
+          const remaining = Math.max(1, Math.min(deadline - Date.now(), budget.remainingMs));
+          return await this.find(locator, Math.min(750, remaining));
         } catch (error) {
+          if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) throw error;
           lastError = error instanceof Error ? error.message : String(error);
         }
       }

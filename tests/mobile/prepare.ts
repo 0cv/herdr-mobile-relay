@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { repositoryPath } from './support/paths';
 import {
@@ -66,6 +66,7 @@ async function main(): Promise<void> {
   const candidateRevision = requiredOption('--candidate-revision');
   const candidateHash = requiredOption('--candidate-sha256');
   const output = repositoryPath(option('--output') || 'run-artifacts');
+  await rm(output, { recursive: true, force: true });
   const names = values('--baseline');
   const selectedNames = names.length ? names : ['0.20.8', '0.20.9'];
   const selected = selectedNames.map((name) => {
@@ -107,6 +108,7 @@ async function main(): Promise<void> {
     { allowDirectory: option('--allow-candidate-directory') === 'true' },
   );
   for (const baseline of baselines) assertDistinctUpgrade(baseline, candidate);
+  await rm(join(output, 'downloads'), { recursive: true, force: true });
   const portable = (bundle: PreparedBundle): PreparedBundle => ({
     ...bundle,
     root: relative(output, bundle.root).split('\\').join('/'),

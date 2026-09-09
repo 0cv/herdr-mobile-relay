@@ -55,11 +55,15 @@ async function control(info: FixtureInfo, path: string, method = 'GET', body?: u
   return text ? JSON.parse(text) : null;
 }
 
-async function waitForFault(info: FixtureInfo, path: string): Promise<void> {
+async function waitForFault(info: FixtureInfo, path: string, faultId: string, faultGeneration: string): Promise<void> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     const state = await control(info, '/state');
-    if (state.requests.some((request: { path: string; fault?: string }) => request.path === path && request.fault === 'missing')) return;
+    if (state.invalidated) throw new Error(`CACHE_RECOVERY: fixture fault expired: ${state.invalidation_reason || 'unknown reason'}`);
+    if (state.requests.some((request: { path: string; fault?: string; fault_id?: string; fault_generation?: string }) => request.path === path
+      && request.fault === 'missing'
+      && request.fault_id === faultId
+      && request.fault_generation === faultGeneration)) return;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
   }
   throw new Error(`CACHE_RECOVERY: missing stylesheet fault was not consumed for ${path}`);
@@ -138,19 +142,24 @@ async function main(): Promise<void> {
       build: bundleSet.candidate.identity.build,
     });
     const faultId = 'cache-recovery-candidate-style';
+    const faultGeneration = `${faultId}-1`;
     await control(info, '/fault', 'POST', {
-      id: faultId, generation: faultId, method: 'GET', path: bundleSet.candidate.identity.style, kind: 'missing', remaining: -1,
+      id: faultId, generation: faultGeneration, method: 'GET', path: bundleSet.candidate.identity.style, kind: 'missing', remaining: -1,
     });
     await control(info, '/activate', 'POST', { release: 'candidate' });
     await page.goto(`${info.app_url}/index.html?herdr_reload=cache-recovery`, { waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: 'Herdr could not load' }).waitFor();
-    await waitForFault(info, bundleSet.candidate.identity.style);
+    await waitForFault(info, bundleSet.candidate.identity.style, faultId, faultGeneration);
     await page.waitForFunction(() => JSON.parse(sessionStorage.getItem('herdr_update_progress') || '{}').phoneState === 'failed');
     const failedPlan = await page.evaluate(() => JSON.parse(sessionStorage.getItem('herdr_update_progress') || '{}')) as { phoneAcknowledged?: boolean; phoneState?: string };
     if (failedPlan.phoneAcknowledged === true || failedPlan.phoneState !== 'failed') {
       throw new Error(`CACHE_RECOVERY: failed plan was not incomplete: ${JSON.stringify(failedPlan)}`);
     }
-    await control(info, '/fault/clear', 'POST', { id: faultId });
+    await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
+    const clearedState = await control(info, '/state');
+    if (clearedState.invalidated || clearedState.faults?.some((fault: { id: string; generation: string }) => fault.id === faultId && fault.generation === faultGeneration)) {
+      throw new Error('CACHE_RECOVERY: fault was not explicitly cleared');
+    }
     await page.getByRole('button', { name: 'Try again' }).click();
     await page.waitForFunction(() => {
       const plan = JSON.parse(sessionStorage.getItem('herdr_update_progress') || '{}');
@@ -171,8 +180,11 @@ async function main(): Promise<void> {
       throw new Error(`CACHE_RECOVERY: target runtime identity mismatch: ${JSON.stringify(targetRuntime)}`);
     }
     const state = await control(info, '/state');
-    const fault = state.requests.find((request: { path: string; fault?: string }) => request.path === bundleSet.candidate.identity.style && request.fault === 'missing');
-    if (!fault) throw new Error('CACHE_RECOVERY: consumed stylesheet fault was not recorded');
+    const fault = state.requests.find((request: { path: string; fault?: string; fault_id?: string; fault_generation?: string }) => request.path === bundleSet.candidate.identity.style
+      && request.fault === 'missing'
+      && request.fault_id === faultId
+      && request.fault_generation === faultGeneration);
+    if (!fault) throw new Error('CACHE_RECOVERY: consumed stylesheet fault was not recorded with its generation');
     const updateDialog = page.locator('#update-progress-dialog');
     await updateDialog.getByRole('button', { name: 'Close', exact: true }).click();
     await updateDialog.waitFor({ state: 'hidden' });

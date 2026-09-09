@@ -77,16 +77,18 @@ type responseFault struct {
 }
 
 type releaseRouter struct {
-	mu        sync.RWMutex
-	old       *web.Handler
-	oldRoot   string
-	oldScript string
-	oldStyle  string
-	candidate *web.Handler
-	active    string
-	faults    map[string]*responseFault
-	barriers  map[string]chan struct{}
-	requests  []requestRecord
+	mu                 sync.RWMutex
+	old                *web.Handler
+	oldRoot            string
+	oldScript          string
+	oldStyle           string
+	candidate          *web.Handler
+	active             string
+	faults             map[string]*responseFault
+	barriers           map[string]chan struct{}
+	requests           []requestRecord
+	invalidated        bool
+	invalidationReason string
 }
 
 func newReleaseRouter(oldRoot, candidateRoot string) (*releaseRouter, error) {
@@ -134,15 +136,14 @@ func (r *releaseRouter) route(method, path string) (string, *web.Handler, *respo
 	if release == "candidate" {
 		handler = r.candidate
 	}
+	r.invalidateExpiredLocked(time.Now())
+	if r.invalidated {
+		return release, handler, &responseFault{ID: "fixture-expired", Generation: r.invalidationReason, Method: "*", Path: "*", Kind: "expired", Remaining: -1}
+	}
 	key := faultKey(method, path)
 	fault := r.faults[key]
 	if fault == nil {
 		fault = r.faults[faultKey("*", path)]
-	}
-	if fault != nil && !fault.ExpiresAt.IsZero() && time.Now().After(fault.ExpiresAt) {
-		delete(r.faults, key)
-		delete(r.faults, faultKey("*", path))
-		fault = nil
 	}
 	if fault != nil && fault.Remaining != 0 {
 		copy := *fault
@@ -195,11 +196,18 @@ func (r *releaseRouter) applyFault(w http.ResponseWriter, request *http.Request,
 		barrier := r.barrier(fault.Barrier)
 		select {
 		case <-barrier:
+			invalidated, _ := r.invalidationState()
+			if invalidated {
+				http.Error(w, "fixture fault lifetime expired; test invalidated", http.StatusServiceUnavailable)
+				return
+			}
 			if handler != nil {
 				handler.ServeHTTP(w, request)
 			}
 		case <-request.Context().Done():
 		}
+	case "expired":
+		http.Error(w, "fixture fault lifetime expired; test invalidated", http.StatusServiceUnavailable)
 	default:
 		http.Error(w, "unknown fixture fault", http.StatusInternalServerError)
 	}
@@ -285,6 +293,10 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 	fault.ExpiresAt = time.Now().Add(time.Duration(fault.LifetimeMs) * time.Millisecond)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.invalidateExpiredLocked(time.Now())
+	if r.invalidated {
+		return errors.New("fixture fault lifetime expired; fixture is invalidated")
+	}
 	if fault.Kind == "stall" {
 		if _, ok := r.barriers[fault.Barrier]; !ok {
 			r.barriers[fault.Barrier] = make(chan struct{})
@@ -295,12 +307,14 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 	return nil
 }
 
-func (r *releaseRouter) clearFault(id, method, path string) error {
+func (r *releaseRouter) clearFault(id, generation, method, path string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cleared := false
 	for key, fault := range r.faults {
-		if (id != "" && fault.ID == id) || (id == "" && key == faultKey(method, path)) {
+		matchesID := id != "" && fault.ID == id && (generation == "" || fault.Generation == generation)
+		matchesPath := id == "" && key == faultKey(method, path)
+		if matchesID || matchesPath {
 			delete(r.faults, key)
 			cleared = true
 		}
@@ -311,15 +325,34 @@ func (r *releaseRouter) clearFault(id, method, path string) error {
 	return nil
 }
 
+func (r *releaseRouter) invalidateExpiredLocked(now time.Time) {
+	for _, fault := range r.faults {
+		if !fault.ExpiresAt.IsZero() && !now.Before(fault.ExpiresAt) {
+			r.invalidated = true
+			if r.invalidationReason == "" {
+				r.invalidationReason = fmt.Sprintf("fault %s/%s expired", fault.ID, fault.Generation)
+			}
+		}
+	}
+}
+
 func (r *releaseRouter) activeFaults() []responseFault {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.invalidateExpiredLocked(time.Now())
 	faults := make([]responseFault, 0, len(r.faults))
 	for _, fault := range r.faults {
 		faults = append(faults, *fault)
 	}
 	sort.Slice(faults, func(i, j int) bool { return faults[i].ID < faults[j].ID })
 	return faults
+}
+
+func (r *releaseRouter) invalidationState() (bool, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.invalidateExpiredLocked(time.Now())
+	return r.invalidated, r.invalidationReason
 }
 
 func (r *releaseRouter) releaseBarrier(name string) error {
@@ -674,18 +707,22 @@ func (f *fixture) snapshot() map[string]any {
 	f.router.mu.RLock()
 	active := f.router.active
 	f.router.mu.RUnlock()
+	faults := f.router.activeFaults()
+	invalidated, invalidationReason := f.router.invalidationState()
 	relays := make([]map[string]any, 0, len(f.relays))
 	for _, relay := range f.relays {
 		relays = append(relays, relay.snapshot())
 	}
 	return map[string]any{
-		"active_release": active,
-		"app_url":        f.appURL,
-		"candidate":      f.candidate,
-		"old":            f.old,
-		"requests":       f.router.snapshotRequests(),
-		"faults":         f.router.activeFaults(),
-		"relays":         relays,
+		"active_release":      active,
+		"app_url":             f.appURL,
+		"candidate":           f.candidate,
+		"old":                 f.old,
+		"requests":            f.router.snapshotRequests(),
+		"faults":              faults,
+		"invalidated":         invalidated,
+		"invalidation_reason": invalidationReason,
+		"relays":              relays,
 	}
 }
 
@@ -729,9 +766,10 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 		writeJSON(w, map[string]any{"ok": true})
 	case "/fault/clear", "/fault/release":
 		var payload struct {
-			ID     string `json:"id"`
-			Method string `json:"method"`
-			Path   string `json:"path"`
+			ID         string `json:"id"`
+			Generation string `json:"generation"`
+			Method     string `json:"method"`
+			Path       string `json:"path"`
 		}
 		if request.Body != nil {
 			if err := json.NewDecoder(io.LimitReader(request.Body, 16*1024)).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
@@ -739,7 +777,7 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 				return
 			}
 		}
-		if err := f.router.clearFault(payload.ID, payload.Method, payload.Path); err != nil {
+		if err := f.router.clearFault(payload.ID, payload.Generation, payload.Method, payload.Path); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

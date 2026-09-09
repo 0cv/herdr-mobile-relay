@@ -18,9 +18,11 @@ import { assertNoKnownSecret, redactText, sanitizeValue } from '../support/diagn
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
-import { androidChromeShortcutArgs, androidOpenUrlArgs, parseAndroidChromeShortcuts } from '../platforms/android';
+import { androidChromeCapabilities, androidChromeShortcutArgs, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
+import { IOSPlatform, iosInstalledContextRejection, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError } from '../platforms/ios';
 import { runtimeScript } from '../platforms/types';
 import { repositoryPath, repositoryRoot } from '../support/paths';
+import { validateProvenance, type ProvenanceRun } from '../support/provenance';
 import { command } from '../support/process';
 import {
   assertBoundedReloads,
@@ -36,8 +38,9 @@ import {
   type RuntimeIdentity,
 } from '../support/oracle';
 
-const tests: Array<[string, () => Promise<void>]> = [];
-function test(name: string, body: () => Promise<void>): void {
+type TestOutcome = void | string;
+const tests: Array<[string, () => Promise<TestOutcome>]> = [];
+function test(name: string, body: () => Promise<TestOutcome>): void {
   tests.push([name, body]);
 }
 
@@ -105,7 +108,7 @@ test('valid release archives extract through the verified GNU tar path', async (
   try {
     execFileSync(tar, ['--version'], { stdio: 'ignore' });
   } catch {
-    return;
+    return 'GNU tar is unavailable';
   }
   const sourceRoot = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-valid-archive-'));
   const web = join(sourceRoot, 'web');
@@ -114,14 +117,18 @@ test('valid release archives extract through the verified GNU tar path', async (
   await writeFile(join(web, 'index.html'), '<html></html>');
   await writeFile(join(web, 'assets', 'app.js'), 'window.fixture = true;');
   await writeFile(join(web, 'assets', 'app.css'), 'body{}');
+  await mkdir(join(sourceRoot, 'relay'), { recursive: true });
+  await writeFile(join(sourceRoot, 'relay', 'binary'), 'not needed by mobile');
   await writeFile(join(sourceRoot, 'release-manifest.json'), JSON.stringify({ version: '0.20.8', revision: 'fixture', web_hash: '' }));
   const archive = join(sourceRoot, 'fixture.tar.gz');
-  execFileSync(tar, ['-C', sourceRoot, '-czf', archive, 'web', 'release-manifest.json']);
+  execFileSync(tar, ['-C', sourceRoot, '-czf', archive, 'web', 'relay', 'release-manifest.json']);
   const output = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-valid-output-'));
   const expected = { ...legacyExpected, revision: 'fixture', archiveSha256: await fileSha256(archive) };
   const prepared = await prepareBundle('valid', expected, archive, join(output, 'valid'));
   assert.equal(prepared.identity.script, '/assets/app.js');
   assert.equal(prepared.identity.style, '/assets/app.css');
+  assert.equal(existsSync(join(output, 'valid', 'release-manifest.json')), true);
+  assert.equal(existsSync(join(output, 'valid', 'relay')), false);
 });
 
 test('same-version different-build pairs are distinct', async () => {
@@ -145,6 +152,52 @@ test('repository-relative CLI paths are anchored at the repository root', async 
   assert.equal(repositoryPath('/tmp/mobile-bundles/bundle-set.json'), '/tmp/mobile-bundles/bundle-set.json');
 });
 
+test('PR provenance keeps merge build and PR head identities separate', async () => {
+  const repository = '0cv/herdr-mobile-relay';
+  const prHead = 'f02fcb1d3742487ac4a1e541d60cf3988284caf8';
+  const mergeBuild = '59fae417ab8d52e352dc4d6fa79cdbd214a8d6a4';
+  const run: ProvenanceRun = {
+    repository,
+    headSha: prHead,
+    event: 'pull_request',
+    headBranch: 'review',
+    workflow: '.github/workflows/check.yml',
+    headRepository: repository,
+    status: 'completed',
+    conclusion: 'failure',
+  };
+  assert.deepEqual(validateProvenance(run, {
+    mode: 'internal', repository, artifactRunId: '34321851994', callerRunId: '34321851994',
+    candidateCommit: mergeBuild, manifestRevision: mergeBuild,
+  }), { sourceSha: mergeBuild, headSha: prHead });
+  assert.throws(() => validateProvenance(run, {
+    mode: 'internal', repository, artifactRunId: '34321851994', callerRunId: '34321851994',
+    candidateCommit: prHead, manifestRevision: mergeBuild,
+  }), /PROVENANCE_BUILD_SHA/);
+});
+
+test('external provenance requires a successful same-repository main push', async () => {
+  const repository = '0cv/herdr-mobile-relay';
+  const mainSha = '5d169cb2d43cbe80eccf5494978001b63dc2fca9';
+  const run: ProvenanceRun = {
+    repository,
+    headSha: mainSha,
+    event: 'push',
+    headBranch: 'main',
+    workflow: '.github/workflows/check.yml',
+    headRepository: repository,
+    status: 'completed',
+    conclusion: 'success',
+  };
+  assert.deepEqual(validateProvenance(run, {
+    mode: 'external', repository, artifactRunId: '34321848225', callerRunId: 'other-run',
+    sourceCommit: mainSha, manifestRevision: mainSha,
+  }), { sourceSha: mainSha, headSha: mainSha });
+  assert.throws(() => validateProvenance({ ...run, headRepository: 'fork/herdr-mobile-relay' }, {
+    mode: 'external', repository, artifactRunId: '34321848225', callerRunId: 'other-run', manifestRevision: mainSha,
+  }), /PROVENANCE_HEAD_REPOSITORY/);
+});
+
 test('Android emulator-console parser handles names, terminators, and errors', async () => {
   assert.equal(parseAndroidAvdName('herdr-mobile-ci-42-1\r\nOK\r\n'), 'herdr-mobile-ci-42-1');
   assert.equal(parseAndroidAvdName('other-avd\nOK\n'), 'other-avd');
@@ -152,6 +205,19 @@ test('Android emulator-console parser handles names, terminators, and errors', a
   assert.equal(parseAndroidAvdName('OK\n'), undefined);
   assert.equal(parseAndroidAvdName('KO: unknown command\n'), undefined);
   assert.equal(parseAndroidAvdName('\r\n'), undefined);
+});
+
+test('Android Chrome startup only enables attach mode after explicit launch', async () => {
+  const ordinary = androidChromeCapabilities('emulator-5554');
+  const attached = androidChromeCapabilities('emulator-5554', true);
+  assert.equal('appium:androidUseRunningApp' in ordinary, false);
+  assert.equal((ordinary['goog:chromeOptions'] as Record<string, unknown>).androidUseRunningApp, undefined);
+  assert.equal((attached['goog:chromeOptions'] as Record<string, unknown>).androidUseRunningApp, true);
+});
+
+test('Android Chrome DevTools readiness recognizes the published socket', async () => {
+  assert.equal(hasAndroidChromeDevToolsSocket('00000000 00000002 00010000 0001 01 12345 @chrome_devtools_remote_42\n'), true);
+  assert.equal(hasAndroidChromeDevToolsSocket('00000000 00000002 00010000 0001 01 12345 @webview_devtools_remote_42\n'), false);
 });
 
 test('Android Chrome shortcut output preserves the signed launch fields', async () => {
@@ -364,6 +430,40 @@ test('Appium timeout preserves context and blocks follow-up commands', async () 
   assert.equal(client.snapshot().unusable, true);
 });
 
+test('Appium element lookup applies its child deadline to HTTP', async () => {
+  let requests = 0;
+  const client = new AppiumClient('http://fake.test', 30_000, async (_input, init) => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason || new DOMException('element lookup timed out', 'TimeoutError')), { once: true });
+    });
+  });
+  await client.create({ capabilities: {} });
+  await assert.rejects(() => client.find({ using: 'css selector', value: '#missing' }, 1), /APPIUM_TIMEOUT/);
+  assert.equal(requests, 2);
+  assert.equal(client.snapshot().lastCommand?.timeoutMs, 1);
+  assert.equal(client.snapshot().unusable, true);
+});
+
+test('Appium response-body timeout quarantines the session', async () => {
+  let requests = 0;
+  const client = new AppiumClient('http://fake.test', 5, async () => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    return {
+      ok: true,
+      status: 200,
+      text: () => new Promise<string>(() => undefined),
+    } as Response;
+  });
+  await client.create({ capabilities: {} });
+  await assert.rejects(() => client.contexts(), /APPIUM_TIMEOUT/);
+  assert.equal(client.snapshot().unusable, true);
+  await assert.rejects(() => client.contexts(), /APPIUM_SESSION_UNUSABLE/);
+  assert.equal(requests, 2);
+});
+
 test('Appium context metadata keeps provider identity separate from context names', async () => {
   const client = new AppiumClient('http://fake.test', 100, async (_input, init) => {
     const body = String(init?.body || '');
@@ -380,11 +480,123 @@ test('Appium context metadata keeps provider identity separate from context name
   }]);
 });
 
+test('Android context metadata keeps the recorded response beside canonical context IDs', async () => {
+  const androidResponse = [{
+    webviewName: 'WEBVIEW_com.android.chrome',
+    webview: 'WEBVIEW_com.android.chrome_devtools_remote',
+    proc: 'com.android.chrome:sandboxed_process0',
+    info: { 'Android-Package': 'com.android.chrome' },
+    pages: [{ id: 'page-1', url: 'https://fixture.test/', title: 'Installed', type: 'page' }],
+  }];
+  const client = new AppiumClient('http://fake.test', 100, async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    const body = String(init?.body || '');
+    const value = path === '/session/session/contexts'
+      ? ['NATIVE_APP', 'CHROMIUM']
+      : body.includes('mobile: getContexts') ? androidResponse : { sessionId: 'session' };
+    return new Response(JSON.stringify({ value, sessionId: 'session' }), { status: 200 });
+  });
+  await client.create({ capabilities: {} });
+  assert.deepEqual(await client.contexts(), ['NATIVE_APP', 'CHROMIUM']);
+  assert.deepEqual(await client.contextMetadataRaw(), androidResponse);
+  assert.deepEqual(await client.contextMetadata(), []);
+});
+
+test('iOS installed-page candidates distinguish Safari from SafariViewService', async () => {
+  const origin = 'https://fixture.test';
+  assert.equal(isIOSSafariBrowserBundle('com.apple.mobilesafari'), true);
+  assert.equal(isIOSSafariViewServiceBundle('com.apple.SafariViewService'), true);
+  assert.match(iosInstalledContextRejection({ id: 'WEBVIEW_1', bundleId: 'com.apple.mobilesafari', url: origin, raw: {} }, origin), /Safari browser/);
+  assert.equal(iosInstalledContextRejection({ id: 'WEBVIEW_2', bundleId: 'com.apple.SafariViewService', url: origin, raw: {} }, origin), '');
+  assert.match(iosInstalledContextRejection({ id: 'WEBVIEW_3', bundleId: 'com.apple.SafariViewService', url: 'https://other.test/', raw: {} }, origin), /origin/);
+});
+
+test('iOS attachment selects a page without enumerating windows', async () => {
+  const platform = new IOSPlatform({
+    origin: 'https://fixture.test',
+    appiumUrl: 'http://fake.test',
+    outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '',
+    setupUrl: '',
+    budget: new PhaseBudget('ios-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+  });
+  const driver = platform.driver as any;
+  (platform as any).installedBundleId = 'com.apple.webapp';
+  const calls: string[] = [];
+  driver.contextMetadata = async () => [{
+    id: 'WEBVIEW_1', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
+  }];
+  driver.switchContext = async (name: string) => { calls.push(`context:${name}`); };
+  driver.currentUrl = async () => 'https://fixture.test/';
+  driver.activeAppInfo = async () => ({ bundleId: 'com.apple.webapp', pid: '19193' });
+  driver.execute = async () => ({ origin: 'https://fixture.test', standalone: true });
+  driver.windowHandles = async () => { calls.push('windows'); return ['unexpected']; };
+  await platform.attachToInstalledView();
+  assert.equal(calls.includes('windows'), false);
+});
+
+test('iOS attachment rejects incorrect foreground, origin, and standalone state', async () => {
+  const cases = [
+    { foreground: 'com.apple.mobilesafari', url: 'https://fixture.test/', standalone: true, error: /installed provider/ },
+    { foreground: 'com.apple.webapp', url: 'https://other.test/', standalone: true, error: /document origin/ },
+    { foreground: 'com.apple.webapp', url: 'https://fixture.test/', standalone: false, error: /not standalone/ },
+  ];
+  for (const scenario of cases) {
+    const platform = new IOSPlatform({
+      origin: 'https://fixture.test',
+      appiumUrl: 'http://fake.test',
+      outputDir: '/tmp/herdr-mobile-ci-unit',
+      certificate: '',
+      setupUrl: '',
+      budget: new PhaseBudget('ios-negative-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+    });
+    const driver = platform.driver as any;
+    (platform as any).installedBundleId = 'com.apple.webapp';
+    driver.contextMetadata = async () => [{
+      id: 'WEBVIEW_1', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
+    }];
+    driver.switchContext = async () => undefined;
+    driver.currentUrl = async () => scenario.url;
+    driver.activeAppInfo = async () => ({ bundleId: scenario.foreground, pid: '19193' });
+    driver.execute = async () => ({ origin: scenario.url.replace(/\/$/u, ''), standalone: scenario.standalone });
+    await assert.rejects(() => platform.attachToInstalledView(), scenario.error);
+  }
+});
+
+test('iOS attachment rediscoveries only a stale cached context', async () => {
+  const platform = new IOSPlatform({
+    origin: 'https://fixture.test',
+    appiumUrl: 'http://fake.test',
+    outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '',
+    setupUrl: '',
+    budget: new PhaseBudget('ios-stale-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+  });
+  const driver = platform.driver as any;
+  (platform as any).installedBundleId = 'com.apple.webapp';
+  (platform as any).selectedInstalledContext = 'WEBVIEW_OLD';
+  const contexts: string[] = [];
+  driver.switchContext = async (name: string) => {
+    contexts.push(name);
+    if (name === 'WEBVIEW_OLD') throw new Error('no such context');
+  };
+  driver.contextMetadata = async () => [{
+    id: 'WEBVIEW_NEW', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
+  }];
+  driver.currentUrl = async () => 'https://fixture.test/';
+  driver.activeAppInfo = async () => ({ bundleId: 'com.apple.webapp', pid: '19193' });
+  driver.execute = async () => ({ origin: 'https://fixture.test', standalone: true });
+  await platform.attachToInstalledView();
+  assert.equal(isIOSStaleContextError(new Error('no such context')), true);
+  assert.equal(isIOSStaleContextError(new Error('document origin mismatch')), false);
+  assert.deepEqual(contexts, ['NATIVE_APP', 'WEBVIEW_OLD', 'NATIVE_APP', 'WEBVIEW_NEW']);
+});
+
 let failures = 0;
 for (const [name, body] of tests) {
   try {
-    await body();
-    process.stdout.write(`ok - ${name}\n`);
+    const outcome = await body();
+    process.stdout.write(outcome ? `ok - ${name} # SKIP ${outcome}\n` : `ok - ${name}\n`);
   } catch (error) {
     failures += 1;
     process.stderr.write(`not ok - ${name}: ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
