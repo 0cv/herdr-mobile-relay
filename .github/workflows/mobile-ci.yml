@@ -102,7 +102,17 @@ jobs:
             .appium == "3.1.1" and
             .appiumLogger == "2.0.4" and
             .drivers.uiautomator2 == "8.2.2" and
-            .drivers.xcuitest == "12.10.0"
+            .drivers.xcuitest == "12.10.0" and
+            .android.browserPackage == "com.android.chrome" and
+            .android.browserVersion == "131.0.6778.200 (677820038)" and
+            .android.browserSha256 == "261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35" and
+            .android.browserCertificateSha256 == "f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83" and
+            .android.browserCertificateSha1 == "38918a453d07199354f8b19af05ec6562ced5788" and
+            .android.trichromeLibraryPackage == "com.google.android.trichromelibrary" and
+            .android.trichromeLibraryVersion == "131.0.6778.200 (677820038)" and
+            .android.trichromeLibrarySha256 == "f7d82fa76a99f13980c4205484f4ae78742755d2e9b7276fd60c20e3cd7f9090" and
+            .android.trichromeLibraryCertificateSha256 == "b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1" and
+            .android.trichromeLibraryCertificateSha1 == "9524aa4a04aceeab425451e593ac639c942fb3cd"
           ' tests/mobile/toolchains.json >/dev/null
           test "$(bun --version)" = 1.4.0
       - name: Select requested device matrix
@@ -267,8 +277,10 @@ jobs:
           printf 'MOBILE_FIXTURE_BINARY=%s\n' "$RUNNER_TEMP/herdr-mobile-fixture" >> "$GITHUB_ENV"
           printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
           printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
+          printf 'IOS_PLATFORM_VERSION=18.5\n' >> "$GITHUB_ENV"
           printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
           printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
+          printf 'IOS_WDA_PREBUILT_PATH=%s/Build/Products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
           printf 'IOS_WDA_AGENT_PATH=%s/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@v2
         with:
@@ -331,7 +343,7 @@ jobs:
             test -w /dev/kvm
           fi
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis_playstore;x86_64"
+          sdkmanager "platform-tools" "emulator" "build-tools;35.0.0" "system-images;android-35;google_apis_playstore;x86_64"
           avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo no | avdmanager create avd --force --name "$avd_name" --package "system-images;android-35;google_apis_playstore;x86_64" --device pixel_7
           avdmanager list avd
@@ -375,6 +387,42 @@ jobs:
             fi
             sleep 2
           done
+      - name: Install pinned Android Chrome and Trichrome Library
+        if: matrix.platform == 'android'
+        run: |
+          set -euo pipefail
+          browser_dir="$RUNNER_TEMP/herdr-android-browser"
+          mkdir -p "$browser_dir/chrome"
+          chrome_url="$(jq -r '.android.browserUrl' tests/mobile/toolchains.json)"
+          chrome_sha256="$(jq -r '.android.browserSha256' tests/mobile/toolchains.json)"
+          trichrome_url="$(jq -r '.android.trichromeLibraryUrl' tests/mobile/toolchains.json)"
+          trichrome_sha256="$(jq -r '.android.trichromeLibrarySha256' tests/mobile/toolchains.json)"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$browser_dir/chrome.apkm" "$chrome_url"
+          printf '%s  %s\n' "$chrome_sha256" "$browser_dir/chrome.apkm" | sha256sum --check --status
+          curl --fail --location --retry 3 --retry-delay 2 --output "$browser_dir/trichrome-library.apk" "$trichrome_url"
+          printf '%s  %s\n' "$trichrome_sha256" "$browser_dir/trichrome-library.apk" | sha256sum --check --status
+          unzip -q "$browser_dir/chrome.apkm" -d "$browser_dir/chrome"
+          mapfile -t chrome_apks < <(find "$browser_dir/chrome" -maxdepth 1 -type f -name '*.apk' -print | sort)
+          test "${#chrome_apks[@]}" -gt 0
+          apksigner="$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -print -quit)"
+          test -x "$apksigner"
+          chrome_signing="$($apksigner verify --verbose --print-certs "$browser_dir/chrome/base.apk")"
+          trichrome_signing="$($apksigner verify --verbose --print-certs "$browser_dir/trichrome-library.apk")"
+          grep -F 'Verified using v3 scheme (APK Signature Scheme v3): true' <<<"$chrome_signing"
+          grep -F 'Signer #1 certificate SHA-256 digest: f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83' <<<"$chrome_signing"
+          grep -F 'Signer #1 certificate SHA-1 digest: 38918a453d07199354f8b19af05ec6562ced5788' <<<"$chrome_signing"
+          grep -F 'Verified using v3 scheme (APK Signature Scheme v3): true' <<<"$trichrome_signing"
+          grep -F 'Signer #1 certificate SHA-256 digest: b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1' <<<"$trichrome_signing"
+          grep -F 'Signer #1 certificate SHA-1 digest: 9524aa4a04aceeab425451e593ac639c942fb3cd' <<<"$trichrome_signing"
+          adb -s "$ANDROID_SERIAL" install -r -d "$browser_dir/trichrome-library.apk"
+          adb -s "$ANDROID_SERIAL" install-multiple -r -d "${chrome_apks[@]}"
+          chrome_dump="$(adb -s "$ANDROID_SERIAL" shell dumpsys package com.android.chrome)"
+          chrome_version="$(grep -m1 'versionName=' <<<"$chrome_dump")"
+          trichrome_version="$(grep -m1 'com.google.android.trichromelibrary version:' <<<"$chrome_dump")"
+          printf '%s\n%s\n' "$chrome_version" "$trichrome_version" >"$RUNNER_TEMP/android-chrome-version.txt"
+          grep -F 'versionName=131.0.6778.200' <<<"$chrome_version"
+          grep -F 'com.google.android.trichromelibrary version:677820038' <<<"$trichrome_version"
+
       - name: Create and boot iOS simulator
         if: matrix.platform == 'ios'
         run: |
@@ -392,6 +440,14 @@ jobs:
           printf 'ios:%s\n' "$udid" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
+          # WDA/XCTest is substantially more reliable when the Simulator UI is
+          # already attached. Appium otherwise restarts the booted device while
+          # it is trying to launch WDA, which can leave XCTest waiting forever.
+          open -Fn /Applications/Xcode_16.4.app/Contents/Developer/Applications/Simulator.app
+          for attempt in $(seq 1 30); do
+            if pgrep -f 'Simulator.app/Contents/MacOS/Simulator' >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
           xcrun simctl listapps "$udid" >"$RUNNER_TEMP/ios-apps-before.txt"
       - name: Install pinned Appium and platform driver
         run: |
@@ -424,7 +480,34 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/wda-build.log"
           xctestrun="$(find "$IOS_WDA_BOOTSTRAP_PATH" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' -print -quit)"
           test -n "$xctestrun"
+          test -d "$IOS_WDA_PREBUILT_PATH"
           test -d "$IOS_WDA_AGENT_PATH"
+      - name: Install and validate prebuilt WebDriverAgent
+        if: matrix.platform == 'ios'
+        run: |
+          set -euo pipefail
+          dump_wda_simulator_log() {
+            xcrun simctl spawn "$IOS_SIMULATOR_UDID" log show --last 10m --style compact \
+              --predicate 'process CONTAINS[c] "WebDriverAgent" OR process == "xctest" OR eventMessage CONTAINS[c] "WebDriverAgent"' \
+              >"$RUNNER_TEMP/ios-wda-system.log" 2>&1 || true
+          }
+          wda_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$IOS_WDA_PREBUILT_PATH/Info.plist")"
+          test "$wda_bundle_id" = com.facebook.WebDriverAgentRunner.xctrunner
+          xcrun simctl install "$IOS_SIMULATOR_UDID" "$IOS_WDA_PREBUILT_PATH"
+          SIMCTL_CHILD_USE_PORT=8100 \
+          SIMCTL_CHILD_WDA_PRODUCT_BUNDLE_IDENTIFIER="$wda_bundle_id" \
+            xcrun simctl launch --terminate-running-process "$IOS_SIMULATOR_UDID" "$wda_bundle_id" \
+            >"$RUNNER_TEMP/wda-preflight.log" 2>&1
+          for attempt in $(seq 1 300); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:8100/status >"$RUNNER_TEMP/wda-status.json"; then
+              cat "$RUNNER_TEMP/wda-status.json"
+              exit 0
+            fi
+            sleep 1
+          done
+          dump_wda_simulator_log
+          tail -200 "$RUNNER_TEMP/wda-preflight.log" >&2 || true
+          exit 1
       - name: Start Appium
         run: |
           set -euo pipefail
@@ -472,6 +555,13 @@ jobs:
           fi
           if [ -f "$RUNNER_TEMP/wda-build.log" ]; then
             head -c 104857600 "$RUNNER_TEMP/wda-build.log" >"$MOBILE_OUTPUT/wda-build.log" || true
+          fi
+          if [ -f "$RUNNER_TEMP/wda-preflight.log" ]; then
+            head -c 104857600 "$RUNNER_TEMP/wda-preflight.log" >"$MOBILE_OUTPUT/wda-preflight.log" || true
+          fi
+          if [ -f "$RUNNER_TEMP/wda-status.json" ]; then cp "$RUNNER_TEMP/wda-status.json" "$MOBILE_OUTPUT/wda-status.json"; fi
+          if [ -f "$RUNNER_TEMP/ios-wda-system.log" ]; then
+            head -c 104857600 "$RUNNER_TEMP/ios-wda-system.log" >"$MOBILE_OUTPUT/ios-wda-system.log" || true
           fi
           if [ -f "$RUNNER_TEMP/emulator.log" ]; then
             head -c 104857600 "$RUNNER_TEMP/emulator.log" >"$MOBILE_OUTPUT/emulator.log" || true

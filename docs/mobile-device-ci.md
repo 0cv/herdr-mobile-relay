@@ -57,6 +57,16 @@ appium --address 127.0.0.1 --port 4723 &
 export MOBILE_FIXTURE_BINARY="$PWD/run-artifacts/herdr-mobile-fixture"
 ```
 
+Hosted Android installs the pinned Chrome/Trichrome pair declared in
+`tests/mobile/toolchains.json` before Appium starts. The current reproducible
+candidate is Chrome `131.0.6778.200` / version code `677820038` for x86+x86_64,
+with the matching `com.google.android.trichromelibrary` library. CI verifies
+both SHA-256 archives and the Google signing certificates, unpacks the Chrome
+APKM, installs the library first, and then installs all Chrome splits. The
+binary URLs are an APK.now mirror fallback because APKMirror is Cloudflare
+blocked; replace them only with another source carrying the same hashes and
+signing certificates.
+
 For iOS, select the Xcode/runtime declared in `toolchains.json`, create one disposable iPhone 16 simulator, and record its ownership marker. The adapter does not erase an already booted simulator; the owner creates a fresh simulator instead:
 
 ```sh
@@ -68,6 +78,7 @@ export MOBILE_DEVICE_OWNERSHIP_FILE="$PWD/run-artifacts/ios-owned"
 printf 'ios:%s\n' "$IOS_SIMULATOR_UDID" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
 xcrun simctl boot "$IOS_SIMULATOR_UDID"
 xcrun simctl bootstatus "$IOS_SIMULATOR_UDID" -b
+open -Fn /Applications/Xcode_16.4.app/Contents/Developer/Applications/Simulator.app
 npm install --global appium@3.1.1
 appium driver install xcuitest@12.10.0
 appium --address 127.0.0.1 --port 4723 &
@@ -93,5 +104,11 @@ The runner keeps fixture info, TLS keys, and relay stores under `--private-outpu
 A manual workflow dispatch requires `artifact_run_id`, the successful `check` run that contains `release-bundles`; select `baseline_set: latest` for one baseline or `all` for the full matrix. The check workflow passes the caller run ID and candidate revision directly, so the tested commit and packaged bytes stay aligned. The release workflow invokes the same file as a reusable workflow with the exact artifact produced by its `build` job, and `publish` depends on the mobile result. Preparation validates the Linux candidate for Android and the Darwin arm64 candidate for iOS against the archive checksum, release manifest, web descriptor, hashed assets, and web-tree hash. It also runs a real Chromium/Go-fixture cache-recovery check with normal browser caching: the baseline loads, the target activates, a target-only missing stylesheet response is consumed, the failed phone plan is observed, and the candidate is reached through the shipped recovery button after the fault is repaired.
 
 Each device matrix entry selects one of 0.20.8, 0.20.9, or 0.20.10 as the installed baseline. The release suite injects one bounded corrupt candidate-script response for historical upgrades and a missing-stylesheet response for the synthetic current-code pair, proves each request was consumed and phone completion was not acknowledged, then uses the shipped Try again control without reinstalling or re-pairing. It also builds two coherent temporary current-code bundles through the real frontend pipeline and runs the same fault/completion assertions against that pair. The historical 0.20.8/0.20.9 progress-format gap is reported as `HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:<version>` rather than treated as a successful acknowledgement or a failed upgrade. After recording completion evidence, the runner closes the non-dismissible update dialog, returns from Settings to the fixture's alpha agent, and only then runs the native keyboard check. Evidence artifacts contain the mobile result, screenshots, bounded fixture/Appium logs, driver versions, and platform version records. Secrets, setup fragments, relay credentials, and control headers are redacted or deleted before upload.
+
+On hosted iOS, CI prebuilds the simulator WDA app, installs and launches it
+through `simctl`/Appium's preinstalled-WDA path, and waits for
+`http://127.0.0.1:8100/status` before creating the Safari session. This
+separates a successful Xcode build from proof that WDA is actually listening;
+bounded WDA and simulator logs are uploaded on failure.
 
 Physical-phone signoff remains separate: verify the same old-to-candidate flow on an approved Android handset and iPhone, with production access disabled and no uploaded device state. Record OS/browser/PWA provider, standalone launch, credential reconnect, preference preservation, cold relaunch, and keyboard results alongside the emulator artifacts; never treat simulator success as physical-device coverage.

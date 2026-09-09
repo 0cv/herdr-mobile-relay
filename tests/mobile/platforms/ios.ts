@@ -46,19 +46,19 @@ export class IOSPlatform implements MobilePlatform {
         platformName: 'iOS',
         browserName: 'Safari',
         'appium:automationName': 'XCUITest',
+        ...(process.env.IOS_PLATFORM_VERSION
+          ? { 'appium:platformVersion': process.env.IOS_PLATFORM_VERSION }
+          : {}),
         'appium:udid': this.udid,
         'appium:noReset': true,
         'appium:fullReset': false,
         'appium:newCommandTimeout': 1_200,
         'appium:includeSafariInWebviews': true,
         'appium:autoWebview': false,
-        'appium:usePrebuiltWDA': false,
-        ...(process.env.IOS_WDA_BOOTSTRAP_PATH
+        ...(process.env.IOS_WDA_PREBUILT_PATH
           ? {
-            'appium:useXctestrunFile': true,
-            'appium:bootstrapPath': process.env.IOS_WDA_BOOTSTRAP_PATH,
-            'appium:agentPath': process.env.IOS_WDA_AGENT_PATH,
-            'appium:derivedDataPath': process.env.IOS_WDA_DERIVED_DATA_PATH,
+            'appium:usePreinstalledWDA': true,
+            'appium:prebuiltWDAPath': process.env.IOS_WDA_PREBUILT_PATH,
           }
           : {}),
         // A fresh hosted runner may need several minutes to build and launch WDA.
@@ -67,8 +67,8 @@ export class IOSPlatform implements MobilePlatform {
         'appium:wdaStartupRetries': 1,
         'appium:wdaStartupRetryInterval': 10_000,
       },
-      // The first XCUITest session builds WebDriverAgent on the hosted runner.
-      // Keep the client request alive for that one-time build.
+      // Keep the client request alive while Appium installs/launches the
+      // prebuilt WebDriverAgent and creates the Safari session.
       requestTimeoutMs: 360_000,
     });
   }
