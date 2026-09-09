@@ -769,7 +769,7 @@ export class AndroidPlatform implements MobilePlatform {
     await delay(500);
     await command(adb, ['-s', this.serial, 'shell', 'am', 'force-stop', 'com.google.android.documentsui']).catch(() => undefined);
     await command(adb, ['-s', this.serial, 'shell', 'am', 'force-stop', 'com.android.settings']);
-    await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'android.settings.SECURITY_SETTINGS'], 30_000);
+    await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'com.android.settings.MORE_SECURITY_PRIVACY_SETTINGS'], 30_000);
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
