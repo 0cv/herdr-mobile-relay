@@ -52,7 +52,12 @@ export class IOSPlatform implements MobilePlatform {
     await this.driver.create({
       capabilities: {
         platformName: 'iOS',
-        browserName: 'Safari',
+        // Run Safari as a native AUT. browserName=Safari makes XCUITest
+        // activate WebKit during createSession, before the simulator has a
+        // debuggable page, and can fail the whole session on hosted runners.
+        // We open the URL explicitly below and attach to WEBVIEW only after it
+        // has been published by Web Inspector.
+        'appium:bundleId': 'com.apple.mobilesafari',
         'appium:automationName': 'XCUITest',
         ...(process.env.IOS_PLATFORM_VERSION
           ? { 'appium:platformVersion': process.env.IOS_PLATFORM_VERSION }
@@ -63,6 +68,9 @@ export class IOSPlatform implements MobilePlatform {
         'appium:newCommandTimeout': 1_200,
         'appium:includeSafariInWebviews': true,
         'appium:autoWebview': false,
+        // Allow Web Inspector time to publish a page after simctl openurl.
+        'appium:webviewConnectTimeout': 15_000,
+        'appium:webviewConnectRetries': 30,
         ...(process.env.IOS_WDA_PREBUILT_PATH
           ? {
             'appium:usePreinstalledWDA': true,
@@ -82,23 +90,26 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async openSetupURL(url: string): Promise<void> {
-    const safariContext = (await this.driver.contexts().catch(() => []))
-      .find((context) => /^WEBVIEW_/u.test(context));
-    if (safariContext) {
-      try {
-        // Keep Appium attached to the same Safari page. Using simctl alone can
-        // leave the Web Inspector session on its initial about:blank page.
-        await this.driver.switchContext(safariContext);
-        await this.driver.navigate(url);
-        await delay(1_500);
-        await this.driver.switchContext('NATIVE_APP');
-        return;
-      } catch {
-        await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-      }
-    }
+    // Open the URL before asking Appium for WEBVIEW contexts. A Safari browser
+    // session starts on about:blank, and querying WebKit before navigation can
+    // make hosted XCUITest report a fatal remote-debugger failure.
     await command('xcrun', ['simctl', 'openurl', this.udid, url], 30_000);
     await delay(1_500);
+    const safariContext = (await this.driver.contexts().catch(() => []))
+      .find((context) => /^WEBVIEW_/u.test(context));
+    if (!safariContext) return;
+    try {
+      // Keep Appium attached to the same Safari page when Web Inspector is
+      // ready. The native Safari page remains usable for share-sheet actions
+      // if discovery is still catching up.
+      await this.driver.switchContext(safariContext);
+      await this.driver.navigate(url);
+    } catch {
+      // Native Safari is enough for the installation flow; later context
+      // polling will attach once Web Inspector exposes the page.
+    } finally {
+      await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    }
   }
 
   async openSetupURLInInstalledApp(url: string): Promise<void> {

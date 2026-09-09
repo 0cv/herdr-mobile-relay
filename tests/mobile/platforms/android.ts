@@ -215,8 +215,16 @@ export class AndroidPlatform implements MobilePlatform {
       textLocator('Add to home screen'),
       accessibility('Add'),
       textLocator('Add'),
-    ], 5_000).catch(() => '');
-    if (launcherConfirm) await this.driver.click(launcherConfirm);
+    ], 2_000).catch(() => '');
+    if (launcherConfirm) {
+      await this.driver.click(launcherConfirm);
+    } else {
+      // Nexus Launcher's Android 15 confirmation is sometimes outside the
+      // UiAutomator2 window exposed to Appium. Read the device hierarchy and
+      // tap the visible button by its reported bounds instead of dismissing it
+      // with HOME.
+      await this.confirmLauncherShortcut();
+    }
     await delay(1_500);
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
   }
@@ -250,6 +258,37 @@ export class AndroidPlatform implements MobilePlatform {
     const identity = await this.readRunningIdentity();
     assertStandalone(identity, origin);
     return identity;
+  }
+
+  private async confirmLauncherShortcut(): Promise<boolean> {
+    const adb = process.env.ADB || 'adb';
+    const dumpPath = `/sdcard/herdr-mobile-ci-ui-${process.pid}.xml`;
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      try {
+        await command(adb, ['-s', this.serial, 'shell', 'uiautomator', 'dump', dumpPath], 10_000);
+        const xml = await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', dumpPath], 10_000);
+        const nodes = xml.match(/<node\b[^>]*\/>/gu) || [];
+        for (const node of nodes) {
+          if (!/add to home screen/iu.test(node)) continue;
+          const bounds = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/u);
+          if (!bounds) continue;
+          const [, left, top, right, bottom] = bounds;
+          await command(adb, [
+            '-s', this.serial, 'shell', 'input', 'tap',
+            String(Math.round((Number(left) + Number(right)) / 2)),
+            String(Math.round((Number(top) + Number(bottom)) / 2)),
+          ], 10_000);
+          return true;
+        }
+      } catch {
+        // The system overlay can be between activity transitions; retry until
+        // the bounded confirmation deadline rather than treating that as a
+        // successful install.
+      }
+      await delay(250);
+    }
+    return false;
   }
 
   private async launchChromeShortcut(): Promise<void> {
