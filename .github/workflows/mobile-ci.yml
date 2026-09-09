@@ -102,6 +102,12 @@ jobs:
       head_sha: ${{ steps.validate.outputs.head_sha }}
       artifact_run_id: ${{ steps.validate.outputs.artifact_run_id }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
       - name: Validate source run and artifact
         id: validate
         env:
@@ -117,7 +123,8 @@ jobs:
           CALLER_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          test -n "$ARTIFACT_RUN_ID"
+          case "$ARTIFACT_RUN_ID" in *[!0-9]*|'') exit 1 ;; esac
+          case "$CALLER_RUN_ID" in *[!0-9]*|'') exit 1 ;; esac
           if [ "$DISPATCH_EVENT" = true ]; then
             MODE=external
           else
@@ -136,6 +143,12 @@ jobs:
           head_sha="${HEAD_COMMIT:-$run_sha}"
           case "$head_sha" in *[!0-9a-f]*|'') exit 1 ;; esac
           test "${#head_sha}" -eq 40
+          if [ "$run_event" = pull_request ]; then
+            test -n "$HEAD_COMMIT"
+            jq -e --arg head "$HEAD_COMMIT" '.pull_requests | any(.[]; .head.sha == $head)' <<<"$run_json" >/dev/null
+          else
+            test "$head_sha" = "$run_sha"
+          fi
           artifact_json="$(gh api "repos/$REPOSITORY/actions/runs/$ARTIFACT_RUN_ID/artifacts" --paginate | jq -cs --arg name "$ARTIFACT_NAME" 'map(.artifacts[]) | map(select(.name == $name and .expired == false))')"
           artifact_count="$(jq 'length' <<<"$artifact_json")"
           test "$artifact_count" = 1
@@ -172,31 +185,27 @@ jobs:
           done
           case "$manifest_sha" in *[!0-9a-f]*|'') exit 1 ;; esac
           test "${#manifest_sha}" -eq 40
-          case "$MODE" in
-            internal)
-              test "$ARTIFACT_RUN_ID" = "$CALLER_RUN_ID"
-              if [ -n "$CANDIDATE_COMMIT" ]; then test "$CANDIDATE_COMMIT" = "$manifest_sha"; fi
-              if [ -n "$SOURCE_COMMIT" ]; then test "$SOURCE_COMMIT" = "$manifest_sha"; fi
-              source_sha="$manifest_sha"
-              ;;
-            external)
-              test "$(jq -r '.status // empty' <<<"$run_json")" = completed
-              test "$(jq -r '.conclusion // empty' <<<"$run_json")" = success
-              test "$run_event" = push
-              test "$run_branch" = main
-              test "$run_workflow" = .github/workflows/check.yml
-              test "$head_repository" = "$REPOSITORY"
-              test "$head_sha" = "$run_sha"
-              test "$manifest_sha" = "$run_sha"
-              if [ -n "$CANDIDATE_COMMIT" ]; then test "$CANDIDATE_COMMIT" = "$run_sha"; fi
-              if [ -n "$SOURCE_COMMIT" ]; then test "$SOURCE_COMMIT" = "$run_sha"; fi
-              source_sha="$run_sha"
-              ;;
-            *)
-              echo "unsupported provenance mode: $MODE" >&2
-              exit 2
-              ;;
-          esac
+          provenance_result="$(
+            PROVENANCE_MODE="$MODE" \
+            PROVENANCE_REPOSITORY="$REPOSITORY" \
+            PROVENANCE_ARTIFACT_RUN_ID="$ARTIFACT_RUN_ID" \
+            PROVENANCE_CALLER_RUN_ID="$CALLER_RUN_ID" \
+            PROVENANCE_CANDIDATE_COMMIT="$CANDIDATE_COMMIT" \
+            PROVENANCE_SOURCE_COMMIT="$SOURCE_COMMIT" \
+            PROVENANCE_MANIFEST_REVISION="$manifest_sha" \
+            PROVENANCE_RUN_REPOSITORY="$run_repository" \
+            PROVENANCE_HEAD_SHA="$head_sha" \
+            PROVENANCE_RUN_EVENT="$run_event" \
+            PROVENANCE_RUN_BRANCH="$run_branch" \
+            PROVENANCE_RUN_WORKFLOW="$run_workflow" \
+            PROVENANCE_HEAD_REPOSITORY="$head_repository" \
+            PROVENANCE_RUN_STATUS="$(jq -r '.status // empty' <<<"$run_json")" \
+            PROVENANCE_RUN_CONCLUSION="$(jq -r '.conclusion // empty' <<<"$run_json")" \
+            bun tests/mobile/provenance-check.ts
+          )"
+          source_sha="$(jq -r '.sourceSha' <<<"$provenance_result")"
+          validated_head_sha="$(jq -r '.headSha' <<<"$provenance_result")"
+          test "$validated_head_sha" = "$head_sha"
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
           printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
           printf 'artifact_run_id=%s\n' "$ARTIFACT_RUN_ID" >> "$GITHUB_OUTPUT"
@@ -754,11 +763,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Download every device evidence artifact
+      - name: Download current-attempt device evidence artifacts
         if: needs.provenance.result == 'success'
         uses: actions/download-artifact@v4
         with:
-          pattern: mobile-evidence-*
+          pattern: mobile-evidence-*-${{ github.run_attempt }}
           path: evidence
           merge-multiple: false
       - name: Reject skipped, duplicate, or incomplete device coverage
@@ -793,7 +802,10 @@ jobs:
             result_count=$((result_count + 1))
           done
           expected_count="$EXPECTED_DEVICES"
-          test "$result_count" -eq "$expected_count"
+          if [ "$result_count" -ne "$expected_count" ]; then
+            echo "current-attempt-only evidence is required; rerun the complete workflow instead of selected jobs" >&2
+            exit 1
+          fi
           while IFS= read -r matrix_row; do
             scenario="$(jq -r '.scenario' <<<"$matrix_row")"
             if [ "$scenario" = synthetic ]; then continue; fi

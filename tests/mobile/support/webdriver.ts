@@ -158,9 +158,20 @@ export class AppiumClient {
   async close(): Promise<void> {
     if (!this.sessionId) return;
     const session = this.sessionId;
-    this.sessionId = '';
-    this.unusable = false;
-    await this.request(`/session/${encodeURIComponent(session)}`, 'DELETE', undefined, this.requestTimeoutMs, false).catch(() => undefined);
+    try {
+      await this.request(`/session/${encodeURIComponent(session)}`, 'DELETE', undefined, this.requestTimeoutMs, false, false, true);
+      this.sessionId = '';
+      this.unusable = false;
+    } catch (error) {
+      if (error instanceof WebDriverError && (error.status === 404
+        || (error.code === 'APPIUM_HTTP' && error.status !== undefined && error.status >= 200 && error.status < 300))) {
+        this.sessionId = '';
+        this.unusable = false;
+        return;
+      }
+      this.unusable = true;
+      throw error;
+    }
   }
 
   async contexts(timeoutMs?: number): Promise<string[]> {
@@ -234,11 +245,12 @@ export class AppiumClient {
     const budget = this.phaseBudget(timeoutMs, `find ${locator.using}`);
     const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
     let lastError = 'element not found';
-    while (Date.now() < deadline) {
+    while (!budget.exhausted && Date.now() < deadline) {
       budget.assertAvailable(`find ${locator.using}`);
+      const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
+      if (remaining <= 0) break;
       try {
-        const requestTimeoutMs = Math.max(1, Math.min(deadline - Date.now(), budget.remainingMs));
-        const value = await this.command<Record<string, string>>('/element', 'POST', locator, requestTimeoutMs);
+        const value = await this.command<Record<string, string>>('/element', 'POST', locator, Math.max(1, remaining));
         const element = value['element-6066-11e4-a52e-4f735466cecf'] || value.ELEMENT;
         if (element) return element;
         lastError = 'element response did not contain an id';
@@ -316,7 +328,7 @@ export class AppiumClient {
   }
 
   private phaseBudget(timeoutMs: number, operation: string): PhaseBudget {
-    return this.budget || new PhaseBudget(operation, { timeoutMs, recoveryLimit: 0 });
+    return this.budget?.phaseView(operation, timeoutMs) || new PhaseBudget(operation, { timeoutMs, recoveryLimit: 0 });
   }
 
   private assertUsable(path: string): void {
@@ -344,12 +356,15 @@ export class AppiumClient {
     body?: unknown,
     timeoutMs = this.requestTimeoutMs,
     checkSession = true,
+    enforceBudget = true,
+    allowEmptyResponse = false,
   ): Promise<WebDriverResponse<T>> {
     if (checkSession) this.assertUsable(path);
     const operation = `${method} ${path}`;
-    this.budget?.assertAvailable(operation);
+    if (enforceBudget) this.budget?.assertAvailable(operation);
     const operationTimeoutMs = timeoutMs ?? this.requestTimeoutMs;
-    const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, this.budget?.remainingMs ?? operationTimeoutMs));
+    const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
+    const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
     const startedAt = Date.now();
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -374,7 +389,7 @@ export class AppiumClient {
       ]);
       text = await Promise.race([response.text(), timeoutPromise]);
     } catch (error) {
-      const timedOut = isTimeoutError(error) || controller.signal.aborted || this.budget?.exhausted === true;
+      const timedOut = isTimeoutError(error) || controller.signal.aborted || (enforceBudget && this.budget?.exhausted === true);
       if (timer !== undefined) clearTimeout(timer);
       if (timedOut) this.unusable = true;
       const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, timedOut, error instanceof Error ? error.message : String(error));
@@ -392,6 +407,10 @@ export class AppiumClient {
       });
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+    }
+    if (allowEmptyResponse && response.ok && text.trim() === '') {
+      this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false);
+      return { value: undefined as T };
     }
     let parsed: WebDriverResponse<T>;
     try {
@@ -454,14 +473,16 @@ export class AppiumClient {
     while (!budget.exhausted && Date.now() < deadline) {
       for (const locator of locators) {
         budget.assertAvailable(`find ${locator.using}`);
+        const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
+        if (remaining <= 0) break;
         try {
-          const remaining = Math.max(1, Math.min(deadline - Date.now(), budget.remainingMs));
           return await this.find(locator, Math.min(750, remaining));
         } catch (error) {
           if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) throw error;
           lastError = error instanceof Error ? error.message : String(error);
         }
       }
+      if (budget.exhausted || Date.now() >= deadline) break;
       await delay(100, budget);
     }
     throw new Error(`APPIUM_ELEMENT_ANY: ${lastError}`);

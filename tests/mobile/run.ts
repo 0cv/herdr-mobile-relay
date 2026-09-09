@@ -21,7 +21,7 @@ import {
   type RelayAuthEvidence,
   type RuntimeIdentity,
 } from './support/oracle';
-import { delay } from './support/webdriver';
+import { delay, WebDriverError } from './support/webdriver';
 import { AndroidPlatform } from './platforms/android';
 import { IOSPlatform } from './platforms/ios';
 import type { MobilePlatform, PlatformOptions, UpdateCompletionEvidence } from './platforms/types';
@@ -290,21 +290,41 @@ async function assertCandidateFailureObserved(
   origin: string,
   baseline: BundleSet['baselines'][number],
   controls: Set<string>,
+  info: FixtureInfo,
+  faultPath: string,
+  faultKind: string,
+  faultId: string,
+  faultGeneration: string,
+  budget?: PhaseBudget,
 ): Promise<UpdateCompletionEvidence> {
-  const identity = await platform.readRunningIdentity();
-  if (!identity.standalone) throw new Error('STANDALONE_REQUIRED: failed candidate is not in the installed standalone provider');
-  if (identity.origin !== origin) throw new Error(`ORIGIN_MISMATCH: failed candidate document is ${identity.origin}, not ${origin}`);
-  if (!identity.nativeProvider) throw new Error('STANDALONE_PROVIDER_REQUIRED: failed candidate has no installed native provider');
-  if (identity.entry !== expected.entry || identity.script !== expected.script || identity.style !== expected.style) {
-    throw new Error(`UPGRADE_FAILURE_TARGET_MISMATCH: observed ${identity.entry}/${identity.script}/${identity.style}`);
+  const deadline = Date.now() + Math.min(60_000, budget?.remainingMs ?? 60_000);
+  let lastError = '';
+  while (!budget?.exhausted && Date.now() < deadline) {
+    const state = await fixtureState(info);
+    assertFaultActive(state, faultPath, faultKind, faultId, faultGeneration);
+    try {
+      const identity = await platform.readRunningIdentity();
+      if (!identity.standalone) throw new Error('STANDALONE_REQUIRED: failed candidate is not in the installed standalone provider');
+      if (identity.origin !== origin) throw new Error(`ORIGIN_MISMATCH: failed candidate document is ${identity.origin}, not ${origin}`);
+      if (!identity.nativeProvider) throw new Error('STANDALONE_PROVIDER_REQUIRED: failed candidate has no installed native provider');
+      const completion = await platform.readUpdateCompletion();
+      if (phonePlanContract(baseline, completion, controls)) assertPhoneUpdateNotAcknowledged(completion);
+      if (identity.entry !== expected.entry || identity.script !== expected.script || identity.style !== expected.style) {
+        throw new Error(`UPGRADE_FAILURE_TARGET_MISMATCH: observed ${identity.entry}/${identity.script}/${identity.style}`);
+      }
+      if (identity.requiredAssetsReady || identity.requiredAssetFailure !== true) {
+        throw new Error('REQUIRED_ASSET_FAILURE_MISSING: candidate fault did not produce a required-asset failure');
+      }
+      if (identity.failureUiVisible !== true) throw new Error('FAILURE_UI_MISSING: candidate fault did not expose the failure recovery UI');
+      return completion;
+    } catch (error) {
+      if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) throw error;
+      if (error instanceof Error && /PHONE_PLAN_MISSING/u.test(error.message)) throw error;
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await delay(500, budget);
   }
-  if (identity.requiredAssetsReady || identity.requiredAssetFailure !== true) {
-    throw new Error('REQUIRED_ASSET_FAILURE_MISSING: candidate fault did not produce a required-asset failure');
-  }
-  if (identity.failureUiVisible !== true) throw new Error('FAILURE_UI_MISSING: candidate fault did not expose the failure recovery UI');
-  const completion = await platform.readUpdateCompletion();
-  if (phonePlanContract(baseline, completion, controls)) assertPhoneUpdateNotAcknowledged(completion);
-  return completion;
+  throw new Error(`FAILURE_OBSERVATION: candidate failure UI was not observed before the deadline: ${lastError}`);
 }
 
 async function waitForCandidate(
@@ -420,7 +440,19 @@ async function runUpgrade(
     await waitForFault(info, faultPath, faultKind, faultId, faultGeneration, budget);
     const faultState = await fixtureState(info);
     assertFaultActive(faultState, faultPath, faultKind, faultId, faultGeneration);
-    await assertCandidateFailureObserved(platform, bundleSet.candidate.identity, info.app_url, baseline, oracleControls);
+    await assertCandidateFailureObserved(
+      platform,
+      bundleSet.candidate.identity,
+      info.app_url,
+      baseline,
+      oracleControls,
+      info,
+      faultPath,
+      faultKind,
+      faultId,
+      faultGeneration,
+      budget,
+    );
     await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
     const clearedState = await fixtureState(info);
     if (clearedState.invalidated || clearedState.faults?.some((fault) => fault.id === faultId)) {

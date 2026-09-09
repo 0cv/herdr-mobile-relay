@@ -74,6 +74,7 @@ type responseFault struct {
 	Barrier    string    `json:"barrier,omitempty"`
 	LifetimeMs int       `json:"lifetime_ms,omitempty"`
 	ExpiresAt  time.Time `json:"-"`
+	key        string
 }
 
 type releaseRouter struct {
@@ -143,15 +144,19 @@ func (r *releaseRouter) route(method, path string) (string, *web.Handler, *respo
 	key := faultKey(method, path)
 	fault := r.faults[key]
 	if fault == nil {
-		fault = r.faults[faultKey("*", path)]
+		key = faultKey("*", path)
+		fault = r.faults[key]
 	}
 	if fault != nil && fault.Remaining != 0 {
 		copy := *fault
+		copy.key = key
 		if fault.Remaining > 0 {
 			fault.Remaining--
-			if fault.Remaining == 0 {
+			if fault.Remaining == 0 && fault.Kind != "stall" {
 				delete(r.faults, key)
-				delete(r.faults, faultKey("*", path))
+				if key != faultKey("*", path) {
+					delete(r.faults, faultKey("*", path))
+				}
 			}
 		}
 		return release, handler, &copy
@@ -193,6 +198,7 @@ func (r *releaseRouter) applyFault(w http.ResponseWriter, request *http.Request,
 			_ = connection.Close()
 		}
 	case "stall":
+		defer r.finishFault(fault)
 		barrier := r.barrier(fault.Barrier)
 		select {
 		case <-barrier:
@@ -310,6 +316,10 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 func (r *releaseRouter) clearFault(id, generation, method, path string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.invalidateExpiredLocked(time.Now())
+	if r.invalidated {
+		return errors.New("fixture fault lifetime expired; fixture is invalidated")
+	}
 	cleared := false
 	for key, fault := range r.faults {
 		matchesID := id != "" && fault.ID == id && (generation == "" || fault.Generation == generation)
@@ -358,6 +368,7 @@ func (r *releaseRouter) invalidationState() (bool, string) {
 func (r *releaseRouter) releaseBarrier(name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.invalidateExpiredLocked(time.Now())
 	barrier, ok := r.barriers[name]
 	if !ok {
 		return fmt.Errorf("barrier %q is not declared", name)
@@ -368,6 +379,18 @@ func (r *releaseRouter) releaseBarrier(name string) error {
 		close(barrier)
 	}
 	return nil
+}
+
+func (r *releaseRouter) finishFault(fault *responseFault) {
+	if fault.Remaining != 0 || fault.key == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	active := r.faults[fault.key]
+	if active != nil && active.ID == fault.ID && active.Generation == fault.Generation && active.Remaining == 0 {
+		delete(r.faults, fault.key)
+	}
 }
 
 func (r *releaseRouter) barrier(name string) <-chan struct{} {

@@ -18,10 +18,10 @@ import { assertNoKnownSecret, redactText, sanitizeValue } from '../support/diagn
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
-import { androidChromeCapabilities, androidChromeShortcutArgs, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
+import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
 import { IOSPlatform, iosInstalledContextRejection, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError } from '../platforms/ios';
 import { runtimeScript } from '../platforms/types';
-import { repositoryPath, repositoryRoot } from '../support/paths';
+import { prepareOutput, repositoryPath, repositoryRoot } from '../support/paths';
 import { validateProvenance, type ProvenanceRun } from '../support/provenance';
 import { command } from '../support/process';
 import {
@@ -152,6 +152,20 @@ test('repository-relative CLI paths are anchored at the repository root', async 
   assert.equal(repositoryPath('/tmp/mobile-bundles/bundle-set.json'), '/tmp/mobile-bundles/bundle-set.json');
 });
 
+test('mobile output preparation preserves existing files and rejects unsafe overlaps', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-output-safety-'));
+  const output = join(root, 'output');
+  await mkdir(output);
+  const sentinel = join(output, 'sentinel.txt');
+  await writeFile(sentinel, 'keep');
+  await assert.rejects(prepareOutput(output), /MOBILE_OUTPUT/);
+  assert.equal(existsSync(sentinel), true);
+  await assert.rejects(prepareOutput(repositoryRoot), /repository or its parent/);
+  const input = join(root, 'input');
+  await mkdir(input);
+  await assert.rejects(prepareOutput(join(input, 'nested-output'), [input]), /overlaps input/);
+});
+
 test('PR provenance keeps merge build and PR head identities separate', async () => {
   const repository = '0cv/herdr-mobile-relay';
   const prHead = 'f02fcb1d3742487ac4a1e541d60cf3988284caf8';
@@ -176,6 +190,32 @@ test('PR provenance keeps merge build and PR head identities separate', async ()
   }), /PROVENANCE_BUILD_SHA/);
 });
 
+test('the workflow provenance adapter uses the shared validator', async () => {
+  const sha = 'a'.repeat(40);
+  const output = execFileSync('bun', ['tests/mobile/provenance-check.ts'], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PROVENANCE_MODE: 'external',
+      PROVENANCE_REPOSITORY: '0cv/herdr-mobile-relay',
+      PROVENANCE_ARTIFACT_RUN_ID: 'source-run',
+      PROVENANCE_CALLER_RUN_ID: 'other-run',
+      PROVENANCE_MANIFEST_REVISION: sha,
+      PROVENANCE_RUN_REPOSITORY: '0cv/herdr-mobile-relay',
+      PROVENANCE_HEAD_SHA: sha,
+      PROVENANCE_RUN_EVENT: 'push',
+      PROVENANCE_RUN_BRANCH: 'main',
+      PROVENANCE_RUN_WORKFLOW: '.github/workflows/check.yml',
+      PROVENANCE_HEAD_REPOSITORY: '0cv/herdr-mobile-relay',
+      PROVENANCE_RUN_STATUS: 'completed',
+      PROVENANCE_RUN_CONCLUSION: 'success',
+      PROVENANCE_SOURCE_COMMIT: sha,
+    },
+  });
+  assert.deepEqual(JSON.parse(output), { sourceSha: sha, headSha: sha });
+});
+
 test('external provenance requires a successful same-repository main push', async () => {
   const repository = '0cv/herdr-mobile-relay';
   const mainSha = '5d169cb2d43cbe80eccf5494978001b63dc2fca9';
@@ -196,6 +236,9 @@ test('external provenance requires a successful same-repository main push', asyn
   assert.throws(() => validateProvenance({ ...run, headRepository: 'fork/herdr-mobile-relay' }, {
     mode: 'external', repository, artifactRunId: '34321848225', callerRunId: 'other-run', manifestRevision: mainSha,
   }), /PROVENANCE_HEAD_REPOSITORY/);
+  assert.throws(() => validateProvenance(run, {
+    mode: 'unsupported' as 'internal', repository, artifactRunId: '34321848225', callerRunId: 'other-run', manifestRevision: mainSha,
+  }), /PROVENANCE_MODE/);
 });
 
 test('Android emulator-console parser handles names, terminators, and errors', async () => {
@@ -213,6 +256,33 @@ test('Android Chrome startup only enables attach mode after explicit launch', as
   assert.equal('appium:androidUseRunningApp' in ordinary, false);
   assert.equal((ordinary['goog:chromeOptions'] as Record<string, unknown>).androidUseRunningApp, undefined);
   assert.equal((attached['goog:chromeOptions'] as Record<string, unknown>).androidUseRunningApp, true);
+});
+
+test('Android final launch verifies readiness only after bootstrap teardown', async () => {
+  const platform = new AndroidPlatform({
+    origin: 'https://fixture.test',
+    appiumUrl: 'http://fake.test',
+    outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '',
+    setupUrl: '',
+    deviceId: 'emulator-5554',
+    budget: new PhaseBudget('android-launch-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
+  });
+  const shortcut = {
+    id: 'shortcut-id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay',
+    url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac',
+  };
+  const events: string[] = [];
+  const driver = platform.driver as any;
+  (platform as any).waitForChromeShortcut = async () => { events.push('shortcut'); return shortcut; };
+  driver.close = async () => { events.push('close'); };
+  (platform as any).launchChromeShortcut = async () => { events.push('launch'); };
+  (platform as any).waitForInstalledTarget = async () => { events.push('target'); };
+  (platform as any).waitForChromeDevTools = async () => { events.push('devtools'); };
+  (platform as any).createChromeSession = async () => { events.push('create'); };
+  (platform as any).attachToInstalledView = async () => { events.push('attach'); };
+  await platform.launchInstalledApp();
+  assert.deepEqual(events, ['shortcut', 'close', 'launch', 'target', 'devtools', 'create', 'attach']);
 });
 
 test('Android Chrome DevTools readiness recognizes the published socket', async () => {
@@ -428,6 +498,78 @@ test('Appium timeout preserves context and blocks follow-up commands', async () 
   await assert.rejects(() => client.contexts(), /APPIUM_SESSION_UNUSABLE/);
   assert.equal(requests, 2);
   assert.equal(client.snapshot().unusable, true);
+});
+
+test('Appium failed teardown retains the session quarantine until confirmed', async () => {
+  let requests = 0;
+  const client = new AppiumClient('http://fake.test', 50, async (_input, init) => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    if (requests === 2) return new Response(JSON.stringify({ value: { error: 'unknown error' } }), { status: 500 });
+    if (requests === 3) return new Response(JSON.stringify({ value: {} }), { status: 200 });
+    if (String(init?.method) === 'POST') return new Response(JSON.stringify({ value: { sessionId: 'replacement' }, sessionId: 'replacement' }), { status: 200 });
+    return new Response(JSON.stringify({ value: {} }), { status: 200 });
+  });
+  await client.create({ capabilities: {} });
+  await assert.rejects(() => client.close(), /APPIUM_COMMAND/);
+  assert.equal(client.snapshot().sessionId, '[active]');
+  assert.equal(client.snapshot().unusable, true);
+  await assert.rejects(() => client.create({ capabilities: {} }), /APPIUM_SESSION_UNUSABLE/);
+  await client.close();
+  assert.equal(client.snapshot().sessionId, '');
+  assert.equal(client.snapshot().unusable, false);
+  await client.create({ capabilities: {} });
+  assert.equal(requests, 4);
+});
+
+test('Appium teardown ignores an expired scenario budget', async () => {
+  let now = 0;
+  let requests = 0;
+  const budget = new PhaseBudget('expired-appium', { timeoutMs: 10, now: () => now, recoveryLimit: 0 });
+  const client = new AppiumClient('http://fake.test', 50, async () => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    return new Response(null, { status: 204 });
+  });
+  await client.create({ capabilities: {}, budget });
+  now = 11;
+  await client.close();
+  assert.equal(requests, 2);
+  assert.equal(client.snapshot().sessionId, '');
+  assert.equal(client.snapshot().unusable, false);
+});
+
+test('Appium teardown treats an already absent session as confirmed', async () => {
+  let requests = 0;
+  const client = new AppiumClient('http://fake.test', 50, async () => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    return new Response(JSON.stringify({ value: { error: 'invalid session id' } }), { status: 404 });
+  });
+  await client.create({ capabilities: {} });
+  await client.close();
+  assert.equal(requests, 2);
+  assert.equal(client.snapshot().sessionId, '');
+  assert.equal(client.snapshot().unusable, false);
+});
+
+test('Appium multi-locator lookup stops at its operation deadline', async () => {
+  let requests = 0;
+  const client = new AppiumClient('http://fake.test', 30_000, async () => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    return new Response(JSON.stringify({ value: { error: 'no such element' } }), { status: 404 });
+  });
+  await client.create({ capabilities: {} });
+  const startedAt = Date.now();
+  await assert.rejects(() => client.findAny([
+    { using: 'css selector', value: '#first' },
+    { using: 'css selector', value: '#second' },
+    { using: 'css selector', value: '#third' },
+  ], 10));
+  assert.ok(Date.now() - startedAt < 200);
+  assert.equal(requests, 2);
+  assert.equal(client.snapshot().unusable, false);
 });
 
 test('Appium element lookup applies its child deadline to HTTP', async () => {

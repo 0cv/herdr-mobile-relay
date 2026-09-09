@@ -254,11 +254,17 @@ function archiveEntries(archive: string): ArchiveEntry[] {
   return entries;
 }
 
+function pathsOverlap(left: string, right: string): boolean {
+  const first = resolve(left);
+  const second = resolve(right);
+  return first === second || first.startsWith(`${second}${sep}`) || second.startsWith(`${first}${sep}`);
+}
+
 async function prepareDirectory(source: string, destination: string): Promise<void> {
-  await rm(destination, { recursive: true, force: true });
-  await mkdir(destination, { recursive: true });
   const sourceInfo = await lstat(source);
   if (sourceInfo.isSymbolicLink() || !sourceInfo.isDirectory()) throw new Error(`ARTIFACT_ROOT: ${source}`);
+  await rm(destination, { recursive: true, force: true });
+  await mkdir(destination, { recursive: true });
   await cp(source, destination, { recursive: true, dereference: false, errorOnExist: false, force: true });
   for (const name of await walkFiles(destination)) {
     const info = await lstat(join(destination, name));
@@ -297,6 +303,7 @@ export async function prepareBundle(
   destination: string,
   options: PrepareBundleOptions = {},
 ): Promise<PreparedBundle> {
+  if (pathsOverlap(source, destination)) throw new Error(`ARTIFACT_PATH_OVERLAP: ${name}`);
   const sourceInfo = await lstat(source).catch(() => null);
   let root: string;
   let archiveSha256 = '';

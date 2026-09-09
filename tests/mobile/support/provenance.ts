@@ -33,6 +33,7 @@ function requireSha(value: string, label: string): void {
 }
 
 export function validateProvenance(run: ProvenanceRun, options: ProvenanceOptions): ProvenanceResult {
+  if (options.mode !== 'internal' && options.mode !== 'external') throw new Error('PROVENANCE_MODE: unsupported provenance mode');
   if (run.repository !== options.repository) throw new Error('PROVENANCE_REPOSITORY: artifact run belongs to another repository');
   requireSha(run.headSha, 'RUN_SHA');
   requireSha(options.manifestRevision, 'MANIFEST_SHA');

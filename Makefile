@@ -206,6 +206,7 @@ web-preview:
 	npx --yes wrangler@$(WRANGLER_VERSION) pages dev web
 
 mobile-ci-check:
+	bun install --frozen-lockfile --cwd frontend
 	bun install --frozen-lockfile --cwd tests/mobile
 	bun run --cwd tests/mobile lint
 	bun run --cwd tests/mobile check

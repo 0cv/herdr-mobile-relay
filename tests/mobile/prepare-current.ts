@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { assertDistinctUpgrade, validateWebRoot, writeBundleSet, type BundleExpectation, type BundleSet, type PreparedBundle } from './support/artifacts';
 import { command } from './support/process';
-import { repositoryPath, repositoryRoot } from './support/paths';
+import { prepareOutput, repositoryPath, repositoryRoot } from './support/paths';
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -43,8 +43,7 @@ async function buildVariant(sourceRoot: string, destination: string, variant: st
 }
 
 async function main(): Promise<void> {
-  const output = repositoryPath(required('--output'));
-  await rm(output, { recursive: true, force: true });
+  const output = await prepareOutput(repositoryPath(required('--output')), [join(repositoryRoot, 'frontend'), join(repositoryRoot, 'herdr-plugin.toml')]);
   await mkdir(join(output, 'bundles'), { recursive: true, mode: 0o700 });
   const temporary = await mkdtemp(join('/tmp', 'herdr-mobile-current-'));
   try {

@@ -254,31 +254,16 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async launchInstalledApp(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP');
     const shortcut = await this.waitForChromeShortcut(30_000);
     this.installedTarget = {
       packageName: 'com.android.chrome',
       activity: CHROME_WEBAPP_COMPONENT.split('/')[1],
       shortcut,
     };
-    await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
-    let launchError: unknown;
-    try {
-      const icon = await this.findLauncherIcon();
-      await this.driver.click(icon);
-    } catch (error) {
-      launchError = error;
-      try {
-        await this.launchChromeShortcut();
-      } catch (shortcutError) {
-        const launcherMessage = error instanceof Error ? error.message : String(error);
-        const shortcutMessage = shortcutError instanceof Error ? shortcutError.message : String(shortcutError);
-        throw new Error(`${launcherMessage}; ${shortcutMessage}`, { cause: shortcutError });
-      }
-    }
-    await this.waitForInstalledTarget(30_000, launchError);
-    await this.waitForChromeDevTools(30_000);
     await this.driver.close();
+    await this.launchChromeShortcut();
+    await this.waitForInstalledTarget(30_000);
+    await this.waitForChromeDevTools(30_000);
     await this.createChromeSession(true);
     await this.attachToInstalledView();
   }

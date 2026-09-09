@@ -104,6 +104,65 @@ func TestReleaseRouterBarrierFaultIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestReleaseRouterExpiredFaultCannotBeCleared(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if err := router.addFault(responseFault{ID: "short-lived", Generation: "generation-1", Method: http.MethodGet, Path: "/assets/app.js", Kind: "missing", Remaining: -1, LifetimeMs: 1}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := router.clearFault("short-lived", "generation-1", "", ""); err == nil {
+		t.Fatal("cleared an expired fault")
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("cleared expired fault served status = %d", response.Code)
+	}
+}
+
+func TestReleaseRouterOneShotStallExpiryRemainsInvalidated(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if err := router.addFault(responseFault{ID: "stalled", Generation: "generation-1", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: "entry", Remaining: 1, LifetimeMs: 1}); err != nil {
+		t.Fatal(err)
+	}
+	responseDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+		responseDone <- response
+	}()
+	deadline := time.Now().Add(time.Second)
+	for len(router.snapshotRequests()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(router.snapshotRequests()) == 0 {
+		t.Fatal("stalled request was not recorded")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := router.releaseBarrier("entry"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case response := <-responseDone:
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expired stalled response = %d, body = %q", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expired stalled response did not finish")
+	}
+	if !router.invalidated {
+		t.Fatal("expired stalled fault did not invalidate the fixture")
+	}
+}
+
 func TestReleaseRouterPersistentFaultRequiresExplicitClear(t *testing.T) {
 	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
 	if err != nil {
