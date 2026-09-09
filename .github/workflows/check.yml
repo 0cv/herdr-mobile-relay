@@ -113,7 +113,7 @@ jobs:
         with:
           name: release-bundles
           path: dist/release/
-          retention-days: ${{ github.ref == 'refs/heads/main' && 7 || 1 }}
+          retention-days: 1
 
   release-native-smoke:
     name: Native release smoke (${{ matrix.target }})
@@ -176,8 +176,8 @@ jobs:
       candidate_commit: ${{ github.sha }}
       head_commit: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       platform: all
-      suite: ${{ github.event_name == 'push' && 'smoke' || 'release' }}
-      baseline_set: ${{ github.event_name == 'push' && 'latest' || 'all' }}
+      suite: ${{ github.ref == 'refs/heads/dev' && 'smoke' || 'release' }}
+      baseline_set: ${{ github.ref == 'refs/heads/dev' && 'latest' || 'all' }}
     permissions:
       actions: read
       contents: read

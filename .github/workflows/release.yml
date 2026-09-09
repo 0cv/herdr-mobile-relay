@@ -77,7 +77,7 @@ jobs:
         with:
           name: release-bundles
           path: dist/release/
-          retention-days: 7
+          retention-days: 1
 
   native-smoke:
     name: Native release smoke (${{ matrix.target }})

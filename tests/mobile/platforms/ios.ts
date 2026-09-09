@@ -12,6 +12,7 @@ import {
   buttonText,
   css,
   delay,
+  isFatalDriverError,
   textLocator,
   type ContextMetadata,
   type Locator,
@@ -31,12 +32,6 @@ export function isIOSStaleContextError(error: unknown): boolean {
   if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) return false;
   const message = error instanceof Error ? error.message : String(error);
   return /no such (?:window|context|frame)|(?:window|context|webview|page|target).*(?:not found|does not exist|is gone|closed|detached)|(?:stale|invalid).*(?:context|window|webview|page|target)/iu.test(message);
-}
-
-function isFatalDriverError(error: unknown): boolean {
-  if (error instanceof WebDriverError) return error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE';
-  const message = error instanceof Error ? error.message : String(error);
-  return /APPIUM_(?:TIMEOUT|SESSION_UNUSABLE)/u.test(message);
 }
 
 export function iosInstalledContextRejection(context: ContextMetadata, origin: string): string {
@@ -169,12 +164,17 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async installFromBrowser(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     const share = await this.driver.findAny([
       accessibility('Share'),
       accessibility('Share button'),
       textLocator('Share'),
-    ], 5_000).catch(() => '');
+    ], 5_000).catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return '';
+    });
     if (share) {
       await this.driver.click(share);
     } else {
@@ -182,7 +182,10 @@ export class IOSPlatform implements MobilePlatform {
       // consistently exposed to WDA's accessibility tree on hosted runners.
       // Tap its stable proportional position as a fallback, then continue
       // using semantic locators for the action sheet.
-      const size = await this.driver.windowSize().catch(() => ({ width: 402, height: 874 }));
+      const size = await this.driver.windowSize().catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return { width: 402, height: 874 };
+      });
       await this.driver.mobile('tap', { x: size.width / 2, y: size.height * 0.91 });
       await delay(500);
     }
@@ -200,7 +203,10 @@ export class IOSPlatform implements MobilePlatform {
       accessibility('Open as Web App'),
       textLocator('Open as Web App…'),
       accessibility('Open as Web App…'),
-    ], 5_000).catch(() => '');
+    ], 5_000).catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return '';
+    });
     if (openAsWebApp) await this.driver.click(openAsWebApp);
     const addButton = await this.driver.findAny([
       textLocator('Add'),
@@ -211,34 +217,52 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async launchInstalledApp(): Promise<void> {
+    await requireOwnedDevice('ios', this.udid);
     this.selectedInstalledContext = '';
-    await this.driver.switchContext('NATIVE_APP');
-    await this.driver.mobile('pressButton', { name: 'home' });
+    const phase = this.budget.phaseView('ios-launch', 120_000);
+    phase.assertAvailable('launch installed provider');
+    await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
+    await this.driver.mobile('pressButton', { name: 'home' }, Math.max(2, phase.remainingMs));
     await this.ensureSpringBoardForeground();
-    await delay(750, this.budget.phaseView('ios-launch', 10_000));
+    await delay(Math.min(750, phase.remainingMs), phase);
     for (let page = 0; page < 8; page += 1) {
-      await this.driver.mobile('swipe', { direction: 'right' });
+      phase.assertAvailable('show first SpringBoard page');
+      await this.driver.mobile('swipe', { direction: 'right' }, Math.max(2, phase.remainingMs));
     }
     for (let page = 0; page < 8; page += 1) {
+      phase.assertAvailable('find installed provider icon');
       await this.ensureSpringBoardForeground();
-      const icon = await this.findHittableHomeIcon();
+      const icon = await this.findHittableHomeIcon(Math.min(5_000, phase.remainingMs));
       if (icon) {
-        await this.driver.click(icon);
-        if (await this.waitForInstalledProvider(5_000)) {
-          await this.driver.mobile('activateApp', { bundleId: this.installedBundleId });
-          await this.requireInstalledProviderForeground();
-          await delay(750);
+        const clickTimeout = phase.remainingMs;
+        if (clickTimeout <= 1) break;
+        await this.driver.click(icon, clickTimeout);
+        const providerTimeout = Math.min(5_000, phase.remainingMs);
+        if (providerTimeout <= 1) break;
+        if (await this.waitForInstalledProvider(providerTimeout)) {
+          const activateTimeout = phase.remainingMs;
+          if (activateTimeout <= 1) break;
+          await this.driver.mobile('activateApp', { bundleId: this.installedBundleId }, activateTimeout);
+          const foregroundTimeout = phase.remainingMs;
+          if (foregroundTimeout <= 1) break;
+          await this.requireInstalledProviderForeground(foregroundTimeout);
+          await delay(Math.min(750, phase.remainingMs), phase);
           await this.attachToInstalledView();
           return;
         }
-        await this.driver.mobile('pressButton', { name: 'home' });
+        const homeTimeout = phase.remainingMs;
+        if (homeTimeout <= 1) break;
+        await this.driver.mobile('pressButton', { name: 'home' }, homeTimeout);
       }
       if (page < 7) {
         await this.ensureSpringBoardForeground();
-        await this.driver.mobile('swipe', { direction: 'left' });
-        await delay(500);
+        const swipeTimeout = phase.remainingMs;
+        if (swipeTimeout <= 1) break;
+        await this.driver.mobile('swipe', { direction: 'left' }, swipeTimeout);
+        await delay(Math.min(500, phase.remainingMs), phase);
       }
     }
+    phase.assertAvailable('launch installed provider');
     throw new Error('IOS_CONTEXT: native launch did not identify the installed provider');
   }
 
@@ -350,8 +374,12 @@ export class IOSPlatform implements MobilePlatform {
 
   async openFixtureAgent(relayName: string): Promise<void> {
     if (!/^[A-Za-z0-9_.-]+$/u.test(relayName)) throw new Error(`APPIUM_AGENT: invalid fixture relay name ${relayName}`);
+    await requireOwnedDevice('ios', this.udid);
     await this.attachToInstalledView();
-    const currentUrl = await this.driver.currentUrl().catch(() => '');
+    const currentUrl = await this.driver.currentUrl().catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return '';
+    });
     if (currentUrl.includes('#settings')) await this.clickWebText('Back');
     const deadline = Date.now() + 30_000;
     let lastError = '';
@@ -367,6 +395,7 @@ export class IOSPlatform implements MobilePlatform {
           try {
             await this.driver.click(agent);
           } catch (error) {
+            if (isFatalDriverError(error)) throw error;
             // Chrome-backed web views can report a visible card button as not
             // interactable after a standalone relaunch. Dispatch the same DOM
             // click only after confirming that the matching enabled button is
@@ -394,6 +423,7 @@ export class IOSPlatform implements MobilePlatform {
           return;
         }
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       await delay(250);
@@ -402,7 +432,10 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async backgroundApp(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await requireOwnedDevice('ios', this.udid);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     await this.driver.mobile('pressButton', { name: 'home' });
     await delay(500);
   }
@@ -412,7 +445,10 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async terminateInstalledApp(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await requireOwnedDevice('ios', this.udid);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     const bundleId = this.installedBundleId;
     if (!bundleId) throw new Error('IOS_TERMINATE: the installed Home Screen app did not expose a native provider id');
     await this.driver.mobile('terminateApp', { bundleId });
@@ -421,7 +457,10 @@ export class IOSPlatform implements MobilePlatform {
 
   async showKeyboardOnComposer(): Promise<void> {
     await this.attachToInstalledView();
-    let composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000).catch(() => '');
+    let composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000).catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return '';
+    });
     if (!composer) {
       const open = await this.driver.find(css('button[aria-label^="Open "]'), 30_000);
       await this.driver.click(open);
@@ -448,18 +487,27 @@ export class IOSPlatform implements MobilePlatform {
     const deadline = Date.now() + 30_000;
     let lastError = '';
     while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 1) break;
       try {
         await this.attachToInstalledView();
-        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], 2_000);
-        if ((await this.driver.attribute(element, 'disabled')) === null) {
-          await this.driver.click(element);
+        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], Math.min(2_000, remaining));
+        const attributeTimeout = deadline - Date.now();
+        if (attributeTimeout <= 1) break;
+        if ((await this.driver.attribute(element, 'disabled', attributeTimeout)) === null) {
+          const clickTimeout = deadline - Date.now();
+          if (clickTimeout <= 1) break;
+          await this.driver.click(element, clickTimeout);
           return;
         }
         lastError = `${text} is disabled`;
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      const waitMs = Math.min(250, deadline - Date.now());
+      if (waitMs <= 0) break;
+      await delay(waitMs);
     }
     throw new Error(`APPIUM_BUTTON: ${text}: ${lastError}`);
   }
@@ -468,20 +516,29 @@ export class IOSPlatform implements MobilePlatform {
     const deadline = Date.now() + 30_000;
     let lastError = '';
     while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 1) break;
       try {
         await this.attachToInstalledView();
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`));
+        const buttons = await this.driver.findAll(css(`#${dialogId} button`), Math.min(2_000, remaining));
         for (const button of buttons) {
-          if ((await this.driver.text(button)).trim() === text) {
-            await this.driver.click(button);
+          const textTimeout = deadline - Date.now();
+          if (textTimeout <= 1) break;
+          if ((await this.driver.text(button, textTimeout)).trim() === text) {
+            const clickTimeout = deadline - Date.now();
+            if (clickTimeout <= 1) break;
+            await this.driver.click(button, clickTimeout);
             return;
           }
         }
         lastError = `${text} is not visible in ${dialogId}`;
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      const waitMs = Math.min(250, deadline - Date.now());
+      if (waitMs <= 0) break;
+      await delay(waitMs);
     }
     throw new Error(`APPIUM_DIALOG_BUTTON: ${dialogId}/${text}: ${lastError}`);
   }
@@ -544,26 +601,40 @@ export class IOSPlatform implements MobilePlatform {
     let lastError = '';
     let scrolls = 0;
     while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 1) break;
       try {
-        return await this.driver.findAny(locators, Math.min(1_500, Math.max(1, deadline - Date.now())));
+        return await this.driver.findAny(locators, Math.min(1_500, remaining));
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
+      const afterLookup = deadline - Date.now();
+      if (afterLookup <= 1) break;
       if (scrolls < 8) {
+        const scrollTimeout = Math.min(1_500, deadline - Date.now());
+        if (scrollTimeout <= 1) break;
         try {
-          await this.driver.mobile('scroll', { direction: 'up', distance: 0.75 });
+          await this.driver.mobile('scroll', { direction: 'up', distance: 0.75 }, scrollTimeout);
         } catch (error) {
+          if (isFatalDriverError(error)) throw error;
           lastError = error instanceof Error ? error.message : String(error);
-          await this.driver.mobile('swipe', { direction: 'up' }).catch(() => undefined);
+          const fallbackTimeout = Math.min(1_500, deadline - Date.now());
+          if (fallbackTimeout <= 1) break;
+          await this.driver.mobile('swipe', { direction: 'up' }, fallbackTimeout).catch((fallbackError: unknown) => {
+            if (isFatalDriverError(fallbackError)) throw fallbackError;
+          });
         }
         scrolls += 1;
       }
-      await delay(250);
+      const waitMs = Math.min(250, deadline - Date.now());
+      if (waitMs <= 0) break;
+      await delay(waitMs);
     }
     throw new Error(`IOS_SHARE: ${description}: ${lastError}`);
   }
 
-  private async findHittableHomeIcon(): Promise<string> {
+  private async findHittableHomeIcon(timeoutMs: number): Promise<string> {
     const locators = [
       accessibility('Herdr Mobile Relay'),
       textLocator('Herdr Mobile Relay'),
@@ -574,12 +645,28 @@ export class IOSPlatform implements MobilePlatform {
         value: "//*[@name='Home screen icons']//*[contains(@name, 'Herdr Mobile Relay') or contains(@name, 'Herdr Relay') or contains(@label, 'Herdr Mobile Relay') or contains(@label, 'Herdr Relay')]",
       },
     ];
+    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
     for (const locator of locators) {
-      const elements = await this.driver.findAll(locator).catch(() => []);
+      const remaining = deadline - Date.now();
+      if (remaining <= 1) break;
+      const elements = await this.driver.findAll(locator, Math.min(750, remaining)).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return [];
+      });
       for (const element of elements) {
-        const hittable = await this.driver.attribute(element, 'hittable').catch(() => null);
+        const hittableTimeout = deadline - Date.now();
+        if (hittableTimeout <= 1) return '';
+        const hittable = await this.driver.attribute(element, 'hittable', Math.min(500, hittableTimeout)).catch((error: unknown) => {
+          if (isFatalDriverError(error)) throw error;
+          return null;
+        });
         if (hittable === 'true') return element;
-        const visible = await this.driver.attribute(element, 'visible').catch(() => null);
+        const visibleTimeout = deadline - Date.now();
+        if (visibleTimeout <= 1) return '';
+        const visible = await this.driver.attribute(element, 'visible', Math.min(500, visibleTimeout)).catch((error: unknown) => {
+          if (isFatalDriverError(error)) throw error;
+          return null;
+        });
         if (hittable === null && visible === 'true') return element;
       }
     }
@@ -658,12 +745,27 @@ export class IOSPlatform implements MobilePlatform {
     let last = '';
     while (!phase.exhausted) {
       phase.assertAvailable(`keyboard ${expected ? 'show' : 'hide'}`);
-      await this.driver.switchContext('NATIVE_APP');
-      const elements = await this.driver.findAll({ using: 'class name', value: 'XCUIElementTypeKeyboard' }).catch(() => []);
+      await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
+      const findTimeout = Math.min(2_000, phase.remainingMs);
+      if (findTimeout <= 1) break;
+      const elements = await this.driver.findAll({ using: 'class name', value: 'XCUIElementTypeKeyboard' }, findTimeout).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return [];
+      });
       let visible = false;
       for (const element of elements) {
-        const rect = await this.driver.elementRect(element).catch(() => ({ x: 0, y: 0, width: 0, height: 0 }));
-        const shown = await this.driver.attribute(element, 'visible').catch(() => null);
+        const rectTimeout = Math.min(1_000, phase.remainingMs);
+        if (rectTimeout <= 1) break;
+        const rect = await this.driver.elementRect(element, rectTimeout).catch((error: unknown) => {
+          if (isFatalDriverError(error)) throw error;
+          return { x: 0, y: 0, width: 0, height: 0 };
+        });
+        const shownTimeout = Math.min(1_000, phase.remainingMs);
+        if (shownTimeout <= 1) break;
+        const shown = await this.driver.attribute(element, 'visible', shownTimeout).catch((error: unknown) => {
+          if (isFatalDriverError(error)) throw error;
+          return null;
+        });
         if (rect.width > 0 && rect.height > 0 && shown !== 'false') visible = true;
       }
       last = `visible=${visible}`;

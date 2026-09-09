@@ -1,0 +1,356 @@
+name: mobile-device-run
+description: Run one disposable mobile qualification scenario
+inputs:
+  platform:
+    required: true
+  baseline:
+    required: true
+  scenario:
+    required: true
+  suite:
+    required: true
+  source_head_sha:
+    required: true
+  evidence_prefix:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Initialize private runner paths
+      env:
+        WORKFLOW_SUITE: ${{ inputs.suite }}
+        WORKFLOW_PLATFORM: ${{ inputs.platform }}
+        SOURCE_HEAD_SHA: ${{ inputs.source_head_sha }}
+      run: |
+        set -euo pipefail
+        umask 077
+        private="$RUNNER_TEMP/herdr-mobile-private"
+        output="$RUNNER_TEMP/herdr-mobile-output"
+        mkdir -p "$private" "$output"
+        printf 'MOBILE_SUITE=%s\n' "$WORKFLOW_SUITE" >> "$GITHUB_ENV"
+        printf 'MOBILE_PLATFORM=%s\n' "$WORKFLOW_PLATFORM" >> "$GITHUB_ENV"
+        printf 'MOBILE_SOURCE_RUN_HEAD_SHA=%s\n' "$SOURCE_HEAD_SHA" >> "$GITHUB_ENV"
+        printf 'MOBILE_PRIVATE=%s\n' "$private" >> "$GITHUB_ENV"
+        printf 'MOBILE_OUTPUT=%s\n' "$output" >> "$GITHUB_ENV"
+        printf 'MOBILE_FIXTURE_BINARY=%s\n' "$RUNNER_TEMP/herdr-mobile-fixture" >> "$GITHUB_ENV"
+        printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
+        printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
+        printf 'IOS_PLATFORM_VERSION=18.5\n' >> "$GITHUB_ENV"
+        printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
+        printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
+        printf 'IOS_WDA_PREBUILT_PATH=%s/Build/Products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
+        printf 'IOS_WDA_AGENT_PATH=%s/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.4.0
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24.12.0
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.27.0'
+        cache: true
+    - name: Install mobile harness dependencies
+      run: bun install --frozen-lockfile --cwd tests/mobile
+      shell: bash
+    - name: Download verified bundle set
+      uses: actions/download-artifact@v4
+      with:
+        name: mobile-bundles-${{ inputs.platform }}
+        path: mobile-bundles
+    - name: Download current-code bundle pair
+      if: inputs.scenario == 'synthetic'
+      uses: actions/download-artifact@v4
+      with:
+        name: mobile-bundles-current
+        path: mobile-bundles-current
+    - name: Build fixture
+      run: go build -trimpath -o "$MOBILE_FIXTURE_BINARY" ./tests/mobile/fixture
+      shell: bash
+    - name: Set up Android SDK
+      if: inputs.platform == 'android'
+      uses: android-actions/setup-android@v3
+    - name: Create and boot Android emulator
+      if: inputs.platform == 'android'
+      run: |
+        set -euo pipefail
+        export PATH="$ANDROID_HOME/emulator:$PATH"
+        android_user_home="$RUNNER_TEMP/android-user"
+        avd_home="$RUNNER_TEMP/android-avd"
+        mkdir -p "$android_user_home" "$avd_home"
+        export ANDROID_USER_HOME="$android_user_home"
+        export ANDROID_EMULATOR_HOME="$android_user_home"
+        export ANDROID_AVD_HOME="$avd_home"
+        printf 'ANDROID_USER_HOME=%s\n' "$ANDROID_USER_HOME" >> "$GITHUB_ENV"
+        printf 'ANDROID_EMULATOR_HOME=%s\n' "$ANDROID_EMULATOR_HOME" >> "$GITHUB_ENV"
+        printf 'ANDROID_AVD_HOME=%s\n' "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+        adb_key="$android_user_home/adbkey"
+        adb keygen "$adb_key"
+        mkdir -p "$HOME/.android"
+        cp "$adb_key" "$HOME/.android/adbkey"
+        cp "$adb_key.pub" "$HOME/.android/adbkey.pub"
+        export ADB_VENDOR_KEYS="$adb_key"
+        printf 'ADB_VENDOR_KEYS=%s\n' "$ADB_VENDOR_KEYS" >> "$GITHUB_ENV"
+        adb kill-server >/dev/null 2>&1 || true
+        adb start-server >/dev/null
+        if [ -e /dev/kvm ]; then
+          sudo chmod a+rw /dev/kvm
+          test -r /dev/kvm
+          test -w /dev/kvm
+        fi
+        yes | sdkmanager --licenses >/dev/null || true
+        sdkmanager "platform-tools" "emulator" "build-tools;35.0.0" "system-images;android-35;google_apis_playstore;x86_64"
+        avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        echo no | avdmanager create avd --force --name "$avd_name" --package "system-images;android-35;google_apis_playstore;x86_64" --device pixel_7
+        avdmanager list avd
+        printf 'ANDROID_AVD_NAME=%s\n' "$avd_name" >> "$GITHUB_ENV"
+        emulator -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 &
+        emulator_pid=$!
+        printf 'ANDROID_EMULATOR_PID=%s\n' "$emulator_pid" >> "$GITHUB_ENV"
+        for attempt in $(seq 1 180); do
+          serial=""
+          while IFS= read -r candidate_serial; do
+            [ -n "$candidate_serial" ] || continue
+            if console_response="$(adb -s "$candidate_serial" emu avd name 2>/dev/null)"; then
+              response_file="$RUNNER_TEMP/android-avd-${candidate_serial}.txt"
+              printf '%s' "$console_response" >"$response_file"
+              actual_avd="$(bun tests/mobile/parse-avd.ts "$response_file")"
+            else
+              actual_avd=""
+            fi
+            if [ "$actual_avd" = "$avd_name" ]; then serial="$candidate_serial"; break; fi
+          done < <(adb devices | awk '$2 == "device" && $1 ~ /^emulator-[0-9]+$/ { print $1 }')
+          if [ -n "$serial" ]; then
+            adb -s "$serial" wait-for-device
+            boot="$(adb -s "$serial" shell getprop sys.boot_completed | tr -d '\r')"
+            if [ "$boot" = 1 ]; then
+              printf 'ANDROID_SERIAL=%s\n' "$serial" >> "$GITHUB_ENV"
+              printf 'android:%s\n' "$serial" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
+              adb -s "$serial" shell settings put global window_animation_scale 0
+              adb -s "$serial" shell settings put global transition_animation_scale 0
+              adb -s "$serial" shell settings put global animator_duration_scale 0
+              adb -s "$serial" shell dumpsys package com.android.chrome | grep -m1 versionName >"$RUNNER_TEMP/android-chrome-version.txt"
+              break
+            fi
+          fi
+          if ! kill -0 "$emulator_pid" 2>/dev/null; then
+            sed -n '1,160p' "$RUNNER_TEMP/emulator.log" >&2 || true
+            exit 1
+          fi
+          if [ "$attempt" -eq 180 ]; then
+            sed -n '1,160p' "$RUNNER_TEMP/emulator.log" >&2 || true
+            exit 1
+          fi
+          sleep 2
+        done
+    - name: Install pinned Android Chrome and Trichrome Library
+      if: inputs.platform == 'android'
+      run: |
+        set -euo pipefail
+        browser_dir="$RUNNER_TEMP/herdr-android-browser"
+        mkdir -p "$browser_dir/chrome"
+        chrome_url="$(jq -r '.android.browserUrl' tests/mobile/toolchains.json)"
+        chrome_sha256="$(jq -r '.android.browserSha256' tests/mobile/toolchains.json)"
+        trichrome_url="$(jq -r '.android.trichromeLibraryUrl' tests/mobile/toolchains.json)"
+        trichrome_sha256="$(jq -r '.android.trichromeLibrarySha256' tests/mobile/toolchains.json)"
+        curl --fail --location --retry 3 --retry-delay 2 --output "$browser_dir/chrome.apkm" "$chrome_url"
+        printf '%s  %s\n' "$chrome_sha256" "$browser_dir/chrome.apkm" | sha256sum --check --status
+        curl --fail --location --retry 3 --retry-delay 2 --output "$browser_dir/trichrome-library.apk" "$trichrome_url"
+        printf '%s  %s\n' "$trichrome_sha256" "$browser_dir/trichrome-library.apk" | sha256sum --check --status
+        unzip -q "$browser_dir/chrome.apkm" -d "$browser_dir/chrome"
+        mapfile -t chrome_apks < <(find "$browser_dir/chrome" -maxdepth 1 -type f -name '*.apk' -print | sort)
+        test "${#chrome_apks[@]}" -gt 0
+        apksigner="$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -print -quit)"
+        test -x "$apksigner"
+        for chrome_apk in "${chrome_apks[@]}"; do
+          chrome_signing="$($apksigner verify --verbose --print-certs "$chrome_apk")"
+          grep -F 'Verified using v3 scheme (APK Signature Scheme v3): true' <<<"$chrome_signing"
+          grep -F 'Signer #1 certificate SHA-256 digest: f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83' <<<"$chrome_signing"
+          grep -F 'Signer #1 certificate SHA-1 digest: 38918a453d07199354f8b19af05ec6562ced5788' <<<"$chrome_signing"
+        done
+        trichrome_signing="$($apksigner verify --verbose --print-certs "$browser_dir/trichrome-library.apk")"
+        grep -F 'Verified using v3 scheme (APK Signature Scheme v3): true' <<<"$trichrome_signing"
+        grep -F 'Signer #1 certificate SHA-256 digest: b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1' <<<"$trichrome_signing"
+        grep -F 'Signer #1 certificate SHA-1 digest: 9524aa4a04aceeab425451e593ac639c942fb3cd' <<<"$trichrome_signing"
+        adb -s "$ANDROID_SERIAL" install -r -d "$browser_dir/trichrome-library.apk"
+        adb -s "$ANDROID_SERIAL" install-multiple -r -d "${chrome_apks[@]}"
+        chrome_dump="$(adb -s "$ANDROID_SERIAL" shell dumpsys package com.android.chrome)"
+        chrome_version="$(grep -m1 'versionName=' <<<"$chrome_dump")"
+        trichrome_version="$(grep -m1 'com.google.android.trichromelibrary version:' <<<"$chrome_dump")"
+        printf '%s\n%s\n' "$chrome_version" "$trichrome_version" >"$RUNNER_TEMP/android-chrome-version.txt"
+        grep -F 'versionName=131.0.6778.200' <<<"$chrome_version"
+        grep -F 'com.google.android.trichromelibrary version:677820038' <<<"$trichrome_version"
+      shell: bash
+    - name: Create and boot iOS simulator
+      if: inputs.platform == 'ios'
+      run: |
+        set -euo pipefail
+        sudo xcode-select -s /Applications/Xcode_16.4.app
+        xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
+        defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool NO
+        runtime="$(xcrun simctl list runtimes | grep -E '^iOS 18\.5 ' | grep -v unavailable | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+' | head -n1)"
+        device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 16 \(/ { print $2; exit }')"
+        test -n "$runtime"
+        test -n "$device_type"
+        device_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        udid="$(xcrun simctl create "$device_name" "$device_type" "$runtime")"
+        printf 'IOS_SIMULATOR_UDID=%s\n' "$udid" >> "$GITHUB_ENV"
+        printf 'ios:%s\n' "$udid" > "$MOBILE_DEVICE_OWNERSHIP_FILE"
+        xcrun simctl boot "$udid"
+        xcrun simctl bootstatus "$udid" -b
+        open -Fn /Applications/Xcode_16.4.app/Contents/Developer/Applications/Simulator.app
+        for attempt in $(seq 1 30); do
+          if pgrep -f 'Simulator.app/Contents/MacOS/Simulator' >/dev/null 2>&1; then break; fi
+          sleep 1
+        done
+        xcrun simctl listapps "$udid" >"$RUNNER_TEMP/ios-apps-before.txt"
+      shell: bash
+    - name: Install pinned Appium and platform driver
+      run: |
+        set -euo pipefail
+        npm install --global appium@3.1.1
+        if [ "$MOBILE_PLATFORM" = android ]; then
+          appium driver install uiautomator2@8.2.2
+        else
+          appium driver install xcuitest@12.10.0
+        fi
+        npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
+        appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
+      shell: bash
+    - name: Prebuild WebDriverAgent
+      if: inputs.platform == 'ios'
+      run: |
+        set -euo pipefail
+        wda_project="$APPIUM_HOME/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj"
+        xcodebuild build-for-testing \
+          -project "$wda_project" \
+          -scheme WebDriverAgentRunner \
+          -derivedDataPath "$IOS_WDA_DERIVED_DATA_PATH" \
+          -destination "id=$IOS_SIMULATOR_UDID" \
+          IPHONEOS_DEPLOYMENT_TARGET=18.5 \
+          GCC_TREAT_WARNINGS_AS_ERRORS=0 \
+          COMPILER_INDEX_STORE_ENABLE=NO \
+          APPIUM_XCODEBUILD_WDA_MARKER=1 \
+          2>&1 | tee "$RUNNER_TEMP/wda-build.log"
+        xctestrun="$(find "$IOS_WDA_BOOTSTRAP_PATH" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' -print -quit)"
+        test -n "$xctestrun"
+        test -d "$IOS_WDA_PREBUILT_PATH"
+        test -d "$IOS_WDA_AGENT_PATH"
+      shell: bash
+    - name: Install and validate prebuilt WebDriverAgent
+      if: inputs.platform == 'ios'
+      run: |
+        set -euo pipefail
+        dump_wda_simulator_log() {
+          xcrun simctl spawn "$IOS_SIMULATOR_UDID" log show --last 10m --style compact \
+            --predicate 'process CONTAINS[c] "WebDriverAgent" OR process == "xctest" OR eventMessage CONTAINS[c] "WebDriverAgent"' \
+            >"$RUNNER_TEMP/ios-wda-system.log" 2>&1 || true
+        }
+        wda_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$IOS_WDA_PREBUILT_PATH/Info.plist")"
+        test "$wda_bundle_id" = com.facebook.WebDriverAgentRunner.xctrunner
+        xcrun simctl install "$IOS_SIMULATOR_UDID" "$IOS_WDA_PREBUILT_PATH"
+        SIMCTL_CHILD_USE_PORT=8100 \
+        SIMCTL_CHILD_WDA_PRODUCT_BUNDLE_IDENTIFIER="$wda_bundle_id" \
+          xcrun simctl launch --terminate-running-process "$IOS_SIMULATOR_UDID" "$wda_bundle_id" \
+          >"$RUNNER_TEMP/wda-preflight.log" 2>&1
+        for attempt in $(seq 1 300); do
+          if curl --fail --silent --max-time 2 http://127.0.0.1:8100/status >"$RUNNER_TEMP/wda-status.json"; then
+            cat "$RUNNER_TEMP/wda-status.json"
+            exit 0
+          fi
+          sleep 1
+        done
+        dump_wda_simulator_log
+        tail -200 "$RUNNER_TEMP/wda-preflight.log" >&2 || true
+        exit 1
+      shell: bash
+    - name: Start Appium
+      run: |
+        set -euo pipefail
+        appium_args=(--address 127.0.0.1 --port 4723 --base-path /)
+        if [ "$MOBILE_PLATFORM" = android ]; then
+          appium_args+=(--allow-insecure=uiautomator2:chromedriver_autodownload)
+        fi
+        appium "${appium_args[@]}" >"$RUNNER_TEMP/appium.log" 2>&1 &
+        printf 'APPIUM_PID=%s\n' "$!" >> "$GITHUB_ENV"
+        for attempt in $(seq 1 60); do
+          if curl --fail --silent http://127.0.0.1:4723/status >/dev/null; then exit 0; fi
+          sleep 1
+        done
+        sed -n '1,160p' "$RUNNER_TEMP/appium.log" >&2
+        exit 1
+      shell: bash
+    - name: Run installed-PWA upgrade scenarios
+      if: inputs.scenario == 'historical'
+      run: |
+        set -euo pipefail
+        bun run --cwd tests/mobile run -- \
+          --bundle-set "$GITHUB_WORKSPACE/mobile-bundles/bundle-set.json" \
+          --baseline "${{ inputs.baseline }}" \
+          --suite "$MOBILE_SUITE" \
+          --output "$MOBILE_OUTPUT" \
+          --private-output "$MOBILE_PRIVATE"
+      shell: bash
+    - name: Run current-code updater fault scenario
+      if: inputs.scenario == 'synthetic'
+      run: |
+        set -euo pipefail
+        bun run --cwd tests/mobile run -- \
+          --bundle-set "$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json" \
+          --baseline current-code-baseline \
+          --suite "$MOBILE_SUITE" \
+          --output "$MOBILE_OUTPUT" \
+          --private-output "$MOBILE_PRIVATE"
+      shell: bash
+    - name: Sanitize bounded diagnostics
+      if: always()
+      run: |
+        set -euo pipefail
+        mkdir -p "$MOBILE_OUTPUT"
+        if [ -f "$RUNNER_TEMP/appium.log" ]; then
+          bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
+        fi
+        if [ -f "$RUNNER_TEMP/wda-build.log" ]; then
+          head -c 104857600 "$RUNNER_TEMP/wda-build.log" >"$MOBILE_OUTPUT/wda-build.log" || true
+        fi
+        if [ -f "$RUNNER_TEMP/wda-preflight.log" ]; then
+          head -c 104857600 "$RUNNER_TEMP/wda-preflight.log" >"$MOBILE_OUTPUT/wda-preflight.log" || true
+        fi
+        if [ -f "$RUNNER_TEMP/wda-status.json" ]; then cp "$RUNNER_TEMP/wda-status.json" "$MOBILE_OUTPUT/wda-status.json"; fi
+        if [ -f "$RUNNER_TEMP/ios-wda-system.log" ]; then
+          head -c 104857600 "$RUNNER_TEMP/ios-wda-system.log" >"$MOBILE_OUTPUT/ios-wda-system.log" || true
+        fi
+        if [ -f "$RUNNER_TEMP/emulator.log" ]; then
+          head -c 104857600 "$RUNNER_TEMP/emulator.log" >"$MOBILE_OUTPUT/emulator.log" || true
+        fi
+        if [ -f "$RUNNER_TEMP/xcode-version.txt" ]; then cp "$RUNNER_TEMP/xcode-version.txt" "$MOBILE_OUTPUT/xcode-version.txt"; fi
+        if [ -f "$RUNNER_TEMP/ios-apps-before.txt" ]; then cp "$RUNNER_TEMP/ios-apps-before.txt" "$MOBILE_OUTPUT/ios-apps-before.txt"; fi
+        if [ -f "$RUNNER_TEMP/appium-drivers.txt" ]; then cp "$RUNNER_TEMP/appium-drivers.txt" "$MOBILE_OUTPUT/appium-drivers.txt"; fi
+        if [ -f "$RUNNER_TEMP/android-chrome-version.txt" ]; then cp "$RUNNER_TEMP/android-chrome-version.txt" "$MOBILE_OUTPUT/android-chrome-version.txt"; fi
+        if [ -f "$MOBILE_OUTPUT/mobile-result.json" ]; then
+          cat "$MOBILE_OUTPUT/mobile-result.json"
+        fi
+      shell: bash
+    - name: Upload mobile evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.evidence_prefix }}-${{ inputs.platform }}-${{ inputs.baseline }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/herdr-mobile-output
+        if-no-files-found: warn
+        retention-days: 1
+    - name: Stop owned mobile processes and devices
+      if: always()
+      run: |
+        set +e
+        if [ -n "${APPIUM_PID:-}" ]; then kill "$APPIUM_PID" 2>/dev/null || true; fi
+        if [ -x "${MOBILE_FIXTURE_BINARY:-}" ]; then pkill -TERM -f "$MOBILE_FIXTURE_BINARY" 2>/dev/null || true; fi
+        if [ "$MOBILE_PLATFORM" = android ]; then
+          if [ -n "${ANDROID_SERIAL:-}" ]; then adb -s "$ANDROID_SERIAL" emu kill 2>/dev/null || true; fi
+          if [ -n "${ANDROID_AVD_NAME:-}" ]; then avdmanager delete avd -n "$ANDROID_AVD_NAME" 2>/dev/null || true; fi
+        elif [ -n "${IOS_SIMULATOR_UDID:-}" ]; then
+          xcrun simctl shutdown "$IOS_SIMULATOR_UDID" 2>/dev/null || true
+          xcrun simctl delete "$IOS_SIMULATOR_UDID" 2>/dev/null || true
+        fi
+        rm -rf "${MOBILE_PRIVATE:-}" "${APPIUM_HOME:-}" "${MOBILE_FIXTURE_BINARY:-}" "${MOBILE_DEVICE_OWNERSHIP_FILE:-}" || true
+      shell: bash

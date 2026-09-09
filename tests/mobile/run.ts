@@ -14,14 +14,19 @@ import {
   assertNoRelayDeploy,
   assertNoRelayInstall,
   assertOldIdentity,
+  assertInvitationOwnership,
+  assertRelayOwnership,
+  isQualificationFatal,
+  QualificationFailureLatch,
   assertPreferencePreserved,
   assertStandalone,
   assertRunningIdentity,
   type PreferenceEvidence,
+  type QualificationFailureSnapshot,
   type RelayAuthEvidence,
   type RuntimeIdentity,
 } from './support/oracle';
-import { delay, WebDriverError } from './support/webdriver';
+import { delay, isFatalDriverError } from './support/webdriver';
 import { AndroidPlatform } from './platforms/android';
 import { IOSPlatform } from './platforms/ios';
 import type { MobilePlatform, PlatformOptions, UpdateCompletionEvidence } from './platforms/types';
@@ -88,6 +93,7 @@ interface RunResult {
   faults_exercised?: string[];
   oracle_controls?: string[];
   phone_completion?: UpdateCompletionEvidence;
+  qualification_failure?: QualificationFailureSnapshot;
   failure_stage?: string;
   failure?: string;
   evidence?: Record<string, unknown>;
@@ -194,6 +200,7 @@ function authEvidence(state: FixtureState): RelayAuthEvidence {
       invitationAuthCount: relay.invitation_auth_count,
       credentialAuthCount: relay.credential_auth_count,
       credentialPseudonyms: [...relay.credential_pseudonyms].sort(),
+      connections: relay.connections,
     }])),
   };
 }
@@ -265,6 +272,7 @@ async function waitForPhoneCompletion(
   platform: MobilePlatform,
   baseline: BundleSet['baselines'][number],
   controls: Set<string>,
+  qualification: QualificationFailureLatch,
   budget?: PhaseBudget,
 ): Promise<UpdateCompletionEvidence> {
   const deadline = Date.now() + Math.min(30_000, budget?.remainingMs ?? 30_000);
@@ -272,11 +280,16 @@ async function waitForPhoneCompletion(
   while (Date.now() < deadline) {
     try {
       const evidence = await platform.readUpdateCompletion();
+      qualification.observe({ completion: evidence });
       if (!phonePlanContract(baseline, evidence, controls)) return evidence;
       assertPhoneUpdateAcknowledged(evidence);
       return evidence;
     } catch (error) {
-      if (error instanceof Error && /PHONE_PLAN_MISSING/u.test(error.message)) throw error;
+      if (isFatalDriverError(error)) throw error;
+      if (isQualificationFatal(error)) qualification.fail(error, 'upgrade');
+      if (error instanceof Error && /PHONE_PLAN_MISSING|PREMATURE_PHONE_COMPLETION/u.test(error.message)) {
+        qualification.fail(error, 'upgrade');
+      }
       lastError = error instanceof Error ? error.message : String(error);
       await delay(250, budget);
     }
@@ -295,19 +308,24 @@ async function assertCandidateFailureObserved(
   faultKind: string,
   faultId: string,
   faultGeneration: string,
+  qualification: QualificationFailureLatch,
   budget?: PhaseBudget,
 ): Promise<UpdateCompletionEvidence> {
   const deadline = Date.now() + Math.min(60_000, budget?.remainingMs ?? 60_000);
   let lastError = '';
   while (!budget?.exhausted && Date.now() < deadline) {
     const state = await fixtureState(info);
+    qualification.observe({ fault: state });
     assertFaultActive(state, faultPath, faultKind, faultId, faultGeneration);
     try {
       const identity = await platform.readRunningIdentity();
       if (!identity.standalone) throw new Error('STANDALONE_REQUIRED: failed candidate is not in the installed standalone provider');
       if (identity.origin !== origin) throw new Error(`ORIGIN_MISMATCH: failed candidate document is ${identity.origin}, not ${origin}`);
-      if (!identity.nativeProvider) throw new Error('STANDALONE_PROVIDER_REQUIRED: failed candidate has no installed native provider');
+      if (identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider || !identity.nativeActivity || !identity.nativePid) {
+        throw new Error('STANDALONE_PROVIDER_REQUIRED: failed candidate has incomplete standalone provider evidence');
+      }
       const completion = await platform.readUpdateCompletion();
+      qualification.observe({ identity, completion });
       if (phonePlanContract(baseline, completion, controls)) assertPhoneUpdateNotAcknowledged(completion);
       if (identity.entry !== expected.entry || identity.script !== expected.script || identity.style !== expected.style) {
         throw new Error(`UPGRADE_FAILURE_TARGET_MISMATCH: observed ${identity.entry}/${identity.script}/${identity.style}`);
@@ -318,8 +336,11 @@ async function assertCandidateFailureObserved(
       if (identity.failureUiVisible !== true) throw new Error('FAILURE_UI_MISSING: candidate fault did not expose the failure recovery UI');
       return completion;
     } catch (error) {
-      if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) throw error;
-      if (error instanceof Error && /PHONE_PLAN_MISSING/u.test(error.message)) throw error;
+      if (isFatalDriverError(error)) throw error;
+      if (isQualificationFatal(error)) qualification.fail(error, 'upgrade-failure-observation');
+      if (error instanceof Error && /PHONE_PLAN_MISSING|PREMATURE_PHONE_COMPLETION/u.test(error.message)) {
+        qualification.fail(error, 'upgrade-failure-observation');
+      }
       lastError = error instanceof Error ? error.message : String(error);
     }
     await delay(500, budget);
@@ -332,6 +353,7 @@ async function waitForCandidate(
   expected: BundleSet['candidate']['identity'],
   origin: string,
   navigationIds: Set<string>,
+  qualification: QualificationFailureLatch,
   budget?: PhaseBudget,
 ): Promise<RuntimeIdentity> {
   const deadline = Date.now() + Math.min(180_000, budget?.remainingMs ?? 180_000);
@@ -344,6 +366,8 @@ async function waitForCandidate(
       assertRunningIdentity(identity, expected);
       return identity;
     } catch (error) {
+      if (isFatalDriverError(error)) throw error;
+      if (isQualificationFatal(error)) qualification.fail(error, 'upgrade');
       lastError = error instanceof Error ? error.message : String(error);
       await delay(500, budget);
     }
@@ -378,13 +402,14 @@ async function removeReverses(serial: string, ports: string[]): Promise<void> {
 
 type ScenarioStage = 'device' | 'pairing' | 'upgrade' | 'lifecycle';
 
-async function runUpgrade(
+async function runUpgradeScenario(
   platform: MobilePlatform,
   info: FixtureInfo,
   bundleSet: BundleSet,
   suite: string,
   setStage: (stage: ScenarioStage) => void,
   budget: PhaseBudget,
+  qualification: QualificationFailureLatch,
 ): Promise<RunResult> {
   const baseline = bundleSet.baselines[0];
   assertDistinctUpgrade(baseline, bundleSet.candidate);
@@ -407,11 +432,17 @@ async function runUpgrade(
   await platform.openSetupURLInInstalledApp(info.setup_urls[1]);
   await waitForCredential(info, 'beta', budget);
   const pairedBeforeReconnect = authEvidence(await fixtureState(info));
-  await reconnectAllRelays(info, pairedBeforeReconnect, budget);
+  qualification.observe({ ownership: pairedBeforeReconnect });
+  assertInvitationOwnership(pairedBeforeReconnect, ['alpha', 'beta']);
+  const pairedAfterReconnect = await reconnectAllRelays(info, pairedBeforeReconnect, budget);
+  qualification.observe({ ownership: pairedAfterReconnect });
+  assertRelayOwnership(pairedAfterReconnect);
   await platform.setPreference('state');
   const beforePreference: PreferenceEvidence = { key: 'herdr_home_workspace_layout', value: await platform.preferenceValue() };
   const pairedState = await fixtureState(info);
   const beforeAuth = authEvidence(pairedState);
+  qualification.observe({ ownership: beforeAuth });
+  assertRelayOwnership(beforeAuth);
   await platform.captureSanitizedEvidence('paired');
   setStage('upgrade');
   await platform.clickWebText('Settings');
@@ -421,7 +452,7 @@ async function runUpgrade(
   const faultKind = bundleSet.candidate.name === 'current-code-target' ? 'missing' : 'corrupt';
   const faultId = `candidate-${bundleSet.candidate.name}-${faultKind}`;
   const faultGeneration = `${faultId}-${Date.now()}`;
-  if (suite === 'release') {
+  if (suite === 'release' || suite === 'smoke') {
     const beforeActivation = await fixtureState(info);
     if (beforeActivation.requests.some((request) => request.release === 'candidate' && request.path === faultPath && !request.fault)) {
       throw new Error(`FIXTURE_FAULT: candidate asset was fetched before fault ${faultPath}`);
@@ -436,7 +467,7 @@ async function runUpgrade(
   await platform.clickWebText('Check for Updates');
   await platform.clickWebText('Load Update');
   await platform.clickDialogText('update-herdr-dialog', 'Load Update');
-  if (suite === 'release') {
+  if (suite === 'release' || suite === 'smoke') {
     await waitForFault(info, faultPath, faultKind, faultId, faultGeneration, budget);
     const faultState = await fixtureState(info);
     assertFaultActive(faultState, faultPath, faultKind, faultId, faultGeneration);
@@ -451,25 +482,33 @@ async function runUpgrade(
       faultKind,
       faultId,
       faultGeneration,
+      qualification,
       budget,
     );
     await control(info, '/fault/clear', 'POST', { id: faultId, generation: faultGeneration });
     const clearedState = await fixtureState(info);
+    qualification.observe({ fault: clearedState });
     if (clearedState.invalidated || clearedState.faults?.some((fault) => fault.id === faultId)) {
       throw new Error(`FIXTURE_FAULT_CLEAR: fault ${faultId} was not explicitly cleared`);
     }
     await platform.clickWebText('Try again');
   }
-  await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
-  const phoneCompletion = await waitForPhoneCompletion(platform, baseline, oracleControls, budget);
+  await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
+  const phoneCompletion = await waitForPhoneCompletion(platform, baseline, oracleControls, qualification, budget);
   await platform.clickDialogText('update-progress-dialog', 'Close');
   const afterUpgradeAuth = await reconnectAllRelays(info, beforeAuth, budget);
+  qualification.observe({ ownership: afterUpgradeAuth });
+  assertRelayOwnership(afterUpgradeAuth);
   assertCredentialPreserved(beforeAuth, afterUpgradeAuth);
   await platform.captureSanitizedEvidence('candidate');
   const finalBeforeAuth = authEvidence(await fixtureState(info));
+  qualification.observe({ ownership: finalBeforeAuth });
+  assertRelayOwnership(finalBeforeAuth);
   await platform.relaunchInstalledApp();
-  const finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
+  const finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
   let finalAuth = await reconnectAllRelays(info, finalBeforeAuth, budget);
+  qualification.observe({ ownership: finalAuth });
+  assertRelayOwnership(finalAuth);
   assertCredentialPreserved(finalBeforeAuth, finalAuth);
   assertCredentialIdentityPreserved(beforeAuth, finalAuth);
   const upgradeNavigationCount = navigationIds.size;
@@ -483,20 +522,38 @@ async function runUpgrade(
   if (suite === 'release') {
     setStage('lifecycle');
     const beforeResumeAuth = authEvidence(await fixtureState(info));
+    qualification.observe({ ownership: beforeResumeAuth });
+    assertRelayOwnership(beforeResumeAuth);
     await platform.backgroundApp();
     await platform.relaunchInstalledApp();
-    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
+    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
     const resumeAuth = await reconnectAllRelays(info, beforeResumeAuth, budget);
+    qualification.observe({ ownership: resumeAuth });
+    assertRelayOwnership(resumeAuth, ['alpha', 'beta']);
     assertCredentialPreserved(beforeResumeAuth, resumeAuth);
     assertCredentialIdentityPreserved(beforeAuth, resumeAuth);
+    const agentBeforeAuth = authEvidence(await fixtureState(info));
+    qualification.observe({ ownership: agentBeforeAuth });
+    assertRelayOwnership(agentBeforeAuth, ['alpha']);
+    const agentCompletion = await platform.readUpdateCompletion();
+    qualification.observe({ completion: agentCompletion });
+    if (phonePlanContract(baseline, agentCompletion, oracleControls)) assertPhoneUpdateAcknowledged(agentCompletion);
     await platform.openFixtureAgent('alpha');
+    const agentAfterAuth = authEvidence(await fixtureState(info));
+    qualification.observe({ ownership: agentAfterAuth });
+    assertRelayOwnership(agentAfterAuth, ['alpha']);
+    assertCredentialIdentityPreserved(agentBeforeAuth, agentAfterAuth, ['alpha']);
     await platform.showKeyboardOnComposer();
     await platform.hideKeyboard();
     const beforeColdAuth = authEvidence(await fixtureState(info));
+    qualification.observe({ ownership: beforeColdAuth });
+    assertRelayOwnership(beforeColdAuth);
     await platform.terminateInstalledApp();
     await platform.relaunchInstalledApp();
-    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
+    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, qualification, budget);
     const coldAuth = await reconnectAllRelays(info, beforeColdAuth, budget);
+    qualification.observe({ ownership: coldAuth });
+    assertRelayOwnership(coldAuth);
     assertCredentialPreserved(beforeColdAuth, coldAuth);
     assertCredentialIdentityPreserved(beforeAuth, coldAuth);
     finalAuth = coldAuth;
@@ -525,6 +582,38 @@ async function runUpgrade(
     oracle_controls: [...oracleControls].sort(),
     phone_completion: phoneCompletion,
   };
+}
+
+async function runUpgrade(
+  platform: MobilePlatform,
+  info: FixtureInfo,
+  bundleSet: BundleSet,
+  suite: string,
+  setStage: (stage: ScenarioStage) => void,
+  budget: PhaseBudget,
+): Promise<RunResult> {
+  const qualification = new QualificationFailureLatch();
+  let stage: ScenarioStage = 'device';
+  try {
+    return await runUpgradeScenario(platform, info, bundleSet, suite, (nextStage) => {
+      stage = nextStage;
+      setStage(nextStage);
+    }, budget, qualification);
+  } catch (error) {
+    if (isFatalDriverError(error)) throw error;
+    return qualification.fail(error, stage);
+  }
+}
+
+function failureSnapshot(error: unknown, stage: string): QualificationFailureSnapshot | undefined {
+  if (isQualificationFatal(error)) return error.snapshot();
+  if (!isFatalDriverError(error)) return undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : message.match(/^([A-Z][A-Z0-9_]+):/u)?.[1] || 'DRIVER_FAILURE';
+  const prefix = `${code}:`;
+  return { code, stage, message: message.startsWith(prefix) ? message.slice(prefix.length).trim() : message };
 }
 
 async function main(): Promise<void> {
@@ -560,6 +649,7 @@ async function main(): Promise<void> {
   let platform: MobilePlatform | undefined;
   let reverse: string[] = [];
   let result: RunResult;
+  let cleanupFailure: unknown;
   let stage: string = 'fixture';
   try {
     fixtureInfo = await waitForInfo(infoFile, 180_000, budget);
@@ -583,6 +673,7 @@ async function main(): Promise<void> {
     await platform?.captureSanitizedEvidence('failure').catch(() => undefined);
     const message = error instanceof Error ? error.message : String(error);
     const partialState = fixtureInfo ? await fixtureState(fixtureInfo).catch(() => undefined) : undefined;
+    const failure = failureSnapshot(error, stage);
     const product = /(RUNTIME_|PREMATURE_|PHONE_COMPLETION_|PHONE_PLAN_|CREDENTIAL_|PREFERENCE_|INVITATION_|RELOAD_|UNEXPECTED_|STANDALONE_|ORIGIN_|APP_NOT_INITIALIZED|REQUIRED_ASSET|BASELINE_)/u.test(message);
     result = {
       schema: 1, result: product ? 'product failure' : 'infrastructure failure',
@@ -591,13 +682,21 @@ async function main(): Promise<void> {
       source_commit: bundleSet.candidate.provenance.sourceCommit,
       source_run_head_sha: process.env.MOBILE_SOURCE_RUN_HEAD_SHA || undefined,
       candidate_web_hash: bundleSet.candidate.identity.webHash,
-      reload_count: 0, failure_stage: stage, failure: message,
+      reload_count: 0,
+      failure_stage: failure?.stage || stage,
+      failure: message,
+      qualification_failure: failure,
       evidence: platform?.evidenceSnapshot(),
       fixture_state: partialState ? { active_release: partialState.active_release, requests: partialState.requests } : undefined,
       budget: budget.snapshot(),
     };
   } finally {
-    await platform?.stopOwnedResources().catch(() => undefined);
+    try {
+      await platform?.stopOwnedResources();
+    } catch (error) {
+      cleanupFailure = error;
+      diagnostics.record({ phase: 'cleanup', operation: 'session-teardown', detail: error instanceof Error ? error.message : String(error) });
+    }
     if (fixtureInfo) await control(fixtureInfo, '/shutdown', 'POST').catch(() => undefined);
     await stopProcess(fixtureProcess.process);
     await removeReverses(process.env.ANDROID_SERIAL || '', reverse);
@@ -605,6 +704,18 @@ async function main(): Promise<void> {
     await writeFile(resolve(outputDir, 'fixture.log'), fixtureLog, { mode: 0o600 });
     await rm(infoFile, { force: true });
     await rm(privateDir, { recursive: true, force: true });
+  }
+  if (cleanupFailure) {
+    result.evidence = platform?.evidenceSnapshot();
+    if (result.result === 'passed') {
+      const message = cleanupFailure instanceof Error ? cleanupFailure.message : String(cleanupFailure);
+      result = {
+        ...result,
+        result: 'infrastructure failure',
+        failure_stage: 'cleanup',
+        failure: message,
+      };
+    }
   }
   await writeSanitizedJson(resolve(outputDir, 'mobile-result.json'), result);
   if (result.result !== 'passed') process.exitCode = 1;

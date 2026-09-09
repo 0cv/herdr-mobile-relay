@@ -16,7 +16,7 @@ import {
 } from '../support/artifacts';
 import { assertNoKnownSecret, redactText, sanitizeValue } from '../support/diagnostics';
 import { PhaseBudget } from '../support/budget';
-import { AppiumClient } from '../support/webdriver';
+import { AppiumClient, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
 import { IOSPlatform, iosInstalledContextRejection, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError } from '../platforms/ios';
@@ -28,6 +28,8 @@ import {
   assertBoundedReloads,
   assertCredentialIdentityPreserved,
   assertCredentialPreserved,
+  assertInvitationOwnership,
+  assertRelayOwnership,
   assertNoRelayDeploy,
   assertNoRelayInstall,
   assertPhoneUpdateAcknowledged,
@@ -35,6 +37,8 @@ import {
   assertRunningIdentity,
   assertStandalone,
   assertUpgradeDidNotComplete,
+  isQualificationFatal,
+  QualificationFailureLatch,
   type RuntimeIdentity,
 } from '../support/oracle';
 
@@ -281,7 +285,17 @@ test('Android final launch verifies readiness only after bootstrap teardown', as
   (platform as any).waitForChromeDevTools = async () => { events.push('devtools'); };
   (platform as any).createChromeSession = async () => { events.push('create'); };
   (platform as any).attachToInstalledView = async () => { events.push('attach'); };
-  await platform.launchInstalledApp();
+  const ownershipRoot = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-ownership-'));
+  const ownershipFile = join(ownershipRoot, 'owned');
+  await writeFile(ownershipFile, 'android:emulator-5554\n');
+  const previousOwnershipFile = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+  process.env.MOBILE_DEVICE_OWNERSHIP_FILE = ownershipFile;
+  try {
+    await platform.launchInstalledApp();
+  } finally {
+    if (previousOwnershipFile === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+    else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previousOwnershipFile;
+  }
   assert.deepEqual(events, ['shortcut', 'close', 'launch', 'target', 'devtools', 'create', 'attach']);
 });
 
@@ -359,6 +373,7 @@ test('WebDriver runtime script returns an identity from function-body execution'
 test('standalone oracle requires native provider evidence', async () => {
   const identity: RuntimeIdentity = {
     url: 'https://localhost/', origin: 'https://localhost', standalone: true, provider: 'android-standalone',
+    nativeActivity: 'WebappActivity', nativePid: '1',
     version: '0.20.10', assets: 363, build: '', entry: '/index.html', script: '/assets/app.js', style: '/assets/app.css',
     requiredAssetsReady: true, applicationInitialized: true,
   };
@@ -457,6 +472,43 @@ test('credential evidence rejects fresh enrollment', async () => {
   ), /INVITATION_REUSED/);
 });
 
+test('qualification ownership and completion failures latch their first cause', async () => {
+  const invitation = {
+    relays: {
+      alpha: { invitationAuthCount: 1, credentialAuthCount: 0, credentialPseudonyms: [] },
+      beta: { invitationAuthCount: 1, credentialAuthCount: 0, credentialPseudonyms: [] },
+    },
+  };
+  assert.doesNotThrow(() => assertInvitationOwnership(invitation, ['alpha', 'beta']));
+  assert.throws(() => assertRelayOwnership(invitation, ['alpha', 'beta']), /CREDENTIAL_OWNERSHIP_MISSING/);
+  assert.throws(() => assertRelayOwnership({ relays: {
+    alpha: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['replacement'] },
+  } }, ['alpha']), /CREDENTIAL_CONNECTION_MISSING/);
+  assert.doesNotThrow(() => assertRelayOwnership({ relays: {
+    alpha: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['replacement'], connections: 1 },
+  } }, ['alpha']));
+
+  const latch = new QualificationFailureLatch();
+  let first: unknown;
+  try {
+    latch.fail(new Error('OPEN_FIXTURE_AGENT: native provider precondition failed'), 'lifecycle');
+  } catch (error) {
+    first = error;
+  }
+  assert.equal(isQualificationFatal(first), true);
+  try {
+    latch.fail(new Error('UPGRADE_FAILURE_TARGET_MISMATCH: later polling error'), 'upgrade');
+    assert.fail('latch should throw');
+  } catch (error) {
+    assert.equal(error, first);
+  }
+  assert.deepEqual((first as { snapshot: () => unknown }).snapshot(), {
+    code: 'OPEN_FIXTURE_AGENT',
+    stage: 'lifecycle',
+    message: 'native provider precondition failed',
+  });
+});
+
 test('diagnostic redaction covers URL and escaped values', async () => {
   const secret = 'A'.repeat(43);
   const text = redactText(`https://localhost/#setup=${secret}&invite=invite-id`);
@@ -498,6 +550,7 @@ test('Appium timeout preserves context and blocks follow-up commands', async () 
   await assert.rejects(() => client.contexts(), /APPIUM_SESSION_UNUSABLE/);
   assert.equal(requests, 2);
   assert.equal(client.snapshot().unusable, true);
+  assert.equal(client.snapshot().firstFatal?.code, 'APPIUM_TIMEOUT');
 });
 
 test('Appium failed teardown retains the session quarantine until confirmed', async () => {
@@ -568,7 +621,8 @@ test('Appium multi-locator lookup stops at its operation deadline', async () => 
     { using: 'css selector', value: '#third' },
   ], 10));
   assert.ok(Date.now() - startedAt < 200);
-  assert.equal(requests, 2);
+  assert.ok(requests >= 3 && requests <= 4);
+  assert.ok(client.snapshot().lookups.every((lookup) => lookup.sliceMs > 1));
   assert.equal(client.snapshot().unusable, false);
 });
 
@@ -582,9 +636,74 @@ test('Appium element lookup applies its child deadline to HTTP', async () => {
     });
   });
   await client.create({ capabilities: {} });
-  await assert.rejects(() => client.find({ using: 'css selector', value: '#missing' }, 1), /APPIUM_TIMEOUT/);
+  await assert.rejects(() => client.find({ using: 'css selector', value: '#missing' }, 5), /APPIUM_TIMEOUT/);
   assert.equal(requests, 2);
-  assert.equal(client.snapshot().lastCommand?.timeoutMs, 1);
+  assert.ok((client.snapshot().lastCommand?.timeoutMs || 0) > 1);
+  assert.ok((client.snapshot().lastCommand?.timeoutMs || 0) <= 5);
+  assert.equal(client.snapshot().unusable, true);
+  assert.equal(client.snapshot().lookups.length, 1);
+  assert.equal(client.snapshot().lookups[0]?.outcome, 'fatal');
+});
+
+test('Appium lookup rotates locators fairly without overlapping commands', async () => {
+  let requests = 0;
+  let active = 0;
+  let maximumActive = 0;
+  const attempts: string[] = [];
+  const perLocator = new Map<string, number>();
+  const client = new AppiumClient('http://fake.test', 1_000, async (input, init) => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    active += 1;
+    maximumActive = Math.max(maximumActive, active);
+    const locator = JSON.parse(String(init?.body)).value as string;
+    attempts.push(locator);
+    perLocator.set(locator, (perLocator.get(locator) || 0) + 1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 3));
+    active -= 1;
+    if (locator === '#second' && (perLocator.get(locator) || 0) >= 2) {
+      return new Response(JSON.stringify({ value: { 'element-6066-11e4-a52e-4f735466cecf': 'target' } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ value: { error: 'no such element' } }), { status: 404 });
+  });
+  const startedAt = Date.now();
+  await client.create({ capabilities: {} });
+  assert.equal(await client.findAny([
+    { using: 'css selector', value: '#first' },
+    { using: 'css selector', value: '#second' },
+  ], 500), 'target');
+  assert.ok(Date.now() - startedAt < 500);
+  assert.equal(maximumActive, 1);
+  assert.deepEqual(attempts.slice(0, 2), ['#first', '#second']);
+  assert.ok(client.snapshot().lookups.every((lookup) => lookup.sliceMs > 1));
+  assert.equal(client.snapshot().lookups.at(-1)?.outcome, 'matched');
+});
+
+test('Appium lookup preserves a fatal element timeout and does not try later locators', async () => {
+  let requests = 0;
+  const client = new AppiumClient('http://fake.test', 50, async (_input, init) => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal?.reason || new DOMException('hung element lookup', 'TimeoutError')), { once: true });
+    });
+  });
+  await client.create({ capabilities: {} });
+  let error: unknown;
+  try {
+    await client.findAny([
+      { using: 'accessibility id', value: 'first' },
+      { using: 'accessibility id', value: 'second' },
+    ], 20);
+    assert.fail('lookup should fail');
+  } catch (caught) {
+    error = caught;
+  }
+  assert.equal(isFatalDriverError(error), true);
+  assert.equal(requests, 2);
+  assert.equal(client.snapshot().lookups.length, 1);
+  assert.equal(client.snapshot().lookups[0]?.locator.value, 'first');
+  assert.equal(client.snapshot().lookups[0]?.outcome, 'fatal');
   assert.equal(client.snapshot().unusable, true);
 });
 
@@ -620,6 +739,37 @@ test('Appium context metadata keeps provider identity separate from context name
     id: 'WEBVIEW_1', url: 'https://fixture.test/', title: 'Installed', bundleId: 'com.apple.webapp', isKey: false,
     raw: { id: 'WEBVIEW_1', url: 'https://fixture.test/', title: 'Installed', bundleId: 'com.apple.webapp' },
   }]);
+});
+
+test('native lookup wrappers preserve a fatal Appium operation and skip fallbacks', async () => {
+  const fatal = new WebDriverError({
+    code: 'APPIUM_TIMEOUT', message: 'element request timed out', path: '/session/session/element', method: 'POST',
+    durationMs: 20, timedOut: true, selectedContext: 'NATIVE_APP', selectedWindow: '',
+  });
+  let androidScrolls = 0;
+  const android = new AndroidPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-native-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+  });
+  (android as any).driver = {
+    windowSize: async () => ({ width: 1_080, height: 2_400 }),
+    findAny: async () => { throw fatal; },
+    mobile: async () => { androidScrolls += 1; },
+  };
+  await assert.rejects(() => (android as any).findNative([{ using: 'accessibility id', value: 'Missing' }], 100), (error: unknown) => error === fatal);
+  assert.equal(androidScrolls, 0);
+
+  let iosScrolls = 0;
+  const ios = new IOSPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', budget: new PhaseBudget('ios-native-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+  });
+  (ios as any).driver = {
+    findAny: async () => { throw fatal; },
+    mobile: async () => { iosScrolls += 1; },
+  };
+  await assert.rejects(() => (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Missing' }], 'Missing', 100), (error: unknown) => error === fatal);
+  assert.equal(iosScrolls, 0);
 });
 
 test('Android context metadata keeps the recorded response beside canonical context IDs', async () => {

@@ -221,6 +221,7 @@ jobs:
     outputs:
       device_matrix: ${{ steps.matrix.outputs.device_matrix }}
       device_count: ${{ steps.matrix.outputs.device_count }}
+      smoke_matrix: ${{ steps.matrix.outputs.smoke_matrix }}
       candidate_web_hash: ${{ steps.artifact_identity.outputs.web_hash }}
       synthetic_web_hash: ${{ steps.artifact_identity.outputs.synthetic_web_hash }}
     steps:
@@ -299,8 +300,11 @@ jobs:
           if [ "$REQUESTED_SUITE" != release ]; then
             matrix="$(jq -c '{include: [.include[] | select(.scenario == "historical")]}' <<<"$matrix")"
           fi
+          smoke_matrix="$(jq -c '{include: [.include[] | select(.scenario == "historical" and .baseline == "0.20.10")]}' <<<"$matrix")"
+          test "$(jq '.include | length' <<<"$smoke_matrix")" -gt 0
           echo "device_matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "device_count=$(jq '.include | length' <<<"$matrix")" >> "$GITHUB_OUTPUT"
+          echo "smoke_matrix=$smoke_matrix" >> "$GITHUB_OUTPUT"
       - name: Install mobile harness dependencies
         run: bun install --frozen-lockfile --cwd tests/mobile
       - name: Install frontend build dependencies
@@ -404,9 +408,59 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  device:
+  smoke:
+    name: Controlled smoke (${{ matrix.platform }})
     needs: [provenance, prepare]
     if: needs.prepare.result == 'success' && needs.provenance.result == 'success'
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.prepare.outputs.smoke_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out the verified source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.provenance.outputs.source_sha }}
+          fetch-depth: 1
+      - name: Run controlled latest-baseline smoke
+        uses: ./.github/actions/mobile-device-run
+        with:
+          platform: ${{ matrix.platform }}
+          baseline: ${{ matrix.baseline }}
+          scenario: ${{ matrix.scenario }}
+          suite: smoke
+          source_head_sha: ${{ needs.provenance.outputs.head_sha }}
+          evidence_prefix: mobile-evidence-smoke
+
+  release_smoke:
+    name: Controlled release scenario (${{ matrix.platform }})
+    needs: [provenance, prepare, smoke]
+    if: needs.smoke.result == 'success' && (inputs.suite || 'release') == 'release'
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.prepare.outputs.smoke_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out the verified source commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.provenance.outputs.source_sha }}
+          fetch-depth: 1
+      - name: Run controlled latest-baseline release scenario
+        uses: ./.github/actions/mobile-device-run
+        with:
+          platform: ${{ matrix.platform }}
+          baseline: ${{ matrix.baseline }}
+          scenario: ${{ matrix.scenario }}
+          suite: release
+          source_head_sha: ${{ needs.provenance.outputs.head_sha }}
+          evidence_prefix: mobile-evidence-release-smoke
+
+  device:
+    needs: [provenance, prepare, smoke, release_smoke]
+    if: always() && needs.prepare.result == 'success' && needs.provenance.result == 'success' && needs.smoke.result == 'success' && (needs.release_smoke.result == 'success' || (inputs.suite || 'release') != 'release') && (inputs.suite || 'release') == 'release'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.device_matrix) }}
@@ -738,10 +792,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mobile-evidence-${{ matrix.platform }}-${{ matrix.baseline }}-${{ github.run_attempt }}
+          name: mobile-evidence-full-${{ matrix.platform }}-${{ matrix.baseline }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/herdr-mobile-output
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 1
       - name: Stop owned mobile processes and devices
         if: always()
         run: |
@@ -758,22 +812,92 @@ jobs:
           rm -rf "${MOBILE_PRIVATE:-}" "${APPIUM_HOME:-}" "${MOBILE_FIXTURE_BINARY:-}" "${MOBILE_DEVICE_OWNERSHIP_FILE:-}" || true
 
   gate:
-    needs: [provenance, prepare, device]
+    needs: [provenance, prepare, smoke, release_smoke, device]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Download current-attempt device evidence artifacts
+        if: needs.provenance.result == 'success' && needs.device.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mobile-evidence-full-*-${{ github.run_attempt }}
+          path: evidence
+          merge-multiple: false
+      - name: Download current-attempt controlled smoke evidence
         if: needs.provenance.result == 'success'
         uses: actions/download-artifact@v4
         with:
-          pattern: mobile-evidence-*-${{ github.run_attempt }}
-          path: evidence
+          pattern: mobile-evidence-smoke-*-${{ github.run_attempt }}
+          path: smoke-evidence
           merge-multiple: false
+      - name: Download current-attempt controlled release evidence
+        if: needs.provenance.result == 'success' && (inputs.suite || 'release') == 'release' && needs.release_smoke.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mobile-evidence-release-smoke-*-${{ github.run_attempt }}
+          path: release-smoke-evidence
+          merge-multiple: false
+      - name: Validate controlled smoke evidence before the full matrix
+        env:
+          PROVENANCE_RESULT: ${{ needs.provenance.result }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          RELEASE_SMOKE_RESULT: ${{ needs.release_smoke.result }}
+          CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
+          SOURCE_RUN_HEAD_SHA: ${{ needs.provenance.outputs.head_sha }}
+          CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+          SMOKE_MATRIX: ${{ needs.prepare.outputs.smoke_matrix }}
+          EXPECTED_SUITE: ${{ inputs.suite || 'release' }}
+        run: |
+          set -euo pipefail
+          test "$PROVENANCE_RESULT" = success
+          test "$PREPARE_RESULT" = success
+          test "$SMOKE_RESULT" = success
+          test "$(jq '.include | length' <<<"$SMOKE_MATRIX")" -gt 0
+          mapfile -t smoke_results < <(find smoke-evidence -type f -name mobile-result.json -print | sort)
+          test "${#smoke_results[@]}" -eq "$(jq '.include | length' <<<"$SMOKE_MATRIX")"
+          for result_file in "${smoke_results[@]}"; do
+            jq -e --arg commit "$CANDIDATE_COMMIT" --arg head "$SOURCE_RUN_HEAD_SHA" --arg hash "$CANDIDATE_WEB_HASH" \
+              '.schema == 1 and .result == "passed" and .suite == "smoke" and .baseline == "0.20.10" and .source_commit == $commit and .source_run_head_sha == $head and .candidate_web_hash == $hash and (.initial_identity.nativeProvider // .final_identity.nativeProvider // "" | length > 0) and ((.faults_exercised // []) | length > 0) and (.phone_completion.rawPlanPresent == true)' \
+              "$result_file" >/dev/null
+          done
+          while IFS= read -r matrix_row; do
+            platform="$(jq -r '.platform' <<<"$matrix_row")"
+            matches=0
+            for result_file in "${smoke_results[@]}"; do
+              if jq -e --arg platform "$platform" '.platform == $platform and .baseline == "0.20.10"' "$result_file" >/dev/null 2>&1; then
+                matches=$((matches + 1))
+              fi
+            done
+            test "$matches" -eq 1
+          done < <(jq -c '.include[]' <<<"$SMOKE_MATRIX")
+          if [ "$EXPECTED_SUITE" = release ]; then
+            test "$RELEASE_SMOKE_RESULT" = success
+            mapfile -t release_results < <(find release-smoke-evidence -type f -name mobile-result.json -print | sort)
+            test "${#release_results[@]}" -eq "$(jq '.include | length' <<<"$SMOKE_MATRIX")"
+            for result_file in "${release_results[@]}"; do
+              jq -e --arg commit "$CANDIDATE_COMMIT" --arg head "$SOURCE_RUN_HEAD_SHA" --arg hash "$CANDIDATE_WEB_HASH" \
+                '.schema == 1 and .result == "passed" and .suite == "release" and .baseline == "0.20.10" and .source_commit == $commit and .source_run_head_sha == $head and .candidate_web_hash == $hash and (.initial_identity.nativeProvider // .final_identity.nativeProvider // "" | length > 0) and ((.faults_exercised // []) | length > 0) and (.phone_completion.rawPlanPresent == true) and (.lifecycle_launch_count // 0) >= 1' \
+                "$result_file" >/dev/null
+            done
+            while IFS= read -r matrix_row; do
+              platform="$(jq -r '.platform' <<<"$matrix_row")"
+              matches=0
+              for result_file in "${release_results[@]}"; do
+                if jq -e --arg platform "$platform" '.platform == $platform and .baseline == "0.20.10"' "$result_file" >/dev/null 2>&1; then
+                  matches=$((matches + 1))
+                fi
+              done
+              test "$matches" -eq 1
+            done < <(jq -c '.include[]' <<<"$SMOKE_MATRIX")
+          fi
       - name: Reject skipped, duplicate, or incomplete device coverage
         env:
           PROVENANCE_RESULT: ${{ needs.provenance.result }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
+          RELEASE_SMOKE_RESULT: ${{ needs.release_smoke.result }}
           DEVICE_RESULT: ${{ needs.device.result }}
           EXPECTED_DEVICES: ${{ needs.prepare.outputs.device_count }}
           CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
@@ -786,6 +910,16 @@ jobs:
           set -euo pipefail
           test "$PROVENANCE_RESULT" = success
           test "$PREPARE_RESULT" = success
+          test "$SMOKE_RESULT" = success
+          if [ "$EXPECTED_SUITE" = release ]; then
+            test "$RELEASE_SMOKE_RESULT" = success
+          else
+            test "$RELEASE_SMOKE_RESULT" = skipped
+          fi
+          if [ "$EXPECTED_SUITE" != release ]; then
+            test "$DEVICE_RESULT" = skipped
+            exit 0
+          fi
           test "$DEVICE_RESULT" = success
           test "${EXPECTED_DEVICES:-0}" -gt 0
           test -n "$CANDIDATE_COMMIT"

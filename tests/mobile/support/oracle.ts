@@ -26,6 +26,7 @@ export interface RelayAuthRecord {
   invitationAuthCount: number;
   credentialAuthCount: number;
   credentialPseudonyms: string[];
+  connections?: number;
 }
 
 export interface RelayAuthEvidence {
@@ -45,6 +46,77 @@ export interface UpdateCompletionEvidence {
   rawPlanPresent: boolean;
 }
 
+export interface QualificationFailureSnapshot {
+  code: string;
+  stage: string;
+  message: string;
+  detail?: unknown;
+}
+
+export class QualificationFatalError extends Error {
+  readonly code: string;
+  readonly stage: string;
+  readonly detail?: unknown;
+
+  constructor(snapshot: QualificationFailureSnapshot, cause?: unknown) {
+    super(`${snapshot.code}: ${snapshot.message}`, { cause });
+    this.name = 'QualificationFatalError';
+    this.code = snapshot.code;
+    this.stage = snapshot.stage;
+    this.detail = snapshot.detail;
+  }
+
+  snapshot(): QualificationFailureSnapshot {
+    return { code: this.code, stage: this.stage, message: this.message.slice(this.code.length + 2), ...(this.detail === undefined ? {} : { detail: this.detail }) };
+  }
+}
+
+export class QualificationFailureLatch {
+  private first?: QualificationFatalError;
+  private lastDetail?: unknown;
+
+  observe(detail: unknown): void {
+    this.lastDetail = detail;
+  }
+
+  fail(error: unknown, stage: string, detail?: unknown): never {
+    if (!this.first) {
+      const message = error instanceof Error ? error.message : String(error);
+      const parsed = message.match(/^([A-Z][A-Z0-9_]+):\s*(.*)$/u);
+      const code = error instanceof QualificationFatalError
+        ? error.code
+        : parsed?.[1] || 'QUALIFICATION_FAILURE';
+      const detailMessage = error instanceof QualificationFatalError
+        ? message
+        : parsed?.[1] === code ? parsed[2] : message;
+      if (error instanceof QualificationFatalError) {
+        this.first = error.detail === undefined && this.lastDetail !== undefined
+          ? new QualificationFatalError({ ...error.snapshot(), detail: this.lastDetail }, error)
+          : error;
+      } else {
+        this.first = new QualificationFatalError({ code, stage, message: detailMessage, detail: detail === undefined ? this.lastDetail : detail }, error);
+      }
+    }
+    throw this.first;
+  }
+
+  assertClear(): void {
+    if (this.first) throw this.first;
+  }
+
+  snapshot(): QualificationFailureSnapshot | undefined {
+    return this.first?.snapshot();
+  }
+}
+
+export function isQualificationFatal(error: unknown): error is QualificationFatalError {
+  return error instanceof QualificationFatalError;
+}
+
+export function qualificationFatal(code: string, message: string, stage: string, detail?: unknown): QualificationFatalError {
+  return new QualificationFatalError({ code, stage, message, ...(detail === undefined ? {} : { detail }) });
+}
+
 export function oracleError(code: string, detail: string): Error {
   return new Error(`${code}: ${detail}`);
 }
@@ -52,8 +124,8 @@ export function oracleError(code: string, detail: string): Error {
 export function assertStandalone(identity: RuntimeIdentity, expectedOrigin: string): void {
   if (!identity.standalone) throw oracleError('STANDALONE_REQUIRED', 'the observed document is not in standalone display mode');
   if (identity.origin !== expectedOrigin) throw oracleError('ORIGIN_MISMATCH', `${identity.origin} is not ${expectedOrigin}`);
-  if (identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider) {
-    throw oracleError('STANDALONE_PROVIDER_REQUIRED', 'the observed document is not an installed standalone web app with native provider evidence');
+  if (identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider || !identity.nativeActivity || !identity.nativePid) {
+    throw oracleError('STANDALONE_PROVIDER_REQUIRED', 'the observed document is not an installed standalone web app with provider, activity, and pid evidence');
   }
   if (!identity.applicationInitialized) throw oracleError('APP_NOT_INITIALIZED', 'the installed document did not initialize the application');
 }
@@ -89,11 +161,41 @@ export function assertOldIdentity(identity: RuntimeIdentity, baseline: PreparedB
   assertRunningIdentity(identity, baseline.identity, false);
 }
 
+export function assertInvitationOwnership(
+  evidence: RelayAuthEvidence,
+  relayNames = Object.keys(evidence.relays).sort(),
+): void {
+  if (!relayNames.length) throw oracleError('CREDENTIAL_RELAYS', 'no relays were included in invitation evidence');
+  for (const relayName of relayNames) {
+    const relay = evidence.relays[relayName];
+    if (!relay) throw oracleError('CREDENTIAL_RELAY_MISSING', `${relayName} is missing from invitation evidence`);
+    if (relay.invitationAuthCount < 1) throw oracleError('INVITATION_COUNT', `${relayName} did not complete invitation authentication`);
+  }
+}
+
+export function assertRelayOwnership(
+  evidence: RelayAuthEvidence,
+  relayNames = Object.keys(evidence.relays).sort(),
+): void {
+  if (!relayNames.length) throw oracleError('CREDENTIAL_RELAYS', 'no relays were included in ownership evidence');
+  for (const relayName of relayNames) {
+    const relay = evidence.relays[relayName];
+    if (!relay) throw oracleError('CREDENTIAL_RELAY_MISSING', `${relayName} is missing from ownership evidence`);
+    if (relay.invitationAuthCount < 1) throw oracleError('INVITATION_COUNT', `${relayName} did not complete invitation authentication`);
+    if (relay.credentialAuthCount < 1 || relay.credentialPseudonyms.length < 1) {
+      throw oracleError('CREDENTIAL_OWNERSHIP_MISSING', `${relayName} has no established credential identity`);
+    }
+    if (relay.connections === undefined || relay.connections < 1) {
+      throw oracleError('CREDENTIAL_CONNECTION_MISSING', `${relayName} has no active credential-owned connection`);
+    }
+  }
+}
+
 export function assertPhoneUpdateNotAcknowledged(evidence: UpdateCompletionEvidence): void {
-  if (!evidence.rawPlanPresent) throw oracleError('PHONE_COMPLETION_EVIDENCE_MISSING', 'the app exposed no update progress record');
-  if (!evidence.phoneRequired) throw oracleError('PHONE_PLAN_MISSING', 'the update plan did not contain a phone item');
+  if (!evidence.rawPlanPresent) throw qualificationFatal('PHONE_COMPLETION_EVIDENCE_MISSING', 'the app exposed no update progress record', 'upgrade');
+  if (!evidence.phoneRequired) throw qualificationFatal('PHONE_PLAN_MISSING', 'the update plan did not contain a phone item', 'upgrade');
   if (evidence.phoneAcknowledged || evidence.visibleCompletion) {
-    throw oracleError('PREMATURE_PHONE_COMPLETION', `phone update reported completion during ${evidence.phoneState || 'asset failure'}`);
+    throw qualificationFatal('PREMATURE_PHONE_COMPLETION', `phone update reported completion during ${evidence.phoneState || 'asset failure'}`, 'upgrade');
   }
 }
 

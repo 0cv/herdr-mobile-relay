@@ -13,6 +13,7 @@ import {
   buttonText,
   css,
   delay,
+  isFatalDriverError,
   textLocator,
   type Locator,
 } from '../support/webdriver';
@@ -206,7 +207,9 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async installFromBrowser(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     const menu = await this.driver.findAny([
       { using: 'xpath', value: "//*[@resource-id='com.android.chrome:id/menu_button' or contains(@content-desc, 'More options') or @content-desc='Customize and control Google Chrome']" },
       accessibility('More options'),
@@ -235,7 +238,10 @@ export class AndroidPlatform implements MobilePlatform {
       textLocator('Add to home screen'),
       accessibility('Add'),
       textLocator('Add'),
-    ], 2_000).catch(() => '');
+    ], 2_000).catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return '';
+    });
     if (launcherConfirm) {
       await this.driver.click(launcherConfirm);
     } else {
@@ -254,6 +260,7 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async launchInstalledApp(): Promise<void> {
+    await requireOwnedDevice('android', this.serial);
     const shortcut = await this.waitForChromeShortcut(30_000);
     this.installedTarget = {
       packageName: 'com.android.chrome',
@@ -381,7 +388,11 @@ export class AndroidPlatform implements MobilePlatform {
       // 15 images), so inspect both launcher surfaces before failing.
       return await this.driver.findAny(locators, 5_000);
     } catch (homeError) {
-      const size = await this.driver.windowSize().catch(() => ({ width: 1_080, height: 2_400 }));
+      if (isFatalDriverError(homeError)) throw homeError;
+      const size = await this.driver.windowSize().catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return { width: 1_080, height: 2_400 };
+      });
       await this.driver.mobile('swipeGesture', {
         left: 0,
         top: 100,
@@ -389,10 +400,13 @@ export class AndroidPlatform implements MobilePlatform {
         height: Math.max(1, size.height - 200),
         direction: 'up',
         percent: 0.75,
-      }).catch(() => undefined);
+      }).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+      });
       try {
         return await this.driver.findAny(locators, 30_000);
       } catch (drawerError) {
+        if (isFatalDriverError(drawerError)) throw drawerError;
         throw new Error(`ANDROID_LAUNCHER: home screen and app drawer did not expose Herdr Relay (${drawerError instanceof Error ? drawerError.message : String(homeError)})`, { cause: drawerError });
       }
     }
@@ -413,12 +427,14 @@ export class AndroidPlatform implements MobilePlatform {
       try {
         contextIds = (await this.driver.contexts(Math.max(1, phase.remainingMs))).filter((context) => context !== 'NATIVE_APP');
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
         await delay(250, phase);
         continue;
       }
       phase.assertAvailable('record Android context metadata');
       const metadata = await this.driver.contextMetadataRaw(Math.max(1, phase.remainingMs)).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
         this.diagnostics.record({ phase: 'android-attachment', operation: 'context-metadata', detail: error instanceof Error ? error.message : String(error) });
         return undefined;
       });
@@ -447,7 +463,9 @@ export class AndroidPlatform implements MobilePlatform {
       lastError = `no installed Chromium window for ${this.origin}`;
       await delay(250, phase);
     }
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     throw new Error(`ANDROID_CONTEXT: no installed web context for ${this.origin}: ${lastError}`);
   }
 
@@ -473,8 +491,12 @@ export class AndroidPlatform implements MobilePlatform {
 
   async openFixtureAgent(relayName: string): Promise<void> {
     if (!/^[A-Za-z0-9_.-]+$/u.test(relayName)) throw new Error(`APPIUM_AGENT: invalid fixture relay name ${relayName}`);
+    await requireOwnedDevice('android', this.serial);
     await this.attachToInstalledView();
-    const currentUrl = await this.driver.currentUrl().catch(() => '');
+    const currentUrl = await this.driver.currentUrl().catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return '';
+    });
     if (currentUrl.includes('#settings')) await this.clickWebText('Back');
     const deadline = Date.now() + 30_000;
     let lastError = '';
@@ -490,6 +512,7 @@ export class AndroidPlatform implements MobilePlatform {
           try {
             await this.driver.click(agent);
           } catch (error) {
+            if (isFatalDriverError(error)) throw error;
             // Chrome 131 can report a visible card button as not interactable
             // after a standalone relaunch. Dispatch the same DOM click only
             // after confirming that the matching, enabled button is visible.
@@ -516,6 +539,7 @@ export class AndroidPlatform implements MobilePlatform {
           return;
         }
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       await delay(250);
@@ -524,7 +548,10 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async backgroundApp(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await requireOwnedDevice('android', this.serial);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
     await delay(500);
   }
@@ -534,7 +561,10 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async terminateInstalledApp(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await requireOwnedDevice('android', this.serial);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     const packageName = this.installedPackage || await this.currentForegroundPackage();
     if (!packageName || packageName === 'com.android.launcher3' || packageName === 'com.google.android.apps.nexuslauncher') {
       throw new Error('ANDROID_TERMINATE: could not identify the installed PWA process');
@@ -545,7 +575,10 @@ export class AndroidPlatform implements MobilePlatform {
 
   async showKeyboardOnComposer(): Promise<void> {
     await this.attachToInstalledView();
-    let composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000).catch(() => '');
+    let composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 5_000).catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return '';
+    });
     if (!composer) {
       const open = await this.driver.find(css('button[aria-label^="Open "]'), 30_000);
       await this.driver.click(open);
@@ -572,18 +605,27 @@ export class AndroidPlatform implements MobilePlatform {
     const deadline = Date.now() + 30_000;
     let lastError = '';
     while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 1) break;
       try {
         await this.attachToInstalledView();
-        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], 2_000);
-        if ((await this.driver.attribute(element, 'disabled')) === null) {
-          await this.driver.click(element);
+        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], Math.min(2_000, remaining));
+        const attributeTimeout = deadline - Date.now();
+        if (attributeTimeout <= 1) break;
+        if ((await this.driver.attribute(element, 'disabled', attributeTimeout)) === null) {
+          const clickTimeout = deadline - Date.now();
+          if (clickTimeout <= 1) break;
+          await this.driver.click(element, clickTimeout);
           return;
         }
         lastError = `${text} is disabled`;
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      const waitMs = Math.min(250, deadline - Date.now());
+      if (waitMs <= 0) break;
+      await delay(waitMs);
     }
     throw new Error(`APPIUM_BUTTON: ${text}: ${lastError}`);
   }
@@ -592,20 +634,29 @@ export class AndroidPlatform implements MobilePlatform {
     const deadline = Date.now() + 30_000;
     let lastError = '';
     while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 1) break;
       try {
         await this.attachToInstalledView();
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`));
+        const buttons = await this.driver.findAll(css(`#${dialogId} button`), Math.min(2_000, remaining));
         for (const button of buttons) {
-          if ((await this.driver.text(button)).trim() === text) {
-            await this.driver.click(button);
+          const textTimeout = deadline - Date.now();
+          if (textTimeout <= 1) break;
+          if ((await this.driver.text(button, textTimeout)).trim() === text) {
+            const clickTimeout = deadline - Date.now();
+            if (clickTimeout <= 1) break;
+            await this.driver.click(button, clickTimeout);
             return;
           }
         }
         lastError = `${text} is not visible in ${dialogId}`;
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      const waitMs = Math.min(250, deadline - Date.now());
+      if (waitMs <= 0) break;
+      await delay(waitMs);
     }
     throw new Error(`APPIUM_DIALOG_BUTTON: ${dialogId}/${text}: ${lastError}`);
   }
@@ -719,7 +770,9 @@ export class AndroidPlatform implements MobilePlatform {
     await command(adb, ['-s', this.serial, 'shell', 'am', 'force-stop', 'com.google.android.documentsui']).catch(() => undefined);
     await command(adb, ['-s', this.serial, 'shell', 'am', 'force-stop', 'com.android.settings']);
     await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'android.settings.SECURITY_SETTINGS'], 30_000);
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     await this.waitForForegroundPackage('com.android.settings');
     await delay(500);
 
@@ -785,14 +838,21 @@ export class AndroidPlatform implements MobilePlatform {
     const deadline = Date.now() + timeoutMs;
     let lastError = '';
     while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 1) break;
       try {
-        const element = await this.findNative(locators, Math.min(2_000, Math.max(1, deadline - Date.now())));
-        await this.driver.click(element);
+        const element = await this.findNative(locators, Math.min(2_000, remaining));
+        const clickRemaining = deadline - Date.now();
+        if (clickRemaining <= 1) break;
+        await this.driver.click(element, clickRemaining);
         return;
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      const waitMs = Math.min(250, deadline - Date.now());
+      if (waitMs <= 0) break;
+      await delay(waitMs);
     }
     throw new Error(`ANDROID_CERTIFICATE: ${description}: ${lastError}`);
   }
@@ -801,17 +861,27 @@ export class AndroidPlatform implements MobilePlatform {
     const deadline = Date.now() + timeoutMs;
     let lastError = '';
     let scrolls = 0;
-    const size = await this.driver.windowSize().catch(() => ({ width: 1_080, height: 2_400 }));
+    const size = await this.driver.windowSize(Math.min(2_000, Math.max(2, timeoutMs))).catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return { width: 1_080, height: 2_400 };
+    });
     while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 1) break;
       try {
-        return await this.driver.findAny(locators, Math.min(2_000, Math.max(1, deadline - Date.now())));
+        return await this.driver.findAny(locators, Math.min(2_000, remaining));
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
+      const afterLookup = deadline - Date.now();
+      if (afterLookup <= 1) break;
       if (scrolls >= 8) {
-        await delay(250);
+        await delay(Math.min(250, afterLookup));
         continue;
       }
+      const scrollTimeout = Math.min(2_000, deadline - Date.now());
+      if (scrollTimeout <= 1) break;
       await this.driver.mobile('scrollGesture', {
         left: 0,
         top: 100,
@@ -819,11 +889,14 @@ export class AndroidPlatform implements MobilePlatform {
         height: Math.max(1, size.height - 200),
         direction: 'down',
         percent: 0.75,
-      }).catch((error) => {
+      }, scrollTimeout).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       });
       scrolls += 1;
-      await delay(250);
+      const waitMs = Math.min(250, deadline - Date.now());
+      if (waitMs <= 0) break;
+      await delay(waitMs);
     }
     throw new Error(`APPIUM_NATIVE: ${lastError}`);
   }
@@ -869,7 +942,9 @@ export class AndroidPlatform implements MobilePlatform {
   private async verifyCertificate(certificateName: string, commonName: string): Promise<void> {
     const adb = process.env.ADB || 'adb';
     await command(adb, ['-s', this.serial, 'shell', 'am', 'start', '-a', 'com.android.settings.TRUSTED_CREDENTIALS_USER'], 30_000);
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+    });
     await this.waitForForegroundPackage('com.android.settings');
     await delay(500);
     const nameWithoutExtension = certificateName.replace(/\.[^.]+$/u, '');
@@ -907,6 +982,7 @@ export class AndroidPlatform implements MobilePlatform {
           && !/ERR_CERT|NET::ERR|privacy error|not private/iu.test(observed.body)) return;
         lastError = `status=${observed.status} url=${observed.url} body=${observed.body.slice(0, 200)}`;
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       await delay(250, phase);

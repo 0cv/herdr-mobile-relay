@@ -1,5 +1,5 @@
 import { redactText } from './diagnostics';
-import { PhaseBudget } from './budget';
+import { PhaseBudget, PhaseBudgetError } from './budget';
 
 export interface WebDriverElement {
   [key: string]: string;
@@ -34,6 +34,26 @@ export interface WebDriverSnapshot {
   unusable: boolean;
   lastCommand?: WebDriverCommandEvidence;
   commands: WebDriverCommandEvidence[];
+  lookups: WebDriverLookupEvidence[];
+  firstFatal?: WebDriverFatalEvidence;
+}
+
+export interface WebDriverFatalEvidence {
+  code: string;
+  path: string;
+  method: string;
+  at: number;
+  detail: string;
+}
+
+export interface WebDriverLookupEvidence {
+  locator: Locator;
+  sliceMs: number;
+  startedAt: number;
+  endedAt: number;
+  remainingMs: number;
+  outcome: 'matched' | 'retryable' | 'fatal';
+  error?: string;
 }
 
 export interface WebDriverCommandEvidence {
@@ -85,6 +105,32 @@ export class WebDriverError extends Error {
   }
 }
 
+export class ElementLookupError extends Error {
+  readonly code = 'APPIUM_ELEMENT';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'ElementLookupError';
+  }
+}
+
+export function isFatalDriverError(error: unknown): boolean {
+  if (error instanceof PhaseBudgetError) return true;
+  if (error instanceof WebDriverError) {
+    return error.timedOut
+      || error.code === 'APPIUM_SESSION_UNUSABLE'
+      || (error.method === 'DELETE' && /\/session\/[^/]+$/u.test(error.path));
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /APPIUM_(?:TIMEOUT|SESSION_UNUSABLE)/u.test(message);
+}
+
+export function isRetryableElementLookupError(error: unknown): boolean {
+  if (error instanceof ElementLookupError) return true;
+  if (!(error instanceof WebDriverError) || error.code !== 'APPIUM_COMMAND') return false;
+  return /no such element|stale element reference|element not found/iu.test(error.message);
+}
+
 export type FetchTransport = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 function isTimeoutError(error: unknown): boolean {
@@ -103,6 +149,8 @@ export class AppiumClient {
   private selectedWindow = '';
   private unusable = false;
   private readonly history: WebDriverCommandEvidence[] = [];
+  private readonly lookupHistory: WebDriverLookupEvidence[] = [];
+  private firstFatal?: WebDriverFatalEvidence;
 
   constructor(baseUrl = 'http://127.0.0.1:4723', requestTimeoutMs = 30_000, transport: FetchTransport = fetch) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
@@ -122,6 +170,8 @@ export class AppiumClient {
       unusable: this.unusable,
       lastCommand: this.history.at(-1),
       commands: this.history.slice(-50),
+      lookups: this.lookupHistory.slice(-100),
+      firstFatal: this.firstFatal,
     };
   }
 
@@ -139,12 +189,18 @@ export class AppiumClient {
     }
     options.budget?.assertAvailable('create session');
     if (options.budget) this.setBudget(options.budget);
-    const response = await this.request<{ value: Record<string, unknown>; sessionId?: string }>('/session', 'POST', {
-      capabilities: {
-        alwaysMatch: options.capabilities,
-        firstMatch: [{}],
-      },
-    }, options.requestTimeoutMs || this.requestTimeoutMs, false);
+    let response: WebDriverResponse<{ value: Record<string, unknown>; sessionId?: string }>;
+    try {
+      response = await this.request<{ value: Record<string, unknown>; sessionId?: string }>('/session', 'POST', {
+        capabilities: {
+          alwaysMatch: options.capabilities,
+          firstMatch: [{}],
+        },
+      }, options.requestTimeoutMs || this.requestTimeoutMs, false);
+    } catch (error) {
+      if (isFatalDriverError(error)) this.recordFatal(error);
+      throw error;
+    }
     const value = response.value as unknown as WebDriverResponse<Record<string, unknown>>;
     this.sessionId = String(response.sessionId || (value as any)?.sessionId || '');
     const capabilities = (value as any)?.value || value;
@@ -163,6 +219,7 @@ export class AppiumClient {
       this.sessionId = '';
       this.unusable = false;
     } catch (error) {
+      if (isFatalDriverError(error)) this.recordFatal(error);
       if (error instanceof WebDriverError && (error.status === 404
         || (error.code === 'APPIUM_HTTP' && error.status !== undefined && error.status >= 200 && error.status < 300))) {
         this.sessionId = '';
@@ -248,19 +305,33 @@ export class AppiumClient {
     while (!budget.exhausted && Date.now() < deadline) {
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
-      if (remaining <= 0) break;
+      if (remaining <= 1) break;
+      const sliceMs = Math.min(250, remaining);
+      const startedAt = Date.now();
       try {
-        const value = await this.command<Record<string, string>>('/element', 'POST', locator, Math.max(1, remaining));
-        const element = value['element-6066-11e4-a52e-4f735466cecf'] || value.ELEMENT;
-        if (element) return element;
-        lastError = 'element response did not contain an id';
+        const element = await this.findOnce(locator, sliceMs);
+        this.recordLookup(locator, sliceMs, startedAt, deadline, 'matched');
+        return element;
       } catch (error) {
-        if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) throw error;
+        const retryable = isRetryableElementLookupError(error);
+        this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
+        if (!retryable) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250, budget);
+      const waitMs = Math.min(100, deadline - Date.now(), budget.remainingMs);
+      if (waitMs <= 0) break;
+      await delay(waitMs);
+      if (this.budget?.exhausted) this.budget.assertAvailable(`find ${locator.using}`);
     }
-    throw new Error(`APPIUM_ELEMENT: ${locator.using}=${redactText(locator.value)}: ${lastError}`);
+    if (this.budget?.exhausted) this.budget.assertAvailable(`find ${locator.using}`);
+    throw new ElementLookupError(`APPIUM_ELEMENT: ${locator.using}=${redactText(locator.value)}: ${lastError}`);
+  }
+
+  private async findOnce(locator: Locator, timeoutMs: number): Promise<string> {
+    const value = await this.command<Record<string, string>>('/element', 'POST', locator, timeoutMs);
+    const element = value['element-6066-11e4-a52e-4f735466cecf'] || value.ELEMENT;
+    if (element) return element;
+    throw new ElementLookupError(`APPIUM_ELEMENT: ${locator.using}=${redactText(locator.value)}: element response did not contain an id`);
   }
 
   async findAll(locator: Locator, timeoutMs = this.requestTimeoutMs): Promise<string[]> {
@@ -322,6 +393,7 @@ export class AppiumClient {
       const response = await this.request<T>(this.sessionPath(path), method, body, timeoutMs);
       return response.value as T;
     } catch (error) {
+      if (isFatalDriverError(error)) this.recordFatal(error);
       if (error instanceof WebDriverError && error.timedOut && path !== '/status') this.unusable = true;
       throw error;
     }
@@ -333,7 +405,7 @@ export class AppiumClient {
 
   private assertUsable(path: string): void {
     if (this.unusable && path !== '/session' && !path.endsWith('/status')) {
-      throw new WebDriverError({
+      const error = new WebDriverError({
         code: 'APPIUM_SESSION_UNUSABLE',
         message: 'the previous command timed out; session replacement is required',
         path,
@@ -342,6 +414,8 @@ export class AppiumClient {
         selectedContext: this.selectedContext,
         selectedWindow: this.selectedWindow,
       });
+      this.recordFatal(error);
+      throw error;
     }
   }
 
@@ -469,23 +543,69 @@ export class AppiumClient {
   async findAny(locators: Locator[], timeoutMs = 30_000): Promise<string> {
     const budget = this.phaseBudget(timeoutMs, 'find any');
     const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
-    let lastError = '';
-    while (!budget.exhausted && Date.now() < deadline) {
-      for (const locator of locators) {
-        budget.assertAvailable(`find ${locator.using}`);
-        const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
-        if (remaining <= 0) break;
-        try {
-          return await this.find(locator, Math.min(750, remaining));
-        } catch (error) {
-          if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) throw error;
-          lastError = error instanceof Error ? error.message : String(error);
-        }
+    let lastError = 'no locator matched';
+    let nextLocator = 0;
+    while (locators.length > 0 && !budget.exhausted && Date.now() < deadline) {
+      const locator = locators[nextLocator % locators.length];
+      nextLocator += 1;
+      budget.assertAvailable(`find ${locator.using}`);
+      const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
+      if (remaining <= 1) break;
+      const sliceMs = Math.min(250, remaining);
+      const startedAt = Date.now();
+      try {
+        const element = await this.findOnce(locator, sliceMs);
+        this.recordLookup(locator, sliceMs, startedAt, deadline, 'matched');
+        return element;
+      } catch (error) {
+        const retryable = isRetryableElementLookupError(error);
+        this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
+        if (!retryable) throw error;
+        lastError = error instanceof Error ? error.message : String(error);
       }
-      if (budget.exhausted || Date.now() >= deadline) break;
-      await delay(100, budget);
+      if (nextLocator % locators.length === 0) {
+        const waitMs = Math.min(100, deadline - Date.now(), budget.remainingMs);
+        if (waitMs <= 0) break;
+        await delay(waitMs);
+        if (this.budget?.exhausted) this.budget.assertAvailable('find any');
+      }
     }
-    throw new Error(`APPIUM_ELEMENT_ANY: ${lastError}`);
+    if (this.budget?.exhausted) this.budget.assertAvailable('find any');
+    throw new ElementLookupError(`APPIUM_ELEMENT_ANY: ${lastError}`);
+  }
+
+  private recordFatal(error: unknown): void {
+    if (this.firstFatal || !isFatalDriverError(error)) return;
+    if (error instanceof WebDriverError) {
+      this.firstFatal = {
+        code: error.code,
+        path: error.path,
+        method: error.method,
+        at: Date.now(),
+        detail: redactText(error.message).slice(0, 500),
+      };
+      return;
+    }
+    this.firstFatal = {
+      code: error instanceof Error && 'code' in error ? String((error as { code?: unknown }).code) : 'APPIUM_FATAL',
+      path: '',
+      method: '',
+      at: Date.now(),
+      detail: redactText(error instanceof Error ? error.message : String(error)).slice(0, 500),
+    };
+  }
+
+  private recordLookup(locator: Locator, sliceMs: number, startedAt: number, operationDeadline: number, outcome: WebDriverLookupEvidence['outcome'], error?: unknown): void {
+    this.lookupHistory.push({
+      locator: { using: locator.using, value: redactText(locator.value).slice(0, 500) },
+      sliceMs,
+      startedAt,
+      endedAt: Date.now(),
+      remainingMs: Math.max(0, operationDeadline - Date.now()),
+      outcome,
+      ...(error === undefined ? {} : { error: redactText(error instanceof Error ? error.message : String(error)).slice(0, 500) }),
+    });
+    if (this.lookupHistory.length > 200) this.lookupHistory.shift();
   }
 }
 
