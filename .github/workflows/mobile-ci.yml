@@ -406,11 +406,13 @@ jobs:
           test "${#chrome_apks[@]}" -gt 0
           apksigner="$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -print -quit)"
           test -x "$apksigner"
-          chrome_signing="$($apksigner verify --verbose --print-certs "$browser_dir/chrome/base.apk")"
+          for chrome_apk in "${chrome_apks[@]}"; do
+            chrome_signing="$($apksigner verify --verbose --print-certs "$chrome_apk")"
+            grep -F 'Verified using v3 scheme (APK Signature Scheme v3): true' <<<"$chrome_signing"
+            grep -F 'Signer #1 certificate SHA-256 digest: f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83' <<<"$chrome_signing"
+            grep -F 'Signer #1 certificate SHA-1 digest: 38918a453d07199354f8b19af05ec6562ced5788' <<<"$chrome_signing"
+          done
           trichrome_signing="$($apksigner verify --verbose --print-certs "$browser_dir/trichrome-library.apk")"
-          grep -F 'Verified using v3 scheme (APK Signature Scheme v3): true' <<<"$chrome_signing"
-          grep -F 'Signer #1 certificate SHA-256 digest: f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83' <<<"$chrome_signing"
-          grep -F 'Signer #1 certificate SHA-1 digest: 38918a453d07199354f8b19af05ec6562ced5788' <<<"$chrome_signing"
           grep -F 'Verified using v3 scheme (APK Signature Scheme v3): true' <<<"$trichrome_signing"
           grep -F 'Signer #1 certificate SHA-256 digest: b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1' <<<"$trichrome_signing"
           grep -F 'Signer #1 certificate SHA-1 digest: 9524aa4a04aceeab425451e593ac639c942fb3cd' <<<"$trichrome_signing"
