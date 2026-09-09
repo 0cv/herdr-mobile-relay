@@ -1,3 +1,5 @@
+import type { DiagnosticRecorder } from '../support/diagnostics';
+import type { PhaseBudget } from '../support/budget';
 import type { AppiumClient } from '../support/webdriver';
 import type { RuntimeIdentity } from '../support/oracle';
 
@@ -16,6 +18,8 @@ export interface PlatformOptions {
   certificate: string;
   setupUrl: string;
   deviceId?: string;
+  budget?: PhaseBudget;
+  diagnostics?: DiagnosticRecorder;
 }
 
 export interface MobilePlatform {
@@ -41,6 +45,7 @@ export interface MobilePlatform {
   setPreference(preference: string): Promise<void>;
   preferenceValue(): Promise<string>;
   captureSanitizedEvidence(name: string): Promise<void>;
+  evidenceSnapshot(): Record<string, unknown>;
   stopOwnedResources(): Promise<void>;
 }
 

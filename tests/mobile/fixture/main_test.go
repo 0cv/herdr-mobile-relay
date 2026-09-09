@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -100,6 +101,50 @@ func TestReleaseRouterBarrierFaultIsDeterministic(t *testing.T) {
 	requests := router.snapshotRequests()
 	if len(requests) != 1 || requests[0].Fault != "stall" {
 		t.Fatalf("requests = %#v", requests)
+	}
+}
+
+func TestReleaseRouterPersistentFaultRequiresExplicitClear(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if err := router.activate("candidate"); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.addFault(responseFault{ID: "candidate-style", Generation: "generation-1", Method: http.MethodGet, Path: "/assets/app.css", Kind: "missing", Remaining: -1}); err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan int, 4)
+	var group sync.WaitGroup
+	for range 4 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app.css", nil))
+			responses <- response.Code
+		}()
+	}
+	group.Wait()
+	close(responses)
+	for status := range responses {
+		if status != http.StatusNotFound {
+			t.Fatalf("persistent fault response = %d", status)
+		}
+	}
+	requests := router.snapshotRequests()
+	if len(requests) != 4 || requests[0].FaultID != "candidate-style" || requests[0].FaultGeneration != "generation-1" {
+		t.Fatalf("requests = %#v", requests)
+	}
+	if err := router.clearFault("candidate-style", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app.css", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("cleared fault response = %d", response.Code)
 	}
 }
 

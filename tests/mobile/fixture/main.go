@@ -54,20 +54,26 @@ type fixtureOptions struct {
 }
 
 type requestRecord struct {
-	Method  string `json:"method"`
-	Path    string `json:"path"`
-	Accept  string `json:"accept_encoding,omitempty"`
-	Release string `json:"release"`
-	Fault   string `json:"fault,omitempty"`
-	At      string `json:"at"`
+	Method          string `json:"method"`
+	Path            string `json:"path"`
+	Accept          string `json:"accept_encoding,omitempty"`
+	Release         string `json:"release"`
+	Fault           string `json:"fault,omitempty"`
+	FaultID         string `json:"fault_id,omitempty"`
+	FaultGeneration string `json:"fault_generation,omitempty"`
+	At              string `json:"at"`
 }
 
 type responseFault struct {
-	Method    string
-	Path      string
-	Kind      string
-	Remaining int
-	Barrier   string
+	ID         string    `json:"id,omitempty"`
+	Generation string    `json:"generation,omitempty"`
+	Method     string    `json:"method"`
+	Path       string    `json:"path"`
+	Kind       string    `json:"kind"`
+	Remaining  int       `json:"remaining"`
+	Barrier    string    `json:"barrier,omitempty"`
+	LifetimeMs int       `json:"lifetime_ms,omitempty"`
+	ExpiresAt  time.Time `json:"-"`
 }
 
 type releaseRouter struct {
@@ -110,6 +116,8 @@ func (r *releaseRouter) ServeHTTP(w http.ResponseWriter, request *http.Request) 
 	}
 	if fault != nil {
 		record.Fault = fault.Kind
+		record.FaultID = fault.ID
+		record.FaultGeneration = fault.Generation
 		r.record(record)
 		r.applyFault(w, request, fault, handler)
 		return
@@ -130,6 +138,11 @@ func (r *releaseRouter) route(method, path string) (string, *web.Handler, *respo
 	fault := r.faults[key]
 	if fault == nil {
 		fault = r.faults[faultKey("*", path)]
+	}
+	if fault != nil && !fault.ExpiresAt.IsZero() && time.Now().After(fault.ExpiresAt) {
+		delete(r.faults, key)
+		delete(r.faults, faultKey("*", path))
+		fault = nil
 	}
 	if fault != nil && fault.Remaining != 0 {
 		copy := *fault
@@ -260,6 +273,16 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 	if fault.Kind == "stall" && fault.Barrier == "" {
 		return errors.New("stall faults require a barrier")
 	}
+	if fault.ID == "" {
+		fault.ID = fmt.Sprintf("fault-%d", time.Now().UnixNano())
+	}
+	if fault.Generation == "" {
+		fault.Generation = fault.ID
+	}
+	if fault.LifetimeMs <= 0 {
+		fault.LifetimeMs = 120_000
+	}
+	fault.ExpiresAt = time.Now().Add(time.Duration(fault.LifetimeMs) * time.Millisecond)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if fault.Kind == "stall" {
@@ -270,6 +293,33 @@ func (r *releaseRouter) addFault(fault responseFault) error {
 	copy := fault
 	r.faults[faultKey(fault.Method, fault.Path)] = &copy
 	return nil
+}
+
+func (r *releaseRouter) clearFault(id, method, path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cleared := false
+	for key, fault := range r.faults {
+		if (id != "" && fault.ID == id) || (id == "" && key == faultKey(method, path)) {
+			delete(r.faults, key)
+			cleared = true
+		}
+	}
+	if !cleared {
+		return errors.New("fault was not active")
+	}
+	return nil
+}
+
+func (r *releaseRouter) activeFaults() []responseFault {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	faults := make([]responseFault, 0, len(r.faults))
+	for _, fault := range r.faults {
+		faults = append(faults, *fault)
+	}
+	sort.Slice(faults, func(i, j int) bool { return faults[i].ID < faults[j].ID })
+	return faults
 }
 
 func (r *releaseRouter) releaseBarrier(name string) error {
@@ -634,6 +684,7 @@ func (f *fixture) snapshot() map[string]any {
 		"candidate":      f.candidate,
 		"old":            f.old,
 		"requests":       f.router.snapshotRequests(),
+		"faults":         f.router.activeFaults(),
 		"relays":         relays,
 	}
 }
@@ -643,7 +694,7 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if (request.URL.Path == "/activate" || request.URL.Path == "/fault" || request.URL.Path == "/barrier/release" || request.URL.Path == "/relay/drop" || request.URL.Path == "/shutdown") && request.Method != http.MethodPost {
+	if (request.URL.Path == "/activate" || request.URL.Path == "/fault" || request.URL.Path == "/fault/clear" || request.URL.Path == "/fault/release" || request.URL.Path == "/barrier/release" || request.URL.Path == "/relay/drop" || request.URL.Path == "/shutdown") && request.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -672,6 +723,23 @@ func (f *fixture) controlHandler(w http.ResponseWriter, request *http.Request) {
 			return
 		}
 		if err := f.router.addFault(fault); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	case "/fault/clear", "/fault/release":
+		var payload struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+			Path   string `json:"path"`
+		}
+		if request.Body != nil {
+			if err := json.NewDecoder(io.LimitReader(request.Body, 16*1024)).Decode(&payload); err != nil && !errors.Is(err, io.EOF) {
+				http.Error(w, "invalid request", http.StatusBadRequest)
+				return
+			}
+		}
+		if err := f.router.clearFault(payload.ID, payload.Method, payload.Path); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

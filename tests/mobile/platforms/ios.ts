@@ -1,6 +1,8 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { assertStandalone, type RuntimeIdentity } from '../support/oracle';
+import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
+import { PhaseBudget } from '../support/budget';
 import { command, commandOutput } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
 import {
@@ -28,13 +30,25 @@ export class IOSPlatform implements MobilePlatform {
   private readonly udid: string;
   private readonly origin: string;
   private readonly outputDir: string;
+  private readonly budget: PhaseBudget;
+  private readonly diagnostics: DiagnosticRecorder;
   private installedBundleId = '';
+  private selectedInstalledContext = '';
+  private lastIdentity?: RuntimeIdentity;
+  private lastUrl = '';
+  private keyboardDraft = '';
+  private lastCompletion?: UpdateCompletionEvidence;
+  private lastNativeActivity = '';
+  private lastNativePid = '';
 
   constructor(private readonly options: PlatformOptions) {
     this.udid = options.deviceId || process.env.IOS_SIMULATOR_UDID || '';
     this.origin = options.origin.replace(/\/$/, '');
     this.outputDir = options.outputDir;
+    this.budget = options.budget || new PhaseBudget('ios-run', { timeoutMs: 30 * 60_000, recoveryLimit: 4 });
+    this.diagnostics = options.diagnostics || new DiagnosticRecorder();
     this.driver = new AppiumClient(options.appiumUrl);
+    this.driver.setBudget(this.budget);
   }
 
   async startFreshDevice(): Promise<void> {
@@ -42,10 +56,6 @@ export class IOSPlatform implements MobilePlatform {
     await requireOwnedDevice('ios', this.udid);
     const available = await commandOutput('xcrun', ['simctl', 'list', 'devices', 'available']);
     if (!available.includes(this.udid)) throw new Error(`IOS_TARGET: simulator ${this.udid} is not an available simulator`);
-    if (process.env.MOBILE_RESET_DEVICE === '1') {
-      await command('xcrun', ['simctl', 'shutdown', this.udid]).catch(() => undefined);
-      await command('xcrun', ['simctl', 'erase', this.udid], 120_000);
-    }
     await command('xcrun', ['simctl', 'boot', this.udid]).catch(() => undefined);
     await command('xcrun', ['simctl', 'bootstatus', this.udid, '-b'], 300_000);
     await command('xcrun', ['simctl', 'keychain', this.udid, 'add-root-cert', this.options.certificate], 30_000);
@@ -87,6 +97,7 @@ export class IOSPlatform implements MobilePlatform {
       // Keep the client request alive while Appium installs/launches the
       // prebuilt WebDriverAgent and creates the Safari session.
       requestTimeoutMs: 360_000,
+      budget: this.budget,
     });
   }
 
@@ -108,21 +119,12 @@ export class IOSPlatform implements MobilePlatform {
     }
     if (lastError) throw new Error(`IOS_NAVIGATION: could not open setup URL: ${lastError}`);
     await delay(1_500);
-    const safariContext = (await this.driver.contexts().catch(() => []))
-      .find((context) => /^WEBVIEW_/u.test(context));
+    const safariContext = (await this.driver.contextMetadata())
+      .find((context) => this.isSafariBundle(context.bundleId) && (!context.url || this.isExpectedOrigin(context.url)))?.id;
     if (!safariContext) return;
-    try {
-      // Keep Appium attached to the same Safari page when Web Inspector is
-      // ready. The native Safari page remains usable for share-sheet actions
-      // if discovery is still catching up.
-      await this.driver.switchContext(safariContext);
-      await this.driver.navigate(url);
-    } catch {
-      // Native Safari is enough for the installation flow; later context
-      // polling will attach once Web Inspector exposes the page.
-    } finally {
-      await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-    }
+    await this.driver.switchContext(safariContext);
+    await this.driver.navigate(url);
+    await this.driver.switchContext('NATIVE_APP');
   }
 
   async openSetupURLInInstalledApp(url: string): Promise<void> {
@@ -174,38 +176,30 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async launchInstalledApp(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    this.selectedInstalledContext = '';
+    await this.driver.switchContext('NATIVE_APP');
     await this.driver.mobile('pressButton', { name: 'home' });
-    // After adding a Home Screen web app, Safari may have been terminated by
-    // the system. WDA still has Safari as its AUT and can reject SpringBoard
-    // gestures until the native home process is explicitly foregrounded.
-    await this.driver.mobile('activateApp', { bundleId: 'com.apple.springboard' }).catch(() => undefined);
-    await delay(750);
+    await this.ensureSpringBoardForeground();
+    await delay(750, this.budget.phaseView('ios-launch', 10_000));
     for (let page = 0; page < 8; page += 1) {
-      await this.driver.mobile('swipe', { direction: 'right' }).catch(() => undefined);
+      await this.driver.mobile('swipe', { direction: 'right' });
     }
-
-    // SpringBoard exposes icons from every Home Screen page through WDA. A
-    // global lookup can therefore return an off-screen icon whose click is a
-    // no-op. Normalize to the first page, then swipe page-by-page and require
-    // a hittable match before tapping it.
     for (let page = 0; page < 8; page += 1) {
+      await this.ensureSpringBoardForeground();
       const icon = await this.findHittableHomeIcon();
       if (icon) {
         await this.driver.click(icon);
         if (await this.waitForInstalledProvider(5_000)) {
-          // SpringBoard can leave Safari marked active in Web Inspector even
-          // though the web app is visibly foregrounded. Re-activate the
-          // provider before asking XCUITest for web contexts so it selects the
-          // installed Home Screen app rather than the setup Safari tab.
-          await this.driver.mobile('activateApp', { bundleId: this.installedBundleId }).catch(() => undefined);
+          await this.driver.mobile('activateApp', { bundleId: this.installedBundleId });
+          await this.requireInstalledProviderForeground();
           await delay(750);
           await this.attachToInstalledView();
           return;
         }
-        await this.driver.mobile('pressButton', { name: 'home' }).catch(() => undefined);
+        await this.driver.mobile('pressButton', { name: 'home' });
       }
       if (page < 7) {
+        await this.ensureSpringBoardForeground();
         await this.driver.mobile('swipe', { direction: 'left' });
         await delay(500);
       }
@@ -220,49 +214,80 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async attachToInstalledView(): Promise<void> {
-    const deadline = Date.now() + 30_000;
-    let recoveryAttempts = 0;
-    while (Date.now() < deadline) {
-      const contexts = await this.driver.contexts().catch(() => []);
-      // When Safari remains alive after the Home Screen web app is launched,
-      // Web Inspector can list Safari's stale page before the installed app's
-      // SafariViewService page. Probe the newest context first; querying the
-      // stale Safari page can block for Appium's full WebKit timeout.
-      for (const context of contexts
-        .filter((value) => value !== 'NATIVE_APP' && !/safari/iu.test(value))
-        .reverse()) {
-        await this.driver.switchContext(context).catch(() => undefined);
-        const url = await this.driver.currentUrl().catch(() => '');
-        if (url === this.origin || url.startsWith(`${this.origin}/`)) {
-          return;
+    const phase = this.budget.phaseView('ios-attachment', 30_000);
+    let lastError = '';
+    while (!phase.exhausted) {
+      phase.assertAvailable('discover installed page');
+      if (this.selectedInstalledContext) {
+        try {
+          await this.driver.switchContext('NATIVE_APP');
+          await this.requireInstalledProviderForeground();
+          await this.driver.switchContext(this.selectedInstalledContext);
+          const url = await this.driver.currentUrl();
+          this.lastUrl = url;
+          if (this.isExpectedOrigin(url)) {
+            await this.validateInstalledDocument();
+            return;
+          }
+          this.selectedInstalledContext = '';
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          this.diagnostics.record({ phase: 'ios-attachment', operation: 'cached-context', detail });
+          throw new Error(`IOS_CONTEXT: cached installed-page selection failed: ${detail}`, { cause: error });
         }
       }
-      // iOS can finish the native Home Screen transition before the generic
-      // Web Clip provider publishes its Web Inspector page. Reactivate the
-      // recorded provider a bounded number of times, but never accept a
-      // missing context as a successful launch.
-      if (this.installedBundleId && recoveryAttempts < 2) {
-        recoveryAttempts += 1;
-        await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-        await this.driver.mobile('activateApp', { bundleId: this.installedBundleId }).catch(() => undefined);
-        await delay(750);
-        continue;
+      const contexts = (await this.driver.contextMetadata())
+        .filter((context) => context.id !== 'NATIVE_APP')
+        .filter((context) => !this.isSafariBundle(context.bundleId));
+      if (!contexts.length) {
+        lastError = 'installed page metadata is unavailable';
+      } else {
+        for (const context of contexts) {
+          if (context.url && !this.isExpectedOrigin(context.url)) continue;
+          await this.driver.switchContext('NATIVE_APP');
+          await this.requireInstalledProviderForeground();
+          await this.driver.switchContext(context.id);
+          const handles = await this.driver.windowHandles().catch(() => []);
+          const windows = handles.length ? handles : [''];
+          for (const handle of windows) {
+            if (handle) await this.driver.switchWindow(handle);
+            const url = await this.driver.currentUrl();
+            this.lastUrl = url;
+            if (!this.isExpectedOrigin(url)) continue;
+            await this.validateInstalledDocument();
+            this.selectedInstalledContext = context.id;
+            return;
+          }
+        }
+        lastError = `no installed page for ${this.origin}`;
       }
-      await delay(250);
+      if (this.installedBundleId) {
+        phase.recovery('reactivate installed provider');
+        await this.driver.switchContext('NATIVE_APP');
+        await this.driver.mobile('activateApp', { bundleId: this.installedBundleId });
+      }
+      await delay(250, phase);
     }
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-    throw new Error(`IOS_CONTEXT: no installed Home Screen web context for ${this.origin}`);
+    throw new Error(`IOS_CONTEXT: no installed Home Screen web context for ${this.origin}: ${lastError}`);
   }
 
   async readRunningIdentity(): Promise<RuntimeIdentity> {
     await this.attachToInstalledView();
     const identity = await this.driver.execute<RuntimeIdentity>(runtimeScript());
-    return { ...identity, nativeProvider: this.installedBundleId ? `ios:${this.installedBundleId}` : undefined };
+    this.lastIdentity = {
+      ...identity,
+      nativeProvider: this.installedBundleId ? `ios:${this.installedBundleId}` : undefined,
+      nativeActivity: this.lastNativeActivity || undefined,
+      nativePid: this.lastNativePid || undefined,
+    };
+    return this.lastIdentity;
   }
 
   async readUpdateCompletion(): Promise<UpdateCompletionEvidence> {
     await this.attachToInstalledView();
-    return this.driver.execute<UpdateCompletionEvidence>(updateCompletionScript());
+    this.lastCompletion = await this.driver.execute<UpdateCompletionEvidence>(updateCompletionScript());
+    return this.lastCompletion;
   }
 
   async openFixtureAgent(relayName: string): Promise<void> {
@@ -345,21 +370,20 @@ export class IOSPlatform implements MobilePlatform {
       composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 30_000);
     }
     await this.driver.click(composer);
-    await this.driver.sendKeys(composer, 'mobile-device-ci draft');
-    await this.driver.switchContext('NATIVE_APP');
-    await this.driver.findAny([
-      accessibility('Done'),
-      accessibility('Return'),
-      accessibility('return'),
-      textLocator('Done'),
-    ], 10_000);
-    await this.attachToInstalledView();
+    this.keyboardDraft = 'mobile-device-ci draft';
+    await this.driver.sendKeys(composer, this.keyboardDraft);
+    await this.waitForKeyboard(true);
   }
 
   async hideKeyboard(): Promise<void> {
     await this.driver.switchContext('NATIVE_APP');
-    await this.driver.mobile('hideKeyboard').catch(() => undefined);
+    await this.driver.mobile('hideKeyboard');
+    await this.waitForKeyboard(false);
     await this.attachToInstalledView();
+    if (this.keyboardDraft) {
+      const value = await this.driver.execute<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''");
+      if (value !== this.keyboardDraft) throw new Error('IOS_KEYBOARD: draft was not preserved after dismissal');
+    }
   }
 
   async clickWebText(text: string): Promise<void> {
@@ -416,9 +440,41 @@ export class IOSPlatform implements MobilePlatform {
 
   async captureSanitizedEvidence(name: string): Promise<void> {
     await mkdir(this.outputDir, { recursive: true });
-    const screenshot = Buffer.from(await this.driver.screenshot(), 'base64');
-    if (screenshot.byteLength > 20 * 1024 * 1024) throw new Error('DIAGNOSTIC_LIMIT: screenshot exceeds the limit');
-    await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
+    try {
+      const screenshot = Buffer.from(await this.driver.screenshot(), 'base64');
+      if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
+    } catch (error) {
+      this.diagnostics.record({ phase: 'evidence', operation: 'screenshot', detail: error instanceof Error ? error.message : String(error) });
+    }
+    await writeSanitizedJson(join(this.outputDir, `${name}-appium.json`), this.evidenceSnapshot());
+    await this.diagnostics.write(join(this.outputDir, `${name}-events.json`));
+    const captures: Array<[string, string[]]> = [
+      ['simulator-log', ['simctl', 'spawn', this.udid, 'log', 'show', '--last', '10m', '--style', 'compact']],
+      ['webkit-safari', ['simctl', 'spawn', this.udid, 'log', 'show', '--last', '10m', '--style', 'compact', '--predicate', 'process CONTAINS[c] "WebKit" OR process CONTAINS[c] "Safari"']],
+      ['apps', ['simctl', 'listapps', this.udid]],
+      ['wda', ['simctl', 'spawn', this.udid, 'launchctl', 'print', 'system']],
+    ];
+    for (const [suffix, args] of captures) {
+      const output = await commandOutput('xcrun', args, 20_000).catch((error) => error instanceof Error ? error.message : String(error));
+      await writeBoundedText(join(this.outputDir, `${name}-ios-${suffix}.log`), output);
+    }
+  }
+
+  evidenceSnapshot(): Record<string, unknown> {
+    return {
+      platform: this.name,
+      device: this.udid,
+      origin: this.origin,
+      installedBundleId: this.installedBundleId,
+      selectedInstalledContext: this.selectedInstalledContext,
+      lastUrl: this.lastUrl,
+      lastIdentity: this.lastIdentity,
+      lastCompletion: this.lastCompletion,
+      nativeActivity: this.lastNativeActivity,
+      nativePid: this.lastNativePid,
+      driver: this.driver.snapshot(),
+      events: this.diagnostics.snapshot(),
+    };
   }
 
   async stopOwnedResources(): Promise<void> {
@@ -473,17 +529,85 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async waitForInstalledProvider(timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-      const appInfo = await this.driver.mobile('activeAppInfo').catch(() => null) as Record<string, unknown> | null;
+    const phase = this.budget.phaseView('ios-provider', timeoutMs);
+    while (!phase.exhausted) {
+      phase.assertAvailable('discover installed provider');
+      await this.driver.switchContext('NATIVE_APP');
+      const appInfo = await this.driver.activeAppInfo();
       const bundleId = String(appInfo?.bundleId || appInfo?.bundleID || '');
-      if (bundleId && !/springboard|safari/iu.test(bundleId)) {
+      if (bundleId && !this.isSafariBundle(bundleId) && !/springboard/iu.test(bundleId)) {
         this.installedBundleId = bundleId;
         return true;
       }
-      await delay(250);
+      await delay(250, phase);
     }
     return false;
+  }
+
+  private async ensureSpringBoardForeground(): Promise<void> {
+    await this.driver.switchContext('NATIVE_APP');
+    const info = await this.driver.activeAppInfo();
+    const bundleId = String(info?.bundleId || info?.bundleID || '');
+    if (!/springboard/iu.test(bundleId)) {
+      await this.driver.mobile('activateApp', { bundleId: 'com.apple.springboard' });
+    }
+    const foreground = await this.driver.activeAppInfo();
+    const active = String(foreground?.bundleId || foreground?.bundleID || '');
+    if (!/springboard/iu.test(active)) throw new Error(`IOS_NATIVE: SpringBoard is not foreground (${active || 'unknown'})`);
+  }
+
+  private async requireInstalledProviderForeground(): Promise<void> {
+    if (!this.installedBundleId) throw new Error('IOS_CONTEXT: installed provider identity is unavailable');
+    const info = await this.driver.activeAppInfo();
+    const active = String(info?.bundleId || info?.bundleID || '');
+    this.lastNativeActivity = String(info?.activity || info?.appActivity || '');
+    this.lastNativePid = String(info?.pid || '');
+    if (active !== this.installedBundleId) throw new Error(`IOS_CONTEXT: installed provider ${this.installedBundleId} is not foreground (${active || 'unknown'})`);
+  }
+
+  private async validateInstalledDocument(): Promise<void> {
+    const document = await this.driver.execute<{ origin: string; standalone: boolean }>(`return {
+      origin: location.origin,
+      standalone: window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,
+    };`);
+    if (document.origin !== this.origin) throw new Error(`IOS_CONTEXT: document origin ${document.origin} is not ${this.origin}`);
+    if (!document.standalone) throw new Error('IOS_CONTEXT: selected page is not standalone');
+  }
+
+  private isSafariBundle(bundleId?: string): boolean {
+    return Boolean(bundleId && /safari|safariviewservice/iu.test(bundleId));
+  }
+
+  private isExpectedOrigin(value: string): boolean {
+    try {
+      return new URL(value).origin === new URL(this.origin).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  private async waitForKeyboard(expected: boolean): Promise<void> {
+    const phase = this.budget.phaseView('ios-keyboard', 10_000);
+    let last = '';
+    while (!phase.exhausted) {
+      phase.assertAvailable(`keyboard ${expected ? 'show' : 'hide'}`);
+      await this.driver.switchContext('NATIVE_APP');
+      const elements = await this.driver.findAll({ using: 'class name', value: 'XCUIElementTypeKeyboard' }).catch(() => []);
+      let visible = false;
+      for (const element of elements) {
+        const rect = await this.driver.elementRect(element).catch(() => ({ x: 0, y: 0, width: 0, height: 0 }));
+        const shown = await this.driver.attribute(element, 'visible').catch(() => null);
+        if (rect.width > 0 && rect.height > 0 && shown !== 'false') visible = true;
+      }
+      last = `visible=${visible}`;
+      if (visible === expected) return;
+      await delay(250, phase);
+    }
+    throw new Error(`IOS_KEYBOARD: expected ${expected ? 'visible' : 'hidden'} native keyboard (${last})`);
+  }
+
+  private async currentForegroundPackage(): Promise<string> {
+    const info = await this.driver.activeAppInfo();
+    return String(info?.bundleId || info?.bundleID || '');
   }
 }

@@ -29,7 +29,7 @@
     "trichromeLibrarySha256": "f7d82fa76a99f13980c4205484f4ae78742755d2e9b7276fd60c20e3cd7f9090",
     "trichromeLibraryCertificateSha256": "b6198a8d5689b62b96a0aa3829ce2cc67d59497f78c469f8792b2cd9255490a1",
     "trichromeLibraryCertificateSha1": "9524aa4a04aceeab425451e593ac639c942fb3cd",
-    "installationProvider": "must be recorded as WebAPK or browser-hosted standalone; a shortcut is rejected"
+    "installationProvider": "signed Chrome WebappLauncherActivity or WebAPK; every attach requires fresh foreground and Chromium-target evidence"
   },
   "ios": {
     "runner": "macos-15",

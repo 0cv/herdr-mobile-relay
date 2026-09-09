@@ -1,10 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assertDistinctUpgrade,
+  fileSha256,
   prepareBundle,
   safeRelativePath,
   sameIdentity,
@@ -13,6 +15,8 @@ import {
   type BundleExpectation,
 } from '../support/artifacts';
 import { assertNoKnownSecret, redactText, sanitizeValue } from '../support/diagnostics';
+import { PhaseBudget } from '../support/budget';
+import { AppiumClient } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { androidChromeShortcutArgs, androidOpenUrlArgs, parseAndroidChromeShortcuts } from '../platforms/android';
 import { runtimeScript } from '../platforms/types';
@@ -94,6 +98,30 @@ test('archive checksum mismatch is rejected before extraction', async () => {
     prepareBundle('bad', expected, source, join(output, 'bad')),
     /ARTIFACT_CHECKSUM|ARTIFACT_MANIFEST/,
   );
+});
+
+test('valid release archives extract through the verified GNU tar path', async () => {
+  const tar = process.env.MOBILE_GNU_TAR || (process.platform === 'darwin' ? 'gtar' : 'tar');
+  try {
+    execFileSync(tar, ['--version'], { stdio: 'ignore' });
+  } catch {
+    return;
+  }
+  const sourceRoot = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-valid-archive-'));
+  const web = join(sourceRoot, 'web');
+  await mkdir(join(web, 'assets'), { recursive: true });
+  await writeFile(join(web, 'version.json'), JSON.stringify({ version: '0.20.8', assets: 361 }));
+  await writeFile(join(web, 'index.html'), '<html></html>');
+  await writeFile(join(web, 'assets', 'app.js'), 'window.fixture = true;');
+  await writeFile(join(web, 'assets', 'app.css'), 'body{}');
+  await writeFile(join(sourceRoot, 'release-manifest.json'), JSON.stringify({ version: '0.20.8', revision: 'fixture', web_hash: '' }));
+  const archive = join(sourceRoot, 'fixture.tar.gz');
+  execFileSync(tar, ['-C', sourceRoot, '-czf', archive, 'web', 'release-manifest.json']);
+  const output = await mkdtemp(join(tmpdir(), 'herdr-mobile-ci-valid-output-'));
+  const expected = { ...legacyExpected, revision: 'fixture', archiveSha256: await fileSha256(archive) };
+  const prepared = await prepareBundle('valid', expected, archive, join(output, 'valid'));
+  assert.equal(prepared.identity.script, '/assets/app.js');
+  assert.equal(prepared.identity.style, '/assets/app.css');
 });
 
 test('same-version different-build pairs are distinct', async () => {
@@ -306,6 +334,50 @@ test('diagnostic redaction covers URL and escaped values', async () => {
 test('reload count is bounded', async () => {
   assert.doesNotThrow(() => assertBoundedReloads(2));
   assert.throws(() => assertBoundedReloads(3), /RELOAD_BOUND_EXCEEDED/);
+});
+
+test('phase budget prevents a new mutation after expiry', async () => {
+  let now = 0;
+  let requests = 0;
+  const budget = new PhaseBudget('fake-appium', { timeoutMs: 10, now: () => now, recoveryLimit: 1 });
+  const client = new AppiumClient('http://fake.test', 100, async () => {
+    requests += 1;
+    return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+  });
+  await client.create({ capabilities: {}, budget });
+  now = 11;
+  await assert.rejects(() => client.contexts(), /PHASE_BUDGET_EXHAUSTED/);
+  assert.equal(requests, 1);
+});
+
+test('Appium timeout preserves context and blocks follow-up commands', async () => {
+  let requests = 0;
+  const client = new AppiumClient('http://fake.test', 5, async () => {
+    requests += 1;
+    if (requests === 1) return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+    throw new DOMException('hung command', 'TimeoutError');
+  });
+  await client.create({ capabilities: {} });
+  await assert.rejects(() => client.contexts(), /APPIUM_TIMEOUT/);
+  await assert.rejects(() => client.contexts(), /APPIUM_SESSION_UNUSABLE/);
+  assert.equal(requests, 2);
+  assert.equal(client.snapshot().unusable, true);
+});
+
+test('Appium context metadata keeps provider identity separate from context names', async () => {
+  const client = new AppiumClient('http://fake.test', 100, async (_input, init) => {
+    const body = String(init?.body || '');
+    const value = body.includes('mobile: getContexts')
+      ? [{ id: 'WEBVIEW_1', url: 'https://fixture.test/', title: 'Installed', bundleId: 'com.apple.webapp' }]
+      : { sessionId: 'session' };
+    return new Response(JSON.stringify({ value, sessionId: 'session' }), { status: 200 });
+  });
+  await client.create({ capabilities: {} });
+  const contexts = await client.contextMetadata();
+  assert.deepEqual(contexts, [{
+    id: 'WEBVIEW_1', url: 'https://fixture.test/', title: 'Installed', bundleId: 'com.apple.webapp', isKey: false,
+    raw: { id: 'WEBVIEW_1', url: 'https://fixture.test/', title: 'Installed', bundleId: 'com.apple.webapp' },
+  }]);
 });
 
 let failures = 0;

@@ -2,12 +2,15 @@ import { X509Certificate } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { assertStandalone, type RuntimeIdentity } from '../support/oracle';
+import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
+import { PhaseBudget } from '../support/budget';
 import { command, commandOutput } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
 import {
   accessibility,
   accessibilityPrefix,
   AppiumClient,
+  type ContextMetadata,
   buttonText,
   css,
   delay,
@@ -105,14 +108,24 @@ export class AndroidPlatform implements MobilePlatform {
   private readonly serial: string;
   private readonly origin: string;
   private readonly outputDir: string;
+  private readonly budget: PhaseBudget;
+  private readonly diagnostics: DiagnosticRecorder;
   private installedPackage = '';
-  private installedStandalone = false;
+  private installedTarget?: { packageName: string; activity: string; shortcut: AndroidChromeShortcut };
+  private lastIdentity?: RuntimeIdentity;
+  private lastUrl = '';
+  private keyboardDraft = '';
+  private lastCompletion?: UpdateCompletionEvidence;
+  private lastForeground?: { packageName: string; activity: string; pid: string };
 
   constructor(private readonly options: PlatformOptions) {
     this.serial = options.deviceId || process.env.ANDROID_SERIAL || '';
     this.origin = options.origin.replace(/\/$/, '');
     this.outputDir = options.outputDir;
+    this.budget = options.budget || new PhaseBudget('android-run', { timeoutMs: 30 * 60_000, recoveryLimit: 4 });
+    this.diagnostics = options.diagnostics || new DiagnosticRecorder();
     this.driver = new AppiumClient(options.appiumUrl);
+    this.driver.setBudget(this.budget);
   }
 
   async startFreshDevice(): Promise<void> {
@@ -161,8 +174,14 @@ export class AndroidPlatform implements MobilePlatform {
         'appium:newCommandTimeout': 1_200,
         'appium:skipDeviceInitialization': false,
         'appium:skipServerInstallation': false,
+        'appium:androidUseRunningApp': true,
+        'goog:chromeOptions': {
+          androidPackage: 'com.android.chrome',
+          androidUseRunningApp: true,
+        },
       },
       requestTimeoutMs: 60_000,
+      budget: this.budget,
     });
     await this.verifyFixtureEndpoint();
   }
@@ -234,27 +253,29 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async launchInstalledApp(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+    await this.driver.switchContext('NATIVE_APP');
+    const shortcut = await this.waitForChromeShortcut(30_000);
+    this.installedTarget = {
+      packageName: 'com.android.chrome',
+      activity: CHROME_WEBAPP_COMPONENT.split('/')[1],
+      shortcut,
+    };
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
+    let launchError: unknown;
     try {
       const icon = await this.findLauncherIcon();
       await this.driver.click(icon);
-    } catch (launcherError) {
-      // Chrome 131 can keep an installed PWA as a Chrome ShortcutInfo without
-      // exposing a launcher icon. Replaying the signed shortcut intent is the
-      // supported equivalent of tapping that icon and works on hosted Android
-      // 15 images where both launcher surfaces omit the shortcut.
+    } catch (error) {
+      launchError = error;
       try {
         await this.launchChromeShortcut();
       } catch (shortcutError) {
-        const launcherMessage = launcherError instanceof Error ? launcherError.message : String(launcherError);
+        const launcherMessage = error instanceof Error ? error.message : String(error);
         const shortcutMessage = shortcutError instanceof Error ? shortcutError.message : String(shortcutError);
         throw new Error(`${launcherMessage}; ${shortcutMessage}`, { cause: shortcutError });
       }
     }
-    this.installedStandalone = true;
-    await delay(1_000);
-    this.installedPackage = await this.currentForegroundPackage();
+    await this.waitForInstalledTarget(30_000, launchError);
     await this.attachToInstalledView();
   }
 
@@ -389,49 +410,66 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async attachToInstalledView(): Promise<void> {
-    const deadline = Date.now() + 30_000;
-    const expectedOrigin = this.origin;
-    let recoveryAttempts = 0;
-    while (Date.now() < deadline) {
-      const contexts = await this.driver.contexts().catch(() => []);
-      for (const context of contexts.filter((value) => value !== 'NATIVE_APP')) {
-        await this.driver.switchContext(context).catch(() => undefined);
-        const url = await this.driver.currentUrl().catch(() => '');
-        if (url.startsWith(`${expectedOrigin}/`) || url === expectedOrigin) return;
-      }
-      // Chrome can leave the Appium session attached to a new-tab renderer
-      // while an updated WebappActivity is restarting. Relaunch the signed
-      // shortcut a bounded number of times instead of treating that transient
-      // context as an installed-app success.
-      if (this.installedStandalone && recoveryAttempts < 2) {
-        recoveryAttempts += 1;
-        await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-        await this.launchChromeShortcut().catch(() => undefined);
-        await delay(750);
+    if (!this.installedTarget) throw new Error('ANDROID_CONTEXT: no native installed-app launch has been verified');
+    const phase = this.budget.phaseView('android-attachment', 30_000);
+    let lastError = '';
+    while (!phase.exhausted) {
+      phase.assertAvailable('discover installed target');
+      if (!(await this.isInstalledTargetForeground())) {
+        lastError = 'installed WebappActivity is not foreground';
+        await delay(250, phase);
         continue;
       }
-      await delay(250);
+      let contexts;
+      try {
+        contexts = await this.driver.contextMetadata();
+      } catch (error) {
+        this.diagnostics.record({ phase: 'android-attachment', operation: 'context-metadata', detail: error instanceof Error ? error.message : String(error) });
+        contexts = (await this.driver.contexts()).map((id): ContextMetadata => ({ id, raw: { id } }));
+      }
+      const chromium = contexts.filter((context) => context.id !== 'NATIVE_APP');
+      if (!chromium.length) {
+        lastError = 'Chromium context metadata is unavailable';
+        await delay(250, phase);
+        continue;
+      }
+      for (const context of chromium) {
+        if (context.url && !this.isExpectedOrigin(context.url)) continue;
+        await this.driver.switchContext(context.id);
+        const handles = await this.driver.windowHandles();
+        const windows = handles.length ? handles : [''];
+        for (const handle of windows) {
+          if (handle) await this.driver.switchWindow(handle);
+          const url = await this.driver.currentUrl();
+          this.lastUrl = url;
+          if (this.isExpectedOrigin(url) && await this.isInstalledTargetForeground()) return;
+        }
+      }
+      lastError = `no installed Chromium window for ${this.origin}`;
+      await delay(250, phase);
     }
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
-    throw new Error(`ANDROID_CONTEXT: no installed web context for ${expectedOrigin}`);
+    throw new Error(`ANDROID_CONTEXT: no installed web context for ${this.origin}: ${lastError}`);
   }
 
   async readRunningIdentity(): Promise<RuntimeIdentity> {
     await this.attachToInstalledView();
     const identity = await this.driver.execute<RuntimeIdentity>(runtimeScript());
-    if (this.installedStandalone && !identity.standalone) {
-      // Chrome 131 on the Android 15 image launches the WebappLauncherActivity
-      // from the home-screen shortcut but reports display-mode: browser to
-      // Chromedriver. The native shortcut launch is the stronger install
-      // evidence for this hosted-compatible target.
-      return { ...identity, standalone: true, provider: 'android-standalone', nativeProvider: `android:${this.installedPackage || 'com.android.chrome'}` };
-    }
-    return { ...identity, nativeProvider: this.installedPackage ? `android:${this.installedPackage}` : undefined };
+    this.lastIdentity = {
+      ...identity,
+      standalone: identity.standalone || Boolean(this.installedTarget && await this.isInstalledTargetForeground()),
+      provider: identity.standalone ? identity.provider : 'android-standalone',
+      nativeProvider: this.installedPackage ? `android:${this.installedPackage}` : undefined,
+      nativeActivity: this.lastForeground?.activity,
+      nativePid: this.lastForeground?.pid,
+    };
+    return this.lastIdentity;
   }
 
   async readUpdateCompletion(): Promise<UpdateCompletionEvidence> {
     await this.attachToInstalledView();
-    return this.driver.execute<UpdateCompletionEvidence>(updateCompletionScript());
+    this.lastCompletion = await this.driver.execute<UpdateCompletionEvidence>(updateCompletionScript());
+    return this.lastCompletion;
   }
 
   async openFixtureAgent(relayName: string): Promise<void> {
@@ -515,13 +553,20 @@ export class AndroidPlatform implements MobilePlatform {
       composer = await this.driver.find(css('textarea[aria-label="Prompt"]'), 30_000);
     }
     await this.driver.click(composer);
-    await this.driver.sendKeys(composer, 'mobile-device-ci draft');
-    const state = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'input_method']);
-    if (!/mInputShown=true|isInputShown=true/u.test(state)) throw new Error('ANDROID_KEYBOARD: software keyboard did not become visible');
+    this.keyboardDraft = 'mobile-device-ci draft';
+    await this.driver.sendKeys(composer, this.keyboardDraft);
+    await this.waitForKeyboard(true);
   }
 
   async hideKeyboard(): Promise<void> {
+    await this.driver.switchContext('NATIVE_APP');
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_BACK']);
+    await this.waitForKeyboard(false);
+    await this.attachToInstalledView();
+    if (this.keyboardDraft) {
+      const value = await this.driver.execute<string>("return document.querySelector('textarea[aria-label=\\\"Prompt\\\"]')?.value || ''");
+      if (value !== this.keyboardDraft) throw new Error('ANDROID_KEYBOARD: draft was not preserved after dismissal');
+    }
   }
 
   async clickWebText(text: string): Promise<void> {
@@ -578,9 +623,46 @@ export class AndroidPlatform implements MobilePlatform {
 
   async captureSanitizedEvidence(name: string): Promise<void> {
     await mkdir(this.outputDir, { recursive: true });
-    const screenshot = Buffer.from(await this.driver.screenshot(), 'base64');
-    if (screenshot.byteLength > 20 * 1024 * 1024) throw new Error('DIAGNOSTIC_LIMIT: screenshot exceeds the limit');
-    await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
+    try {
+      const screenshot = Buffer.from(await this.driver.screenshot(), 'base64');
+      if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
+    } catch (error) {
+      this.diagnostics.record({ phase: 'evidence', operation: 'screenshot', detail: error instanceof Error ? error.message : String(error) });
+    }
+    await writeSanitizedJson(join(this.outputDir, `${name}-appium.json`), this.evidenceSnapshot());
+    await this.diagnostics.write(join(this.outputDir, `${name}-events.json`));
+    const adb = process.env.ADB || 'adb';
+    const captures: Array<[string, string[]]> = [
+      ['logcat', ['-s', this.serial, 'logcat', '-d', '-t', '1200']],
+      ['crash', ['-s', this.serial, 'logcat', '-b', 'crash', '-d', '-t', '600']],
+      ['activity', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities']],
+      ['window', ['-s', this.serial, 'shell', 'dumpsys', 'window', 'windows']],
+      ['packages', ['-s', this.serial, 'shell', 'dumpsys', 'package', 'com.android.chrome']],
+    ];
+    for (const [suffix, args] of captures) {
+      const output = await commandOutput(adb, args, 10_000).catch((error) => error instanceof Error ? error.message : String(error));
+      await writeBoundedText(join(this.outputDir, `${name}-android-${suffix}.log`), output);
+    }
+  }
+
+  evidenceSnapshot(): Record<string, unknown> {
+    return {
+      platform: this.name,
+      device: this.serial,
+      origin: this.origin,
+      installedTarget: this.installedTarget ? {
+        packageName: this.installedTarget.packageName,
+        activity: this.installedTarget.activity,
+        shortcutId: this.installedTarget.shortcut.id,
+        scope: this.installedTarget.shortcut.scope,
+      } : undefined,
+      lastUrl: this.lastUrl,
+      lastIdentity: this.lastIdentity,
+      lastCompletion: this.lastCompletion,
+      lastForeground: this.lastForeground,
+      driver: this.driver.snapshot(),
+      events: this.diagnostics.snapshot(),
+    };
   }
 
   async stopOwnedResources(): Promise<void> {
@@ -732,6 +814,23 @@ export class AndroidPlatform implements MobilePlatform {
     throw new Error(`ANDROID_CERTIFICATE: expected ${accepted.join(' or ')} in foreground, found ${current || 'none'}`);
   }
 
+  private async waitForKeyboard(expected: boolean): Promise<void> {
+    const phase = this.budget.phaseView('android-keyboard', 10_000);
+    let last = '';
+    while (!phase.exhausted) {
+      phase.assertAvailable(`keyboard ${expected ? 'show' : 'hide'}`);
+      const inputMethod = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'input_method'], 5_000);
+      const windowState = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'window', 'windows'], 5_000).catch(() => '');
+      const visible = /mInputShown=true|isInputShown=true/u.test(inputMethod);
+      const rectangles = [...windowState.matchAll(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/gu)]
+        .some((match) => Number(match[4]) > Number(match[2]) && Number(match[3]) > Number(match[1]));
+      last = `visible=${visible} geometry=${rectangles}`;
+      if (visible === expected && (!expected || rectangles)) return;
+      await delay(250, phase);
+    }
+    throw new Error(`ANDROID_KEYBOARD: expected ${expected ? 'visible' : 'hidden'} software keyboard (${last})`);
+  }
+
   private async certificateCommonName(): Promise<string> {
     const certificate = new X509Certificate(await readFile(this.options.certificate));
     const commonName = certificate.subject.match(/CN\s*=\s*([^,\n/]+)/u)?.[1]?.trim();
@@ -758,32 +857,83 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async verifyFixtureEndpoint(): Promise<void> {
-    // Exercise the actual fixture HTTPS endpoint through the newly started
-    // Chrome target; an adb VIEW intent can open a second tab while
-    // Chromedriver remains attached to the old target.
-    const deadline = Date.now() + 30_000;
-    let lastUrl = '';
-    let lastSource = '';
-    while (Date.now() < deadline) {
+    const phase = this.budget.phaseView('android-certificate', 30_000);
+    let lastError = '';
+    while (!phase.exhausted) {
+      phase.assertAvailable('verify fixture certificate');
       try {
         const webContext = (await this.driver.contexts()).find((context) => context !== 'NATIVE_APP');
         if (!webContext) throw new Error('Chrome web context is unavailable');
         await this.driver.switchContext(webContext);
-        await this.driver.execute('window.location.href = arguments[0]; return true;', [`${this.origin}/version.json`]);
-        await delay(750);
-        lastUrl = await this.driver.currentUrl();
-        lastSource = await this.driver.pageSource();
-        if (lastUrl.startsWith(`${this.origin}/`) && !/ERR_CERT|NET::ERR|privacy error|not private/iu.test(lastSource)) return;
+        await this.driver.navigate(`${this.origin}/version.json`);
+        const observed = await this.driver.execute<{ status: number; url: string; body: string }>(`return fetch(location.href, { cache: 'no-store' }).then(async response => ({
+          status: response.status,
+          url: response.url,
+          body: (await response.text()).slice(0, 8192),
+        }));`);
+        const metadata = JSON.parse(observed.body) as Record<string, unknown>;
+        if (observed.status === 200 && this.isExpectedOrigin(observed.url)
+          && typeof metadata.version === 'string'
+          && Number.isInteger(Number(metadata.assets))
+          && Number(metadata.assets) > 0
+          && !/ERR_CERT|NET::ERR|privacy error|not private/iu.test(observed.body)) return;
+        lastError = `status=${observed.status} url=${observed.url} body=${observed.body.slice(0, 200)}`;
       } catch (error) {
-        lastSource = error instanceof Error ? error.message : String(error);
+        lastError = error instanceof Error ? error.message : String(error);
       }
-      await delay(250);
+      await delay(250, phase);
     }
-    throw new Error(`ANDROID_CERTIFICATE: fixture HTTPS endpoint is not trusted (${lastUrl || lastSource.slice(0, 200)})`);
+    throw new Error(`ANDROID_CERTIFICATE: fixture HTTPS response identity was not trusted (${lastError})`);
+  }
+
+  private async foregroundEvidence(): Promise<{ packageName: string; activity: string; pid: string; raw: string }> {
+    const output = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities'], 10_000);
+    const component = output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s([A-Za-z0-9_.]+)\/([A-Za-z0-9_.$]+)/u);
+    const pid = output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s+pid=(\d+)/u)?.[1] || '';
+    return { packageName: component?.[1] || '', activity: component?.[2] || '', pid, raw: output.slice(-20_000) };
+  }
+
+  private async isInstalledTargetForeground(): Promise<boolean> {
+    if (!this.installedTarget) return false;
+    const foreground = await this.foregroundEvidence();
+    this.lastForeground = foreground;
+    const packageMatches = foreground.packageName === this.installedTarget.packageName
+      || /webapk/iu.test(foreground.packageName);
+    if (!packageMatches) return false;
+    if (foreground.activity === this.installedTarget.activity) return true;
+    return /Webapp|WebApk/iu.test(foreground.activity) && !/ChromeTabbedActivity|LauncherActivity$/u.test(foreground.activity);
+  }
+
+  private async waitForInstalledTarget(timeoutMs: number, launchError?: unknown): Promise<void> {
+    const phase = this.budget.phaseView('android-launch-proof', timeoutMs);
+    let last = '';
+    while (!phase.exhausted) {
+      phase.assertAvailable('verify installed launch');
+      try {
+        const evidence = await this.foregroundEvidence();
+        last = `${evidence.packageName}/${evidence.activity} pid=${evidence.pid}`;
+        if (await this.isInstalledTargetForeground()) {
+          this.installedPackage = evidence.packageName;
+          return;
+        }
+      } catch (error) {
+        last = error instanceof Error ? error.message : String(error);
+      }
+      await delay(250, phase);
+    }
+    const detail = launchError instanceof Error ? `; launch=${launchError.message}` : '';
+    throw new Error(`ANDROID_TARGET: signed installed target was not foreground (${last || 'none'})${detail}`);
+  }
+
+  private isExpectedOrigin(value: string): boolean {
+    try {
+      return new URL(value).origin === new URL(this.origin).origin;
+    } catch {
+      return false;
+    }
   }
 
   private async currentForegroundPackage(): Promise<string> {
-    const output = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities']);
-    return output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s([A-Za-z0-9_.]+)\//)?.[1] || '';
+    return (await this.foregroundEvidence()).packageName;
   }
 }

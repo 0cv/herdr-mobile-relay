@@ -32,6 +32,16 @@ on:
         required: false
         default: all
         type: string
+      provenance_mode:
+        description: internal caller artifact or completed same-repository main push
+        required: false
+        default: internal
+        type: string
+      source_commit:
+        description: Exact source commit for external qualification
+        required: false
+        default: ''
+        type: string
   workflow_dispatch:
     inputs:
       artifact_run_id:
@@ -63,6 +73,19 @@ on:
         options:
           - all
           - latest
+      provenance_mode:
+        description: Provenance mode
+        required: true
+        default: external
+        type: choice
+        options:
+          - external
+          - internal
+      source_commit:
+        description: Exact commit from the completed main push
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -73,7 +96,66 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  provenance:
+    name: Validate exact artifact provenance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.validate.outputs.source_sha }}
+      artifact_run_id: ${{ steps.validate.outputs.artifact_run_id }}
+    steps:
+      - name: Validate source run and artifact
+        id: validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.provenance_mode || 'internal' }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name || 'release-bundles' }}
+          CANDIDATE_COMMIT: ${{ inputs.candidate_commit }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          REPOSITORY: ${{ github.repository }}
+          CALLER_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          test -n "$ARTIFACT_RUN_ID"
+          run_json="$(gh api "repos/$REPOSITORY/actions/runs/$ARTIFACT_RUN_ID")"
+          run_repository="$(jq -r '.repository.full_name // empty' <<<"$run_json")"
+          run_sha="$(jq -r '.head_sha // empty' <<<"$run_json")"
+          run_event="$(jq -r '.event // empty' <<<"$run_json")"
+          run_branch="$(jq -r '.head_branch // empty' <<<"$run_json")"
+          run_workflow="$(jq -r '.path // empty' <<<"$run_json")"
+          test "$run_repository" = "$REPOSITORY"
+          test -n "$run_sha"
+          artifact_count="$(gh api "repos/$REPOSITORY/actions/runs/$ARTIFACT_RUN_ID/artifacts" --paginate | jq --arg name "$ARTIFACT_NAME" '[.artifacts[] | select(.name == $name and .expired == false)] | length')"
+          test "$artifact_count" = 1
+          case "$MODE" in
+            internal)
+              test "$ARTIFACT_RUN_ID" = "$CALLER_RUN_ID"
+              if [ -n "$CANDIDATE_COMMIT" ]; then test "$CANDIDATE_COMMIT" = "$run_sha"; fi
+              source_sha="$CANDIDATE_COMMIT"
+              [ -n "$source_sha" ] || source_sha="$run_sha"
+              ;;
+            external)
+              test "$(jq -r '.status // empty' <<<"$run_json")" = completed
+              test "$(jq -r '.conclusion // empty' <<<"$run_json")" = success
+              test "$run_event" = push
+              test "$run_branch" = main
+              test "$run_workflow" = .github/workflows/check.yml
+              if [ -n "$SOURCE_COMMIT" ]; then test "$SOURCE_COMMIT" = "$run_sha"; fi
+              source_sha="$SOURCE_COMMIT"
+              [ -n "$source_sha" ] || source_sha="$run_sha"
+              ;;
+            *)
+              echo "unsupported provenance mode: $MODE" >&2
+              exit 2
+              ;;
+          esac
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'artifact_run_id=%s\n' "$ARTIFACT_RUN_ID" >> "$GITHUB_OUTPUT"
+
   prepare:
+    needs: provenance
+    if: needs.provenance.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     outputs:
@@ -81,10 +163,10 @@ jobs:
       device_count: ${{ steps.matrix.outputs.device_count }}
       candidate_web_hash: ${{ steps.artifact_identity.outputs.web_hash }}
     steps:
-      - name: Check out the release commit
+      - name: Check out the verified source commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_commit || github.sha }}
+          ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
       - uses: oven-sh/setup-bun@v2
         with:
@@ -126,32 +208,36 @@ jobs:
         env:
           REQUESTED_PLATFORM: ${{ inputs.platform || 'all' }}
           REQUESTED_BASELINE_SET: ${{ inputs.baseline_set || 'all' }}
+          REQUESTED_SUITE: ${{ inputs.suite || 'release' }}
         run: |
           set -euo pipefail
           case "$REQUESTED_PLATFORM/$REQUESTED_BASELINE_SET" in
             all/all)
-              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"},{"platform":"ios","runner":"macos-15","baseline":"0.20.8"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.8","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"},{"platform":"ios","runner":"macos-15","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             all/latest)
-              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"},{"platform":"ios","runner":"macos-15","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             android/all)
-              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"}]}'
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.8","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.9","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             android/latest)
-              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10"}]}'
+              matrix='{"include":[{"platform":"android","runner":"ubuntu-24.04","baseline":"0.20.10","scenario":"historical"},{"platform":"android","runner":"ubuntu-24.04","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             ios/all)
-              matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.8"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
+              matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.8","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.9","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             ios/latest)
-              matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.10"}]}'
+              matrix='{"include":[{"platform":"ios","runner":"macos-15","baseline":"0.20.10","scenario":"historical"},{"platform":"ios","runner":"macos-15","baseline":"current-code-baseline","scenario":"synthetic"}]}'
               ;;
             *)
               echo "unsupported platform/baseline set: $REQUESTED_PLATFORM/$REQUESTED_BASELINE_SET" >&2
               exit 2
               ;;
           esac
+          if [ "$REQUESTED_SUITE" != release ]; then
+            matrix="$(jq -c '{include: [.include[] | select(.scenario == "historical")]}' <<<"$matrix")"
+          fi
           echo "device_matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "device_count=$(jq '.include | length' <<<"$matrix")" >> "$GITHUB_OUTPUT"
       - name: Install mobile harness dependencies
@@ -166,7 +252,7 @@ jobs:
         run: cd frontend && bun x playwright install --with-deps chromium
       - name: Prepare current-code bundle pair
         env:
-          CANDIDATE_REVISION: ${{ inputs.candidate_commit || github.sha }}
+          CANDIDATE_REVISION: ${{ needs.provenance.outputs.source_sha }}
         run: |
           bun run --cwd tests/mobile prepare:current -- \
             --output "$GITHUB_WORKSPACE/dist/mobile-current" \
@@ -181,10 +267,10 @@ jobs:
           name: ${{ inputs.artifact_name || 'release-bundles' }}
           path: dist/release
           github-token: ${{ github.token }}
-          run-id: ${{ inputs.artifact_run_id }}
+          run-id: ${{ needs.provenance.outputs.artifact_run_id }}
       - name: Prepare and verify Android bundle set
         env:
-          CANDIDATE_REVISION: ${{ inputs.candidate_commit || github.sha }}
+          CANDIDATE_REVISION: ${{ needs.provenance.outputs.source_sha }}
         run: |
           set -euo pipefail
           version="$(jq -r '.version' web/version.json)"
@@ -205,7 +291,7 @@ jobs:
             --baseline 0.20.10
       - name: Prepare and verify iOS bundle set
         env:
-          CANDIDATE_REVISION: ${{ inputs.candidate_commit || github.sha }}
+          CANDIDATE_REVISION: ${{ needs.provenance.outputs.source_sha }}
         run: |
           set -euo pipefail
           version="$(jq -r '.version' web/version.json)"
@@ -252,8 +338,8 @@ jobs:
           retention-days: 3
 
   device:
-    needs: prepare
-    if: needs.prepare.result == 'success'
+    needs: [provenance, prepare]
+    if: needs.prepare.result == 'success' && needs.provenance.result == 'success'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.device_matrix) }}
@@ -263,10 +349,10 @@ jobs:
       MOBILE_PLATFORM: ${{ matrix.platform }}
       APPIUM_URL: http://127.0.0.1:4723
     steps:
-      - name: Check out the release commit
+      - name: Check out the verified source commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.candidate_commit || github.sha }}
+          ref: ${{ needs.provenance.outputs.source_sha }}
           fetch-depth: 1
       - name: Initialize private runner paths
         env:
@@ -532,6 +618,7 @@ jobs:
           sed -n '1,160p' "$RUNNER_TEMP/appium.log" >&2
           exit 1
       - name: Run installed-PWA upgrade scenarios
+        if: matrix.scenario == 'historical'
         run: |
           set -euo pipefail
           bun run --cwd tests/mobile run -- \
@@ -541,18 +628,15 @@ jobs:
             --output "$MOBILE_OUTPUT" \
             --private-output "$MOBILE_PRIVATE"
       - name: Run current-code updater fault scenario
-        if: always()
+        if: matrix.scenario == 'synthetic'
         run: |
           set -euo pipefail
-          if [ "$MOBILE_SUITE" = release ]; then
-            mkdir -p "$MOBILE_OUTPUT/current" "$MOBILE_PRIVATE/current"
-            MOBILE_RESET_DEVICE=1 bun run --cwd tests/mobile run -- \
-              --bundle-set "$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json" \
-              --baseline current-code-baseline \
-              --suite release \
-              --output "$MOBILE_OUTPUT/current" \
-              --private-output "$MOBILE_PRIVATE/current"
-          fi
+          bun run --cwd tests/mobile run -- \
+            --bundle-set "$GITHUB_WORKSPACE/mobile-bundles-current/bundle-set.json" \
+            --baseline current-code-baseline \
+            --suite "$MOBILE_SUITE" \
+            --output "$MOBILE_OUTPUT" \
+            --private-output "$MOBILE_PRIVATE"
       - name: Sanitize bounded diagnostics
         if: always()
         run: |
@@ -605,24 +689,68 @@ jobs:
           rm -rf "${MOBILE_PRIVATE:-}" "${APPIUM_HOME:-}" "${MOBILE_FIXTURE_BINARY:-}" "${MOBILE_DEVICE_OWNERSHIP_FILE:-}" || true
 
   gate:
-    needs: [prepare, device]
+    needs: [provenance, prepare, device]
     if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Reject skipped or incomplete device coverage
+      - name: Download every device evidence artifact
+        if: needs.provenance.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mobile-evidence-*
+          path: evidence
+          merge-multiple: false
+      - name: Reject skipped, duplicate, or incomplete device coverage
         env:
+          PROVENANCE_RESULT: ${{ needs.provenance.result }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
           DEVICE_RESULT: ${{ needs.device.result }}
           EXPECTED_DEVICES: ${{ needs.prepare.outputs.device_count }}
-          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
-          CANDIDATE_COMMIT: ${{ inputs.candidate_commit || github.sha }}
+          CANDIDATE_COMMIT: ${{ needs.provenance.outputs.source_sha }}
           CANDIDATE_WEB_HASH: ${{ needs.prepare.outputs.candidate_web_hash }}
+          DEVICE_MATRIX: ${{ needs.prepare.outputs.device_matrix }}
+          EXPECTED_SUITE: ${{ inputs.suite || 'release' }}
         run: |
           set -euo pipefail
+          test "$PROVENANCE_RESULT" = success
           test "$PREPARE_RESULT" = success
           test "$DEVICE_RESULT" = success
           test "${EXPECTED_DEVICES:-0}" -gt 0
-          test -n "$ARTIFACT_RUN_ID"
           test -n "$CANDIDATE_COMMIT"
           test "${#CANDIDATE_WEB_HASH}" -eq 64
+          mapfile -t result_files < <(find evidence -type f -name mobile-result.json -print | sort)
+          test "${#result_files[@]}" -gt 0
+          result_count=0
+          for result_file in "${result_files[@]}"; do
+            jq -e --arg commit "$CANDIDATE_COMMIT" --arg hash "$CANDIDATE_WEB_HASH" --arg suite "$EXPECTED_SUITE" \
+              '.schema == 1 and .result == "passed" and .suite == $suite and .source_commit == $commit and (.candidate_web_hash | test("^[0-9a-f]{64}$")) and ((.candidate | startswith("current-code-")) or (.candidate_web_hash == $hash)) and (.initial_identity.nativeProvider // .final_identity.nativeProvider // "" | length > 0)' \
+              "$result_file" >/dev/null
+            result_count=$((result_count + 1))
+          done
+          expected_count="$EXPECTED_DEVICES"
+          test "$result_count" -eq "$expected_count"
+          while IFS= read -r matrix_row; do
+            scenario="$(jq -r '.scenario' <<<"$matrix_row")"
+            if [ "$scenario" = synthetic ]; then continue; fi
+            platform="$(jq -r '.platform' <<<"$matrix_row")"
+            baseline="$(jq -r '.baseline' <<<"$matrix_row")"
+            matches=0
+            for result_file in "${result_files[@]}"; do
+              if jq -e --arg platform "$platform" --arg baseline "$baseline" \
+                '.platform == $platform and .baseline == $baseline and ((.candidate | startswith("current-code-")) | not)' "$result_file" >/dev/null 2>&1; then
+                matches=$((matches + 1))
+              fi
+            done
+            test "$matches" -eq 1
+          done < <(jq -c '.include[]' <<<"$DEVICE_MATRIX")
+          while IFS= read -r platform; do
+            [ -n "$platform" ] || continue
+            matches=0
+            for result_file in "${result_files[@]}"; do
+              if jq -e --arg platform "$platform" '.platform == $platform and .candidate == "current-code-target"' "$result_file" >/dev/null 2>&1; then
+                matches=$((matches + 1))
+              fi
+            done
+            test "$matches" -eq 1
+          done < <(jq -r '.include[] | select(.scenario == "synthetic") | .platform' <<<"$DEVICE_MATRIX" | sort -u)

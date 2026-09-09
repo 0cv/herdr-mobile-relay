@@ -7,6 +7,25 @@ const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 20_000;
 const MAX_WEB_FILES = 20_000;
 const SHA256 = /^[a-f0-9]{64}$/;
+let verifiedTar: string | undefined;
+
+function tarBinary(): string {
+  if (verifiedTar) return verifiedTar;
+  const candidates = process.env.MOBILE_GNU_TAR ? [process.env.MOBILE_GNU_TAR] : process.platform === 'darwin' ? ['gtar', 'tar'] : ['tar'];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const version = execFileSync(candidate, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      if (/GNU tar/iu.test(version)) {
+        verifiedTar = candidate;
+        return candidate;
+      }
+    } catch {
+      continue;
+    }
+  }
+  throw new Error('ARTIFACT_TAR_REQUIRED: bundle extraction requires GNU tar; set MOBILE_GNU_TAR to a GNU tar binary');
+}
 
 export interface BundleExpectation {
   name: string;
@@ -215,7 +234,7 @@ export async function validateWebRoot(rootValue: string, expected: BundleExpecta
 }
 
 function archiveEntries(archive: string): ArchiveEntry[] {
-  const output = execFileSync('tar', ['-tvzf', archive], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  const output = execFileSync(tarBinary(), ['-tvzf', archive], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   const entries: ArchiveEntry[] = [];
   let total = 0;
   for (const line of output.split(/\r?\n/).filter(Boolean)) {
@@ -253,7 +272,7 @@ async function prepareArchive(archive: string, destination: string, expectedHash
   archiveEntries(archive);
   await rm(destination, { recursive: true, force: true });
   await mkdir(destination, { recursive: true });
-  execFileSync('tar', ['-xzf', archive, '--no-same-owner', '--no-same-permissions', '--no-overwrite-dir', '-C', destination, '--']);
+  execFileSync(tarBinary(), ['-xzf', archive, '--no-same-owner', '--no-same-permissions', '--no-overwrite-dir', '-C', destination, '--']);
   const webRoot = join(destination, 'web');
   const info = await lstat(webRoot).catch(() => null);
   if (!info?.isDirectory() || info.isSymbolicLink()) throw new Error('ARTIFACT_ARCHIVE: archive has no static web tree');

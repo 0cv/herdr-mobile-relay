@@ -137,10 +137,11 @@ async function main(): Promise<void> {
       assets: bundleSet.candidate.identity.assets,
       build: bundleSet.candidate.identity.build,
     });
-    await control(info, '/activate', 'POST', { release: 'candidate' });
+    const faultId = 'cache-recovery-candidate-style';
     await control(info, '/fault', 'POST', {
-      method: 'GET', path: bundleSet.candidate.identity.style, kind: 'missing', remaining: 2,
+      id: faultId, generation: faultId, method: 'GET', path: bundleSet.candidate.identity.style, kind: 'missing', remaining: -1,
     });
+    await control(info, '/activate', 'POST', { release: 'candidate' });
     await page.goto(`${info.app_url}/index.html?herdr_reload=cache-recovery`, { waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: 'Herdr could not load' }).waitFor();
     await waitForFault(info, bundleSet.candidate.identity.style);
@@ -149,6 +150,7 @@ async function main(): Promise<void> {
     if (failedPlan.phoneAcknowledged === true || failedPlan.phoneState !== 'failed') {
       throw new Error(`CACHE_RECOVERY: failed plan was not incomplete: ${JSON.stringify(failedPlan)}`);
     }
+    await control(info, '/fault/clear', 'POST', { id: faultId });
     await page.getByRole('button', { name: 'Try again' }).click();
     await page.waitForFunction(() => {
       const plan = JSON.parse(sessionStorage.getItem('herdr_update_progress') || '{}');

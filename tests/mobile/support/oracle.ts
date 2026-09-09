@@ -6,6 +6,8 @@ export interface RuntimeIdentity {
   standalone: boolean;
   provider: string;
   nativeProvider?: string;
+  nativeActivity?: string;
+  nativePid?: string;
   navigationId?: string;
   version: string;
   assets: number;

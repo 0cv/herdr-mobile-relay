@@ -2,7 +2,8 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { assertDistinctUpgrade, type BundleSet } from './support/artifacts';
-import { redactText, writeSanitizedJson } from './support/diagnostics';
+import { DiagnosticRecorder, redactText, writeSanitizedJson } from './support/diagnostics';
+import { PhaseBudget } from './support/budget';
 import { command, startCommand, stopProcess } from './support/process';
 import {
   assertBoundedReloads,
@@ -51,6 +52,8 @@ interface FixtureRequest {
   method: string;
   path: string;
   fault?: string;
+  fault_id?: string;
+  fault_generation?: string;
   release: string;
 }
 
@@ -58,6 +61,7 @@ interface FixtureState {
   active_release: string;
   app_url: string;
   requests: FixtureRequest[];
+  faults?: Array<{ id: string; generation: string; path: string; kind: string; remaining: number }>;
   relays: FixtureRelayState[];
 }
 
@@ -83,6 +87,9 @@ interface RunResult {
   phone_completion?: UpdateCompletionEvidence;
   failure_stage?: string;
   failure?: string;
+  evidence?: Record<string, unknown>;
+  fixture_state?: { requests: FixtureRequest[]; active_release: string };
+  budget?: ReturnType<PhaseBudget['snapshot']>;
 }
 
 function option(name: string): string | undefined {
@@ -100,13 +107,13 @@ async function readJsonFile<T>(filename: string): Promise<T> {
   return JSON.parse(await readFile(filename, 'utf8')) as T;
 }
 
-async function waitForInfo(filename: string, timeoutMs: number): Promise<FixtureInfo> {
-  const deadline = Date.now() + timeoutMs;
+async function waitForInfo(filename: string, timeoutMs: number, budget?: PhaseBudget): Promise<FixtureInfo> {
+  const deadline = Date.now() + Math.min(timeoutMs, budget?.remainingMs ?? timeoutMs);
   while (Date.now() < deadline) {
     try {
       return await readJsonFile<FixtureInfo>(filename);
     } catch {
-      await delay(250);
+      await delay(250, budget);
     }
   }
   throw new Error('FIXTURE_STARTUP: fixture did not publish its private info before the deadline');
@@ -156,24 +163,24 @@ async function fixtureState(info: FixtureInfo): Promise<FixtureState> {
   return control(info, '/state') as Promise<FixtureState>;
 }
 
-async function waitForCredential(info: FixtureInfo, relayName: string): Promise<FixtureState> {
-  const deadline = Date.now() + 60_000;
+async function waitForCredential(info: FixtureInfo, relayName: string, budget?: PhaseBudget): Promise<FixtureState> {
+  const deadline = Date.now() + Math.min(60_000, budget?.remainingMs ?? 60_000);
   while (Date.now() < deadline) {
     const state = await fixtureState(info);
     const relay = state.relays.find((candidate) => candidate.name === relayName);
     if (relay && relay.invitation_auth_count >= 1) return state;
-    await delay(250);
+    await delay(250, budget);
   }
   throw new Error(`PAIRING: ${relayName} did not consume its invitation`);
 }
 
-async function waitForCredentialReconnect(info: FixtureInfo, relayName: string, previousCount: number): Promise<FixtureState> {
-  const deadline = Date.now() + 60_000;
+async function waitForCredentialReconnect(info: FixtureInfo, relayName: string, previousCount: number, budget?: PhaseBudget): Promise<FixtureState> {
+  const deadline = Date.now() + Math.min(60_000, budget?.remainingMs ?? 60_000);
   while (Date.now() < deadline) {
     const state = await fixtureState(info);
     const relay = state.relays.find((candidate) => candidate.name === relayName);
     if (relay && relay.credential_auth_count > previousCount && relay.connections > 0) return state;
-    await delay(250);
+    await delay(250, budget);
   }
   throw new Error(`LIFECYCLE: ${relayName} did not reconnect with its issued credential`);
 }
@@ -188,17 +195,17 @@ function authEvidence(state: FixtureState): RelayAuthEvidence {
   };
 }
 
-async function waitForFault(info: FixtureInfo, path: string, kind: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
+async function waitForFault(info: FixtureInfo, path: string, kind: string, faultId?: string, budget?: PhaseBudget): Promise<void> {
+  const deadline = Date.now() + Math.min(30_000, budget?.remainingMs ?? 30_000);
   while (Date.now() < deadline) {
     const state = await fixtureState(info);
-    if (state.requests.some((request) => request.path === path && request.fault === kind)) return;
-    await delay(250);
+    if (state.requests.some((request) => request.path === path && request.fault === kind && (!faultId || request.fault_id === faultId))) return;
+    await delay(250, budget);
   }
   throw new Error(`FIXTURE_FAULT: ${kind} for ${path} was not consumed`);
 }
 
-async function reconnectAllRelays(info: FixtureInfo, before: RelayAuthEvidence): Promise<RelayAuthEvidence> {
+async function reconnectAllRelays(info: FixtureInfo, before: RelayAuthEvidence, budget?: PhaseBudget): Promise<RelayAuthEvidence> {
   const relayNames = Object.keys(before.relays).sort();
   for (const relayName of relayNames) {
     await control(info, `/relay/drop?name=${encodeURIComponent(relayName)}`, 'POST');
@@ -207,7 +214,7 @@ async function reconnectAllRelays(info: FixtureInfo, before: RelayAuthEvidence):
   for (const relayName of relayNames) {
     const previousCount = before.relays[relayName]?.credentialAuthCount;
     if (previousCount === undefined) throw new Error(`CREDENTIAL_RELAY_MISSING: ${relayName}`);
-    state = await waitForCredentialReconnect(info, relayName, previousCount);
+    state = await waitForCredentialReconnect(info, relayName, previousCount, budget);
   }
   return authEvidence(state);
 }
@@ -230,8 +237,9 @@ async function waitForPhoneCompletion(
   platform: MobilePlatform,
   baseline: BundleSet['baselines'][number],
   controls: Set<string>,
+  budget?: PhaseBudget,
 ): Promise<UpdateCompletionEvidence> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + Math.min(30_000, budget?.remainingMs ?? 30_000);
   let lastError = '';
   while (Date.now() < deadline) {
     try {
@@ -242,7 +250,7 @@ async function waitForPhoneCompletion(
     } catch (error) {
       if (error instanceof Error && /PHONE_PLAN_MISSING/u.test(error.message)) throw error;
       lastError = error instanceof Error ? error.message : String(error);
-      await delay(250);
+      await delay(250, budget);
     }
   }
   throw new Error(`PHONE_COMPLETION_MISSING: ${lastError}`);
@@ -269,8 +277,9 @@ async function waitForCandidate(
   expected: BundleSet['candidate']['identity'],
   origin: string,
   navigationIds: Set<string>,
+  budget?: PhaseBudget,
 ): Promise<RuntimeIdentity> {
-  const deadline = Date.now() + 180_000;
+  const deadline = Date.now() + Math.min(180_000, budget?.remainingMs ?? 180_000);
   let lastError = '';
   while (Date.now() < deadline) {
     try {
@@ -281,7 +290,7 @@ async function waitForCandidate(
       return identity;
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
-      await delay(500);
+      await delay(500, budget);
     }
   }
   throw new Error(`UPGRADE: candidate did not initialize before the deadline: ${lastError}`);
@@ -320,6 +329,7 @@ async function runUpgrade(
   bundleSet: BundleSet,
   suite: string,
   setStage: (stage: ScenarioStage) => void,
+  budget: PhaseBudget,
 ): Promise<RunResult> {
   const baseline = bundleSet.baselines[0];
   assertDistinctUpgrade(baseline, bundleSet.candidate);
@@ -338,11 +348,11 @@ async function runUpgrade(
   assertOldIdentity(initialIdentity, baseline, info.app_url);
   if (initialIdentity.navigationId) navigationIds.add(initialIdentity.navigationId);
   setStage('pairing');
-  await waitForCredential(info, 'alpha');
+  await waitForCredential(info, 'alpha', budget);
   await platform.openSetupURLInInstalledApp(info.setup_urls[1]);
-  await waitForCredential(info, 'beta');
+  await waitForCredential(info, 'beta', budget);
   const pairedBeforeReconnect = authEvidence(await fixtureState(info));
-  await reconnectAllRelays(info, pairedBeforeReconnect);
+  await reconnectAllRelays(info, pairedBeforeReconnect, budget);
   await platform.setPreference('state');
   const beforePreference: PreferenceEvidence = { key: 'herdr_home_workspace_layout', value: await platform.preferenceValue() };
   const pairedState = await fixtureState(info);
@@ -350,40 +360,46 @@ async function runUpgrade(
   await platform.captureSanitizedEvidence('paired');
   setStage('upgrade');
   await platform.clickWebText('Settings');
-  await control(info, '/activate', 'POST', { release: 'candidate' });
-  await platform.clickWebText('Settings');
-  await platform.clickWebText('Check for Updates');
   const faultPath = bundleSet.candidate.name === 'current-code-target'
     ? bundleSet.candidate.identity.style
     : bundleSet.candidate.identity.script;
   const faultKind = bundleSet.candidate.name === 'current-code-target' ? 'missing' : 'corrupt';
+  const faultId = `candidate-${bundleSet.candidate.name}-${faultKind}`;
   if (suite === 'release') {
+    const beforeActivation = await fixtureState(info);
+    if (beforeActivation.requests.some((request) => request.release === 'candidate' && request.path === faultPath && !request.fault)) {
+      throw new Error(`FIXTURE_FAULT: candidate asset was fetched before fault ${faultPath}`);
+    }
     await control(info, '/fault', 'POST', {
-      method: 'GET', path: faultPath, kind: faultKind, remaining: faultKind === 'missing' ? 2 : 1,
+      id: faultId, generation: faultId, method: 'GET', path: faultPath, kind: faultKind, remaining: -1,
     });
     faultsExercised.push(`${faultKind}:${faultPath}`);
   }
+  await control(info, '/activate', 'POST', { release: 'candidate' });
+  await platform.clickWebText('Settings');
+  await platform.clickWebText('Check for Updates');
   await platform.clickWebText('Load Update');
   await platform.clickDialogText('update-herdr-dialog', 'Load Update');
   if (suite === 'release') {
-    await waitForFault(info, faultPath, faultKind);
+    await waitForFault(info, faultPath, faultKind, faultId, budget);
     await assertCandidateNotReady(platform, bundleSet.candidate.identity, info.app_url);
     const faultCompletion = await platform.readUpdateCompletion();
     if (phonePlanContract(baseline, faultCompletion, oracleControls)) {
       assertPhoneUpdateNotAcknowledged(faultCompletion);
     }
+    await control(info, '/fault/clear', 'POST', { id: faultId });
     await platform.clickWebText('Try again');
   }
-  await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds);
-  const phoneCompletion = await waitForPhoneCompletion(platform, baseline, oracleControls);
+  await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
+  const phoneCompletion = await waitForPhoneCompletion(platform, baseline, oracleControls, budget);
   await platform.clickDialogText('update-progress-dialog', 'Close');
-  const afterUpgradeAuth = await reconnectAllRelays(info, beforeAuth);
+  const afterUpgradeAuth = await reconnectAllRelays(info, beforeAuth, budget);
   assertCredentialPreserved(beforeAuth, afterUpgradeAuth);
   await platform.captureSanitizedEvidence('candidate');
   const finalBeforeAuth = authEvidence(await fixtureState(info));
   await platform.relaunchInstalledApp();
-  const finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds);
-  let finalAuth = await reconnectAllRelays(info, finalBeforeAuth);
+  const finalIdentity = await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
+  let finalAuth = await reconnectAllRelays(info, finalBeforeAuth, budget);
   assertCredentialPreserved(finalBeforeAuth, finalAuth);
   assertCredentialIdentityPreserved(beforeAuth, finalAuth);
   const upgradeNavigationCount = navigationIds.size;
@@ -399,8 +415,8 @@ async function runUpgrade(
     const beforeResumeAuth = authEvidence(await fixtureState(info));
     await platform.backgroundApp();
     await platform.relaunchInstalledApp();
-    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds);
-    const resumeAuth = await reconnectAllRelays(info, beforeResumeAuth);
+    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
+    const resumeAuth = await reconnectAllRelays(info, beforeResumeAuth, budget);
     assertCredentialPreserved(beforeResumeAuth, resumeAuth);
     assertCredentialIdentityPreserved(beforeAuth, resumeAuth);
     await platform.openFixtureAgent('alpha');
@@ -409,8 +425,8 @@ async function runUpgrade(
     const beforeColdAuth = authEvidence(await fixtureState(info));
     await platform.terminateInstalledApp();
     await platform.relaunchInstalledApp();
-    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds);
-    const coldAuth = await reconnectAllRelays(info, beforeColdAuth);
+    await waitForCandidate(platform, bundleSet.candidate.identity, info.app_url, navigationIds, budget);
+    const coldAuth = await reconnectAllRelays(info, beforeColdAuth, budget);
     assertCredentialPreserved(beforeColdAuth, coldAuth);
     assertCredentialIdentityPreserved(beforeAuth, coldAuth);
     finalAuth = coldAuth;
@@ -459,6 +475,11 @@ async function main(): Promise<void> {
   const outputDir = repositoryPath(outputOption);
   const privateDir = repositoryPath(option('--private-output') || process.env.MOBILE_PRIVATE || `${outputOption}.private-${process.pid}`);
   const suite = option('--suite') || 'smoke';
+  const budget = new PhaseBudget('mobile-scenario', {
+    timeoutMs: suite === 'release' ? 45 * 60_000 : 30 * 60_000,
+    recoveryLimit: 8,
+  });
+  const diagnostics = new DiagnosticRecorder();
   if (resolve(outputDir) === resolve(privateDir)) throw new Error('DIAGNOSTIC_PRIVATE: private output must be separate from evidence output');
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
   await mkdir(privateDir, { recursive: true, mode: 0o700 });
@@ -470,7 +491,7 @@ async function main(): Promise<void> {
   let result: RunResult;
   let stage: string = 'fixture';
   try {
-    fixtureInfo = await waitForInfo(infoFile, 180_000);
+    fixtureInfo = await waitForInfo(infoFile, 180_000, budget);
     if (process.env.MOBILE_PLATFORM === 'android') reverse = await reversePorts(fixtureInfo, process.env.ANDROID_SERIAL || '');
     const platformOptions: PlatformOptions = {
       origin: fixtureInfo.app_url,
@@ -479,12 +500,18 @@ async function main(): Promise<void> {
       certificate: fixtureInfo.ca_certificate,
       setupUrl: fixtureInfo.setup_urls[0],
       deviceId: process.env.MOBILE_PLATFORM === 'android' ? process.env.ANDROID_SERIAL : process.env.IOS_SIMULATOR_UDID,
+      budget,
+      diagnostics,
     };
     platform = platformFor(platformOptions);
-    result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; });
+    result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; }, budget);
+    result.evidence = platform.evidenceSnapshot();
+    result.budget = budget.snapshot();
   } catch (error) {
+    diagnostics.record({ phase: stage, operation: 'scenario-failure', detail: error instanceof Error ? error.message : String(error) });
     await platform?.captureSanitizedEvidence('failure').catch(() => undefined);
     const message = error instanceof Error ? error.message : String(error);
+    const partialState = fixtureInfo ? await fixtureState(fixtureInfo).catch(() => undefined) : undefined;
     const product = /(RUNTIME_|PREMATURE_|PHONE_COMPLETION_|PHONE_PLAN_|CREDENTIAL_|PREFERENCE_|INVITATION_|RELOAD_|UNEXPECTED_|STANDALONE_|ORIGIN_|APP_NOT_INITIALIZED|REQUIRED_ASSET|BASELINE_)/u.test(message);
     result = {
       schema: 1, result: product ? 'product failure' : 'infrastructure failure',
@@ -493,6 +520,9 @@ async function main(): Promise<void> {
       source_commit: bundleSet.candidate.provenance.sourceCommit,
       candidate_web_hash: bundleSet.candidate.identity.webHash,
       reload_count: 0, failure_stage: stage, failure: message,
+      evidence: platform?.evidenceSnapshot(),
+      fixture_state: partialState ? { active_release: partialState.active_release, requests: partialState.requests } : undefined,
+      budget: budget.snapshot(),
     };
   } finally {
     await platform?.stopOwnedResources().catch(() => undefined);
