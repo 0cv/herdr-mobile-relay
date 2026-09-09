@@ -139,7 +139,7 @@ async function main(): Promise<void> {
     });
     await control(info, '/activate', 'POST', { release: 'candidate' });
     await control(info, '/fault', 'POST', {
-      method: 'GET', path: bundleSet.candidate.identity.style, kind: 'missing', remaining: 1,
+      method: 'GET', path: bundleSet.candidate.identity.style, kind: 'missing', remaining: 2,
     });
     await page.goto(`${info.app_url}/index.html?herdr_reload=cache-recovery`, { waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: 'Herdr could not load' }).waitFor();

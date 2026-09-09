@@ -359,7 +359,7 @@ async function runUpgrade(
   const faultKind = bundleSet.candidate.name === 'current-code-target' ? 'missing' : 'corrupt';
   if (suite === 'release') {
     await control(info, '/fault', 'POST', {
-      method: 'GET', path: faultPath, kind: faultKind, remaining: 1,
+      method: 'GET', path: faultPath, kind: faultKind, remaining: faultKind === 'missing' ? 2 : 1,
     });
     faultsExercised.push(`${faultKind}:${faultPath}`);
   }
