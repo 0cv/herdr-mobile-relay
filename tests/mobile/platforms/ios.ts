@@ -218,7 +218,13 @@ export class IOSPlatform implements MobilePlatform {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const contexts = await this.driver.contexts().catch(() => []);
-      for (const context of contexts.filter((value) => value !== 'NATIVE_APP' && !/safari/iu.test(value))) {
+      // When Safari remains alive after the Home Screen web app is launched,
+      // Web Inspector can list Safari's stale page before the installed app's
+      // SafariViewService page. Probe the newest context first; querying the
+      // stale Safari page can block for Appium's full WebKit timeout.
+      for (const context of contexts
+        .filter((value) => value !== 'NATIVE_APP' && !/safari/iu.test(value))
+        .reverse()) {
         await this.driver.switchContext(context).catch(() => undefined);
         const url = await this.driver.currentUrl().catch(() => '');
         if (url === this.origin || url.startsWith(`${this.origin}/`)) {
