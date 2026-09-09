@@ -139,7 +139,7 @@ function isTimeoutError(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ETIMEDOUT');
 }
 
-const lookupSliceMs = 1_000;
+const lookupSliceMs = 5_000;
 
 export class AppiumClient {
   private sessionId = '';

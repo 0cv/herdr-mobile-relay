@@ -491,7 +491,7 @@ export class IOSPlatform implements MobilePlatform {
       if (remaining <= 1) break;
       try {
         await this.attachToInstalledView();
-        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], Math.min(2_000, remaining));
+        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], remaining);
         const attributeTimeout = deadline - Date.now();
         if (attributeTimeout <= 1) break;
         if ((await this.driver.attribute(element, 'disabled', attributeTimeout)) === null) {
@@ -520,7 +520,7 @@ export class IOSPlatform implements MobilePlatform {
       if (remaining <= 1) break;
       try {
         await this.attachToInstalledView();
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`), Math.min(2_000, remaining));
+        const buttons = await this.driver.findAll(css(`#${dialogId} button`), remaining);
         for (const button of buttons) {
           const textTimeout = deadline - Date.now();
           if (textTimeout <= 1) break;
@@ -604,7 +604,7 @@ export class IOSPlatform implements MobilePlatform {
       const remaining = deadline - Date.now();
       if (remaining <= 1) break;
       try {
-        return await this.driver.findAny(locators, Math.min(1_500, remaining));
+        return await this.driver.findAny(locators, remaining);
       } catch (error) {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
@@ -612,14 +612,14 @@ export class IOSPlatform implements MobilePlatform {
       const afterLookup = deadline - Date.now();
       if (afterLookup <= 1) break;
       if (scrolls < 8) {
-        const scrollTimeout = Math.min(1_500, deadline - Date.now());
+        const scrollTimeout = deadline - Date.now();
         if (scrollTimeout <= 1) break;
         try {
           await this.driver.mobile('scroll', { direction: 'up', distance: 0.75 }, scrollTimeout);
         } catch (error) {
           if (isFatalDriverError(error)) throw error;
           lastError = error instanceof Error ? error.message : String(error);
-          const fallbackTimeout = Math.min(1_500, deadline - Date.now());
+          const fallbackTimeout = deadline - Date.now();
           if (fallbackTimeout <= 1) break;
           await this.driver.mobile('swipe', { direction: 'up' }, fallbackTimeout).catch((fallbackError: unknown) => {
             if (isFatalDriverError(fallbackError)) throw fallbackError;
@@ -649,21 +649,21 @@ export class IOSPlatform implements MobilePlatform {
     for (const locator of locators) {
       const remaining = deadline - Date.now();
       if (remaining <= 1) break;
-      const elements = await this.driver.findAll(locator, Math.min(750, remaining)).catch((error: unknown) => {
+      const elements = await this.driver.findAll(locator, remaining).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
         return [];
       });
       for (const element of elements) {
         const hittableTimeout = deadline - Date.now();
         if (hittableTimeout <= 1) return '';
-        const hittable = await this.driver.attribute(element, 'hittable', Math.min(500, hittableTimeout)).catch((error: unknown) => {
+        const hittable = await this.driver.attribute(element, 'hittable', hittableTimeout).catch((error: unknown) => {
           if (isFatalDriverError(error)) throw error;
           return null;
         });
         if (hittable === 'true') return element;
         const visibleTimeout = deadline - Date.now();
         if (visibleTimeout <= 1) return '';
-        const visible = await this.driver.attribute(element, 'visible', Math.min(500, visibleTimeout)).catch((error: unknown) => {
+        const visible = await this.driver.attribute(element, 'visible', visibleTimeout).catch((error: unknown) => {
           if (isFatalDriverError(error)) throw error;
           return null;
         });

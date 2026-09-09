@@ -609,7 +609,7 @@ export class AndroidPlatform implements MobilePlatform {
       if (remaining <= 1) break;
       try {
         await this.attachToInstalledView();
-        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], Math.min(2_000, remaining));
+        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], remaining);
         const attributeTimeout = deadline - Date.now();
         if (attributeTimeout <= 1) break;
         if ((await this.driver.attribute(element, 'disabled', attributeTimeout)) === null) {
@@ -638,7 +638,7 @@ export class AndroidPlatform implements MobilePlatform {
       if (remaining <= 1) break;
       try {
         await this.attachToInstalledView();
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`), Math.min(2_000, remaining));
+        const buttons = await this.driver.findAll(css(`#${dialogId} button`), remaining);
         for (const button of buttons) {
           const textTimeout = deadline - Date.now();
           if (textTimeout <= 1) break;
@@ -869,7 +869,7 @@ export class AndroidPlatform implements MobilePlatform {
       const remaining = deadline - Date.now();
       if (remaining <= 1) break;
       try {
-        return await this.driver.findAny(locators, Math.min(2_000, remaining));
+        return await this.driver.findAny(locators, remaining);
       } catch (error) {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
