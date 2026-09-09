@@ -391,12 +391,24 @@ export class AndroidPlatform implements MobilePlatform {
   async attachToInstalledView(): Promise<void> {
     const deadline = Date.now() + 30_000;
     const expectedOrigin = this.origin;
+    let recoveryAttempts = 0;
     while (Date.now() < deadline) {
       const contexts = await this.driver.contexts().catch(() => []);
       for (const context of contexts.filter((value) => value !== 'NATIVE_APP')) {
         await this.driver.switchContext(context).catch(() => undefined);
         const url = await this.driver.currentUrl().catch(() => '');
         if (url.startsWith(`${expectedOrigin}/`) || url === expectedOrigin) return;
+      }
+      // Chrome can leave the Appium session attached to a new-tab renderer
+      // while an updated WebappActivity is restarting. Relaunch the signed
+      // shortcut a bounded number of times instead of treating that transient
+      // context as an installed-app success.
+      if (this.installedStandalone && recoveryAttempts < 2) {
+        recoveryAttempts += 1;
+        await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+        await this.launchChromeShortcut().catch(() => undefined);
+        await delay(750);
+        continue;
       }
       await delay(250);
     }

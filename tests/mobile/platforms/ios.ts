@@ -221,6 +221,7 @@ export class IOSPlatform implements MobilePlatform {
 
   async attachToInstalledView(): Promise<void> {
     const deadline = Date.now() + 30_000;
+    let recoveryAttempts = 0;
     while (Date.now() < deadline) {
       const contexts = await this.driver.contexts().catch(() => []);
       // When Safari remains alive after the Home Screen web app is launched,
@@ -235,6 +236,17 @@ export class IOSPlatform implements MobilePlatform {
         if (url === this.origin || url.startsWith(`${this.origin}/`)) {
           return;
         }
+      }
+      // iOS can finish the native Home Screen transition before the generic
+      // Web Clip provider publishes its Web Inspector page. Reactivate the
+      // recorded provider a bounded number of times, but never accept a
+      // missing context as a successful launch.
+      if (this.installedBundleId && recoveryAttempts < 2) {
+        recoveryAttempts += 1;
+        await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
+        await this.driver.mobile('activateApp', { bundleId: this.installedBundleId }).catch(() => undefined);
+        await delay(750);
+        continue;
       }
       await delay(250);
     }
