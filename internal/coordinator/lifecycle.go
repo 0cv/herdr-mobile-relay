@@ -30,7 +30,7 @@ const (
 	// millisecond, before its own --timeout applies, and every attempt forks a
 	// subprocess through an 8-slot semaphore shared with every other pane
 	// command. The interval therefore grows instead of polling flat out.
-	agentStartRetryInitial = 150 * time.Millisecond
+	agentStartRetryInitial = 50 * time.Millisecond
 	agentStartRetryMax     = 1500 * time.Millisecond
 )
 

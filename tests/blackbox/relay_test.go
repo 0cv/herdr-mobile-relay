@@ -169,7 +169,7 @@ func startInventorySocket(t *testing.T, socketPath, scenario string) net.Listene
 			if acceptErr != nil {
 				return
 			}
-			go func() {
+			go func(conn net.Conn) {
 				defer conn.Close()
 				var request struct {
 					ID     string `json:"id"`
@@ -242,7 +242,7 @@ func startInventorySocket(t *testing.T, socketPath, scenario string) net.Listene
 				default:
 					sendError("unknown_method", "unknown method")
 				}
-			}()
+			}(conn)
 		}
 	}()
 	return listener

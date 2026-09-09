@@ -13,6 +13,7 @@ import {
   css,
   delay,
   isFatalDriverError,
+  minimumDriverRequestMs,
   textLocator,
   type ContextMetadata,
   type Locator,
@@ -189,14 +190,13 @@ export class IOSPlatform implements MobilePlatform {
       await this.driver.mobile('tap', { x: size.width / 2, y: size.height * 0.91 });
       await delay(500);
     }
-    const add = await this.findNativeScrollable([
+    await this.clickNativeScrollable([
       iosLabelContains('Add to Home Screen'),
       textLocator('Add to Home Screen'),
       accessibility('Add to Home Screen'),
       textLocator('Add to Home Screen…'),
       accessibility('Add to Home Screen…'),
     ], 'Add to Home Screen', 30_000);
-    await this.driver.click(add);
     const openAsWebApp = await this.driver.findAny([
       iosLabelContains('Open as Web App'),
       textLocator('Open as Web App'),
@@ -272,8 +272,8 @@ export class IOSPlatform implements MobilePlatform {
     return identity;
   }
 
-  async attachToInstalledView(): Promise<void> {
-    const phase = this.budget.phaseView('ios-attachment', 30_000);
+  async attachToInstalledView(timeoutMs = 30_000): Promise<void> {
+    const phase = this.budget.phaseView('ios-attachment', timeoutMs);
     let lastError = '';
     while (!phase.exhausted) {
       phase.assertAvailable('discover installed page');
@@ -484,19 +484,21 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async clickWebText(text: string): Promise<void> {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
     let lastError = '';
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      if (remaining <= 1) break;
+      if (remaining < minimumDriverRequestMs) break;
       try {
-        await this.attachToInstalledView();
-        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], remaining);
+        await this.attachToInstalledView(remaining);
+        const findTimeout = deadline - Date.now();
+        if (findTimeout < minimumDriverRequestMs) break;
+        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], findTimeout);
         const attributeTimeout = deadline - Date.now();
-        if (attributeTimeout <= 1) break;
+        if (attributeTimeout < minimumDriverRequestMs) break;
         if ((await this.driver.attribute(element, 'disabled', attributeTimeout)) === null) {
           const clickTimeout = deadline - Date.now();
-          if (clickTimeout <= 1) break;
+          if (clickTimeout < minimumDriverRequestMs) break;
           await this.driver.click(element, clickTimeout);
           return;
         }
@@ -505,28 +507,29 @@ export class IOSPlatform implements MobilePlatform {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      const waitMs = Math.min(250, deadline - Date.now());
-      if (waitMs <= 0) break;
-      await delay(waitMs);
+      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
+      if (waitMs > 0) await delay(waitMs);
     }
     throw new Error(`APPIUM_BUTTON: ${text}: ${lastError}`);
   }
 
   async clickDialogText(dialogId: string, text: string): Promise<void> {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
     let lastError = '';
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      if (remaining <= 1) break;
+      if (remaining < minimumDriverRequestMs) break;
       try {
-        await this.attachToInstalledView();
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`), remaining);
+        await this.attachToInstalledView(remaining);
+        const findTimeout = deadline - Date.now();
+        if (findTimeout < minimumDriverRequestMs) break;
+        const buttons = await this.driver.findAll(css(`#${dialogId} button`), findTimeout);
         for (const button of buttons) {
           const textTimeout = deadline - Date.now();
-          if (textTimeout <= 1) break;
+          if (textTimeout < minimumDriverRequestMs) break;
           if ((await this.driver.text(button, textTimeout)).trim() === text) {
             const clickTimeout = deadline - Date.now();
-            if (clickTimeout <= 1) break;
+            if (clickTimeout < minimumDriverRequestMs) break;
             await this.driver.click(button, clickTimeout);
             return;
           }
@@ -536,9 +539,8 @@ export class IOSPlatform implements MobilePlatform {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      const waitMs = Math.min(250, deadline - Date.now());
-      if (waitMs <= 0) break;
-      await delay(waitMs);
+      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
+      if (waitMs > 0) await delay(waitMs);
     }
     throw new Error(`APPIUM_DIALOG_BUTTON: ${dialogId}/${text}: ${lastError}`);
   }
@@ -596,40 +598,55 @@ export class IOSPlatform implements MobilePlatform {
     await this.driver.close();
   }
 
+  private async clickNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const findTimeout = deadline - Date.now();
+    if (findTimeout < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
+    const element = await this.findNativeScrollable(locators, description, findTimeout);
+    const enabledTimeout = deadline - Date.now();
+    if (enabledTimeout < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to inspect control`);
+    const enabled = await this.driver.attribute(element, 'enabled', enabledTimeout);
+    if (enabled === 'false') throw new Error(`IOS_SHARE: ${description}: control is disabled`);
+    const visibleTimeout = deadline - Date.now();
+    if (visibleTimeout < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to inspect visibility`);
+    const visible = await this.driver.attribute(element, 'visible', visibleTimeout);
+    if (visible === 'false') throw new Error(`IOS_SHARE: ${description}: control is not visible`);
+    const clickTimeout = deadline - Date.now();
+    if (clickTimeout < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to click control`);
+    await this.driver.click(element, clickTimeout);
+  }
+
   private async findNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<string> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
     let lastError = '';
     let scrolls = 0;
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      if (remaining <= 1) break;
+      if (remaining < minimumDriverRequestMs) break;
       try {
-        return await this.driver.findAny(locators, remaining);
+        return await this.driver.findAnyOnce(locators, Math.min(5_000, remaining));
       } catch (error) {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       const afterLookup = deadline - Date.now();
-      if (afterLookup <= 1) break;
-      if (scrolls < 8) {
-        const scrollTimeout = deadline - Date.now();
-        if (scrollTimeout <= 1) break;
-        try {
-          await this.driver.mobile('scroll', { direction: 'up', distance: 0.75 }, scrollTimeout);
-        } catch (error) {
-          if (isFatalDriverError(error)) throw error;
-          lastError = error instanceof Error ? error.message : String(error);
-          const fallbackTimeout = deadline - Date.now();
-          if (fallbackTimeout <= 1) break;
-          await this.driver.mobile('swipe', { direction: 'up' }, fallbackTimeout).catch((fallbackError: unknown) => {
-            if (isFatalDriverError(fallbackError)) throw fallbackError;
-          });
-        }
-        scrolls += 1;
+      if (afterLookup < minimumDriverRequestMs || scrolls >= 8) break;
+      const scrollTimeout = Math.min(5_000, afterLookup);
+      if (scrollTimeout < minimumDriverRequestMs) break;
+      try {
+        await this.driver.mobile('scroll', { direction: 'up', distance: 0.75 }, scrollTimeout);
+      } catch (error) {
+        if (isFatalDriverError(error)) throw error;
+        lastError = error instanceof Error ? error.message : String(error);
+        const fallbackTimeout = deadline - Date.now();
+        if (fallbackTimeout < minimumDriverRequestMs) break;
+        await this.driver.mobile('swipe', { direction: 'up' }, fallbackTimeout).catch((fallbackError: unknown) => {
+          if (isFatalDriverError(fallbackError)) throw fallbackError;
+        });
       }
-      const waitMs = Math.min(250, deadline - Date.now());
-      if (waitMs <= 0) break;
-      await delay(waitMs);
+      scrolls += 1;
+      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
+      if (waitMs > 0) await delay(waitMs);
     }
     throw new Error(`IOS_SHARE: ${description}: ${lastError}`);
   }

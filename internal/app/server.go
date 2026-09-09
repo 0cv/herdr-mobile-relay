@@ -571,7 +571,7 @@ func (s *Server) Run(ctx context.Context) error {
 		s.hub.Broadcast(map[string]any{
 			"type":         "herdr_status",
 			"status":       herdrStatusPayload(status),
-			"capabilities": s.effectiveCapabilities(),
+			"capabilities": s.effectiveCapabilitiesFor(status),
 		})
 	})
 	s.hub.SetOnConnect(func(client *transport.ClientConn) {
@@ -580,10 +580,11 @@ func (s *Server) Run(ctx context.Context) error {
 			vapidPublicKey = s.pushM.VAPIDPublicKey()
 		}
 		inventory := s.committedInventoryStatus()
-		capabilities := s.effectiveCapabilities()
+		herdrCapabilityStatus := s.herdrC.CapabilityStatus()
+		capabilities := s.effectiveCapabilitiesFor(herdrCapabilityStatus)
 		speechStatus := s.speechStatus()
 		speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
-		herdrStatus := herdrStatusPayload(s.herdrC.CapabilityStatus())
+		herdrStatus := herdrStatusPayload(herdrCapabilityStatus)
 		s.hub.Send(client, protocol.PushConfig{
 			Type:            "push_config",
 			VAPIDPublicKey:  vapidPublicKey,
@@ -1491,6 +1492,10 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) effectiveCapabilities() []string {
+	return s.effectiveCapabilitiesFor(s.herdrC.CapabilityStatus())
+}
+
+func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
 	capabilities := append([]string(nil), protocol.Capabilities...)
 	if s.pushM != nil {
 		capabilities = append(capabilities, "typed_push", "push_policy")
@@ -1505,13 +1510,13 @@ func (s *Server) effectiveCapabilities() []string {
 	if speechStatus.ManagementSupported {
 		capabilities = append(capabilities, protocol.SpeechVoiceManagementCapability)
 	}
-	if s.herdrC.SupportsPaneRead() {
+	if herdrStatus.Supports(herdr.FeaturePaneRead) {
 		capabilities = append(capabilities, "pane_realtime_delta")
 	}
-	if s.herdrC.SupportsTabMove() {
+	if herdrStatus.Supports(herdr.FeatureTabMove) {
 		capabilities = append(capabilities, "tab_reorder")
 	}
-	if s.herdrC.SupportsWorkspaceMoveBlock() {
+	if herdrStatus.Supports(herdr.FeatureWorkspaceMoveBlock) {
 		capabilities = append(capabilities, "workspace_reorder_block")
 	}
 	if s.appDeployM.State().Configured {

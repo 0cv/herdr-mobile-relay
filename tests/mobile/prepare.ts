@@ -1,6 +1,7 @@
 import { lstat, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { prepareOutput, repositoryPath } from './support/paths';
+import { downloadWithRetry } from './support/download';
 import {
   assertDistinctUpgrade,
   fileSha256,
@@ -36,11 +37,7 @@ function values(name: string): string[] {
 }
 
 async function download(url: string, filename: string): Promise<void> {
-  const response = await fetch(url, { redirect: 'follow' });
-  if (!response.ok) throw new Error(`baseline download returned HTTP ${response.status}`);
-  const data = new Uint8Array(await response.arrayBuffer());
-  if (data.byteLength > 512 * 1024 * 1024) throw new Error('baseline archive is larger than the allowed limit');
-  await writeFile(filename, data, { mode: 0o600 });
+  await downloadWithRetry(url, filename);
 }
 
 const SHA256 = /^[a-f0-9]{64}$/u;
@@ -117,7 +114,10 @@ async function main(): Promise<void> {
       if (!expected.url || !expected.archiveSha256) throw new Error(`baseline ${expected.name} has no immutable source`);
       await download(expected.url, source);
       const downloadedHash = await fileSha256(source);
-      if (downloadedHash !== expected.archiveSha256) throw new Error(`baseline ${expected.name} checksum mismatch after download`);
+      if (downloadedHash !== expected.archiveSha256) {
+        await rm(source, { force: true });
+        throw new Error(`baseline ${expected.name} checksum mismatch after download`);
+      }
     }
     baselines.push(await prepareBundle(
       expected.name,

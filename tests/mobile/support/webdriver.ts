@@ -128,7 +128,7 @@ export function isFatalDriverError(error: unknown): boolean {
 export function isRetryableElementLookupError(error: unknown): boolean {
   if (error instanceof ElementLookupError) return true;
   if (!(error instanceof WebDriverError) || error.code !== 'APPIUM_COMMAND') return false;
-  return /no such element|stale element reference|element not found/iu.test(error.message);
+  return error.status === 404 || /no such element|stale element reference|element not found|could not be located|unable to find element/iu.test(error.message);
 }
 
 export type FetchTransport = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -140,6 +140,7 @@ function isTimeoutError(error: unknown): boolean {
 }
 
 const lookupSliceMs = 5_000;
+export const minimumDriverRequestMs = 50;
 
 export class AppiumClient {
   private sessionId = '';
@@ -298,6 +299,14 @@ export class AppiumClient {
   async activeAppInfo(timeoutMs?: number): Promise<Record<string, unknown> | null> {
     const value = await this.mobile('activeAppInfo', {}, timeoutMs);
     return value && typeof value === 'object' ? value as Record<string, unknown> : null;
+  }
+
+  async settings(timeoutMs?: number): Promise<Record<string, unknown>> {
+    return this.command<Record<string, unknown>>('/appium/settings', 'GET', undefined, timeoutMs);
+  }
+
+  async updateSettings(settings: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>> {
+    return this.command<Record<string, unknown>>('/appium/settings', 'POST', { settings }, timeoutMs);
   }
 
   async find(locator: Locator, timeoutMs = 30_000): Promise<string> {
@@ -542,6 +551,32 @@ export class AppiumClient {
     return evidence;
   }
 
+  async findAnyOnce(locators: Locator[], timeoutMs = 30_000): Promise<string> {
+    const budget = this.phaseBudget(timeoutMs, 'find any once');
+    const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
+    let lastError = 'no locator matched';
+    for (const locator of locators) {
+      if (budget.exhausted || Date.now() >= deadline) break;
+      budget.assertAvailable(`find ${locator.using}`);
+      const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
+      if (remaining < minimumDriverRequestMs) break;
+      const sliceMs = Math.min(lookupSliceMs, remaining);
+      const startedAt = Date.now();
+      try {
+        const element = await this.findOnce(locator, sliceMs);
+        this.recordLookup(locator, sliceMs, startedAt, deadline, 'matched');
+        return element;
+      } catch (error) {
+        const retryable = isRetryableElementLookupError(error);
+        this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
+        if (!retryable) throw error;
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (this.budget?.exhausted) this.budget.assertAvailable('find any once');
+    throw new ElementLookupError(`APPIUM_ELEMENT_ANY: ${lastError}`);
+  }
+
   async findAny(locators: Locator[], timeoutMs = 30_000): Promise<string> {
     const budget = this.phaseBudget(timeoutMs, 'find any');
     const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
@@ -617,6 +652,10 @@ export function css(value: string): Locator {
 
 export function textLocator(value: string): Locator {
   return { using: 'xpath', value: `//*[normalize-space(@text)=${xpathLiteral(value)} or normalize-space(.)=${xpathLiteral(value)}]` };
+}
+
+export function androidTextLocator(value: string): Locator {
+  return { using: '-android uiautomator', value: `new UiSelector().text(${JSON.stringify(value)})` };
 }
 
 export function buttonText(value: string): Locator {

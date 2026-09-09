@@ -75,6 +75,8 @@ type responseFault struct {
 	LifetimeMs int       `json:"lifetime_ms,omitempty"`
 	ExpiresAt  time.Time `json:"-"`
 	key        string
+	admitted   bool
+	inFlight   int
 }
 
 type releaseRouter struct {
@@ -150,9 +152,15 @@ func (r *releaseRouter) route(method, path string) (string, *web.Handler, *respo
 	if fault != nil && fault.Remaining != 0 {
 		copy := *fault
 		copy.key = key
+		copy.admitted = true
 		if fault.Remaining > 0 {
 			fault.Remaining--
-			if fault.Remaining == 0 && fault.Kind != "stall" {
+			if fault.Kind == "stall" {
+				fault.inFlight++
+				if fault.Remaining == 0 {
+					copy.Remaining = 0
+				}
+			} else if fault.Remaining == 0 {
 				delete(r.faults, key)
 				if key != faultKey("*", path) {
 					delete(r.faults, faultKey("*", path))
@@ -382,13 +390,19 @@ func (r *releaseRouter) releaseBarrier(name string) error {
 }
 
 func (r *releaseRouter) finishFault(fault *responseFault) {
-	if fault.Remaining != 0 || fault.key == "" {
+	if fault == nil || !fault.admitted || fault.key == "" || fault.Kind != "stall" {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	active := r.faults[fault.key]
-	if active != nil && active.ID == fault.ID && active.Generation == fault.Generation && active.Remaining == 0 {
+	if active == nil || active.ID != fault.ID || active.Generation != fault.Generation {
+		return
+	}
+	if active.inFlight > 0 {
+		active.inFlight--
+	}
+	if active.Remaining == 0 && active.inFlight == 0 {
 		delete(r.faults, fault.key)
 	}
 }

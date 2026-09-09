@@ -16,7 +16,7 @@ WRANGLER_VERSION ?= 4.125.0
 PATH := /opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$(HOME)/.local/bin:$(PATH)
 export PATH
 
-.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
+.PHONY: help setup setup-link app-deploy-setup rotate-token quick-start dev-tunnel stable-setup stable-teardown gateway check go-check backend-check shell-check production-path-audit cross-build release-bundle-check frontend-check frontend-browser frontend-browser-release frontend-browser-attention-release relay-plugin service-install service-uninstall service-status service-logs speech-voices web-bundle-check web-release web-release-check web-deploy web-preview mobile-ci-check mobile-retention-check mobile-composite-check mobile-cache-recovery mobile-ci-run mobile-android mobile-ios
 
 help:
 	@echo "Common targets:"
@@ -98,7 +98,7 @@ go-check:
 	@test -z "$$(gofmt -l $$(find . -name '*.go' -not -path './frontend/node_modules/*'))"
 	go vet ./...
 	go test ./...
-	go test -race ./...
+	go test -race -p 1 ./...
 
 backend-check: go-check shell-check production-path-audit
 
@@ -205,7 +205,7 @@ web-deploy: web-bundle-check
 web-preview:
 	npx --yes wrangler@$(WRANGLER_VERSION) pages dev web
 
-mobile-ci-check: mobile-retention-check
+mobile-ci-check: mobile-retention-check mobile-composite-check
 	bun install --frozen-lockfile --cwd frontend
 	bun install --frozen-lockfile --cwd tests/mobile
 	bun run --cwd tests/mobile lint
@@ -215,13 +215,10 @@ mobile-ci-check: mobile-retention-check
 	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes= .github/workflows/check.yml .github/workflows/mobile-ci.yml .github/workflows/release.yml
 
 mobile-retention-check:
-	@set -eu; for workflow in $$(find .github -type f \( -name '*.yml' -o -name '*.yaml' \) -print); do \
-		awk '\
-		/^[[:space:]]*- uses:/ && index($$0, "actions/upload-artifact@") { upload=1; retention=0; line=NR; next } \
-		upload && /^[[:space:]]*- / { if (!retention) { print FILENAME ":" line ": upload-artifact is missing literal retention-days: 1" > "/dev/stderr"; exit 1 } upload=0 } \
-		upload && /^[[:space:]]*retention-days:[[:space:]]*1[[:space:]]*$$/ { retention=1 } \
-		END { if (upload && !retention) { print FILENAME ":" line ": upload-artifact is missing literal retention-days: 1" > "/dev/stderr"; exit 1 } }' "$$workflow" || exit 1; \
-	done
+	bun tests/mobile/retention-check.ts .github
+
+mobile-composite-check:
+	bun tests/mobile/composite-check.ts .github/actions
 
 mobile-cache-recovery:
 	@test -n "$(MOBILE_ARGS)" || (echo 'MOBILE_ARGS is required' >&2; exit 2)

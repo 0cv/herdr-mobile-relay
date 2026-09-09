@@ -9,11 +9,13 @@ import { requireOwnedDevice } from '../support/device';
 import {
   accessibility,
   accessibilityPrefix,
+  androidTextLocator,
   AppiumClient,
   buttonText,
   css,
   delay,
   isFatalDriverError,
+  minimumDriverRequestMs,
   textLocator,
   type Locator,
 } from '../support/webdriver';
@@ -23,6 +25,10 @@ function androidShellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
 }
 
+const ANDROID_NATIVE_IDLE_TIMEOUT_MS = 500;
+const ANDROID_NATIVE_SELECTOR_TIMEOUT_MS = 0;
+const ANDROID_NATIVE_LOOKUP_ROUND_MS = 5_000;
+const ANDROID_NATIVE_SCROLL_LIMIT = 8;
 const CHROME_WEBAPP_ACTION = 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP';
 const CHROME_WEBAPP_COMPONENT = 'com.android.chrome/org.chromium.chrome.browser.webapps.WebappLauncherActivity';
 const CHROME_WEBAPP_ID = 'org.chromium.chrome.browser.webapp_id';
@@ -138,6 +144,7 @@ export class AndroidPlatform implements MobilePlatform {
   private keyboardDraft = '';
   private lastCompletion?: UpdateCompletionEvidence;
   private lastForeground?: { packageName: string; activity: string; pid: string };
+  private lastNativeSettings?: Record<string, unknown>;
 
   constructor(private readonly options: PlatformOptions) {
     this.serial = options.deviceId || process.env.ANDROID_SERIAL || '';
@@ -182,6 +189,7 @@ export class AndroidPlatform implements MobilePlatform {
       },
       requestTimeoutMs: 60_000,
     });
+    await this.configureNativeSettings();
     await this.installCertificate();
     await this.driver.close();
     await this.createChromeSession(false);
@@ -412,13 +420,14 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
-  async attachToInstalledView(): Promise<void> {
+  async attachToInstalledView(timeoutMs = 30_000): Promise<void> {
     if (!this.installedTarget) throw new Error('ANDROID_CONTEXT: no native installed-app launch has been verified');
-    const phase = this.budget.phaseView('android-attachment', 30_000);
+    const phase = this.budget.phaseView('android-attachment', timeoutMs);
     let lastError = '';
     while (!phase.exhausted) {
       phase.assertAvailable('discover installed target');
-      if (!(await this.isInstalledTargetForeground())) {
+      const foregroundTimeout = Math.min(5_000, phase.remainingMs);
+      if (foregroundTimeout < minimumDriverRequestMs || !(await this.isInstalledTargetForeground(foregroundTimeout, phase))) {
         lastError = 'installed WebappActivity is not foreground';
         await delay(250, phase);
         continue;
@@ -457,7 +466,8 @@ export class AndroidPlatform implements MobilePlatform {
           if (handle) await this.driver.switchWindow(handle, windowTimeoutMs);
           const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
           this.lastUrl = url;
-          if (this.isExpectedOrigin(url) && await this.isInstalledTargetForeground()) return;
+          const foregroundTimeout = Math.min(5_000, phase.remainingMs);
+          if (foregroundTimeout >= minimumDriverRequestMs && this.isExpectedOrigin(url) && await this.isInstalledTargetForeground(foregroundTimeout, phase)) return;
         }
       }
       lastError = `no installed Chromium window for ${this.origin}`;
@@ -602,19 +612,21 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async clickWebText(text: string): Promise<void> {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
     let lastError = '';
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      if (remaining <= 1) break;
+      if (remaining < minimumDriverRequestMs) break;
       try {
-        await this.attachToInstalledView();
-        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], remaining);
+        await this.attachToInstalledView(remaining);
+        const findTimeout = deadline - Date.now();
+        if (findTimeout < minimumDriverRequestMs) break;
+        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], findTimeout);
         const attributeTimeout = deadline - Date.now();
-        if (attributeTimeout <= 1) break;
+        if (attributeTimeout < minimumDriverRequestMs) break;
         if ((await this.driver.attribute(element, 'disabled', attributeTimeout)) === null) {
           const clickTimeout = deadline - Date.now();
-          if (clickTimeout <= 1) break;
+          if (clickTimeout < minimumDriverRequestMs) break;
           await this.driver.click(element, clickTimeout);
           return;
         }
@@ -623,28 +635,29 @@ export class AndroidPlatform implements MobilePlatform {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      const waitMs = Math.min(250, deadline - Date.now());
-      if (waitMs <= 0) break;
-      await delay(waitMs);
+      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
+      if (waitMs > 0) await delay(waitMs);
     }
     throw new Error(`APPIUM_BUTTON: ${text}: ${lastError}`);
   }
 
   async clickDialogText(dialogId: string, text: string): Promise<void> {
-    const deadline = Date.now() + 30_000;
+    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
     let lastError = '';
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      if (remaining <= 1) break;
+      if (remaining < minimumDriverRequestMs) break;
       try {
-        await this.attachToInstalledView();
-        const buttons = await this.driver.findAll(css(`#${dialogId} button`), remaining);
+        await this.attachToInstalledView(remaining);
+        const findTimeout = deadline - Date.now();
+        if (findTimeout < minimumDriverRequestMs) break;
+        const buttons = await this.driver.findAll(css(`#${dialogId} button`), findTimeout);
         for (const button of buttons) {
           const textTimeout = deadline - Date.now();
-          if (textTimeout <= 1) break;
+          if (textTimeout < minimumDriverRequestMs) break;
           if ((await this.driver.text(button, textTimeout)).trim() === text) {
             const clickTimeout = deadline - Date.now();
-            if (clickTimeout <= 1) break;
+            if (clickTimeout < minimumDriverRequestMs) break;
             await this.driver.click(button, clickTimeout);
             return;
           }
@@ -654,9 +667,8 @@ export class AndroidPlatform implements MobilePlatform {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
-      const waitMs = Math.min(250, deadline - Date.now());
-      if (waitMs <= 0) break;
-      await delay(waitMs);
+      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
+      if (waitMs > 0) await delay(waitMs);
     }
     throw new Error(`APPIUM_DIALOG_BUTTON: ${dialogId}/${text}: ${lastError}`);
   }
@@ -710,6 +722,7 @@ export class AndroidPlatform implements MobilePlatform {
       lastIdentity: this.lastIdentity,
       lastCompletion: this.lastCompletion,
       lastForeground: this.lastForeground,
+      nativeSettings: this.lastNativeSettings,
       driver: this.driver.snapshot(),
       events: this.diagnostics.snapshot(),
     };
@@ -725,6 +738,31 @@ export class AndroidPlatform implements MobilePlatform {
       requestTimeoutMs: 60_000,
       budget: this.budget,
     });
+    await this.configureNativeSettings();
+  }
+
+  private async configureNativeSettings(): Promise<void> {
+    const timeoutMs = Math.min(10_000, this.budget.remainingMs);
+    if (timeoutMs < minimumDriverRequestMs) throw new Error('ANDROID_SETTINGS: insufficient time to configure native settings');
+    const requested = {
+      waitForIdleTimeout: ANDROID_NATIVE_IDLE_TIMEOUT_MS,
+      waitForSelectorTimeout: ANDROID_NATIVE_SELECTOR_TIMEOUT_MS,
+    };
+    await this.driver.updateSettings(requested, timeoutMs);
+    const readbackTimeout = Math.min(timeoutMs, this.budget.remainingMs);
+    if (readbackTimeout < minimumDriverRequestMs) throw new Error('ANDROID_SETTINGS: insufficient time to read back native settings');
+    const response = await this.driver.settings(readbackTimeout);
+    const observed = response.settings && typeof response.settings === 'object'
+      ? response.settings as Record<string, unknown>
+      : response;
+    if (Number(observed.waitForIdleTimeout) !== ANDROID_NATIVE_IDLE_TIMEOUT_MS
+      || Number(observed.waitForSelectorTimeout) !== ANDROID_NATIVE_SELECTOR_TIMEOUT_MS) {
+      throw new Error(`ANDROID_SETTINGS: Appium did not apply bounded native settings (${JSON.stringify(observed)})`);
+    }
+    this.lastNativeSettings = {
+      waitForIdleTimeout: Number(observed.waitForIdleTimeout),
+      waitForSelectorTimeout: Number(observed.waitForSelectorTimeout),
+    };
   }
 
   private async waitForChromeDevTools(timeoutMs: number): Promise<void> {
@@ -773,47 +811,34 @@ export class AndroidPlatform implements MobilePlatform {
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
-    await this.waitForForegroundPackage('com.android.settings');
-    await delay(500);
+    await this.waitForSettingsPage(30_000);
+    await this.captureNativeSettingsEvidence('settings-more-security-privacy');
 
-    // Android 11+ only permits CA installation when the user starts it from
-    // Settings. The generic credential intent is deliberately rejected and
-    // cannot select the file pushed above on the Android 35 image.
-    await this.clickNative([
-      accessibility('More security settings'),
-      accessibility('More security & privacy'),
-      accessibility('More security and privacy'),
-      textLocator('More security settings'),
-      textLocator('More security & privacy'),
-      textLocator('More security and privacy'),
-    ], 'More security settings');
     await this.clickNative([
       accessibility('Encryption & credentials'),
-      textLocator('Encryption & credentials'),
-      textLocator('Encryption & Credentials'),
+      androidTextLocator('Encryption & credentials'),
+      androidTextLocator('Encryption & Credentials'),
     ], 'Encryption & credentials');
     await this.clickNative([
       accessibility('Install a certificate'),
       accessibility('Install from device storage'),
       accessibility('Install from storage'),
-      textLocator('Install a certificate'),
-      textLocator('Install from device storage'),
-      textLocator('Install from storage'),
+      androidTextLocator('Install a certificate'),
+      androidTextLocator('Install from device storage'),
+      androidTextLocator('Install from storage'),
     ], 'Install a certificate');
     await this.clickNative([
       accessibility('CA certificate'),
-      textLocator('CA certificate'),
-      textLocator('CA Certificate'),
+      androidTextLocator('CA certificate'),
+      androidTextLocator('CA Certificate'),
     ], 'CA certificate');
     await this.clickNative([
       accessibility('Install anyway'),
       accessibility('INSTALL ANYWAY'),
-      textLocator('Install anyway'),
-      textLocator('INSTALL ANYWAY'),
+      androidTextLocator('Install anyway'),
+      androidTextLocator('INSTALL ANYWAY'),
     ], 'Install anyway');
 
-    // The supported flow now opens DocumentsUI. Explicitly open Downloads and
-    // choose the pushed file; do not continue after a missing control.
     await this.clickNative([
       accessibility('Show roots'),
       accessibility('Open navigation drawer'),
@@ -821,29 +846,94 @@ export class AndroidPlatform implements MobilePlatform {
     ], 'certificate picker navigation');
     await this.clickNative([
       accessibility('Downloads'),
-      textLocator('Downloads'),
+      androidTextLocator('Downloads'),
     ], 'Downloads');
     await this.clickNative([
       accessibility(remoteName),
-      textLocator(remoteName),
+      androidTextLocator(remoteName),
     ], remoteName);
-    // Android 15 installs a CA certificate immediately after the file is
-    // selected; there is no certificate-name dialog or Done button.
     await delay(1_000);
     await this.verifyCertificate(remoteName, commonName);
     await command(adb, ['-s', this.serial, 'shell', 'rm', '-f', remote], 30_000);
   }
 
+  private async waitForSettingsPage(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    let last = '';
+    while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      if (remaining < minimumDriverRequestMs) break;
+      try {
+        const foreground = await this.foregroundEvidence(Math.min(5_000, remaining));
+        last = `${foreground.packageName}/${foreground.activity} pid=${foreground.pid}`;
+        if (foreground.packageName !== 'com.android.settings' || !/MoreSecurityPrivacySettingsActivity$/u.test(foreground.activity)) {
+          await delay(Math.min(250, deadline - Date.now()));
+          continue;
+        }
+        const sourceTimeout = deadline - Date.now();
+        if (sourceTimeout < minimumDriverRequestMs) break;
+        const source = await this.driver.pageSource(sourceTimeout);
+        if (/More security|Security & privacy/iu.test(source)) return;
+        last = 'Settings activity hierarchy did not expose its landing page';
+      } catch (error) {
+        if (isFatalDriverError(error)) throw error;
+        last = error instanceof Error ? error.message : String(error);
+      }
+      const waitMs = Math.min(250, deadline - Date.now());
+      if (waitMs <= 0) break;
+      await delay(waitMs);
+    }
+    throw new Error(`ANDROID_CERTIFICATE: Settings landing page was not ready (${last || 'no activity evidence'})`);
+  }
+
+  private async captureNativeSettingsEvidence(name: string): Promise<void> {
+    await mkdir(this.outputDir, { recursive: true });
+    try {
+      const source = await this.driver.pageSource(Math.min(5_000, this.budget.remainingMs));
+      await writeBoundedText(join(this.outputDir, `${name}-hierarchy.xml`), source);
+    } catch (error) {
+      this.diagnostics.record({ phase: 'android-certificate', operation: 'settings-hierarchy', detail: error instanceof Error ? error.message : String(error) });
+    }
+    try {
+      const screenshot = Buffer.from(await this.driver.screenshot(Math.min(5_000, this.budget.remainingMs)), 'base64');
+      if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
+    } catch (error) {
+      this.diagnostics.record({ phase: 'android-certificate', operation: 'settings-screenshot', detail: error instanceof Error ? error.message : String(error) });
+    }
+    try {
+      await writeSanitizedJson(join(this.outputDir, `${name}-activity.json`), await this.foregroundEvidence(Math.min(5_000, this.budget.remainingMs)));
+    } catch (error) {
+      this.diagnostics.record({ phase: 'android-certificate', operation: 'settings-activity', detail: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  private async nativeElementEnabled(element: string, deadline: number): Promise<boolean> {
+    const enabledTimeout = deadline - Date.now();
+    if (enabledTimeout < minimumDriverRequestMs) return false;
+    const enabled = await this.driver.attribute(element, 'enabled', enabledTimeout);
+    if (enabled === 'false') return false;
+    const displayedTimeout = deadline - Date.now();
+    if (displayedTimeout < minimumDriverRequestMs) return false;
+    const displayed = await this.driver.attribute(element, 'displayed', displayedTimeout);
+    return displayed !== 'false';
+  }
+
   private async clickNative(locators: Locator[], description: string, timeoutMs = 30_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
     let lastError = '';
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      if (remaining <= 1) break;
+      if (remaining < minimumDriverRequestMs) break;
       try {
         const element = await this.findNative(locators, remaining);
+        const attributeTimeout = deadline - Date.now();
+        if (attributeTimeout < minimumDriverRequestMs) break;
+        if (!await this.nativeElementEnabled(element, deadline)) {
+          lastError = `${description} is not enabled and displayed`;
+          continue;
+        }
         const clickRemaining = deadline - Date.now();
-        if (clickRemaining <= 1) break;
+        if (clickRemaining < minimumDriverRequestMs) break;
         await this.driver.click(element, clickRemaining);
         return;
       } catch (error) {
@@ -858,30 +948,30 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async findNative(locators: Locator[], timeoutMs: number): Promise<string> {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
     let lastError = '';
     let scrolls = 0;
-    const size = await this.driver.windowSize(Math.min(2_000, Math.max(2, timeoutMs))).catch((error: unknown) => {
-      if (isFatalDriverError(error)) throw error;
-      return { width: 1_080, height: 2_400 };
-    });
+    let size = { width: 1_080, height: 2_400 };
+    const windowTimeout = Math.min(2_000, timeoutMs, this.budget.remainingMs);
+    if (windowTimeout >= minimumDriverRequestMs) {
+      size = await this.driver.windowSize(windowTimeout).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return size;
+      });
+    }
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      if (remaining <= 1) break;
+      if (remaining < minimumDriverRequestMs) break;
       try {
-        return await this.driver.findAny(locators, remaining);
+        return await this.driver.findAnyOnce(locators, Math.min(ANDROID_NATIVE_LOOKUP_ROUND_MS, remaining));
       } catch (error) {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       const afterLookup = deadline - Date.now();
-      if (afterLookup <= 1) break;
-      if (scrolls >= 8) {
-        await delay(Math.min(250, afterLookup));
-        continue;
-      }
-      const scrollTimeout = Math.min(2_000, deadline - Date.now());
-      if (scrollTimeout <= 1) break;
+      if (afterLookup < minimumDriverRequestMs || scrolls >= ANDROID_NATIVE_SCROLL_LIMIT) break;
+      const scrollTimeout = Math.min(2_000, afterLookup);
+      if (scrollTimeout < minimumDriverRequestMs) break;
       await this.driver.mobile('scrollGesture', {
         left: 0,
         top: 100,
@@ -894,9 +984,8 @@ export class AndroidPlatform implements MobilePlatform {
         lastError = error instanceof Error ? error.message : String(error);
       });
       scrolls += 1;
-      const waitMs = Math.min(250, deadline - Date.now());
-      if (waitMs <= 0) break;
-      await delay(waitMs);
+      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
+      if (waitMs > 0) await delay(waitMs);
     }
     throw new Error(`APPIUM_NATIVE: ${lastError}`);
   }
@@ -990,16 +1079,25 @@ export class AndroidPlatform implements MobilePlatform {
     throw new Error(`ANDROID_CERTIFICATE: fixture HTTPS response identity was not trusted (${lastError})`);
   }
 
-  private async foregroundEvidence(): Promise<{ packageName: string; activity: string; pid: string; raw: string }> {
-    const output = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities'], 10_000);
+  private async foregroundEvidence(timeoutMs = 10_000, budget?: PhaseBudget): Promise<{ packageName: string; activity: string; pid: string; raw: string }> {
+    const output = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities'], timeoutMs, {
+      budget,
+      label: 'read Android foreground activity',
+    });
     const component = output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s([A-Za-z0-9_.]+)\/([A-Za-z0-9_.$]+)/u);
-    const pid = output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s+pid=(\d+)/u)?.[1] || '';
-    return { packageName: component?.[1] || '', activity: component?.[2] || '', pid, raw: output.slice(-20_000) };
+    const packageName = component?.[1] || '';
+    const processLine = packageName
+      ? output.split(/\r?\n/u).find((line) => line.includes(`:${packageName}/`)) || ''
+      : '';
+    const pid = output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s+pid=(\d+)/u)?.[1]
+      || processLine.match(/ProcessRecord\{[^}\n]*\s(\d+):/u)?.[1]
+      || '';
+    return { packageName, activity: component?.[2] || '', pid, raw: output.slice(-20_000) };
   }
 
-  private async isInstalledTargetForeground(): Promise<boolean> {
+  private async isInstalledTargetForeground(timeoutMs = 10_000, budget?: PhaseBudget): Promise<boolean> {
     if (!this.installedTarget) return false;
-    const foreground = await this.foregroundEvidence();
+    const foreground = await this.foregroundEvidence(timeoutMs, budget);
     this.lastForeground = foreground;
     const packageMatches = foreground.packageName === this.installedTarget.packageName
       || /webapk/iu.test(foreground.packageName);
@@ -1014,9 +1112,9 @@ export class AndroidPlatform implements MobilePlatform {
     while (!phase.exhausted) {
       phase.assertAvailable('verify installed launch');
       try {
-        const evidence = await this.foregroundEvidence();
+        const evidence = await this.foregroundEvidence(Math.min(5_000, phase.remainingMs), phase);
         last = `${evidence.packageName}/${evidence.activity} pid=${evidence.pid}`;
-        if (await this.isInstalledTargetForeground()) {
+        if (await this.isInstalledTargetForeground(Math.min(5_000, phase.remainingMs), phase)) {
           this.installedPackage = evidence.packageName;
           return;
         }
@@ -1037,7 +1135,7 @@ export class AndroidPlatform implements MobilePlatform {
     }
   }
 
-  private async currentForegroundPackage(): Promise<string> {
-    return (await this.foregroundEvidence()).packageName;
+  private async currentForegroundPackage(timeoutMs = 10_000, budget?: PhaseBudget): Promise<string> {
+    return (await this.foregroundEvidence(timeoutMs, budget)).packageName;
   }
 }

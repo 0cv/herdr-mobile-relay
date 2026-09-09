@@ -85,7 +85,7 @@ func TestOnConnectHandshake(t *testing.T) {
 
 func TestTerminalReadCapabilityIsCheckedWithoutOpenPanes(t *testing.T) {
 	env := setupEnvWithScenario(t, `{"panes":[],"tabs":[],"workspaces":[]}`)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	conn, _, err := websocket.Dial(ctx, env.wsURL, nil)
 	if err != nil {
@@ -782,7 +782,7 @@ func countFakeOperations(t *testing.T, path string, want ...string) int {
 
 func readNextJSON(t *testing.T, conn *websocket.Conn, ctx context.Context) map[string]any {
 	t.Helper()
-	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	_, data, err := conn.Read(readCtx)

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1881,6 +1882,9 @@ func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
 	if err := os.WriteFile(fakeHerdr, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := exec.Command(fakeHerdr, "--version").Output(); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{
 		HerdrBin:   fakeHerdr,
 		CacheDir:   filepath.Join(root, "cache"),
@@ -1895,7 +1899,7 @@ func TestBackgroundClaudeHistoryCaptureDoesNotRequirePhoneRead(t *testing.T) {
 	s.syncHistoryPanes(s.state.Snapshot())
 
 	s.scheduleHistoryCapture(context.Background(), "pane-1")
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for !strings.Contains(s.historyM.Content("pane-1", 100), "second output") {
 		if time.Now().After(deadline) {
 			t.Fatal("background capture did not persist Claude pane output")

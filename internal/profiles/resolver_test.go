@@ -2,6 +2,7 @@ package profiles
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -57,6 +58,9 @@ func TestAgentVersionUsesResolvedProfileExecutable(t *testing.T) {
 	binDir := t.TempDir()
 	codex := filepath.Join(binDir, "codex")
 	if err := os.WriteFile(codex, []byte("#!/bin/sh\necho 'codex-cli 1.2.3'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Command(codex, "--version").Output(); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir)

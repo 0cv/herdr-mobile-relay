@@ -31,7 +31,7 @@ export interface MobilePlatform {
   installFromBrowser(): Promise<void>
   launchInstalledApp(): Promise<void>;
   assertStandalone(origin: string): Promise<RuntimeIdentity>;
-  attachToInstalledView(): Promise<void>;
+  attachToInstalledView(timeoutMs?: number): Promise<void>;
   readRunningIdentity(): Promise<RuntimeIdentity>;
   readUpdateCompletion(): Promise<UpdateCompletionEvidence>;
   openFixtureAgent(relayName: string): Promise<void>;

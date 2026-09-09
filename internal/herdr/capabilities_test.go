@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -16,6 +17,9 @@ func TestCapabilityRefreshTracksLiveServerSeparatelyFromInstalledClient(t *testi
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "herdr")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' 'herdr 0.7.5'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Command(bin, "--version").Output(); err != nil {
 		t.Fatal(err)
 	}
 	socketPath, listener, done := capabilitySocket(t, []map[string]any{

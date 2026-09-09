@@ -121,12 +121,33 @@ export function oracleError(code: string, detail: string): Error {
   return new Error(`${code}: ${detail}`);
 }
 
-export function assertStandalone(identity: RuntimeIdentity, expectedOrigin: string): void {
+function ownershipError(code: string, detail: string): QualificationFatalError {
+  return qualificationFatal(code, detail, 'ownership');
+}
+
+export function assertStandaloneOwnership(identity: RuntimeIdentity, expectedOrigin: string): void {
   if (!identity.standalone) throw oracleError('STANDALONE_REQUIRED', 'the observed document is not in standalone display mode');
-  if (identity.origin !== expectedOrigin) throw oracleError('ORIGIN_MISMATCH', `${identity.origin} is not ${expectedOrigin}`);
-  if (identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider || !identity.nativeActivity || !identity.nativePid) {
-    throw oracleError('STANDALONE_PROVIDER_REQUIRED', 'the observed document is not an installed standalone web app with provider, activity, and pid evidence');
+  if (identity.origin !== expectedOrigin) throw ownershipError('ORIGIN_MISMATCH', `${identity.origin} is not ${expectedOrigin}`);
+  if (identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider) {
+    throw ownershipError('STANDALONE_PROVIDER_REQUIRED', 'the observed document is not an installed standalone web app with a native provider');
   }
+  const ios = identity.provider === 'ios-home-screen';
+  const providerPrefix = ios ? 'ios:' : 'android:';
+  if (!identity.nativeProvider.startsWith(providerPrefix)) {
+    throw ownershipError('STANDALONE_PROVIDER_REQUIRED', `native provider ${identity.nativeProvider} does not match ${ios ? 'iOS' : 'Android'}`);
+  }
+  if (!identity.nativePid || (!ios && !identity.nativeActivity)) {
+    throw ownershipError(
+      'STANDALONE_PROVIDER_REQUIRED',
+      ios
+        ? 'the installed iOS web app has no foreground bundle or pid evidence'
+        : 'the installed Android web app has no foreground activity or pid evidence',
+    );
+  }
+}
+
+export function assertStandalone(identity: RuntimeIdentity, expectedOrigin: string): void {
+  assertStandaloneOwnership(identity, expectedOrigin);
   if (!identity.applicationInitialized) throw oracleError('APP_NOT_INITIALIZED', 'the installed document did not initialize the application');
 }
 
@@ -165,11 +186,11 @@ export function assertInvitationOwnership(
   evidence: RelayAuthEvidence,
   relayNames = Object.keys(evidence.relays).sort(),
 ): void {
-  if (!relayNames.length) throw oracleError('CREDENTIAL_RELAYS', 'no relays were included in invitation evidence');
+  if (!relayNames.length) throw ownershipError('CREDENTIAL_RELAYS', 'no relays were included in invitation evidence');
   for (const relayName of relayNames) {
     const relay = evidence.relays[relayName];
-    if (!relay) throw oracleError('CREDENTIAL_RELAY_MISSING', `${relayName} is missing from invitation evidence`);
-    if (relay.invitationAuthCount < 1) throw oracleError('INVITATION_COUNT', `${relayName} did not complete invitation authentication`);
+    if (!relay) throw ownershipError('CREDENTIAL_RELAY_MISSING', `${relayName} is missing from invitation evidence`);
+    if (relay.invitationAuthCount < 1) throw ownershipError('INVITATION_COUNT', `${relayName} did not complete invitation authentication`);
   }
 }
 
@@ -177,16 +198,16 @@ export function assertRelayOwnership(
   evidence: RelayAuthEvidence,
   relayNames = Object.keys(evidence.relays).sort(),
 ): void {
-  if (!relayNames.length) throw oracleError('CREDENTIAL_RELAYS', 'no relays were included in ownership evidence');
+  if (!relayNames.length) throw ownershipError('CREDENTIAL_RELAYS', 'no relays were included in ownership evidence');
   for (const relayName of relayNames) {
     const relay = evidence.relays[relayName];
-    if (!relay) throw oracleError('CREDENTIAL_RELAY_MISSING', `${relayName} is missing from ownership evidence`);
-    if (relay.invitationAuthCount < 1) throw oracleError('INVITATION_COUNT', `${relayName} did not complete invitation authentication`);
+    if (!relay) throw ownershipError('CREDENTIAL_RELAY_MISSING', `${relayName} is missing from ownership evidence`);
+    if (relay.invitationAuthCount < 1) throw ownershipError('INVITATION_COUNT', `${relayName} did not complete invitation authentication`);
     if (relay.credentialAuthCount < 1 || relay.credentialPseudonyms.length < 1) {
-      throw oracleError('CREDENTIAL_OWNERSHIP_MISSING', `${relayName} has no established credential identity`);
+      throw ownershipError('CREDENTIAL_OWNERSHIP_MISSING', `${relayName} has no established credential identity`);
     }
     if (relay.connections === undefined || relay.connections < 1) {
-      throw oracleError('CREDENTIAL_CONNECTION_MISSING', `${relayName} has no active credential-owned connection`);
+      throw ownershipError('CREDENTIAL_CONNECTION_MISSING', `${relayName} has no active credential-owned connection`);
     }
   }
 }
@@ -223,21 +244,21 @@ export function assertCredentialIdentityPreserved(
   after: RelayAuthEvidence,
   relayNames = Object.keys(before.relays).sort(),
 ): void {
-  if (!relayNames.length) throw oracleError('CREDENTIAL_RELAYS', 'no relays were included in credential evidence');
+  if (!relayNames.length) throw ownershipError('CREDENTIAL_RELAYS', 'no relays were included in credential evidence');
   for (const relayName of relayNames) {
     const previous = before.relays[relayName];
     const current = after.relays[relayName];
-    if (!previous || !current) throw oracleError('CREDENTIAL_RELAY_MISSING', `${relayName} is missing from credential evidence`);
+    if (!previous || !current) throw ownershipError('CREDENTIAL_RELAY_MISSING', `${relayName} is missing from credential evidence`);
     if (previous.invitationAuthCount < 1) {
-      throw oracleError('INVITATION_COUNT', `${relayName} did not complete bootstrap authentication`);
+      throw ownershipError('INVITATION_COUNT', `${relayName} did not complete bootstrap authentication`);
     }
     if (current.invitationAuthCount !== previous.invitationAuthCount) {
-      throw oracleError('INVITATION_REUSED', `${relayName} invitation authentication changed from ${previous.invitationAuthCount} to ${current.invitationAuthCount}`);
+      throw ownershipError('INVITATION_REUSED', `${relayName} invitation authentication changed from ${previous.invitationAuthCount} to ${current.invitationAuthCount}`);
     }
     const beforeIds = [...previous.credentialPseudonyms].sort();
     const afterIds = [...current.credentialPseudonyms].sort();
     if (JSON.stringify(beforeIds) !== JSON.stringify(afterIds)) {
-      throw oracleError('CREDENTIAL_CHANGED', `${relayName} reconnect used a different credential identity`);
+      throw ownershipError('CREDENTIAL_CHANGED', `${relayName} reconnect used a different credential identity`);
     }
   }
 }
@@ -252,7 +273,7 @@ export function assertCredentialPreserved(
     const previous = before.relays[relayName];
     const current = after.relays[relayName];
     if (!previous || !current || current.credentialAuthCount <= previous.credentialAuthCount) {
-      throw oracleError('CREDENTIAL_NOT_USED', `${relayName} had no post-boundary credential-authenticated reconnect`);
+      throw ownershipError('CREDENTIAL_NOT_USED', `${relayName} had no post-boundary credential-authenticated reconnect`);
     }
   }
 }

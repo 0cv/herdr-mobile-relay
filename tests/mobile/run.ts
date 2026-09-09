@@ -20,6 +20,7 @@ import {
   QualificationFailureLatch,
   assertPreferencePreserved,
   assertStandalone,
+  assertStandaloneOwnership,
   assertRunningIdentity,
   type PreferenceEvidence,
   type QualificationFailureSnapshot,
@@ -319,11 +320,8 @@ async function assertCandidateFailureObserved(
     assertFaultActive(state, faultPath, faultKind, faultId, faultGeneration);
     try {
       const identity = await platform.readRunningIdentity();
-      if (!identity.standalone) throw new Error('STANDALONE_REQUIRED: failed candidate is not in the installed standalone provider');
-      if (identity.origin !== origin) throw new Error(`ORIGIN_MISMATCH: failed candidate document is ${identity.origin}, not ${origin}`);
-      if (identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider || !identity.nativeActivity || !identity.nativePid) {
-        throw new Error('STANDALONE_PROVIDER_REQUIRED: failed candidate has incomplete standalone provider evidence');
-      }
+      qualification.observe({ identity });
+      assertStandaloneOwnership(identity, origin);
       const completion = await platform.readUpdateCompletion();
       qualification.observe({ identity, completion });
       if (phonePlanContract(baseline, completion, controls)) assertPhoneUpdateNotAcknowledged(completion);
@@ -361,6 +359,7 @@ async function waitForCandidate(
   while (Date.now() < deadline) {
     try {
       const identity = await platform.readRunningIdentity();
+      qualification.observe({ identity });
       if (identity.navigationId) navigationIds.add(identity.navigationId);
       assertStandalone(identity, origin);
       assertRunningIdentity(identity, expected);

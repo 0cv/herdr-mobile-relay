@@ -104,6 +104,148 @@ func TestReleaseRouterBarrierFaultIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestReleaseRouterHealthyOneShotStallFinishes(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if err := router.addFault(responseFault{ID: "healthy", Generation: "generation-1", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: "entry", Remaining: 1, LifetimeMs: 60_000}); err != nil {
+		t.Fatal(err)
+	}
+	responseDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+		responseDone <- response
+	}()
+	deadline := time.Now().Add(time.Second)
+	for len(router.snapshotRequests()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(router.snapshotRequests()) != 1 {
+		t.Fatal("one-shot stall was not admitted")
+	}
+	if err := router.releaseBarrier("entry"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case response := <-responseDone:
+		if response.Code != http.StatusOK {
+			t.Fatalf("healthy one-shot response = %d", response.Code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("healthy one-shot response did not finish")
+	}
+	if active := router.activeFaults(); len(active) != 0 {
+		t.Fatalf("completed one-shot stall remains active: %#v", active)
+	}
+	later := httptest.NewRecorder()
+	router.ServeHTTP(later, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+	if later.Code != http.StatusOK {
+		t.Fatalf("later healthy request returned %d", later.Code)
+	}
+}
+
+func TestReleaseRouterOverlappingFiniteStallsRetireAfterAllCompletions(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if err := router.addFault(responseFault{ID: "overlap", Generation: "generation-1", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: "entry", Remaining: 2, LifetimeMs: 60_000}); err != nil {
+		t.Fatal(err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	var group sync.WaitGroup
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/index.html", nil))
+			responses <- response
+		}()
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(router.snapshotRequests()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(router.snapshotRequests()) != 2 {
+		t.Fatal("both finite stall admissions were not recorded")
+	}
+	if active := router.activeFaults(); len(active) != 1 || active[0].Remaining != 0 {
+		t.Fatalf("finite stall was not held for in-flight requests: %#v", active)
+	}
+	if err := router.releaseBarrier("entry"); err != nil {
+		t.Fatal(err)
+	}
+	group.Wait()
+	close(responses)
+	for response := range responses {
+		if response.Code != http.StatusOK {
+			t.Fatalf("overlapping healthy response = %d", response.Code)
+		}
+	}
+	if active := router.activeFaults(); len(active) != 0 {
+		t.Fatalf("overlapping finite stall remains active: %#v", active)
+	}
+}
+
+func TestReleaseRouterStaleStallCompletionCannotRetireNewGeneration(t *testing.T) {
+	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer router.close()
+	if err := router.addFault(responseFault{ID: "same", Generation: "generation-1", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: "entry-1", Remaining: 1, LifetimeMs: 60_000}); err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/index.html", nil))
+		close(firstDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for len(router.snapshotRequests()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := router.addFault(responseFault{ID: "same", Generation: "generation-2", Method: http.MethodGet, Path: "/index.html", Kind: "stall", Barrier: "entry-2", Remaining: 1, LifetimeMs: 60_000}); err != nil {
+		t.Fatal(err)
+	}
+	secondDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/index.html", nil))
+		close(secondDone)
+	}()
+	deadline = time.Now().Add(time.Second)
+	for len(router.snapshotRequests()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := router.releaseBarrier("entry-1"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first generation did not finish")
+	}
+	if active := router.activeFaults(); len(active) != 1 || active[0].Generation != "generation-2" {
+		t.Fatalf("stale completion retired replacement fault: %#v", active)
+	}
+	if err := router.releaseBarrier("entry-2"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second generation did not finish")
+	}
+	if active := router.activeFaults(); len(active) != 0 {
+		t.Fatalf("replacement generation remains active: %#v", active)
+	}
+}
+
 func TestReleaseRouterExpiredFaultCannotBeCleared(t *testing.T) {
 	router, err := newReleaseRouter(fixtureWebRoot(t, "0.20.8", "old"), fixtureWebRoot(t, "0.20.10", "candidate"))
 	if err != nil {

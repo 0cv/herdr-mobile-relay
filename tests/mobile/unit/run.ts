@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,6 +24,10 @@ import { runtimeScript } from '../platforms/types';
 import { prepareOutput, repositoryPath, repositoryRoot } from '../support/paths';
 import { validateProvenance, type ProvenanceRun } from '../support/provenance';
 import { command } from '../support/process';
+import { downloadWithRetry } from '../support/download';
+import { compositeIssues } from '../support/composite';
+import { retentionIssues } from '../support/retention';
+import { validateMobileEvidence } from '../support/evidence';
 import {
   assertBoundedReloads,
   assertCredentialIdentityPreserved,
@@ -36,6 +40,7 @@ import {
   assertPhoneUpdateNotAcknowledged,
   assertRunningIdentity,
   assertStandalone,
+  assertStandaloneOwnership,
   assertUpgradeDidNotComplete,
   isQualificationFatal,
   QualificationFailureLatch,
@@ -65,6 +70,122 @@ async function legacyRoot(version = '0.20.8', assets = 361): Promise<string> {
   await writeFile(join(root, 'assets', 'app.css'), 'body{}');
   return root;
 }
+
+test('transient baseline downloads retry without accepting a failed response', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-download-'));
+  const filename = join(root, 'baseline.tar.gz');
+  let attempts = 0;
+  await downloadWithRetry('https://example.invalid/baseline.tar.gz', filename, {
+    fetchImpl: async () => {
+      attempts += 1;
+      return attempts === 1 ? new Response('temporary failure', { status: 500 }) : new Response('verified bytes', { status: 200 });
+    },
+    sleep: async () => undefined,
+  });
+  assert.equal(attempts, 2);
+  assert.equal(await readFile(filename, 'utf8'), 'verified bytes');
+});
+
+test('repeated baseline download failure leaves no partial file', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-download-failure-'));
+  const filename = join(root, 'baseline.tar.gz');
+  await assert.rejects(
+    downloadWithRetry('https://example.invalid/baseline.tar.gz', filename, {
+      maxAttempts: 2,
+      totalTimeoutMs: 1_000,
+      fetchImpl: async () => new Response('server failure', { status: 503 }),
+      sleep: async () => undefined,
+    }),
+    /HTTP 503/,
+  );
+  assert.equal(existsSync(filename), false);
+});
+
+test('checksum validation is terminal and leaves no downloaded artifact', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-download-checksum-'));
+  const filename = join(root, 'baseline.tar.gz');
+  let attempts = 0;
+  await assert.rejects(
+    downloadWithRetry('https://example.invalid/baseline.tar.gz', filename, {
+      fetchImpl: async () => {
+        attempts += 1;
+        return new Response('wrong bytes', { status: 200 });
+      },
+      validate: () => { throw new Error('checksum mismatch'); },
+      sleep: async () => undefined,
+    }),
+    /checksum mismatch/,
+  );
+  assert.equal(attempts, 1);
+  assert.equal(existsSync(filename), false);
+});
+
+test('retention and composite checks cover named and unnamed steps', async () => {
+  const named = `jobs:\n  build:\n    steps:\n      - name: named upload\n        uses: actions/upload-artifact@v4\n        with:\n          retention-days: 7\n`;
+  const unnamed = `jobs:\n  build:\n    steps:\n      - uses: actions/upload-artifact@v4\n        with:\n          retention-days: \${{ inputs.retention }}\n`;
+  const omitted = `jobs:\n  build:\n    steps:\n      - name: omitted upload\n        uses: actions/upload-artifact@v4\n`;
+  const unnamedSeven = `jobs:\n  build:\n    steps:\n      - uses: actions/upload-artifact@v4\n        with:\n          retention-days: 7\n`;
+  const valid = `jobs:\n  build:\n    steps:\n      - name: named upload\n        uses: actions/upload-artifact@v4\n        with:\n          retention-days: 1\n`;
+  assert.equal(retentionIssues(named).length, 1);
+  assert.equal(retentionIssues(unnamed).length, 1);
+  assert.equal(retentionIssues(omitted).length, 1);
+  assert.equal(retentionIssues(unnamedSeven).length, 1);
+  assert.equal(retentionIssues(valid).length, 0);
+  const missingShell = `runs:\n  using: composite\n  steps:\n    - run: echo test\n`;
+  const validComposite = `runs:\n  using: composite\n  steps:\n    - run: echo test\n      shell: bash\n`;
+  assert.equal(compositeIssues(missingShell).length, 1);
+  assert.equal(compositeIssues(validComposite).length, 0);
+});
+
+test('iOS standalone ownership accepts bundle and pid evidence without Android activity', async () => {
+  const identity: RuntimeIdentity = {
+    url: 'https://fixture.example/', origin: 'https://fixture.example', standalone: true,
+    provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
+    version: '0.20.10', assets: 363, build: 'build', entry: '/', script: '/app.js', style: '/app.css',
+    requiredAssetsReady: true, applicationInitialized: true,
+  };
+  assert.doesNotThrow(() => assertStandaloneOwnership(identity, 'https://fixture.example'));
+});
+
+test('evidence validation enforces matrix identity and platform-specific native proof', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-mobile-evidence-'));
+  const sourceCommit = 'a'.repeat(40);
+  const headSha = 'b'.repeat(40);
+  const webHash = 'c'.repeat(64);
+  const result = {
+    schema: 1, result: 'passed', suite: 'release', platform: 'ios', baseline: '0.20.10', candidate: 'candidate-0.20.10',
+    source_commit: sourceCommit, source_run_head_sha: headSha, candidate_web_hash: webHash,
+    initial_identity: {
+      standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
+      requiredAssetsReady: true, applicationInitialized: true, script: '/assets/app.js', style: '/assets/app.css',
+    },
+    final_identity: {
+      standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
+      requiredAssetsReady: true, applicationInitialized: true, script: '/assets/app.js', style: '/assets/app.css',
+    },
+    credential_preserved: true,
+    credential_evidence: { relays: { alpha: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['one'], connections: 1 } } },
+    preference_preserved: true,
+    lifecycle_launch_count: 1,
+    phone_completion: { rawPlanPresent: true, phoneRequired: false },
+    faults_exercised: ['corrupt:/assets/app.js'],
+    fixture_requests: [{ release: 'candidate', path: '/assets/app.js', fault: 'corrupt', fault_id: 'id', fault_generation: 'generation' }],
+  };
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify(result));
+  const options = {
+    directory: root,
+    matrix: [{ platform: 'ios', baseline: '0.20.10', scenario: 'historical' }],
+    suite: 'release', candidateCommit: sourceCommit, sourceRunHeadSha: headSha, candidateWebHash: webHash,
+  };
+  await validateMobileEvidence(options);
+  await assert.rejects(validateMobileEvidence({ ...options, candidateWebHash: 'd'.repeat(64) }), /wrong candidate web hash/);
+  await mkdir(join(root, 'duplicate'), { recursive: true });
+  await writeFile(join(root, 'duplicate', 'mobile-result.json'), JSON.stringify(result));
+  await assert.rejects(validateMobileEvidence(options), /expected 1 result files, found 2/);
+  await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, platform: 'android' }));
+  await rm(join(root, 'duplicate'), { recursive: true, force: true });
+  await assert.rejects(validateMobileEvidence({ ...options, matrix: [{ platform: 'android', baseline: '0.20.10', scenario: 'historical' }] }), /Android activity evidence/);
+});
 
 test('safe archive and descriptor paths reject traversal', async () => {
   assert.equal(safeRelativePath('assets/app.js'), true);
@@ -260,6 +381,21 @@ test('Android Chrome startup only enables attach mode after explicit launch', as
   assert.equal('appium:androidUseRunningApp' in ordinary, false);
   assert.equal((ordinary['goog:chromeOptions'] as Record<string, unknown>).androidUseRunningApp, undefined);
   assert.equal((attached['goog:chromeOptions'] as Record<string, unknown>).androidUseRunningApp, true);
+});
+
+test('Android native settings are applied and read back before lookup', async () => {
+  const platform = new AndroidPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('android-settings-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+  });
+  const updates: Record<string, unknown>[] = [];
+  (platform as any).driver = {
+    updateSettings: async (settings: Record<string, unknown>) => { updates.push(settings); return { settings }; },
+    settings: async () => ({ settings: { waitForIdleTimeout: 500, waitForSelectorTimeout: 0 } }),
+  };
+  await (platform as any).configureNativeSettings();
+  assert.deepEqual(updates, [{ waitForIdleTimeout: 500, waitForSelectorTimeout: 0 }]);
+  assert.deepEqual((platform as any).lastNativeSettings, { waitForIdleTimeout: 500, waitForSelectorTimeout: 0 });
 });
 
 test('Android final launch verifies readiness only after bootstrap teardown', async () => {
@@ -753,7 +889,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
   });
   (android as any).driver = {
     windowSize: async () => ({ width: 1_080, height: 2_400 }),
-    findAny: async () => { throw fatal; },
+    findAnyOnce: async () => { throw fatal; },
     mobile: async () => { androidScrolls += 1; },
   };
   await assert.rejects(() => (android as any).findNative([{ using: 'accessibility id', value: 'Missing' }], 100), (error: unknown) => error === fatal);
@@ -765,11 +901,48 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
     certificate: '', setupUrl: '', budget: new PhaseBudget('ios-native-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
   });
   (ios as any).driver = {
-    findAny: async () => { throw fatal; },
+    findAnyOnce: async () => { throw fatal; },
     mobile: async () => { iosScrolls += 1; },
   };
   await assert.rejects(() => (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Missing' }], 'Missing', 100), (error: unknown) => error === fatal);
   assert.equal(iosScrolls, 0);
+});
+
+test('native lookup scrolls between single-pass locator rounds', async () => {
+  const android = new AndroidPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-scroll-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+  });
+  let androidLookups = 0;
+  let androidScrolls = 0;
+  (android as any).driver = {
+    windowSize: async () => ({ width: 1_080, height: 2_400 }),
+    findAnyOnce: async () => {
+      androidLookups += 1;
+      if (androidLookups > 1) return 'android-target';
+      throw new Error('element not found');
+    },
+    mobile: async () => { androidScrolls += 1; },
+  };
+  assert.equal(await (android as any).findNative([{ using: 'accessibility id', value: 'Target' }], 500), 'android-target');
+  assert.equal(androidScrolls, 1);
+
+  const ios = new IOSPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', deviceId: 'simulator-1', budget: new PhaseBudget('ios-scroll-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+  });
+  let iosLookups = 0;
+  let iosScrolls = 0;
+  (ios as any).driver = {
+    findAnyOnce: async () => {
+      iosLookups += 1;
+      if (iosLookups > 1) return 'ios-target';
+      throw new Error('element not found');
+    },
+    mobile: async () => { iosScrolls += 1; },
+  };
+  assert.equal(await (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Target' }], 'Target', 500), 'ios-target');
+  assert.equal(iosScrolls, 1);
 });
 
 test('Android context metadata keeps the recorded response beside canonical context IDs', async () => {
