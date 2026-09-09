@@ -127,7 +127,9 @@ export function isFatalDriverError(error: unknown): boolean {
 
 export function isRetryableElementLookupError(error: unknown): boolean {
   if (error instanceof ElementLookupError) return true;
-  if (!(error instanceof WebDriverError) || error.code !== 'APPIUM_COMMAND') return false;
+  if (!(error instanceof WebDriverError)) return false;
+  if (error.code === 'APPIUM_COMMAND_NOT_ADMITTED') return true;
+  if (error.code !== 'APPIUM_COMMAND') return false;
   return error.status === 404 || /no such element|stale element reference|element not found|could not be located|unable to find element/iu.test(error.message);
 }
 
@@ -141,6 +143,38 @@ function isTimeoutError(error: unknown): boolean {
 
 const lookupSliceMs = 5_000;
 export const minimumDriverRequestMs = 50;
+export const driverRequestAllowanceMs = {
+  generic: 250,
+  lookup: 1_000,
+  attribute: 750,
+  click: 1_000,
+  gesture: 4_000,
+  navigation: 5_000,
+  source: 5_000,
+} as const;
+
+export function driverCommandAllowance(path: string, method: string, body?: unknown): number {
+  if (path === '/session' && method === 'POST') return 0;
+  if ((path === '/element' || path === '/elements') && method === 'POST') return driverRequestAllowanceMs.lookup;
+  if (/\/attribute\/|\/text$/u.test(path)) return driverRequestAllowanceMs.attribute;
+  if (/\/click$/u.test(path)) return driverRequestAllowanceMs.click;
+  if (path === '/source' || path === '/screenshot') return driverRequestAllowanceMs.source;
+  if (path === '/window/rect' || path === '/window/handles' || path === '/window') return driverRequestAllowanceMs.attribute;
+  if (path === '/url' && method === 'POST') return driverRequestAllowanceMs.navigation;
+  if (path === '/execute/sync' && method === 'POST') {
+    const script = body && typeof body === 'object' && 'script' in body
+      ? String((body as { script?: unknown }).script || '')
+      : '';
+    if (/^mobile:\s*(?:scrollGesture|scroll)$/u.test(script)) return driverRequestAllowanceMs.gesture;
+    if (/^mobile:\s*(?:swipe|tap|pressButton|activateApp|terminateApp|hideKeyboard)$/u.test(script)) return 2_000;
+    return driverRequestAllowanceMs.lookup;
+  }
+  return driverRequestAllowanceMs.generic;
+}
+
+export function isCommandAdmissionError(error: unknown): boolean {
+  return error instanceof WebDriverError && error.code === 'APPIUM_COMMAND_NOT_ADMITTED';
+}
 
 export class AppiumClient {
   private sessionId = '';
@@ -312,11 +346,12 @@ export class AppiumClient {
   async find(locator: Locator, timeoutMs = 30_000): Promise<string> {
     const budget = this.phaseBudget(timeoutMs, `find ${locator.using}`);
     const deadline = Date.now() + Math.min(timeoutMs, budget.remainingMs);
+    const allowance = driverCommandAllowance('/element', 'POST', locator);
     let lastError = 'element not found';
     while (!budget.exhausted && Date.now() < deadline) {
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
-      if (remaining <= 1) break;
+      if (remaining <= 1 || (this.budget && remaining < allowance)) break;
       const sliceMs = Math.min(lookupSliceMs, remaining);
       const startedAt = Date.now();
       try {
@@ -328,6 +363,7 @@ export class AppiumClient {
         this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
         if (!retryable) throw error;
         lastError = error instanceof Error ? error.message : String(error);
+        if (isCommandAdmissionError(error)) break;
       }
       const waitMs = Math.min(100, deadline - Date.now(), budget.remainingMs);
       if (waitMs <= 0) break;
@@ -450,7 +486,22 @@ export class AppiumClient {
     const operationTimeoutMs = timeoutMs ?? this.requestTimeoutMs;
     const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
     const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
+    const commandPath = path.replace(/^\/session\/[^/]+(?=\/)/u, '');
+    const allowance = driverCommandAllowance(commandPath, method, body);
     const startedAt = Date.now();
+    if (enforceBudget && this.budget && requestTimeoutMs < allowance) {
+      const error = new WebDriverError({
+        code: 'APPIUM_COMMAND_NOT_ADMITTED',
+        message: `${operation} has ${requestTimeoutMs}ms available; ${allowance}ms is required to complete the command`,
+        path,
+        method,
+        durationMs: 0,
+        selectedContext: this.selectedContext,
+        selectedWindow: this.selectedWindow,
+      });
+      this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, error.message);
+      throw error;
+    }
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
@@ -559,7 +610,8 @@ export class AppiumClient {
       if (budget.exhausted || Date.now() >= deadline) break;
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
-      if (remaining < minimumDriverRequestMs) break;
+      const allowance = driverCommandAllowance('/element', 'POST', locator);
+      if (remaining < minimumDriverRequestMs || (this.budget && remaining < allowance)) break;
       const sliceMs = Math.min(lookupSliceMs, remaining);
       const startedAt = Date.now();
       try {
@@ -571,6 +623,7 @@ export class AppiumClient {
         this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
         if (!retryable) throw error;
         lastError = error instanceof Error ? error.message : String(error);
+        if (isCommandAdmissionError(error)) break;
       }
     }
     if (this.budget?.exhausted) this.budget.assertAvailable('find any once');
@@ -587,7 +640,8 @@ export class AppiumClient {
       nextLocator += 1;
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
-      if (remaining <= 1) break;
+      const allowance = driverCommandAllowance('/element', 'POST', locator);
+      if (remaining <= 1 || (this.budget && remaining < allowance)) break;
       const sliceMs = Math.min(lookupSliceMs, remaining);
       const startedAt = Date.now();
       try {
@@ -599,6 +653,7 @@ export class AppiumClient {
         this.recordLookup(locator, sliceMs, startedAt, deadline, isFatalDriverError(error) || !retryable ? 'fatal' : 'retryable', error);
         if (!retryable) throw error;
         lastError = error instanceof Error ? error.message : String(error);
+        if (isCommandAdmissionError(error)) break;
       }
       if (nextLocator % locators.length === 0) {
         const waitMs = Math.min(100, deadline - Date.now(), budget.remainingMs);

@@ -260,11 +260,12 @@ func canonicalPiPattern(path string) string {
 	prefix := path[:wildcard]
 	suffix := path[wildcard:]
 	base := prefix
+	filenamePrefix := ""
 	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
 		base = filepath.Dir(prefix)
-		suffix = filepath.Join(filepath.Base(prefix), suffix)
+		filenamePrefix = filepath.Base(prefix)
 	}
-	return filepath.Join(canonicalPiPath(base), suffix)
+	return filepath.Join(canonicalPiPath(base), filenamePrefix+suffix)
 }
 
 func piProjectTrusted(agentDir, cwd, defaultTrust string) bool {

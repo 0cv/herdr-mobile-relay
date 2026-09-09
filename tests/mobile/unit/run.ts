@@ -19,7 +19,7 @@ import { PhaseBudget } from '../support/budget';
 import { AppiumClient, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
-import { IOSPlatform, iosInstalledContextRejection, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError } from '../platforms/ios';
+import { IOSPlatform, iosInstalledContextRejection, iosOpenURLFailureKind, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError } from '../platforms/ios';
 import { runtimeScript } from '../platforms/types';
 import { prepareOutput, repositoryPath, repositoryRoot } from '../support/paths';
 import { validateProvenance, type ProvenanceRun } from '../support/provenance';
@@ -133,8 +133,11 @@ test('retention and composite checks cover named and unnamed steps', async () =>
   assert.equal(retentionIssues(valid).length, 0);
   const missingShell = `runs:\n  using: composite\n  steps:\n    - run: echo test\n`;
   const validComposite = `runs:\n  using: composite\n  steps:\n    - run: echo test\n      shell: bash\n`;
+  const reorderedComposite = `runs:\n  using: "composite"\n  steps:\n    - shell: bash\n      run: echo test\n`;
   assert.equal(compositeIssues(missingShell).length, 1);
   assert.equal(compositeIssues(validComposite).length, 0);
+  assert.equal(compositeIssues(reorderedComposite).length, 0);
+  assert.match(compositeIssues('runs: [').at(0)?.message || '', /invalid YAML/);
 });
 
 test('iOS standalone ownership accepts bundle and pid evidence without Android activity', async () => {
@@ -157,19 +160,27 @@ test('evidence validation enforces matrix identity and platform-specific native 
     source_commit: sourceCommit, source_run_head_sha: headSha, candidate_web_hash: webHash,
     initial_identity: {
       standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
-      requiredAssetsReady: true, applicationInitialized: true, script: '/assets/app.js', style: '/assets/app.css',
+      url: 'https://fixture.test/old', origin: 'https://fixture.test', version: '0.20.10', assets: 363,
+      entry: '/old/index.html', script: '/assets/old.js', style: '/assets/old.css',
+      requiredAssetsReady: true, applicationInitialized: true,
     },
     final_identity: {
       standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
-      requiredAssetsReady: true, applicationInitialized: true, script: '/assets/app.js', style: '/assets/app.css',
+      url: 'https://fixture.test/new', origin: 'https://fixture.test', version: '0.21.0', assets: 364,
+      entry: '/new/index.html', script: '/assets/new.js', style: '/assets/new.css',
+      requiredAssetsReady: true, applicationInitialized: true,
     },
     credential_preserved: true,
-    credential_evidence: { relays: { alpha: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['one'], connections: 1 } } },
+    credential_evidence: { relays: {
+      alpha: { invitationAuthCount: 1, credentialAuthCount: 2, credentialPseudonyms: ['one'], connections: 1 },
+      beta: { invitationAuthCount: 1, credentialAuthCount: 2, credentialPseudonyms: ['two'], connections: 1 },
+    } },
     preference_preserved: true,
     lifecycle_launch_count: 1,
-    phone_completion: { rawPlanPresent: true, phoneRequired: false },
-    faults_exercised: ['corrupt:/assets/app.js'],
-    fixture_requests: [{ release: 'candidate', path: '/assets/app.js', fault: 'corrupt', fault_id: 'id', fault_generation: 'generation' }],
+    oracle_controls: [],
+    phone_completion: { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true },
+    faults_exercised: ['corrupt:/assets/new.js'],
+    fixture_requests: [{ release: 'candidate', path: '/assets/new.js', fault: 'corrupt', fault_id: 'id', fault_generation: 'generation' }],
   };
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify(result));
   const options = {
@@ -184,7 +195,15 @@ test('evidence validation enforces matrix identity and platform-specific native 
   await assert.rejects(validateMobileEvidence(options), /expected 1 result files, found 2/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, platform: 'android' }));
   await rm(join(root, 'duplicate'), { recursive: true, force: true });
-  await assert.rejects(validateMobileEvidence({ ...options, matrix: [{ platform: 'android', baseline: '0.20.10', scenario: 'historical' }] }), /Android activity evidence/);
+  await assert.rejects(validateMobileEvidence({ ...options, matrix: [{ platform: 'android', baseline: '0.20.10', scenario: 'historical' }] }), /invalid android provider|nativeActivity/);
+});
+
+test('final evidence checkout precedes artifact download', async () => {
+  const workflow = await readFile(join(repositoryRoot, '.github/workflows/mobile-ci.yml'), 'utf8');
+  const gate = workflow.slice(workflow.indexOf('\n  gate:'));
+  const checkout = gate.indexOf('Check out the verified source for final evidence validation');
+  const download = gate.indexOf('Download current-attempt device evidence artifacts');
+  assert.ok(checkout >= 0 && download >= 0 && checkout < download);
 });
 
 test('safe archive and descriptor paths reject traversal', async () => {
@@ -674,6 +693,22 @@ test('phase budget prevents a new mutation after expiry', async () => {
   assert.equal(requests, 1);
 });
 
+test('Appium native commands are not admitted near the scenario deadline', async () => {
+  let now = 0;
+  let requests = 0;
+  const budget = new PhaseBudget('admission-test', { timeoutMs: 100, now: () => now, recoveryLimit: 0 });
+  const client = new AppiumClient('http://fake.test', 100, async () => {
+    requests += 1;
+    return new Response(JSON.stringify({ value: { sessionId: 'session' }, sessionId: 'session' }), { status: 200 });
+  });
+  await client.create({ capabilities: {}, budget });
+  now = 50;
+  await assert.rejects(() => client.mobile('scrollGesture', {}, 100), /APPIUM_COMMAND_NOT_ADMITTED/);
+  assert.equal(requests, 1);
+  assert.equal(client.snapshot().unusable, false);
+  assert.ok((client.snapshot().lastCommand?.durationMs || 0) < 100);
+});
+
 test('Appium timeout preserves context and blocks follow-up commands', async () => {
   let requests = 0;
   const client = new AppiumClient('http://fake.test', 5, async () => {
@@ -965,6 +1000,32 @@ test('Android context metadata keeps the recorded response beside canonical cont
   assert.deepEqual(await client.contexts(), ['NATIVE_APP', 'CHROMIUM']);
   assert.deepEqual(await client.contextMetadataRaw(), androidResponse);
   assert.deepEqual(await client.contextMetadata(), []);
+});
+
+test('iOS native installation rejects a disabled Share control', async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-install-'));
+  const platform = new IOSPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
+    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    budget: new PhaseBudget('ios-install-test', { timeoutMs: 5_000, recoveryLimit: 1 }),
+  });
+  const driver = platform.driver as any;
+  const gestures: string[] = [];
+  driver.switchContext = async () => undefined;
+  driver.activeAppInfo = async () => ({ bundleId: 'com.apple.mobilesafari' });
+  driver.pageSource = async () => '<XCUIElementTypeButton name="Share" label="Share" enabled="false" visible="true" bounds="[10,700][50,740]"/>';
+  driver.screenshot = async () => '';
+  driver.findAnyOnce = async () => 'share';
+  driver.attribute = async (_element: string, name: string) => name === 'enabled' ? 'false' : 'true';
+  driver.mobile = async (command: string) => { gestures.push(command); };
+  await assert.rejects(() => platform.installFromBrowser(), /Share: control is disabled/);
+  assert.deepEqual(gestures, []);
+});
+
+test('iOS openurl failures distinguish transient, terminal, and timeout outcomes', async () => {
+  assert.equal(iosOpenURLFailureKind(new Error('LaunchServices temporarily unavailable')), 'transient');
+  assert.equal(iosOpenURLFailureKind(new Error('invalid simulator device')), 'terminal');
+  assert.equal(iosOpenURLFailureKind(new Error('ETIMEDOUT')), 'timeout');
 });
 
 test('iOS installed-page candidates distinguish Safari from SafariViewService', async () => {

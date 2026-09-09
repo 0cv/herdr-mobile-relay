@@ -907,6 +907,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - name: Check out the verified source for final evidence validation
+        if: needs.provenance.result == 'success' && needs.device.result == 'success'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.provenance.outputs.source_sha }}
+          fetch-depth: 1
       - name: Download current-attempt device evidence artifacts
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
         uses: actions/download-artifact@v4
@@ -914,12 +920,6 @@ jobs:
           pattern: mobile-evidence-full-*-${{ github.run_attempt }}
           path: evidence
           merge-multiple: false
-      - name: Check out the verified source for final evidence validation
-        if: needs.provenance.result == 'success' && needs.device.result == 'success'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.provenance.outputs.source_sha }}
-          fetch-depth: 1
       - name: Install Bun for final evidence validation
         if: needs.provenance.result == 'success' && needs.device.result == 'success'
         uses: oven-sh/setup-bun@v2

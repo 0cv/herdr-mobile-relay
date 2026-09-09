@@ -125,8 +125,13 @@ function ownershipError(code: string, detail: string): QualificationFatalError {
   return qualificationFatal(code, detail, 'ownership');
 }
 
+export function isRuntimeIdentityNotReady(identity: RuntimeIdentity): boolean {
+  return identity.applicationInitialized !== true
+    && (!identity.standalone || identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider);
+}
+
 export function assertStandaloneOwnership(identity: RuntimeIdentity, expectedOrigin: string): void {
-  if (!identity.standalone) throw oracleError('STANDALONE_REQUIRED', 'the observed document is not in standalone display mode');
+  if (!identity.standalone) throw ownershipError('STANDALONE_REQUIRED', 'the observed document is not in standalone display mode');
   if (identity.origin !== expectedOrigin) throw ownershipError('ORIGIN_MISMATCH', `${identity.origin} is not ${expectedOrigin}`);
   if (identity.provider === 'browser' || identity.provider === 'unknown' || !identity.nativeProvider) {
     throw ownershipError('STANDALONE_PROVIDER_REQUIRED', 'the observed document is not an installed standalone web app with a native provider');

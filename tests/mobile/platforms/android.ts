@@ -14,6 +14,7 @@ import {
   buttonText,
   css,
   delay,
+  isCommandAdmissionError,
   isFatalDriverError,
   minimumDriverRequestMs,
   textLocator,
@@ -28,6 +29,7 @@ function androidShellQuote(value: string): string {
 const ANDROID_NATIVE_IDLE_TIMEOUT_MS = 500;
 const ANDROID_NATIVE_SELECTOR_TIMEOUT_MS = 0;
 const ANDROID_NATIVE_LOOKUP_ROUND_MS = 5_000;
+const ANDROID_NATIVE_SCROLL_COMMAND_MS = 4_000;
 const ANDROID_NATIVE_SCROLL_LIMIT = 8;
 const CHROME_WEBAPP_ACTION = 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP';
 const CHROME_WEBAPP_COMPONENT = 'com.android.chrome/org.chromium.chrome.browser.webapps.WebappLauncherActivity';
@@ -888,22 +890,45 @@ export class AndroidPlatform implements MobilePlatform {
 
   private async captureNativeSettingsEvidence(name: string): Promise<void> {
     await mkdir(this.outputDir, { recursive: true });
-    try {
+    const capture = async (operation: string, action: () => Promise<void>): Promise<void> => {
+      try {
+        await action();
+      } catch (error) {
+        if (isFatalDriverError(error)) {
+          await this.captureNativeSettingsAdbEvidence(name);
+          throw error;
+        }
+        this.diagnostics.record({ phase: 'android-certificate', operation, detail: error instanceof Error ? error.message : String(error) });
+      }
+    };
+    await capture('settings-hierarchy', async () => {
       const source = await this.driver.pageSource(Math.min(5_000, this.budget.remainingMs));
       await writeBoundedText(join(this.outputDir, `${name}-hierarchy.xml`), source);
-    } catch (error) {
-      this.diagnostics.record({ phase: 'android-certificate', operation: 'settings-hierarchy', detail: error instanceof Error ? error.message : String(error) });
-    }
-    try {
+    });
+    await capture('settings-screenshot', async () => {
       const screenshot = Buffer.from(await this.driver.screenshot(Math.min(5_000, this.budget.remainingMs)), 'base64');
       if (screenshot.byteLength <= 20 * 1024 * 1024) await writeFile(join(this.outputDir, `${name}.png`), screenshot, { mode: 0o600 });
-    } catch (error) {
-      this.diagnostics.record({ phase: 'android-certificate', operation: 'settings-screenshot', detail: error instanceof Error ? error.message : String(error) });
-    }
-    try {
+    });
+    await capture('settings-activity', async () => {
       await writeSanitizedJson(join(this.outputDir, `${name}-activity.json`), await this.foregroundEvidence(Math.min(5_000, this.budget.remainingMs)));
+    });
+  }
+
+  private async captureNativeSettingsAdbEvidence(name: string): Promise<void> {
+    try {
+      await mkdir(this.outputDir, { recursive: true });
+      const adb = process.env.ADB || 'adb';
+      const captures: Array<[string, string[]]> = [
+        ['logcat', ['-s', this.serial, 'logcat', '-d', '-t', '600']],
+        ['activity-adb', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities']],
+        ['window-adb', ['-s', this.serial, 'shell', 'dumpsys', 'window', 'windows']],
+      ];
+      for (const [suffix, args] of captures) {
+        const output = await commandOutput(adb, args, 10_000).catch((error) => error instanceof Error ? error.message : String(error));
+        await writeBoundedText(join(this.outputDir, `${name}-${suffix}.log`), output);
+      }
     } catch (error) {
-      this.diagnostics.record({ phase: 'android-certificate', operation: 'settings-activity', detail: error instanceof Error ? error.message : String(error) });
+      this.diagnostics.record({ phase: 'android-certificate', operation: 'settings-adb-evidence', detail: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -970,19 +995,24 @@ export class AndroidPlatform implements MobilePlatform {
       }
       const afterLookup = deadline - Date.now();
       if (afterLookup < minimumDriverRequestMs || scrolls >= ANDROID_NATIVE_SCROLL_LIMIT) break;
-      const scrollTimeout = Math.min(2_000, afterLookup);
+      if (this.driver instanceof AppiumClient && afterLookup < ANDROID_NATIVE_SCROLL_COMMAND_MS) break;
+      const scrollTimeout = Math.min(ANDROID_NATIVE_SCROLL_COMMAND_MS, afterLookup);
       if (scrollTimeout < minimumDriverRequestMs) break;
-      await this.driver.mobile('scrollGesture', {
-        left: 0,
-        top: 100,
-        width: size.width,
-        height: Math.max(1, size.height - 200),
-        direction: 'down',
-        percent: 0.75,
-      }, scrollTimeout).catch((error: unknown) => {
+      try {
+        await this.driver.mobile('scrollGesture', {
+          left: 0,
+          top: 100,
+          width: size.width,
+          height: Math.max(1, size.height - 200),
+          direction: 'down',
+          percent: 0.75,
+        }, scrollTimeout);
+      } catch (error) {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
-      });
+        if (isCommandAdmissionError(error)) break;
+        break;
+      }
       scrolls += 1;
       const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
       if (waitMs > 0) await delay(waitMs);

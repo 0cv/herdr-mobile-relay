@@ -22,6 +22,7 @@ import {
   assertStandalone,
   assertStandaloneOwnership,
   assertRunningIdentity,
+  isRuntimeIdentityNotReady,
   type PreferenceEvidence,
   type QualificationFailureSnapshot,
   type RelayAuthEvidence,
@@ -361,6 +362,11 @@ async function waitForCandidate(
       const identity = await platform.readRunningIdentity();
       qualification.observe({ identity });
       if (identity.navigationId) navigationIds.add(identity.navigationId);
+      if (isRuntimeIdentityNotReady(identity)) {
+        lastError = 'RUNTIME_NOT_READY: installed document has not initialized its standalone provider';
+        await delay(500, budget);
+        continue;
+      }
       assertStandalone(identity, origin);
       assertRunningIdentity(identity, expected);
       return identity;
