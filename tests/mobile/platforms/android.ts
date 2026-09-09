@@ -20,10 +20,82 @@ function androidShellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\"'\"'")}'`;
 }
 
+const CHROME_WEBAPP_ACTION = 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP';
+const CHROME_WEBAPP_COMPONENT = 'com.android.chrome/org.chromium.chrome.browser.webapps.WebappLauncherActivity';
+const CHROME_WEBAPP_ID = 'org.chromium.chrome.browser.webapp_id';
+const CHROME_WEBAPP_URL = 'org.chromium.chrome.browser.webapp_url';
+const CHROME_WEBAPP_SCOPE = 'org.chromium.chrome.browser.webapp_scope';
+const CHROME_WEBAPP_NAME = 'org.chromium.chrome.browser.webapp_name';
+const CHROME_WEBAPP_SHORT_NAME = 'org.chromium.chrome.browser.webapp_short_name';
+const CHROME_WEBAPP_MAC = 'org.chromium.chrome.browser.webapp_mac';
+const CHROME_WEBAPP_SOURCE = 'org.chromium.chrome.browser.webapp_source';
+const CHROME_WEBAPP_DISPLAY_MODE = 'org.chromium.chrome.browser.webapp_display_mode';
+const CHROME_WEBAPP_ORIENTATION = 'org.chromium.content_public.common.orientation';
+
+export interface AndroidChromeShortcut {
+  id: string;
+  shortLabel: string;
+  name: string;
+  url: string;
+  scope: string;
+  mac: string;
+  source?: string;
+  displayMode?: string;
+  orientation?: string;
+}
+
+function shortcutField(block: string, name: string): string | undefined {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const match = block.match(new RegExp(`(?:^|[,{[]|\\s)${escaped}=([^,}\\]\\r\\n]+)`, 'u'));
+  return match?.[1]?.trim();
+}
+
+export function parseAndroidChromeShortcuts(output: string): AndroidChromeShortcut[] {
+  return output.split(/(?=^ShortcutInfo \{)/mu).flatMap((block) => {
+    const id = shortcutField(block, 'id');
+    const shortLabel = shortcutField(block, 'shortLabel');
+    const name = shortcutField(block, CHROME_WEBAPP_NAME);
+    const url = shortcutField(block, CHROME_WEBAPP_URL);
+    const scope = shortcutField(block, CHROME_WEBAPP_SCOPE);
+    const mac = shortcutField(block, CHROME_WEBAPP_MAC);
+    if (!id || !shortLabel || !name || !url || !scope || !mac) return [];
+    return [{
+      id,
+      shortLabel,
+      name,
+      url,
+      scope,
+      mac,
+      source: shortcutField(block, CHROME_WEBAPP_SOURCE),
+      displayMode: shortcutField(block, CHROME_WEBAPP_DISPLAY_MODE),
+      orientation: shortcutField(block, CHROME_WEBAPP_ORIENTATION),
+    }];
+  });
+}
+
 export function androidOpenUrlArgs(serial: string, url: string): string[] {
   const remoteCommand = ['am', 'start', '-a', 'android.intent.action.VIEW', '-d', url, 'com.android.chrome']
     .map(androidShellQuote)
     .join(' ');
+  return ['-s', serial, 'shell', remoteCommand];
+}
+
+export function androidChromeShortcutArgs(serial: string, shortcut: AndroidChromeShortcut): string[] {
+  const args = [
+    'am', 'start', '-W', '--user', '0',
+    '-a', CHROME_WEBAPP_ACTION,
+    '-n', CHROME_WEBAPP_COMPONENT,
+    '--es', CHROME_WEBAPP_ID, shortcut.id,
+    '--es', CHROME_WEBAPP_URL, shortcut.url,
+    '--es', CHROME_WEBAPP_SCOPE, shortcut.scope,
+    '--es', CHROME_WEBAPP_NAME, shortcut.name,
+    '--es', CHROME_WEBAPP_SHORT_NAME, shortcut.shortLabel,
+    '--es', CHROME_WEBAPP_MAC, shortcut.mac,
+  ];
+  if (shortcut.source !== undefined) args.push('--ei', CHROME_WEBAPP_SOURCE, shortcut.source);
+  if (shortcut.displayMode !== undefined) args.push('--ei', CHROME_WEBAPP_DISPLAY_MODE, shortcut.displayMode);
+  if (shortcut.orientation !== undefined) args.push('--ei', CHROME_WEBAPP_ORIENTATION, shortcut.orientation);
+  const remoteCommand = args.map(androidShellQuote).join(' ');
   return ['-s', serial, 'shell', remoteCommand];
 }
 
@@ -152,8 +224,22 @@ export class AndroidPlatform implements MobilePlatform {
   async launchInstalledApp(): Promise<void> {
     await this.driver.switchContext('NATIVE_APP').catch(() => undefined);
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
-    const icon = await this.findLauncherIcon();
-    await this.driver.click(icon);
+    try {
+      const icon = await this.findLauncherIcon();
+      await this.driver.click(icon);
+    } catch (launcherError) {
+      // Chrome 131 can keep an installed PWA as a Chrome ShortcutInfo without
+      // exposing a launcher icon. Replaying the signed shortcut intent is the
+      // supported equivalent of tapping that icon and works on hosted Android
+      // 15 images where both launcher surfaces omit the shortcut.
+      try {
+        await this.launchChromeShortcut();
+      } catch (shortcutError) {
+        const launcherMessage = launcherError instanceof Error ? launcherError.message : String(launcherError);
+        const shortcutMessage = shortcutError instanceof Error ? shortcutError.message : String(shortcutError);
+        throw new Error(`${launcherMessage}; ${shortcutMessage}`, { cause: shortcutError });
+      }
+    }
     this.installedStandalone = true;
     await delay(1_000);
     this.installedPackage = await this.currentForegroundPackage();
@@ -164,6 +250,40 @@ export class AndroidPlatform implements MobilePlatform {
     const identity = await this.readRunningIdentity();
     assertStandalone(identity, origin);
     return identity;
+  }
+
+  private async launchChromeShortcut(): Promise<void> {
+    const adb = process.env.ADB || 'adb';
+    const deadline = Date.now() + 30_000;
+    let lastError = '';
+    while (Date.now() < deadline) {
+      try {
+        const output = await commandOutput(adb, [
+          '-s', this.serial, 'shell', 'cmd', 'shortcut', 'get-shortcuts',
+          '--user', '0', '--flags', '15', 'com.android.chrome',
+        ], 30_000);
+        const expectedOrigin = new URL(this.origin).origin;
+        const shortcut = parseAndroidChromeShortcuts(output).find((candidate) => {
+          const labels = [candidate.shortLabel, candidate.name];
+          if (!labels.some((label) => /herdr(?: mobile)? relay/iu.test(label))) return false;
+          try {
+            return new URL(candidate.url).origin === expectedOrigin
+              && new URL(candidate.scope).origin === expectedOrigin;
+          } catch {
+            return false;
+          }
+        });
+        if (shortcut) {
+          await command(adb, androidChromeShortcutArgs(this.serial, shortcut), 30_000);
+          return;
+        }
+        lastError = 'Chrome did not publish a matching Herdr Relay ShortcutInfo';
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      await delay(250);
+    }
+    throw new Error(`ANDROID_SHORTCUT: ${lastError}`);
   }
 
   private async findLauncherIcon(): Promise<string> {

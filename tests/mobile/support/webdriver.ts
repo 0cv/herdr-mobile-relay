@@ -117,7 +117,10 @@ export class AppiumClient {
   }
 
   async windowSize(): Promise<{ width: number; height: number }> {
-    return this.command<{ width: number; height: number }>('/window/size', 'GET');
+    // Appium 3's W3C endpoint is /window/rect; the legacy /window/size route
+    // is not implemented by UiAutomator2 and returns a misleading 404.
+    const rect = await this.command<{ width: number; height: number }>('/window/rect', 'GET');
+    return { width: rect.width, height: rect.height };
   }
 
   async back(): Promise<void> {

@@ -14,7 +14,7 @@ import {
 } from '../support/artifacts';
 import { assertNoKnownSecret, redactText, sanitizeValue } from '../support/diagnostics';
 import { parseAndroidAvdName } from '../support/android';
-import { androidOpenUrlArgs } from '../platforms/android';
+import { androidChromeShortcutArgs, androidOpenUrlArgs, parseAndroidChromeShortcuts } from '../platforms/android';
 import { runtimeScript } from '../platforms/types';
 import { repositoryPath, repositoryRoot } from '../support/paths';
 import { command } from '../support/process';
@@ -124,6 +124,23 @@ test('Android emulator-console parser handles names, terminators, and errors', a
   assert.equal(parseAndroidAvdName('OK\n'), undefined);
   assert.equal(parseAndroidAvdName('KO: unknown command\n'), undefined);
   assert.equal(parseAndroidAvdName('\r\n'), undefined);
+});
+
+test('Android Chrome shortcut output preserves the signed launch fields', async () => {
+  const shortcuts = parseAndroidChromeShortcuts(`ShortcutInfo {id=shortcut-id, flags=0x28a
+  shortLabel=Herdr Relay, resId=0[null]
+  intents=[Intent { act=com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP pkg=com.android.chrome }/PersistableBundle[{org.chromium.chrome.browser.webapp_scope=https://localhost:38289/, org.chromium.chrome.browser.webapp_name=Herdr Mobile Relay, org.chromium.chrome.browser.webapp_mac=mac+/=, org.chromium.chrome.browser.webapp_id=shortcut-id, org.chromium.chrome.browser.webapp_source=7, org.chromium.chrome.browser.webapp_display_mode=3, org.chromium.content_public.common.orientation=0, org.chromium.chrome.browser.webapp_url=https://localhost:38289/}]]
+}`);
+  assert.equal(shortcuts.length, 1);
+  assert.deepEqual(shortcuts[0], {
+    id: 'shortcut-id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay',
+    url: 'https://localhost:38289/', scope: 'https://localhost:38289/', mac: 'mac+/=',
+    source: '7', displayMode: '3', orientation: '0',
+  });
+  const args = androidChromeShortcutArgs('emulator-5554', shortcuts[0]);
+  assert.equal(args.slice(0, 3).join(' '), '-s emulator-5554 shell');
+  assert.match(args[3], /webapp_mac.*mac\+\//s);
+  assert.match(args[3], /webapp_url.*https:\/\/localhost:38289\//s);
 });
 
 test('Android setup URL survives ADB remote-shell serialization', async () => {

@@ -11,8 +11,16 @@ import {
   css,
   delay,
   textLocator,
+  type Locator,
 } from '../support/webdriver';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
+
+function iosLabelContains(value: string): Locator {
+  return {
+    using: 'xpath',
+    value: `//*[contains(@label, '${value}') or contains(@name, '${value}') or contains(@value, '${value}') or contains(@text, '${value}')]`,
+  };
+}
 
 export class IOSPlatform implements MobilePlatform {
   readonly name = 'ios' as const;
@@ -117,14 +125,20 @@ export class IOSPlatform implements MobilePlatform {
       await this.driver.mobile('tap', { x: size.width / 2, y: size.height * 0.91 });
       await delay(500);
     }
-    const add = await this.driver.findAny([
+    const add = await this.findNativeScrollable([
+      iosLabelContains('Add to Home Screen'),
       textLocator('Add to Home Screen'),
       accessibility('Add to Home Screen'),
-    ], 30_000);
+      textLocator('Add to Home Screen…'),
+      accessibility('Add to Home Screen…'),
+    ], 'Add to Home Screen', 30_000);
     await this.driver.click(add);
     const openAsWebApp = await this.driver.findAny([
+      iosLabelContains('Open as Web App'),
       textLocator('Open as Web App'),
       accessibility('Open as Web App'),
+      textLocator('Open as Web App…'),
+      accessibility('Open as Web App…'),
     ], 5_000).catch(() => '');
     if (openAsWebApp) await this.driver.click(openAsWebApp);
     const addButton = await this.driver.findAny([
@@ -299,6 +313,30 @@ export class IOSPlatform implements MobilePlatform {
 
   async stopOwnedResources(): Promise<void> {
     await this.driver.close();
+  }
+
+  private async findNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    let lastError = '';
+    let scrolls = 0;
+    while (Date.now() < deadline) {
+      try {
+        return await this.driver.findAny(locators, Math.min(1_500, Math.max(1, deadline - Date.now())));
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      if (scrolls < 8) {
+        try {
+          await this.driver.mobile('scroll', { direction: 'up', distance: 0.75 });
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
+          await this.driver.mobile('swipe', { direction: 'up' }).catch(() => undefined);
+        }
+        scrolls += 1;
+      }
+      await delay(250);
+    }
+    throw new Error(`IOS_SHARE: ${description}: ${lastError}`);
   }
 
   private async identifyInstalledProvider(): Promise<void> {
