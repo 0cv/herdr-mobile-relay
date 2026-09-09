@@ -20,7 +20,7 @@
     "browserVersion": "131.0.6778.200 (677820038)",
     "browserSource": "APK.now pinned direct binary; Google-signed third-party mirror",
     "browserUrl": "https://download.apk.now/apks/chrome/677820038/google-chrome-131-0-6778-200-14-android-apk-download.apk",
-    "browserSha256": "261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35",
+    "browserSha256": "261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35a",
     "browserCertificateSha256": "f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83",
     "browserCertificateSha1": "38918a453d07199354f8b19af05ec6562ced5788",
     "trichromeLibraryPackage": "com.google.android.trichromelibrary",

@@ -105,7 +105,7 @@ jobs:
             .drivers.xcuitest == "12.10.0" and
             .android.browserPackage == "com.android.chrome" and
             .android.browserVersion == "131.0.6778.200 (677820038)" and
-            .android.browserSha256 == "261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35" and
+            .android.browserSha256 == "261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35a" and
             .android.browserCertificateSha256 == "f0fd6c5b410f25cb25c3b53346c8972fae30f8ee7411df910480ad6b2d60db83" and
             .android.browserCertificateSha1 == "38918a453d07199354f8b19af05ec6562ced5788" and
             .android.trichromeLibraryPackage == "com.google.android.trichromelibrary" and
