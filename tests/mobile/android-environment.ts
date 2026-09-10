@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
 import { CommandError, command, type CommandResult } from './support/process';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
 
@@ -308,6 +309,50 @@ function staticLibraryMetadata(dump: string): { name: string; versionCode: strin
   return { name: match?.[1] || '', versionCode: match?.[2] || '' };
 }
 
+function staticLibraryPackageRecord(dump: string, resolution: AndroidStaticLibraryResolution): string {
+  if (dump.length > PACKAGE_DUMP_LIMIT) throw new Error('ANDROID_ENVIRONMENT: static library dump exceeds parsing limit');
+  const records: string[][] = [];
+  let packagesIndent = -1;
+  let recordIndent = -1;
+  for (const line of dump.split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    const indent = line.length - line.trimStart().length;
+    if (packagesIndent >= 0 && indent <= packagesIndent) packagesIndent = -1;
+    if (recordIndent >= 0 && indent <= recordIndent) recordIndent = -1;
+    if (line.trim() === 'Packages:') {
+      packagesIndent = indent;
+      continue;
+    }
+    if (packagesIndent < 0) continue;
+    if (/^Package \[/u.test(line.trim())) {
+      records.push([line]);
+      recordIndent = indent;
+      continue;
+    }
+    if (recordIndent >= 0) records[records.length - 1].push(line);
+  }
+  if (records.length !== 1 || firstMatch(records[0][0], /Package \[([^\]]+)\]/u) !== resolution.packageRecordName) {
+    throw new Error('ANDROID_ENVIRONMENT: static library package record does not match Chrome\'s dependency or is ambiguous');
+  }
+  return records[0].join('\n');
+}
+
+function staticLibrarySourcePath(listing: string, resolution: AndroidStaticLibraryResolution): string {
+  if (listing.length > PACKAGE_DUMP_LIMIT) throw new Error('ANDROID_ENVIRONMENT: static library listing exceeds parsing limit');
+  if (!listing) throw new Error('ANDROID_ENVIRONMENT: static library listing is missing');
+  if (!listing.endsWith('\n')) throw new Error('ANDROID_ENVIRONMENT: static library listing is truncated');
+  const matches: string[] = [];
+  for (const line of listing.replace(/\r?\n$/u, '').split(/\r?\n/u)) {
+    const record = line.match(/^package:(\/[^\s\p{Cc}]+)=([A-Za-z0-9._]+) versionCode:(\d+)$/u);
+    if (!record || posix.normalize(record[1]) !== record[1] || !record[1].endsWith('.apk')) {
+      throw new Error('ANDROID_ENVIRONMENT: malformed static library listing record');
+    }
+    if (record[2] === resolution.libraryName && record[3] === resolution.versionCode) matches.push(record[1]);
+  }
+  if (matches.length !== 1) throw new Error(`ANDROID_ENVIRONMENT: static library source path ${matches.length ? 'is ambiguous' : 'is missing'}`);
+  return matches[0];
+}
+
 function policyFromToolchains(value: unknown): AndroidEnvironmentPolicy {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('ANDROID_ENVIRONMENT: toolchains file is not an object');
   const android = (value as ToolchainsFile).android;
@@ -517,19 +562,22 @@ async function snapshot(
   );
   diagnostics?.setResolvedStaticLibrary(staticLibrary);
   diagnostics?.setStage(`read ${staticLibrary.packageRecordName} package metadata`);
-  packageDumps[policy.trichromeLibraryPackage] = await adb(
+  const libraryDump = await adb(
     serial,
     ['shell', 'dumpsys', 'package', staticLibrary.packageRecordName],
     adbTimeoutMs,
     diagnostics,
   );
+  diagnostics?.setStage('validate static library package record');
+  packageDumps[policy.trichromeLibraryPackage] = staticLibraryPackageRecord(libraryDump, staticLibrary);
   diagnostics?.setStage(`read ${staticLibrary.packageRecordName} APK paths`);
-  packagePaths[policy.trichromeLibraryPackage] = await adb(
+  const librarySourcePath = staticLibrarySourcePath(await adb(
     serial,
-    ['shell', 'pm', 'path', staticLibrary.packageRecordName],
+    ['shell', 'pm', 'list', 'packages', '--match-libraries', '-f', '--show-versioncode', '--user', '0', staticLibrary.libraryName],
     adbTimeoutMs,
     diagnostics,
-  );
+  ), staticLibrary);
+  packagePaths[policy.trichromeLibraryPackage] = `package:${librarySourcePath}\n`;
 
   const packageIdentities = Object.fromEntries(ANDROID_PACKAGES.map((packageName) => [
     packageName,
@@ -555,6 +603,21 @@ async function snapshot(
   if (!packageVersionMatches(libraryIdentity, policy.trichromeLibraryPackage, policy.trichromeLibraryVersion)) {
     throw new Error(`ANDROID_ENVIRONMENT: ${policy.trichromeLibraryPackage} does not match the pinned library identity`);
   }
+  const libraryRecord = packageDumps[policy.trichromeLibraryPackage];
+  const splits = [...libraryRecord.matchAll(/^[ \t]+splits=([^\r\n]+)$/gmu)];
+  if (splits.length !== 1 || splits[0][1] !== '[base]') {
+    throw new Error('ANDROID_ENVIRONMENT: static library split layout must be base-only');
+  }
+  const users = [...libraryRecord.matchAll(/^[ \t]+User 0: ([^\r\n]+)$/gmu)];
+  if (users.length !== 1 || !/(?:^| )installed=true(?: |$)/u.test(users[0][1])) {
+    throw new Error('ANDROID_ENVIRONMENT: static library is not installed for user 0');
+  }
+  if (librarySourcePath !== `${libraryIdentity.codePath}/base.apk`) {
+    throw new Error('ANDROID_ENVIRONMENT: static library source path does not match its installed code path');
+  }
+  libraryIdentity.dumpSha256 = sha256(libraryDump);
+  diagnostics?.setStage('verify static library APK exists');
+  await adb(serial, ['shell', 'test', '-f', `'${librarySourcePath.replaceAll("'", "'\\''")}'`], adbTimeoutMs, diagnostics);
 
   diagnostics?.setStage('check Play Store installation state');
   const installedPackages = await adb(serial, ['shell', 'pm', 'list', 'packages', PLAY_STORE_PACKAGE], adbTimeoutMs, diagnostics);

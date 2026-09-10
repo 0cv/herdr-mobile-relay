@@ -602,29 +602,75 @@ export class IOSPlatform implements MobilePlatform {
       iosActionLabelContains('Add to Home Screen'),
     ], 'Add to Home Screen', Math.min(IOS_NATIVE_ACTION_TIMEOUT_MS, phase.remainingMs));
     const addButton = await this.waitForInstallConfirmation(phase);
-    await this.assertNativeControl(addButton, 'Add', phase);
-    await this.driver.click(addButton, Math.max(minimumDriverRequestMs, phase.remainingMs));
+    if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+    await this.driver.click(addButton, IOS_NATIVE_LOOKUP_ROUND_MS);
     await delay(Math.min(1_500, phase.remainingMs), phase);
   }
 
   private async waitForInstallConfirmation(parent: PhaseBudget): Promise<string> {
     const phase = parent.phaseView('ios-install-confirmation', 15_000);
+    let lastState = 'missing';
     while (phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS) {
-      let element = '';
       try {
-        element = await this.driver.findAnyOnce([accessibility('Add')], IOS_NATIVE_LOOKUP_ROUND_MS);
+        if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') throw new Error('IOS_SHARE: Add: confirmation is not in the native context');
+        const appInfo = await this.driver.activeAppInfo(IOS_NATIVE_LOOKUP_ROUND_MS);
+        const bundleId = String(appInfo?.bundleId || appInfo?.bundleID || '');
+        if (!isIOSSafariBrowserBundle(bundleId) && !isIOSSafariViewServiceBundle(bundleId)) {
+          throw new Error(`IOS_SHARE: Add: Safari confirmation is not foreground (${bundleId || 'unknown'})`);
+        }
+        if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+        const response = await this.driver.command<unknown>('/element', 'POST', accessibility('Add'), IOS_NATIVE_LOOKUP_ROUND_MS);
+        const element = this.installConfirmationElementId(response);
+        if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+        if (await this.installConfirmationIdentity() !== element) {
+          lastState = 'confirmation identity is missing or replaced';
+        } else {
+          if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+          const state = await this.nativeControlState(element, phase);
+          if (state === 'indeterminate' && phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+          if (state === 'ready') {
+            if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+            const currentElement = await this.installConfirmationIdentity();
+            if (!currentElement) throw new Error('IOS_SHARE: Add: confirmation identity was replaced before click');
+            if (currentElement === element) {
+              if (!phase.exhausted) return element;
+              break;
+            }
+            lastState = 'confirmation Add control was replaced before click';
+          } else {
+            lastState = state;
+          }
+        }
       } catch (error) {
-        if (isFatalDriverError(error) || !isRetryableElementLookupError(error)) throw error;
+        if (!(error instanceof WebDriverError)
+          || error.code !== 'APPIUM_COMMAND' || error.timedOut || error.status !== 404
+          || error.selectedContext !== 'NATIVE_APP'
+          || !/\/elements?$|\/element\/[^/]+\/attribute\/(?:enabled|visible|hittable)$/u.test(error.path)
+          || !/"error":"(?:stale element reference|no such element)"/u.test(error.message)) throw error;
+        lastState = error.message;
       }
-      if (element) {
-        const state = await this.nativeControlState(element, Date.now() + phase.remainingMs);
-        if (state === 'ready') return element;
-        if (state === 'disabled') throw new Error('IOS_SHARE: Add: control is disabled');
-      }
+      this.diagnostics.record({ phase: 'ios-install-confirmation', operation: 'confirmation-pending', detail: { state: lastState, remainingMs: phase.remainingMs } });
       if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS + 250) break;
       await delay(250, phase);
     }
-    throw new Error('IOS_SHARE: Add: confirmation control was not ready within the complete native lookup allowance');
+    throw new Error(`IOS_SHARE: Add: confirmation control was not ready within the complete native lookup/read allowance (${lastState})`);
+  }
+
+  private installConfirmationElementId(response: unknown): string {
+    const id = response && typeof response === 'object' && 'element-6066-11e4-a52e-4f735466cecf' in response
+      ? response['element-6066-11e4-a52e-4f735466cecf'] : undefined;
+    if (typeof id !== 'string' || !id.trim()) throw new Error('IOS_SHARE: Add: malformed native element response');
+    return id;
+  }
+
+  private async installConfirmationIdentity(): Promise<string | undefined> {
+    const response = await this.driver.command<unknown>('/elements', 'POST', {
+      using: 'xpath',
+      value: "//XCUIElementTypeNavigationBar[@name='Add to Home Screen' and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add']",
+    }, IOS_NATIVE_LOOKUP_ROUND_MS);
+    if (!Array.isArray(response)) throw new Error('IOS_SHARE: Add: malformed confirmation identity response');
+    const matches = response.map((candidate: unknown) => this.installConfirmationElementId(candidate));
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   async launchInstalledApp(): Promise<void> {
@@ -1097,18 +1143,22 @@ export class IOSPlatform implements MobilePlatform {
     return source;
   }
 
-  private async nativeControlState(element: string, deadline: number): Promise<'ready' | 'hidden' | 'disabled' | 'not-hittable' | 'indeterminate'> {
-    const enabledTimeout = deadline - Date.now();
-    if (enabledTimeout < minimumDriverRequestMs) return 'indeterminate';
-    const enabled = await this.driver.attribute(element, 'enabled', enabledTimeout);
+  private async nativeControlState(element: string, deadline: number | PhaseBudget): Promise<'ready' | 'hidden' | 'disabled' | 'not-hittable' | 'indeterminate'> {
+    const read = async (name: string): Promise<string | null> => {
+      const timeout = typeof deadline === 'number' ? deadline - Date.now()
+        : deadline.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS ? IOS_NATIVE_LOOKUP_ROUND_MS : 0;
+      if (timeout < minimumDriverRequestMs) return null;
+      const response = await this.driver.attribute(element, name, timeout);
+      if (deadline instanceof PhaseBudget && response !== null && typeof response !== 'string') {
+        throw new Error('IOS_SHARE: Add: malformed native attribute response');
+      }
+      return response;
+    };
+    const enabled = await read('enabled');
     if (enabled !== 'true') return enabled === 'false' ? 'disabled' : 'indeterminate';
-    const visibleTimeout = deadline - Date.now();
-    if (visibleTimeout < minimumDriverRequestMs) return 'indeterminate';
-    const visible = await this.driver.attribute(element, 'visible', visibleTimeout);
+    const visible = await read('visible');
     if (visible !== 'true') return visible === 'false' ? 'hidden' : 'indeterminate';
-    const hittableTimeout = deadline - Date.now();
-    if (hittableTimeout < minimumDriverRequestMs) return 'indeterminate';
-    const hittable = await this.driver.attribute(element, 'hittable', hittableTimeout);
+    const hittable = await read('hittable');
     if (hittable !== 'true') return hittable === 'false' ? 'not-hittable' : 'indeterminate';
     return 'ready';
   }

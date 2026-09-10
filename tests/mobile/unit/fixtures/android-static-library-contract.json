@@ -1,0 +1,62 @@
+{
+  "recorded": [
+    {
+      "file": "android-recorded-34478620554-trichrome.dump",
+      "run": "34478620554",
+      "classification": "recorded",
+      "completeness": "Complete 2842-byte dumpsys stdout from acquisition diagnostics",
+      "bytes": 2842,
+      "sha256": "abdeea2c3a782c14f2c101cd81e856dce439468580f6c573577e1ca42d81be46"
+    },
+    {
+      "file": "android-recorded-34478620554-chrome-context.dump",
+      "run": "34478620554",
+      "classification": "recorded",
+      "completeness": "Selected Chrome packageContext lines with diagnostic line-number prefixes removed; not a complete dump",
+      "bytes": 1274,
+      "sha256": "ba19bddb4b2224895a1dd8ff54a2dea63d0200312bfff675f926b6c6091a8b44"
+    },
+    {
+      "file": "android-recorded-34478627478-trichrome.dump",
+      "run": "34478627478",
+      "classification": "recorded",
+      "completeness": "Complete 2842-byte dumpsys stdout from acquisition diagnostics",
+      "bytes": 2842,
+      "sha256": "24a77b66dc129ce6f21e2bcb74268f351c160592539f02f2dc1e136109430b5f"
+    },
+    {
+      "file": "android-recorded-34478627478-chrome-context.dump",
+      "run": "34478627478",
+      "classification": "recorded",
+      "completeness": "Selected Chrome packageContext lines with diagnostic line-number prefixes removed; not a complete dump",
+      "bytes": 1274,
+      "sha256": "f9b2c8113079b1ddc260144c18eb52ab492a7b7a3c4bc85eb1ef2ebbef66faf0"
+    }
+  ],
+  "listing": {
+    "classification": "source-derived",
+    "files": [
+      "android-source-derived-34478620554-libraries.list",
+      "android-source-derived-34478627478-libraries.list"
+    ],
+    "command": "adb -s emulator-5554 shell pm list packages --match-libraries -f --show-versioncode --user 0 com.google.android.trichromelibrary",
+    "source": "https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/PackageManagerShellCommand.java",
+    "lines": "1026-1028, 1067-1075, 1124-1140",
+    "provenance": "Producer grammar from Android 15 source, not captured query output. Selected source paths are observed in the recorded Chrome usesLibraryFiles contexts; other versions, package names and paths are hypothetical controls."
+  },
+  "staticLibraryPath": {
+    "classification": "recorded versioned failure; source-derived bare-name failure",
+    "versionedCommand": "adb -s emulator-5554 shell pm path com.google.android.trichromelibrary_677820038",
+    "exitCode": 1,
+    "stdout": "",
+    "stderr": "",
+    "timedOut": false,
+    "durationMs": {
+      "34478620554": 52,
+      "34478627478": 29
+    },
+    "source": "https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/pm/ComputerEngine.java",
+    "lines": "2083-2135"
+  },
+  "replay": "Host-only fake ADB. GMS/system/version responses, supplemented Chrome version fields, file existence and all mutated negative states are hypothetical. Full library dumps and Chrome contexts remain byte-exact. No supported listing, file check or stable native qualification was performed on a device."
+}

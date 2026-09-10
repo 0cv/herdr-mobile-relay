@@ -548,7 +548,6 @@ function androidPackageDump(
   versionCode: string,
   codePath: string,
   extra = '',
-  recordName = packageName,
 ): string {
   return [
     `Package [${packageName}] (fixture):`,
@@ -563,7 +562,6 @@ function androidPackageDump(
     '  firstInstallTime=2026-01-01 00:00:00',
     '  lastUpdateTime=2026-01-01 00:00:00',
     '  enabled=true',
-    recordName === packageName ? '' : `  compat name=${recordName}`,
     extra,
   ].filter(Boolean).join('\n') + '\n';
 }
@@ -571,28 +569,31 @@ function androidPackageDump(
 async function writeAndroidEnvironmentFixtureState(
   directory: string,
   state: string,
-  options: { chromeDependencies?: string[]; emptyLibraryPaths?: boolean; changedPaths?: boolean; libraryRecordName?: string } = {},
+  options: { chromeDependencies?: string[]; changedPaths?: boolean; recordedRun?: string } = {},
 ): Promise<void> {
   const changed = options.changedPaths === true;
   const gmsPath = changed ? '/data/app/~~changed/com.google.android.gms-changed' : '/data/app/~~fixture/com.google.android.gms-fixture';
   const chromePath = changed ? '/data/app/~~changed/com.android.chrome-changed' : '/data/app/~~fixture/com.android.chrome-fixture';
-  const libraryRecord = options.libraryRecordName || 'com.google.android.trichromelibrary_677820038';
-  const libraryPath = changed ? '/data/app/~~changed/com.google.android.trichromelibrary-changed' : '/data/app/~~fixture/com.google.android.trichromelibrary-fixture';
+  const fixtures = repositoryPath('tests/mobile/unit/fixtures');
+  const run = options.recordedRun || '34478620554';
+  const recordedDump = await readFile(join(fixtures, `android-recorded-${run}-trichrome.dump`), 'utf8');
+  const recordedContext = await readFile(join(fixtures, `android-recorded-${run}-chrome-context.dump`), 'utf8');
+  const recordedPath = recordedDump.match(/codePath=(\S+)/u)![1];
+  const libraryPath = changed ? '/data/app/~~changed==/com.google.android.trichromelibrary-changed==' : recordedPath;
+  const libraryApkPath = recordedContext.match(/usesLibraryFiles:\n\s+(\S+)/u)![1].replace(recordedPath, libraryPath);
+  const libraryDump = recordedDump.replaceAll(recordedPath, libraryPath);
+  const listing = (await readFile(join(fixtures, `android-source-derived-${run}-libraries.list`), 'utf8')).replaceAll(recordedPath, libraryPath);
   const dependencies = options.chromeDependencies === undefined
     ? ['com.google.android.trichromelibrary version:677820038']
     : options.chromeDependencies;
-  const chromeDump = (await readFile(join(repositoryRoot, 'tests/mobile/unit/fixtures/android15-chrome-package.txt'), 'utf8'))
+  const chromeSource = options.recordedRun
+    ? recordedContext.replace('    supportsScreens=', '    versionCode=677820038 minSdk=29 targetSdk=34\n    versionName=131.0.6778.200\n    supportsScreens=')
+    : await readFile(join(fixtures, 'android15-chrome-package.txt'), 'utf8');
+  const chromeDump = chromeSource
     .replaceAll('/data/app/~~fixture/com.android.chrome-fixture', chromePath)
+    .replaceAll('/data/app/~~fixture/com.google.android.trichromelibrary-fixture', libraryPath)
     .replace('    usesStaticLibraries:\n      com.google.android.trichromelibrary version:677820038\n',
       dependencies.length ? `    usesStaticLibraries:\n${dependencies.map((dependency) => `      ${dependency}`).join('\n')}\n` : '');
-  const libraryDump = androidPackageDump(
-    'com.google.android.trichromelibrary',
-    '131.0.6778.200',
-    '677820038',
-    libraryPath,
-    '  static library:\n    name:com.google.android.trichromelibrary version:677820038',
-    libraryRecord,
-  );
   const gmsDump = androidPackageDump(
     'com.google.android.gms',
     changed ? '24.99.99' : '24.23.35',
@@ -604,8 +605,9 @@ async function writeAndroidEnvironmentFixtureState(
     writeFile(join(directory, `${state}-chrome.dump`), chromeDump),
     writeFile(join(directory, `${state}-trichrome.dump`), libraryDump),
     writeFile(join(directory, `${state}-gms.path`), `package:${gmsPath}/base.apk\n`),
-    writeFile(join(directory, `${state}-chrome.path`), `package:${chromePath}/base.apk\n`),
-    writeFile(join(directory, `${state}-trichrome.path`), options.emptyLibraryPaths ? '' : `package:${libraryPath}/base.apk\n`),
+    writeFile(join(directory, `${state}-chrome.path`), `package:${chromeDump.match(/codePath=(\S+)/u)![1]}/base.apk\n`),
+    writeFile(join(directory, `${state}-trichrome.list`), listing),
+    writeFile(join(directory, `${state}-trichrome.file`), `'${libraryApkPath}'`),
   ]);
 }
 
@@ -646,10 +648,14 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
   await writeAndroidEnvironmentFixtureState(fixtureDirectory, 'wrong-version', {
     chromeDependencies: ['com.google.android.trichromelibrary version:677820039'],
   });
-  await writeAndroidEnvironmentFixtureState(fixtureDirectory, 'empty-path', { emptyLibraryPaths: true });
-  await writeAndroidEnvironmentFixtureState(fixtureDirectory, 'identity-change', { libraryRecordName: 'com.google.android.trichromelibrary_677820039' });
-  await writeAndroidEnvironmentFixtureState(fixtureDirectory, 'adb-failure');
-  await writeAndroidEnvironmentFixtureState(fixtureDirectory, 'adb-timeout');
+  for (const run of ['34478620554', '34478627478']) {
+    await writeAndroidEnvironmentFixtureState(fixtureDirectory, `recorded-${run}`, { recordedRun: run });
+  }
+  for (const state of ['adb-failure', 'adb-timeout', 'listing-failure', 'listing-timeout', 'missing-file', 'file-timeout', 'module-change']) {
+    await writeAndroidEnvironmentFixtureState(fixtureDirectory, state);
+  }
+  const gms = await readFile(join(fixtureDirectory, 'module-change-gms.dump'), 'utf8');
+  await writeFile(join(fixtureDirectory, 'module-change-gms.dump'), `${gms}  dynamite module config=changed\n`);
   const log = join(root, 'adb.log');
   const adb = join(binDirectory, 'adb');
   await writeFile(adb, `#!/bin/sh
@@ -670,7 +676,7 @@ if [ "\${3:-}" != shell ]; then
   exit 1
 fi
 if [ "$request" = "dumpsys/package/com.android.chrome/" ] && [ "$state" = adb-timeout ]; then
-  sleep 2
+  exec sleep 2
 fi
 if [ "$request" = "dumpsys/package/com.google.android.trichromelibrary_677820038/" ] && [ "$state" = adb-failure ]; then
   printf 'Failure [static package unavailable]\\n' >&2
@@ -698,12 +704,23 @@ case "$request" in
   pm/path/com.android.chrome/)
     cat "$FAKE_ANDROID_FIXTURE_DIR/$state-chrome.path"
     ;;
-  pm/path/com.google.android.trichromelibrary_677820038/)
-    cat "$FAKE_ANDROID_FIXTURE_DIR/$state-trichrome.path"
-    ;;
-  pm/path/com.google.android.trichromelibrary/)
-    printf 'Failure [bare static library package name is not installed]\\n' >&2
+  pm/path/com.google.android.trichromelibrary_677820038/|pm/path/com.google.android.trichromelibrary/)
     exit 1
+    ;;
+  pm/list/packages/--match-libraries)
+    shift 3
+    [ "$*" = 'pm list packages --match-libraries -f --show-versioncode --user 0 com.google.android.trichromelibrary' ] || exit 1
+    if [ "$state" = listing-timeout ]; then exec sleep 2; fi
+    if [ "$state" = listing-failure ]; then
+      printf 'Error: Unknown option: --match-libraries https://fixture.test/?token=android-fixture-secret\\n'
+      exit 1
+    fi
+    cat "$FAKE_ANDROID_FIXTURE_DIR/$state-trichrome.list"
+    ;;
+  test/-f/*)
+    [ "$state" != missing-file ] || exit 1
+    if [ "$state" = file-timeout ]; then exec sleep 2; fi
+    [ "$#" -eq 6 ] && [ "$6" = "$(cat "$FAKE_ANDROID_FIXTURE_DIR/$state-trichrome.file")" ]
     ;;
   pm/list/packages/com.android.vending)
     ;;
@@ -713,6 +730,7 @@ case "$request" in
     ;;
 esac
 `, { mode: 0o700 });
+  await writeFile(join(binDirectory, 'emulator'), '#!/bin/sh\nprintf "Android emulator version fixture\\n"\n', { mode: 0o700 });
   await writeFile(join(fixtureDirectory, 'getprop'), '[ro.build.fingerprint]: [fixture/fingerprint]\n[ro.build.id]: [AP4A]\n[ro.build.version.incremental]: [fixture]\n[ro.build.version.release]: [15]\n[ro.build.version.sdk]: [35]\n[ro.product.name]: [sdk_gphone]\n[ro.product.device]: [emu64x86-64]\n');
   return {
     root,
@@ -761,68 +779,190 @@ async function readAndroidAcquisitionDiagnostics(filename: string): Promise<Andr
   return JSON.parse(await readFile(filename, 'utf8')) as AndroidEnvironmentAcquisitionDiagnostics;
 }
 
-test('Android environment snapshot resolves versioned static-library identity through production paths', async () => {
-  const fixture = await createAndroidEnvironmentFixture();
-  const bareNameError = await command(
-    'adb',
-    ['-s', 'emulator-5554', 'shell', 'pm', 'path', 'com.google.android.trichromelibrary'],
-    5_000,
-    { env: fixture.environment, label: 'fixture bare static library lookup' },
-  ).then(() => undefined, (error: unknown) => error);
-  assert.ok(bareNameError instanceof Error);
-  assert.match(bareNameError.message, /bare static library package name is not installed/u);
-  const outputDirectory = join(fixture.root, 'outputs');
-  const beforeFile = join(outputDirectory, 'before.json');
-  const beforeDiagnosticsFile = join(outputDirectory, 'before-diagnostics.json');
-  const afterFile = join(outputDirectory, 'after.json');
-  const afterDiagnosticsFile = join(outputDirectory, 'after-diagnostics.json');
-  assert.equal((await runAndroidEnvironmentFixtureSnapshot(fixture, 'valid', beforeFile, beforeDiagnosticsFile)).passed, true);
-  assert.equal((await runAndroidEnvironmentFixtureSnapshot(fixture, 'changed', afterFile, afterDiagnosticsFile)).passed, true);
-  const before = JSON.parse(await readFile(beforeFile, 'utf8')) as AndroidEnvironmentSnapshot;
-  const after = JSON.parse(await readFile(afterFile, 'utf8')) as AndroidEnvironmentSnapshot;
-  const library = before.packages['com.google.android.trichromelibrary'];
-  assert.equal(library.packageRecordName, 'com.google.android.trichromelibrary_677820038');
-  assert.equal(library.staticLibraryName, 'com.google.android.trichromelibrary');
-  assert.equal(library.staticLibraryVersion, '677820038');
-  assert.deepEqual(library.apkPaths, ['package:/data/app/~~fixture/com.google.android.trichromelibrary-fixture/base.apk']);
-  assert.equal(library.codePath, '/data/app/~~fixture/com.google.android.trichromelibrary-fixture');
-  const diagnostics = await readAndroidAcquisitionDiagnostics(beforeDiagnosticsFile);
-  assert.equal(diagnostics.resolvedStaticLibrary?.packageRecordName, 'com.google.android.trichromelibrary_677820038');
-  assert.ok(diagnostics.commands.length > 0);
-  const chromeContext = diagnostics.commands.find((entry) => entry.args.includes('dumpsys') && entry.args.includes('com.android.chrome'))?.packageContext;
-  assert.ok(chromeContext);
-  assert.ok(chromeContext.includes('usesOptionalLibraries:'));
-  assert.ok(chromeContext?.includes('version:677820038'));
-  assert.ok(chromeContext.length <= 4_000);
-  const requests = await readFile(fixture.log, 'utf8');
-  assert.equal(requests.includes('pm path com.google.android.trichromelibrary\n'), false);
-  const issues = compareAndroidEnvironment(before, after);
-  assert.ok(issues.some((issue) => /com.google.android.gms versionCode changed/u.test(issue)));
-  assert.ok(issues.some((issue) => /com.google.android.trichromelibrary codePath changed/u.test(issue)));
-  assert.ok(issues.some((issue) => /com.google.android.trichromelibrary APK paths changed/u.test(issue)));
+async function runAndroidEnvironmentFixtureCheck(
+  fixture: AndroidEnvironmentFixture,
+  before: string,
+  after: string,
+  log = '',
+): Promise<{ passed: boolean; issues: string[] }> {
+  const logFile = join(fixture.root, 'qualification.log');
+  const output = join(fixture.root, 'check.json');
+  await writeFile(logFile, log);
+  let passed = true;
+  try {
+    execFileSync('bun', [
+      'tests/mobile/android-environment.ts', 'check', '--before', before, '--after', after, '--log', logFile, '--output', output,
+    ], { cwd: repositoryRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch {
+    passed = false;
+  }
+  const result = JSON.parse(await readFile(output, 'utf8')) as { passed: boolean; issues: string[] };
+  assert.equal(result.passed, passed);
+  return result;
+}
+
+test('Android recorded package evidence remains complete and separate from source-derived listings', async () => {
+  const fixtures = repositoryPath('tests/mobile/unit/fixtures');
+  const contract = JSON.parse(await readFile(join(fixtures, 'android-static-library-contract.json'), 'utf8')) as {
+    recorded: Array<{ file: string; bytes: number; sha256: string }>;
+  };
+  assert.equal(contract.recorded.length, 4);
+  for (const entry of contract.recorded) {
+    const path = join(fixtures, entry.file);
+    assert.equal((await readFile(path)).length, entry.bytes);
+    assert.equal(await fileSha256(path), entry.sha256);
+  }
+  for (const run of ['34478620554', '34478627478']) {
+    const context = await readFile(join(fixtures, `android-recorded-${run}-chrome-context.dump`), 'utf8');
+    assert.equal(resolveStaticLibraryPackage(context, 'com.google.android.trichromelibrary', '131.0.6778.200 (677820038)').packageRecordName,
+      'com.google.android.trichromelibrary_677820038');
+    const sourcePath = context.match(/usesLibraryFiles:\n\s+(\S+)/u)![1];
+    const listing = await readFile(join(fixtures, `android-source-derived-${run}-libraries.list`), 'utf8');
+    assert.ok(listing.includes(`package:${sourcePath}=com.google.android.trichromelibrary versionCode:677820038\n`));
+  }
 });
+
+for (const state of ['valid', 'recorded-34478620554', 'recorded-34478627478']) {
+  test(`Android environment snapshot CLI acquires and checks ${state} metadata with source-derived library listing`, async () => {
+    const fixture = await createAndroidEnvironmentFixture();
+    for (const packageName of ['com.google.android.trichromelibrary', 'com.google.android.trichromelibrary_677820038']) {
+      await assert.rejects(command('adb', ['-s', 'emulator-5554', 'shell', 'pm', 'path', packageName], 5_000, { env: fixture.environment }),
+        (error: { exitCode?: number; stdout?: string; stderr?: string; timedOut?: boolean }) => {
+          assert.equal(error.exitCode, 1);
+          assert.equal(error.stdout, '');
+          assert.equal(error.stderr, '');
+          assert.equal(error.timedOut, false);
+          return true;
+        });
+    }
+    const beforeFile = join(fixture.root, 'outputs', 'before.json');
+    const beforeDiagnosticsFile = join(fixture.root, 'outputs', 'before-diagnostics.json');
+    const afterFile = join(fixture.root, 'outputs', 'after.json');
+    const afterDiagnosticsFile = join(fixture.root, 'outputs', 'after-diagnostics.json');
+    const result = await runAndroidEnvironmentFixtureSnapshot(fixture, state, beforeFile, beforeDiagnosticsFile);
+    assert.equal(result.passed, true, result.stderr);
+    assert.equal((await runAndroidEnvironmentFixtureSnapshot(fixture, state, afterFile, afterDiagnosticsFile)).passed, true);
+    const before = JSON.parse(await readFile(beforeFile, 'utf8')) as AndroidEnvironmentSnapshot;
+    assert.deepEqual(Object.keys(before.packages).sort(), ['com.android.chrome', 'com.google.android.gms', 'com.google.android.trichromelibrary']);
+    const library = before.packages['com.google.android.trichromelibrary'];
+    const observedSource = (await readFile(join(fixture.fixtureDirectory, `${state}-trichrome.file`), 'utf8')).slice(1, -1);
+    assert.equal(library.packageRecordName, 'com.google.android.trichromelibrary_677820038');
+    assert.equal(library.staticLibraryName, 'com.google.android.trichromelibrary');
+    assert.equal(library.staticLibraryVersion, '677820038');
+    assert.equal(library.versionCode, '677820038');
+    assert.equal(library.versionName, '131.0.6778.200');
+    assert.deepEqual(library.apkPaths, [`package:${observedSource}`]);
+    assert.equal(library.codePath, observedSource.slice(0, -'/base.apk'.length));
+    assert.equal(library.dumpSha256, await fileSha256(join(fixture.fixtureDirectory, `${state}-trichrome.dump`)));
+    const diagnostics = await readAndroidAcquisitionDiagnostics(beforeDiagnosticsFile);
+    assert.equal(diagnostics.resolvedStaticLibrary?.packageRecordName, library.packageRecordName);
+    assert.equal(diagnostics.failure, undefined);
+    const metadata = diagnostics.commands.find((entry) => entry.args.includes('dumpsys') && entry.args.includes(library.packageRecordName));
+    assert.equal(metadata?.stdoutBytes, 2_842);
+    assert.equal(metadata?.stdoutPreview, await readFile(join(fixture.fixtureDirectory, `${state}-trichrome.dump`), 'utf8'));
+    assert.equal(metadata?.stdoutSha256, library.dumpSha256);
+    const chromeContext = diagnostics.commands.find((entry) => entry.args.includes('dumpsys') && entry.args.includes('com.android.chrome'))?.packageContext;
+    assert.ok(chromeContext);
+    assert.ok(chromeContext.includes('usesOptionalLibraries:'));
+    assert.ok(chromeContext.includes('version:677820038'));
+    assert.ok(chromeContext.length <= 4_000);
+    const requests = await readFile(fixture.log, 'utf8');
+    assert.equal(requests.includes('pm path com.google.android.trichromelibrary'), false);
+    assert.ok(requests.includes('pm list packages --match-libraries -f --show-versioncode --user 0 com.google.android.trichromelibrary\n'));
+    assert.ok(requests.includes(`shell test -f '${observedSource}'\n`));
+    assert.deepEqual((await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile)).issues, []);
+    const restart = await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile, 'Module config changed, forcing restart due to module googlecertificates\n');
+    assert.equal(restart.passed, false);
+    assert.ok(restart.issues.includes('native dependency replacement or forced restart was observed'));
+    if (state !== 'valid') return;
+    assert.equal((await runAndroidEnvironmentFixtureSnapshot(fixture, 'changed', afterFile, afterDiagnosticsFile)).passed, true);
+    const changed = await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile);
+    assert.equal(changed.passed, false);
+    assert.ok(changed.issues.includes('com.google.android.gms versionCode changed'));
+    assert.ok(changed.issues.includes('com.google.android.trichromelibrary codePath changed'));
+    assert.ok(changed.issues.includes('com.google.android.trichromelibrary APK paths changed'));
+    assert.equal((await runAndroidEnvironmentFixtureSnapshot(fixture, 'module-change', afterFile, afterDiagnosticsFile)).passed, true);
+    const module = await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile);
+    assert.equal(module.passed, false);
+    assert.ok(module.issues.includes('com.google.android.gms module configuration changed'));
+    assert.ok(module.issues.includes('com.google.android.gms moduleConfigSha256 changed'));
+  });
+}
 
 test('Android environment snapshot persists bounded diagnostics for static-library acquisition failures', async () => {
   const fixture = await createAndroidEnvironmentFixture();
+  const mutations: Array<[string, string, (source: string) => string, RegExp]> = [
+    ['empty-listing', 'list', () => '', /listing is missing/u],
+    ['absent-version', 'list', (source) => source.split('\n').filter((line) => !line.endsWith('versionCode:677820038')).join('\n'), /source path is missing/u],
+    ['wrong-public-name', 'list', (source) => source.replaceAll('=com.google.android.trichromelibrary ', '=com.google.android.trichromelibrary_677820038 '), /source path is missing/u],
+    ['inexact-version', 'list', (source) => source.replaceAll('versionCode:677820038', 'versionCode:0677820038'), /source path is missing/u],
+    ['duplicate-listing', 'list', (source) => source + source, /source path is ambiguous/u],
+    ['ambiguous-path', 'list', (source) => source + source.replaceAll('/base.apk', '/other.apk'), /source path is ambiguous/u],
+    ['malformed-listing', 'list', (source) => source + 'package:/truncated.apk=com.google.android.trichromelibrary versionCode:\n', /malformed/u],
+    ['truncated-listing', 'list', (source) => source.trimEnd(), /truncated/u],
+    ['truncated-version', 'list', (source) => source.replace('versionCode:677820038', 'versionCode:67782003'), /source path is missing/u],
+    ['blank-record', 'list', (source) => source + '\n', /malformed/u],
+    ['oversized-listing', 'list', () => 'x'.repeat(2_000_001), /parsing limit/u],
+    ['relative-path', 'list', (source) => source.replaceAll('package:/', 'package:'), /malformed/u],
+    ['path-traversal', 'list', (source) => source.replaceAll('/base.apk', '/../base.apk'), /malformed/u],
+    ['wrong-source', 'list', (source) => source.replaceAll('/base.apk', '/split.apk'), /source path does not match/u],
+    ['code-path-change', 'dump', (source) => source.replace('codePath=/data/app/', 'codePath=/wrong/'), /source path does not match/u],
+    ['identity-change', 'dump', (source) => source.replace('Package [com.google.android.trichromelibrary_677820038]', 'Package [com.google.android.trichromelibrary_677820039]'), /package record does not match/u],
+    ['inactive-record', 'dump', (source) => source.replace('Packages:', 'Hidden system packages:'), /package record does not match/u],
+    ['duplicate-record', 'dump', (source) => source + source, /ambiguous/u],
+    ['metadata-name', 'dump', (source) => source.replace('name:com.google.android.trichromelibrary', 'name:com.example.library'), /static library metadata does not match/u],
+    ['metadata-version', 'dump', (source) => source.replace('version:677820038', 'version:677820039'), /static library metadata does not match/u],
+    ['package-version', 'dump', (source) => source.replace('versionCode=677820038', 'versionCode=677820039'), /pinned library identity/u],
+    ['package-version-name', 'dump', (source) => source.replace('versionName=131.0.6778.200', 'versionName=131.0.6778.201'), /pinned library identity/u],
+    ['split-layout', 'dump', (source) => source.replace('splits=[base]', 'splits=[base, config.x86_64]'), /split layout/u],
+    ['missing-splits', 'dump', (source) => source.replace('    splits=[base]\n', ''), /split layout/u],
+    ['not-installed', 'dump', (source) => source.replace('installed=true', 'installed=false'), /not installed for user 0/u],
+    ['wrong-user', 'dump', (source) => source.replace('User 0:', 'User 10:'), /not installed for user 0/u],
+  ];
   const cases: Array<[string, RegExp, (diagnostics: AndroidEnvironmentAcquisitionDiagnostics) => void]> = [
     ['missing', /static library dependency .* is missing/u, () => undefined],
     ['ambiguous', /static library dependency .* is ambiguous/u, () => undefined],
     ['wrong-version', /version .* does not match/u, () => undefined],
-    ['empty-path', /APK paths are missing/u, () => undefined],
-    ['identity-change', /package record does not match/u, () => undefined],
-    ['adb-failure', /COMMAND_FAILED/u, (diagnostics) => assert.ok(diagnostics.commands.some((commandDiagnostic) => commandDiagnostic.outcome === 'failed'))],
-    ['adb-timeout', /COMMAND_FAILED/u, (diagnostics) => assert.ok(diagnostics.commands.some((commandDiagnostic) => commandDiagnostic.timedOut))],
+    ...['adb-failure', 'adb-timeout', 'listing-failure', 'listing-timeout', 'missing-file', 'file-timeout'].map((state): typeof cases[number] => [
+      state, /COMMAND_FAILED/u, (diagnostics) => {
+        const failed = diagnostics.commands.at(-1)!;
+        assert.equal(failed.outcome, 'failed');
+        assert.equal(failed.timedOut, state.endsWith('timeout'));
+        assert.equal(diagnostics.failure?.timedOut, failed.timedOut);
+        assert.equal(diagnostics.failure?.exitCode, failed.exitCode);
+        assert.ok(diagnostics.failure?.message.includes(failed.args.map((arg) => JSON.stringify(arg)).join(' ')));
+        if (state.startsWith('listing-')) assert.ok(failed.args.includes('--match-libraries'));
+        if (state === 'missing-file' || state === 'file-timeout') assert.ok(failed.args.includes('test'));
+        if (state === 'listing-failure') assert.ok(diagnostics.failure?.detail?.includes('[REDACTED]'));
+      },
+    ]),
   ];
+  for (const [state, extension, mutate, failure] of mutations) {
+    await writeAndroidEnvironmentFixtureState(fixture.fixtureDirectory, state);
+    const filename = join(fixture.fixtureDirectory, `${state}-trichrome.${extension}`);
+    await writeFile(filename, mutate(await readFile(filename, 'utf8')));
+    cases.push([state, failure, () => undefined]);
+  }
   for (const [state, failure, check] of cases) {
     const output = join(fixture.root, `${state}.json`);
     const diagnosticsFile = join(fixture.root, `${state}-diagnostics.json`);
-    const result = await runAndroidEnvironmentFixtureSnapshot(fixture, state, output, diagnosticsFile, state === 'adb-timeout' ? 500 : undefined);
+    const result = await runAndroidEnvironmentFixtureSnapshot(fixture, state, output, diagnosticsFile, state.endsWith('timeout') ? 500 : undefined);
     assert.equal(result.passed, false, state);
     const diagnostics = await readAndroidAcquisitionDiagnostics(diagnosticsFile);
     assert.ok(diagnostics.failure, state);
     assert.match(diagnostics.failure?.message || '', failure, state);
     check(diagnostics);
+    assert.equal(existsSync(output), false, state);
+    const requests = await readFile(fixture.log, 'utf8');
+    assert.equal(requests.includes('pm path com.google.android.trichromelibrary'), false, state);
+    assert.equal(requests.includes('pm list packages com.android.vending'), false, state);
+    assert.ok(diagnostics.commands.length <= 64, state);
+    for (const entry of diagnostics.commands) {
+      assert.ok((entry.stdoutPreview?.length || 0) <= 4_000, state);
+      assert.ok((entry.stderrPreview?.length || 0) <= 4_000, state);
+    }
     assert.ok(Buffer.byteLength(JSON.stringify(diagnostics)) < 100_000, state);
+    assert.equal(JSON.stringify(diagnostics).includes('android-fixture-secret'), false, state);
   }
 });
 
@@ -1921,7 +2061,8 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     }
     if (path.endsWith('/elements')) {
       const value = String(body.value || '');
-      const matches = value.includes('Add to Home Screen') && scrolls >= 1 ? [element('hidden-add'), element('add-home')]
+      const matches = value.includes('XCUIElementTypeNavigationBar') ? [element('add-button')]
+        : value.includes('Add to Home Screen') && scrolls >= 1 ? [element('hidden-add'), element('add-home')]
         : value.includes('activityCollectionView') ? [element('container')] : [];
       return new Response(JSON.stringify({ value: matches }), { status: 200 });
     }

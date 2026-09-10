@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as wait } from 'node:timers/promises';
 import { IOSPlatform, iosOpenURLProcessEvidence, nativeActionListEvidence } from '../platforms/ios';
-import { AppiumClient } from '../support/webdriver';
+import { AppiumClient, isRetryableElementLookupError } from '../support/webdriver';
 import { PhaseBudget } from '../support/budget';
 import { writeSanitizedJson } from '../support/diagnostics';
 import { CommandError, command } from '../support/process';
 import recorded from './fixtures/ios/publication.json';
+import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
 
 const origin = 'https://localhost:52101';
 const fixtureDir = fileURLToPath(new URL('./fixtures/ios/', import.meta.url));
@@ -262,6 +263,7 @@ test('a page already inspected during initial binding cannot regain the blank-pu
 const before = await readFile(join(fixtureDir, 'ios-share-0-hierarchy.xml'), 'utf8');
 const after = await readFile(join(fixtureDir, 'ios-share-1-hierarchy.xml'), 'utf8');
 const browser = await readFile(join(fixtureDir, 'ios-before-share-hierarchy.xml'), 'utf8');
+const hypotheticalConfirmation = await readFile(join(fixtureDir, 'ios-confirmation-hypothetical.xml'), 'utf8');
 
 function xpathCount(source: string, xpath: string): number {
   return Number(execFileSync('xmllint', ['--xpath', `count(${xpath})`, '-'], { input: source, encoding: 'utf8' }).trim());
@@ -311,6 +313,10 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       }
       if (path.endsWith('/elements')) {
         assert.equal(body.using, 'xpath');
+        if (body.value.includes('XCUIElementTypeNavigationBar')) {
+          assert.equal(xpathCount(hypotheticalConfirmation, body.value), 1);
+          return value([element('add')]);
+        }
         assert.ok(xpathCount(source, body.value) > 0, 'adapter XPath must match the recorded hierarchy');
         return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
       }
@@ -338,7 +344,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       }
       if (path.includes('/attribute/')) {
         if (path.includes('/add/')) {
-          if (mode === 'add-disabled' && path.endsWith('/enabled')) return value('false');
+          if (mode === 'add-disabled' && path.endsWith('/enabled')) { now += 5_000; return value('false'); }
           if (mode === 'add-hidden' && path.endsWith('/visible')) { now += 5_000; return value('false'); }
           if (mode === 'add-not-hittable' && path.endsWith('/hittable')) { now += 5_000; return value('false'); }
         }
@@ -370,7 +376,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       assert.equal(scrolls, 1);
       assert.equal(confirmationLookups, (confirmationProfiles[mode]?.length ?? 0) + 1);
     } else if (mode.startsWith('add-')) {
-      await assert.rejects(() => platform.installFromBrowser(), mode === 'add-hung' ? /APPIUM_TIMEOUT/u : mode === 'add-disabled' ? /Add: control is disabled/u : /Add: confirmation control was not ready/u);
+      await assert.rejects(() => platform.installFromBrowser(), mode === 'add-hung' ? /APPIUM_TIMEOUT/u : /Add: confirmation control was not ready/u);
       assert.deepEqual(clicks, ['share', 'target-1']);
       if (mode === 'add-budget') assert.equal(confirmationLookups, 0, 'do not dispatch a partial confirmation lookup');
       if (mode === 'add-hung') {
@@ -386,6 +392,425 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
     const lookups = driver.snapshot().commands.filter((_entry, index) => requests[index]?.body.value === 'Add');
     assert.ok(lookups.every((entry) => entry.timeoutMs >= 4_900 && entry.timeoutMs <= 5_000), 'confirmation probes must receive a complete native transaction, never optional-loop leftovers');
     assert.equal(driver.snapshot().unusable, mode === 'add-hung');
+  });
+}
+
+type ConfirmationState = 'ready' | 'missing' | 'stale-lookup' | 'stale-enabled' | 'stale-visible' | 'stale-hittable' | 'disabled' | 'hidden' | 'not-hittable' | 'indeterminate';
+type ConfirmationFault = 'stale' | 'unrelated' | 'invalid-session' | 'misleading-404' | 'malformed' | 'malformed-value' | 'transport' | 'interrupted' | 'hung';
+type ConfirmationBoundary = 'lookup' | 'identity' | 'enabled' | 'visible' | 'hittable' | 'click';
+
+async function confirmationReplay(name: string, options: {
+  recorded?: typeof recordedConfirmation[number];
+  states?: ConfirmationState[];
+  persistent?: boolean;
+  dialog?: 'different' | 'hidden' | 'unrelated-add' | 'ambiguous' | 'ambiguous-after-ready' | 'replaced' | 'replaced-after-ready';
+  staleIdentityRead?: number;
+  replaceReadyIdentity?: 'once' | 'always';
+  foreground?: string;
+  fault?: ConfirmationFault;
+  faultAt?: ConfirmationBoundary;
+  fourthReadStale?: boolean;
+  after?: (boundary: string, lookup: number) => number;
+  parentRemaining?: number;
+} = {}) {
+  const fixture = options.recorded;
+  const shareSources = fixture ? await Promise.all(Object.values(fixture.sources).map((path) => readFile(join(fixtureDir, path), 'utf8'))) : [browser, before, after];
+  let now = 0;
+  let sheet = false;
+  let confirming = false;
+  let scrolls = 0;
+  let lookups = 0;
+  let identityReads = 0;
+  let source = shareSources[0];
+  const clicks: string[] = [];
+  const attributes: string[] = [];
+  const observations: Array<{ boundary: string; lookup: number; now: number }> = [];
+  const states = options.states || ['ready'];
+  const state = () => states[Math.min(lookups - 1, states.length - 1)];
+  const stale = () => Response.json({ value: (fixture || recordedConfirmation[0]).response.value }, { status: 404 });
+  const advance = (boundary: string) => {
+    now += options.after?.(boundary, lookups) || 0;
+    observations.push({ boundary, lookup: lookups, now });
+  };
+  const { platform, driver, requests, budget, outputDir } = await adapter(`confirmation-${name}`, async ({ path, body, signal }) => {
+    const fault = () => {
+      if (options.fault === 'hung') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+      if (options.fault === 'transport') throw new Error('synthetic connection reset');
+      if (options.fault === 'interrupted') throw new DOMException('synthetic interrupted transport', 'TimeoutError');
+      if (options.fault === 'malformed') return new Response('not-json', { status: 200 });
+      if (options.fault === 'malformed-value') return value({ unexpected: true });
+      if (options.fault === 'stale') return stale();
+      const error = options.fault === 'invalid-session' ? 'invalid session id' : options.fault === 'misleading-404' ? 'unknown command' : 'invalid argument';
+      return Response.json({ value: { error, message: options.fault === 'misleading-404' ? 'stale element reference is not this error code' : 'synthetic protocol failure' } }, { status: options.fault === 'unrelated' ? 400 : 404 });
+    };
+    if (path.endsWith('/context')) return value(null);
+    if (body.script === 'mobile: activeAppInfo') {
+      if (confirming) advance('foreground');
+      return value({ bundleId: confirming ? options.foreground ?? 'com.apple.mobilesafari' : 'com.apple.mobilesafari' });
+    }
+    if (path.endsWith('/source')) {
+      source = !sheet ? shareSources[0] : scrolls ? shareSources[2] : shareSources[1];
+      return value(source);
+    }
+    if (path.endsWith('/screenshot')) return value('');
+    if (body.script === 'mobile: scroll') {
+      assert.deepEqual(body.args, { element: `container-${scrolls}`, direction: 'down', distance: 0.75 });
+      scrolls++;
+      return value(null);
+    }
+    if (path.endsWith('/elements')) {
+      assert.equal(body.using, 'xpath');
+      if (confirming) {
+        advance('identity');
+        identityReads++;
+        if (identityReads === options.staleIdentityRead) return stale();
+        if (options.faultAt === 'identity') return fault();
+        let xml = hypotheticalConfirmation;
+        const replaced = (options.dialog === 'replaced' && lookups > 1) || (options.dialog === 'replaced-after-ready' && identityReads > 1);
+        if (options.dialog === 'different' || replaced) xml = xml.replace('name="Add to Home Screen"', 'name="Add Bookmark"');
+        if (options.dialog === 'hidden') xml = xml.replace('name="Add to Home Screen" visible="true"', 'name="Add to Home Screen" visible="false"');
+        const count = xpathCount(xml, body.value);
+        assert.equal(count, options.dialog === 'different' || options.dialog === 'hidden' || replaced ? 0 : 1, 'only Add in the visible expected navigation bar may match');
+        if (!count) return value([]);
+        if (options.dialog === 'ambiguous' || (options.dialog === 'ambiguous-after-ready' && identityReads > 1)) return value([element(`add-${lookups}`), element('other-add')]);
+        const replacedAdd = options.replaceReadyIdentity && identityReads % 2 === 0 && (options.replaceReadyIdentity === 'always' || identityReads === 2);
+        return value([element(options.dialog === 'unrelated-add' ? 'expected-add' : `add-${lookups + (replacedAdd ? 1 : 0)}`)]);
+      }
+      assert.ok(xpathCount(source, body.value) > 0, 'real adapter selector must match recorded Share XML');
+      return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
+    }
+    if (path.endsWith('/element')) {
+      if (body.value === 'ShareButton') return value(element('share'));
+      assert.ok(confirming, 'confirmation lookup cannot precede the verified activity click');
+      assert.deepEqual(body, { using: 'accessibility id', value: 'Add' }, 'no optional or unscoped replacement selectors');
+      lookups++;
+      advance('lookup');
+      if (options.persistent || (options.fault && lookups > 1)) now += 3_000;
+      if (fixture && lookups === 1) await wait(fixture.lookup.endedAt - fixture.lookup.startedAt, undefined, { signal: signal! });
+      if (options.faultAt === 'lookup') return fault();
+      if (state() === 'missing') return missing();
+      if (state() === 'stale-lookup') return stale();
+      return value(element(`add-${lookups}`));
+    }
+    if (path.endsWith('/rect')) {
+      const list = nativeActionListEvidence(source, 'Add to Home Screen')!;
+      return value(path.includes('/container-') ? list.collection.bounds : list.targetRows[0].bounds);
+    }
+    if (path.includes('/attribute/')) {
+      if (path.includes('/add-')) {
+        const attribute = path.split('/attribute/')[1];
+        const id = path.split('/element/')[1].split('/')[0];
+        assert.equal(id, `add-${lookups}`, 'readiness must use the freshly acquired candidate');
+        attributes.push(`${id}:${attribute}`);
+        advance(attribute);
+        if (options.faultAt === attribute) return fault();
+        if (options.fourthReadStale && attributes.length === 4) return stale();
+        if (state() === `stale-${attribute}`) {
+          if (fixture && lookups === 1) await wait(fixture.attribute.durationMs, undefined, { signal: signal! });
+          return stale();
+        }
+        if (state() === 'disabled' && attribute === 'enabled') return value('false');
+        if (state() === 'hidden' && attribute === 'visible') return value('false');
+        if (state() === 'not-hittable' && attribute === 'hittable') return value('false');
+        if (state() === 'indeterminate' && attribute === 'enabled') return value(null);
+      }
+      if (path.includes('/target-') && /\/(?:visible|hittable)$/u.test(path)) return value(String(scrolls > 0));
+      return value('true');
+    }
+    if (path.endsWith('/click')) {
+      const id = path.split('/element/')[1].split('/')[0];
+      clicks.push(id);
+      if (id === 'share') sheet = true;
+      if (id.startsWith('target-')) {
+        assert.equal(scrolls, 1);
+        confirming = true;
+        if (options.parentRemaining !== undefined) now = 120_000 - options.parentRemaining;
+      }
+      if (id.startsWith('add-')) {
+        advance('click');
+        if (options.faultAt === 'click') return fault();
+      }
+      return value(null);
+    }
+    throw new Error(`unexpected confirmation request ${path} ${JSON.stringify(body)}`);
+  }, fixture ? undefined : () => now);
+  (platform as any).installedBundleId = '';
+  let error: unknown;
+  try { await platform.installFromBrowser(); } catch (caught) { error = caught; }
+  await writeSanitizedJson(join(outputDir, 'confirmation-result.json'), {
+    proofKind: fixture?.proofKind || 'Hypothetical protocol boundary and native confirmation hierarchy; not observed native recovery.',
+    error: String(error || ''), lookups, attributes, clicks, observations, evidence: platform.evidenceSnapshot(),
+  });
+  assert.equal(budget.recoveryCount, 0);
+  assert.equal(platform.evidenceSnapshot().installedBindingState, 'unselected');
+  assert.equal(platform.evidenceSnapshot().installedDocumentBound, false);
+  assert.equal(requests.filter((request) => request.path.endsWith('/context')).length, 1, 'no context reset during reacquisition');
+  assert.equal(requests.some((request) => /activateApp|pressButton/u.test(request.body.script || '') || request.path.endsWith('/url')), false, 'never restart installation or navigation');
+  assert.deepEqual(clicks.slice(0, 2), ['share', 'target-1']);
+  assert.ok(clicks.length <= 3, 'final Add must be dispatched at most once');
+  return { platform, driver, requests, error, lookups, attributes, clicks, observations, now };
+}
+
+for (const fixture of recordedConfirmation) {
+  test(`confirmation replays recorded ${fixture.run} enabled-stale then hypothetical ready replacement`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(fixture.run, { recorded: fixture, states: ['stale-enabled', 'ready'] });
+    assert.equal(replay.error, undefined);
+    assert.equal(replay.lookups, 2);
+    assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-2:enabled', 'add-2:visible', 'add-2:hittable']);
+    assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-2']);
+    assert.equal(replay.driver.snapshot().unusable, false);
+    const failed = replay.driver.snapshot().commands.find((entry) => entry.error?.includes('kAXErrorInvalidUIElement'));
+    assert.ok(failed && !failed.timedOut);
+  });
+}
+
+for (const initial of ['missing', 'stale-lookup', 'stale-visible', 'stale-hittable', 'disabled', 'hidden', 'not-hittable', 'indeterminate'] as const) {
+  test(`confirmation hypothetical ${initial} reacquires all readiness attributes on a new ID`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(initial, { states: [initial, 'ready'] });
+    assert.equal(replay.error, undefined);
+    assert.equal(replay.lookups, 2);
+    assert.deepEqual(replay.attributes.filter((read) => read.startsWith('add-2:')), ['add-2:enabled', 'add-2:visible', 'add-2:hittable']);
+    assert.equal(replay.clicks.at(-1), 'add-2');
+  });
+}
+
+test('confirmation hypothetical stale then disabled loading then ready clicks only the third candidate', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('stale-disabled-ready', { states: ['stale-enabled', 'disabled', 'ready'] });
+  assert.equal(replay.error, undefined);
+  assert.equal(replay.lookups, 3);
+  assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-2:enabled', 'add-3:enabled', 'add-3:visible', 'add-3:hittable']);
+  assert.equal(replay.clicks.at(-1), 'add-3');
+});
+
+test('confirmation has no fourth-read duplicate validation outside its observation boundary', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('fourth-read', { fourthReadStale: true });
+  assert.equal(replay.error, undefined);
+  assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+  assert.equal(replay.lookups, 1);
+  assert.equal(replay.clicks.at(-1), 'add-1');
+});
+
+for (const state of ['missing', 'stale-enabled', 'stale-visible', 'stale-hittable', 'disabled', 'hidden', 'not-hittable', 'indeterminate'] as const) {
+  test(`confirmation persistent hypothetical ${state} exhausts the original deadline without a click`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`persistent-${state}`, { states: [state], persistent: true });
+    assert.match(String(replay.error), /Add: confirmation control was not ready/u);
+    assert.match(String(replay.error), state === 'missing' ? /no such element/u : state.startsWith('stale') ? /stale element reference/u : new RegExp(state, 'u'));
+    assert.ok(replay.lookups >= 2 && replay.lookups <= 4);
+    assert.ok(replay.now <= 15_000);
+    assert.equal(replay.clicks.length, 2);
+    assert.equal(replay.driver.snapshot().unusable, false);
+  });
+}
+
+for (const identityRead of [1, 2]) {
+  test(`confirmation stale identity read ${identityRead} restarts the complete candidate validation`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`identity-stale-${identityRead}`, { staleIdentityRead: identityRead });
+    assert.equal(replay.error, undefined);
+    assert.equal(replay.lookups, 2);
+    assert.deepEqual(replay.attributes.filter((read) => read.startsWith('add-2:')), ['add-2:enabled', 'add-2:visible', 'add-2:hittable']);
+    assert.equal(replay.attributes.length, identityRead === 1 ? 3 : 6);
+    assert.equal(replay.clicks.at(-1), 'add-2');
+  });
+}
+
+test('confirmation hypothetical same-dialog Add replacement reacquires a complete fresh triplet before clicking once', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('same-dialog-replacement', { replaceReadyIdentity: 'once', after: () => 500 });
+  assert.equal(replay.error, undefined);
+  assert.equal(replay.lookups, 2);
+  assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable', 'add-2:enabled', 'add-2:visible', 'add-2:hittable']);
+  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-2']);
+  assert.deepEqual(replay.observations.map((entry) => `${entry.lookup}:${entry.boundary}`), [
+    '0:foreground', '1:lookup', '1:identity', '1:enabled', '1:visible', '1:hittable', '1:identity',
+    '1:foreground', '2:lookup', '2:identity', '2:enabled', '2:visible', '2:hittable', '2:identity', '2:click',
+  ]);
+  assert.ok(replay.now < 15_000);
+  assert.equal(replay.driver.snapshot().unusable, false);
+});
+
+for (const remaining of [15_000, 6_000]) {
+  test(`confirmation hypothetical repeated same-dialog Add replacements keep the original ${remaining}ms deadline`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`same-dialog-deadline-${remaining}`, {
+      replaceReadyIdentity: 'always', parentRemaining: remaining,
+      after: (boundary) => boundary === 'identity' ? 1_000 : 0,
+    });
+    assert.match(String(replay.error), /confirmation control was not ready.*Add control was replaced/u);
+    assert.equal(replay.lookups, remaining === 15_000 ? 5 : 1);
+    assert.deepEqual(replay.clicks, ['share', 'target-1']);
+    assert.equal(replay.now - (120_000 - remaining), remaining === 15_000 ? 10_000 : 2_000);
+    const commands = replay.driver.snapshot().commands;
+    const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
+    assert.ok(commands.slice(targetClick + 1).every((entry) => entry.timeoutMs === 5_000 && !entry.error && !entry.timedOut));
+    assert.equal(replay.driver.snapshot().unusable, false);
+  });
+}
+
+for (const dialog of ['replaced-after-ready', 'ambiguous-after-ready'] as const) {
+  test(`confirmation hypothetical ${dialog} identity after the ready triplet still prevents the final click`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(dialog, { dialog });
+    assert.match(String(replay.error), /confirmation identity was replaced/u);
+    assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+    assert.equal(replay.lookups, 1);
+    assert.equal(replay.clicks.length, 2);
+  });
+}
+
+for (const dialog of ['different', 'hidden', 'unrelated-add', 'ambiguous', 'replaced'] as const) {
+  test(`confirmation hypothetical ${dialog} dialog cannot authorize a same-labelled Add`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`dialog-${dialog}`, { dialog, states: dialog === 'replaced' ? ['stale-enabled', 'ready'] : undefined, persistent: true });
+    assert.match(String(replay.error), /confirmation.*(?:identity|replaced)/u);
+    assert.equal(replay.clicks.length, 2);
+    assert.equal(replay.attributes.some((read) => dialog === 'replaced' ? read.startsWith('add-2') : true), false);
+  });
+}
+
+for (const foreground of ['com.example.other', '', 'com.apple.SafariViewService']) {
+  test(`confirmation native foreground ${foreground || 'unknown'} remains identity-bound`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`foreground-${foreground || 'unknown'}`, { foreground });
+    if (foreground === 'com.apple.SafariViewService') {
+      assert.equal(replay.error, undefined);
+      assert.equal(replay.clicks.length, 3);
+    } else {
+      assert.match(String(replay.error), /IOS_SHARE:.*foreground/u);
+      assert.equal(replay.clicks.length, 2);
+    }
+  });
+}
+
+for (const boundary of ['lookup', 'identity', 'enabled', 'visible', 'hittable'] as const) {
+  for (const fault of ['unrelated', 'invalid-session', 'misleading-404', 'malformed', 'malformed-value', 'transport'] as const) {
+    test(`confirmation ${boundary} ${fault} propagates without candidate retries`, async () => {
+      const skip = requireXmlLint();
+      if (skip) return skip;
+      const replay = await confirmationReplay(`${boundary}-${fault}`, { fault, faultAt: boundary });
+      assert.ok(replay.error);
+      assert.equal(replay.lookups, 1);
+      assert.equal(replay.clicks.length, 2);
+      assert.match(String(replay.error), fault === 'malformed-value' ? /(?:malformed|invalid).*response/u : fault === 'transport' ? /connection reset/u : /APPIUM_(?:COMMAND|HTTP)/u);
+    });
+  }
+}
+
+for (const boundary of ['lookup', 'identity', 'enabled', 'visible', 'hittable'] as const) {
+  test(`confirmation ${boundary} receives a complete allowance or no command at child exhaustion`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`admission-${boundary}`, { after: (current) => current === boundary ? 10_001 : 0 });
+    assert.match(String(replay.error), /Add: confirmation control was not ready/u);
+    assert.equal(replay.clicks.length, 2);
+    const commands = replay.driver.snapshot().commands;
+    const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
+    const confirmation = commands.slice(targetClick + 1);
+    assert.ok(confirmation.every((entry) => !entry.error && !entry.timedOut));
+    assert.ok(confirmation.filter((entry) => /\/element(?:s|\/add-1\/attribute\/\w+)?$/u.test(entry.path)).every((entry) => entry.timeoutMs === 5_000), 'never dispatch a shortened lookup/read');
+    assert.equal(replay.lookups, 1);
+    if (boundary === 'lookup') assert.equal(replay.observations.some((entry) => entry.boundary === 'identity'), false);
+    if (boundary === 'enabled') assert.deepEqual(replay.attributes, ['add-1:enabled']);
+    if (boundary === 'visible') assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible']);
+    assert.equal(replay.driver.snapshot().unusable, false);
+  });
+}
+
+test('confirmation foreground read cannot consume the allowance of the next lookup', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('foreground-admission', { after: (boundary) => boundary === 'foreground' ? 10_001 : 0 });
+  assert.match(String(replay.error), /Add: confirmation control was not ready/u);
+  assert.equal(replay.lookups, 0);
+  assert.equal(replay.clicks.length, 2);
+  assert.equal(replay.driver.snapshot().unusable, false);
+});
+
+for (const remaining of [4_999, 6_000]) {
+  test(`confirmation parent budget ${remaining} never admits a partial tail observation`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`parent-${remaining}`, { parentRemaining: remaining, after: (boundary) => boundary === 'lookup' ? 1_001 : 0 });
+    assert.match(String(replay.error), /Add: confirmation control was not ready/u);
+    assert.equal(replay.lookups, remaining < 5_000 ? 0 : 1);
+    assert.deepEqual(replay.attributes, []);
+    assert.equal(replay.clicks.length, 2);
+    assert.equal(replay.driver.snapshot().unusable, false);
+  });
+}
+
+test('confirmation exhaustion retains the last meaningful loading observation', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('last-loading-state', {
+    states: ['disabled', 'ready'], after: (boundary, lookup) => lookup === 2 && boundary === 'enabled' ? 10_001 : 0,
+  });
+  assert.match(String(replay.error), /confirmation control was not ready.*disabled/u);
+  assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-2:enabled']);
+  assert.equal(replay.lookups, 2);
+  assert.equal(replay.clicks.length, 2);
+});
+
+test('confirmation final click requires its complete parent allowance after all reads', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  let identityReads = 0;
+  const replay = await confirmationReplay('click-admission', {
+    parentRemaining: 6_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 1_001 : 0,
+  });
+  assert.match(String(replay.error), /insufficient time to complete confirmation click/u);
+  assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+  assert.equal(replay.lookups, 1);
+  assert.equal(replay.clicks.length, 2);
+});
+
+for (const boundary of ['lookup', 'enabled', 'click'] as const) {
+  for (const fault of ['hung', 'interrupted'] as const) {
+    test(`confirmation ${fault} ${boundary} preserves single-flight, first fatal evidence and quarantine`, async () => {
+      const skip = requireXmlLint();
+      if (skip) return skip;
+      const replay = await confirmationReplay(`${fault}-${boundary}`, { fault, faultAt: boundary });
+      assert.match(String(replay.error), /APPIUM_TIMEOUT/u);
+      assert.equal(replay.lookups, 1);
+      assert.equal(replay.clicks.length, boundary === 'click' ? 3 : 2);
+      assert.equal(replay.driver.snapshot().unusable, true);
+      const first = replay.driver.snapshot().firstFatal;
+      assert.equal(first?.code, 'APPIUM_TIMEOUT');
+      const count = replay.requests.length;
+      await assert.rejects(() => replay.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
+      await assert.rejects(() => replay.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
+      assert.equal(replay.requests.length, count);
+      assert.deepEqual(replay.driver.snapshot().firstFatal, first);
+    });
+  }
+}
+
+for (const fault of ['stale', 'transport'] as const) {
+  test(`confirmation final click ${fault} is never retried or restarted`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const replay = await confirmationReplay(`click-${fault}`, { fault, faultAt: 'click' });
+    assert.ok(replay.error);
+    assert.equal(replay.lookups, 1);
+    assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
+    assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-1']);
+    if (fault === 'stale') assert.equal(isRetryableElementLookupError(replay.error), true, 'generic classification must not authorize action retries');
   });
 }
 

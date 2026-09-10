@@ -1,0 +1,78 @@
+[
+  {
+    "run": "34478620554",
+    "proofKind": "Recorded lookup/error and latency excerpts plus complete recorded pre-confirmation Share XMLs. The ready replacement and confirmation XML in host tests are hypothetical, not captured recovery.",
+    "sources": {
+      "ios-before-share-hierarchy.xml": "ios-34478620554-before-share-hierarchy.xml",
+      "ios-share-0-hierarchy.xml": "ios-34478620554-share-0-hierarchy.xml",
+      "ios-share-1-hierarchy.xml": "ios-34478620554-share-1-hierarchy.xml"
+    },
+    "lookup": {
+      "locator": {
+        "using": "accessibility id",
+        "value": "Add"
+      },
+      "sliceMs": 5000,
+      "startedAt": 1789044917715,
+      "endedAt": 1789044918196,
+      "remainingMs": 4519,
+      "outcome": "matched"
+    },
+    "attribute": {
+      "command": "GET /session/19639a2c-96e0-43b1-b568-84eca07d9703/element/4F000000-0000-0000-772C-000000000000/attribute/enabled",
+      "path": "/session/19639a2c-96e0-43b1-b568-84eca07d9703/element/4F000000-0000-0000-772C-000000000000/attribute/enabled",
+      "method": "GET",
+      "durationMs": 291,
+      "timeoutMs": 14519,
+      "timedOut": false,
+      "selectedContext": "NATIVE_APP",
+      "selectedWindow": "",
+      "error": "{\"error\":\"stale element reference\",\"message\":\"The previously found element \\\"\\\"Add\\\" Button\\\" is not present in the current view anymore. Make sure the application UI has the expected state. Original error: Error getting main window kAXErrorInvalidUIElement\",\"stacktrace\":\"ProxyRequestError: Request failed with status code 404\\n    at JWProxy.proxy (/Users/runner/work/_temp/herdr-appium-home/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/jsonwp-proxy/proxy.ts:284:13)\\n  "
+    },
+    "response": {
+      "status": 404,
+      "value": {
+        "error": "stale element reference",
+        "message": "The previously found element \"\"Add\" Button\" is not present in the current view anymore. Make sure the application UI has the expected state. Original error: Error getting main window kAXErrorInvalidUIElement"
+      }
+    }
+  },
+  {
+    "run": "34478627478",
+    "proofKind": "Recorded lookup/error and latency excerpts plus complete recorded pre-confirmation Share XMLs. The ready replacement and confirmation XML in host tests are hypothetical, not captured recovery.",
+    "sources": {
+      "ios-before-share-hierarchy.xml": "ios-34478627478-before-share-hierarchy.xml",
+      "ios-share-0-hierarchy.xml": "ios-34478627478-share-0-hierarchy.xml",
+      "ios-share-1-hierarchy.xml": "ios-34478627478-share-1-hierarchy.xml"
+    },
+    "lookup": {
+      "locator": {
+        "using": "accessibility id",
+        "value": "Add"
+      },
+      "sliceMs": 5000,
+      "startedAt": 1789045097895,
+      "endedAt": 1789045098307,
+      "remainingMs": 4588,
+      "outcome": "matched"
+    },
+    "attribute": {
+      "command": "GET /session/851bde5a-ab96-47a2-b32e-58933b0ec970/element/4F000000-0000-0000-E138-000000000000/attribute/enabled",
+      "path": "/session/851bde5a-ab96-47a2-b32e-58933b0ec970/element/4F000000-0000-0000-E138-000000000000/attribute/enabled",
+      "method": "GET",
+      "durationMs": 496,
+      "timeoutMs": 14587,
+      "timedOut": false,
+      "selectedContext": "NATIVE_APP",
+      "selectedWindow": "",
+      "error": "{\"error\":\"stale element reference\",\"message\":\"The previously found element \\\"\\\"Add\\\" Button\\\" is not present in the current view anymore. Make sure the application UI has the expected state. Original error: Error getting main window kAXErrorInvalidUIElement\",\"stacktrace\":\"ProxyRequestError: Request failed with status code 404\\n    at JWProxy.proxy (/Users/runner/work/_temp/herdr-appium-home/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/jsonwp-proxy/proxy.ts:284:13)\\n  "
+    },
+    "response": {
+      "status": 404,
+      "value": {
+        "error": "stale element reference",
+        "message": "The previously found element \"\"Add\" Button\" is not present in the current view anymore. Make sure the application UI has the expected state. Original error: Error getting main window kAXErrorInvalidUIElement"
+      }
+    }
+  }
+]
