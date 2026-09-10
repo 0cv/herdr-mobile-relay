@@ -1,0 +1,67 @@
+Domain verification status:
+
+Key Set Manager:
+  [com.google.android.trichromelibrary_677820038]
+      Signing KeySets: 32
+
+Packages:
+  Package [com.google.android.trichromelibrary_677820038] (4dbb947):
+    appId=10209
+    pkg=Package{7ebb574 com.google.android.trichromelibrary_677820038}
+    codePath=/data/app/~~55xAnGZiFriVByE4zgbwag==/com.google.android.trichromelibrary_677820038-jn7u0fiWnte7JlL25OlaCg==
+    resourcePath=/data/app/~~55xAnGZiFriVByE4zgbwag==/com.google.android.trichromelibrary_677820038-jn7u0fiWnte7JlL25OlaCg==
+    legacyNativeLibraryDir=/data/app/~~55xAnGZiFriVByE4zgbwag==/com.google.android.trichromelibrary_677820038-jn7u0fiWnte7JlL25OlaCg==/lib
+    extractNativeLibs=false
+    primaryCpuAbi=x86_64
+    secondaryCpuAbi=null
+    cpuAbiOverride=null
+    versionCode=677820038 minSdk=29 targetSdk=34
+    minExtensionVersions=[]
+    versionName=131.0.6778.200
+    hiddenApiEnforcementPolicy=2
+    usesNonSdkApi=false
+    splits=[base]
+    apkSigningVersion=3
+    flags=[ ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]
+    privateFlags=[ PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION ALLOW_AUDIO_PLAYBACK_CAPTURE STATIC_SHARED_LIBRARY PRIVATE_FLAG_ALLOW_NATIVE_HEAP_POINTER_TAGGING ]
+    forceQueryable=false
+    scannedAsStoppedSystemApp=false
+    supportsScreens=[small, medium, large, xlarge, resizeable, anyDensity]
+    static library:
+      name:com.google.android.trichromelibrary version:677820038
+    timeStamp=2026-09-10 14:23:35
+    lastUpdateTime=2026-09-10 14:23:35
+    installerPackageName=null
+    installerPackageUid=-1
+    initiatingPackageName=com.android.shell
+    originatingPackageName=null
+    packageSource=1
+    appMetadataFilePath=null
+    appMetadataSource=0
+    signatures=PackageSignatures{c5dca9d version:3, signatures:[da735754], past signatures:[]}
+    installPermissionsFixed=false
+    pkgFlags=[ ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]
+    privatePkgFlags=[ PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION ALLOW_AUDIO_PLAYBACK_CAPTURE STATIC_SHARED_LIBRARY PRIVATE_FLAG_ALLOW_NATIVE_HEAP_POINTER_TAGGING ]
+    apexModuleName=null
+    User 0: ceDataInode=360626 deDataInode=57856 installed=true hidden=false suspended=false distractionFlags=0 stopped=true notLaunched=true enabled=0 instant=false virtual=false quarantined=false
+      installReason=0
+      dataDir=/data/user/0/com.google.android.trichromelibrary_677820038
+      firstInstallTime=2026-09-10 14:23:35
+      uninstallReason=0
+      runtime permissions:
+
+Queries:
+  system apps queryable: false
+  queries via forceQueryable:
+  queries via package name:
+  queries via component:
+  queryable via interaction:
+    User 0:
+  queryable via uses-library:
+
+Dexopt state:
+  [com.google.android.trichromelibrary_677820038]
+
+Compiler stats:
+  [com.google.android.trichromelibrary_677820038]
+    (No recorded stats)

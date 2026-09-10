@@ -118,11 +118,12 @@ export function isFatalDriverError(error: unknown): boolean {
   if (error instanceof PhaseBudgetError) return true;
   if (error instanceof WebDriverError) {
     return error.timedOut
+      || error.code === 'APPIUM_INTERRUPTED'
       || error.code === 'APPIUM_SESSION_UNUSABLE'
       || (error.method === 'DELETE' && /\/session\/[^/]+$/u.test(error.path));
   }
   const message = error instanceof Error ? error.message : String(error);
-  return /APPIUM_(?:TIMEOUT|SESSION_UNUSABLE)/u.test(message);
+  return /APPIUM_(?:TIMEOUT|INTERRUPTED|SESSION_UNUSABLE)/u.test(message);
 }
 
 export function isRetryableElementLookupError(error: unknown): boolean {
@@ -216,7 +217,7 @@ export class AppiumClient {
     if (this.unusable) {
       throw new WebDriverError({
         code: 'APPIUM_SESSION_UNUSABLE',
-        message: 'the previous session operation timed out; bounded teardown is required before replacement',
+        message: 'the previous session operation did not complete; bounded teardown is required before replacement',
         path: '/session',
         method: 'POST',
         durationMs: 0,
@@ -257,7 +258,7 @@ export class AppiumClient {
       this.unusable = false;
     } catch (error) {
       if (isFatalDriverError(error)) this.recordFatal(error);
-      if (error instanceof WebDriverError && (error.status === 404
+      if (error instanceof WebDriverError && ((error.code === 'APPIUM_COMMAND' && error.status === 404)
         || (error.code === 'APPIUM_HTTP' && error.status !== undefined && error.status >= 200 && error.status < 300))) {
         this.sessionId = '';
         this.unusable = false;
@@ -458,7 +459,7 @@ export class AppiumClient {
     if (this.unusable && path !== '/session' && !path.endsWith('/status')) {
       const error = new WebDriverError({
         code: 'APPIUM_SESSION_UNUSABLE',
-        message: 'the previous command timed out; session replacement is required',
+        message: 'the previous command did not complete; session replacement is required',
         path,
         method: 'COMMAND',
         durationMs: 0,
@@ -531,10 +532,14 @@ export class AppiumClient {
     } catch (error) {
       const timedOut = isTimeoutError(error) || controller.signal.aborted || (enforceBudget && this.budget?.exhausted === true);
       if (timer !== undefined) clearTimeout(timer);
-      if (timedOut) this.unusable = true;
+      const interrupted = response !== undefined;
+      if (timedOut || interrupted) {
+        this.unusable = true;
+        controller.abort(error);
+      }
       const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, timedOut, error instanceof Error ? error.message : String(error));
       throw new WebDriverError({
-        code: timedOut ? 'APPIUM_TIMEOUT' : 'APPIUM_HTTP',
+        code: timedOut ? 'APPIUM_TIMEOUT' : interrupted ? 'APPIUM_INTERRUPTED' : 'APPIUM_HTTP',
         message: error instanceof Error ? error.message : String(error),
         path,
         method,

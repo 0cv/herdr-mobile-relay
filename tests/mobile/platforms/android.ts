@@ -13,6 +13,8 @@ import { DiagnosticRecorder, redactText, writeBoundedText, writeSanitizedJson } 
 import { PhaseBudget, PhaseBudgetError } from '../support/budget';
 import { CommandError, command, commandOutput, type CommandResult } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
+import type { AndroidEnvironmentMeasurement } from '../android-measurement';
+import { isAndroidTerminationPackage } from '../android-events';
 import {
   accessibility,
   androidTextLocator,
@@ -167,6 +169,7 @@ export function androidChromeShortcutArgs(serial: string, shortcut: AndroidChrom
 
 export class AndroidPlatform implements MobilePlatform {
   readonly name = 'android' as const;
+  environmentMeasurement?: AndroidEnvironmentMeasurement;
   readonly driver: AppiumClient;
   private readonly serial: string;
   private readonly origin: string;
@@ -762,11 +765,12 @@ export class AndroidPlatform implements MobilePlatform {
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
-    const packageName = this.installedPackage || await this.currentForegroundPackage();
-    if (!packageName || packageName === 'com.android.launcher3' || packageName === 'com.google.android.apps.nexuslauncher') {
-      throw new Error('ANDROID_TERMINATE: could not identify the installed PWA process');
+    const foreground = await this.foregroundEvidence();
+    if (!this.environmentMeasurement || foreground.packageName !== this.installedPackage || !isAndroidTerminationPackage(foreground.packageName)
+      || !isAndroidPersistentWebAppActivity(foreground.activity) || !foreground.pid) {
+      throw new Error('ANDROID_TERMINATE: measured installed PWA process is not independently identified');
     }
-    await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'am', 'force-stop', packageName]);
+    await this.environmentMeasurement.terminate(foreground.packageName, foreground.pid);
     await command(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'input', 'keyevent', 'KEYCODE_HOME']);
   }
 

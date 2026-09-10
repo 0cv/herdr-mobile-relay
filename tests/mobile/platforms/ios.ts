@@ -31,6 +31,7 @@ import {
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
 
 const IOS_INSTALLED_BUNDLE_ID = 'com.apple.webapp';
+const IOS_SPRINGBOARD_BUNDLE_ID = 'com.apple.springboard';
 const IOS_OPENURL_COMMAND_MS = 30_000;
 const IOS_WEBVIEW_CONNECT_TIMEOUT_MS = 15_000;
 const IOS_WEBVIEW_CONNECT_RETRIES = 30;
@@ -39,6 +40,7 @@ const IOS_SAFARI_READINESS_PHASE_MS = IOS_WEBKIT_DISCOVERY_COMMAND_MS * 2 + 10_0
 const IOS_NAVIGATION_PHASE_MS = IOS_OPENURL_COMMAND_MS + IOS_SAFARI_READINESS_PHASE_MS + 10_000;
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
+const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
 const IOS_NATIVE_LIST_READINESS_MS = 15_000;
 const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_SCROLL_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
@@ -314,6 +316,9 @@ export class IOSPlatform implements MobilePlatform {
   private lastNativePid = '';
   private simulatorReadyAt = '';
   private ownershipFailure?: QualificationFatalError;
+  private nativeObservationFailure?: unknown;
+  private nativeObservationTarget = 'auto';
+  private springBoardRoot = '';
   private navigationCommand = command;
 
   constructor(private readonly options: PlatformOptions) {
@@ -382,6 +387,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async openSetupURL(url: string): Promise<void> {
+    this.assertOwnershipClear();
     await this.captureNavigationState('before');
     const phase = this.budget.phaseView('ios-navigation', IOS_NAVIGATION_PHASE_MS);
     phase.assertAvailable('open setup URL');
@@ -568,12 +574,12 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async installFromBrowser(): Promise<void> {
+    this.assertOwnershipClear();
     const phase = this.budget.phaseView('ios-install', 120_000);
     phase.assertAvailable('start iOS installation');
     await this.driver.switchContext('NATIVE_APP', Math.max(minimumDriverRequestMs, phase.remainingMs));
-    const appInfo = await this.driver.activeAppInfo(Math.max(minimumDriverRequestMs, phase.remainingMs));
-    const bundleId = String(appInfo?.bundleId || appInfo?.bundleID || '');
-    if (!isIOSSafariBrowserBundle(bundleId)) throw new Error(`IOS_SHARE: Safari is not foreground (${bundleId || 'unknown'})`);
+    await this.setNativeObservationTarget('auto', phase);
+    await this.observeNativeForeground('com.apple.mobilesafari', phase);
     const source = await this.captureNativeReadiness('ios-before-share', phase.remainingMs);
     const findTimeout = Math.min(5_000, phase.remainingMs);
     if (findTimeout < minimumDriverRequestMs) throw new Error('IOS_SHARE: insufficient time to inspect Safari toolbar');
@@ -588,15 +594,20 @@ export class IOSPlatform implements MobilePlatform {
     });
     if (share) {
       await this.assertNativeControl(share, 'Share', phase);
-      await this.driver.click(share, Math.max(minimumDriverRequestMs, phase.remainingMs));
+      if (phase.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+        throw new Error('IOS_SHARE: insufficient time to open and observe the Share sheet');
+      }
+      await this.driver.click(share, IOS_NATIVE_SCROLL_COMMAND_MS);
     } else {
       const bounds = nativeShareBounds(source);
       if (!bounds) throw new Error('IOS_SHARE: no verified enabled Share control was exposed by Safari');
-      phase.assertAvailable('tap verified Safari Share control');
+      if (phase.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+        throw new Error('IOS_SHARE: insufficient time to open and observe the Share sheet');
+      }
       await this.driver.mobile('tap', {
         x: Math.round(bounds.x + bounds.width / 2),
         y: Math.round(bounds.y + bounds.height / 2),
-      }, Math.max(minimumDriverRequestMs, phase.remainingMs));
+      }, IOS_NATIVE_SCROLL_COMMAND_MS);
     }
     await this.clickNativeScrollable([
       iosActionLabelContains('Add to Home Screen'),
@@ -674,13 +685,15 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async launchInstalledApp(): Promise<void> {
+    this.assertOwnershipClear();
     await requireOwnedDevice('ios', this.udid);
     this.selectedInstalledContext = '';
     const phase = this.budget.phaseView('ios-launch', 120_000);
     phase.assertAvailable('launch installed provider');
     await this.driver.switchContext('NATIVE_APP', Math.max(2, phase.remainingMs));
+    await this.setNativeObservationTarget(IOS_SPRINGBOARD_BUNDLE_ID, phase);
     await this.driver.mobile('pressButton', { name: 'home' }, Math.max(2, phase.remainingMs));
-    await this.ensureSpringBoardForeground();
+    await this.ensureSpringBoardForeground(phase);
     await delay(Math.min(750, phase.remainingMs), phase);
     for (let page = 0; page < 8; page += 1) {
       phase.assertAvailable('show first SpringBoard page');
@@ -688,31 +701,31 @@ export class IOSPlatform implements MobilePlatform {
     }
     for (let page = 0; page < 8; page += 1) {
       phase.assertAvailable('find installed provider icon');
-      await this.ensureSpringBoardForeground();
+      await this.ensureSpringBoardForeground(phase);
       const icon = await this.findHittableHomeIcon(Math.min(5_000, phase.remainingMs));
       if (icon) {
+        await this.setNativeObservationTarget(IOS_INSTALLED_BUNDLE_ID, phase);
         const clickTimeout = phase.remainingMs;
         if (clickTimeout <= 1) break;
         await this.driver.click(icon, clickTimeout);
-        const providerTimeout = Math.min(5_000, phase.remainingMs);
+        const providerTimeout = Math.min(30_000, phase.remainingMs);
         if (providerTimeout <= 1) break;
         if (await this.waitForInstalledProvider(providerTimeout)) {
-          const activateTimeout = phase.remainingMs;
-          if (activateTimeout <= 1) break;
-          await this.driver.mobile('activateApp', { bundleId: this.installedBundleId }, activateTimeout);
           const foregroundTimeout = phase.remainingMs;
           if (foregroundTimeout <= 1) break;
           await this.requireInstalledProviderForeground(foregroundTimeout);
           await delay(Math.min(750, phase.remainingMs), phase);
-          await this.attachToInstalledView();
+          await this.attachToInstalledView(Math.min(30_000, phase.remainingMs));
           return;
         }
+        if (this.installedBindingState === 'bound') this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider did not return after the planned launch');
+        await this.setNativeObservationTarget(IOS_SPRINGBOARD_BUNDLE_ID, phase);
         const homeTimeout = phase.remainingMs;
         if (homeTimeout <= 1) break;
         await this.driver.mobile('pressButton', { name: 'home' }, homeTimeout);
       }
       if (page < 7) {
-        await this.ensureSpringBoardForeground();
+        await this.ensureSpringBoardForeground(phase);
         const swipeTimeout = phase.remainingMs;
         if (swipeTimeout <= 1) break;
         await this.driver.mobile('swipe', { direction: 'left' }, swipeTimeout);
@@ -909,13 +922,14 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async backgroundApp(): Promise<void> {
+    this.assertOwnershipClear();
     await requireOwnedDevice('ios', this.udid);
+    await this.attachToInstalledView();
     this.selectedInstalledContext = '';
-    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
-      if (isFatalDriverError(error)) throw error;
-    });
+    await this.driver.switchContext('NATIVE_APP');
+    await this.setNativeObservationTarget(IOS_SPRINGBOARD_BUNDLE_ID, this.budget);
     await this.driver.mobile('pressButton', { name: 'home' });
-    await delay(500);
+    await this.ensureSpringBoardForeground();
   }
 
   async relaunchInstalledApp(): Promise<void> {
@@ -923,15 +937,19 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async terminateInstalledApp(): Promise<void> {
+    this.assertOwnershipClear();
     await requireOwnedDevice('ios', this.udid);
+    await this.attachToInstalledView();
     this.selectedInstalledContext = '';
-    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
-      if (isFatalDriverError(error)) throw error;
-    });
+    await this.driver.switchContext('NATIVE_APP');
     const bundleId = this.installedBundleId;
     if (!bundleId) throw new Error('IOS_TERMINATE: the installed Home Screen app did not expose a native provider id');
+    await this.setNativeObservationTarget(IOS_SPRINGBOARD_BUNDLE_ID, this.budget);
     await this.driver.mobile('terminateApp', { bundleId });
+    const state = await this.driver.mobile('queryAppState', { bundleId });
+    if (state !== 1) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider did not terminate');
     await this.driver.mobile('pressButton', { name: 'home' });
+    await this.ensureSpringBoardForeground();
   }
 
   async showKeyboardOnComposer(): Promise<void> {
@@ -1101,6 +1119,9 @@ export class IOSPlatform implements MobilePlatform {
       installedBindingState: this.installedBindingState,
       installedDocumentBound: this.installedBindingState === 'bound',
       ownershipFailure: this.ownershipFailure?.snapshot(),
+      nativeObservationTarget: this.nativeObservationTarget,
+      springBoardObservationRoot: this.springBoardRoot,
+      nativeObservationFailure: this.nativeObservationFailure === undefined ? undefined : String(this.nativeObservationFailure),
       lastUrl: this.lastUrl,
       lastIdentity: this.lastIdentity,
       lastCompletion: this.lastCompletion,
@@ -1119,17 +1140,8 @@ export class IOSPlatform implements MobilePlatform {
   private async captureNativeReadiness(name: string, timeoutMs: number): Promise<string> {
     await mkdir(this.outputDir, { recursive: true });
     const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
-    let source = '';
-    try {
-      const sourceTimeout = deadline - Date.now();
-      if (sourceTimeout >= minimumDriverRequestMs) {
-        source = await this.driver.pageSource(sourceTimeout);
-        await writeBoundedText(join(this.outputDir, `${name}-hierarchy.xml`), source);
-      }
-    } catch (error) {
-      if (isFatalDriverError(error)) throw error;
-      this.diagnostics.record({ phase: 'ios-install', operation: 'native-hierarchy', detail: error instanceof Error ? error.message : String(error) });
-    }
+    const phase = this.budget.phaseView('ios-native-readiness', timeoutMs);
+    const source = await this.captureNativeHierarchy(name, phase);
     try {
       const screenshotTimeout = deadline - Date.now();
       if (screenshotTimeout >= minimumDriverRequestMs) {
@@ -1183,18 +1195,20 @@ export class IOSPlatform implements MobilePlatform {
     return Boolean(bounds && rows.some((row) => nativeBoundsOverlap(bounds, row.bounds)));
   }
 
-  private async captureNativeShareHierarchy(scroll: number, deadline: number): Promise<string> {
-    const timeout = Math.min(5_000, deadline - Date.now());
-    if (timeout < minimumDriverRequestMs) return '';
-    try {
-      const source = await this.driver.pageSource(timeout);
-      await writeBoundedText(join(this.outputDir, `ios-share-${scroll}-hierarchy.xml`), source);
-      return source;
-    } catch (error) {
-      if (isFatalDriverError(error)) throw error;
-      this.diagnostics.record({ phase: 'ios-install', operation: 'share-hierarchy', detail: error instanceof Error ? error.message : String(error) });
-      return '';
+  private async captureNativeHierarchy(name: string, phase: PhaseBudget): Promise<string> {
+    if (phase.remainingMs < IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+      throw new Error('IOS_SHARE: insufficient time to complete native hierarchy observation');
     }
+    const source = await this.driver.pageSource(IOS_NATIVE_HIERARCHY_COMMAND_MS);
+    if (typeof source !== 'string' || !source.includes('<AppiumAUT>') || !source.trimEnd().endsWith('</AppiumAUT>')) {
+      throw new Error('IOS_SHARE: incomplete native hierarchy response');
+    }
+    await writeBoundedText(join(this.outputDir, `${name}-hierarchy.xml`), source);
+    return source;
+  }
+
+  private async captureNativeShareHierarchy(scroll: number, phase: PhaseBudget): Promise<string> {
+    return this.captureNativeHierarchy(`ios-share-${scroll}`, phase);
   }
 
   private async findNativeScrollContainer(
@@ -1271,14 +1285,13 @@ export class IOSPlatform implements MobilePlatform {
   private async findNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<string> {
     if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
     const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
-    const readinessDeadline = Math.min(deadline, Date.now() + IOS_NATIVE_LIST_READINESS_MS);
+    const phase = this.budget.phaseView('ios-share-search', timeoutMs);
+    const readiness = phase.phaseView('ios-share-publication', IOS_NATIVE_LIST_READINESS_MS);
     let lastError = '';
     let source: string | undefined;
     let actionList: NativeActionListEvidence | undefined;
-    while (!actionList && Date.now() < readinessDeadline) {
-      const sourceTimeout = Math.min(5_000, readinessDeadline - Date.now());
-      if (sourceTimeout < minimumDriverRequestMs) break;
-      const currentSource = await this.captureNativeShareHierarchy(0, readinessDeadline);
+    while (!actionList && readiness.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+      const currentSource = await this.captureNativeShareHierarchy(0, readiness);
       actionList = nativeActionListEvidence(currentSource, description);
       if (actionList) {
         source = currentSource;
@@ -1287,22 +1300,15 @@ export class IOSPlatform implements MobilePlatform {
       lastError = currentSource
         ? `${description}: native action list is not ready`
         : `${description}: native hierarchy is unavailable`;
-      const waitMs = Math.min(250, Math.max(0, readinessDeadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs < minimumDriverRequestMs) break;
-      try {
-        await delay(waitMs);
-      } catch (error) {
-        if (readinessDeadline <= Date.now() || this.budget.exhausted) break;
-        throw error;
-      }
+      if (readiness.remainingMs < IOS_NATIVE_HIERARCHY_COMMAND_MS + 250) break;
+      await delay(250, readiness);
     }
     if (!actionList || source === undefined) throw new Error(`IOS_SHARE: ${description}: ${lastError || 'native action list was not ready'}`);
 
     let scrolls = 0;
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      source = await this.captureNativeShareHierarchy(scrolls, deadline);
+    while (phase.remainingMs >= IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+      const remaining = phase.remainingMs;
+      source = await this.captureNativeShareHierarchy(scrolls, phase);
       actionList = nativeActionListEvidence(source, description);
       if (!actionList) {
         lastError = `${description}: native action list was dismissed or replaced`;
@@ -1362,9 +1368,9 @@ export class IOSPlatform implements MobilePlatform {
         targetBounds: targetRow.bounds,
         actionRows: actionList.rows,
       } });
-      const gestureTimeout = Math.min(IOS_NATIVE_SCROLL_COMMAND_MS, deadline - Date.now());
-      if (gestureTimeout < IOS_NATIVE_SCROLL_COMMAND_MS) {
-        lastError = `${description}: insufficient time to complete native scroll`;
+      const gestureTimeout = IOS_NATIVE_SCROLL_COMMAND_MS;
+      if (phase.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+        lastError = `${description}: insufficient time to complete native scroll and hierarchy verification`;
         break;
       }
       let scrolled = false;
@@ -1375,7 +1381,8 @@ export class IOSPlatform implements MobilePlatform {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
         if (isIOSStaleElementError(error) || isCommandAdmissionError(error)) break;
-        const fallbackSource = await this.captureNativeShareHierarchy(scrolls, deadline);
+        if (phase.remainingMs < IOS_NATIVE_HIERARCHY_COMMAND_MS) break;
+        const fallbackSource = await this.captureNativeShareHierarchy(scrolls, phase);
         const fallbackList = nativeActionListEvidence(fallbackSource, description);
         if (!fallbackList) {
           lastError = `${description}: native action list was dismissed or replaced after scroll failure`;
@@ -1387,8 +1394,11 @@ export class IOSPlatform implements MobilePlatform {
           break;
         }
         const fallbackDirection = iosNativeSwipeDirection(direction);
-        const fallbackTimeout = Math.min(IOS_NATIVE_SCROLL_COMMAND_MS, deadline - Date.now());
-        if (fallbackTimeout < IOS_NATIVE_SCROLL_COMMAND_MS) break;
+        const fallbackTimeout = IOS_NATIVE_SCROLL_COMMAND_MS;
+        if (phase.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS + IOS_NATIVE_HIERARCHY_COMMAND_MS) {
+          lastError = `${description}: insufficient time to complete fallback swipe and hierarchy verification`;
+          break;
+        }
         try {
           await this.driver.mobile('swipe', { element: fallbackContainer.element, direction: fallbackDirection }, fallbackTimeout);
           scrolled = true;
@@ -1399,21 +1409,7 @@ export class IOSPlatform implements MobilePlatform {
         }
       }
       if (!scrolled) break;
-      const afterSourceTimeout = deadline - Date.now();
-      if (afterSourceTimeout < 1_000) {
-        lastError = `${description}: insufficient time to verify native scroll progress`;
-        break;
-      }
-      const waitMs = Math.min(250, Math.max(0, afterSourceTimeout - 1_000));
-      if (waitMs > 0) {
-        try {
-          await delay(waitMs);
-        } catch (error) {
-          if (this.budget.exhausted) break;
-          throw error;
-        }
-      }
-      const afterSource = await this.captureNativeShareHierarchy(scrolls + 1, deadline);
+      const afterSource = await this.captureNativeShareHierarchy(scrolls + 1, phase);
       const afterActionList = nativeActionListEvidence(afterSource, description);
       if (!afterActionList) {
         lastError = `${description}: native action list was dismissed or replaced after scroll`;
@@ -1508,13 +1504,15 @@ export class IOSPlatform implements MobilePlatform {
     while (!phase.exhausted) {
       phase.assertAvailable('discover installed provider');
       await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
-      const appInfo = await this.driver.activeAppInfo(Math.max(1, phase.remainingMs));
-      const bundleId = String(appInfo?.bundleId || appInfo?.bundleID || '');
-      if (bundleId && !isIOSSafariBrowserBundle(bundleId) && !isIOSSafariViewServiceBundle(bundleId) && !/springboard/iu.test(bundleId)) {
-        if (bundleId !== IOS_INSTALLED_BUNDLE_ID) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `foreground provider ${bundleId} is not ${IOS_INSTALLED_BUNDLE_ID}`);
-        this.installedBundleId = bundleId;
+      const state = await this.driver.mobile('queryAppState', { bundleId: IOS_INSTALLED_BUNDLE_ID }, phase.remainingMs);
+      if (state === 4) {
+        await this.observeNativeForeground(IOS_INSTALLED_BUNDLE_ID, phase);
+        this.installedBundleId = IOS_INSTALLED_BUNDLE_ID;
         return true;
       }
+      if (state !== 1 && state !== 2 && state !== 3) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'installed provider state is missing or invalid');
+      const homeState = await this.driver.mobile('queryAppState', { bundleId: IOS_SPRINGBOARD_BUNDLE_ID }, phase.remainingMs);
+      if (homeState !== 4) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'neither the launch screen nor installed provider is foreground');
       if (phase.exhausted) {
         this.budget.assertAvailable('discover installed provider');
         return false;
@@ -1533,26 +1531,88 @@ export class IOSPlatform implements MobilePlatform {
     return false;
   }
 
-  private async ensureSpringBoardForeground(): Promise<void> {
-    await this.driver.switchContext('NATIVE_APP');
-    const info = await this.driver.activeAppInfo();
-    const bundleId = String(info?.bundleId || info?.bundleID || '');
-    if (!/springboard/iu.test(bundleId)) {
-      await this.driver.mobile('activateApp', { bundleId: 'com.apple.springboard' });
+  private async setNativeObservationTarget(target: string, phase: PhaseBudget): Promise<void> {
+    this.assertOwnershipClear();
+    const settings = { defaultActiveApplication: target, respectSystemAlerts: true };
+    try {
+      if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS * 2) throw new Error('IOS_NATIVE_SETTINGS: insufficient time to apply and read back the observation target');
+      const response = await this.driver.updateSettings(settings, IOS_NATIVE_LOOKUP_ROUND_MS);
+      if (response !== null) throw new Error('IOS_NATIVE_SETTINGS: malformed settings acknowledgement');
+      if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_NATIVE_SETTINGS: insufficient time to read back the observation target');
+      const actual = await this.driver.settings(IOS_NATIVE_LOOKUP_ROUND_MS);
+      if (!actual || Object.entries(settings).some(([key, value]) => actual[key] !== value)) {
+        throw new Error('IOS_NATIVE_SETTINGS: observation target readback did not match');
+      }
+      this.nativeObservationTarget = target;
+      this.diagnostics.record({ phase: phase.phase, operation: 'native-observation-target', detail: settings });
+    } catch (error) {
+      if (!isFatalDriverError(error)) this.nativeObservationFailure ??= error;
+      throw error;
     }
-    const foreground = await this.driver.activeAppInfo();
-    const active = String(foreground?.bundleId || foreground?.bundleID || '');
-    if (!/springboard/iu.test(active)) throw new Error(`IOS_NATIVE: SpringBoard is not foreground (${active || 'unknown'})`);
   }
 
-  private async requireInstalledProviderForeground(timeoutMs?: number): Promise<void> {
+  private async observeNativeForeground(expected: string, phase: PhaseBudget): Promise<void> {
+    this.assertOwnershipClear();
+    try {
+      if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') await this.driver.switchContext('NATIVE_APP', phase.remainingMs);
+      const state = await this.driver.mobile('queryAppState', { bundleId: expected }, phase.remainingMs);
+      if (state !== 4) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `native provider ${expected} is not foreground (state ${String(state)})`);
+      if (expected === IOS_INSTALLED_BUNDLE_ID) await this.requireUnobscuredSystem(phase);
+      try {
+        await this.driver.command('/alert/text', 'GET', undefined, phase.remainingMs);
+        this.failOwnership('IOS_CONTEXT_OWNERSHIP', `native dialog obscures ${expected}`);
+      } catch (error) {
+        if (!(error instanceof WebDriverError) || error.code !== 'APPIUM_COMMAND' || error.status !== 404
+          || !/"error":"no such alert"/u.test(error.message)) throw error;
+      }
+      const info = await this.driver.activeAppInfo(phase.remainingMs);
+      const active = String(info?.bundleId || info?.bundleID || '');
+      const pid = info?.pid;
+      if (active !== expected || (typeof pid !== 'number' && typeof pid !== 'string')
+        || !/^[1-9]\d*$/u.test(String(pid)) || !Number.isSafeInteger(Number(pid))) {
+        this.failOwnership('IOS_CONTEXT_OWNERSHIP', `native provider ${expected} is not identified in foreground (${active || 'unknown'}, PID ${String(pid)})`);
+      }
+      this.lastNativeActivity = String(info?.activity || info?.appActivity || '');
+      this.lastNativePid = String(pid);
+    } catch (error) {
+      if (!isFatalDriverError(error)) this.nativeObservationFailure ??= error;
+      throw error;
+    }
+  }
+
+  private async requireUnobscuredSystem(phase: PhaseBudget): Promise<void> {
+    if (!this.springBoardRoot) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'independent system observation root is unavailable');
+    const response = await this.driver.command<unknown>(`/element/${encodeURIComponent(this.springBoardRoot)}/elements`, 'POST', {
+      using: 'xpath',
+      value: "self::XCUIElementTypeApplication[@name='SpringBoard'] | .//XCUIElementTypeAlert | .//*[@name='SBTransientOverlayWindow' or @name='NotificationShortLookView']",
+    }, phase.remainingMs);
+    if (!Array.isArray(response) || response.length !== 1 || this.installConfirmationElementId(response[0]) !== this.springBoardRoot) {
+      this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'system observation is missing, replaced, or contains an overlay');
+    }
+  }
+
+  private async ensureSpringBoardForeground(parent = this.budget): Promise<void> {
+    this.assertOwnershipClear();
+    const phase = parent.phaseView('ios-springboard', 30_000);
+    try {
+      await this.driver.switchContext('NATIVE_APP', phase.remainingMs);
+      await this.observeNativeForeground(IOS_SPRINGBOARD_BUNDLE_ID, phase);
+      const roots = await this.driver.command<unknown>('/elements', 'POST', {
+        using: 'xpath', value: "//XCUIElementTypeApplication[@name='SpringBoard']",
+      }, phase.remainingMs);
+      if (!Array.isArray(roots) || roots.length !== 1) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'SpringBoard observation root is not unique');
+      this.springBoardRoot = this.installConfirmationElementId(roots[0]);
+      await this.requireUnobscuredSystem(phase);
+    } catch (error) {
+      if (!isFatalDriverError(error)) this.nativeObservationFailure ??= error;
+      throw error;
+    }
+  }
+
+  private async requireInstalledProviderForeground(timeoutMs = 30_000): Promise<void> {
     if (!this.installedBundleId) throw new Error('IOS_CONTEXT: installed provider identity is unavailable');
     if (this.installedBundleId !== IOS_INSTALLED_BUNDLE_ID) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `installed provider ${this.installedBundleId} is not ${IOS_INSTALLED_BUNDLE_ID}`);
-    const info = await this.driver.activeAppInfo(timeoutMs);
-    const active = String(info?.bundleId || info?.bundleID || '');
-    this.lastNativeActivity = String(info?.activity || info?.appActivity || '');
-    this.lastNativePid = String(info?.pid || '');
-    if (active !== this.installedBundleId) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `installed provider ${this.installedBundleId} is not foreground (${active || 'unknown'})`);
+    await this.observeNativeForeground(this.installedBundleId, this.budget.phaseView('ios-native-foreground', Math.min(30_000, timeoutMs)));
   }
 
   private async validateInstalledDocument(timeoutMs?: number): Promise<void> {
@@ -1615,6 +1675,7 @@ export class IOSPlatform implements MobilePlatform {
 
   private assertOwnershipClear(): void {
     if (this.ownershipFailure) throw this.ownershipFailure;
+    if (this.nativeObservationFailure !== undefined) throw this.nativeObservationFailure;
   }
 
   private failOwnership(code: string, detail: string): never {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, mkdtemp, mkdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { readFile, mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,7 @@ import { writeSanitizedJson } from '../support/diagnostics';
 import { CommandError, command } from '../support/process';
 import recorded from './fixtures/ios/publication.json';
 import recordedConfirmation from './fixtures/ios/ios-confirmation-recorded.json';
+import recordedIteration13 from './fixtures/ios/ios-iteration13-recorded.json';
 
 const origin = 'https://localhost:52101';
 const fixtureDir = fileURLToPath(new URL('./fixtures/ios/', import.meta.url));
@@ -26,19 +28,30 @@ type TestOutcome = void | string;
 const tests: Array<[string, () => Promise<TestOutcome>]> = [];
 const test = (name: string, body: () => Promise<TestOutcome>) => tests.push([name, body]);
 
-async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number) {
+async function adapter(name: string, handler: (request: Request) => Response | Promise<Response>, now?: () => number, nativeDefaults = true) {
   await mkdir(outputRoot, { recursive: true });
   const outputDir = await mkdtemp(join(outputRoot, `${name}-`));
   const budget = new PhaseBudget(name, { timeoutMs: 120_000, recoveryLimit: 0, now });
   const platform = new IOSPlatform({ origin, appiumUrl: 'http://protocol.invalid', outputDir, certificate: '', setupUrl: '', deviceId: 'protocol-only', budget });
   const requests: Request[] = [];
   let inFlight = 0;
+  let settings: Record<string, unknown> = {};
   const driver = new AppiumClient('http://protocol.invalid', 30_000, async (input, init) => {
     assert.equal(++inFlight, 1, 'Appium requests must not overlap');
     try {
       const request = { path: new URL(String(input)).pathname, body: init?.body ? JSON.parse(String(init.body)) : {}, method: init?.method || 'GET', signal: init?.signal };
       requests.push(request);
       if (request.path === '/session') return Response.json({ value: {}, sessionId: 'protocol' });
+      if (nativeDefaults) {
+        if (request.path.endsWith('/appium/settings')) {
+          if (request.method === 'GET') return value(settings);
+          settings = { ...settings, ...request.body.settings };
+          return value(null);
+        }
+        if (request.body.script === 'mobile: queryAppState') return value(request.body.args.bundleId === 'com.apple.springboard' ? 2 : 4);
+        if (request.path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert', message: 'No alert is open' } }, { status: 404 });
+        if (request.path.endsWith('/element/springboard-root/elements')) return value([element('springboard-root')]);
+      }
       return await handler(request);
     } finally {
       inFlight -= 1;
@@ -48,6 +61,7 @@ async function adapter(name: string, handler: (request: Request) => Response | P
   driver.setBudget(budget);
   (platform as any).driver = driver;
   (platform as any).installedBundleId = 'com.apple.webapp';
+  (platform as any).springBoardRoot = 'springboard-root';
   return { platform, driver, requests, budget, outputDir };
 }
 
@@ -157,7 +171,7 @@ for (const mode of ['delayed', 'hung'] as const) {
       }
       assert.equal(driver.snapshot().unusable, false);
       assert.equal(driver.snapshot().firstFatal, undefined);
-      assert.ok(driver.snapshot().commands.every((entry) => !entry.timedOut && !entry.error));
+      assert.ok(driver.snapshot().commands.every((entry) => !entry.timedOut && (!entry.error || entry.error.includes('"error":"no such alert"'))));
       const pending = (platform.evidenceSnapshot().events as any[]).filter((event) => event.operation === 'initial-publication-pending');
       assert.equal(pending.length, discoveries);
       assert.ok(pending.every((event) => event.context === installed.id && event.detail.nativePid === String(recorded.foreground.pid)));
@@ -302,7 +316,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
     };
     const { platform, driver, requests } = await adapter(`share-${mode}`, async ({ path, body, signal }) => {
       if (path.endsWith('/context')) return value(null);
-      if (body.script === 'mobile: activeAppInfo') return value({ bundleId: 'com.apple.mobilesafari' });
+      if (body.script === 'mobile: activeAppInfo') return value({ bundleId: 'com.apple.mobilesafari', pid: 20640 });
       if (path.endsWith('/source')) { source = currentSource(); return value(source); }
       if (path.endsWith('/screenshot')) return value('');
       if (body.script === 'mobile: scroll') {
@@ -446,7 +460,7 @@ async function confirmationReplay(name: string, options: {
     if (path.endsWith('/context')) return value(null);
     if (body.script === 'mobile: activeAppInfo') {
       if (confirming) advance('foreground');
-      return value({ bundleId: confirming ? options.foreground ?? 'com.apple.mobilesafari' : 'com.apple.mobilesafari' });
+      return value({ bundleId: confirming ? options.foreground ?? 'com.apple.mobilesafari' : 'com.apple.mobilesafari', pid: 20640 });
     }
     if (path.endsWith('/source')) {
       source = !sheet ? shareSources[0] : scrolls ? shareSources[2] : shareSources[1];
@@ -948,9 +962,406 @@ test('an insufficient navigation budget records prerequisite skips without admit
   assert.ok(events.length > 0 && events.every((event) => event.detail.outcome === 'skipped'));
 });
 
+test('Plan13 recorded hierarchy inputs retain their exact evidence hashes', async () => {
+  for (const [file, expected] of Object.entries(recordedIteration13.files)) {
+    assert.equal(createHash('sha256').update(await readFile(join(fixtureDir, file))).digest('hex'), expected);
+  }
+});
+
+const lifecycleError = recordedIteration13.safariAUTFailure.response;
+
+async function lifecycleReplay(name: string) {
+  const state = {
+    safariRunning: true, foreground: 'com.apple.mobilesafari', installed: false, pid: 16089 as unknown,
+    overlay: '', documentOrigin: origin, standalone: true, url: `${origin}/`,
+    settingsFault: '', stateFault: undefined as unknown, activeFault: undefined as unknown,
+    alertFault: false, ignoreHome: false, wrongLaunch: '', systemObservationFault: '', slowInstalledObservation: false,
+  };
+  let settings: Record<string, unknown> = { defaultActiveApplication: 'auto', respectSystemAlerts: false };
+  const appState = (bundle: string) => {
+    if (bundle === 'com.apple.webapp' && state.stateFault !== undefined) return state.stateFault;
+    if (bundle === state.foreground) return 4;
+    if (bundle === 'com.apple.springboard') return state.overlay && state.overlay !== 'app-dialog' ? 4 : 2;
+    if (bundle === 'com.apple.webapp') return state.installed ? 2 : 1;
+    return state.safariRunning ? 2 : 1;
+  };
+  const active = () => {
+    const target = String(settings.defaultActiveApplication);
+    if (target !== 'auto' && appState(target) === 4) return target;
+    if (state.safariRunning && state.foreground === 'com.apple.mobilesafari') {
+      return settings.respectSystemAlerts && state.overlay ? 'com.apple.springboard' : 'com.apple.mobilesafari';
+    }
+    if (!state.safariRunning) return '';
+    return state.overlay ? 'com.apple.springboard' : state.foreground;
+  };
+  const replay = await adapter(`lifecycle-${name}`, async ({ path, body, method }) => {
+    if (path.endsWith('/appium/settings')) {
+      if (method === 'GET') return value(state.settingsFault === 'readback' ? { ...settings, defaultActiveApplication: 'auto' } : state.settingsFault === 'malformed-readback' ? [] : settings);
+      if (state.settingsFault === 'unsupported') return Response.json({ value: { error: 'invalid argument', message: 'unsupported setting' } }, { status: 400 });
+      settings = { ...settings, ...body.settings };
+      return value(state.settingsFault === 'malformed-update' ? {} : null);
+    }
+    if (path.endsWith('/context')) return value(null);
+    if (body.script === 'mobile: queryAppState') return value(appState(body.args.bundleId));
+    if (body.script === 'mobile: activeAppInfo') {
+      const bundleId = active();
+      if (!bundleId) return Response.json({ value: lifecycleError }, { status: 400 });
+      return value(state.activeFault ?? { bundleId, pid: bundleId === 'com.apple.webapp' ? state.pid : 42 });
+    }
+    if (path.endsWith('/alert/text')) {
+      if (state.slowInstalledObservation && state.foreground === 'com.apple.webapp') await wait(2_300);
+      if (!active()) return Response.json({ value: lifecycleError }, { status: 400 });
+      if (state.alertFault) return Response.json({ value: { error: 'unknown command', message: 'no such alert is not the error code' } }, { status: 404 });
+      if (state.overlay === 'alert' || state.overlay === 'app-dialog') return value('System or native dialog');
+      return Response.json({ value: { error: 'no such alert', message: 'No alert is open' } }, { status: 404 });
+    }
+    if (body.script === 'mobile: pressButton') {
+      assert.equal(body.args.name, 'home');
+      if (!state.ignoreHome) state.foreground = 'com.apple.springboard';
+      return value(null);
+    }
+    if (body.script === 'mobile: swipe') {
+      assert.equal(active(), 'com.apple.springboard');
+      return value(null);
+    }
+    if (body.script === 'mobile: activateApp') {
+      state.foreground = body.args.bundleId;
+      return value(null);
+    }
+    if (body.script === 'mobile: terminateApp') {
+      assert.equal(body.args.bundleId, 'com.apple.webapp');
+      state.installed = false;
+      state.foreground = 'com.apple.springboard';
+      return value(true);
+    }
+    if (path.endsWith('/element/springboard-root/elements')) {
+      if (state.slowInstalledObservation && state.foreground === 'com.apple.webapp') await wait(2_800);
+      assert.equal(body.using, 'xpath');
+      if (state.systemObservationFault === 'empty') return value([]);
+      if (state.systemObservationFault === 'malformed') return value({});
+      if (state.systemObservationFault === 'replaced') return value([element('different-root')]);
+      const overlay = state.overlay && state.overlay !== 'app-dialog';
+      const xml = `<XCUIElementTypeApplication name="SpringBoard">${overlay ? state.overlay === 'alert' ? '<XCUIElementTypeAlert/>' : `<XCUIElementTypeOther name="${state.overlay}"/>` : ''}</XCUIElementTypeApplication>`;
+      const scopedXPath = String(body.value).split(' | ').map((part) => `/XCUIElementTypeApplication/${part}`).join(' | ');
+      assert.equal(xpathCount(xml, scopedXPath), overlay ? 2 : 1);
+      return value([element('springboard-root'), ...(overlay ? [element('system-overlay')] : [])]);
+    }
+    if (path.endsWith('/elements')) {
+      assert.equal(active(), 'com.apple.springboard');
+      if (body.value.includes('XCUIElementTypeApplication')) return value([element('springboard-root')]);
+      return value([element('home-icon')]);
+    }
+    if (path.endsWith('/home-icon/attribute/hittable')) return value('true');
+    if (path.endsWith('/home-icon/click')) {
+      state.foreground = state.wrongLaunch || 'com.apple.webapp';
+      state.installed = true;
+      return value(null);
+    }
+    if (body.script === 'mobile: getContexts') return value([published]);
+    if (path.endsWith('/url')) return value(state.url);
+    if (body.script?.startsWith('return {')) return value({ origin: state.documentOrigin, standalone: state.standalone, applicationInitialized: true });
+    throw new Error(`unexpected lifecycle request ${path} ${JSON.stringify(body)}`);
+  }, undefined, false);
+  (replay.platform as any).installedBundleId = '';
+  (replay.platform as any).springBoardRoot = '';
+  const marker = join(replay.outputDir, 'ios-ownership');
+  await writeFile(marker, 'ios:protocol-only\n');
+  const owned = async (operation: () => Promise<void>) => {
+    const previous = process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+    process.env.MOBILE_DEVICE_OWNERSHIP_FILE = marker;
+    try { await operation(); } finally {
+      if (previous === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
+      else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previous;
+    }
+  };
+  return { ...replay, state, settings: () => settings, owned };
+}
+
+test('Plan13 lifecycle supported handoff survives obsolete Safari through background cold termination and relaunch', async () => {
+  const a = await lifecycleReplay('complete');
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  a.state.safariRunning = false;
+  await a.platform.attachToInstalledView();
+  assert.equal(a.platform.evidenceSnapshot().nativePid, '16089');
+  await a.owned(() => a.platform.backgroundApp());
+  assert.equal(a.settings().defaultActiveApplication, 'com.apple.springboard');
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  await a.owned(() => a.platform.relaunchInstalledApp());
+  await a.owned(() => a.platform.terminateInstalledApp());
+  a.state.pid = 17001;
+  await a.owned(() => a.platform.relaunchInstalledApp());
+  assert.equal(a.settings().defaultActiveApplication, 'com.apple.webapp');
+  assert.equal(a.platform.evidenceSnapshot().nativePid, '17001');
+  const transitions = a.requests.filter((r) => r.path.endsWith('/appium/settings') && r.method === 'POST');
+  assert.deepEqual(transitions.map((r) => r.body.settings.defaultActiveApplication), [
+    'com.apple.springboard', 'com.apple.webapp', 'com.apple.springboard',
+    'com.apple.springboard', 'com.apple.webapp', 'com.apple.springboard',
+    'com.apple.springboard', 'com.apple.webapp',
+  ]);
+  for (const transition of transitions) {
+    const index = a.requests.indexOf(transition);
+    assert.equal(a.requests[index + 1].method, 'GET');
+    assert.ok(a.requests[index + 1].path.endsWith('/appium/settings'));
+    assert.ok(/pressButton|terminateApp/u.test(a.requests[index + 2].body.script || '') || a.requests[index + 2].path.endsWith('/home-icon/click'));
+  }
+  assert.equal(a.requests.some((r) => /activateApp|launchApp/u.test(r.body.script || '') || (r.path.endsWith('/url') && r.method === 'POST')), false);
+  assert.equal(a.driver.snapshot().unusable, false);
+  await writeSanitizedJson(join(a.outputDir, 'ios-lifecycle-result.json'), { proofKind: 'Source-derived WDA 16.12.1 branch model with hypothetical lifecycle and system-state replies; actual adapter/client, no native execution.', requests: a.requests, evidence: a.platform.evidenceSnapshot() });
+});
+
+test('Plan13 lifecycle complete native proof is not cut off by the former five-second provider phase', async () => {
+  const a = await lifecycleReplay('slow-native-observation');
+  a.state.slowInstalledObservation = true;
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  assert.equal(a.settings().defaultActiveApplication, 'com.apple.webapp');
+  assert.equal(a.driver.snapshot().unusable, false);
+  assert.ok(a.driver.snapshot().commands.every((entry) => entry.timeoutMs <= 120_000 && !entry.timedOut));
+});
+
+for (const mode of ['wrong-foreground', 'missing-foreground', 'missing-pid', 'invalid-pid', 'wrong-native-info', 'alert', 'SBTransientOverlayWindow', 'NotificationShortLookView', 'app-dialog', 'wrong-origin', 'wrong-document', 'not-standalone', 'malformed-state', 'alert-protocol', 'system-empty', 'system-malformed', 'system-replaced'] as const) {
+  test(`Plan13 lifecycle bound ${mode} cannot be hidden by a configured target or cached document`, async () => {
+    const a = await lifecycleReplay(mode);
+    await a.owned(() => a.platform.launchInstalledApp());
+    a.state.safariRunning = false;
+    if (mode === 'wrong-foreground') a.state.foreground = 'com.example.other';
+    if (mode === 'missing-foreground') a.state.foreground = '';
+    if (mode === 'missing-pid') a.state.pid = undefined;
+    if (mode === 'invalid-pid') a.state.pid = -1;
+    if (mode === 'wrong-native-info') a.state.activeFault = { bundleId: 'com.example.other', pid: 42 };
+    if (['alert', 'SBTransientOverlayWindow', 'NotificationShortLookView', 'app-dialog'].includes(mode)) a.state.overlay = mode;
+    if (mode === 'wrong-origin') a.state.url = 'https://other.test/';
+    if (mode === 'wrong-document') a.state.documentOrigin = 'https://other.test';
+    if (mode === 'not-standalone') a.state.standalone = false;
+    if (mode === 'malformed-state') a.state.stateFault = '4';
+    if (mode === 'alert-protocol') a.state.alertFault = true;
+    if (mode.startsWith('system-')) a.state.systemObservationFault = mode.slice('system-'.length);
+    const count = a.requests.length;
+    let failure: unknown;
+    await assert.rejects(() => a.platform.attachToInstalledView(), (error) => { failure = error; return /IOS_CONTEXT_OWNERSHIP|APPIUM_COMMAND/u.test(String(error)); });
+    const stopped = a.requests.length;
+    await assert.rejects(() => a.platform.attachToInstalledView(), (error) => error === failure);
+    await assert.rejects(() => a.owned(() => a.platform.relaunchInstalledApp()), (error) => error === failure);
+    assert.equal(a.requests.length, stopped);
+    assert.equal(a.requests.slice(count).some((r) => r.method === 'POST' && r.path.endsWith('/appium/settings')), false);
+    assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  });
+}
+
+for (const fault of ['unsupported', 'readback', 'malformed-update', 'malformed-readback']) {
+  test(`Plan13 lifecycle ${fault} settings fail before a planned native mutation`, async () => {
+    const a = await lifecycleReplay(fault);
+    a.state.settingsFault = fault;
+    let first: unknown;
+    await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => { first = error; return /IOS_NATIVE_SETTINGS|APPIUM_COMMAND/u.test(String(error)); });
+    const count = a.requests.length;
+    await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), (error) => error === first);
+    assert.equal(a.requests.length, count);
+    assert.equal(a.requests.some((r) => /pressButton|activateApp/u.test(r.body.script || '')), false);
+  });
+}
+
+for (const fault of ['wrong-launch', 'springboard-overlay', 'home-failed']) {
+  test(`Plan13 lifecycle first identification ${fault} is not repaired by activation`, async () => {
+    const a = await lifecycleReplay(fault);
+    if (fault === 'wrong-launch') a.state.wrongLaunch = 'com.example.other';
+    if (fault === 'springboard-overlay') a.state.overlay = 'SBTransientOverlayWindow';
+    if (fault === 'home-failed') a.state.ignoreHome = true;
+    await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /IOS_CONTEXT_OWNERSHIP/u);
+    assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, false);
+    assert.equal(a.requests.some((r) => r.body.script === 'mobile: activateApp'), false);
+  });
+}
+
+async function hierarchyReplay(mode: string) {
+  const sources = await Promise.all(['ios-34488020101-before-share-hierarchy.xml', 'ios-34488020101-share-0-hierarchy.xml', 'ios-34488014724-share-1-hierarchy.xml'].map((file) => readFile(join(fixtureDir, file), 'utf8')));
+  let source = sources[0];
+  let now = 0;
+  let sheet = false;
+  let scrolls = 0;
+  let swipes = 0;
+  let reads = 0;
+  let sheetReads = 0;
+  let confirming = false;
+  let lookups = 0;
+  let identities = 0;
+  const clicks: string[] = [];
+  const pending: Promise<unknown>[] = [];
+  const timed = mode === 'recorded-latency' || mode.startsWith('slow-');
+  const waitFor = async (ms: number) => {
+    const promise = wait(ms);
+    pending.push(promise);
+    await promise;
+  };
+  const a = await adapter(`hierarchy-${mode}`, async ({ path, body, signal }) => {
+    if (path.endsWith('/context')) {
+      if (mode === 'parent-initial') now = 112_001;
+      return value(null);
+    }
+    if (body.script === 'mobile: activeAppInfo') return value({ bundleId: 'com.apple.mobilesafari', pid: 20640 });
+    if (path.endsWith('/source')) {
+      reads++;
+      if (sheet) sheetReads++;
+      source = !sheet ? sources[0] : scrolls ? sources[2] : sources[1];
+      if (mode === 'recorded-latency' && sheet && sheetReads < 3) source = sources[0];
+      if (mode === 'publication-tail' && sheetReads === 1) { source = sources[0]; now += 7_001; }
+      if (mode === 'search-tail' && sheetReads === 1) now += 52_001;
+      if (mode === 'fallback-tail' && scrolls === 1) now = 52_001;
+      if (mode === 'fallback-reserve' && scrolls === 1) now = 47_001;
+      if (mode === 'malformed-source' && scrolls === 1) return value(source.slice(0, -100));
+      if (mode === 'hung-source' && scrolls === 1) return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+      if (mode === 'late-source' && scrolls === 1) await waitFor(8_200);
+      if (mode.startsWith('interrupted-') && scrolls === 1) {
+        const error = mode === 'interrupted-reset' ? new TypeError('hypothetical source connection reset')
+          : new DOMException('interrupted source body', mode === 'interrupted-abort' ? 'AbortError' : 'TimeoutError');
+        return new Response(new ReadableStream({ start(controller) { controller.error(error); } }));
+      }
+      if ((mode === 'slow-body' || mode === 'late-body') && scrolls === 1 && sheetReads === 3) {
+        const payload = JSON.stringify({ value: source.replace('</AppiumAUT>', `${' '.repeat(80_000)}</AppiumAUT>`) });
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(payload.slice(0, 50_000)));
+            const completion = wait(mode === 'slow-body' ? 5_764 : 8_200).then(() => {
+              controller.enqueue(new TextEncoder().encode(payload.slice(50_000)));
+              controller.close();
+            });
+            pending.push(completion);
+          },
+        }));
+      }
+      if ((mode === 'slow-initial' && !sheet) || (mode === 'slow-publication' && sheetReads === 1)
+        || (mode === 'slow-search' && sheetReads === 2) || (mode === 'slow-fallback' && sheetReads === 3)) {
+        await waitFor(recordedIteration13.share.sourceBackendMs);
+      }
+      if (mode === 'recorded-latency') await waitFor(!sheet ? recordedIteration13.share.initialSourceMs : scrolls ? recordedIteration13.share.sourceBackendMs : recordedIteration13.share.sourceMs[sheetReads - 1] || 0);
+      return value(source);
+    }
+    if (path.endsWith('/screenshot')) return value('');
+    if (body.script === 'mobile: scroll') {
+      assert.deepEqual(body.args, { element: `container-${scrolls}`, direction: 'down', distance: 0.75 });
+      scrolls++;
+      if (mode === 'recorded-latency') await waitFor(recordedIteration13.share.scrollClientMs);
+      if (mode === 'fallback-source-admission') now = 52_001;
+      if (mode.startsWith('fallback') || mode === 'slow-fallback') return Response.json({ value: { error: 'unknown error', message: 'completed scroll failure' } }, { status: 500 });
+      if (mode === 'post-source-admission') now = 112_001;
+      return value(null);
+    }
+    if (body.script === 'mobile: swipe') { swipes++; return value(null); }
+    if (path.endsWith('/elements')) {
+      const xml = confirming ? hypotheticalConfirmation : source;
+      assert.ok(xpathCount(xml, body.value) > 0);
+      if (confirming) {
+        identities++;
+        if (mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.identityMs[identities - 1]);
+        return value([element('add')]);
+      }
+      return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
+    }
+    if (path.endsWith('/element')) {
+      if (body.value === 'ShareButton') return value(element('share'));
+      assert.equal(body.value, 'Add');
+      lookups++;
+      if (mode === 'recorded-latency') {
+        await waitFor(recordedIteration13.confirmation.lookupMs[lookups - 1]);
+        if (lookups === 1) return missing();
+      }
+      return value(element('add'));
+    }
+    if (path.endsWith('/rect')) {
+      assert.ok(path.includes(`-${scrolls}/`));
+      const list = nativeActionListEvidence(source, 'Add to Home Screen')!;
+      return value(path.includes('/container-') ? list.collection.bounds : list.targetRows[0].bounds);
+    }
+    if (path.includes('/attribute/')) {
+      if (mode === 'recorded-latency' && path.includes('/add/')) {
+        const attribute = path.split('/attribute/')[1] as keyof typeof recordedIteration13.confirmation.attributeMs;
+        await waitFor(recordedIteration13.confirmation.attributeMs[attribute]);
+      }
+      if (path.includes('/container-') && path.endsWith('/visible')) {
+        if (mode === 'parent-gesture') now = 107_001;
+        if (mode === 'child-gesture') now = 47_001;
+        if (mode === 'near-gesture') now = 46_500;
+      }
+      return value(path.includes('/target-') && /\/(visible|hittable)$/u.test(path) ? String(scrolls > 0) : 'true');
+    }
+    if (path.endsWith('/click')) {
+      const id = path.split('/element/')[1].split('/')[0];
+      clicks.push(id);
+      if (id === 'share') sheet = true;
+      if (id.startsWith('target')) confirming = true;
+      if (id === 'add' && mode === 'recorded-latency') await waitFor(recordedIteration13.confirmation.clickMs);
+      return value(null);
+    }
+    throw new Error(`unexpected hierarchy request ${path} ${JSON.stringify(body)}`);
+  }, timed || /^(?:hung|late|interrupted)-/u.test(mode) ? undefined : () => now);
+  let error: unknown;
+  try { await a.platform.installFromBrowser(); } catch (caught) { error = caught; }
+  const stopped = a.requests.length;
+  const first = a.driver.snapshot().firstFatal;
+  if (/^(?:hung|late|interrupted)-/u.test(mode)) {
+    assert.match(String(error), /APPIUM_(?:TIMEOUT|INTERRUPTED)/u);
+    await assert.rejects(() => a.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
+    await Promise.allSettled(pending);
+    await assert.rejects(() => a.platform.installFromBrowser(), /APPIUM_SESSION_UNUSABLE/u);
+    assert.equal(a.requests.length, stopped);
+    assert.deepEqual(a.driver.snapshot().firstFatal, first);
+  } else await Promise.allSettled(pending);
+  await writeSanitizedJson(join(a.outputDir, 'ios-hierarchy-result.json'), {
+    proofKind: 'Actual-client protocol replay. PR pre-scroll XML and latencies recorded; completing post-scroll XML from push, confirmation XML hypothetical. Budget, body and hung controls hypothetical. No native acceptance.',
+    error: String(error || ''), clicks, reads, sheetReads, scrolls, swipes, lookups, evidence: a.platform.evidenceSnapshot(),
+  });
+  return { ...a, error, clicks, reads, sheetReads, scrolls, swipes, lookups };
+}
+
+for (const mode of ['recorded-latency', 'slow-body', 'slow-initial', 'slow-publication', 'slow-search', 'slow-fallback', 'near-gesture', 'fallback-success']) {
+  test(`Plan13 hierarchy full install ${mode} completes with full source allowances and one final Add`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const a = await hierarchyReplay(mode);
+    assert.equal(a.error, undefined);
+    assert.deepEqual(a.clicks, ['share', 'target-1', 'add']);
+    assert.equal(a.scrolls, 1);
+    assert.equal(a.swipes, mode.includes('fallback') ? 1 : 0);
+    assert.equal(a.driver.snapshot().unusable, false);
+    assert.ok(a.driver.snapshot().commands.filter((r) => r.path.endsWith('/source')).every((r) => r.timeoutMs === 8_000));
+  });
+}
+
+for (const mode of ['parent-initial', 'publication-tail', 'search-tail', 'parent-gesture', 'child-gesture', 'fallback-tail', 'fallback-reserve', 'fallback-source-admission', 'post-source-admission', 'malformed-source']) {
+  test(`Plan13 hierarchy full install ${mode} never dispatches a short source or an unverifiable gesture`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const a = await hierarchyReplay(mode);
+    assert.ok(a.error);
+    assert.ok(a.clicks.length <= 1);
+    assert.equal(a.scrolls, /fallback|post-source|malformed/u.test(mode) ? 1 : 0);
+    assert.equal(a.swipes, 0);
+    if (mode === 'parent-initial') assert.equal(a.reads, 0);
+    if (mode === 'publication-tail' || mode === 'search-tail') assert.equal(a.sheetReads, 1);
+    if (mode === 'fallback-source-admission' || mode === 'post-source-admission') assert.equal(a.sheetReads, 2);
+    assert.ok(a.driver.snapshot().commands.filter((r) => r.path.endsWith('/source')).every((r) => r.timeoutMs === 8_000 && !r.timedOut));
+    assert.equal(a.driver.snapshot().unusable, false);
+  });
+}
+
+for (const mode of ['hung-source', 'late-source', 'late-body', 'interrupted-body', 'interrupted-reset', 'interrupted-abort']) {
+  test(`Plan13 hierarchy full install ${mode} preserves quarantine first failure and no late work`, async () => {
+    const skip = requireXmlLint();
+    if (skip) return skip;
+    const a = await hierarchyReplay(mode);
+    assert.deepEqual(a.clicks, ['share']);
+    assert.equal(a.scrolls, 1);
+    assert.equal(a.swipes, 0);
+    assert.equal(a.lookups, 0);
+    assert.equal(a.driver.snapshot().firstFatal?.code, /interrupted-(?:reset|abort)/u.test(mode) ? 'APPIUM_INTERRUPTED' : 'APPIUM_TIMEOUT');
+  });
+}
+
 export async function runIOSRegressions(): Promise<void> {
   let failures = 0;
   for (const [name, body] of tests) {
+    if (process.env.IOS_TEST_FILTER && !new RegExp(process.env.IOS_TEST_FILTER, 'u').test(name)) continue;
     try {
       const outcome = await body();
       process.stdout.write(outcome ? `ok - iOS ${name} # SKIP ${outcome}\n` : `ok - iOS ${name}\n`);

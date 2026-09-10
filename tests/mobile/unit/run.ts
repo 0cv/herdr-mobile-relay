@@ -19,7 +19,7 @@ import { PhaseBudget } from '../support/budget';
 import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
-import { androidPackageContext, resolveStaticLibraryPackage, compareAndroidEnvironment, forcedRestartEvents, type AndroidEnvironmentAcquisitionDiagnostics, type AndroidEnvironmentSnapshot } from '../android-environment';
+import { androidPackageContext, resolveStaticLibraryPackage, forcedRestartEvents, type AndroidEnvironmentAcquisitionDiagnostics, type AndroidEnvironmentSnapshot } from '../android-environment';
 import { IOSPlatform, iosInstalledContextRejection, iosNativeScrollDirection, iosNativeSwipeDirection, iosOpenURLFailureKind, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError, nativeActionListEvidence } from '../platforms/ios';
 import { runtimeScript } from '../platforms/types';
 import { prepareOutput, repositoryPath, repositoryRoot } from '../support/paths';
@@ -50,7 +50,10 @@ import {
 } from '../support/oracle';
 
 import { androidTransitionTests } from './android-transitions';
+import { androidEnvironmentTests } from './android-environment';
 import { runIOSRegressions } from './ios';
+import { scenarioRunnerTests } from './scenario-runner';
+import { webdriverInterruptionTests } from './webdriver-interruption';
 
 type TestOutcome = void | string;
 const tests: Array<[string, () => Promise<TestOutcome>]> = [];
@@ -78,6 +81,23 @@ async function legacyRoot(version = '0.20.8', assets = 361): Promise<string> {
 
 function iosSafariHierarchy(): string {
   return '<AppiumAUT><XCUIElementTypeApplication name="Safari" bundleId="com.apple.mobilesafari"><XCUIElementTypeButton name="ShareButton" label="Share" enabled="true" visible="true" x="166" y="774" width="61" height="44"/></XCUIElementTypeApplication></AppiumAUT>';
+}
+
+function mockIOSNativeObservation(platform: IOSPlatform): void {
+  const driver = platform.driver as any;
+  (platform as any).springBoardRoot = 'springboard-root';
+  let settings: Record<string, unknown> = {};
+  driver.updateSettings = async (value: Record<string, unknown>) => { settings = { ...settings, ...value }; return null; };
+  driver.settings = async () => settings;
+  driver.mobile = async (name: string) => { assert.equal(name, 'queryAppState'); return 4; };
+  driver.command = async (path: string) => {
+    if (path === '/element/springboard-root/elements') return [{ 'element-6066-11e4-a52e-4f735466cecf': 'springboard-root' }];
+    assert.equal(path, '/alert/text');
+    throw new WebDriverError({
+      code: 'APPIUM_COMMAND', message: 'HTTP 404: {"error":"no such alert"}', status: 404,
+      path, method: 'GET', durationMs: 0, selectedContext: 'NATIVE_APP', selectedWindow: '',
+    });
+  };
 }
 
 function iosShareHierarchy(scrolls: number, populated = true): string {
@@ -494,45 +514,10 @@ test('Android emulator-console parser handles names, terminators, and errors', a
   assert.equal(parseAndroidAvdName('\r\n'), undefined);
 });
 
-test('Android environment comparison rejects dependency churn and forced restarts', async () => {
-  const packageIdentity = (packageName: string) => ({
-    packageName, packageRecordName: packageName, staticLibraryName: '', staticLibraryVersion: '',
-    versionName: '131.0.6778.200', versionCode: '677820038', installerPackageName: 'adb',
-    initiatingPackageName: 'com.android.shell', originatingPackageName: '', packageSource: '1',
-    firstInstallTime: '2026-01-01 00:00:00', lastUpdateTime: '2026-01-01 00:00:00', enabled: 'true',
-    codePath: `/data/app/${packageName}`, apkPaths: [`package:/data/app/${packageName}/base.apk`],
-    moduleConfig: [], moduleConfigSha256: 'a'.repeat(64), dumpSha256: 'b'.repeat(64),
-  });
-  const baseline: AndroidEnvironmentSnapshot = {
-    schema: 1, capturedAt: '2026-01-01T00:00:00.000Z', serial: 'emulator-5554', avdName: 'herdr-mobile-ci',
-    policy: {
-      systemImage: 'system-images;android-35;google_apis;x86_64', systemImagePolicy: 'google-apis-without-play-store', playStore: false,
-      browserPackage: 'com.android.chrome', browserVersion: '131.0.6778.200 (677820038)',
-      trichromeLibraryPackage: 'com.google.android.trichromelibrary', trichromeLibraryVersion: '131.0.6778.200 (677820038)',
-    }, emulatorVersion: 'emulator 35', adbVersion: 'Android Debug Bridge version 1',
-    system: { fingerprint: 'fixture/fingerprint' }, playStoreInstalled: false,
-    packages: {
-      'com.google.android.gms': packageIdentity('com.google.android.gms'),
-      'com.google.android.trichromelibrary': packageIdentity('com.google.android.trichromelibrary'),
-      'com.android.chrome': packageIdentity('com.android.chrome'),
-    },
-  };
-  assert.deepEqual(compareAndroidEnvironment(baseline, { ...baseline, capturedAt: '2026-01-01T00:01:00.000Z' }), []);
-  const changed: AndroidEnvironmentSnapshot = {
-    ...baseline,
-    playStoreInstalled: true,
-    packages: {
-      ...baseline.packages,
-      'com.google.android.gms': { ...baseline.packages['com.google.android.gms'], versionCode: '999' },
-    },
-  };
-  const issues = compareAndroidEnvironment(changed, baseline, 'Module config changed, forcing restart due to module googlecertificates\n');
-  assert.ok(issues.some((issue) => /versionCode changed/u.test(issue)));
-  assert.ok(issues.some((issue) => /Play Store/u.test(issue)));
-  assert.ok(issues.some((issue) => /forced restart/u.test(issue)));
+test('Android environment events require authoritative package or process evidence', async () => {
   assert.equal(forcedRestartEvents('ordinary package com.example changed').length, 0);
-  assert.equal(forcedRestartEvents('PackageManager: Package com.google.android.gms changed').length, 1);
-  assert.equal(forcedRestartEvents('Module config changed, forcing restart due to module googlecertificates\nProcess : Sending signal. PID: 6538 SIG: 9').length, 2);
+  assert.equal(forcedRestartEvents('09-10 08:45:09.464 6538 7277 I DynamiteLoaderV2Impl: Module config changed, forcing restart due to module googlecertificates', { '6538': 'com.android.chrome' }).length, 1);
+  assert.equal(forcedRestartEvents('09-10 08:45:09.464 6538 7277 I DynamiteLoaderV2Impl: Module config changed, forcing restart due to module googlecertificates', { '6538': 'com.example.other' }).length, 0);
 });
 
 interface AndroidEnvironmentFixture {
@@ -550,6 +535,7 @@ function androidPackageDump(
   extra = '',
 ): string {
   return [
+    'Packages:',
     `Package [${packageName}] (fixture):`,
     `  codePath=${codePath}`,
     `  resourcePath=${codePath}`,
@@ -559,11 +545,13 @@ function androidPackageDump(
     '  initiatingPackageName=com.android.shell',
     '  originatingPackageName=com.android.shell',
     '  packageSource=1',
-    '  firstInstallTime=2026-01-01 00:00:00',
     '  lastUpdateTime=2026-01-01 00:00:00',
-    '  enabled=true',
+    '  flags=[ SYSTEM HAS_CODE ]',
+    '  splits=[base]',
     extra,
-  ].filter(Boolean).join('\n') + '\n';
+    '  User 0: installed=true hidden=false suspended=false stopped=false enabled=0',
+    '    firstInstallTime=2026-01-01 00:00:00',
+  ].filter(Boolean).map((line, index) => index ? `  ${line}` : line).join('\n') + `\nQueries:\n\nCompiler stats:\n  [${packageName}]\n    (No recorded stats)\n`;
 }
 
 async function writeAndroidEnvironmentFixtureState(
@@ -586,9 +574,7 @@ async function writeAndroidEnvironmentFixtureState(
   const dependencies = options.chromeDependencies === undefined
     ? ['com.google.android.trichromelibrary version:677820038']
     : options.chromeDependencies;
-  const chromeSource = options.recordedRun
-    ? recordedContext.replace('    supportsScreens=', '    versionCode=677820038 minSdk=29 targetSdk=34\n    versionName=131.0.6778.200\n    supportsScreens=')
-    : await readFile(join(fixtures, 'android15-chrome-package.txt'), 'utf8');
+  const chromeSource = (await readFile(join(fixtures, 'android15-chrome-package.txt'), 'utf8')).replace('    flags=', '    splits=[base]\n    flags=');
   const chromeDump = chromeSource
     .replaceAll('/data/app/~~fixture/com.android.chrome-fixture', chromePath)
     .replaceAll('/data/app/~~fixture/com.google.android.trichromelibrary-fixture', libraryPath)
@@ -631,7 +617,7 @@ test('Android producer-shaped package sections are scoped, heading-relative and 
 });
 
 async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixture> {
-  const root = await mkdtemp(join(tmpdir(), 'herdr-android-environment-'));
+  const root = await mkdtemp(join(process.env.ANDROID_TEST_OUTPUT || tmpdir(), 'herdr-android-environment-'));
   const fixtureDirectory = join(root, 'fixtures');
   const binDirectory = join(root, 'bin');
   await mkdir(fixtureDirectory, { recursive: true });
@@ -655,83 +641,17 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
     await writeAndroidEnvironmentFixtureState(fixtureDirectory, state);
   }
   const gms = await readFile(join(fixtureDirectory, 'module-change-gms.dump'), 'utf8');
-  await writeFile(join(fixtureDirectory, 'module-change-gms.dump'), `${gms}  dynamite module config=changed\n`);
+  await writeFile(join(fixtureDirectory, 'module-change-gms.dump'), gms.replace('    flags=', '    usesLibraryFiles:\n      /data/app/module-changed/base.apk\n    flags='));
   const log = join(root, 'adb.log');
   const adb = join(binDirectory, 'adb');
-  await writeFile(adb, `#!/bin/sh
-set -eu
-printf '%s\\n' "$*" >> "$FAKE_ANDROID_LOG"
-state="\${FAKE_ANDROID_STATE:-valid}"
-request="\${4:-}/\${5:-}/\${6:-}/\${7:-}"
-if [ "\${1:-}" = version ]; then
-  printf 'Android Debug Bridge version 35.0.2\\n'
-  exit 0
-fi
-if [ "\${3:-}" = emu ] && [ "$request" = "avd/name//" ]; then
-  printf 'herdr-mobile-ci-fixture\\nOK\\n'
-  exit 0
-fi
-if [ "\${3:-}" != shell ]; then
-  printf 'unexpected fake adb request: %s\\n' "$*" >&2
-  exit 1
-fi
-if [ "$request" = "dumpsys/package/com.android.chrome/" ] && [ "$state" = adb-timeout ]; then
-  exec sleep 2
-fi
-if [ "$request" = "dumpsys/package/com.google.android.trichromelibrary_677820038/" ] && [ "$state" = adb-failure ]; then
-  printf 'Failure [static package unavailable]\\n' >&2
-  exit 1
-fi
-case "$request" in
-  getprop///)
-    cat "$FAKE_ANDROID_FIXTURE_DIR/getprop"
-    ;;
-  avd/name//)
-    printf 'herdr-mobile-ci-fixture\\nOK\\n'
-    ;;
-  dumpsys/package/com.google.android.gms/)
-    cat "$FAKE_ANDROID_FIXTURE_DIR/$state-gms.dump"
-    ;;
-  dumpsys/package/com.android.chrome/)
-    cat "$FAKE_ANDROID_FIXTURE_DIR/$state-chrome.dump"
-    ;;
-  dumpsys/package/com.google.android.trichromelibrary_677820038/)
-    cat "$FAKE_ANDROID_FIXTURE_DIR/$state-trichrome.dump"
-    ;;
-  pm/path/com.google.android.gms/)
-    cat "$FAKE_ANDROID_FIXTURE_DIR/$state-gms.path"
-    ;;
-  pm/path/com.android.chrome/)
-    cat "$FAKE_ANDROID_FIXTURE_DIR/$state-chrome.path"
-    ;;
-  pm/path/com.google.android.trichromelibrary_677820038/|pm/path/com.google.android.trichromelibrary/)
-    exit 1
-    ;;
-  pm/list/packages/--match-libraries)
-    shift 3
-    [ "$*" = 'pm list packages --match-libraries -f --show-versioncode --user 0 com.google.android.trichromelibrary' ] || exit 1
-    if [ "$state" = listing-timeout ]; then exec sleep 2; fi
-    if [ "$state" = listing-failure ]; then
-      printf 'Error: Unknown option: --match-libraries https://fixture.test/?token=android-fixture-secret\\n'
-      exit 1
-    fi
-    cat "$FAKE_ANDROID_FIXTURE_DIR/$state-trichrome.list"
-    ;;
-  test/-f/*)
-    [ "$state" != missing-file ] || exit 1
-    if [ "$state" = file-timeout ]; then exec sleep 2; fi
-    [ "$#" -eq 6 ] && [ "$6" = "$(cat "$FAKE_ANDROID_FIXTURE_DIR/$state-trichrome.file")" ]
-    ;;
-  pm/list/packages/com.android.vending)
-    ;;
-  *)
-    printf 'unexpected fake adb request: %s\\n' "$*" >&2
-    exit 1
-    ;;
-esac
-`, { mode: 0o700 });
-  await writeFile(join(binDirectory, 'emulator'), '#!/bin/sh\nprintf "Android emulator version fixture\\n"\n', { mode: 0o700 });
-  await writeFile(join(fixtureDirectory, 'getprop'), '[ro.build.fingerprint]: [fixture/fingerprint]\n[ro.build.id]: [AP4A]\n[ro.build.version.incremental]: [fixture]\n[ro.build.version.release]: [15]\n[ro.build.version.sdk]: [35]\n[ro.product.name]: [sdk_gphone]\n[ro.product.device]: [emu64x86-64]\n');
+  await writeFile(adb, `#!${process.execPath}\nimport ${JSON.stringify(repositoryPath('tests/mobile/unit/android-fake-adb.ts'))};\n`, { mode: 0o700 });
+  await writeFile(join(root, 'ownership'), 'android:emulator-5554\n');
+  await mkdir(join(root, 'avd', 'herdr-mobile-ci-fixture.avd'), { recursive: true });
+  await mkdir(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64'), { recursive: true });
+  await writeFile(join(root, 'avd', 'herdr-mobile-ci-fixture.avd', 'config.ini'), 'image.sysdir.1=system-images/android-35/google_apis/x86_64/\ntag.id=google_apis\nabi.type=x86_64\n');
+  await writeFile(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64', 'source.properties'), 'Pkg.Revision=12\nAndroidVersion.ApiLevel=35\nSystemImage.TagId=google_apis\nSystemImage.Abi=x86_64\n');
+  await writeFile(join(binDirectory, 'emulator'), '#!/bin/sh\nprintf "Android emulator version 35.0.2.0\\n"\n', { mode: 0o700 });
+  await writeFile(join(fixtureDirectory, 'getprop'), '[ro.build.fingerprint]: [fixture/fingerprint]\n[ro.build.id]: [AP4A]\n[ro.build.version.incremental]: [fixture]\n[ro.build.version.release]: [15]\n[ro.build.version.sdk]: [35]\n[ro.product.name]: [sdk_gphone]\n[ro.product.device]: [emu64x86-64]\n[ro.kernel.qemu]: [1]\n');
   return {
     root,
     fixtureDirectory,
@@ -741,6 +661,10 @@ esac
       PATH: `${binDirectory}:${process.env.PATH || ''}`,
       FAKE_ANDROID_FIXTURE_DIR: fixtureDirectory,
       FAKE_ANDROID_LOG: log,
+      ANDROID_AVD_NAME: 'herdr-mobile-ci-fixture',
+      ANDROID_HOME: join(root, 'sdk'),
+      ANDROID_AVD_HOME: join(root, 'avd'),
+      MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'ownership'),
     },
   };
 }
@@ -754,9 +678,10 @@ async function runAndroidEnvironmentFixtureSnapshot(
 ): Promise<{ passed: boolean; stderr: string }> {
   await writeFile(fixture.log, '');
   const args = [
-    'tests/mobile/android-environment.ts', 'snapshot',
+    process.env.ANDROID_ENVIRONMENT_SOURCE || 'tests/mobile/android-environment.ts', 'snapshot',
     '--serial', 'emulator-5554',
-    '--toolchains', repositoryPath('tests/mobile/toolchains.json'),
+    '--toolchains', process.env.ANDROID_ENVIRONMENT_TOOLCHAINS || repositoryPath('tests/mobile/toolchains.json'),
+    '--boundary', output.endsWith('before.json') ? 'start' : 'end', '--measurement', 'android-test',
     '--output', output,
     '--diagnostics', diagnostics,
   ];
@@ -787,11 +712,13 @@ async function runAndroidEnvironmentFixtureCheck(
 ): Promise<{ passed: boolean; issues: string[] }> {
   const logFile = join(fixture.root, 'qualification.log');
   const output = join(fixture.root, 'check.json');
-  await writeFile(logFile, log);
+  await writeFile(logFile, `09-10 08:45:00.000 2000 2000 I HerdrMeasure: android-test START\n${log}09-10 08:46:00.000 2000 2000 I HerdrMeasure: android-test END\n`);
+  await writeFile(join(fixture.root, 'operations.json'), '[]');
   let passed = true;
   try {
     execFileSync('bun', [
-      'tests/mobile/android-environment.ts', 'check', '--before', before, '--after', after, '--log', logFile, '--output', output,
+      process.env.ANDROID_ENVIRONMENT_SOURCE || 'tests/mobile/android-environment.ts', 'check', '--before', before, '--after', after, '--log', logFile, '--output', output,
+      '--operations', join(fixture.root, 'operations.json'),
     ], { cwd: repositoryRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch {
     passed = false;
@@ -871,7 +798,7 @@ for (const state of ['valid', 'recorded-34478620554', 'recorded-34478627478']) {
     assert.ok(requests.includes('pm list packages --match-libraries -f --show-versioncode --user 0 com.google.android.trichromelibrary\n'));
     assert.ok(requests.includes(`shell test -f '${observedSource}'\n`));
     assert.deepEqual((await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile)).issues, []);
-    const restart = await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile, 'Module config changed, forcing restart due to module googlecertificates\n');
+    const restart = await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile, '09-10 08:45:09.464 6538 7277 I DynamiteLoaderV2Impl: Module config changed, forcing restart due to module googlecertificates\n');
     assert.equal(restart.passed, false);
     assert.ok(restart.issues.includes('native dependency replacement or forced restart was observed'));
     if (state !== 'valid') return;
@@ -884,8 +811,8 @@ for (const state of ['valid', 'recorded-34478620554', 'recorded-34478627478']) {
     assert.equal((await runAndroidEnvironmentFixtureSnapshot(fixture, 'module-change', afterFile, afterDiagnosticsFile)).passed, true);
     const module = await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile);
     assert.equal(module.passed, false);
-    assert.ok(module.issues.includes('com.google.android.gms module configuration changed'));
-    assert.ok(module.issues.includes('com.google.android.gms moduleConfigSha256 changed'));
+    assert.ok(module.issues.includes('com.google.android.gms dependency configuration changed'));
+    assert.ok(module.issues.includes('com.google.android.gms dependencyConfigSha256 changed'));
   });
 }
 
@@ -915,7 +842,7 @@ test('Android environment snapshot persists bounded diagnostics for static-libra
     ['package-version', 'dump', (source) => source.replace('versionCode=677820038', 'versionCode=677820039'), /pinned library identity/u],
     ['package-version-name', 'dump', (source) => source.replace('versionName=131.0.6778.200', 'versionName=131.0.6778.201'), /pinned library identity/u],
     ['split-layout', 'dump', (source) => source.replace('splits=[base]', 'splits=[base, config.x86_64]'), /split layout/u],
-    ['missing-splits', 'dump', (source) => source.replace('    splits=[base]\n', ''), /split layout/u],
+    ['missing-splits', 'dump', (source) => source.replace('    splits=[base]\n', ''), /splits|split layout/u],
     ['not-installed', 'dump', (source) => source.replace('installed=true', 'installed=false'), /not installed for user 0/u],
     ['wrong-user', 'dump', (source) => source.replace('User 0:', 'User 10:'), /not installed for user 0/u],
   ];
@@ -966,6 +893,13 @@ test('Android environment snapshot persists bounded diagnostics for static-libra
   }
 });
 
+for (const [name, body] of androidEnvironmentTests({
+  createFixture: createAndroidEnvironmentFixture,
+  writeState: writeAndroidEnvironmentFixtureState,
+  snapshot: runAndroidEnvironmentFixtureSnapshot,
+  check: runAndroidEnvironmentFixtureCheck,
+})) test(name, body);
+
 test('Android Chrome startup only enables attach mode after explicit launch', async () => {
   const ordinary = androidChromeCapabilities('emulator-5554');
   const attached = androidChromeCapabilities('emulator-5554', true);
@@ -976,7 +910,7 @@ test('Android Chrome startup only enables attach mode after explicit launch', as
 
 test('Android native settings are applied and read back before lookup', async () => {
   const platform = new AndroidPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('android-settings-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
   });
   const updates: Record<string, unknown>[] = [];
@@ -998,7 +932,7 @@ test('Android final launch verifies readiness only after bootstrap teardown', as
   const platform = new AndroidPlatform({
     origin: 'https://fixture.test',
     appiumUrl: 'http://fake.test',
-    outputDir: '/tmp/herdr-mobile-ci-unit',
+    outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '',
     setupUrl: '',
     deviceId: 'emulator-5554',
@@ -1038,7 +972,7 @@ test('Android Chrome DevTools readiness recognizes the published socket', async 
 
 test('Android installed attachment selects the owned standalone window instead of a browser window', async () => {
   const platform = new AndroidPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'emulator-5554',
     budget: new PhaseBudget('android-attachment-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
   });
@@ -1117,7 +1051,7 @@ test('Android web controls use supported locators and preserve ownership failure
     });
     await client.create({ capabilities: {}, budget });
     const platform = new AndroidPlatform({
-      origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+      origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
       certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget,
     });
     (platform as any).driver = client;
@@ -1174,7 +1108,7 @@ test('Android web controls use supported locators and preserve ownership failure
 
 test('Android fixture verification keeps the HTTP status separate from the Appium response status', async () => {
   const platform = new AndroidPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'emulator-5554',
     budget: new PhaseBudget('android-fixture-test', { timeoutMs: 15_000, recoveryLimit: 1 }),
   });
@@ -1228,7 +1162,7 @@ test('Android fixture verification rejects unsafe HTTP response identities witho
   for (const [index, scenario] of cases.entries()) {
     const clock = { value: 0 };
     const platform = new AndroidPlatform({
-      origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+      origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
       certificate: '', setupUrl: '', deviceId: 'emulator-5554',
       budget: new PhaseBudget(`android-fixture-rejection-${index}`, { timeoutMs: 350, recoveryLimit: 1, now: () => clock.value }),
     });
@@ -1257,7 +1191,7 @@ test('Android Chrome shortcut output preserves the signed launch fields', async 
   });
   const args = androidChromeShortcutArgs('emulator-5554', shortcuts[0]);
   const platform = new AndroidPlatform({
-    origin: 'https://localhost:38289', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    origin: 'https://localhost:38289', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('shortcut-evidence', { timeoutMs: 10_000, recoveryLimit: 1 }),
   });
   const evidence = (platform as any).shortcutEvidence(shortcuts[0]);
@@ -1853,7 +1787,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
   });
   let androidScrolls = 0;
   const android = new AndroidPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-native-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
   });
   (android as any).driver = {
@@ -1866,21 +1800,21 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
 
   let iosScrolls = 0;
   const ios = new IOSPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
-    certificate: '', setupUrl: '', budget: new PhaseBudget('ios-native-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
+    certificate: '', setupUrl: '', budget: new PhaseBudget('ios-native-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   (ios as any).driver = {
     pageSource: async () => iosShareHierarchy(0),
     findAll: async () => { throw fatal; },
     mobile: async () => { iosScrolls += 1; },
   };
-  await assert.rejects(() => (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Missing' }], 'Missing', 100), (error: unknown) => error === fatal);
+  await assert.rejects(() => (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Missing' }], 'Missing', 20_000), (error: unknown) => error === fatal);
   assert.equal(iosScrolls, 0);
 });
 
 test('native lookup scrolls between single-pass locator rounds', async () => {
   const android = new AndroidPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-scroll-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   let androidLookups = 0;
@@ -1898,7 +1832,7 @@ test('native lookup scrolls between single-pass locator rounds', async () => {
   assert.equal(androidScrolls, 1);
 
   const ios = new IOSPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'simulator-1', budget: new PhaseBudget('ios-scroll-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   let iosLookups = 0;
@@ -1945,7 +1879,7 @@ test('iOS native scrolling rejects a hidden match when the hierarchy shows no pr
   driver.attribute = async (element: string, name: string) => element === 'target' && name === 'visible' ? 'false' : 'true';
   driver.mobile = async () => { gestures += 1; };
   await assert.rejects(
-    () => (platform as any).findNativeScrollable([{ using: 'accessibility id', value: 'Add to Home Screen' }], 'Add to Home Screen', 10_000),
+    () => (platform as any).findNativeScrollable([{ using: 'accessibility id', value: 'Add to Home Screen' }], 'Add to Home Screen', 20_000),
     /made no verified progress/,
   );
   assert.equal(gestures, 1);
@@ -1956,7 +1890,7 @@ test('iOS native action controls stop when readiness is indeterminate', async ()
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
     certificate: '', setupUrl: '', deviceId: 'simulator-1',
-    budget: new PhaseBudget('ios-indeterminate', { timeoutMs: 10_000, recoveryLimit: 1 }),
+    budget: new PhaseBudget('ios-indeterminate', { timeoutMs: 20_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
   const source = '<AppiumAUT><XCUIElementTypeApplication name="Safari"><XCUIElementTypeOther name="ActivityListView" visible="true"><XCUIElementTypeOther name="ShareSheet.RemoteContainerView" visible="true"><XCUIElementTypeCollectionView name="activityCollectionView" x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeCell name="actionGroupCell" label="Add to Home Screen" visible="true" enabled="true" x="16" y="200" width="361" height="40"/></XCUIElementTypeCollectionView></XCUIElementTypeOther></XCUIElementTypeOther></XCUIElementTypeApplication></AppiumAUT>';
@@ -1969,7 +1903,7 @@ test('iOS native action controls stop when readiness is indeterminate', async ()
   driver.attribute = async (_element: string, name: string) => name === 'hittable' ? null : 'true';
   driver.mobile = async () => { gestures += 1; };
   await assert.rejects(
-    () => (platform as any).findNativeScrollable([{ using: 'xpath', value: 'Add to Home Screen' }], 'Add to Home Screen', 5_000),
+    () => (platform as any).findNativeScrollable([{ using: 'xpath', value: 'Add to Home Screen' }], 'Add to Home Screen', 20_000),
     /control readiness is indeterminate/,
   );
   assert.equal(gestures, 0);
@@ -2005,7 +1939,7 @@ test('iOS progress ignores browser bars and rejects a dismissed action list', as
     };
     let failure = '';
     try {
-      await (platform as any).findNativeScrollable([{ using: 'xpath', value: 'Add to Home Screen' }], 'Add to Home Screen', 10_000);
+      await (platform as any).findNativeScrollable([{ using: 'xpath', value: 'Add to Home Screen' }], 'Add to Home Screen', 20_000);
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
     }
@@ -2030,6 +1964,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   let sheetOpen = false;
   let scrolls = 0;
   let shareSourceReads = 0;
+  let settings: Record<string, unknown> = {};
   const scrollArguments: Array<Record<string, unknown>> = [];
   const clicks: string[] = [];
   const source = () => {
@@ -2044,6 +1979,13 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, any> : {};
     if (path === '/session') return new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 });
     if (path.endsWith('/context')) return new Response(JSON.stringify({ value: null }), { status: 200 });
+    if (path.endsWith('/appium/settings')) {
+      if (init?.method === 'GET') return Response.json({ value: settings });
+      settings = { ...settings, ...body.settings };
+      return Response.json({ value: null });
+    }
+    if (path.endsWith('/alert/text')) return Response.json({ value: { error: 'no such alert' } }, { status: 404 });
+    if (body.script === 'mobile: queryAppState') return Response.json({ value: 4 });
     if (path.endsWith('/source')) return new Response(JSON.stringify({ value: source() }), { status: 200 });
     if (path.endsWith('/screenshot')) return new Response(JSON.stringify({ value: '' }), { status: 200 });
     if (path.endsWith('/execute/sync')) {
@@ -2137,17 +2079,21 @@ test('iOS native installation rejects a disabled Share control', async () => {
   const platform = new IOSPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
     certificate: '', setupUrl: '', deviceId: 'simulator-1',
-    budget: new PhaseBudget('ios-install-test', { timeoutMs: 5_000, recoveryLimit: 1 }),
+    budget: new PhaseBudget('ios-install-test', { timeoutMs: 120_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
   const gestures: string[] = [];
+  mockIOSNativeObservation(platform);
   driver.switchContext = async () => undefined;
-  driver.activeAppInfo = async () => ({ bundleId: 'com.apple.mobilesafari' });
-  driver.pageSource = async () => '<XCUIElementTypeButton name="Share" label="Share" enabled="false" visible="true" bounds="[10,700][50,740]"/>';
+  driver.activeAppInfo = async () => ({ bundleId: 'com.apple.mobilesafari', pid: 42 });
+  driver.pageSource = async () => iosSafariHierarchy().replace('enabled="true"', 'enabled="false"');
   driver.screenshot = async () => '';
   driver.findAnyOnce = async () => 'share';
   driver.attribute = async (_element: string, name: string) => name === 'enabled' ? 'false' : 'true';
-  driver.mobile = async (command: string) => { gestures.push(command); };
+  driver.mobile = async (command: string) => {
+    if (command === 'queryAppState') return 4;
+    gestures.push(command);
+  };
   await assert.rejects(() => platform.installFromBrowser(), /Share: control is disabled/);
   assert.deepEqual(gestures, []);
 });
@@ -2160,7 +2106,7 @@ test('iOS openurl failures distinguish transient, terminal, and timeout outcomes
 
 test('iOS WebKit discovery retries until Safari publishes a delayed page', async () => {
   const platform = new IOSPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '', setupUrl: '', deviceId: 'simulator-1',
     budget: new PhaseBudget('ios-discovery-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
@@ -2205,7 +2151,7 @@ test('iOS attachment selects a page without enumerating windows', async () => {
   const platform = new IOSPlatform({
     origin: 'https://fixture.test',
     appiumUrl: 'http://fake.test',
-    outputDir: '/tmp/herdr-mobile-ci-unit',
+    outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '',
     setupUrl: '',
     budget: new PhaseBudget('ios-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
@@ -2213,10 +2159,11 @@ test('iOS attachment selects a page without enumerating windows', async () => {
   const driver = platform.driver as any;
   (platform as any).installedBundleId = 'com.apple.webapp';
   const calls: string[] = [];
+  mockIOSNativeObservation(platform);
   driver.contextMetadata = async () => [{
     id: 'WEBVIEW_1', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
   }];
-  driver.switchContext = async (name: string) => { calls.push(`context:${name}`); };
+  driver.switchContext = async (name: string) => { calls.push(`context:${name}`); driver.selectedContext = name; };
   driver.currentUrl = async () => 'https://fixture.test/';
   driver.activeAppInfo = async () => ({ bundleId: 'com.apple.webapp', pid: '19193' });
   driver.execute = async () => ({ origin: 'https://fixture.test', standalone: true });
@@ -2227,7 +2174,7 @@ test('iOS attachment selects a page without enumerating windows', async () => {
 
 test('iOS attachment rejects incorrect foreground, origin, and standalone state', async () => {
   const cases = [
-    { foreground: 'com.apple.mobilesafari', url: 'https://fixture.test/', standalone: true, error: /installed provider/ },
+    { foreground: 'com.apple.mobilesafari', url: 'https://fixture.test/', standalone: true, error: /native provider/ },
     { foreground: 'com.apple.webapp', url: 'https://other.test/', standalone: true, error: /document origin/ },
     { foreground: 'com.apple.webapp', url: 'https://fixture.test/', standalone: false, error: /not standalone/ },
   ];
@@ -2235,17 +2182,18 @@ test('iOS attachment rejects incorrect foreground, origin, and standalone state'
     const platform = new IOSPlatform({
       origin: 'https://fixture.test',
       appiumUrl: 'http://fake.test',
-      outputDir: '/tmp/herdr-mobile-ci-unit',
+      outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
       certificate: '',
       setupUrl: '',
       budget: new PhaseBudget('ios-negative-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
     });
     const driver = platform.driver as any;
     (platform as any).installedBundleId = 'com.apple.webapp';
+    mockIOSNativeObservation(platform);
     driver.contextMetadata = async () => [{
       id: 'WEBVIEW_1', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
     }];
-    driver.switchContext = async () => undefined;
+    driver.switchContext = async (name: string) => { driver.selectedContext = name; };
     driver.currentUrl = async () => scenario.url;
     driver.activeAppInfo = async () => ({ bundleId: scenario.foreground, pid: '19193' });
     driver.execute = async () => ({ origin: scenario.url.replace(/\/$/u, ''), standalone: scenario.standalone });
@@ -2257,7 +2205,7 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
   const platform = new IOSPlatform({
     origin: 'https://fixture.test',
     appiumUrl: 'http://fake.test',
-    outputDir: '/tmp/herdr-mobile-ci-unit',
+    outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
     certificate: '',
     setupUrl: '',
     budget: new PhaseBudget('ios-stale-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
@@ -2265,10 +2213,12 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
   const driver = platform.driver as any;
   (platform as any).installedBundleId = 'com.apple.webapp';
   (platform as any).selectedInstalledContext = 'WEBVIEW_OLD';
+  mockIOSNativeObservation(platform);
   const contexts: string[] = [];
   driver.switchContext = async (name: string) => {
     contexts.push(name);
     if (name === 'WEBVIEW_OLD') throw new Error('no such context');
+    driver.selectedContext = name;
   };
   driver.contextMetadata = async () => [{
     id: 'WEBVIEW_NEW', bundleId: 'com.apple.SafariViewService', url: 'https://fixture.test/', raw: {},
@@ -2283,6 +2233,8 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
 });
 
 for (const [name, body] of androidTransitionTests) test(name, body);
+for (const [name, body] of scenarioRunnerTests) test(name, body);
+for (const [name, body] of webdriverInterruptionTests) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
 
 let failures = 0;

@@ -30,6 +30,7 @@ import {
 } from './support/oracle';
 import { delay, isFatalDriverError } from './support/webdriver';
 import { AndroidPlatform } from './platforms/android';
+import { AndroidEnvironmentMeasurement } from './android-measurement';
 import { IOSPlatform } from './platforms/ios';
 import type { MobilePlatform, PlatformOptions, UpdateCompletionEvidence } from './platforms/types';
 import { repositoryPath, repositoryRoot } from './support/paths';
@@ -100,6 +101,7 @@ interface RunResult {
   qualification_failure?: QualificationFailureSnapshot;
   failure_stage?: string;
   failure?: string;
+  android_environment_failure?: string;
   evidence?: Record<string, unknown>;
   fixture_state?: { requests: FixtureRequest[]; active_release: string };
   budget?: ReturnType<PhaseBudget['snapshot']>;
@@ -418,6 +420,7 @@ async function runUpgradeScenario(
   setStage: (stage: ScenarioStage) => void,
   budget: PhaseBudget,
   qualification: QualificationFailureLatch,
+  afterDevicePreparation: () => Promise<void>,
 ): Promise<RunResult> {
   const baseline = bundleSet.baselines[0];
   assertDistinctUpgrade(baseline, bundleSet.candidate);
@@ -428,6 +431,7 @@ async function runUpgradeScenario(
   const initialIdentity: RuntimeIdentity = await (async () => {
     setStage('device');
     await platform.startFreshDevice();
+    await afterDevicePreparation();
     await platform.openSetupURL(info.setup_urls[0]);
     await platform.installFromBrowser();
     await platform.launchInstalledApp();
@@ -602,6 +606,7 @@ async function runUpgrade(
   suite: string,
   setStage: (stage: ScenarioStage) => void,
   budget: PhaseBudget,
+  afterDevicePreparation: () => Promise<void>,
 ): Promise<RunResult> {
   const qualification = new QualificationFailureLatch();
   let stage: ScenarioStage = 'device';
@@ -609,7 +614,7 @@ async function runUpgrade(
     return await runUpgradeScenario(platform, info, bundleSet, suite, (nextStage) => {
       stage = nextStage;
       setStage(nextStage);
-    }, budget, qualification);
+    }, budget, qualification, afterDevicePreparation);
   } catch (error) {
     if (isFatalDriverError(error)) throw error;
     return qualification.fail(error, stage);
@@ -661,6 +666,9 @@ async function main(): Promise<void> {
   let reverse: string[] = [];
   let result: RunResult;
   let cleanupFailure: unknown;
+  let measurement: AndroidEnvironmentMeasurement | undefined;
+  let measurementStarted = false;
+  let androidEnvironmentFailure: string | undefined;
   let stage: string = 'fixture';
   try {
     fixtureInfo = await waitForInfo(infoFile, 180_000, budget);
@@ -676,7 +684,14 @@ async function main(): Promise<void> {
       diagnostics,
     };
     platform = platformFor(platformOptions);
-    result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; }, budget);
+    const android = platform instanceof AndroidPlatform ? platform : undefined;
+    if (android) measurement = new AndroidEnvironmentMeasurement(platformOptions.deviceId || '', outputDir, repositoryPath('tests/mobile/toolchains.json'));
+    result = await runUpgrade(platform, fixtureInfo, bundleSet, suite, (nextStage) => { stage = nextStage; }, budget, async () => {
+      if (!android || !measurement) return;
+      await measurement.begin();
+      measurementStarted = true;
+      android.environmentMeasurement = measurement;
+    });
     result.evidence = platform.evidenceSnapshot();
     result.budget = budget.snapshot();
   } catch (error) {
@@ -702,6 +717,14 @@ async function main(): Promise<void> {
       budget: budget.snapshot(),
     };
   } finally {
+    if (measurementStarted) {
+      try {
+        await measurement!.finish();
+      } catch (error) {
+        androidEnvironmentFailure = error instanceof Error ? error.message : String(error);
+        diagnostics.record({ phase: 'android-environment', operation: 'postcheck', detail: androidEnvironmentFailure });
+      }
+    }
     try {
       await platform?.stopOwnedResources();
     } catch (error) {
@@ -716,6 +739,12 @@ async function main(): Promise<void> {
     await rm(infoFile, { force: true });
     await rm(privateDir, { recursive: true, force: true });
   }
+  if (androidEnvironmentFailure !== undefined) {
+    result.android_environment_failure = androidEnvironmentFailure;
+    if (result.result === 'passed') {
+      result = { ...result, result: 'infrastructure failure', failure_stage: 'android-environment', failure: androidEnvironmentFailure };
+    }
+  }
   if (cleanupFailure) {
     result.evidence = platform?.evidenceSnapshot();
     if (result.result === 'passed') {
@@ -728,6 +757,7 @@ async function main(): Promise<void> {
       };
     }
   }
+  await diagnostics.write(resolve(outputDir, 'scenario-events.json'));
   await writeSanitizedJson(resolve(outputDir, 'mobile-result.json'), result);
   if (result.result !== 'passed') process.exitCode = 1;
 }

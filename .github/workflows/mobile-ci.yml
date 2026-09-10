@@ -252,8 +252,8 @@ jobs:
             .drivers.uiautomator2 == "8.2.2" and
             .drivers.xcuitest == "12.10.0" and
             .android.systemImage == "system-images;android-35;google_apis;x86_64" and
-            .android.systemImagePolicy == "google-apis-without-play-store" and
-            .android.playStore == false and
+            .android.systemImagePolicy == "owned-google-apis-emulator" and
+            .android.vendingPolicy == "absent-or-disabled-user-0" and
             .android.browserPackage == "com.android.chrome" and
             .android.browserVersion == "131.0.6778.200 (677820038)" and
             .android.browserSha256 == "261439a1ed20090f9f2f9aeef64024c1cfb9f242d4770f8f7c8f2e777843a35a" and
@@ -642,6 +642,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
           # Keep avdmanager and emulator on the same explicit, disposable path.
           # Hosted images can expose different Android home defaults to the two
           # tools, which otherwise leaves the emulator unable to find the AVD.
@@ -756,18 +757,15 @@ jobs:
           printf '%s\n%s\n' "$chrome_version" "$trichrome_version" >"$RUNNER_TEMP/android-chrome-version.txt"
           grep -F 'versionName=131.0.6778.200' <<<"$chrome_version"
           grep -F 'com.google.android.trichromelibrary version:677820038' <<<"$trichrome_version"
-      - name: Capture Android environment baseline
+      - name: Prepare owned Android environment policy
         if: matrix.platform == 'android'
         run: |
           set -euo pipefail
-          adb -s "$ANDROID_SERIAL" logcat -c
-          adb -s "$ANDROID_SERIAL" logcat -v threadtime >"$RUNNER_TEMP/android-qualification-logcat.log" 2>&1 &
-          printf 'ANDROID_LOGCAT_PID=%s\n' "$!" >> "$GITHUB_ENV"
-          bun tests/mobile/android-environment.ts snapshot \
+          bun tests/mobile/android-environment.ts prepare \
             --serial "$ANDROID_SERIAL" \
             --toolchains tests/mobile/toolchains.json \
-            --output "$MOBILE_OUTPUT/android-environment-before.json" \
-            --diagnostics "$MOBILE_OUTPUT/android-environment-before-diagnostics.json"
+            --output "$MOBILE_OUTPUT/android-environment-preparation.json" \
+            --diagnostics "$MOBILE_OUTPUT/android-environment-preparation-diagnostics.json"
         shell: bash
 
       - name: Create and boot iOS simulator
@@ -893,28 +891,14 @@ jobs:
       - name: Verify Android environment stability
         if: always() && matrix.platform == 'android'
         run: |
-          set +e
-          if [ -n "${ANDROID_LOGCAT_PID:-}" ]; then
-            kill "$ANDROID_LOGCAT_PID" 2>/dev/null || true
-            wait "$ANDROID_LOGCAT_PID" 2>/dev/null || true
-          fi
-          snapshot_status=0
-          bun tests/mobile/android-environment.ts snapshot \
-            --serial "$ANDROID_SERIAL" \
-            --toolchains tests/mobile/toolchains.json \
-            --output "$MOBILE_OUTPUT/android-environment-after.json" \
-            --diagnostics "$MOBILE_OUTPUT/android-environment-after-diagnostics.json" || snapshot_status=$?
-          check_status=1
-          if [ "$snapshot_status" -eq 0 ]; then
-            check_status=0
-            bun tests/mobile/android-environment.ts check \
-              --before "$MOBILE_OUTPUT/android-environment-before.json" \
-              --after "$MOBILE_OUTPUT/android-environment-after.json" \
-              --log "$RUNNER_TEMP/android-qualification-logcat.log" \
-              --output "$MOBILE_OUTPUT/android-environment-check.json" || check_status=$?
-          fi
-          if [ "$snapshot_status" -ne 0 ]; then exit "$snapshot_status"; fi
-          exit "$check_status"
+          set -euo pipefail
+          jq -e '.failure == null and .bytes > 0 and .bytes <= 104857600' "$MOBILE_OUTPUT/android-environment-collector.json"
+          bun tests/mobile/android-environment.ts check \
+            --before "$MOBILE_OUTPUT/android-environment-before.json" \
+            --after "$MOBILE_OUTPUT/android-environment-after.json" \
+            --log "$MOBILE_OUTPUT/android-qualification-logcat.log" \
+            --operations "$MOBILE_OUTPUT/android-environment-operations.json" \
+            --output "$MOBILE_OUTPUT/android-environment-check.json"
         shell: bash
       - name: Sanitize bounded diagnostics
         if: always()
@@ -936,9 +920,6 @@ jobs:
           fi
           if [ -f "$RUNNER_TEMP/emulator.log" ]; then
             head -c 104857600 "$RUNNER_TEMP/emulator.log" >"$MOBILE_OUTPUT/emulator.log" || true
-          fi
-          if [ -f "$RUNNER_TEMP/android-qualification-logcat.log" ]; then
-            bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/android-qualification-logcat.log" "$MOBILE_OUTPUT/android-qualification-logcat.log"
           fi
           if [ -f "$RUNNER_TEMP/xcode-version.txt" ]; then cp "$RUNNER_TEMP/xcode-version.txt" "$MOBILE_OUTPUT/xcode-version.txt"; fi
           if [ -f "$RUNNER_TEMP/ios-apps-before.txt" ]; then cp "$RUNNER_TEMP/ios-apps-before.txt" "$MOBILE_OUTPUT/ios-apps-before.txt"; fi
