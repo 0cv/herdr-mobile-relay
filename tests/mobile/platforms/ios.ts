@@ -33,11 +33,13 @@ import { runtimeScript, updateCompletionScript, type MobilePlatform, type Platfo
 const IOS_INSTALLED_BUNDLE_ID = 'com.apple.webapp';
 const IOS_SPRINGBOARD_BUNDLE_ID = 'com.apple.springboard';
 const IOS_OPENURL_COMMAND_MS = 30_000;
-const IOS_WEBVIEW_CONNECT_TIMEOUT_MS = 15_000;
-const IOS_WEBVIEW_CONNECT_RETRIES = 30;
-const IOS_WEBKIT_DISCOVERY_COMMAND_MS = 18_000;
-const IOS_SAFARI_READINESS_PHASE_MS = IOS_WEBKIT_DISCOVERY_COMMAND_MS * 2 + 10_000;
-const IOS_NAVIGATION_PHASE_MS = IOS_OPENURL_COMMAND_MS + IOS_SAFARI_READINESS_PHASE_MS + 10_000;
+const IOS_WEBVIEW_CONNECT_TIMEOUT_MS = 5_000;
+const IOS_WEBVIEW_CONNECT_RETRIES = 1;
+const IOS_WEBKIT_DISCOVERY_COMMAND_MS = 20_000;
+const IOS_SAFARI_READINESS_PHASE_MS = 46_000;
+const IOS_NAVIGATION_PHASE_MS = 86_000;
+const IOS_SAFARI_OBSERVATION_MS = 6_000;
+const IOS_INSTALLED_FOREGROUND_MS = 8_000;
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
@@ -517,8 +519,8 @@ export class IOSPlatform implements MobilePlatform {
     let lastError = '';
     while (!phase.exhausted) {
       try {
-        if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS) {
-          lastError = `not enough time for WebKit discovery (${phase.remainingMs}ms remains; ${IOS_WEBKIT_DISCOVERY_COMMAND_MS}ms required)`;
+        if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_SAFARI_OBSERVATION_MS) {
+          lastError = `not enough time for WebKit discovery and Safari observation (${phase.remainingMs}ms remains)`;
           break;
         }
         const metadata = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
@@ -527,17 +529,14 @@ export class IOSPlatform implements MobilePlatform {
         if (!context) {
           lastError = 'Safari did not publish a web context';
         } else {
-          const switchTimeout = phase.remainingMs;
-          if (switchTimeout < minimumDriverRequestMs) break;
-          await this.driver.switchContext(context.id, switchTimeout);
-          const currentUrlTimeout = phase.remainingMs;
-          if (currentUrlTimeout < minimumDriverRequestMs) break;
-          const currentUrl = await this.driver.currentUrl(currentUrlTimeout);
+          if (phase.remainingMs < IOS_SAFARI_OBSERVATION_MS) break;
+          await this.driver.switchContext(context.id, 4_000);
+          if (phase.remainingMs < 2_000) break;
+          const currentUrl = await this.driver.currentUrl(1_000);
           if (this.isExpectedOrigin(currentUrl)) {
             this.lastUrl = currentUrl;
-            const nativeTimeout = phase.remainingMs;
-            if (nativeTimeout < minimumDriverRequestMs) break;
-            await this.driver.switchContext('NATIVE_APP', nativeTimeout);
+            if (phase.remainingMs < 1_000) break;
+            await this.driver.switchContext('NATIVE_APP', 1_000);
             return;
           }
           if (!fallbackAttempted) {
@@ -768,13 +767,14 @@ export class IOSPlatform implements MobilePlatform {
         }
       }
       phase.assertAvailable('discover installed page metadata');
-      if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS) {
-        lastError ||= `not enough time for WebKit discovery (${phase.remainingMs}ms remains; ${IOS_WEBKIT_DISCOVERY_COMMAND_MS}ms required)`;
+      if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_INSTALLED_FOREGROUND_MS) {
+        lastError ||= `not enough time for WebKit discovery and foreground observation (${phase.remainingMs}ms remains)`;
         break;
       }
       const contexts = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
       phase.assertAvailable('validate installed discovery foreground');
-      await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
+      if (phase.remainingMs < IOS_INSTALLED_FOREGROUND_MS) break;
+      await this.requireInstalledProviderForeground(IOS_INSTALLED_FOREGROUND_MS);
       let candidateError: unknown;
       if (!contexts.length) {
         lastError = 'installed page metadata is unavailable';

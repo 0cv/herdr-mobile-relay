@@ -19,7 +19,7 @@ interface Fixture {
 interface Harness {
   createFixture(): Promise<Fixture>;
   writeState(directory: string, state: string): Promise<void>;
-  snapshot(fixture: Fixture, state: string, output: string, diagnostics: string): Promise<{ passed: boolean; stderr: string }>;
+  snapshot(fixture: Fixture, state: string, output: string, diagnostics: string, timeoutMs?: number): Promise<{ passed: boolean; stderr: string }>;
   check(fixture: Fixture, before: string, after: string, log?: string): Promise<{ passed: boolean; issues: string[] }>;
 }
 type Test = [string, () => Promise<void>];
@@ -41,7 +41,7 @@ function cli(fixture: Fixture, args: string[]): { passed: boolean; stderr: strin
 export function androidEnvironmentTests(harness: Harness): Test[] {
   const tests: Test[] = [];
   const test = (name: string, body: () => Promise<void>) => tests.push([`Android production CLI ${name}`, body]);
-  const prepare = (fixture: Fixture) => cli(fixture, ['prepare', '--serial', 'emulator-5554', '--toolchains', process.env.ANDROID_ENVIRONMENT_TOOLCHAINS || repositoryPath('tests/mobile/toolchains.json'), '--output', join(fixture.root, 'preparation.json')]);
+  const prepare = (fixture: Fixture) => cli(fixture, ['prepare', '--serial', 'emulator-5554', '--toolchains', process.env.ANDROID_ENVIRONMENT_TOOLCHAINS || repositoryPath('tests/mobile/toolchains.json'), '--output', join(fixture.root, 'preparation.json'), '--adb-timeout-ms', '1000']);
   const state = (fixture: Fixture, value: unknown) => writeFile(join(fixture.fixtureDirectory, 'valid-vending.json'), JSON.stringify(value));
   const snapshots = async (fixture: Fixture) => {
     const before = join(fixture.root, 'before.json');
@@ -78,6 +78,89 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.equal((await harness.check(fixture, before, after)).passed, true);
     assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
     assert.equal(requests.includes('disable-user --user 0 com.google.android.gms'), false);
+  });
+  test('acquires only eight named identity properties despite legal ambiguous dump records beyond preview', async () => {
+    const fixture = await harness.createFixture();
+    const dump = await readFile(join(fixture.fixtureDirectory, 'getprop'), 'utf8');
+    assert.ok(dump.indexOf('[source-derived]') > 4000);
+    assert.ok(dump.includes('first]\n[ro.synthetic.other]: [second'));
+    assert.equal(prepare(fixture).passed, true);
+    const preparation = JSON.parse(await readFile(join(fixture.root, 'preparation.json'), 'utf8')) as AndroidPreparation;
+    const { before, after } = await snapshots(fixture);
+    const snapshot = JSON.parse(await readFile(before, 'utf8')) as AndroidEnvironmentSnapshot;
+    assert.deepEqual(snapshot.system, preparation.system);
+    assert.equal(Object.keys(snapshot.system).length, 7);
+    const requests = (await readFile(fixture.log, 'utf8')).trim().split('\n');
+    const properties = requests.filter((line) => line.includes('getprop'));
+    assert.equal(properties.length, 8);
+    assert.ok(properties.includes('-s emulator-5554 shell getprop ro.kernel.qemu'));
+    assert.ok(properties.every((line) => /^-s emulator-5554 shell getprop ro\.[a-z.]+$/u.test(line)));
+    const diagnostics = JSON.parse(await readFile(after.replace('.json', '-diagnostics.json'), 'utf8'));
+    assert.ok(diagnostics.commands.filter((entry: { args: string[] }) => entry.args.includes('getprop')).every((entry: { stdoutPreview?: string }) => entry.stdoutPreview === undefined));
+    assert.equal((await harness.check(fixture, before, after)).passed, true);
+  });
+  for (const [name, value] of [
+    ['empty', ''], ['missing', '\n'], ['truncated', 'fixture'], ['multiline', 'first\nsecond\n'],
+    ['framed dump', '[ro.build.id]: [AP4A]\n[ro.build.id]: [AP4A]\n'],
+    ['oversized', 'x'.repeat(4096) + '\n'], ['control', 'fixture\u0000\n'], ['padded', ' fixture\n'],
+  ]) test(`rejects ${name} required property in preparation and snapshot without mutation`, async () => {
+    const fixture = await harness.createFixture();
+    await state(fixture, { enabled: 0, propertyResponses: { 'ro.build.id': value } });
+    const preparation = prepare(fixture);
+    assert.equal(preparation.passed, false, name);
+    assert.match(preparation.stderr, /required system property ro.build.id/u);
+    assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
+    const snapshot = await harness.snapshot(fixture, 'valid', join(fixture.root, 'before.json'), join(fixture.root, 'diagnostics.json'));
+    assert.equal(snapshot.passed, false, name);
+    assert.match(snapshot.stderr, /required system property ro.build.id/u);
+    assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
+  });
+  for (const [name, value] of [['ro.build.version.sdk', '34\n'], ['ro.kernel.qemu', '0\n']]) {
+    test(`rejects wrong ${name} before preparation mutation and during snapshot`, async () => {
+      const fixture = await harness.createFixture();
+      await state(fixture, { enabled: 0, propertyResponses: { [name]: value } });
+      assert.equal(prepare(fixture).passed, false);
+      assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
+      assert.equal((await harness.snapshot(fixture, 'valid', join(fixture.root, 'before.json'), join(fixture.root, 'diagnostics.json'))).passed, false);
+      assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
+    });
+  }
+  for (const failure of ['propertyTimeout', 'propertyFailure', 'propertyStderr']) {
+    test(`rejects named acquisition ${failure} before any preparation mutation and snapshot`, async () => {
+      const fixture = await harness.createFixture();
+      await state(fixture, { enabled: 0, [failure]: 'ro.build.id' });
+      assert.equal(prepare(fixture).passed, false);
+      assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
+      assert.equal((await harness.snapshot(fixture, 'valid', join(fixture.root, 'before.json'), join(fixture.root, 'diagnostics.json'), 1000)).passed, false);
+      assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
+      const diagnostics = JSON.parse(await readFile(join(fixture.root, 'diagnostics.json'), 'utf8'));
+      assert.equal(diagnostics.failure.stage, 'read required system property ro.build.id');
+      if (failure === 'propertyTimeout') assert.equal(diagnostics.failure.timedOut, true);
+    });
+  }
+  test('requires every persisted identity field and qemu before preparation mutation', async () => {
+    const keys = ['ro.build.fingerprint', 'ro.build.id', 'ro.build.version.incremental', 'ro.build.version.release', 'ro.build.version.sdk', 'ro.product.name', 'ro.product.device', 'ro.kernel.qemu'];
+    for (const key of keys) {
+      const fixture = await harness.createFixture();
+      await state(fixture, { enabled: 0, propertyResponses: { [key]: '\n' } });
+      assert.equal(prepare(fixture).passed, false, key);
+      assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false, key);
+    }
+  });
+  test('independent preparation readback rejects changed system identity without repair', async () => {
+    const fixture = await harness.createFixture();
+    await state(fixture, { enabled: 0, propertyChangeOnDisable: { 'ro.build.id': 'CHANGED\n' } });
+    const result = prepare(fixture);
+    assert.equal(result.passed, false);
+    assert.match(result.stderr, /preparation provenance changed/u);
+    assert.equal((await readFile(fixture.log, 'utf8')).split('\n').filter((line) => line.includes('disable-user')).length, 1);
+  });
+  test('rejects changed named system identity after measurement', async () => {
+    const fixture = await harness.createFixture();
+    const { before, after } = await snapshots(fixture);
+    await state(fixture, { absent: true, propertyResponses: { 'ro.build.id': 'CHANGED\n' } });
+    assert.equal((await harness.snapshot(fixture, 'valid', after, join(fixture.root, 'diagnostics.json'))).passed, true);
+    assert.equal((await harness.check(fixture, before, after)).passed, false);
   });
   for (const enabled of [2, 4]) test(`review: shell denies preparation from enabled=${enabled} without additional mutation`, async () => {
     const fixture = await harness.createFixture();

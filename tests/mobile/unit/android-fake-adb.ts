@@ -24,6 +24,15 @@ if (args.join(' ') === 'version') output('Android Debug Bridge version 1.0.41\nV
 else if (request === 'emu avd name') output(`${vending.avd || 'herdr-mobile-ci-fixture'}\nOK\n`);
 else if (args[0] !== '-s' || args[1] !== 'emulator-5554') fail('unexpected serial');
 else if (request === 'shell getprop') output(readFileSync(join(directory, 'getprop'), 'utf8'));
+else if (request.startsWith('shell getprop ')) {
+  const name = args[4];
+  const properties = JSON.parse(readFileSync(join(directory, 'properties.json'), 'utf8'));
+  if (vending.propertyTimeout === name) await sleep();
+  if (vending.propertyFailure === name) fail('getprop acquisition denied\n');
+  if (vending.propertyStderr === name) process.stderr.write('getprop acquisition warning\n');
+  if (vending.propertyResponses && Object.hasOwn(vending.propertyResponses, name)) output(vending.propertyResponses[name]);
+  else output(`${properties[name] ?? ''}\n`);
+}
 else if (request === 'shell am get-current-user') output(`${vending.foregroundUser ?? 0}\n`);
 else if (request === 'shell dumpsys activity activities') output(`ResumedActivity: ActivityRecord{fixture u0 ${processPackage}/org.chromium.chrome.browser.webapps.WebappActivity t1 pid=${processPid}}\n`);
 else if (request === 'shell input keyevent KEYCODE_HOME') output('');
@@ -58,6 +67,7 @@ else if (request === 'shell pm disable-user --user 0 com.android.vending') {
   if ([2, 4].includes(vending.enabled)) fail('java.lang.SecurityException: Shell cannot change component state for null to 3\n');
   if (vending.disableFail) fail('Failure [disable denied]');
   if (!vending.readbackFail) vending.enabled = 3;
+  if (vending.propertyChangeOnDisable) vending.propertyResponses = vending.propertyChangeOnDisable;
   writeFileSync(vendingFile, JSON.stringify(vending));
   output(vending.disableOutput ?? 'Package com.android.vending new state: disabled-user\n');
 } else if (request === 'shell dumpsys package com.android.vending') {

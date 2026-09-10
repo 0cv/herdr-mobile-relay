@@ -651,7 +651,22 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
   await writeFile(join(root, 'avd', 'herdr-mobile-ci-fixture.avd', 'config.ini'), 'image.sysdir.1=system-images/android-35/google_apis/x86_64/\ntag.id=google_apis\nabi.type=x86_64\n');
   await writeFile(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64', 'source.properties'), 'Pkg.Revision=12\nAndroidVersion.ApiLevel=35\nSystemImage.TagId=google_apis\nSystemImage.Abi=x86_64\n');
   await writeFile(join(binDirectory, 'emulator'), '#!/bin/sh\nprintf "Android emulator version 35.0.2.0\\n"\n', { mode: 0o700 });
-  await writeFile(join(fixtureDirectory, 'getprop'), '[ro.build.fingerprint]: [fixture/fingerprint]\n[ro.build.id]: [AP4A]\n[ro.build.version.incremental]: [fixture]\n[ro.build.version.release]: [15]\n[ro.build.version.sdk]: [35]\n[ro.product.name]: [sdk_gphone]\n[ro.product.device]: [emu64x86-64]\n[ro.kernel.qemu]: [1]\n');
+  const properties = {
+    'ro.build.fingerprint': 'fixture/fingerprint',
+    'ro.build.id': 'AP4A',
+    'ro.build.version.incremental': 'fixture',
+    'ro.build.version.release': '15',
+    'ro.build.version.sdk': '35',
+    'ro.product.name': 'sdk_gphone',
+    'ro.product.device': 'emu64x86-64',
+    'ro.kernel.qemu': '1',
+    'ro.synthetic.padding': 'x'.repeat(4100),
+    'ro.synthetic.brackets': '[source-derived]',
+    'ro.synthetic.multiline': 'first\nsecond',
+    'ro.synthetic.framing': 'first]\n[ro.synthetic.other]: [second',
+  };
+  await writeFile(join(fixtureDirectory, 'properties.json'), JSON.stringify(properties));
+  await writeFile(join(fixtureDirectory, 'getprop'), Object.entries(properties).map(([name, value]) => `[${name}]: [${value}]\n`).join(''));
   return {
     root,
     fixtureDirectory,
@@ -2133,7 +2148,7 @@ test('iOS WebKit discovery retries until Safari publishes a delayed page', async
   await driver.create({ capabilities: {} });
   (platform as any).driver = driver;
   driver.setBudget((platform as any).budget);
-  await (platform as any).waitForSafariFixturePage('https://fixture.test/setup', 25_000, (platform as any).budget);
+  await (platform as any).waitForSafariFixturePage('https://fixture.test/setup', 46_000, (platform as any).budget);
   assert.ok(discoveries >= 9);
   assert.deepEqual(contexts, ['WEBVIEW_1', 'NATIVE_APP']);
 });

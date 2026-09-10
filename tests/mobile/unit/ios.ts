@@ -149,7 +149,7 @@ for (const mode of ['delayed', 'hung'] as const) {
         failure = String(error);
         return mode === 'hung' ? /APPIUM_TIMEOUT/u.test(failure) : /IOS_CONTEXT: no installed.*initial page publication is pending/u.test(failure);
       });
-      assert.equal(discoveries, mode === 'hung' ? 1 : 3);
+      assert.equal(discoveries, 1);
       assert.equal(completed, mode === 'hung' ? 0 : discoveries);
       assert.equal(budget.recoveryCount, 0);
       assert.equal(platform.evidenceSnapshot().selectedInstalledContext, '');
@@ -157,7 +157,7 @@ for (const mode of ['delayed', 'hung'] as const) {
       assert.equal(platform.evidenceSnapshot().ownershipFailure, undefined);
       const commands = driver.snapshot().commands.filter((_entry, index) => requests[index]?.body.script === 'mobile: getContexts');
       assert.equal(commands.length, discoveries);
-      assert.ok(commands.every((entry) => entry.timeoutMs === 18_000), 'every dispatched discovery needs the complete WebKit allowance');
+      assert.ok(commands.every((entry) => entry.timeoutMs === 20_000), 'every dispatched discovery needs the complete WebKit allowance');
       if (mode === 'hung') {
         assert.equal(driver.snapshot().unusable, true);
         const first = driver.snapshot().firstFatal;
@@ -180,6 +180,87 @@ for (const mode of ['delayed', 'hung'] as const) {
     } finally {
       await writeSanitizedJson(join(outputDir, 'publication-result.json'), { failure, discoveries, completed, evidence: platform.evidenceSnapshot() });
     }
+  });
+}
+
+test('recorded 18302ms native-only discovery settles before subsequent Safari publication within original phase', async () => {
+  let discoveries = 0;
+  const { platform, driver, requests, budget } = await adapter('recorded-safari-discovery', async ({ path, body, signal }) => {
+    if (body.script === 'mobile: getContexts') {
+      discoveries += 1;
+      if (discoveries === 1) {
+        await wait(18_302, undefined, { signal: signal! });
+        return value([{ id: 'NATIVE_APP' }]);
+      }
+      return value([{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
+    }
+    if (path.endsWith('/context')) return value(null);
+    if (path.endsWith('/url') && !body.url) return value(`${origin}/`);
+    throw new Error(`unexpected Safari operation ${path}`);
+  });
+  const start = Date.now();
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget.phaseView('navigation', 86_000));
+  assert.equal(discoveries, 2);
+  assert.ok(Date.now() - start < 46_000);
+  assert.equal(driver.snapshot().unusable, false);
+  assert.equal(driver.snapshot().firstFatal, undefined);
+  assert.equal(requests.some((request) => request.body.url || request.body.script === 'mobile: activateApp'), false);
+  assert.ok(driver.snapshot().commands.filter((entry) => entry.path.endsWith('/execute/sync')).every((entry) => entry.timeoutMs === 20_000 && !entry.timedOut));
+});
+
+test('bounded discovery admits initial app wait plus settled RPC and completion work', async () => {
+  const { platform, driver, budget } = await adapter('discovery-envelope', async ({ path, body, signal }) => {
+    if (body.script === 'mobile: getContexts') {
+      await wait(5_000, undefined, { signal: signal! });
+      await wait(14_500, undefined, { signal: signal! });
+      return value([{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]);
+    }
+    if (path.endsWith('/context')) return value(null);
+    if (path.endsWith('/url')) return value(`${origin}/`);
+    throw new Error(`unexpected bounded discovery operation ${path}`);
+  });
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget);
+  assert.equal(driver.snapshot().unusable, false);
+  assert.ok(driver.snapshot().commands.every((entry) => !entry.timedOut));
+});
+
+for (const mode of ['parent', 'absent', 'backend-error', 'interrupted-body'] as const) {
+  test(`Safari discovery ${mode} cannot turn missing evidence into readiness`, async () => {
+    let now = 0;
+    const { platform, driver, requests, budget } = await adapter(`safari-discovery-${mode}`, ({ body }) => {
+      assert.equal(body.script, 'mobile: getContexts');
+      if (mode === 'interrupted-body') return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('interrupted discovery body')); } }));
+      now += 20_000;
+      if (mode === 'backend-error') return Response.json({ value: { error: 'unknown error', message: 'discovery backend unavailable' } }, { status: 500 });
+      return value([{ id: 'NATIVE_APP' }]);
+    }, () => now);
+    const phase = budget.phaseView('navigation', mode === 'parent' ? 25_999 : 46_000);
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, phase), mode === 'interrupted-body' ? /APPIUM_/u : /IOS_NAVIGATION/u);
+    assert.equal(requests.filter((request) => request.body.script === 'mobile: getContexts').length, mode === 'parent' ? 0 : mode === 'interrupted-body' ? 1 : 2);
+    assert.equal(requests.some((request) => request.path.endsWith('/context') || request.body.url), false);
+    assert.equal(driver.snapshot().unusable, mode === 'interrupted-body');
+    assert.equal(budget.recoveryCount, 0);
+  });
+}
+
+for (const late of [[{ id: 'NATIVE_APP' }], [{ id: 'WEBVIEW_18099.1', bundleId: 'com.apple.mobilesafari', url: `${origin}/` }]]) {
+  test(`late discovery ${late[0].id} cannot clear timeout quarantine`, async () => {
+    let settled = false;
+    const { platform, driver, requests, budget } = await adapter('late-safari-discovery', async ({ body }) => {
+      assert.equal(body.script, 'mobile: getContexts');
+      await wait(20_300);
+      settled = true;
+      return value(late);
+    });
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget), /APPIUM_TIMEOUT/u);
+    const first = driver.snapshot().firstFatal;
+    const count = requests.length;
+    await wait(500);
+    assert.equal(settled, true);
+    assert.equal(driver.snapshot().unusable, true);
+    assert.deepEqual(driver.snapshot().firstFatal, first);
+    await assert.rejects(() => driver.contextMetadata(20_000), /APPIUM_SESSION_UNUSABLE/u);
+    assert.equal(requests.length, count);
   });
 }
 
@@ -207,7 +288,7 @@ for (const metadata of ['blank', 'absent', 'unrelated-browser'] as const) {
     });
     const reason = metadata === 'blank' ? /initial page publication is pending/u : metadata === 'absent' ? /installed page metadata is unavailable/u : /no installed page for/u;
     await assert.rejects(() => platform.attachToInstalledView(), (error) => /IOS_CONTEXT: no installed/u.test(String(error)) && reason.test(String(error)));
-    assert.equal(discoveries, 2);
+    assert.equal(discoveries, 1);
     assert.equal(driver.snapshot().unusable, false);
     assert.equal(driver.snapshot().firstFatal, undefined);
     assert.equal(platform.evidenceSnapshot().ownershipFailure, undefined);

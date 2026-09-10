@@ -203,7 +203,7 @@ class AcquisitionDiagnostics {
       stdoutSha256: sha256(stdout),
       stderrSha256: sha256(stderr),
     };
-    if (stdout) diagnostic.stdoutPreview = redactText(stdout).slice(0, ACQUISITION_PREVIEW_LIMIT);
+    if (stdout && !args.includes('getprop')) diagnostic.stdoutPreview = redactText(stdout).slice(0, ACQUISITION_PREVIEW_LIMIT);
     if (args.includes('dumpsys') && args.includes('package')) {
       diagnostic.packageContext = androidPackageContext(stdout);
     }
@@ -245,13 +245,18 @@ function firstMatch(source: string, pattern: RegExp): string {
   return source.match(pattern)?.[1]?.trim() || '';
 }
 
-function parseProperties(source: string): Record<string, string> {
+async function acquireSystemProperties(serial: string, timeout: number, diagnostics?: AcquisitionDiagnostics): Promise<Record<string, string>> {
   const properties: Record<string, string> = {};
-  for (const line of boundedLines(source, 'system properties')) {
-    const match = line.match(/^\[([^\]]+)\]: \[([^\]]*)\]$/u);
-    if (!line) continue;
-    if (!match || Object.hasOwn(properties, match[1])) throw new Error('ANDROID_ENVIRONMENT: malformed or duplicate system property');
-    properties[match[1]] = match[2];
+  for (const key of [...Object.keys(systemProperties({})), 'ro.kernel.qemu']) {
+    diagnostics?.setStage(`read required system property ${key}`);
+    const response = await adb(serial, ['shell', 'getprop', key], timeout, diagnostics);
+    const value = response.replace(/\r?\n$/u, '');
+    if (Buffer.byteLength(response) > 4096 || !response.endsWith('\n') || !value
+      || [...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
+      throw new Error(`ANDROID_ENVIRONMENT: required system property ${key} has missing, malformed, truncated or oversized response`);
+    }
+    if (!value.trim() || value !== value.trim()) throw new Error(`ANDROID_ENVIRONMENT: required system property ${key} has empty or padded value`);
+    properties[key] = value;
   }
   return properties;
 }
@@ -856,7 +861,7 @@ async function ownedProvenance(serial: string, policy: AndroidEnvironmentPolicy,
   if (response !== `${expectedAvd}\nOK\n`) throw new Error('ANDROID_ENVIRONMENT: owned AVD identity mismatch');
   const user = await adb(serial, ['shell', 'am', 'get-current-user'], timeout, diagnostics);
   if (user.replace(/\r/gu, '') !== '0\n') throw new Error('ANDROID_ENVIRONMENT: foreground user must be exactly 0');
-  const properties = parseProperties(await adb(serial, ['shell', 'getprop'], timeout, diagnostics));
+  const properties = await acquireSystemProperties(serial, timeout, diagnostics);
   const system = systemProperties(properties);
   if (Object.values(system).some((value) => !value) || system['ro.build.version.sdk'] !== '35' || properties['ro.kernel.qemu'] !== '1') {
     throw new Error('ANDROID_ENVIRONMENT: missing or unexpected emulator system identity');
