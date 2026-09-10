@@ -351,7 +351,11 @@ export class AppiumClient {
     while (!budget.exhausted && Date.now() < deadline) {
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
-      if (remaining <= 1 || (this.budget && remaining < allowance)) break;
+      if (remaining <= 1) break;
+      if (this.budget && remaining < Math.max(minimumDriverRequestMs, allowance)) {
+        lastError = `lookup was not admitted with ${remaining}ms remaining; ${allowance}ms is required`;
+        break;
+      }
       const sliceMs = Math.min(lookupSliceMs, remaining);
       const startedAt = Date.now();
       try {
@@ -611,7 +615,11 @@ export class AppiumClient {
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
       const allowance = driverCommandAllowance('/element', 'POST', locator);
-      if (remaining < minimumDriverRequestMs || (this.budget && remaining < allowance)) break;
+      if (remaining <= 1) break;
+      if (this.budget && remaining < Math.max(minimumDriverRequestMs, allowance)) {
+        lastError = `lookup was not admitted with ${remaining}ms remaining; ${allowance}ms is required`;
+        break;
+      }
       const sliceMs = Math.min(lookupSliceMs, remaining);
       const startedAt = Date.now();
       try {
@@ -641,7 +649,11 @@ export class AppiumClient {
       budget.assertAvailable(`find ${locator.using}`);
       const remaining = Math.min(deadline - Date.now(), budget.remainingMs);
       const allowance = driverCommandAllowance('/element', 'POST', locator);
-      if (remaining <= 1 || (this.budget && remaining < allowance)) break;
+      if (remaining <= 1) break;
+      if (this.budget && remaining < Math.max(minimumDriverRequestMs, allowance)) {
+        lastError = `lookup was not admitted with ${remaining}ms remaining; ${allowance}ms is required`;
+        break;
+      }
       const sliceMs = Math.min(lookupSliceMs, remaining);
       const startedAt = Date.now();
       try {
@@ -722,6 +734,14 @@ export function accessibility(value: string): Locator {
 }
 
 export function accessibilityPrefix(value: string): Locator {
+  return { using: 'xpath', value: `//*[@aria-label and starts-with(@aria-label,${xpathLiteral(value)})]` };
+}
+
+export function ariaLabel(value: string): Locator {
+  return { using: 'xpath', value: `//*[@aria-label=${xpathLiteral(value)}]` };
+}
+
+export function ariaLabelPrefix(value: string): Locator {
   return { using: 'xpath', value: `//*[@aria-label and starts-with(@aria-label,${xpathLiteral(value)})]` };
 }
 

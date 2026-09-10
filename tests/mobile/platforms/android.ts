@@ -3,28 +3,32 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import {
   assertStandalone,
+  isAndroidPersistentWebAppActivity,
   isQualificationFatal,
   qualificationFatal,
   type QualificationFatalError,
   type RuntimeIdentity,
 } from '../support/oracle';
-import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
+import { DiagnosticRecorder, redactText, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
 import { PhaseBudget, PhaseBudgetError } from '../support/budget';
-import { command, commandOutput } from '../support/process';
+import { CommandError, command, commandOutput, type CommandResult } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
 import {
   accessibility,
-  accessibilityPrefix,
   androidTextLocator,
+  ariaLabel,
+  ariaLabelPrefix,
   AppiumClient,
   buttonText,
   css,
   delay,
   isCommandAdmissionError,
   isFatalDriverError,
+  isRetryableElementLookupError,
   minimumDriverRequestMs,
   textLocator,
   type Locator,
+  WebDriverError,
 } from '../support/webdriver';
 import { runtimeScript, updateCompletionScript, type MobilePlatform, type PlatformOptions, type UpdateCompletionEvidence } from './types';
 
@@ -49,8 +53,17 @@ const CHROME_WEBAPP_SOURCE = 'org.chromium.chrome.browser.webapp_source';
 const CHROME_WEBAPP_DISPLAY_MODE = 'org.chromium.chrome.browser.webapp_display_mode';
 const CHROME_WEBAPP_ORIENTATION = 'org.chromium.content_public.common.orientation';
 
+export type AndroidLaunchFailureKind = 'terminal' | 'timeout';
+
+export function androidLaunchFailureKind(error: unknown): AndroidLaunchFailureKind {
+  if (error instanceof CommandError && error.timedOut) return 'timeout';
+  const message = error instanceof Error ? error.message : String(error);
+  return /timed out|timeout|ETIMEDOUT/iu.test(message) ? 'timeout' : 'terminal';
+}
+
 export interface AndroidChromeShortcut {
   id: string;
+  flags?: string;
   shortLabel: string;
   name: string;
   url: string;
@@ -59,6 +72,14 @@ export interface AndroidChromeShortcut {
   source?: string;
   displayMode?: string;
   orientation?: string;
+}
+
+function redactShortcutValue(value: string, shortcut: AndroidChromeShortcut): string {
+  let redacted = redactText(value);
+  for (const secret of [shortcut.url, shortcut.mac]) {
+    if (secret) redacted = redacted.replaceAll(secret, '[REDACTED]');
+  }
+  return redacted;
 }
 
 function shortcutField(block: string, name: string): string | undefined {
@@ -70,6 +91,7 @@ function shortcutField(block: string, name: string): string | undefined {
 export function parseAndroidChromeShortcuts(output: string): AndroidChromeShortcut[] {
   return output.split(/(?=^ShortcutInfo \{)/mu).flatMap((block) => {
     const id = shortcutField(block, 'id');
+    const flags = shortcutField(block, 'flags');
     const shortLabel = shortcutField(block, 'shortLabel');
     const name = shortcutField(block, CHROME_WEBAPP_NAME);
     const url = shortcutField(block, CHROME_WEBAPP_URL);
@@ -78,6 +100,7 @@ export function parseAndroidChromeShortcuts(output: string): AndroidChromeShortc
     if (!id || !shortLabel || !name || !url || !scope || !mac) return [];
     return [{
       id,
+      flags,
       shortLabel,
       name,
       url,
@@ -156,6 +179,7 @@ export class AndroidPlatform implements MobilePlatform {
   private lastCompletion?: UpdateCompletionEvidence;
   private lastForeground?: { packageName: string; activity: string; pid: string };
   private lastNativeSettings?: Record<string, unknown>;
+  private lastLaunch?: { shortcut: Record<string, unknown>; transitions: Record<string, unknown>[] };
 
   constructor(private readonly options: PlatformOptions) {
     this.serial = options.deviceId || process.env.ANDROID_SERIAL || '';
@@ -268,7 +292,8 @@ export class AndroidPlatform implements MobilePlatform {
       // UiAutomator2 window exposed to Appium. Read the device hierarchy and
       // tap the visible button by its reported bounds instead of dismissing it
       // with HOME.
-      await this.confirmLauncherShortcut();
+      const confirmed = await this.confirmLauncherShortcut();
+      if (!confirmed) throw new Error('ANDROID_LAUNCHER: confirmation control was not exposed by the automation hierarchy');
     }
     // Do not proceed merely because the launcher overlay disappeared. Chrome
     // publishes the signed ShortcutInfo asynchronously, and that record is
@@ -288,8 +313,17 @@ export class AndroidPlatform implements MobilePlatform {
       activity: CHROME_WEBAPP_COMPONENT.split('/')[1],
       shortcut,
     };
+    this.lastLaunch = { shortcut: this.shortcutEvidence(shortcut), transitions: [] };
+    this.diagnostics.record({ phase: 'android-launch', operation: 'shortcut-observed', detail: this.lastLaunch.shortcut });
     await this.driver.close();
-    await this.launchChromeShortcut();
+    await this.recordLaunchForeground('before-command');
+    try {
+      await this.launchChromeShortcut(shortcut);
+    } catch (error) {
+      await this.recordLaunchForeground('after-command-failure');
+      throw error;
+    }
+    await this.recordLaunchForeground('after-command');
     await this.waitForInstalledTarget(30_000);
     await this.waitForChromeDevTools(30_000);
     await this.createChromeSession(true);
@@ -303,66 +337,120 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async confirmLauncherShortcut(): Promise<boolean> {
-    const adb = process.env.ADB || 'adb';
-    const dumpPath = `/sdcard/herdr-mobile-ci-ui-${process.pid}.xml`;
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       let xml = '';
       try {
-        await command(adb, ['-s', this.serial, 'shell', 'uiautomator', 'dump', dumpPath], 10_000);
-        xml = await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', dumpPath], 10_000);
-      } catch {
-        // The hierarchy may be unavailable while the launcher window is
-        // changing. Activity inspection below is an independent fallback.
+        xml = await this.driver.pageSource(Math.min(5_000, deadline - Date.now()));
+        this.diagnostics.record({ phase: 'android-certificate', operation: 'launcher-confirmation-hierarchy', detail: { source: xml.slice(-20_000) } });
+      } catch (error) {
+        if (isFatalDriverError(error)) throw error;
+        this.diagnostics.record({ phase: 'android-certificate', operation: 'launcher-confirmation-hierarchy', detail: error instanceof Error ? error.message : String(error) });
       }
       const nodes = xml.match(/<node\b[^>]*\/>/gu) || [];
       for (const node of nodes) {
-        if (!/add to home screen/iu.test(node)) continue;
-        const bounds = node.match(/bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/u);
+        if (!/(?:add to home screen|install)/iu.test(node)) continue;
+        if (/enabled="false"|visible="false"/u.test(node)) continue;
+        const bounds = node.match(/bounds="\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]"/u);
         if (!bounds) continue;
         const [, left, top, right, bottom] = bounds;
-        await command(adb, [
-          '-s', this.serial, 'shell', 'input', 'tap',
-          String(Math.round((Number(left) + Number(right)) / 2)),
-          String(Math.round((Number(top) + Number(bottom)) / 2)),
-        ], 10_000);
+        const x = Math.round((Number(left) + Number(right)) / 2);
+        const y = Math.round((Number(top) + Number(bottom)) / 2);
+        await this.driver.mobile('tap', { x, y }, Math.min(5_000, deadline - Date.now()));
         return true;
       }
-
-      try {
-        // Some hosted Android images expose AddItemActivity before its
-        // accessibility tree is ready. If it is the top activity, the Android
-        // 15 launcher confirmation button is consistently the lower-right
-        // action; use the device-reported display size rather than a fixed
-        // pixel coordinate.
-        const activities = await commandOutput(adb, [
-          '-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities',
-        ], 10_000);
-        if (/\.dragndrop\.AddItemActivity\b/u.test(activities)) {
-          const size = await commandOutput(adb, ['-s', this.serial, 'shell', 'wm', 'size'], 10_000);
-          const match = [...size.matchAll(/(\d+)x(\d+)/gu)].at(-1);
-          const width = Number(match?.[1] || 1_080);
-          const height = Number(match?.[2] || 2_400);
-          await command(adb, [
-            '-s', this.serial, 'shell', 'input', 'tap',
-            String(Math.round(width * 0.78)),
-            String(Math.round(height * 0.94)),
-          ], 10_000);
-          return true;
-        }
-      } catch {
-        // The system overlay can be between activity transitions; retry until
-        // the bounded confirmation deadline rather than treating that as a
-        // successful install.
-      }
-      await delay(250);
+      const waitMs = Math.min(250, Math.max(0, deadline - Date.now()));
+      if (waitMs > 0) await delay(waitMs);
     }
     return false;
   }
 
-  private async launchChromeShortcut(): Promise<void> {
-    const shortcut = await this.waitForChromeShortcut(30_000);
-    await command(process.env.ADB || 'adb', androidChromeShortcutArgs(this.serial, shortcut), 30_000);
+  private async launchChromeShortcut(shortcut?: AndroidChromeShortcut): Promise<CommandResult> {
+    const launchShortcut = shortcut || await this.waitForChromeShortcut(30_000);
+    const args = androidChromeShortcutArgs(this.serial, launchShortcut);
+    try {
+      const result = await command(process.env.ADB || 'adb', args, 30_000);
+      this.recordLaunchCommand('succeeded', result, launchShortcut);
+      return result;
+    } catch (error) {
+      this.recordLaunchCommand(androidLaunchFailureKind(error), error, launchShortcut);
+      throw error;
+    }
+  }
+
+  private shortcutEvidence(shortcut: AndroidChromeShortcut): Record<string, unknown> {
+    const safe = (value: string): string => redactShortcutValue(value, shortcut);
+    return {
+      id: safe(shortcut.id),
+      flags: shortcut.flags,
+      shortLabel: safe(shortcut.shortLabel),
+      name: safe(shortcut.name),
+      url: safe(shortcut.url),
+      scope: safe(shortcut.scope),
+      fields: {
+        id: { type: 'string', present: true },
+        flags: { type: 'string', present: shortcut.flags !== undefined },
+        shortLabel: { type: 'string', present: true },
+        name: { type: 'string', present: true },
+        url: { type: 'string', present: true },
+        scope: { type: 'string', present: true },
+        mac: { type: 'string', present: true, redacted: true, length: shortcut.mac.length },
+        source: { type: 'string', present: shortcut.source !== undefined },
+        displayMode: { type: 'string', present: shortcut.displayMode !== undefined },
+        orientation: { type: 'string', present: shortcut.orientation !== undefined },
+      },
+      mac: '[REDACTED]',
+      source: shortcut.source,
+      displayMode: shortcut.displayMode,
+      orientation: shortcut.orientation,
+    };
+  }
+
+  private recordLaunchCommand(status: string, result: CommandResult | CommandError | unknown, shortcut?: AndroidChromeShortcut): void {
+    const safe = (value: string): string => shortcut ? redactShortcutValue(value, shortcut) : redactText(value);
+    const detail = result instanceof CommandError
+      ? {
+        status,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        timedOut: result.timedOut,
+        signal: result.signal,
+        stdout: safe(result.stdout),
+        stderr: safe(result.stderr),
+      }
+      : result && typeof result === 'object' && 'code' in result
+        ? {
+          status,
+          exitCode: Number((result as CommandResult).code),
+          durationMs: Number((result as CommandResult).durationMs),
+          timedOut: (result as CommandResult).timedOut,
+          signal: (result as CommandResult).signal,
+          stdout: safe((result as CommandResult).stdout),
+          stderr: safe((result as CommandResult).stderr),
+        }
+        : { status, error: safe(result instanceof Error ? result.message : String(result)) };
+    this.diagnostics.record({ phase: 'android-launch', operation: 'launch-command', durationMs: detail.durationMs as number | undefined, timedOut: detail.timedOut as boolean | undefined, signal: detail.signal as string | undefined, detail });
+  }
+
+  private async recordLaunchForeground(label: string): Promise<void> {
+    try {
+      const evidence = await this.foregroundEvidence(5_000);
+      const detail = {
+        state: label,
+        packageName: evidence.packageName,
+        activity: evidence.activity,
+        pid: evidence.pid,
+        raw: evidence.raw,
+      };
+      this.lastForeground = evidence;
+      this.lastLaunch?.transitions.push(detail);
+      this.diagnostics.record({ phase: 'android-launch', operation: 'foreground-transition', detail });
+    } catch (error) {
+      if (isFatalDriverError(error)) throw error;
+      const detail = { state: label, error: error instanceof Error ? error.message : String(error) };
+      this.lastLaunch?.transitions.push(detail);
+      this.diagnostics.record({ phase: 'android-launch', operation: 'foreground-transition', detail });
+    }
   }
 
   private async waitForChromeShortcut(timeoutMs: number): Promise<AndroidChromeShortcut> {
@@ -441,9 +529,22 @@ export class AndroidPlatform implements MobilePlatform {
     while (!phase.exhausted) {
       phase.assertAvailable('discover installed target');
       const foregroundTimeout = Math.min(5_000, phase.remainingMs);
-      if (foregroundTimeout < minimumDriverRequestMs || !(await this.isInstalledTargetForeground(foregroundTimeout, phase))) {
-        lastError = 'installed WebappActivity is not foreground';
-        await delay(250, phase);
+      let targetForeground = false;
+      try {
+        targetForeground = foregroundTimeout >= minimumDriverRequestMs
+          && await this.isInstalledTargetForeground(foregroundTimeout, phase);
+      } catch (error) {
+        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      if (!targetForeground) {
+        lastError ||= 'installed WebappActivity is not foreground';
+        try {
+          await delay(250, phase);
+        } catch (error) {
+          if (phase.exhausted) break;
+          throw error;
+        }
         continue;
       }
       let contextIds: string[];
@@ -454,10 +555,15 @@ export class AndroidPlatform implements MobilePlatform {
       } catch (error) {
         if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
-        await delay(250, phase);
+        try {
+          await delay(250, phase);
+        } catch (delayError) {
+          if (phase.exhausted) break;
+          throw delayError;
+        }
         continue;
       }
-      phase.assertAvailable('record Android context metadata');
+      if (phase.exhausted) break;
       const metadataTimeout = phase.remainingMs;
       if (metadataTimeout < minimumDriverRequestMs) break;
       const metadata = await this.driver.contextMetadataRaw(metadataTimeout).catch((error: unknown) => {
@@ -470,11 +576,16 @@ export class AndroidPlatform implements MobilePlatform {
       }
       if (!contextIds.length) {
         lastError = 'Chromium context IDs are unavailable';
-        await delay(250, phase);
+        try {
+          await delay(250, phase);
+        } catch (error) {
+          if (phase.exhausted) break;
+          throw error;
+        }
         continue;
       }
       for (const contextId of contextIds) {
-        phase.assertAvailable('select installed Chromium context');
+        if (phase.exhausted) break;
         try {
           const contextTimeout = phase.remainingMs;
           if (contextTimeout < minimumDriverRequestMs) break;
@@ -523,13 +634,20 @@ export class AndroidPlatform implements MobilePlatform {
       lastError ||= `no installed Chromium window for ${this.origin}`;
       const waitMs = Math.min(250, Math.max(0, phase.remainingMs - minimumDriverRequestMs));
       if (waitMs < minimumDriverRequestMs) break;
-      await delay(waitMs, phase);
+      try {
+        await delay(waitMs, phase);
+      } catch (error) {
+        if (phase.exhausted) break;
+        throw error;
+      }
     }
-    await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
-      if (isFatalDriverError(error)) throw error;
-    });
-    this.budget.assertAvailable('discover installed page');
-    throw new Error(`ANDROID_CONTEXT: no installed web context for ${this.origin}: ${lastError}`);
+    if (!phase.exhausted) {
+      await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+      });
+    }
+    if (!lastError) this.budget.assertAvailable('discover installed page');
+    throw new Error(`ANDROID_CONTEXT: no installed web context for ${this.origin}: ${lastError || 'phase budget expired'}`);
   }
 
   async readRunningIdentity(): Promise<RuntimeIdentity> {
@@ -610,6 +728,8 @@ export class AndroidPlatform implements MobilePlatform {
 
   async backgroundApp(): Promise<void> {
     await requireOwnedDevice('android', this.serial);
+    this.selectedInstalledWindow = '';
+    this.selectedInstalledWindowValid = false;
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
@@ -623,6 +743,8 @@ export class AndroidPlatform implements MobilePlatform {
 
   async terminateInstalledApp(): Promise<void> {
     await requireOwnedDevice('android', this.serial);
+    this.selectedInstalledWindow = '';
+    this.selectedInstalledWindowValid = false;
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
@@ -672,24 +794,59 @@ export class AndroidPlatform implements MobilePlatform {
         await this.attachToInstalledView(remaining);
         const findTimeout = deadline - Date.now();
         if (findTimeout < minimumDriverRequestMs) break;
-        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], findTimeout);
-        const attributeTimeout = deadline - Date.now();
-        if (attributeTimeout < minimumDriverRequestMs) break;
-        if ((await this.driver.attribute(element, 'disabled', attributeTimeout)) === null) {
-          const clickTimeout = deadline - Date.now();
-          if (clickTimeout < minimumDriverRequestMs) break;
-          await this.driver.click(element, clickTimeout);
-          return;
+        const locators = [buttonText(text), ariaLabel(text), ariaLabelPrefix(text), textLocator(text)];
+        for (const locator of locators) {
+          const locatorTimeout = deadline - Date.now();
+          if (locatorTimeout < minimumDriverRequestMs) break;
+          try {
+            const element = await this.driver.findAnyOnce([locator], locatorTimeout);
+            const controlTimeout = deadline - Date.now();
+            if (controlTimeout < minimumDriverRequestMs) break;
+            if (await this.webControlReady(element, deadline)) {
+              const clickTimeout = deadline - Date.now();
+              if (clickTimeout < minimumDriverRequestMs) break;
+              await this.driver.click(element, clickTimeout);
+              return;
+            }
+            lastError = `${text} is disabled, hidden, or empty`;
+          } catch (error) {
+            if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
+            if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
+            lastError = error instanceof Error ? error.message : String(error);
+          }
         }
-        lastError = `${text} is disabled`;
       } catch (error) {
-        if (isFatalDriverError(error)) throw error;
+        if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
+        if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
       if (waitMs > 0) await delay(waitMs);
     }
-    throw new Error(`APPIUM_BUTTON: ${text}: ${lastError}`);
+    throw new Error(`APPIUM_BUTTON: ${text}: ${lastError || 'control was not usable before the deadline'}`);
+  }
+
+  private async webControlReady(element: string, deadline: number): Promise<boolean> {
+    const disabledTimeout = deadline - Date.now();
+    if (disabledTimeout < minimumDriverRequestMs) return false;
+    const disabled = await this.driver.attribute(element, 'disabled', disabledTimeout);
+    if (disabled !== null && disabled !== 'false') return false;
+    const ariaDisabledTimeout = deadline - Date.now();
+    if (ariaDisabledTimeout < minimumDriverRequestMs) return false;
+    const ariaDisabled = await this.driver.attribute(element, 'aria-disabled', ariaDisabledTimeout);
+    if (ariaDisabled === 'true') return false;
+    const hiddenTimeout = deadline - Date.now();
+    if (hiddenTimeout < minimumDriverRequestMs) return false;
+    const hidden = await this.driver.attribute(element, 'hidden', hiddenTimeout);
+    if (hidden !== null && hidden !== 'false') return false;
+    const ariaHiddenTimeout = deadline - Date.now();
+    if (ariaHiddenTimeout < minimumDriverRequestMs) return false;
+    const ariaHidden = await this.driver.attribute(element, 'aria-hidden', ariaHiddenTimeout);
+    if (ariaHidden === 'true') return false;
+    const rectTimeout = deadline - Date.now();
+    if (rectTimeout < minimumDriverRequestMs) return false;
+    const rect = await this.driver.elementRect(element, rectTimeout);
+    return rect.width > 0 && rect.height > 0;
   }
 
   async clickDialogText(dialogId: string, text: string): Promise<void> {
@@ -776,6 +933,7 @@ export class AndroidPlatform implements MobilePlatform {
       lastIdentity: this.lastIdentity,
       lastCompletion: this.lastCompletion,
       lastForeground: this.lastForeground,
+      lastLaunch: this.lastLaunch,
       nativeSettings: this.lastNativeSettings,
       driver: this.driver.snapshot(),
       events: this.diagnostics.snapshot(),
@@ -1210,30 +1368,40 @@ export class AndroidPlatform implements MobilePlatform {
     this.lastForeground = foreground;
     const packageMatches = foreground.packageName === this.installedTarget.packageName
       || /webapk/iu.test(foreground.packageName);
-    if (!packageMatches) return false;
-    if (foreground.activity === this.installedTarget.activity) return true;
-    return /(?:^|[.$])(?:Webapp|WebApk)[A-Za-z0-9_.-]*Activity$/u.test(foreground.activity);
+    const matches = packageMatches && isAndroidPersistentWebAppActivity(foreground.activity);
+    if (!matches && this.selectedInstalledWindowValid) {
+      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', `installed window lost its native provider (${foreground.packageName || 'unknown'}/${foreground.activity || 'unknown'})`);
+    }
+    return matches;
   }
 
   private async waitForInstalledTarget(timeoutMs: number, launchError?: unknown): Promise<void> {
     const phase = this.budget.phaseView('android-launch-proof', timeoutMs);
-    let last = '';
+    let last = launchError instanceof Error ? launchError.message : '';
     while (!phase.exhausted) {
       phase.assertAvailable('verify installed launch');
       try {
         const evidence = await this.foregroundEvidence(Math.min(5_000, phase.remainingMs), phase);
+        this.lastForeground = evidence;
         last = `${evidence.packageName}/${evidence.activity} pid=${evidence.pid}`;
-        if (await this.isInstalledTargetForeground(Math.min(5_000, phase.remainingMs), phase)) {
+        this.diagnostics.record({ phase: 'android-launch-proof', operation: 'foreground-observation', detail: { packageName: evidence.packageName, activity: evidence.activity, pid: evidence.pid } });
+        if (isAndroidPersistentWebAppActivity(evidence.activity)
+          && (evidence.packageName === this.installedTarget?.packageName || /webapk/iu.test(evidence.packageName))) {
           this.installedPackage = evidence.packageName;
           return;
         }
       } catch (error) {
+        if (isFatalDriverError(error)) throw error;
         last = error instanceof Error ? error.message : String(error);
       }
-      await delay(250, phase);
+      try {
+        await delay(250, phase);
+      } catch (error) {
+        if (phase.exhausted) break;
+        throw error;
+      }
     }
-    const detail = launchError instanceof Error ? `; launch=${launchError.message}` : '';
-    throw new Error(`ANDROID_TARGET: signed installed target was not foreground (${last || 'none'})${detail}`);
+    throw new Error(`ANDROID_TARGET: signed installed target was not foreground (${last || 'none'})`, { cause: launchError });
   }
 
   private isExpectedOrigin(value: string): boolean {

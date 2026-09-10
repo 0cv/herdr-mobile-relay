@@ -18,8 +18,8 @@ import { assertNoKnownSecret, redactText, sanitizeValue } from '../support/diagn
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
-import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
-import { IOSPlatform, iosInstalledContextRejection, iosOpenURLFailureKind, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError } from '../platforms/ios';
+import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
+import { IOSPlatform, iosInstalledContextRejection, iosNativeScrollDirection, iosNativeSwipeDirection, iosOpenURLFailureKind, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError, nativeActionListEvidence } from '../platforms/ios';
 import { runtimeScript } from '../platforms/types';
 import { prepareOutput, repositoryPath, repositoryRoot } from '../support/paths';
 import { validateProvenance, type ProvenanceRun } from '../support/provenance';
@@ -70,6 +70,28 @@ async function legacyRoot(version = '0.20.8', assets = 361): Promise<string> {
   await writeFile(join(root, 'assets', 'app.js'), `window.app = '${version}';`);
   await writeFile(join(root, 'assets', 'app.css'), 'body{}');
   return root;
+}
+
+function iosSafariHierarchy(): string {
+  return '<AppiumAUT><XCUIElementTypeApplication name="Safari" bundleId="com.apple.mobilesafari"><XCUIElementTypeButton name="ShareButton" label="Share" enabled="true" visible="true" x="166" y="774" width="61" height="44"/></XCUIElementTypeApplication></AppiumAUT>';
+}
+
+function iosShareHierarchy(scrolls: number, populated = true): string {
+  if (!populated) return '<AppiumAUT><XCUIElementTypeApplication name="Safari" bundleId="com.apple.mobilesafari"><XCUIElementTypeOther name="ActivityListView" visible="true"><XCUIElementTypeOther name="ShareSheet.RemoteContainerView" visible="true"/></XCUIElementTypeOther></XCUIElementTypeApplication></AppiumAUT>';
+  const shift = Math.min(scrolls, 2) * 60;
+  const targetY = 907 - shift;
+  const targetVisible = scrolls >= 2 ? 'true' : 'false';
+  const rows = [
+    ['Copy', 645 - shift],
+    ['Add to Reading List', 706 - shift],
+    ['Add Bookmark', 756 - shift],
+    ['Add to Favorites', 806 - shift],
+    ['Add to Home Screen', targetY],
+  ];
+  const cells = rows.map(([label, y]) => `<XCUIElementTypeCell name="actionGroupCell" label="${label}" enabled="true" visible="${label === 'Add to Home Screen' ? targetVisible : 'true'}" x="16" y="${y}" width="361" height="51"/>`).join('');
+  const horizontalStrip = '<XCUIElementTypeScrollView name="share-apps-strip" enabled="true" visible="true" x="8" y="513" width="377" height="133"><XCUIElementTypeCell name="shareCell" label="Add to Home Screen" enabled="true" visible="true" x="8" y="513" width="78" height="133"/></XCUIElementTypeScrollView>';
+  const browserBar = '<XCUIElementTypeOther name="Vertical scroll bar, 2 pages" value="0%" enabled="true" visible="true" x="360" y="0" width="30" height="398"/>';
+  return `<AppiumAUT><XCUIElementTypeApplication name="Safari" bundleId="com.apple.mobilesafari">${browserBar}<XCUIElementTypeOther name="ActivityListView" visible="true"><XCUIElementTypeOther name="ShareSheet.RemoteContainerView" visible="true"><XCUIElementTypeCollectionView name="activityCollectionView" enabled="true" visible="true" x="0" y="398" width="393" height="454">${horizontalStrip}${cells}</XCUIElementTypeCollectionView></XCUIElementTypeOther></XCUIElementTypeOther></XCUIElementTypeApplication></AppiumAUT>`;
 }
 
 test('transient baseline downloads retry without accepting a failed response', async () => {
@@ -176,7 +198,7 @@ test('evidence validation enforces matrix identity and platform-specific native 
     final_identity: {
       standalone: true, provider: 'ios-home-screen', nativeProvider: 'ios:com.apple.webapp', nativePid: '42',
       url: 'https://fixture.test/new', origin: 'https://fixture.test', ...expectedCandidateIdentity,
-      requiredAssetsReady: true, applicationInitialized: true,
+      buildFromApplication: true, requiredAssetsReady: true, applicationInitialized: true,
     },
     credential_preserved: true,
     credential_evidence: { relays: {
@@ -230,7 +252,7 @@ test('evidence validation enforces matrix identity and platform-specific native 
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, origin: 'http://fixture.test' }));
   await assert.rejects(validateMobileEvidence(options), /HTTPS origin/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, final_identity: { ...result.final_identity, build: 'wrong-build' } }));
-  await assert.rejects(validateMobileEvidence(options), /final identity\.build/);
+  await assert.rejects(validateMobileEvidence(options), /final identity\.build|RUNTIME_BUILD_MISMATCH/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({ ...result, fault_identity: { ...result.fault_identity, id: 'other' } }));
   await assert.rejects(validateMobileEvidence(options), /unrelated id/);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify(result));
@@ -462,6 +484,11 @@ test('Android native settings are applied and read back before lookup', async ()
   assert.deepEqual((platform as any).lastNativeSettings, { waitForIdleTimeout: 500, waitForSelectorTimeout: 0 });
 });
 
+test('Android launch failures are classified without hiding command diagnostics', async () => {
+  assert.equal(androidLaunchFailureKind(new Error('exit status 1')), 'terminal');
+  assert.equal(androidLaunchFailureKind(new Error('command timed out')), 'timeout');
+});
+
 test('Android final launch verifies readiness only after bootstrap teardown', async () => {
   const platform = new AndroidPlatform({
     origin: 'https://fixture.test',
@@ -511,7 +538,7 @@ test('Android installed attachment selects the owned standalone window instead o
     budget: new PhaseBudget('android-attachment-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
   });
   (platform as any).installedTarget = {
-    packageName: 'com.android.chrome', activity: 'WebappLauncherActivity',
+    packageName: 'com.android.chrome', activity: 'org.chromium.chrome.browser.webapps.WebappActivity',
     shortcut: { id: 'id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay', url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac' },
   };
   (platform as any).isInstalledTargetForeground = async () => true;
@@ -528,6 +555,116 @@ test('Android installed attachment selects the owned standalone window instead o
     : { origin: 'https://fixture.test', standalone: false, provider: 'browser' };
   await platform.attachToInstalledView();
   assert.equal((platform as any).selectedInstalledWindow, 'installed-window');
+});
+
+test('Android web controls use supported locators and preserve ownership failures', async () => {
+  type ControlMode = 'settings' | 'ordinary' | 'disabled' | 'hidden' | 'none';
+  const makeHarness = async (initialMode: ControlMode, timeoutMs = 30_000) => {
+    const budget = new PhaseBudget(`android-web-control-${initialMode}`, { timeoutMs, recoveryLimit: 1 });
+    let mode = initialMode;
+    let selected = '';
+    let attachmentChecks = 0;
+    let requests = 0;
+    const locators: Array<{ using: string; value: string }> = [];
+    const clicks: string[] = [];
+    const element = (id: string) => ({ 'element-6066-11e4-a52e-4f735466cecf': id });
+    const response = (value: unknown, status = 200) => new Response(JSON.stringify({ value, sessionId: 'session' }), { status });
+    const absent = () => response({ error: 'no such element', message: 'no such element' }, 404);
+    const client = new AppiumClient('http://fake.test', 30_000, async (input, init) => {
+      requests += 1;
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, any> : {};
+      if (path === '/session') return response({});
+      if (path.endsWith('/contexts')) return response(['NATIVE_APP', 'CHROMIUM']);
+      if (path.endsWith('/window/handles')) return response(['installed-window']);
+      if (path.endsWith('/window') && init?.method === 'POST') {
+        selected = String(body.handle || '');
+        return response(null);
+      }
+      if (path.endsWith('/url')) return response('https://fixture.test/');
+      if (path.endsWith('/execute/sync')) {
+        if (body.script === 'mobile: getContexts') return response([]);
+        return response({ origin: 'https://fixture.test', standalone: selected === 'installed-window', provider: selected === 'installed-window' ? 'android-standalone' : 'browser' });
+      }
+      if (path.endsWith('/element') && init?.method === 'POST') {
+        const locator = { using: String(body.using || ''), value: String(body.value || '') };
+        locators.push(locator);
+        if (locator.using === 'accessibility id') return response({ error: 'invalid argument', message: 'invalid locator' }, 400);
+        if (mode === 'settings' && locator.value.includes('starts-with(@aria-label')) return response(element('settings'));
+        if (mode === 'ordinary' && locator.value.includes('Mixed')) return response(element('mixed'));
+        if (mode === 'disabled' && locator.value.includes('Disabled')) return response(element('disabled'));
+        if (mode === 'hidden' && locator.value.includes('Hidden')) return response(element('hidden'));
+        return absent();
+      }
+      if (path.includes('/attribute/')) {
+        const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
+        const name = decodeURIComponent(path.split('/attribute/')[1] || '');
+        if (id === 'disabled' && name === 'disabled') return response('true');
+        if (id === 'hidden' && name === 'hidden') return response('true');
+        return response(null);
+      }
+      if (path.endsWith('/rect')) return response({ x: 0, y: 0, width: 100, height: 40 });
+      if (path.endsWith('/click')) {
+        clicks.push(decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || ''));
+        return response(null);
+      }
+      return response(null);
+    });
+    await client.create({ capabilities: {}, budget });
+    const platform = new AndroidPlatform({
+      origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+      certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget,
+    });
+    (platform as any).driver = client;
+    (platform as any).installedTarget = {
+      packageName: 'com.android.chrome', activity: 'org.chromium.chrome.browser.webapps.WebappActivity',
+      shortcut: { id: 'id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay', url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac' },
+    };
+    (platform as any).installedPackage = 'com.android.chrome';
+    (platform as any).foregroundEvidence = async () => {
+      attachmentChecks += 1;
+      return { packageName: 'com.android.chrome', activity: 'org.chromium.chrome.browser.webapps.WebappActivity', pid: '1', raw: '' };
+    };
+    return {
+      platform,
+      client,
+      locators,
+      clicks,
+      get requests() { return requests; },
+      get attachmentChecks() { return attachmentChecks; },
+      setMode(value: ControlMode) { mode = value; },
+    };
+  };
+
+  const harness = await makeHarness('settings');
+  await harness.platform.clickWebText('Settings');
+  harness.setMode('ordinary');
+  await harness.platform.clickWebText('Mixed');
+  assert.deepEqual(harness.clicks, ['settings', 'mixed']);
+  assert.ok(harness.attachmentChecks >= 2);
+  assert.equal(harness.locators.some((locator) => locator.using === 'accessibility id'), false);
+  assert.ok(harness.locators.some((locator) => locator.value.includes('starts-with(@aria-label')));
+
+  const beforeOwnershipFailure = harness.requests;
+  (harness.platform as any).foregroundEvidence = async () => ({
+    packageName: 'com.google.android.apps.nexuslauncher', activity: 'com.android.launcher3.Launcher', pid: '2', raw: '',
+  });
+  await assert.rejects(() => harness.platform.clickWebText('Mixed'), /ANDROID_CONTEXT_OWNERSHIP/);
+  const afterOwnershipFailure = harness.requests;
+  await assert.rejects(() => harness.platform.clickWebText('Mixed'), /ANDROID_CONTEXT_OWNERSHIP/);
+  assert.equal(harness.requests, afterOwnershipFailure);
+  assert.ok(afterOwnershipFailure >= beforeOwnershipFailure);
+
+  for (const mode of ['disabled', 'hidden', 'none'] as const) {
+    const blocked = await makeHarness(mode, 1_200);
+    await assert.rejects(() => blocked.platform.clickWebText(mode === 'none' ? 'Missing' : mode[0].toUpperCase() + mode.slice(1)), /APPIUM_BUTTON|PHASE_BUDGET_EXHAUSTED|disabled|hidden|not found/iu);
+    assert.equal(blocked.clicks.length, 0);
+  }
+
+  const invalid = await makeHarness('none');
+  await assert.rejects(() => invalid.client.findAny([{ using: 'accessibility id', value: 'unsupported' }], 5_000), /APPIUM_COMMAND/);
+  assert.equal(invalid.client.snapshot().lookups.length, 1);
+  assert.equal(invalid.client.snapshot().unusable, false);
 });
 
 test('Android fixture verification keeps the HTTP status separate from the Appium response status', async () => {
@@ -609,11 +746,18 @@ test('Android Chrome shortcut output preserves the signed launch fields', async 
 }`);
   assert.equal(shortcuts.length, 1);
   assert.deepEqual(shortcuts[0], {
-    id: 'shortcut-id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay',
+    id: 'shortcut-id', flags: '0x28a', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay',
     url: 'https://localhost:38289/', scope: 'https://localhost:38289/', mac: 'mac+/=',
     source: '7', displayMode: '3', orientation: '0',
   });
   const args = androidChromeShortcutArgs('emulator-5554', shortcuts[0]);
+  const platform = new AndroidPlatform({
+    origin: 'https://localhost:38289', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
+    certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('shortcut-evidence', { timeoutMs: 10_000, recoveryLimit: 1 }),
+  });
+  const evidence = (platform as any).shortcutEvidence(shortcuts[0]);
+  assert.equal(evidence.url, '[REDACTED]');
+  assert.equal(evidence.mac, '[REDACTED]');
   assert.equal(args.slice(0, 3).join(' '), '-s emulator-5554 shell');
   assert.match(args[3], /webapp_mac.*mac\+\//s);
   assert.match(args[3], /webapp_url.*https:\/\/localhost:38289\//s);
@@ -668,10 +812,130 @@ test('WebDriver runtime script returns an identity from function-body execution'
   assert.equal(identity.applicationInitialized, true);
 });
 
+test('runtime script observations satisfy baseline and candidate validation contracts', async () => {
+  const definitions = JSON.parse(await readFile(join(repositoryRoot, 'tests/mobile/baselines.json'), 'utf8')).baselines as Array<Record<string, unknown>>;
+  const origin = 'https://fixture.test';
+  const candidate: BundleIdentity = {
+    version: '0.21.0',
+    assets: 999,
+    build: 'c'.repeat(64),
+    entry: `/builds/0.21.0-999-${'c'.repeat(16)}/index.html`,
+    script: '/assets/app-candidate.js',
+    style: '/assets/app-candidate.css',
+    scriptSha256: '1'.repeat(64),
+    styleSha256: '2'.repeat(64),
+    webHash: 'd'.repeat(64),
+    descriptor: true,
+  };
+  for (const definition of definitions) {
+    const expected: BundleIdentity = {
+      version: String(definition.version),
+      assets: Number(definition.assets),
+      build: String(definition.build || ''),
+      entry: String(definition.entry),
+      script: String(definition.script),
+      style: String(definition.style),
+      scriptSha256: '1'.repeat(64),
+      styleSha256: '2'.repeat(64),
+      webHash: String(definition.webHash),
+      descriptor: definition.name === '0.20.10',
+    };
+    const metadata = definition.name === '0.20.10'
+      ? { version: expected.version, assets: expected.assets, build: expected.build, entry: expected.entry }
+      : { version: expected.version, assets: expected.assets };
+    const location = new URL(expected.entry, origin);
+    const hasDescriptor = expected.descriptor;
+    const document = {
+      querySelector: (selector: string) => selector === '[data-app-assets]'
+        ? hasDescriptor ? { getAttribute: (name: string) => name === 'data-app-assets' ? String(expected.assets) : '' } : null
+        : selector.startsWith('script')
+          ? { getAttribute: () => expected.script }
+          : selector.startsWith('link')
+            ? { getAttribute: () => expected.style, sheet: {} }
+            : null,
+      querySelectorAll: () => [],
+      documentElement: { dataset: { herdrCssReady: '1' } },
+      getElementById: () => ({ childNodes: [{}] }),
+      body: { innerText: '' },
+    };
+    const observed = new Function('document', 'window', 'navigator', 'performance', 'location', 'XMLHttpRequest', runtimeScript())(
+      document,
+      { matchMedia: () => ({ matches: true }) },
+      { userAgent: 'Android', standalone: false },
+      { timeOrigin: 123 },
+      location,
+      class { status = 200; responseText = JSON.stringify(metadata); open() {} send() {} },
+    ) as RuntimeIdentity;
+    const initial: RuntimeIdentity = {
+      ...observed,
+      nativeProvider: 'android:com.android.chrome',
+      nativeActivity: 'org.chromium.chrome.browser.webapps.WebappActivity',
+      nativePid: '42',
+    };
+    assert.doesNotThrow(() => assertRunningIdentity(initial, expected, false));
+    const directory = await mkdtemp(join(tmpdir(), 'herdr-mobile-runtime-contract-'));
+    const sourceCommit = 'a'.repeat(40);
+    const result = {
+      schema: 1, result: 'passed', suite: 'smoke', platform: 'android', baseline: expected.version,
+      candidate: 'candidate-proof', origin, source_commit: sourceCommit, source_run_head_sha: sourceCommit,
+      candidate_web_hash: candidate.webHash,
+      initial_identity: initial,
+      final_identity: {
+        ...initial,
+        ...candidate,
+        url: new URL(candidate.entry, origin).href,
+        nativeProvider: 'android:com.android.chrome',
+        nativeActivity: 'org.chromium.chrome.browser.webapps.WebappActivity',
+        nativePid: '42',
+        buildFromApplication: true,
+      },
+      credential_preserved: true,
+      credential_evidence: { relays: {
+        alpha: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['alpha'], connections: 1 },
+        beta: { invitationAuthCount: 1, credentialAuthCount: 1, credentialPseudonyms: ['beta'], connections: 1 },
+      } },
+      preference_preserved: true,
+      oracle_controls: expected.version === '0.20.10' ? [] : [`HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:${expected.version}`],
+      phone_completion: expected.version === '0.20.10'
+        ? { rawPlanPresent: true, phoneRequired: true, phoneAcknowledged: true, phoneState: 'loaded', visibleCompletion: true }
+        : { rawPlanPresent: true, phoneRequired: false, phoneAcknowledged: false, phoneState: 'failed', visibleCompletion: false },
+      faults_exercised: [`corrupt:${candidate.script}`],
+      fault_identity: { id: 'contract', generation: '1', kind: 'corrupt', path: candidate.script },
+      fixture_requests: [{ release: 'candidate', path: candidate.script, fault: 'corrupt', fault_id: 'contract', fault_generation: '1' }],
+    };
+    await writeFile(join(directory, 'mobile-result.json'), JSON.stringify(result));
+    await validateMobileEvidence({
+      directory,
+      matrix: [{ platform: 'android', baseline: expected.version, scenario: 'historical' }],
+      suite: 'smoke', candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
+      candidateWebHash: candidate.webHash, candidateIdentity: candidate,
+      baselineIdentities: [{ name: expected.version, identity: expected }],
+    });
+    if (expected.descriptor) {
+      assert.throws(() => assertRunningIdentity({ ...result.final_identity, buildFromApplication: false }, candidate), /RUNTIME_BUILD_SOURCE/);
+      await writeFile(join(directory, 'mobile-result.json'), JSON.stringify({
+        ...result,
+        final_identity: { ...result.final_identity, buildFromApplication: false },
+      }));
+      await assert.rejects(validateMobileEvidence({
+        directory,
+        matrix: [{ platform: 'android', baseline: expected.version, scenario: 'historical' }],
+        suite: 'smoke', candidateCommit: sourceCommit, sourceRunHeadSha: sourceCommit,
+        candidateWebHash: candidate.webHash, candidateIdentity: candidate,
+        baselineIdentities: [{ name: expected.version, identity: expected }],
+      }), /RUNTIME_BUILD_SOURCE/);
+      await writeFile(join(directory, 'mobile-result.json'), JSON.stringify(result));
+    }
+    if (expected.build) {
+      assert.throws(() => assertRunningIdentity({ ...initial, build: 'deadbeefdeadbeef' }, expected, false), /RUNTIME_BUILD_MISMATCH/);
+    }
+  }
+});
+
 test('runtime readiness only permits an owned same-origin loading document', async () => {
   const identity: RuntimeIdentity = {
     url: 'https://localhost/', origin: 'https://localhost', standalone: true, provider: 'android-standalone',
-    nativeProvider: 'android:com.android.chrome', nativeActivity: 'WebappLauncherActivity', nativePid: '1',
+    nativeProvider: 'android:com.android.chrome', nativeActivity: 'WebappActivity', nativePid: '1',
     version: '0.20.10', assets: 363, build: '', entry: '/index.html', script: '/assets/app.js', style: '/assets/app.css',
     requiredAssetsReady: false, applicationInitialized: false,
   };
@@ -691,14 +955,17 @@ test('standalone oracle requires native provider evidence', async () => {
   assert.throws(() => assertStandalone(identity, 'https://localhost'), /STANDALONE_PROVIDER_REQUIRED/);
   assert.doesNotThrow(() => assertStandalone({ ...identity, nativeProvider: 'android:org.chromium.webapk' }, 'https://localhost'));
   assert.doesNotThrow(() => assertStandalone({
-    ...identity, nativeProvider: 'android:com.android.chrome', nativeActivity: 'org.chromium.chrome.browser.webapps.WebappLauncherActivity',
+    ...identity, nativeProvider: 'android:com.android.chrome', nativeActivity: 'org.chromium.chrome.browser.webapps.WebappActivity',
   }, 'https://localhost'));
+  assert.throws(() => assertStandalone({
+    ...identity, nativeProvider: 'android:com.android.chrome', nativeActivity: 'org.chromium.chrome.browser.webapps.WebappLauncherActivity',
+  }, 'https://localhost'), /STANDALONE_PROVIDER_REQUIRED/);
 });
 
 test('runtime oracle requires loaded target assets and identity', async () => {
   const identity: RuntimeIdentity = {
     url: 'https://localhost/', origin: 'https://localhost', standalone: true, provider: 'test',
-    version: '0.20.10', assets: 363, build: 'cf1b92fa5edff10a',
+    version: '0.20.10', assets: 363, build: 'cf1b92fa5edff10ab372fcb8479ad789a5443a6a8260a81dc61f30c8198045ab',
     entry: '/builds/0.20.10-363-cf1b92fa5edff10a/index.html',
     buildFromApplication: true,
     script: '/assets/app-script.js', style: '/assets/app-style.css',
@@ -1095,7 +1362,7 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
     certificate: '', setupUrl: '', budget: new PhaseBudget('ios-native-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
   });
   (ios as any).driver = {
-    findAnyOnce: async () => { throw fatal; },
+    pageSource: async () => iosShareHierarchy(0),
     findAll: async () => { throw fatal; },
     mobile: async () => { iosScrolls += 1; },
   };
@@ -1129,12 +1396,7 @@ test('native lookup scrolls between single-pass locator rounds', async () => {
   let iosLookups = 0;
   let iosScrolls = 0;
   (ios as any).driver = {
-    findAnyOnce: async () => {
-      iosLookups += 1;
-      if (iosLookups > 1) return 'ios-target';
-      throw new Error('element not found');
-    },
-    pageSource: async () => `<XCUIElementTypeCollectionView x="0" y="100" width="393" height="600" visible="true"/><XCUIElementTypeOther value="${iosScrolls * 50}%" name="Vertical scroll bar, 2 pages" visible="true"/>`,
+    pageSource: async () => `<AppiumAUT><XCUIElementTypeApplication name="Safari"><XCUIElementTypeOther name="ActivityListView" visible="true"><XCUIElementTypeOther name="ShareSheet.RemoteContainerView" visible="true"><XCUIElementTypeCollectionView name="activityCollectionView" x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeCell name="actionGroupCell" label="Target" enabled="true" visible="${iosScrolls > 0 ? 'true' : 'false'}" x="16" y="${700 - iosScrolls * 50}" width="361" height="40"/></XCUIElementTypeCollectionView></XCUIElementTypeOther></XCUIElementTypeOther></XCUIElementTypeApplication></AppiumAUT>`,
     findAll: async (locator: { value: string }) => {
       if (locator.value === 'Target') {
         iosLookups += 1;
@@ -1144,12 +1406,16 @@ test('native lookup scrolls between single-pass locator rounds', async () => {
     },
     elementRect: async (element: string) => element === 'ios-container'
       ? { x: 0, y: 100, width: 393, height: 600 }
-      : { x: 100, y: 700, width: 100, height: 40 },
+      : { x: 16, y: 700 - iosScrolls * 50, width: 361, height: 40 },
     attribute: async () => 'true',
     mobile: async () => { iosScrolls += 1; },
   };
   assert.equal(await (ios as any).findNativeScrollable([{ using: 'accessibility id', value: 'Target' }], 'Target', 20_000), 'ios-target');
   assert.equal(iosScrolls, 1);
+  assert.equal(iosNativeScrollDirection({ x: 0, y: 700, width: 10, height: 40 }, { x: 0, y: 100, width: 393, height: 600 }), 'down');
+  assert.equal(iosNativeScrollDirection({ x: 0, y: 50, width: 10, height: 40 }, { x: 0, y: 100, width: 393, height: 600 }), 'up');
+  assert.equal(iosNativeSwipeDirection('down'), 'up');
+  assert.equal(iosNativeSwipeDirection('up'), 'down');
 });
 
 test('iOS native scrolling rejects a hidden match when the hierarchy shows no progress', async () => {
@@ -1160,14 +1426,14 @@ test('iOS native scrolling rejects a hidden match when the hierarchy shows no pr
     budget: new PhaseBudget('ios-no-progress-test', { timeoutMs: 20_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
-  const source = '<XCUIElementTypeScrollView x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeButton name="Add to Home Screen" visible="false" enabled="true"/></XCUIElementTypeScrollView>';
+  const source = '<AppiumAUT><XCUIElementTypeApplication name="Safari"><XCUIElementTypeOther name="ActivityListView" visible="true"><XCUIElementTypeOther name="ShareSheet.RemoteContainerView" visible="true"><XCUIElementTypeCollectionView name="activityCollectionView" x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeCell name="actionGroupCell" label="Add to Home Screen" visible="false" enabled="true" x="16" y="700" width="361" height="40"/></XCUIElementTypeCollectionView></XCUIElementTypeOther></XCUIElementTypeOther></XCUIElementTypeApplication></AppiumAUT>';
   let gestures = 0;
   driver.findAnyOnce = async () => 'target';
   driver.pageSource = async () => source;
   driver.findAll = async (locator: { value: string }) => locator.value.includes('Add to Home Screen') ? ['target'] : ['container'];
   driver.elementRect = async (element: string) => element === 'container'
     ? { x: 0, y: 100, width: 393, height: 600 }
-    : { x: 100, y: 700, width: 100, height: 40 };
+    : { x: 16, y: 700, width: 361, height: 40 };
   driver.attribute = async (element: string, name: string) => element === 'target' && name === 'visible' ? 'false' : 'true';
   driver.mobile = async () => { gestures += 1; };
   await assert.rejects(
@@ -1175,6 +1441,75 @@ test('iOS native scrolling rejects a hidden match when the hierarchy shows no pr
     /made no verified progress/,
   );
   assert.equal(gestures, 1);
+});
+
+test('iOS native action controls stop when readiness is indeterminate', async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-indeterminate-'));
+  const platform = new IOSPlatform({
+    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
+    certificate: '', setupUrl: '', deviceId: 'simulator-1',
+    budget: new PhaseBudget('ios-indeterminate', { timeoutMs: 10_000, recoveryLimit: 1 }),
+  });
+  const driver = platform.driver as any;
+  const source = '<AppiumAUT><XCUIElementTypeApplication name="Safari"><XCUIElementTypeOther name="ActivityListView" visible="true"><XCUIElementTypeOther name="ShareSheet.RemoteContainerView" visible="true"><XCUIElementTypeCollectionView name="activityCollectionView" x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeCell name="actionGroupCell" label="Add to Home Screen" visible="true" enabled="true" x="16" y="200" width="361" height="40"/></XCUIElementTypeCollectionView></XCUIElementTypeOther></XCUIElementTypeOther></XCUIElementTypeApplication></AppiumAUT>';
+  let gestures = 0;
+  driver.pageSource = async () => source;
+  driver.findAll = async (locator: { value: string }) => locator.value.includes('Add to Home Screen') ? ['target'] : ['container'];
+  driver.elementRect = async (element: string) => element === 'container'
+    ? { x: 0, y: 100, width: 393, height: 600 }
+    : { x: 16, y: 200, width: 361, height: 40 };
+  driver.attribute = async (_element: string, name: string) => name === 'hittable' ? null : 'true';
+  driver.mobile = async () => { gestures += 1; };
+  await assert.rejects(
+    () => (platform as any).findNativeScrollable([{ using: 'xpath', value: 'Add to Home Screen' }], 'Add to Home Screen', 5_000),
+    /control readiness is indeterminate/,
+  );
+  assert.equal(gestures, 0);
+});
+
+test('iOS progress ignores browser bars and rejects a dismissed action list', async () => {
+  const run = async (dismissAfterGesture: boolean): Promise<{ gestures: number; failure: string }> => {
+    const outputDir = await mkdtemp(join(tmpdir(), 'herdr-mobile-ios-progress-'));
+    const platform = new IOSPlatform({
+      origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir,
+      certificate: '', setupUrl: '', deviceId: 'simulator-1',
+      budget: new PhaseBudget(`ios-progress-${dismissAfterGesture}`, { timeoutMs: 20_000, recoveryLimit: 1 }),
+    });
+    const driver = platform.driver as any;
+    let bars = '0%';
+    let dismissed = false;
+    let gestures = 0;
+    const modal = () => dismissed
+      ? iosSafariHierarchy()
+      : `<AppiumAUT><XCUIElementTypeApplication name="Safari"><XCUIElementTypeOther name="ActivityListView" visible="true"><XCUIElementTypeOther name="ShareSheet.RemoteContainerView" visible="true"><XCUIElementTypeCollectionView name="activityCollectionView" x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeScrollView name="share-apps-strip" visible="true" x="8" y="110" width="377" height="100"><XCUIElementTypeCell name="shareCell" label="Add to Home Screen" visible="true" x="8" y="110" width="78" height="100"/></XCUIElementTypeScrollView><XCUIElementTypeCell name="actionGroupCell" label="Add to Home Screen" enabled="true" visible="false" x="16" y="700" width="361" height="40"/></XCUIElementTypeCollectionView></XCUIElementTypeOther></XCUIElementTypeOther></XCUIElementTypeApplication><XCUIElementTypeOther name="Vertical scroll bar, 2 pages" value="${bars}" visible="true"/></AppiumAUT>`;
+    driver.pageSource = async () => modal();
+    driver.findAll = async (locator: { value: string }) => locator.value.includes('Add to Home Screen') ? ['target'] : ['container'];
+    driver.elementRect = async (element: string) => element === 'container'
+      ? { x: 0, y: 100, width: 393, height: 600 }
+      : { x: 16, y: 700, width: 361, height: 40 };
+    driver.attribute = async (element: string, name: string) => element === 'target' && name === 'visible' ? 'false' : 'true';
+    driver.mobile = async (command: string, args: Record<string, unknown>) => {
+      assert.equal(command, 'scroll');
+      assert.equal(args.direction, 'down');
+      gestures += 1;
+      if (dismissAfterGesture) dismissed = true;
+      else bars = '50%';
+    };
+    let failure = '';
+    try {
+      await (platform as any).findNativeScrollable([{ using: 'xpath', value: 'Add to Home Screen' }], 'Add to Home Screen', 10_000);
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+    return { gestures, failure };
+  };
+
+  const barChange = await run(false);
+  assert.equal(barChange.gestures, 1);
+  assert.match(barChange.failure, /made no verified progress/);
+  const dismissal = await run(true);
+  assert.equal(dismissal.gestures, 1);
+  assert.match(dismissal.failure, /dismissed or replaced/);
 });
 
 test('iOS installation scrolls the evidenced action list before clicking ready controls', async () => {
@@ -1187,11 +1522,14 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   let sheetOpen = false;
   let scrolls = 0;
   let addHomeClicked = false;
+  let shareSourceReads = 0;
   const scrollArguments: Array<Record<string, unknown>> = [];
   const clicks: string[] = [];
-  const source = () => sheetOpen
-    ? `<XCUIElementTypeScrollView x="0" y="100" width="393" height="600" visible="true"><XCUIElementTypeButton name="Add to Home Screen" visible="${scrolls >= 2 ? 'true' : 'false'}" enabled="true"/></XCUIElementTypeScrollView><XCUIElementTypeOther name="Vertical scroll bar, 2 pages" value="${scrolls * 50}%" visible="true"/>`
-    : '<XCUIElementTypeButton name="Share" label="Share" enabled="true" visible="true" bounds="[166,774][227,818]"/>';
+  const source = () => {
+    if (!sheetOpen) return iosSafariHierarchy();
+    if (shareSourceReads++ === 0) return iosShareHierarchy(0, false);
+    return iosShareHierarchy(scrolls);
+  };
   const element = (id: string) => ({ 'element-6066-11e4-a52e-4f735466cecf': id });
   const absent = () => new Response(JSON.stringify({ value: { error: 'no such element', message: 'No such element' } }), { status: 404 });
   const driver = new AppiumClient('http://fake.test', 100, async (input, init) => {
@@ -1217,14 +1555,15 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     if (path.endsWith('/elements')) {
       const value = String(body.value || '');
       const matches = value.includes('Add to Home Screen') && scrolls >= 1 ? [element('hidden-add'), element('add-home')]
-        : value.includes('XCUIElementTypeScrollView') ? [element('container')] : [];
+        : value.includes('activityCollectionView') ? [element('container')] : [];
       return new Response(JSON.stringify({ value: matches }), { status: 200 });
     }
     if (path.endsWith('/element') && init?.method === 'POST') {
       const value = String(body.value || '');
+      if (value.includes('ShareButton')) return new Response(JSON.stringify({ value: element('share') }), { status: 200 });
       if (value.includes('Add to Home Screen') && sheetOpen && scrolls >= 1) return new Response(JSON.stringify({ value: element('add-home') }), { status: 200 });
       if (value.includes('Open as Web App') && addHomeClicked) return new Response(JSON.stringify({ value: element('open-webapp') }), { status: 200 });
-      if (value === 'Add') return new Response(JSON.stringify({ value: element('add-button') }), { status: 200 });
+      if (value.includes('Add')) return new Response(JSON.stringify({ value: element('add-button') }), { status: 200 });
       return absent();
     }
     if (path.includes('/attribute/')) {
@@ -1237,26 +1576,31 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     }
     if (path.endsWith('/rect')) {
       const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
-      return new Response(JSON.stringify({ value: id === 'container' ? { x: 0, y: 100, width: 393, height: 600 } : { x: 100, y: 700, width: 100, height: 40 } }), { status: 200 });
+      const targetY = 907 - Math.min(scrolls, 2) * 60;
+      return new Response(JSON.stringify({ value: id === 'container' ? { x: 0, y: 398, width: 393, height: 454 } : { x: 16, y: targetY, width: 361, height: 51 } }), { status: 200 });
     }
     if (path.endsWith('/click')) {
       const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
       clicks.push(id);
+      if (id === 'share') sheetOpen = true;
       if (id === 'add-home') addHomeClicked = true;
       return new Response(JSON.stringify({ value: null }), { status: 200 });
     }
     return new Response(JSON.stringify({ value: null }), { status: 200 });
   });
   await driver.create({ capabilities: {} });
+  const actionList = nativeActionListEvidence(iosShareHierarchy(0), 'Add to Home Screen');
+  assert.equal(actionList?.collection.bounds.y, 398);
+  assert.deepEqual(actionList?.targetRows.map((row) => row.label), ['Add to Home Screen']);
   (platform as any).driver = driver;
   driver.setBudget((platform as any).budget);
   await platform.installFromBrowser();
   assert.equal(scrolls, 2);
   assert.deepEqual(scrollArguments, [
-    { element: 'container', direction: 'up', distance: 0.75 },
-    { element: 'container', direction: 'up', distance: 0.75 },
+    { element: 'container', direction: 'down', distance: 0.75 },
+    { element: 'container', direction: 'down', distance: 0.75 },
   ]);
-  assert.deepEqual(clicks, ['add-home', 'open-webapp', 'add-button']);
+  assert.deepEqual(clicks, ['share', 'add-home', 'open-webapp', 'add-button']);
   assert.equal(driver.snapshot().unusable, false);
 });
 

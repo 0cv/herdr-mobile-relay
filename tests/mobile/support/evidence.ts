@@ -1,5 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isAndroidPersistentWebAppActivity, runtimeIdentityMismatch } from './oracle';
 
 export interface EvidenceMatrixEntry {
   platform: string;
@@ -15,6 +16,7 @@ export interface EvidenceBundleIdentity {
   script: string;
   style: string;
   webHash: string;
+  descriptor?: boolean;
 }
 
 export interface EvidenceExpectedBundle {
@@ -47,6 +49,7 @@ interface RuntimeIdentity {
   version?: unknown;
   assets?: unknown;
   build?: unknown;
+  buildFromApplication?: unknown;
   entry?: unknown;
   script?: unknown;
   style?: unknown;
@@ -117,11 +120,14 @@ function bundleIdentity(value: unknown, label: string): EvidenceBundleIdentity {
   stringValue(identity.version, `${label}.version`);
   integerAtLeast(identity.assets, 1, `${label}.assets`);
   if (typeof identity.build !== 'string') fail(`${label}.build must be a string`);
-  stringValue(identity.entry, `${label}.entry`);
+  const entry = stringValue(identity.entry, `${label}.entry`);
   stringValue(identity.script, `${label}.script`);
   stringValue(identity.style, `${label}.style`);
   const webHash = stringValue(identity.webHash, `${label}.webHash`);
   if (!/^[0-9a-f]{64}$/u.test(webHash)) fail(`${label}.webHash must be a SHA-256 value`);
+  if (identity.descriptor !== undefined && typeof identity.descriptor !== 'boolean') fail(`${label}.descriptor must be a boolean`);
+  if ((identity.descriptor === true || entry.startsWith('/builds/'))
+    && !/^[0-9a-f]{64}$/u.test(identity.build)) fail(`${label}.build must be a SHA-256 value for a descriptor bundle`);
   return identity as unknown as EvidenceBundleIdentity;
 }
 
@@ -137,13 +143,14 @@ function verifiedOrigin(value: unknown, label: string): string {
   return origin;
 }
 
-function assertExpectedBundle(identity: RuntimeIdentity, expected: EvidenceBundleIdentity, label: string): void {
-  if (identity.version !== expected.version) fail(`${label}.version does not match the expected bundle`);
-  if (identity.assets !== expected.assets) fail(`${label}.assets does not match the expected bundle`);
-  if (identity.build !== expected.build) fail(`${label}.build does not match the expected bundle`);
-  if (identity.entry !== expected.entry) fail(`${label}.entry does not match the expected bundle`);
-  if (identity.script !== expected.script) fail(`${label}.script does not match the expected bundle`);
-  if (identity.style !== expected.style) fail(`${label}.style does not match the expected bundle`);
+function assertExpectedBundle(
+  identity: RuntimeIdentity,
+  expected: EvidenceBundleIdentity,
+  label: string,
+  requireExecutingBuild: boolean,
+): void {
+  const mismatch = runtimeIdentityMismatch(identity as any, expected, requireExecutingBuild);
+  if (mismatch) fail(`${label}.${mismatch.code}: ${mismatch.detail}`);
 }
 
 function assertNativeProvider(identity: RuntimeIdentity, platform: string, label: string): void {
@@ -156,7 +163,7 @@ function assertNativeProvider(identity: RuntimeIdentity, platform: string, label
     fail(`${label} has an invalid Android installed provider`);
   }
   const activity = stringValue(identity.nativeActivity, `${label}.nativeActivity`);
-  if (!/(?:^|[.$])(?:Webapp|WebApk)[A-Za-z0-9_.-]*Activity$/u.test(activity)) {
+  if (!isAndroidPersistentWebAppActivity(activity)) {
     fail(`${label} has an invalid Android installed activity`);
   }
 }
@@ -167,6 +174,7 @@ function assertRuntime(
   label: string,
   expectedOrigin: string,
   expectedBundle: EvidenceBundleIdentity,
+  requireExecutingBuild: boolean,
 ): RuntimeIdentity {
   const identity = record(value, label) as RuntimeIdentity;
   if (identity.standalone !== true) fail(`${label} is not an installed standalone runtime`);
@@ -187,13 +195,17 @@ function assertRuntime(
   if (parsedUrl.origin !== origin) fail(`${label}.url does not belong to its verified origin`);
   stringValue(identity.version, `${label}.version`);
   integerAtLeast(identity.assets, 1, `${label}.assets`);
+  if (typeof identity.build !== 'string') fail(`${label}.build must be a string`);
   stringValue(identity.entry, `${label}.entry`);
   stringValue(identity.script, `${label}.script`);
   stringValue(identity.style, `${label}.style`);
+  if (identity.buildFromApplication !== undefined && typeof identity.buildFromApplication !== 'boolean') {
+    fail(`${label}.buildFromApplication must be a boolean`);
+  }
   if (identity.requiredAssetsReady !== true || identity.applicationInitialized !== true) {
     fail(`${label} is missing loaded runtime evidence`);
   }
-  assertExpectedBundle(identity, expectedBundle, label);
+  assertExpectedBundle(identity, expectedBundle, label, requireExecutingBuild);
   return identity;
 }
 
@@ -329,8 +341,8 @@ export async function validateMobileEvidence(options: EvidenceValidationOptions)
     if (platform !== 'android' && platform !== 'ios') fail(`${filename} has an unsupported platform`);
     seen.add(key);
     const origin = verifiedOrigin(result.origin, `${filename}.origin`);
-    assertRuntime(result.initial_identity, platform, 'initial identity', origin, expectedBaseline);
-    const finalIdentity = assertRuntime(result.final_identity, platform, 'final identity', origin, expectedCandidate);
+    assertRuntime(result.initial_identity, platform, 'initial identity', origin, expectedBaseline, false);
+    const finalIdentity = assertRuntime(result.final_identity, platform, 'final identity', origin, expectedCandidate, true);
     if (finalIdentity.origin !== (result.initial_identity as Record<string, unknown>).origin) fail(`${filename} changed fixture origin between identities`);
     assertCredentialEvidence(result);
     if (options.suite === 'release' && (!Number.isInteger(result.lifecycle_launch_count) || Number(result.lifecycle_launch_count) < 1)) {

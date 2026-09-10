@@ -117,8 +117,52 @@ export function qualificationFatal(code: string, message: string, stage: string,
   return new QualificationFatalError({ code, stage, message, ...(detail === undefined ? {} : { detail }) });
 }
 
+export function isAndroidPersistentWebAppActivity(activity: string): boolean {
+  return /(?:^|[.$])(?:Webapp|WebApk)[A-Za-z0-9_.-]*Activity$/u.test(activity)
+    && !/(?:^|[.$])(?:Webapp|WebApk)LauncherActivity$/u.test(activity);
+}
+
 export function oracleError(code: string, detail: string): Error {
   return new Error(`${code}: ${detail}`);
+}
+
+export interface RuntimeIdentityContractResult {
+  code: string;
+  detail: string;
+}
+
+function descriptorExpected(expected: Pick<BundleIdentity, 'build' | 'entry'> & { descriptor?: boolean }): boolean {
+  return expected.descriptor === true || Boolean(expected.build) || expected.entry.startsWith('/builds/');
+}
+
+export function runtimeIdentityMismatch(
+  identity: RuntimeIdentity,
+  expected: Pick<BundleIdentity, 'version' | 'assets' | 'build' | 'entry' | 'script' | 'style'> & { descriptor?: boolean },
+  requireExecutingBuild = true,
+): RuntimeIdentityContractResult | undefined {
+  if (identity.version !== expected.version) return { code: 'RUNTIME_VERSION_MISMATCH', detail: `${identity.version} is not ${expected.version}` };
+  if (identity.assets !== expected.assets) return { code: 'RUNTIME_ASSET_VERSION_MISMATCH', detail: `${identity.assets} is not ${expected.assets}` };
+  if (identity.entry !== expected.entry) return { code: 'RUNTIME_ENTRY_MISMATCH', detail: `${identity.entry} is not ${expected.entry}` };
+  if (identity.script !== expected.script) return { code: 'RUNTIME_SCRIPT_MISMATCH', detail: `${identity.script} is not ${expected.script}` };
+  if (identity.style !== expected.style) return { code: 'RUNTIME_STYLE_MISMATCH', detail: `${identity.style} is not ${expected.style}` };
+  const descriptor = descriptorExpected(expected);
+  if (requireExecutingBuild && descriptor && identity.buildFromApplication !== true) {
+    return { code: 'RUNTIME_BUILD_SOURCE', detail: 'the executing document did not expose its compile-time build identity' };
+  }
+  if (!descriptor) {
+    if (identity.build !== expected.build) return { code: 'RUNTIME_BUILD_MISMATCH', detail: `${identity.build} is not the expected legacy build identity` };
+    return undefined;
+  }
+  const exactBuild = identity.build === expected.build;
+  const expectedEntryToken = expected.entry.match(/^\/builds\/[^/]+-([a-f0-9]{16})\/index\.html$/u)?.[1];
+  const verifiedBaselineToken = !requireExecutingBuild
+    && identity.entry === expected.entry
+    && expectedEntryToken === identity.build
+    && expected.build.startsWith(identity.build);
+  if (!exactBuild && !verifiedBaselineToken) {
+    return { code: 'RUNTIME_BUILD_MISMATCH', detail: `${identity.build} is not the expected build identity for ${expected.entry}` };
+  }
+  return undefined;
 }
 
 function ownershipError(code: string, detail: string): QualificationFatalError {
@@ -137,7 +181,7 @@ export function isRuntimeIdentityNotReady(identity: RuntimeIdentity, expectedOri
   return /^android:(?:com\.android\.chrome|org\.chromium\.webapk(?:\.[A-Za-z0-9_.-]+)?|com\.google\.android\.webapk(?:\.[A-Za-z0-9_.-]+)?)$/u.test(identity.nativeProvider)
     && typeof identity.nativeActivity === 'string'
     && identity.nativeActivity.length > 0
-    && /(?:^|[.$])(?:Webapp|WebApk)[A-Za-z0-9_.-]*Activity$/u.test(identity.nativeActivity);
+    && isAndroidPersistentWebAppActivity(identity.nativeActivity);
 }
 
 export function assertStandaloneOwnership(identity: RuntimeIdentity, expectedOrigin: string): void {
@@ -160,7 +204,7 @@ export function assertStandaloneOwnership(identity: RuntimeIdentity, expectedOri
   }
   if (typeof identity.nativePid !== 'string' || identity.nativePid.length === 0
     || (!ios && (typeof identity.nativeActivity !== 'string' || identity.nativeActivity.length === 0
-      || !/(?:^|[.$])(?:Webapp|WebApk)[A-Za-z0-9_.-]*Activity$/u.test(identity.nativeActivity)))) {
+      || !isAndroidPersistentWebAppActivity(identity.nativeActivity)))) {
     throw ownershipError(
       'STANDALONE_PROVIDER_REQUIRED',
       ios
@@ -186,19 +230,8 @@ export function assertRunningIdentity(
   requireExecutingBuild = true,
 ): void {
   assertRequiredAssets(identity);
-  if (identity.version !== expected.version) throw oracleError('RUNTIME_VERSION_MISMATCH', `${identity.version} is not ${expected.version}`);
-  if (identity.assets !== expected.assets) throw oracleError('RUNTIME_ASSET_VERSION_MISMATCH', `${identity.assets} is not ${expected.assets}`);
-  if (identity.entry !== expected.entry && expected.descriptor) {
-    throw oracleError('RUNTIME_ENTRY_MISMATCH', `${identity.entry} is not ${expected.entry}`);
-  }
-  if (identity.script !== expected.script) throw oracleError('RUNTIME_SCRIPT_MISMATCH', `${identity.script} is not ${expected.script}`);
-  if (identity.style !== expected.style) throw oracleError('RUNTIME_STYLE_MISMATCH', `${identity.style} is not ${expected.style}`);
-  if (expected.build && (!identity.build || !expected.build.startsWith(identity.build))) {
-    throw oracleError('RUNTIME_BUILD_MISMATCH', `${identity.build} is not the expected build prefix`);
-  }
-  if (expected.descriptor && requireExecutingBuild && !identity.buildFromApplication) {
-    throw oracleError('RUNTIME_BUILD_SOURCE', 'the executing document did not expose its compile-time build identity');
-  }
+  const mismatch = runtimeIdentityMismatch(identity, expected, requireExecutingBuild);
+  if (mismatch) throw oracleError(mismatch.code, mismatch.detail);
 }
 
 export function assertOldIdentity(identity: RuntimeIdentity, baseline: PreparedBundle, expectedOrigin: string): void {

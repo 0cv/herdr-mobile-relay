@@ -13,13 +13,15 @@ import { CommandError, command, commandOutput } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
 import {
   accessibility,
-  accessibilityPrefix,
+  ariaLabel,
+  ariaLabelPrefix,
   AppiumClient,
   isCommandAdmissionError,
   buttonText,
   css,
   delay,
   isFatalDriverError,
+  isRetryableElementLookupError,
   minimumDriverRequestMs,
   textLocator,
   type ContextMetadata,
@@ -38,6 +40,7 @@ const IOS_NAVIGATION_PHASE_MS = IOS_OPENURL_COMMAND_MS + IOS_SAFARI_READINESS_PH
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
+const IOS_NATIVE_LIST_READINESS_MS = 15_000;
 const IOS_NATIVE_ACTION_TIMEOUT_MS = IOS_NATIVE_SCROLL_COMMAND_MS * IOS_NATIVE_SCROLL_LIMIT + 20_000;
 
 export function isIOSSafariBrowserBundle(bundleId?: string): boolean {
@@ -52,6 +55,11 @@ export function isIOSStaleContextError(error: unknown): boolean {
   if (error instanceof WebDriverError && (error.timedOut || error.code === 'APPIUM_SESSION_UNUSABLE')) return false;
   const message = error instanceof Error ? error.message : String(error);
   return /no such (?:window|context|frame)|(?:window|context|webview|page|target).*(?:not found|does not exist|is gone|closed|detached)|(?:stale|invalid).*(?:context|window|webview|page|target)/iu.test(message);
+}
+
+function isIOSStaleElementError(error: unknown): boolean {
+  if (!(error instanceof WebDriverError) || error.timedOut) return false;
+  return error.status === 404 && /stale element|element.*(?:not present|not found|does not exist)|no matches for/iu.test(error.message);
 }
 
 export type IOSOpenURLFailureKind = 'transient' | 'terminal' | 'timeout';
@@ -100,10 +108,32 @@ export function iosInstalledContextRejection(context: ContextMetadata, origin: s
   return '';
 }
 
+function xpathLiteral(value: string): string {
+  if (!value.includes("'")) return `'${value}'`;
+  if (!value.includes('"')) return `"${value}"`;
+  return `concat(${value.split("'").map((part) => `'${part}'`).join(", \"'\", ")})`;
+}
+
 function iosLabelContains(value: string): Locator {
+  const literal = xpathLiteral(value);
   return {
     using: 'xpath',
-    value: `//*[contains(@label, '${value}') or contains(@name, '${value}') or contains(@value, '${value}') or contains(@text, '${value}')]`,
+    value: `//*[contains(@label, ${literal}) or contains(@name, ${literal}) or contains(@value, ${literal}) or contains(@text, ${literal})]`,
+  };
+}
+
+function iosActionLabelContains(value: string): Locator {
+  const literal = xpathLiteral(value);
+  return {
+    using: 'xpath',
+    value: `//*[ancestor::*[@name='ActivityListView'] and ancestor::*[@name='ShareSheet.RemoteContainerView'] and ancestor::*[@name='activityCollectionView'] and (self::*[@name='actionGroupCell'] or ancestor::*[@name='actionGroupCell']) and (contains(@label, ${literal}) or contains(@name, ${literal}) or contains(@value, ${literal}) or contains(@text, ${literal}))]`,
+  };
+}
+
+function iosActionCollectionLocator(): Locator {
+  return {
+    using: 'xpath',
+    value: "//*[@name='ActivityListView']//*[@name='ShareSheet.RemoteContainerView']//*[@name='activityCollectionView']",
   };
 }
 
@@ -123,7 +153,20 @@ interface NativeScrollContainer {
 interface NativeScrollEvidence {
   type: string;
   bounds: NativeBounds;
-  targetAncestor: boolean;
+}
+
+interface NativeActionRow {
+  key: string;
+  label: string;
+  bounds: NativeBounds;
+  visible: boolean;
+  enabled: boolean;
+}
+
+interface NativeActionListEvidence {
+  collection: NativeScrollEvidence;
+  rows: NativeActionRow[];
+  targetRows: NativeActionRow[];
 }
 
 function nativeAttribute(node: string, name: string): string | undefined {
@@ -149,45 +192,88 @@ function nativeNodeType(node: string): string {
   return node.match(/^<(XCUIElementType\w+)\b/u)?.[1] || '';
 }
 
-function isNativeScrollableType(type: string): boolean {
-  return type === 'XCUIElementTypeCollectionView'
-    || type === 'XCUIElementTypeTable'
-    || type === 'XCUIElementTypeScrollView'
-    || type === 'XCUIElementTypeOther';
-}
-
-function nativeScrollableEvidence(source: string, target: string): NativeScrollEvidence[] {
+export function nativeActionListEvidence(source: string, target: string): NativeActionListEvidence | undefined {
   const tokens = source.match(/<\/?[^>]+>/gu) || [];
-  const stack: Array<{ type: string; bounds?: NativeBounds; targetAncestor: boolean; evidence?: NativeScrollEvidence }> = [];
-  const evidence: NativeScrollEvidence[] = [];
+  const stack: Array<{
+    type: string;
+    name: string;
+    visible: boolean;
+    activityList: boolean;
+    remoteContainer: boolean;
+    actionCollection: boolean;
+  }> = [];
+  let collection: NativeScrollEvidence | undefined;
+  const rows: NativeActionRow[] = [];
+  const occurrences = new Map<string, number>();
   for (const token of tokens) {
     if (/^<\//u.test(token)) {
-      stack.pop();
+      if (/^<\/XCUIElementType\w+>/u.test(token)) stack.pop();
       continue;
     }
     const type = nativeNodeType(token);
     if (!type) continue;
+    const name = nativeAttribute(token, 'name') || '';
     const bounds = nativeNodeBounds(token);
-    const labels = nativeNodeLabels(token);
-    const targetNode = target.length > 0 && labels.some((label) => label.toLowerCase().includes(target.toLowerCase()));
-    const stackTarget = stack.some((node) => node.targetAncestor);
-    const node: { type: string; bounds?: NativeBounds; targetAncestor: boolean; evidence?: NativeScrollEvidence } = {
-      type, bounds, targetAncestor: targetNode || stackTarget,
+    const visible = nativeAttribute(token, 'visible') !== 'false';
+    const activityList = stack.some((node) => node.activityList) || (visible && /(?:^|\.)ActivityListView$/u.test(name));
+    const remoteContainer = stack.some((node) => node.remoteContainer) || (visible && name === 'ShareSheet.RemoteContainerView');
+    const inActionCollection = stack.some((node) => node.actionCollection);
+    const isActionCollection = activityList && remoteContainer
+      && (type === 'XCUIElementTypeCollectionView' || type === 'XCUIElementTypeTable')
+      && name === 'activityCollectionView'
+      && visible
+      && Boolean(bounds);
+    const node = {
+      type,
+      name,
+      visible,
+      activityList,
+      remoteContainer,
+      actionCollection: inActionCollection || isActionCollection,
     };
-    if (bounds && isNativeScrollableType(type)) {
-      const nodeEvidence = { type, bounds, targetAncestor: node.targetAncestor };
-      node.evidence = nodeEvidence;
-      evidence.push(nodeEvidence);
+    if (isActionCollection && bounds && !collection) {
+      collection = { type, bounds };
     }
-    if (targetNode) {
-      for (const ancestor of stack) {
-        ancestor.targetAncestor = true;
-        if (ancestor.evidence) ancestor.evidence.targetAncestor = true;
-      }
+    if (inActionCollection && type === 'XCUIElementTypeCell' && name === 'actionGroupCell' && bounds) {
+      const label = nativeNodeLabels(token).find((value) => value !== name) || name;
+      const normalized = label.toLowerCase();
+      const occurrence = occurrences.get(normalized) || 0;
+      occurrences.set(normalized, occurrence + 1);
+      rows.push({
+        key: `${normalized}#${occurrence}`,
+        label,
+        bounds,
+        visible,
+        enabled: nativeAttribute(token, 'enabled') !== 'false',
+      });
     }
     if (!token.endsWith('/>')) stack.push(node);
   }
-  return evidence;
+  if (!collection || rows.length === 0) return undefined;
+  const targetText = target.toLowerCase();
+  return {
+    collection,
+    rows,
+    targetRows: rows.filter((row) => row.label.toLowerCase().includes(targetText)),
+  };
+}
+
+export function iosNativeScrollDirection(target: NativeBounds, viewport: NativeBounds): 'up' | 'down' | undefined {
+  if (target.y < viewport.y - 1) return 'up';
+  if (target.y + target.height > viewport.y + viewport.height + 1) return 'down';
+  return undefined;
+}
+
+export function iosNativeSwipeDirection(scrollDirection: 'up' | 'down'): 'up' | 'down' {
+  return scrollDirection === 'down' ? 'up' : 'down';
+}
+
+function nativeActionRowsMoved(before: NativeActionRow[], after: NativeActionRow[]): boolean {
+  const afterByKey = new Map(after.map((row) => [row.key, row]));
+  return before.some((row) => {
+    const next = afterByKey.get(row.key);
+    return Boolean(next && nativeBoundsChanged(row.bounds, next.bounds));
+  });
 }
 
 function nativeShareBounds(source: string): NativeBounds | undefined {
@@ -210,18 +296,11 @@ function nativeBoundsChanged(before: NativeBounds | undefined, after: NativeBoun
     || Math.abs(before.height - after.height) > 1;
 }
 
-function nativeScrollBarProgress(source: string): string {
-  return (source.match(/<XCUIElementTypeOther\b[^>]*(?:name|label)="Vertical scroll bar[^"]*"[^>]*>/giu) || [])
-    .map((node) => nativeAttribute(node, 'value') || '')
-    .filter(Boolean)
-    .join('|');
-}
-
-function nativeSourceTargetVisible(source: string, target: string): boolean {
-  const nodes = source.match(/<XCUIElementType\w+\b[^>]*>/gu) || [];
-  const matching = nodes.filter((node) => nativeNodeLabels(node).some((label) => label.toLowerCase().includes(target.toLowerCase())));
-  if (!matching.length) return false;
-  return matching.some((node) => nativeAttribute(node, 'visible') !== 'false');
+function nativeBoundsOverlap(left: NativeBounds, right: NativeBounds): boolean {
+  return left.x < right.x + right.width
+    && right.x < left.x + left.width
+    && left.y < right.y + right.height
+    && right.y < left.y + left.height;
 }
 
 export class IOSPlatform implements MobilePlatform {
@@ -441,11 +520,7 @@ export class IOSPlatform implements MobilePlatform {
       }, Math.max(minimumDriverRequestMs, phase.remainingMs));
     }
     await this.clickNativeScrollable([
-      iosLabelContains('Add to Home Screen'),
-      textLocator('Add to Home Screen'),
-      accessibility('Add to Home Screen'),
-      textLocator('Add to Home Screen…'),
-      accessibility('Add to Home Screen…'),
+      iosActionLabelContains('Add to Home Screen'),
     ], 'Add to Home Screen', Math.min(IOS_NATIVE_ACTION_TIMEOUT_MS, phase.remainingMs));
     const openAsWebApp = phase.remainingMs < minimumDriverRequestMs
       ? ''
@@ -697,6 +772,7 @@ export class IOSPlatform implements MobilePlatform {
 
   async backgroundApp(): Promise<void> {
     await requireOwnedDevice('ios', this.udid);
+    this.selectedInstalledContext = '';
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
@@ -710,6 +786,7 @@ export class IOSPlatform implements MobilePlatform {
 
   async terminateInstalledApp(): Promise<void> {
     await requireOwnedDevice('ios', this.udid);
+    this.selectedInstalledContext = '';
     await this.driver.switchContext('NATIVE_APP').catch((error: unknown) => {
       if (isFatalDriverError(error)) throw error;
     });
@@ -757,24 +834,59 @@ export class IOSPlatform implements MobilePlatform {
         await this.attachToInstalledView(remaining);
         const findTimeout = deadline - Date.now();
         if (findTimeout < minimumDriverRequestMs) break;
-        const element = await this.driver.findAny([buttonText(text), accessibility(text), accessibilityPrefix(text), textLocator(text)], findTimeout);
-        const attributeTimeout = deadline - Date.now();
-        if (attributeTimeout < minimumDriverRequestMs) break;
-        if ((await this.driver.attribute(element, 'disabled', attributeTimeout)) === null) {
-          const clickTimeout = deadline - Date.now();
-          if (clickTimeout < minimumDriverRequestMs) break;
-          await this.driver.click(element, clickTimeout);
-          return;
+        const locators = [buttonText(text), ariaLabel(text), ariaLabelPrefix(text), textLocator(text)];
+        for (const locator of locators) {
+          const locatorTimeout = deadline - Date.now();
+          if (locatorTimeout < minimumDriverRequestMs) break;
+          try {
+            const element = await this.driver.findAnyOnce([locator], locatorTimeout);
+            const controlTimeout = deadline - Date.now();
+            if (controlTimeout < minimumDriverRequestMs) break;
+            if (await this.webControlReady(element, deadline)) {
+              const clickTimeout = deadline - Date.now();
+              if (clickTimeout < minimumDriverRequestMs) break;
+              await this.driver.click(element, clickTimeout);
+              return;
+            }
+            lastError = `${text} is disabled, hidden, or empty`;
+          } catch (error) {
+            if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
+            if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
+            lastError = error instanceof Error ? error.message : String(error);
+          }
         }
-        lastError = `${text} is disabled`;
       } catch (error) {
         if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
+        if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
       if (waitMs > 0) await delay(waitMs);
     }
-    throw new Error(`APPIUM_BUTTON: ${text}: ${lastError}`);
+    throw new Error(`APPIUM_BUTTON: ${text}: ${lastError || 'control was not usable before the deadline'}`);
+  }
+
+  private async webControlReady(element: string, deadline: number): Promise<boolean> {
+    const disabledTimeout = deadline - Date.now();
+    if (disabledTimeout < minimumDriverRequestMs) return false;
+    const disabled = await this.driver.attribute(element, 'disabled', disabledTimeout);
+    if (disabled !== null && disabled !== 'false') return false;
+    const ariaDisabledTimeout = deadline - Date.now();
+    if (ariaDisabledTimeout < minimumDriverRequestMs) return false;
+    const ariaDisabled = await this.driver.attribute(element, 'aria-disabled', ariaDisabledTimeout);
+    if (ariaDisabled === 'true') return false;
+    const hiddenTimeout = deadline - Date.now();
+    if (hiddenTimeout < minimumDriverRequestMs) return false;
+    const hidden = await this.driver.attribute(element, 'hidden', hiddenTimeout);
+    if (hidden !== null && hidden !== 'false') return false;
+    const ariaHiddenTimeout = deadline - Date.now();
+    if (ariaHiddenTimeout < minimumDriverRequestMs) return false;
+    const ariaHidden = await this.driver.attribute(element, 'aria-hidden', ariaHiddenTimeout);
+    if (ariaHidden === 'true') return false;
+    const rectTimeout = deadline - Date.now();
+    if (rectTimeout < minimumDriverRequestMs) return false;
+    const rect = await this.driver.elementRect(element, rectTimeout);
+    return rect.width > 0 && rect.height > 0;
   }
 
   async clickDialogText(dialogId: string, text: string): Promise<void> {
@@ -916,6 +1028,16 @@ export class IOSPlatform implements MobilePlatform {
     throw new Error(`IOS_SHARE: ${description}: control readiness is indeterminate`);
   }
 
+  private async nativeElementBelongsToRows(element: string, rows: NativeActionRow[], deadline: number): Promise<boolean> {
+    const timeout = Math.min(750, deadline - Date.now());
+    if (timeout < minimumDriverRequestMs) return false;
+    const bounds = await this.driver.elementRect(element, timeout).catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return undefined;
+    });
+    return Boolean(bounds && rows.some((row) => nativeBoundsOverlap(bounds, row.bounds)));
+  }
+
   private async captureNativeShareHierarchy(scroll: number, deadline: number): Promise<string> {
     const timeout = Math.min(5_000, deadline - Date.now());
     if (timeout < minimumDriverRequestMs) return '';
@@ -933,57 +1055,45 @@ export class IOSPlatform implements MobilePlatform {
   private async findNativeScrollContainer(
     source: string,
     target: string,
-    targetBounds: NativeBounds | undefined,
     deadline: number,
   ): Promise<NativeScrollContainer | undefined> {
-    const evidence = nativeScrollableEvidence(source, target);
-    const typedEvidence = evidence.filter((entry) => entry.type !== 'XCUIElementTypeOther');
-    const types = ['XCUIElementTypeCollectionView', 'XCUIElementTypeTable', 'XCUIElementTypeScrollView'];
-    if (evidence.some((entry) => entry.type === 'XCUIElementTypeOther' && entry.targetAncestor)
-      && !typedEvidence.some((entry) => entry.targetAncestor)) types.push('XCUIElementTypeOther');
-    const candidates: Array<NativeScrollContainer & { score: number }> = [];
-    for (const type of types) {
-      const timeout = Math.min(2_000, deadline - Date.now());
-      if (timeout < minimumDriverRequestMs) break;
-      const elements = await this.driver.findAll({ using: 'class name', value: type }, timeout).catch((error: unknown) => {
+    const actionList = nativeActionListEvidence(source, target);
+    if (!actionList) return undefined;
+    const timeout = Math.min(2_000, deadline - Date.now());
+    if (timeout < minimumDriverRequestMs) return undefined;
+    const elements = await this.driver.findAll(iosActionCollectionLocator(), timeout).catch((error: unknown) => {
+      if (isFatalDriverError(error)) throw error;
+      return [];
+    });
+    for (const element of elements) {
+      const rectTimeout = Math.min(750, deadline - Date.now());
+      if (rectTimeout < minimumDriverRequestMs) break;
+      const bounds = await this.driver.elementRect(element, rectTimeout).catch((error: unknown) => {
         if (isFatalDriverError(error)) throw error;
-        return [];
+        return undefined;
       });
-      for (const element of elements) {
-        const rectTimeout = Math.min(750, deadline - Date.now());
-        if (rectTimeout < minimumDriverRequestMs) break;
-        const bounds = await this.driver.elementRect(element, rectTimeout).catch((error: unknown) => {
-          if (isFatalDriverError(error)) throw error;
-          return undefined;
-        });
-        if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
-        const visibleTimeout = Math.min(750, deadline - Date.now());
-        if (visibleTimeout < minimumDriverRequestMs) break;
-        const visible = await this.driver.attribute(element, 'visible', visibleTimeout).catch((error: unknown) => {
-          if (isFatalDriverError(error)) throw error;
-          return null;
-        });
-        if (visible === 'false' || visible === null) continue;
-        const matchingEvidence = evidence.filter((entry) => entry.type === type);
-        const evidenceMatch = matchingEvidence.find((entry) => nativeBoundsChanged(entry.bounds, bounds) === false
-          && Math.abs(entry.bounds.x - bounds.x) <= 2
-          && Math.abs(entry.bounds.y - bounds.y) <= 2
-          && Math.abs(entry.bounds.width - bounds.width) <= 2
-          && Math.abs(entry.bounds.height - bounds.height) <= 2);
-        if (!evidenceMatch) continue;
-        const horizontalOverlap = targetBounds
-          ? Math.max(0, Math.min(bounds.x + bounds.width, targetBounds.x + targetBounds.width) - Math.max(bounds.x, targetBounds.x))
-          : 0;
-        const typeScore = type === 'XCUIElementTypeCollectionView' ? 4 : type === 'XCUIElementTypeTable' ? 3 : type === 'XCUIElementTypeScrollView' ? 2 : 1;
-        const score = (evidenceMatch?.targetAncestor ? 10_000_000 : 0)
-          + typeScore * 1_000_000
-          + (evidenceMatch ? 10_000 : 0)
-          + (horizontalOverlap > 0 ? 1_000 : 0)
-          - bounds.width * bounds.height / 1_000_000;
-        candidates.push({ element, bounds, type, score });
-      }
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
+      if (Math.abs(actionList.collection.bounds.x - bounds.x) > 2
+        || Math.abs(actionList.collection.bounds.y - bounds.y) > 2
+        || Math.abs(actionList.collection.bounds.width - bounds.width) > 2
+        || Math.abs(actionList.collection.bounds.height - bounds.height) > 2) continue;
+      const enabledTimeout = Math.min(750, deadline - Date.now());
+      if (enabledTimeout < minimumDriverRequestMs) break;
+      const enabled = await this.driver.attribute(element, 'enabled', enabledTimeout).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return null;
+      });
+      if (enabled !== 'true' && enabled !== null) continue;
+      const visibleTimeout = Math.min(750, deadline - Date.now());
+      if (visibleTimeout < minimumDriverRequestMs) break;
+      const visible = await this.driver.attribute(element, 'visible', visibleTimeout).catch((error: unknown) => {
+        if (isFatalDriverError(error)) throw error;
+        return null;
+      });
+      if (visible !== 'true' && visible !== null) continue;
+      return { element, bounds, type: actionList.collection.type };
     }
-    return candidates.sort((left, right) => right.score - left.score)[0];
+    return undefined;
   }
 
   private async clickNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<void> {
@@ -1016,92 +1126,184 @@ export class IOSPlatform implements MobilePlatform {
   private async findNativeScrollable(locators: Locator[], description: string, timeoutMs: number): Promise<string> {
     if (timeoutMs < minimumDriverRequestMs) throw new Error(`IOS_SHARE: ${description}: insufficient time to find control`);
     const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
+    const readinessDeadline = Math.min(deadline, Date.now() + IOS_NATIVE_LIST_READINESS_MS);
     let lastError = '';
+    let source: string | undefined;
+    let actionList: NativeActionListEvidence | undefined;
+    while (!actionList && Date.now() < readinessDeadline) {
+      const sourceTimeout = Math.min(5_000, readinessDeadline - Date.now());
+      if (sourceTimeout < minimumDriverRequestMs) break;
+      const currentSource = await this.captureNativeShareHierarchy(0, readinessDeadline);
+      actionList = nativeActionListEvidence(currentSource, description);
+      if (actionList) {
+        source = currentSource;
+        break;
+      }
+      lastError = currentSource
+        ? `${description}: native action list is not ready`
+        : `${description}: native hierarchy is unavailable`;
+      const waitMs = Math.min(250, Math.max(0, readinessDeadline - Date.now() - minimumDriverRequestMs));
+      if (waitMs < minimumDriverRequestMs) break;
+      try {
+        await delay(waitMs);
+      } catch (error) {
+        if (readinessDeadline <= Date.now() || this.budget.exhausted) break;
+        throw error;
+      }
+    }
+    if (!actionList || source === undefined) throw new Error(`IOS_SHARE: ${description}: ${lastError || 'native action list was not ready'}`);
+
     let scrolls = 0;
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
       if (remaining < minimumDriverRequestMs) break;
-      const candidates = await this.findNativeMatches(locators, remaining);
-      const element = candidates[0] || '';
+      source = await this.captureNativeShareHierarchy(scrolls, deadline);
+      actionList = nativeActionListEvidence(source, description);
+      if (!actionList) {
+        lastError = `${description}: native action list was dismissed or replaced`;
+        break;
+      }
+      const candidates = await this.findNativeMatches(locators, Math.min(remaining, deadline - Date.now()));
       const states: Array<Awaited<ReturnType<IOSPlatform['nativeControlState']>>> = [];
+      let readyElement = '';
       for (const candidate of candidates) {
-        const state = await this.nativeControlState(candidate, deadline);
+        if (!await this.nativeElementBelongsToRows(candidate, actionList.targetRows, deadline)) continue;
+        let state: Awaited<ReturnType<IOSPlatform['nativeControlState']>>;
+        try {
+          state = await this.nativeControlState(candidate, deadline);
+        } catch (error) {
+          if (isFatalDriverError(error)) throw error;
+          if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
+          lastError = error instanceof Error ? error.message : String(error);
+          continue;
+        }
         states.push(state);
-        if (state === 'ready') return candidate;
+        if (state === 'ready') {
+          readyElement = candidate;
+          break;
+        }
         if (state === 'disabled') lastError = `${description}: control is disabled`;
         else if (state === 'not-hittable') lastError = `${description}: control is not hittable`;
         else if (state === 'indeterminate') lastError = `${description}: control readiness is indeterminate`;
         else lastError = `${description}: control is not visible`;
       }
-      if (states.length > 0 && (states.every((state) => state === 'disabled') || states.every((state) => state === 'indeterminate'))) break;
-      const afterLookup = deadline - Date.now();
-      if (afterLookup < minimumDriverRequestMs || scrolls >= IOS_NATIVE_SCROLL_LIMIT) break;
-      const beforeSource = await this.captureNativeShareHierarchy(scrolls, deadline);
-      const targetRectTimeout = Math.min(750, deadline - Date.now());
-      const targetBounds = element && targetRectTimeout >= minimumDriverRequestMs
-        ? await this.driver.elementRect(element, targetRectTimeout).catch((error: unknown) => {
-          if (isFatalDriverError(error)) throw error;
-          return undefined;
-        })
-        : undefined;
-      const container = await this.findNativeScrollContainer(beforeSource, description, targetBounds, deadline);
+      if (readyElement) return readyElement;
+      if (states.length > 0 && states.every((state) => state === 'disabled' || state === 'indeterminate')) break;
+      const targetRow = actionList.targetRows[0];
+      if (!targetRow) {
+        lastError = `${description}: action list did not expose the requested row`;
+        break;
+      }
+      const direction = iosNativeScrollDirection(targetRow.bounds, actionList.collection.bounds);
+      if (!direction) {
+        lastError = `${description}: target row has no verified movement remaining`;
+        break;
+      }
+      const container = await this.findNativeScrollContainer(source, description, deadline);
       if (!container) {
         lastError = `${description}: no verified native action-list container`;
         break;
       }
-      this.diagnostics.record({ phase: 'ios-install', operation: 'share-scroll-container', detail: { scroll: scrolls, type: container.type, element: container.element, bounds: container.bounds, targetBounds } });
+      this.diagnostics.record({ phase: 'ios-install', operation: 'share-scroll-container', detail: {
+        scroll: scrolls,
+        type: container.type,
+        element: container.element,
+        bounds: container.bounds,
+        direction,
+        targetBounds: targetRow.bounds,
+        actionRows: actionList.rows,
+      } });
       const gestureTimeout = Math.min(IOS_NATIVE_SCROLL_COMMAND_MS, deadline - Date.now());
-      if (gestureTimeout < minimumDriverRequestMs) break;
+      if (gestureTimeout < IOS_NATIVE_SCROLL_COMMAND_MS) {
+        lastError = `${description}: insufficient time to complete native scroll`;
+        break;
+      }
       let scrolled = false;
       try {
-        await this.driver.mobile('scroll', { element: container.element, direction: 'up', distance: 0.75 }, gestureTimeout);
+        await this.driver.mobile('scroll', { element: container.element, direction, distance: 0.75 }, gestureTimeout);
         scrolled = true;
       } catch (error) {
         if (isFatalDriverError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
-        if (isCommandAdmissionError(error)) break;
+        if (isIOSStaleElementError(error) || isCommandAdmissionError(error)) break;
+        const fallbackSource = await this.captureNativeShareHierarchy(scrolls, deadline);
+        const fallbackList = nativeActionListEvidence(fallbackSource, description);
+        if (!fallbackList) {
+          lastError = `${description}: native action list was dismissed or replaced after scroll failure`;
+          break;
+        }
+        const fallbackContainer = await this.findNativeScrollContainer(fallbackSource, description, deadline);
+        if (!fallbackContainer) {
+          lastError = `${description}: native action-list container was replaced after scroll failure`;
+          break;
+        }
+        const fallbackDirection = iosNativeSwipeDirection(direction);
         const fallbackTimeout = Math.min(IOS_NATIVE_SCROLL_COMMAND_MS, deadline - Date.now());
-        if (fallbackTimeout < minimumDriverRequestMs) break;
+        if (fallbackTimeout < IOS_NATIVE_SCROLL_COMMAND_MS) break;
         try {
-          await this.driver.mobile('swipe', { element: container.element, direction: 'up' }, fallbackTimeout);
+          await this.driver.mobile('swipe', { element: fallbackContainer.element, direction: fallbackDirection }, fallbackTimeout);
           scrolled = true;
         } catch (fallbackError) {
           if (isFatalDriverError(fallbackError)) throw fallbackError;
           lastError = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-          if (isCommandAdmissionError(fallbackError)) break;
+          if (isCommandAdmissionError(fallbackError) || isIOSStaleElementError(fallbackError)) break;
         }
       }
       if (!scrolled) break;
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now() - minimumDriverRequestMs));
-      if (waitMs > 0) await delay(waitMs);
+      const afterSourceTimeout = deadline - Date.now();
+      if (afterSourceTimeout < 1_000) {
+        lastError = `${description}: insufficient time to verify native scroll progress`;
+        break;
+      }
+      const waitMs = Math.min(250, Math.max(0, afterSourceTimeout - 1_000));
+      if (waitMs > 0) {
+        try {
+          await delay(waitMs);
+        } catch (error) {
+          if (this.budget.exhausted) break;
+          throw error;
+        }
+      }
       const afterSource = await this.captureNativeShareHierarchy(scrolls + 1, deadline);
-      const afterTargetRectTimeout = Math.min(750, deadline - Date.now());
-      const afterTargetBounds = element && afterTargetRectTimeout >= minimumDriverRequestMs
-        ? await this.driver.elementRect(element, afterTargetRectTimeout).catch((error: unknown) => {
-          if (isFatalDriverError(error)) throw error;
-          return undefined;
-        })
-        : undefined;
-      const afterContainerRectTimeout = Math.min(750, deadline - Date.now());
-      const afterContainerBounds = afterContainerRectTimeout >= minimumDriverRequestMs
-        ? await this.driver.elementRect(container.element, afterContainerRectTimeout).catch((error: unknown) => {
-          if (isFatalDriverError(error)) throw error;
-          return undefined;
-        })
-        : undefined;
-      const progressed = nativeBoundsChanged(targetBounds, afterTargetBounds)
-        || (nativeScrollBarProgress(beforeSource) !== nativeScrollBarProgress(afterSource)
-          && nativeScrollBarProgress(afterSource) !== '')
-        || (nativeSourceTargetVisible(beforeSource, description) === false
-          && nativeSourceTargetVisible(afterSource, description) === true);
+      const afterActionList = nativeActionListEvidence(afterSource, description);
+      if (!afterActionList) {
+        lastError = `${description}: native action list was dismissed or replaced after scroll`;
+        this.diagnostics.record({ phase: 'ios-install', operation: 'share-scroll-progress', detail: {
+          scroll: scrolls,
+          beforeRows: actionList.rows,
+          afterRows: [],
+          progressed: false,
+          direction,
+          modal: false,
+        } });
+        break;
+      }
+      const afterMatches = await this.findNativeMatches(locators, Math.min(deadline - Date.now(), 5_000));
+      const afterTargetReady = afterActionList.targetRows.some((row) => row.visible && row.enabled);
+      let afterReady = false;
+      if (afterTargetReady) {
+        for (const candidate of afterMatches) {
+          if (!await this.nativeElementBelongsToRows(candidate, afterActionList.targetRows, deadline)) continue;
+          try {
+            if (await this.nativeControlState(candidate, deadline) === 'ready') {
+              afterReady = true;
+              break;
+            }
+          } catch (error) {
+            if (isFatalDriverError(error)) throw error;
+            if (error instanceof WebDriverError && !isRetryableElementLookupError(error)) throw error;
+          }
+        }
+      }
+      const progressed = (afterTargetReady && afterReady) || nativeActionRowsMoved(actionList.rows, afterActionList.rows);
       this.diagnostics.record({ phase: 'ios-install', operation: 'share-scroll-progress', detail: {
         scroll: scrolls,
-        beforeTargetBounds: targetBounds,
-        afterTargetBounds,
-        beforeContainerBounds: container.bounds,
-        afterContainerBounds,
-        beforeScrollbar: nativeScrollBarProgress(beforeSource),
-        afterScrollbar: nativeScrollBarProgress(afterSource),
+        beforeRows: actionList.rows,
+        afterRows: afterActionList.rows,
+        beforeTargetRows: actionList.targetRows,
+        afterTargetRows: afterActionList.targetRows,
+        direction,
+        targetReady: afterReady,
         progressed,
       } });
       if (!progressed) {

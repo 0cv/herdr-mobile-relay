@@ -63,6 +63,7 @@ export function runtimeScript(): string {
     const buildEntry = /^\\/builds\\/[^/]+\\/index\\.html$/.test(location.pathname)
       ? location.pathname
       : '';
+    const documentEntry = location.pathname === '/' ? '/index.html' : location.pathname;
     const versionMatch = [...document.querySelectorAll('main, p, small')]
       .map((node) => (node.textContent || '').match(/Phone app version\\s+(\\d+\\.\\d+\\.\\d+)/))
       .find((match) => match);
@@ -74,7 +75,7 @@ export function runtimeScript(): string {
     const observedBuild = buildText || (buildEntry.match(/-([a-f0-9]{16,64})\\/index\\.html$/)?.[1] || String(metadata.build || ''));
     const observedEntry = buildEntry || String(metadata.entry || (version && observedAssets && observedBuild.length >= 16
       ? '/builds/' + version + '-' + observedAssets + '-' + observedBuild.slice(0, 16) + '/index.html'
-      : ''));
+      : documentEntry));
     const standalone = window.matchMedia('(display-mode: standalone)').matches
       || navigator.standalone === true;
     const iosHomeScreen = /iPhone|iPad|iPod/u.test(navigator.userAgent);
