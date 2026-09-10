@@ -1100,6 +1100,7 @@ async function lifecycleReplay(name: string) {
     overlay: '', documentOrigin: origin, standalone: true, url: `${origin}/`,
     settingsFault: '', stateFault: undefined as unknown, activeFault: undefined as unknown,
     alertFault: false, ignoreHome: false, wrongLaunch: '', systemObservationFault: '', slowInstalledObservation: false,
+    systemName: 'SpringBoard', systemRootCount: 1,
   };
   let settings: Record<string, unknown> = { defaultActiveApplication: 'auto', respectSystemAlerts: false };
   const appState = (bundle: string) => {
@@ -1165,14 +1166,17 @@ async function lifecycleReplay(name: string) {
       if (state.systemObservationFault === 'malformed') return value({});
       if (state.systemObservationFault === 'replaced') return value([element('different-root')]);
       const overlay = state.overlay && state.overlay !== 'app-dialog';
-      const xml = `<XCUIElementTypeApplication name="SpringBoard">${overlay ? state.overlay === 'alert' ? '<XCUIElementTypeAlert/>' : `<XCUIElementTypeOther name="${state.overlay}"/>` : ''}</XCUIElementTypeApplication>`;
+      const xml = `<XCUIElementTypeApplication name="${state.systemName}">${overlay ? state.overlay === 'alert' ? '<XCUIElementTypeAlert/>' : `<XCUIElementTypeOther name="${state.overlay}"/>` : ''}</XCUIElementTypeApplication>`;
       const scopedXPath = String(body.value).split(' | ').map((part) => `/XCUIElementTypeApplication/${part}`).join(' | ');
       assert.equal(xpathCount(xml, scopedXPath), overlay ? 2 : 1);
       return value([element('springboard-root'), ...(overlay ? [element('system-overlay')] : [])]);
     }
     if (path.endsWith('/elements')) {
       assert.equal(active(), 'com.apple.springboard');
-      if (body.value.includes('XCUIElementTypeApplication')) return value([element('springboard-root')]);
+      if (body.value.includes('XCUIElementTypeApplication')) {
+        const xml = `<AppiumAUT>${Array.from({ length: state.systemRootCount }, () => `<XCUIElementTypeApplication name="${state.systemName}"/>`).join('')}</AppiumAUT>`;
+        return value(Array.from({ length: xpathCount(xml, String(body.value)) }, (_, index) => element(index ? `other-root-${index}` : 'springboard-root')));
+      }
       return value([element('home-icon')]);
     }
     if (path.endsWith('/home-icon/attribute/hittable')) return value('true');
@@ -1199,6 +1203,27 @@ async function lifecycleReplay(name: string) {
     }
   };
   return { ...replay, state, settings: () => settings, owned };
+}
+
+test('Cycle4 unnamed system application retains native ownership and overlay observation', async () => {
+  const a = await lifecycleReplay('unnamed-system');
+  a.state.systemName = '';
+  await a.owned(() => a.platform.launchInstalledApp());
+  assert.equal(a.platform.evidenceSnapshot().installedDocumentBound, true);
+  a.state.overlay = 'SBTransientOverlayWindow';
+  await assert.rejects(() => a.platform.attachToInstalledView(), /IOS_CONTEXT_OWNERSHIP/u);
+});
+
+for (const count of [0, 2]) {
+  test(`Cycle4 system application root count ${count} fails before launch without retry`, async () => {
+    const a = await lifecycleReplay(`root-count-${count}`);
+    a.state.systemRootCount = count;
+    await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /SpringBoard observation root is not unique/u);
+    const stopped = a.requests.length;
+    await assert.rejects(() => a.owned(() => a.platform.launchInstalledApp()), /IOS_CONTEXT_OWNERSHIP/u);
+    assert.equal(a.requests.length, stopped);
+    assert.equal(a.requests.some((request) => request.path.endsWith('/home-icon/click')), false);
+  });
 }
 
 test('Plan13 lifecycle supported handoff survives obsolete Safari through background cold termination and relaunch', async () => {

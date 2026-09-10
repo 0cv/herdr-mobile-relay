@@ -1585,7 +1585,7 @@ export class IOSPlatform implements MobilePlatform {
     if (!this.springBoardRoot) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'independent system observation root is unavailable');
     const response = await this.driver.command<unknown>(`/element/${encodeURIComponent(this.springBoardRoot)}/elements`, 'POST', {
       using: 'xpath',
-      value: "self::XCUIElementTypeApplication[@name='SpringBoard'] | .//XCUIElementTypeAlert | .//*[@name='SBTransientOverlayWindow' or @name='NotificationShortLookView']",
+      value: "self::XCUIElementTypeApplication | .//XCUIElementTypeAlert | .//*[@name='SBTransientOverlayWindow' or @name='NotificationShortLookView']",
     }, phase.remainingMs);
     if (!Array.isArray(response) || response.length !== 1 || this.installConfirmationElementId(response[0]) !== this.springBoardRoot) {
       this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'system observation is missing, replaced, or contains an overlay');
@@ -1599,7 +1599,7 @@ export class IOSPlatform implements MobilePlatform {
       await this.driver.switchContext('NATIVE_APP', phase.remainingMs);
       await this.observeNativeForeground(IOS_SPRINGBOARD_BUNDLE_ID, phase);
       const roots = await this.driver.command<unknown>('/elements', 'POST', {
-        using: 'xpath', value: "//XCUIElementTypeApplication[@name='SpringBoard']",
+        using: 'xpath', value: '//XCUIElementTypeApplication',
       }, phase.remainingMs);
       if (!Array.isArray(roots) || roots.length !== 1) this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'SpringBoard observation root is not unique');
       this.springBoardRoot = this.installConfirmationElementId(roots[0]);
