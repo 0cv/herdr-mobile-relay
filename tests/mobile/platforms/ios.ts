@@ -320,6 +320,7 @@ export class IOSPlatform implements MobilePlatform {
   private lastCompletion?: UpdateCompletionEvidence;
   private lastNativeActivity = '';
   private lastNativePid = '';
+  private simulatorReadyAt = '';
   private ownershipFailure?: QualificationFatalError;
   private navigationCommand = command;
 
@@ -339,7 +340,12 @@ export class IOSPlatform implements MobilePlatform {
     const available = await commandOutput('xcrun', ['simctl', 'list', 'devices', 'available']);
     if (!available.includes(this.udid)) throw new Error(`IOS_TARGET: simulator ${this.udid} is not an available simulator`);
     await command('xcrun', ['simctl', 'boot', this.udid]).catch(() => undefined);
-    await command('xcrun', ['simctl', 'bootstatus', this.udid, '-b'], 300_000);
+    const bootStatus = await command('xcrun', ['simctl', 'bootstatus', this.udid, '-b'], 300_000);
+    this.simulatorReadyAt = new Date().toISOString();
+    this.diagnostics.record({
+      phase: 'ios-device', operation: 'simulator-boot-ready', durationMs: bootStatus.durationMs,
+      detail: { outcome: 'collected', observedAt: this.simulatorReadyAt, source: 'simctl bootstatus', process: { ...bootStatus, normalizedExitCode: bootStatus.code, code: undefined } },
+    });
     await command('xcrun', ['simctl', 'keychain', this.udid, 'add-root-cert', this.options.certificate], 30_000);
     await this.driver.create({
       capabilities: {
@@ -414,9 +420,13 @@ export class IOSPlatform implements MobilePlatform {
       });
       try {
         await this.captureNavigationState('after');
-        await this.captureNavigationHostLog(startedAt, settledAt);
       } catch (diagnosticError) {
         this.diagnostics.record({ phase: 'ios-navigation', operation: 'openurl-diagnostics-stopped', detail: iosOpenURLProcessEvidence(diagnosticError) });
+      }
+      try {
+        await this.captureNavigationHostLog(startedAt, settledAt);
+      } catch (diagnosticError) {
+        this.diagnostics.record({ phase: 'ios-navigation', operation: 'openurl-host-log-stopped', detail: iosOpenURLProcessEvidence(diagnosticError) });
       }
       throw new Error(`IOS_NAVIGATION: could not open setup URL: ${JSON.stringify(evidence)}`, { cause: error });
     }
@@ -441,13 +451,27 @@ export class IOSPlatform implements MobilePlatform {
       const result = await collect();
       this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, durationMs: Date.now() - startedAt, detail: { outcome: 'collected', result } });
     } catch (error) {
-      this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, durationMs: Date.now() - startedAt, detail: { outcome: 'failed', process: iosOpenURLProcessEvidence(error) } });
-      if (isFatalDriverError(error) || (error instanceof CommandError && error.timedOut)) throw error;
+      const fatal = isFatalDriverError(error);
+      this.diagnostics.record({
+        phase: 'ios-navigation',
+        operation,
+        timeoutMs,
+        durationMs: Date.now() - startedAt,
+        detail: { outcome: fatal ? 'failed' : 'unavailable', process: iosOpenURLProcessEvidence(error) },
+      });
+      if (fatal) throw error;
     }
   }
 
   private async captureNavigationState(stage: 'before' | 'after'): Promise<void> {
     const phase = this.budget.phaseView(`ios-${stage}-openurl`, stage === 'before' ? 10_000 : 30_000);
+    if (stage === 'before' && this.simulatorReadyAt) {
+      this.diagnostics.record({
+        phase: 'ios-navigation', operation: 'before-openurl-boot-state',
+        detail: { outcome: 'reused', observedAt: this.simulatorReadyAt, source: 'ios-device/simctl bootstatus' },
+      });
+      return;
+    }
     await this.navigationDiagnostic(phase, `${stage}-openurl-boot-state`, 3_000, async () => {
       const result = await this.navigationCommand('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], 3_000, { budget: phase });
       const listing = JSON.parse(result.stdout) as { devices: Record<string, Array<{ udid: string; state: string; isAvailable: boolean }>> };
@@ -455,6 +479,7 @@ export class IOSPlatform implements MobilePlatform {
       if (!device) throw new Error('IOS_NAVIGATION_DIAGNOSTIC: owned simulator is absent from the available device listing');
       return device;
     });
+    if (stage === 'before') return;
     let nativeContext = false;
     await this.navigationDiagnostic(phase, `${stage}-openurl-native-context`, 1_000, async () => {
       await this.driver.switchContext('NATIVE_APP', 1_000);
@@ -1044,6 +1069,7 @@ export class IOSPlatform implements MobilePlatform {
       lastCompletion: this.lastCompletion,
       nativeActivity: this.lastNativeActivity,
       nativePid: this.lastNativePid,
+      simulatorReadyAt: this.simulatorReadyAt,
       driver: this.driver.snapshot(),
       events: this.diagnostics.snapshot(),
     };

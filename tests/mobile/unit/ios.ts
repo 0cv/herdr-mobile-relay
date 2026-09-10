@@ -348,6 +348,18 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth'] as co
   });
 }
 
+test('navigation reuses the required simulator boot observation instead of enumerating again', async () => {
+  const { platform, requests } = await adapter('navigation-reused-boot', () => {
+    throw new Error('no optional navigation command is admissible');
+  });
+  (platform as any).simulatorReadyAt = '2026-01-01T00:00:00.000Z';
+  await (platform as any).captureNavigationState('before');
+  assert.equal(requests.length, 1);
+  const event = (platform.evidenceSnapshot().events as any[]).find((candidate) => candidate.operation === 'before-openurl-boot-state');
+  assert.equal(event.detail.outcome, 'reused');
+  assert.equal(event.detail.observedAt, '2026-01-01T00:00:00.000Z');
+});
+
 test('recorded openurl timeout preserves signal and duration without inventing an application exit status', async () => {
   const process = recorded.openurlFailure.detail.process;
   const error = new CommandError('xcrun', ['simctl', 'openurl', 'protocol-only', `${origin}/`], {
@@ -363,7 +375,7 @@ test('recorded openurl timeout preserves signal and duration without inventing a
   assert.equal(evidence.stderr, '');
 });
 
-for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeout', 'diagnostic-failure', 'discovery-interrupted'] as const) {
+for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeout', 'diagnostic-failure', 'discovery-interrupted', 'pre-diagnostic-timeout', 'post-simulator-timeout'] as const) {
   test(`openurl ${mode} records bounded serial diagnostics without reissuing navigation`, async () => {
     let processActive = false;
     const { platform, requests, outputDir } = await adapter(`navigation-${mode}`, ({ path, body, signal }) => {
@@ -385,6 +397,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
       platform.driver.contextMetadata = () => discover(1_000);
     }
     const processes: Array<{ binary: string; args: string[]; timeoutMs: number }> = [];
+    let listCalls = 0;
     let navigationError: unknown;
     (platform as any).navigationCommand = async (binary: string, args: string[], timeoutMs: number) => {
       assert.equal(processActive, false);
@@ -411,6 +424,10 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
         }
         assert.deepEqual(args, ['simctl', 'list', 'devices', 'available', '--json']);
         assert.ok(timeoutMs <= 3_000);
+        listCalls += 1;
+        if ((mode === 'pre-diagnostic-timeout' && listCalls === 1) || (mode === 'post-simulator-timeout' && listCalls === 2)) {
+          return command('/bin/sleep', ['2'], 40);
+        }
         return command('/usr/bin/printf', ['%s', JSON.stringify({ devices: { runtime: [{ udid: 'protocol-only', state: 'Booted', isAvailable: true }] } })], timeoutMs);
       } finally {
         processActive = false;
@@ -427,8 +444,12 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
     assert.equal(failure.detail.process.normalizedExitCode, 1);
     assert.equal(failure.detail.process.timedOut, mode !== 'uncertain-failure');
     assert.equal(failure.detail.startedAt, start.detail.startedAt);
-    assert.ok(events.some((event) => event.operation === 'before-openurl-boot-state' && event.detail.outcome === 'collected'));
+    assert.ok(events.some((event) => event.operation === 'before-openurl-boot-state'
+      && event.detail.outcome === (mode === 'pre-diagnostic-timeout' ? 'unavailable' : 'collected')));
     assert.ok(events.some((event) => event.operation === 'after-openurl-foreground' && event.detail.outcome === 'collected'));
+    if (mode === 'post-simulator-timeout') {
+      assert.ok(events.some((event) => event.operation === 'after-openurl-boot-state' && event.detail.outcome === 'unavailable'));
+    }
     assert.ok(events.some((event) => event.operation === 'after-openurl-pages' && event.detail.outcome === (mode === 'discovery-interrupted' ? 'failed' : 'collected')));
     if (mode === 'discovery-interrupted') {
       assert.equal(platform.driver.snapshot().unusable, true);
@@ -437,7 +458,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
       await assert.rejects(() => platform.attachToInstalledView(), /APPIUM_SESSION_UNUSABLE/u);
       assert.equal(requests.length, count);
       assert.deepEqual(platform.driver.snapshot().firstFatal, first);
-      assert.equal(processes.some((process) => process.binary === '/usr/bin/log'), false);
+      assert.equal(processes.some((process) => process.binary === '/usr/bin/log'), true);
       return;
     }
     assert.match(await readFile(join(outputDir, 'ios-after-openurl-hierarchy.xml'), 'utf8'), /XCUIElementType/u);
@@ -446,7 +467,7 @@ for (const mode of ['recorded-timeout', 'uncertain-failure', 'real-process-timeo
       assert.match(text, /host trace/u);
       assert.equal(text.includes('fixture-secret'), false);
     }
-    assert.ok(events.some((event) => event.operation === 'openurl-host-log' && event.detail.outcome === (mode === 'diagnostic-failure' ? 'failed' : 'collected')));
+    assert.ok(events.some((event) => event.operation === 'openurl-host-log' && event.detail.outcome === (mode === 'diagnostic-failure' ? 'unavailable' : 'collected')));
   });
 }
 
