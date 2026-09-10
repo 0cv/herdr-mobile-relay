@@ -79,6 +79,18 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.equal((await readFile(fixture.log, 'utf8')).includes('disable-user'), false);
     assert.equal(requests.includes('disable-user --user 0 com.google.android.gms'), false);
   });
+  test('headless version acquisition avoids the GUI runtime and preserves measured identity', async () => {
+    const fixture = await harness.createFixture();
+    assert.throws(() => execFileSync('emulator', ['-version'], { env: fixture.environment, stdio: 'pipe' }), /libpulse.so.0/u);
+    assert.equal(execFileSync('emulator', ['-no-window', '-version'], { env: fixture.environment, encoding: 'utf8' }).trim(), 'Android emulator version 35.0.2.0');
+    const { before, after } = await snapshots(fixture);
+    assert.equal((JSON.parse(await readFile(before, 'utf8')) as AndroidEnvironmentSnapshot).emulatorVersion, 'Android emulator version 35.0.2.0');
+    assert.equal((await harness.check(fixture, before, after)).passed, true);
+    await writeFile(join(fixture.root, 'bin', 'emulator'), '#!/bin/sh\nexit 127\n');
+    const output = join(fixture.root, 'failed-version.json');
+    assert.equal((await harness.snapshot(fixture, 'valid', output, join(fixture.root, 'failed-version-diagnostics.json'))).passed, false);
+    assert.equal(existsSync(output), false);
+  });
   test('acquires only eight named identity properties despite legal ambiguous dump records beyond preview', async () => {
     const fixture = await harness.createFixture();
     const dump = await readFile(join(fixture.fixtureDirectory, 'getprop'), 'utf8');

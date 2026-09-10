@@ -41,6 +41,7 @@ const IOS_NAVIGATION_PHASE_MS = 86_000;
 const IOS_SAFARI_OBSERVATION_MS = 6_000;
 const IOS_INSTALLED_FOREGROUND_MS = 8_000;
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
+const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
@@ -618,7 +619,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   private async waitForInstallConfirmation(parent: PhaseBudget): Promise<string> {
-    const phase = parent.phaseView('ios-install-confirmation', 15_000);
+    const phase = parent.phaseView('ios-install-confirmation', 30_000);
     let lastState = 'missing';
     while (phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS) {
       try {
@@ -628,10 +629,10 @@ export class IOSPlatform implements MobilePlatform {
         if (!isIOSSafariBrowserBundle(bundleId) && !isIOSSafariViewServiceBundle(bundleId)) {
           throw new Error(`IOS_SHARE: Add: Safari confirmation is not foreground (${bundleId || 'unknown'})`);
         }
-        if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
-        const response = await this.driver.command<unknown>('/element', 'POST', accessibility('Add'), IOS_NATIVE_LOOKUP_ROUND_MS);
+        if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
+        const response = await this.driver.command<unknown>('/element', 'POST', accessibility('Add'), IOS_CONFIRMATION_LOOKUP_MS);
         const element = this.installConfirmationElementId(response);
-        if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+        if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
         if (await this.installConfirmationIdentity() !== element) {
           lastState = 'confirmation identity is missing or replaced';
         } else {
@@ -639,7 +640,7 @@ export class IOSPlatform implements MobilePlatform {
           const state = await this.nativeControlState(element, phase);
           if (state === 'indeterminate' && phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
           if (state === 'ready') {
-            if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+            if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
             const currentElement = await this.installConfirmationIdentity();
             if (!currentElement) throw new Error('IOS_SHARE: Add: confirmation identity was replaced before click');
             if (currentElement === element) {
@@ -677,7 +678,7 @@ export class IOSPlatform implements MobilePlatform {
     const response = await this.driver.command<unknown>('/elements', 'POST', {
       using: 'xpath',
       value: "//XCUIElementTypeNavigationBar[@name='Add to Home Screen' and @visible='true' and not(ancestor::*[@visible='false'])]//XCUIElementTypeButton[@name='Add']",
-    }, IOS_NATIVE_LOOKUP_ROUND_MS);
+    }, IOS_CONFIRMATION_LOOKUP_MS);
     if (!Array.isArray(response)) throw new Error('IOS_SHARE: Add: malformed confirmation identity response');
     const matches = response.map((candidate: unknown) => this.installConfirmationElementId(candidate));
     return matches.length === 1 ? matches[0] : undefined;

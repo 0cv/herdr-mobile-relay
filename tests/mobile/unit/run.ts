@@ -650,7 +650,7 @@ async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixt
   await mkdir(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64'), { recursive: true });
   await writeFile(join(root, 'avd', 'herdr-mobile-ci-fixture.avd', 'config.ini'), 'image.sysdir.1=system-images/android-35/google_apis/x86_64/\ntag.id=google_apis\nabi.type=x86_64\n');
   await writeFile(join(root, 'sdk', 'system-images', 'android-35', 'google_apis', 'x86_64', 'source.properties'), 'Pkg.Revision=12\nAndroidVersion.ApiLevel=35\nSystemImage.TagId=google_apis\nSystemImage.Abi=x86_64\n');
-  await writeFile(join(binDirectory, 'emulator'), '#!/bin/sh\nprintf "Android emulator version 35.0.2.0\\n"\n', { mode: 0o700 });
+  await writeFile(join(binDirectory, 'emulator'), '#!/bin/sh\nif [ "$*" != "-no-window -version" ]; then\n  printf "qemu-system-x86_64: error while loading shared libraries: libpulse.so.0\\n" >&2\n  exit 127\nfi\nprintf "Android emulator version 35.0.2.0\\n"\n', { mode: 0o700 });
   const properties = {
     'ro.build.fingerprint': 'fixture/fingerprint',
     'ro.build.id': 'AP4A',

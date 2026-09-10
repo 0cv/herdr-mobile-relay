@@ -463,7 +463,7 @@ async function adb(
 }
 
 async function hostVersion(binary: 'adb' | 'emulator'): Promise<string> {
-  const args = binary === 'adb' ? ['version'] : ['-version'];
+  const args = binary === 'adb' ? ['version'] : ['-no-window', '-version'];
   const result = await command(binary, args, 10_000, { label: `${binary} version` });
   const pattern = binary === 'adb' ? /^Android Debug Bridge version [\d.]+\r?\nVersion [^\r\n]+$/gmu : /^Android emulator version [\d.]+[^\r\n]*$/gmu;
   const matches = [...`${result.stdout}${result.stderr}`.matchAll(pattern)];
