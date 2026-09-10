@@ -1,12 +1,15 @@
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { command } from './support/process';
-import { writeSanitizedJson } from './support/diagnostics';
+import { CommandError, command, type CommandResult } from './support/process';
+import { redactText, writeSanitizedJson } from './support/diagnostics';
 
 const ANDROID_PACKAGES = ['com.google.android.gms', 'com.google.android.trichromelibrary', 'com.android.chrome'] as const;
 const PLAY_STORE_PACKAGE = 'com.android.vending';
 const PACKAGE_DUMP_LIMIT = 2_000_000;
 const MODULE_CONFIG_LIMIT = 500;
+const ACQUISITION_COMMAND_LIMIT = 64;
+const ACQUISITION_PREVIEW_LIMIT = 4_000;
+const DEFAULT_ADB_TIMEOUT_MS = 30_000;
 
 export interface AndroidEnvironmentPolicy {
   systemImage: string;
@@ -20,6 +23,9 @@ export interface AndroidEnvironmentPolicy {
 
 export interface AndroidPackageIdentity {
   packageName: string;
+  packageRecordName: string;
+  staticLibraryName: string;
+  staticLibraryVersion: string;
   versionName: string;
   versionCode: string;
   installerPackageName: string;
@@ -29,6 +35,7 @@ export interface AndroidPackageIdentity {
   firstInstallTime: string;
   lastUpdateTime: string;
   enabled: string;
+  codePath: string;
   apkPaths: string[];
   moduleConfig: string[];
   moduleConfigSha256: string;
@@ -61,6 +68,108 @@ export interface AndroidEnvironmentCheck {
 
 interface ToolchainsFile {
   android?: Partial<AndroidEnvironmentPolicy>;
+}
+
+export interface AndroidStaticLibraryResolution {
+  libraryName: string;
+  versionCode: string;
+  packageRecordName: string;
+}
+
+export interface AndroidAcquisitionCommandDiagnostic {
+  args: string[];
+  outcome: 'passed' | 'failed';
+  durationMs: number;
+  exitCode: number;
+  timedOut: boolean;
+  signal?: string;
+  stdoutBytes: number;
+  stderrBytes: number;
+  stdoutSha256: string;
+  stderrSha256: string;
+  stdoutPreview?: string;
+  stderrPreview?: string;
+}
+
+export interface AndroidEnvironmentAcquisitionDiagnostics {
+  schema: 1;
+  capturedAt: string;
+  serial: string;
+  policy?: AndroidEnvironmentPolicy;
+  stage: string;
+  resolvedStaticLibrary?: AndroidStaticLibraryResolution;
+  commands: AndroidAcquisitionCommandDiagnostic[];
+  failure?: {
+    stage: string;
+    message: string;
+    code?: string;
+    exitCode?: number;
+    timedOut?: boolean;
+    signal?: string;
+    detail?: string;
+  };
+}
+
+class AcquisitionDiagnostics {
+  readonly value: AndroidEnvironmentAcquisitionDiagnostics;
+
+  constructor(serial: string) {
+    this.value = {
+      schema: 1,
+      capturedAt: new Date().toISOString(),
+      serial,
+      stage: 'initialization',
+      commands: [],
+    };
+  }
+
+  setPolicy(policy: AndroidEnvironmentPolicy): void {
+    this.value.policy = policy;
+  }
+
+  setStage(stage: string): void {
+    this.value.stage = stage;
+  }
+
+  setResolvedStaticLibrary(resolution: AndroidStaticLibraryResolution): void {
+    this.value.resolvedStaticLibrary = resolution;
+  }
+
+  recordCommand(binary: string, args: string[], result?: CommandResult, error?: unknown): void {
+    if (this.value.commands.length >= ACQUISITION_COMMAND_LIMIT) return;
+    const commandError = error instanceof CommandError ? error : undefined;
+    const stdout = commandError?.stdout || result?.stdout || '';
+    const stderr = commandError?.stderr || result?.stderr || '';
+    const diagnostic: AndroidAcquisitionCommandDiagnostic = {
+      args: [binary, ...args].map((value) => redactText(value).slice(0, 300)),
+      outcome: error ? 'failed' : 'passed',
+      durationMs: commandError?.durationMs || result?.durationMs || 0,
+      exitCode: commandError?.exitCode ?? result?.code ?? 0,
+      timedOut: commandError?.timedOut ?? result?.timedOut ?? false,
+      signal: commandError?.signal || result?.signal,
+      stdoutBytes: Buffer.byteLength(stdout),
+      stderrBytes: Buffer.byteLength(stderr),
+      stdoutSha256: sha256(stdout),
+      stderrSha256: sha256(stderr),
+    };
+    if (stdout) diagnostic.stdoutPreview = redactText(stdout).slice(0, ACQUISITION_PREVIEW_LIMIT);
+    if (stderr) diagnostic.stderrPreview = redactText(stderr).slice(0, ACQUISITION_PREVIEW_LIMIT);
+    this.value.commands.push(diagnostic);
+  }
+
+  recordFailure(error: unknown): void {
+    const commandError = error instanceof CommandError ? error : undefined;
+    const detail = commandError?.stderr || commandError?.stdout || '';
+    this.value.failure = {
+      stage: this.value.stage,
+      message: redactText(error instanceof Error ? error.message : String(error)).slice(0, 1_000),
+      code: commandError?.code,
+      exitCode: commandError?.exitCode,
+      timedOut: commandError?.timedOut,
+      signal: commandError?.signal,
+      detail: redactText(detail).slice(0, ACQUISITION_PREVIEW_LIMIT) || undefined,
+    };
+  }
 }
 
 function option(name: string): string | undefined {
@@ -97,6 +206,68 @@ function expectedVersion(value: string): { name: string; code: string } {
   return { name: match[1], code: match[2] || '' };
 }
 
+interface StaticLibraryDependency {
+  name: string;
+  versionCode: string;
+}
+
+function parseStaticLibraryDependencies(dump: string): StaticLibraryDependency[] {
+  const dependencies: StaticLibraryDependency[] = [];
+  let inSection = false;
+  for (const rawLine of dump.slice(0, PACKAGE_DUMP_LIMIT).split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line === 'usesStaticLibraries:') {
+      inSection = true;
+      continue;
+    }
+    if (!inSection) continue;
+    if (!/^[ \t]{4,}\S/u.test(rawLine)) {
+      inSection = false;
+      continue;
+    }
+    if (!line) continue;
+    const match = line.match(/^(\S+)\s+version:(\d+)$/u);
+    if (!match) throw new Error(`ANDROID_ENVIRONMENT: malformed Chrome static library record ${line}`);
+    dependencies.push({ name: match[1], versionCode: match[2] });
+  }
+  return dependencies;
+}
+
+export function resolveStaticLibraryPackage(
+  chromeDump: string,
+  libraryName: string,
+  declaredVersion: string,
+): AndroidStaticLibraryResolution {
+  const expected = expectedVersion(declaredVersion);
+  if (!expected.code) throw new Error(`ANDROID_ENVIRONMENT: static library ${libraryName} requires a declared version code`);
+  if (!/^[A-Za-z0-9._]+$/u.test(libraryName)) throw new Error(`ANDROID_ENVIRONMENT: invalid static library name ${libraryName}`);
+  const matches = parseStaticLibraryDependencies(chromeDump).filter((dependency) => dependency.name === libraryName);
+  if (!matches.length) throw new Error(`ANDROID_ENVIRONMENT: Chrome static library dependency ${libraryName} is missing`);
+  if (matches.length !== 1) throw new Error(`ANDROID_ENVIRONMENT: Chrome static library dependency ${libraryName} is ambiguous`);
+  const dependency = matches[0];
+  if (dependency.versionCode !== expected.code) {
+    throw new Error(`ANDROID_ENVIRONMENT: Chrome static library ${libraryName} version ${dependency.versionCode} does not match ${expected.code}`);
+  }
+  return {
+    libraryName: dependency.name,
+    versionCode: dependency.versionCode,
+    packageRecordName: `${dependency.name}_${dependency.versionCode}`,
+  };
+}
+
+function packageRecordNameFromDump(dump: string): string {
+  const boundedDump = dump.slice(0, PACKAGE_DUMP_LIMIT);
+  return firstMatch(boundedDump, /^[ \t]+compat name=([^\s]+)[ \t]*$/mu)
+    || firstMatch(boundedDump, /^[ \t]*Package \[([^\]]+)\]/mu);
+}
+
+function staticLibraryMetadata(dump: string): { name: string; versionCode: string } {
+  const match = dump.slice(0, PACKAGE_DUMP_LIMIT).match(
+    /^[ \t]+static library:[ \t]*\r?\n[ \t]+name:([^\s]+)[ \t]+version:(\d+)[ \t]*$/mu,
+  );
+  return { name: match?.[1] || '', versionCode: match?.[2] || '' };
+}
+
 function policyFromToolchains(value: unknown): AndroidEnvironmentPolicy {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('ANDROID_ENVIRONMENT: toolchains file is not an object');
   const android = (value as ToolchainsFile).android;
@@ -124,8 +295,20 @@ async function readPolicy(filename: string): Promise<AndroidEnvironmentPolicy> {
   return policyFromToolchains(JSON.parse(await readFile(filename, 'utf8')));
 }
 
-async function adb(serial: string, args: string[], timeoutMs = 30_000): Promise<string> {
-  return (await command('adb', ['-s', serial, ...args], timeoutMs, { label: `adb ${args.join(' ')}` })).stdout;
+async function adb(
+  serial: string,
+  args: string[],
+  timeoutMs = DEFAULT_ADB_TIMEOUT_MS,
+  diagnostics?: AcquisitionDiagnostics,
+): Promise<string> {
+  try {
+    const result = await command('adb', ['-s', serial, ...args], timeoutMs, { label: `adb ${args.join(' ')}` });
+    diagnostics?.recordCommand('adb', ['-s', serial, ...args], result);
+    return result.stdout;
+  } catch (error) {
+    diagnostics?.recordCommand('adb', ['-s', serial, ...args], undefined, error);
+    throw error;
+  }
 }
 
 async function optionalHostCommand(binary: string, args: string[]): Promise<string> {
@@ -144,8 +327,12 @@ function packageIdentity(packageName: string, dump: string, paths: string): Andr
     .map((line) => line.trim())
     .filter(Boolean)
     .slice(0, MODULE_CONFIG_LIMIT);
+  const staticLibrary = staticLibraryMetadata(boundedDump);
   return {
     packageName,
+    packageRecordName: packageRecordNameFromDump(boundedDump),
+    staticLibraryName: staticLibrary.name,
+    staticLibraryVersion: staticLibrary.versionCode,
     versionName: firstMatch(boundedDump, /\bversionName=([^\s]+)/u),
     versionCode: firstMatch(boundedDump, /\bversionCode=(\d+)/u),
     installerPackageName: firstMatch(boundedDump, /\binstallerPackageName=([^\s]+)/u),
@@ -155,6 +342,7 @@ function packageIdentity(packageName: string, dump: string, paths: string): Andr
     firstInstallTime: firstMatch(boundedDump, /\bfirstInstallTime=([^\r\n]+)/u),
     lastUpdateTime: firstMatch(boundedDump, /\blastUpdateTime=([^\r\n]+)/u),
     enabled: firstMatch(boundedDump, /\benabled=([^\s]+)/u),
+    codePath: firstMatch(boundedDump, /^[ \t]+codePath=([^\r\n]+)$/mu),
     apkPaths: paths.split(/\r?\n/u)
       .map((line) => line.trim())
       .filter((line) => line.startsWith('package:'))
@@ -193,7 +381,7 @@ function packageMapEqual(before: Record<string, AndroidPackageIdentity>, after: 
       issues.push(`${packageName} package identity is missing`);
       continue;
     }
-    for (const key of ['versionName', 'versionCode', 'installerPackageName', 'initiatingPackageName', 'originatingPackageName', 'packageSource', 'firstInstallTime', 'lastUpdateTime', 'enabled', 'moduleConfigSha256'] as const) {
+    for (const key of ['packageRecordName', 'staticLibraryName', 'staticLibraryVersion', 'versionName', 'versionCode', 'installerPackageName', 'initiatingPackageName', 'originatingPackageName', 'packageSource', 'firstInstallTime', 'lastUpdateTime', 'enabled', 'codePath', 'moduleConfigSha256'] as const) {
       if (previous[key] !== current[key]) issues.push(`${packageName} ${key} changed`);
     }
     if (JSON.stringify(previous.apkPaths) !== JSON.stringify(current.apkPaths)) issues.push(`${packageName} APK paths changed`);
@@ -241,27 +429,94 @@ export function compareAndroidEnvironment(
   return [...new Set(issues)];
 }
 
-async function snapshot(serial: string, policy: AndroidEnvironmentPolicy): Promise<AndroidEnvironmentSnapshot> {
+function requireInstalledPackage(identity: AndroidPackageIdentity, label: string): void {
+  if (!identity.packageRecordName) throw new Error(`ANDROID_ENVIRONMENT: ${label} package record is missing`);
+  if (!identity.versionName || !identity.versionCode) throw new Error(`ANDROID_ENVIRONMENT: ${label} version identity is incomplete`);
+  if (!identity.codePath || !identity.codePath.startsWith('/')) throw new Error(`ANDROID_ENVIRONMENT: ${label} code path is missing`);
+  if (!identity.apkPaths.length || identity.apkPaths.some((path) => !path.startsWith('package:/'))) {
+    throw new Error(`ANDROID_ENVIRONMENT: ${label} APK paths are missing or malformed`);
+  }
+}
+
+function adbTimeoutOption(): number {
+  const value = option('--adb-timeout-ms');
+  if (!value) return DEFAULT_ADB_TIMEOUT_MS;
+  if (!/^\d+$/u.test(value) || Number(value) < 1 || !Number.isSafeInteger(Number(value))) {
+    throw new Error(`ANDROID_ENVIRONMENT: invalid --adb-timeout-ms ${value}`);
+  }
+  return Number(value);
+}
+
+async function snapshot(
+  serial: string,
+  policy: AndroidEnvironmentPolicy,
+  diagnostics?: AcquisitionDiagnostics,
+  adbTimeoutMs = DEFAULT_ADB_TIMEOUT_MS,
+): Promise<AndroidEnvironmentSnapshot> {
   if (!serial) throw new Error('ANDROID_ENVIRONMENT: device serial is required');
-  const properties = parseProperties(await adb(serial, ['shell', 'getprop']));
-  const avdName = (await adb(serial, ['emu', 'avd', 'name'])).replace(/\r/g, '').split('\n').find((line) => line && line !== 'OK') || '';
+  diagnostics?.setStage('read Android system properties');
+  const properties = parseProperties(await adb(serial, ['shell', 'getprop'], adbTimeoutMs, diagnostics));
+  diagnostics?.setStage('read Android AVD identity');
+  const avdName = (await adb(serial, ['emu', 'avd', 'name'], adbTimeoutMs, diagnostics)).replace(/\r/g, '').split('\n').find((line) => line && line !== 'OK') || '';
+
   const packageDumps: Record<string, string> = {};
   const packagePaths: Record<string, string> = {};
-  for (const packageName of ANDROID_PACKAGES) {
-    packageDumps[packageName] = await adb(serial, ['shell', 'dumpsys', 'package', packageName]);
-    packagePaths[packageName] = await adb(serial, ['shell', 'pm', 'path', packageName]);
+  for (const packageName of ['com.google.android.gms', 'com.android.chrome'] as const) {
+    diagnostics?.setStage(`read ${packageName} package metadata`);
+    packageDumps[packageName] = await adb(serial, ['shell', 'dumpsys', 'package', packageName], adbTimeoutMs, diagnostics);
+    diagnostics?.setStage(`read ${packageName} APK paths`);
+    packagePaths[packageName] = await adb(serial, ['shell', 'pm', 'path', packageName], adbTimeoutMs, diagnostics);
   }
+
+  diagnostics?.setStage('resolve Chrome static library dependency');
+  const staticLibrary = resolveStaticLibraryPackage(
+    packageDumps[policy.browserPackage],
+    policy.trichromeLibraryPackage,
+    policy.trichromeLibraryVersion,
+  );
+  diagnostics?.setResolvedStaticLibrary(staticLibrary);
+  diagnostics?.setStage(`read ${staticLibrary.packageRecordName} package metadata`);
+  packageDumps[policy.trichromeLibraryPackage] = await adb(
+    serial,
+    ['shell', 'dumpsys', 'package', staticLibrary.packageRecordName],
+    adbTimeoutMs,
+    diagnostics,
+  );
+  diagnostics?.setStage(`read ${staticLibrary.packageRecordName} APK paths`);
+  packagePaths[policy.trichromeLibraryPackage] = await adb(
+    serial,
+    ['shell', 'pm', 'path', staticLibrary.packageRecordName],
+    adbTimeoutMs,
+    diagnostics,
+  );
+
   const packageIdentities = Object.fromEntries(ANDROID_PACKAGES.map((packageName) => [
     packageName,
     packageIdentity(packageName, packageDumps[packageName], packagePaths[packageName]),
   ]));
+  diagnostics?.setStage('validate Android package identities');
+  for (const packageName of ANDROID_PACKAGES) requireInstalledPackage(packageIdentities[packageName], packageName);
+  for (const packageName of ['com.google.android.gms', 'com.android.chrome'] as const) {
+    if (packageIdentities[packageName].packageRecordName !== packageName) {
+      throw new Error(`ANDROID_ENVIRONMENT: ${packageName} package record is unexpected`);
+    }
+  }
   if (!packageVersionMatches(packageIdentities[policy.browserPackage], policy.browserPackage, policy.browserVersion)) {
     throw new Error(`ANDROID_ENVIRONMENT: ${policy.browserPackage} does not match the pinned browser identity`);
   }
-  if (!packageVersionMatches(packageIdentities[policy.trichromeLibraryPackage], policy.trichromeLibraryPackage, policy.trichromeLibraryVersion)) {
+  const libraryIdentity = packageIdentities[policy.trichromeLibraryPackage];
+  if (libraryIdentity.packageRecordName !== staticLibrary.packageRecordName) {
+    throw new Error(`ANDROID_ENVIRONMENT: ${policy.trichromeLibraryPackage} package record does not match Chrome's dependency`);
+  }
+  if (libraryIdentity.staticLibraryName !== staticLibrary.libraryName || libraryIdentity.staticLibraryVersion !== staticLibrary.versionCode) {
+    throw new Error(`ANDROID_ENVIRONMENT: ${policy.trichromeLibraryPackage} static library metadata does not match Chrome's dependency`);
+  }
+  if (!packageVersionMatches(libraryIdentity, policy.trichromeLibraryPackage, policy.trichromeLibraryVersion)) {
     throw new Error(`ANDROID_ENVIRONMENT: ${policy.trichromeLibraryPackage} does not match the pinned library identity`);
   }
-  const installedPackages = await adb(serial, ['shell', 'pm', 'list', 'packages', PLAY_STORE_PACKAGE]);
+
+  diagnostics?.setStage('check Play Store installation state');
+  const installedPackages = await adb(serial, ['shell', 'pm', 'list', 'packages', PLAY_STORE_PACKAGE], adbTimeoutMs, diagnostics);
   const playStoreInstalled = installedPackages.split(/\r?\n/u).some((line) => line.trim() === `package:${PLAY_STORE_PACKAGE}`);
   if (!policy.playStore && playStoreInstalled) throw new Error('ANDROID_ENVIRONMENT: Play Store is installed under the selected policy');
   return {
@@ -278,12 +533,31 @@ async function snapshot(serial: string, policy: AndroidEnvironmentPolicy): Promi
   };
 }
 
+function diagnosticsFilename(output: string): string {
+  const explicit = option('--diagnostics');
+  if (explicit) return explicit;
+  return output.endsWith('.json') ? `${output.slice(0, -5)}-diagnostics.json` : `${output}.diagnostics.json`;
+}
+
 async function runSnapshot(): Promise<void> {
   const serial = required('--serial');
   const output = required('--output');
   const toolchains = required('--toolchains');
-  const policy = await readPolicy(toolchains);
-  await writeSanitizedJson(output, await snapshot(serial, policy));
+  const diagnosticsOutput = diagnosticsFilename(output);
+  const diagnostics = new AcquisitionDiagnostics(serial);
+  try {
+    diagnostics.setStage('read Android toolchain policy');
+    const policy = await readPolicy(toolchains);
+    diagnostics.setPolicy(policy);
+    await writeSanitizedJson(output, await snapshot(serial, policy, diagnostics, adbTimeoutOption()));
+    await writeSanitizedJson(diagnosticsOutput, diagnostics.value);
+  } catch (error) {
+    diagnostics.recordFailure(error);
+    await writeSanitizedJson(diagnosticsOutput, diagnostics.value).catch((diagnosticError: unknown) => {
+      process.stderr.write(`ANDROID_ENVIRONMENT: acquisition diagnostics unavailable: ${diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)}\n`);
+    });
+    throw error;
+  }
 }
 
 async function runCheck(): Promise<void> {

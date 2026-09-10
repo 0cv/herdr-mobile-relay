@@ -68,7 +68,10 @@ APKM, installs the library first, and then installs all Chrome splits. The
 hosted emulator uses the declared Google APIs image without the Play Store and
 records GMS, module, Chrome, and Trichrome identities before and after each
 Android scenario; package replacement or a forced restart fails the run as an
-environment failure. The binary URLs are an APK.now mirror fallback because
+environment failure. Android 15's package manager stores a static-library record
+as `<library-name>_<version-code>`; the snapshot reads Chrome's declared dependency,
+queries that exact record, and records its resolved package path instead of passing a
+version selector to `pm path`. The binary URLs are an APK.now mirror fallback because
 APKMirror is Cloudflare blocked; replace them only with another source carrying
 the same hashes and signing certificates.
 

@@ -197,7 +197,8 @@ runs:
         bun tests/mobile/android-environment.ts snapshot \
           --serial "$ANDROID_SERIAL" \
           --toolchains tests/mobile/toolchains.json \
-          --output "$MOBILE_OUTPUT/android-environment-before.json"
+          --output "$MOBILE_OUTPUT/android-environment-before.json" \
+          --diagnostics "$MOBILE_OUTPUT/android-environment-before-diagnostics.json"
       shell: bash
     - name: Create and boot iOS simulator
       if: inputs.platform == 'ios'
@@ -332,7 +333,8 @@ runs:
         bun tests/mobile/android-environment.ts snapshot \
           --serial "$ANDROID_SERIAL" \
           --toolchains tests/mobile/toolchains.json \
-          --output "$MOBILE_OUTPUT/android-environment-after.json" || snapshot_status=$?
+          --output "$MOBILE_OUTPUT/android-environment-after.json" \
+          --diagnostics "$MOBILE_OUTPUT/android-environment-after-diagnostics.json" || snapshot_status=$?
         check_status=1
         if [ "$snapshot_status" -eq 0 ]; then
           check_status=0
