@@ -19,7 +19,7 @@ import { PhaseBudget } from '../support/budget';
 import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
-import { compareAndroidEnvironment, forcedRestartEvents, type AndroidEnvironmentAcquisitionDiagnostics, type AndroidEnvironmentSnapshot } from '../android-environment';
+import { androidPackageContext, resolveStaticLibraryPackage, compareAndroidEnvironment, forcedRestartEvents, type AndroidEnvironmentAcquisitionDiagnostics, type AndroidEnvironmentSnapshot } from '../android-environment';
 import { IOSPlatform, iosInstalledContextRejection, iosNativeScrollDirection, iosNativeSwipeDirection, iosOpenURLFailureKind, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError, nativeActionListEvidence } from '../platforms/ios';
 import { runtimeScript } from '../platforms/types';
 import { prepareOutput, repositoryPath, repositoryRoot } from '../support/paths';
@@ -581,13 +581,10 @@ async function writeAndroidEnvironmentFixtureState(
   const dependencies = options.chromeDependencies === undefined
     ? ['com.google.android.trichromelibrary version:677820038']
     : options.chromeDependencies;
-  const chromeDump = androidPackageDump(
-    'com.android.chrome',
-    '131.0.6778.200',
-    '677820038',
-    chromePath,
-    dependencies.length ? `  usesStaticLibraries:\n${dependencies.map((dependency) => `    ${dependency}`).join('\n')}` : '',
-  );
+  const chromeDump = (await readFile(join(repositoryRoot, 'tests/mobile/unit/fixtures/android15-chrome-package.txt'), 'utf8'))
+    .replaceAll('/data/app/~~fixture/com.android.chrome-fixture', chromePath)
+    .replace('    usesStaticLibraries:\n      com.google.android.trichromelibrary version:677820038\n',
+      dependencies.length ? `    usesStaticLibraries:\n${dependencies.map((dependency) => `      ${dependency}`).join('\n')}\n` : '');
   const libraryDump = androidPackageDump(
     'com.google.android.trichromelibrary',
     '131.0.6778.200',
@@ -611,6 +608,25 @@ async function writeAndroidEnvironmentFixtureState(
     writeFile(join(directory, `${state}-trichrome.path`), options.emptyLibraryPaths ? '' : `package:${libraryPath}/base.apk\n`),
   ]);
 }
+
+test('Android producer-shaped package sections are scoped, heading-relative and diagnostic context is bounded', async () => {
+  const dump = await readFile(join(repositoryRoot, 'tests/mobile/unit/fixtures/android15-chrome-package.txt'), 'utf8');
+  const resolve = (source: string) => resolveStaticLibraryPackage(source, 'com.google.android.trichromelibrary', '131.0.6778.200 (677820038)');
+  assert.equal(resolve(dump).versionCode, '677820038');
+  assert.equal(resolve(dump.replace(/^/gmu, '    ')).versionCode, '677820038');
+  assert.equal(resolve(dump.replaceAll('\n', '\r\n')).versionCode, '677820038');
+  assert.throws(() => resolve(dump.replace('Packages:', 'Inactive packages:')), /active package record.*missing/u);
+  assert.throws(() => resolve(dump.replace('      com.google.android.trichromelibrary version:677820038', '      broken dependency')), /malformed/u);
+  assert.throws(() => resolve(dump.replace('    usesOptionalLibraries:', '    usesStaticLibraries:')), /malformed|ambiguous/u);
+  assert.throws(() => resolve(dump.replace('Package [com.example.other]', 'Package [com.android.chrome]')), /ambiguous/u);
+  assert.throws(() => resolve(dump.replace('      com.google.android.trichromelibrary version:677820038\n', '')), /dependency.*missing/u);
+  assert.throws(() => resolve('x'.repeat(2_000_001) + dump), /parsing limit/u);
+  const context = androidPackageContext('Resolver preamble\n'.repeat(5_000) + dump);
+  assert.ok(context.includes('usesStaticLibraries:'));
+  assert.ok(context.includes('usesOptionalLibraries:'));
+  assert.ok(context.includes('version:677820038'));
+  assert.ok(context.length <= 4_000);
+});
 
 async function createAndroidEnvironmentFixture(): Promise<AndroidEnvironmentFixture> {
   const root = await mkdtemp(join(tmpdir(), 'herdr-android-environment-'));
@@ -773,6 +789,11 @@ test('Android environment snapshot resolves versioned static-library identity th
   const diagnostics = await readAndroidAcquisitionDiagnostics(beforeDiagnosticsFile);
   assert.equal(diagnostics.resolvedStaticLibrary?.packageRecordName, 'com.google.android.trichromelibrary_677820038');
   assert.ok(diagnostics.commands.length > 0);
+  const chromeContext = diagnostics.commands.find((entry) => entry.args.includes('dumpsys') && entry.args.includes('com.android.chrome'))?.packageContext;
+  assert.ok(chromeContext);
+  assert.ok(chromeContext.includes('usesOptionalLibraries:'));
+  assert.ok(chromeContext?.includes('version:677820038'));
+  assert.ok(chromeContext.length <= 4_000);
   const requests = await readFile(fixture.log, 'utf8');
   assert.equal(requests.includes('pm path com.google.android.trichromelibrary\n'), false);
   const issues = compareAndroidEnvironment(before, after);
@@ -1868,7 +1889,6 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   });
   let sheetOpen = false;
   let scrolls = 0;
-  let addHomeClicked = false;
   let shareSourceReads = 0;
   const scrollArguments: Array<Record<string, unknown>> = [];
   const clicks: string[] = [];
@@ -1909,7 +1929,6 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
       const value = String(body.value || '');
       if (value.includes('ShareButton')) return new Response(JSON.stringify({ value: element('share') }), { status: 200 });
       if (value.includes('Add to Home Screen') && sheetOpen && scrolls >= 1) return new Response(JSON.stringify({ value: element('add-home') }), { status: 200 });
-      if (value.includes('Open as Web App') && addHomeClicked) return new Response(JSON.stringify({ value: element('open-webapp') }), { status: 200 });
       if (value.includes('Add')) return new Response(JSON.stringify({ value: element('add-button') }), { status: 200 });
       return absent();
     }
@@ -1930,7 +1949,6 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
       const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
       clicks.push(id);
       if (id === 'share') sheetOpen = true;
-      if (id === 'add-home') addHomeClicked = true;
       return new Response(JSON.stringify({ value: null }), { status: 200 });
     }
     return new Response(JSON.stringify({ value: null }), { status: 200 });
@@ -1947,7 +1965,7 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     { element: 'container', direction: 'down', distance: 0.75 },
     { element: 'container', direction: 'down', distance: 0.75 },
   ]);
-  assert.deepEqual(clicks, ['share', 'add-home', 'open-webapp', 'add-button']);
+  assert.deepEqual(clicks, ['share', 'add-home', 'add-button']);
   assert.equal(driver.snapshot().unusable, false);
 });
 

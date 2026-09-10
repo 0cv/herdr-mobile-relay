@@ -114,14 +114,6 @@ function xpathLiteral(value: string): string {
   return `concat(${value.split("'").map((part) => `'${part}'`).join(", \"'\", ")})`;
 }
 
-function iosLabelContains(value: string): Locator {
-  const literal = xpathLiteral(value);
-  return {
-    using: 'xpath',
-    value: `//*[contains(@label, ${literal}) or contains(@name, ${literal}) or contains(@value, ${literal}) or contains(@text, ${literal})]`,
-  };
-}
-
 function iosActionLabelContains(value: string): Locator {
   const literal = xpathLiteral(value);
   return {
@@ -609,31 +601,30 @@ export class IOSPlatform implements MobilePlatform {
     await this.clickNativeScrollable([
       iosActionLabelContains('Add to Home Screen'),
     ], 'Add to Home Screen', Math.min(IOS_NATIVE_ACTION_TIMEOUT_MS, phase.remainingMs));
-    const openAsWebApp = phase.remainingMs < minimumDriverRequestMs
-      ? ''
-      : await this.driver.findAnyOnce([
-        iosLabelContains('Open as Web App'),
-        textLocator('Open as Web App'),
-        accessibility('Open as Web App'),
-        textLocator('Open as Web App…'),
-        accessibility('Open as Web App…'),
-      ], Math.min(5_000, phase.remainingMs)).catch((error: unknown) => {
-        if (isFatalDriverError(error)) throw error;
-        return '';
-      });
-    if (openAsWebApp) {
-      await this.assertNativeControl(openAsWebApp, 'Open as Web App', phase);
-      await this.driver.click(openAsWebApp, Math.max(minimumDriverRequestMs, phase.remainingMs));
-    }
-    const addTimeout = Math.min(15_000, phase.remainingMs);
-    if (addTimeout < minimumDriverRequestMs) throw new Error('IOS_SHARE: Add: insufficient time to find control');
-    const addButton = await this.driver.findAnyOnce([
-      textLocator('Add'),
-      accessibility('Add'),
-    ], addTimeout);
+    const addButton = await this.waitForInstallConfirmation(phase);
     await this.assertNativeControl(addButton, 'Add', phase);
     await this.driver.click(addButton, Math.max(minimumDriverRequestMs, phase.remainingMs));
     await delay(Math.min(1_500, phase.remainingMs), phase);
+  }
+
+  private async waitForInstallConfirmation(parent: PhaseBudget): Promise<string> {
+    const phase = parent.phaseView('ios-install-confirmation', 15_000);
+    while (phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS) {
+      let element = '';
+      try {
+        element = await this.driver.findAnyOnce([accessibility('Add')], IOS_NATIVE_LOOKUP_ROUND_MS);
+      } catch (error) {
+        if (isFatalDriverError(error) || !isRetryableElementLookupError(error)) throw error;
+      }
+      if (element) {
+        const state = await this.nativeControlState(element, Date.now() + phase.remainingMs);
+        if (state === 'ready') return element;
+        if (state === 'disabled') throw new Error('IOS_SHARE: Add: control is disabled');
+      }
+      if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS + 250) break;
+      await delay(250, phase);
+    }
+    throw new Error('IOS_SHARE: Add: confirmation control was not ready within the complete native lookup allowance');
   }
 
   async launchInstalledApp(): Promise<void> {

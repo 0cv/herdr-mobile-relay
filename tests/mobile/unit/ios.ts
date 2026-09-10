@@ -272,7 +272,14 @@ function requireXmlLint(): string | undefined {
   catch { return 'xmllint is required for recorded XML XPath protocol checks'; }
 }
 
-for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth'] as const) {
+const confirmationProfiles: Record<string, number[]> = {
+  'latest-push': [364, 333],
+  'earlier-pr': [354, 281],
+  'earlier-push': [4_378],
+  'latest-pr': [1_488, 4_587],
+};
+
+for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'latest-push', 'earlier-pr', 'earlier-push', 'latest-pr', 'add-missing', 'add-disabled', 'add-hidden', 'add-not-hittable', 'add-budget', 'add-hung'] as const) {
   test(`recorded Share sheet protocol ${mode} keeps scoped controls and bounded gestures`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -281,6 +288,8 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth'] as co
     let reads = 0;
     let source = browser;
     const clicks: string[] = [];
+    let confirmationLookups = 0;
+    let now = 0;
     const scrolling = mode === 'limit' || mode === 'eighth';
     const ready = () => scrolling ? scrolls >= (mode === 'eighth' ? 8 : 9) : scrolls > 0;
     const currentSource = () => {
@@ -289,7 +298,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth'] as co
       if (!scrolling) return before;
       return before.replace(/\by="(-?\d+)"/gu, (match, y) => Number(y) >= 645 ? `y="${Number(y) - scrolls * 2}"` : match);
     };
-    const { platform, driver } = await adapter(`share-${mode}`, ({ path, body }) => {
+    const { platform, driver, requests } = await adapter(`share-${mode}`, async ({ path, body, signal }) => {
       if (path.endsWith('/context')) return value(null);
       if (body.script === 'mobile: activeAppInfo') return value({ bundleId: 'com.apple.mobilesafari' });
       if (path.endsWith('/source')) { source = currentSource(); return value(source); }
@@ -307,7 +316,19 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth'] as co
       }
       if (path.endsWith('/element')) {
         if (body.value === 'ShareButton') return value(element('share'));
-        if (body.value === 'Add') return value(element('add'));
+        assert.ok(!body.value.includes('Open as Web App'), 'the pinned confirmation must not probe optional controls');
+        if (body.value === 'Add') {
+          assert.equal(body.using, 'accessibility id');
+          confirmationLookups += 1;
+          if (mode === 'add-hung') return new Promise<Response>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+          if (mode === 'add-missing') { now += 5_000; return missing(); }
+          const latency = confirmationProfiles[mode]?.[confirmationLookups - 1];
+          if (latency !== undefined) {
+            await wait(latency, undefined, { signal: signal! });
+            return missing();
+          }
+          return value(element('add'));
+        }
         return missing();
       }
       if (path.endsWith('/rect')) {
@@ -316,6 +337,11 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth'] as co
         return value(path.includes('/container-') ? list.collection.bounds : list.targetRows[0].bounds);
       }
       if (path.includes('/attribute/')) {
+        if (path.includes('/add/')) {
+          if (mode === 'add-disabled' && path.endsWith('/enabled')) return value('false');
+          if (mode === 'add-hidden' && path.endsWith('/visible')) { now += 5_000; return value('false'); }
+          if (mode === 'add-not-hittable' && path.endsWith('/hittable')) { now += 5_000; return value('false'); }
+        }
         if (path.includes('/target-') && path.endsWith('/enabled') && mode === 'disabled') return value('false');
         if (path.includes('/target-') && /\/(?:visible|hittable)$/u.test(path)) return value(String(ready()));
         return value('true');
@@ -323,28 +349,43 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth'] as co
       if (path.endsWith('/click')) {
         const id = path.split('/element/')[1].split('/')[0];
         if (id === 'share') sheet = true;
-        else if (id.startsWith('target')) assert.ok(ready());
+        else if (id.startsWith('target')) {
+          assert.ok(ready());
+          if (mode === 'add-budget') now = 116_000;
+        }
         clicks.push(id);
         return value(null);
       }
       throw new Error(`unexpected Share command ${path} ${JSON.stringify(body)}`);
-    });
+    }, mode.startsWith('add-') && mode !== 'add-hung' ? () => now : undefined);
     if (scrolling) {
       const operation = () => (platform as any).findNativeScrollable([{ using: 'xpath', value: "//*[@name='ActivityListView']//*[@name='activityCollectionView']//*[@name='actionGroupCell' and contains(@label, 'Add to Home Screen')]" }], 'Add to Home Screen', 60_000);
       if (mode === 'limit') await assert.rejects(operation, /scroll limit/u);
       else assert.equal(await operation(), 'target-8');
       assert.equal(scrolls, 8);
       assert.deepEqual(clicks, []);
-    } else if (mode === 'success') {
+    } else if (mode === 'success' || mode in confirmationProfiles) {
       await platform.installFromBrowser();
       assert.deepEqual(clicks, ['share', 'target-1', 'add']);
       assert.equal(scrolls, 1);
+      assert.equal(confirmationLookups, (confirmationProfiles[mode]?.length ?? 0) + 1);
+    } else if (mode.startsWith('add-')) {
+      await assert.rejects(() => platform.installFromBrowser(), mode === 'add-hung' ? /APPIUM_TIMEOUT/u : mode === 'add-disabled' ? /Add: control is disabled/u : /Add: confirmation control was not ready/u);
+      assert.deepEqual(clicks, ['share', 'target-1']);
+      if (mode === 'add-budget') assert.equal(confirmationLookups, 0, 'do not dispatch a partial confirmation lookup');
+      if (mode === 'add-hung') {
+        const count = requests.length;
+        await assert.rejects(() => driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
+        assert.equal(requests.length, count);
+      }
     } else {
       await assert.rejects(() => platform.installFromBrowser(), mode === 'disabled' ? /disabled/u : /dismissed or replaced/u);
       assert.deepEqual(clicks, ['share']);
       assert.equal(scrolls, mode === 'disabled' ? 0 : 1);
     }
-    assert.equal(driver.snapshot().unusable, false);
+    const lookups = driver.snapshot().commands.filter((_entry, index) => requests[index]?.body.value === 'Add');
+    assert.ok(lookups.every((entry) => entry.timeoutMs >= 4_900 && entry.timeoutMs <= 5_000), 'confirmation probes must receive a complete native transaction, never optional-loop leftovers');
+    assert.equal(driver.snapshot().unusable, mode === 'add-hung');
   });
 }
 

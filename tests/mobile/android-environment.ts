@@ -89,6 +89,7 @@ export interface AndroidAcquisitionCommandDiagnostic {
   stderrSha256: string;
   stdoutPreview?: string;
   stderrPreview?: string;
+  packageContext?: string;
 }
 
 export interface AndroidEnvironmentAcquisitionDiagnostics {
@@ -153,6 +154,9 @@ class AcquisitionDiagnostics {
       stderrSha256: sha256(stderr),
     };
     if (stdout) diagnostic.stdoutPreview = redactText(stdout).slice(0, ACQUISITION_PREVIEW_LIMIT);
+    if (args.includes('dumpsys') && args.includes('package')) {
+      diagnostic.packageContext = androidPackageContext(stdout);
+    }
     if (stderr) diagnostic.stderrPreview = redactText(stderr).slice(0, ACQUISITION_PREVIEW_LIMIT);
     this.value.commands.push(diagnostic);
   }
@@ -211,25 +215,60 @@ interface StaticLibraryDependency {
   versionCode: string;
 }
 
-function parseStaticLibraryDependencies(dump: string): StaticLibraryDependency[] {
+export function androidPackageContext(dump: string): string {
+  const lines = dump.slice(0, PACKAGE_DUMP_LIMIT).split(/\r?\n/u);
+  const selected = new Set<number>();
+  for (let index = 0; index < lines.length; index++) {
+    if (!/^\s*(?:Packages:|Hidden system packages:|Package \[|usesStaticLibraries:|static library:)/u.test(lines[index])) continue;
+    for (let nearby = Math.max(0, index - 1); nearby <= Math.min(lines.length - 1, index + 8); nearby++) {
+      selected.add(nearby);
+    }
+    if (selected.size >= 100) break;
+  }
+  return redactText([...selected].map((index) => `${index + 1}: ${lines[index].slice(0, 300)}`).join('\n')).slice(0, ACQUISITION_PREVIEW_LIMIT);
+}
+
+function parseStaticLibraryDependencies(dump: string, packageName: string): StaticLibraryDependency[] {
+  if (dump.length > PACKAGE_DUMP_LIMIT) throw new Error('ANDROID_ENVIRONMENT: Chrome package dump exceeds parsing limit');
   const dependencies: StaticLibraryDependency[] = [];
-  let inSection = false;
-  for (const rawLine of dump.slice(0, PACKAGE_DUMP_LIMIT).split(/\r?\n/u)) {
+  let packagesIndent = -1;
+  let recordIndent = -1;
+  let headingIndent = -1;
+  let records = 0;
+  let sections = 0;
+  for (const rawLine of dump.split(/\r?\n/u)) {
     const line = rawLine.trim();
-    if (line === 'usesStaticLibraries:') {
-      inSection = true;
-      continue;
-    }
-    if (!inSection) continue;
-    if (!/^[ \t]{4,}\S/u.test(rawLine)) {
-      inSection = false;
-      continue;
-    }
     if (!line) continue;
+    const indent = rawLine.length - rawLine.trimStart().length;
+    if (packagesIndent >= 0 && indent <= packagesIndent) packagesIndent = -1;
+    if (recordIndent >= 0 && indent <= recordIndent) {
+      recordIndent = -1;
+      headingIndent = -1;
+    }
+    if (line === 'Packages:') {
+      packagesIndent = indent;
+      continue;
+    }
+    const record = line.match(/^Package \[([^\]]+)\]/u);
+    if (packagesIndent >= 0 && record?.[1] === packageName) {
+      records++;
+      recordIndent = indent;
+      continue;
+    }
+    if (recordIndent < 0) continue;
+    if (headingIndent >= 0 && indent <= headingIndent) headingIndent = -1;
+    if (line === 'usesStaticLibraries:') {
+      sections++;
+      headingIndent = indent;
+      continue;
+    }
+    if (headingIndent < 0) continue;
     const match = line.match(/^(\S+)\s+version:(\d+)$/u);
-    if (!match) throw new Error(`ANDROID_ENVIRONMENT: malformed Chrome static library record ${line}`);
+    if (!match) throw new Error(`ANDROID_ENVIRONMENT: malformed Chrome static library record ${line.slice(0, 300)}`);
     dependencies.push({ name: match[1], versionCode: match[2] });
   }
+  if (!records) throw new Error(`ANDROID_ENVIRONMENT: active package record ${packageName} is missing`);
+  if (records !== 1 || sections > 1) throw new Error(`ANDROID_ENVIRONMENT: active package record ${packageName} or static library section is ambiguous`);
   return dependencies;
 }
 
@@ -237,11 +276,12 @@ export function resolveStaticLibraryPackage(
   chromeDump: string,
   libraryName: string,
   declaredVersion: string,
+  browserPackage = 'com.android.chrome',
 ): AndroidStaticLibraryResolution {
   const expected = expectedVersion(declaredVersion);
   if (!expected.code) throw new Error(`ANDROID_ENVIRONMENT: static library ${libraryName} requires a declared version code`);
   if (!/^[A-Za-z0-9._]+$/u.test(libraryName)) throw new Error(`ANDROID_ENVIRONMENT: invalid static library name ${libraryName}`);
-  const matches = parseStaticLibraryDependencies(chromeDump).filter((dependency) => dependency.name === libraryName);
+  const matches = parseStaticLibraryDependencies(chromeDump, browserPackage).filter((dependency) => dependency.name === libraryName);
   if (!matches.length) throw new Error(`ANDROID_ENVIRONMENT: Chrome static library dependency ${libraryName} is missing`);
   if (matches.length !== 1) throw new Error(`ANDROID_ENVIRONMENT: Chrome static library dependency ${libraryName} is ambiguous`);
   const dependency = matches[0];
@@ -473,6 +513,7 @@ async function snapshot(
     packageDumps[policy.browserPackage],
     policy.trichromeLibraryPackage,
     policy.trichromeLibraryVersion,
+    policy.browserPackage,
   );
   diagnostics?.setResolvedStaticLibrary(staticLibrary);
   diagnostics?.setStage(`read ${staticLibrary.packageRecordName} package metadata`);
