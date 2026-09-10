@@ -10,6 +10,7 @@ const secretPatterns = [
   /Bearer\s+[A-Za-z0-9._~-]+/giu,
 ];
 const secretKeys = /(?:secret|token|password|private[_-]?key|invitation|control[_-]?header)/iu;
+const safeNumericCounterKeys = new Set(['invitationAuthCount', 'credentialAuthCount', 'connections']);
 
 export interface DiagnosticEvent {
   at: string;
@@ -52,6 +53,9 @@ export function redactText(value: string): string {
 }
 
 export function sanitizeValue(value: unknown, key = ''): unknown {
+  if (safeNumericCounterKeys.has(key)) {
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : REDACTED;
+  }
   if (secretKeys.test(key)) return REDACTED;
   if (typeof value === 'string') return redactText(value);
   if (Array.isArray(value)) return value.map((item) => sanitizeValue(item));

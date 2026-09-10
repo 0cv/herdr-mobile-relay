@@ -14,11 +14,12 @@ import {
   type BundleIdentity,
   type BundleExpectation,
 } from '../support/artifacts';
-import { assertNoKnownSecret, redactText, sanitizeValue } from '../support/diagnostics';
+import { assertNoKnownSecret, redactText, sanitizeValue, writeSanitizedJson } from '../support/diagnostics';
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
+import { compareAndroidEnvironment, forcedRestartEvents, type AndroidEnvironmentSnapshot } from '../android-environment';
 import { IOSPlatform, iosInstalledContextRejection, iosNativeScrollDirection, iosNativeSwipeDirection, iosOpenURLFailureKind, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError, nativeActionListEvidence } from '../platforms/ios';
 import { runtimeScript } from '../platforms/types';
 import { prepareOutput, repositoryPath, repositoryRoot } from '../support/paths';
@@ -216,7 +217,10 @@ test('evidence validation enforces matrix identity and platform-specific native 
     fault_identity: { id: 'id', generation: 'generation', kind: 'corrupt', path: '/assets/new.js' },
     fixture_requests: [{ release: 'candidate', path: '/assets/new.js', fault: 'corrupt', fault_id: 'id', fault_generation: 'generation' }],
   };
-  await writeFile(join(root, 'mobile-result.json'), JSON.stringify(result));
+  await writeSanitizedJson(join(root, 'mobile-result.json'), result);
+  const serialized = JSON.parse(await readFile(join(root, 'mobile-result.json'), 'utf8')) as typeof result;
+  assert.equal(serialized.credential_evidence.relays.alpha.invitationAuthCount, 1);
+  assert.equal(serialized.credential_evidence.relays.beta.credentialAuthCount, 2);
   const options = {
     directory: root,
     matrix: [{ platform: 'ios', baseline: '0.20.10', scenario: 'historical' }],
@@ -225,6 +229,32 @@ test('evidence validation enforces matrix identity and platform-specific native 
     baselineIdentities: [{ name: '0.20.10', identity: expectedBaselineIdentity }],
   };
   await validateMobileEvidence(options);
+  const secretSentinel = 'serialization-secret-value';
+  await writeSanitizedJson(join(root, 'mobile-result.json'), {
+    ...result,
+    diagnostics: {
+      invitation: secretSentinel,
+      nested: { token: secretSentinel, private_key: secretSentinel },
+      escapedUrl: `https://fixture.test/#invite=${secretSentinel}`,
+    },
+  });
+  assertNoKnownSecret(await readFile(join(root, 'mobile-result.json'), 'utf8'), [secretSentinel]);
+  await validateMobileEvidence(options);
+  const invalidCounterResult = {
+    ...result,
+    credential_evidence: {
+      relays: {
+        ...result.credential_evidence.relays,
+        alpha: { ...result.credential_evidence.relays.alpha, invitationAuthCount: 'counter-secret' },
+      },
+    },
+  };
+  await writeSanitizedJson(join(root, 'mobile-result.json'), invalidCounterResult);
+  const sanitizedInvalidCounterResult = JSON.parse(await readFile(join(root, 'mobile-result.json'), 'utf8')) as typeof invalidCounterResult;
+  assert.equal(sanitizedInvalidCounterResult.credential_evidence.relays.alpha.invitationAuthCount, '[REDACTED]');
+  assert.equal(sanitizedInvalidCounterResult.credential_evidence.relays.beta.invitationAuthCount, 1);
+  await assert.rejects(validateMobileEvidence(options), /alpha.invitationAuthCount must be an integer/);
+  await writeSanitizedJson(join(root, 'mobile-result.json'), result);
   await writeFile(join(root, 'mobile-result.json'), JSON.stringify({
     ...result,
     fixture_requests: [...result.fixture_requests, { ...result.fixture_requests[0] }],
@@ -462,6 +492,45 @@ test('Android emulator-console parser handles names, terminators, and errors', a
   assert.equal(parseAndroidAvdName('OK\n'), undefined);
   assert.equal(parseAndroidAvdName('KO: unknown command\n'), undefined);
   assert.equal(parseAndroidAvdName('\r\n'), undefined);
+});
+
+test('Android environment comparison rejects dependency churn and forced restarts', async () => {
+  const packageIdentity = (packageName: string) => ({
+    packageName, versionName: '131.0.6778.200', versionCode: '677820038', installerPackageName: 'adb',
+    initiatingPackageName: 'com.android.shell', originatingPackageName: '', packageSource: '1',
+    firstInstallTime: '2026-01-01 00:00:00', lastUpdateTime: '2026-01-01 00:00:00', enabled: 'true',
+    apkPaths: [`package:/data/app/${packageName}/base.apk`], moduleConfig: [], moduleConfigSha256: 'a'.repeat(64), dumpSha256: 'b'.repeat(64),
+  });
+  const baseline: AndroidEnvironmentSnapshot = {
+    schema: 1, capturedAt: '2026-01-01T00:00:00.000Z', serial: 'emulator-5554', avdName: 'herdr-mobile-ci',
+    policy: {
+      systemImage: 'system-images;android-35;google_apis;x86_64', systemImagePolicy: 'google-apis-without-play-store', playStore: false,
+      browserPackage: 'com.android.chrome', browserVersion: '131.0.6778.200 (677820038)',
+      trichromeLibraryPackage: 'com.google.android.trichromelibrary', trichromeLibraryVersion: '131.0.6778.200 (677820038)',
+    }, emulatorVersion: 'emulator 35', adbVersion: 'Android Debug Bridge version 1',
+    system: { fingerprint: 'fixture/fingerprint' }, playStoreInstalled: false,
+    packages: {
+      'com.google.android.gms': packageIdentity('com.google.android.gms'),
+      'com.google.android.trichromelibrary': packageIdentity('com.google.android.trichromelibrary'),
+      'com.android.chrome': packageIdentity('com.android.chrome'),
+    },
+  };
+  assert.deepEqual(compareAndroidEnvironment(baseline, { ...baseline, capturedAt: '2026-01-01T00:01:00.000Z' }), []);
+  const changed: AndroidEnvironmentSnapshot = {
+    ...baseline,
+    playStoreInstalled: true,
+    packages: {
+      ...baseline.packages,
+      'com.google.android.gms': { ...baseline.packages['com.google.android.gms'], versionCode: '999' },
+    },
+  };
+  const issues = compareAndroidEnvironment(changed, baseline, 'Module config changed, forcing restart due to module googlecertificates\n');
+  assert.ok(issues.some((issue) => /versionCode changed/u.test(issue)));
+  assert.ok(issues.some((issue) => /Play Store/u.test(issue)));
+  assert.ok(issues.some((issue) => /forced restart/u.test(issue)));
+  assert.equal(forcedRestartEvents('ordinary package com.example changed').length, 0);
+  assert.equal(forcedRestartEvents('PackageManager: Package com.google.android.gms changed').length, 1);
+  assert.equal(forcedRestartEvents('Module config changed, forcing restart due to module googlecertificates\nProcess : Sending signal. PID: 6538 SIG: 9').length, 2);
 });
 
 test('Android Chrome startup only enables attach mode after explicit launch', async () => {
@@ -1100,6 +1169,9 @@ test('diagnostic redaction covers URL and escaped values', async () => {
   assertNoKnownSecret(text, [secret]);
   assert.deepEqual(sanitizeValue({ url: `#setup=${secret}`, nested: [secret] }), {
     url: '#setup=[REDACTED]', nested: ['[REDACTED]'],
+  });
+  assert.deepEqual(sanitizeValue({ invitationAuthCount: 2, credentialAuthCount: 'credential-secret', connections: 1 }), {
+    invitationAuthCount: 2, credentialAuthCount: '[REDACTED]', connections: 1,
   });
 });
 
