@@ -23,7 +23,7 @@ const relevant = (name: string) => dependency(name) || isAndroidTerminationPacka
 type PlannedInterval = Pick<AndroidPlannedTermination, 'packageName' | 'processes'> & { start: number; end: number };
 
 function parseRecord(line: string): LogRecord | undefined {
-  const match = line.match(/^(?:(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})|(\d{10}\.\d{3,6}))\s+(\d+)\s+\d+\s+[VDIWEF]\s+([^:]+?)\s*:\s?(.*)$/u);
+  const match = line.match(/^(?:(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})|[ \t]*(\d{10}\.\d{3,6}))\s+(\d+)\s+\d+\s+[VDIWEF]\s+([^:]+?)\s*:\s?(.*)$/u);
   if (!match) return undefined;
   const time = match[2] ? Number(match[2]) * 1000 : Date.parse(`2000-${match[1].replace(' ', 'T')}Z`);
   if (!Number.isFinite(time)) return undefined;

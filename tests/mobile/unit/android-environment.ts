@@ -311,6 +311,56 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.equal((await harness.snapshot(fixture, 'valid', after, join(fixture.root, 'after-diagnostics.json'))).passed, true);
     assert.equal((await harness.check(fixture, before, after)).passed, false);
   });
+  test('padded epoch measurement framing preserves event attribution and rejects invalid records', async () => {
+    const fixture = await harness.createFixture();
+    const { before, after } = await snapshots(fixture);
+    const recordedStart = '         1789081242.368  5536  5536 I HerdrMeasure: f2965e32-5a0d-48c2-beb6-e3a259a020f4 START\n';
+    const recordedEnd = '         1789081278.547  6233  6233 I HerdrMeasure: f2965e32-5a0d-48c2-beb6-e3a259a020f4 END\n';
+    for (const [path, boundary] of [[before, 'start'], [after, 'end']]) {
+      const snapshot = JSON.parse(await readFile(path, 'utf8')) as AndroidEnvironmentSnapshot;
+      snapshot.measurement = { ...snapshot.measurement!, id: 'f2965e32-5a0d-48c2-beb6-e3a259a020f4', boundary: boundary as 'start' | 'end' };
+      await writeFile(path, JSON.stringify(snapshot));
+    }
+    const operations = join(fixture.root, 'operations.json');
+    const logFile = join(fixture.root, 'epoch.log');
+    const output = join(fixture.root, 'check.json');
+    await writeFile(operations, '[]');
+    const check = async (log: string) => {
+      await writeFile(logFile, log);
+      const result = cli(fixture, ['check', '--before', before, '--after', after, '--log', logFile, '--operations', operations, '--output', output]);
+      return { ...result, report: JSON.parse(await readFile(output, 'utf8')) };
+    };
+    const recordedDex = '         1789081242.806  5192  5192 I artd    : Dex parent of /product/priv-app/PrebuiltGmsCore/PrebuiltGmsCore.apk is not writable: Read-only file system\n';
+    for (const padding of ['         ', '', '\t ', ' \t']) {
+      const log = (recordedStart + recordedDex + recordedEnd).replace(/^ +/gmu, padding);
+      assert.equal((await check(log)).passed, true, JSON.stringify(padding));
+    }
+    const death = '         1789081250.000 546 1761 I ActivityManager: Process com.android.chrome (pid 6538) has died: fg TOP\n';
+    const module = '\t1789081251.000 1427 7277 I ChimeraCfgMgr: Updating module config: old -> new\n';
+    const changed = await check(recordedStart + death + module + recordedEnd);
+    assert.equal(changed.passed, false);
+    assert.deepEqual(changed.report.forcedRestartEvents, [death.trimEnd(), module.trimEnd()]);
+    assert.deepEqual(changed.report.issues, ['native dependency replacement or forced restart was observed']);
+    const unrelated = module.replace('1427', '1486');
+    assert.equal((await check(death + recordedStart + unrelated + recordedEnd)).passed, true);
+    for (const log of [
+      recordedStart, recordedEnd, recordedStart + recordedStart + recordedEnd,
+      recordedStart + recordedEnd + recordedEnd, recordedEnd + recordedStart,
+      recordedStart + recordedEnd.replace('1789081278.547', '1789081241.000'),
+      (recordedStart + recordedEnd).trimEnd(),
+      ...['broken log record\n', death.replace('1789081250.000', '1789081250.x00'),
+        death.replace('546 1761', 'pid 1761'), death.replace('546 1761', '546 tid'),
+        death.replace('1789081250.000', '1789081280.000')].map((body) => recordedStart + body + recordedEnd),
+      ...['prefix ', '\v', '\f', '\u00a0'].map((prefix) => prefix + recordedStart + recordedEnd),
+      recordedStart.replace('I HerdrMeasure:', 'I Other: HerdrMeasure:') + recordedEnd,
+    ]) assert.equal((await check(log)).passed, false, JSON.stringify(log));
+    const snapshot = JSON.parse(await readFile(after, 'utf8')) as AndroidEnvironmentSnapshot;
+    snapshot.packages['com.google.android.gms'].dependencyConfig.enabledComponents = ['com.google.android.gms.fonts.provider.FontsProvider'];
+    await writeFile(after, JSON.stringify(snapshot));
+    const persistent = await check(recordedStart + recordedEnd);
+    assert.equal(persistent.passed, false);
+    assert.ok(persistent.report.issues.includes('com.google.android.gms dependency configuration changed'));
+  });
   test('recorded push and PR setup notifications are outside the authoritative interval', async () => {
     const fixture = await harness.createFixture();
     const { before, after } = await snapshots(fixture);
@@ -385,8 +435,11 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       [[operation], termination + '09-10 08:45:09.464 6538 7277 I DynamiteLoaderV2Impl: Module config changed, forcing restart due to module googlecertificates\n', false],
     ] as const) {
       await writeFile(operationsFile, JSON.stringify(operations));
-      await writeFile(logFile, marker('00.000', 'START') + log + marker('30.000', 'END'));
-      assert.equal(check().passed, passed);
+      const interval = marker('00.000', 'START') + log + marker('30.000', 'END');
+      for (const framed of [interval, interval.replace(/^09-10 08:45:(\d{2}\.\d{3})/gmu, (_, seconds: string) => `         ${(1789081200 + Number(seconds)).toFixed(3)}`)]) {
+        await writeFile(logFile, framed);
+        assert.equal(check().passed, passed);
+      }
     }
   });
   for (const packageName of ['com.android.chrome', 'org.chromium.webapk.fixture', 'com.google.android.webapk.fixture']) {
