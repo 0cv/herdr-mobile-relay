@@ -283,9 +283,11 @@ function xpathCount(source: string, xpath: string): number {
   return Number(execFileSync('xmllint', ['--xpath', `count(${xpath})`, '-'], { input: source, encoding: 'utf8' }).trim());
 }
 
-function requireXmlLint(): string | undefined {
-  try { execFileSync('xmllint', ['--version'], { stdio: 'pipe' }); return undefined; }
-  catch { return 'xmllint is required for recorded XML XPath protocol checks'; }
+function requireXmlLint(): undefined {
+  try { execFileSync('xmllint', ['--version'], { stdio: 'pipe' }); }
+  catch (cause) {
+    throw new Error('xmllint is required for XML XPath protocol checks; install libxml2-utils on Ubuntu before running the mobile tests', { cause });
+  }
 }
 
 const confirmationProfiles: Record<string, number[]> = {
