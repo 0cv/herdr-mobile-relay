@@ -45,7 +45,9 @@ bun install --frozen-lockfile --cwd tests/mobile
 For Android, create exactly one disposable emulator and record an ownership marker before running. The adapter refuses a physical or unmarked target, because it clears browser data and removes installed web providers:
 
 ```sh
-avdmanager create avd --force --name herdr-mobile-ci --package "system-images;android-35;google_apis_playstore;x86_64" --device pixel_7
+android_system_image="$(jq -r '.android.systemImage' tests/mobile/toolchains.json)"
+android_device_profile="$(jq -r '.android.deviceProfile' tests/mobile/toolchains.json)"
+avdmanager create avd --force --name herdr-mobile-ci --package "$android_system_image" --device "$android_device_profile"
 emulator -avd herdr-mobile-ci -no-window -no-audio -no-boot-anim -no-snapshot &
 export MOBILE_PLATFORM=android
 export ANDROID_SERIAL=emulator-5554
@@ -63,9 +65,12 @@ candidate is Chrome `131.0.6778.200` / version code `677820038` for x86+x86_64,
 with the matching `com.google.android.trichromelibrary` library. CI verifies
 both SHA-256 archives and the Google signing certificates, unpacks the Chrome
 APKM, installs the library first, and then installs all Chrome splits. The
-binary URLs are an APK.now mirror fallback because APKMirror is Cloudflare
-blocked; replace them only with another source carrying the same hashes and
-signing certificates.
+hosted emulator uses the declared Google APIs image without the Play Store and
+records GMS, module, Chrome, and Trichrome identities before and after each
+Android scenario; package replacement or a forced restart fails the run as an
+environment failure. The binary URLs are an APK.now mirror fallback because
+APKMirror is Cloudflare blocked; replace them only with another source carrying
+the same hashes and signing certificates.
 
 For iOS, select the Xcode/runtime declared in `toolchains.json`, create one disposable iPhone 16 simulator, and record its ownership marker. The adapter does not erase an already booted simulator; the owner creates a fresh simulator instead:
 

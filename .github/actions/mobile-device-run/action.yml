@@ -100,9 +100,13 @@ runs:
           test -w /dev/kvm
         fi
         yes | sdkmanager --licenses >/dev/null || true
-        sdkmanager "platform-tools" "emulator" "build-tools;35.0.0" "system-images;android-35;google_apis_playstore;x86_64"
+        android_system_image="$(jq -r '.android.systemImage' tests/mobile/toolchains.json)"
+        android_device_profile="$(jq -r '.android.deviceProfile' tests/mobile/toolchains.json)"
+        test "$android_system_image" = "system-images;android-35;google_apis;x86_64"
+        test "$android_device_profile" = pixel_7
+        sdkmanager "platform-tools" "emulator" "build-tools;35.0.0" "$android_system_image"
         avd_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-        echo no | avdmanager create avd --force --name "$avd_name" --package "system-images;android-35;google_apis_playstore;x86_64" --device pixel_7
+        echo no | avdmanager create avd --force --name "$avd_name" --package "$android_system_image" --device "$android_device_profile"
         avdmanager list avd
         printf 'ANDROID_AVD_NAME=%s\n' "$avd_name" >> "$GITHUB_ENV"
         emulator -avd "$avd_name" -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 &
@@ -182,6 +186,18 @@ runs:
         printf '%s\n%s\n' "$chrome_version" "$trichrome_version" >"$RUNNER_TEMP/android-chrome-version.txt"
         grep -F 'versionName=131.0.6778.200' <<<"$chrome_version"
         grep -F 'com.google.android.trichromelibrary version:677820038' <<<"$trichrome_version"
+      shell: bash
+    - name: Capture Android environment baseline
+      if: inputs.platform == 'android'
+      run: |
+        set -euo pipefail
+        adb -s "$ANDROID_SERIAL" logcat -c
+        adb -s "$ANDROID_SERIAL" logcat -v threadtime >"$RUNNER_TEMP/android-qualification-logcat.log" 2>&1 &
+        printf 'ANDROID_LOGCAT_PID=%s\n' "$!" >> "$GITHUB_ENV"
+        bun tests/mobile/android-environment.ts snapshot \
+          --serial "$ANDROID_SERIAL" \
+          --toolchains tests/mobile/toolchains.json \
+          --output "$MOBILE_OUTPUT/android-environment-before.json"
       shell: bash
     - name: Create and boot iOS simulator
       if: inputs.platform == 'ios'
@@ -304,6 +320,31 @@ runs:
           --output "$MOBILE_OUTPUT" \
           --private-output "$MOBILE_PRIVATE"
       shell: bash
+    - name: Verify Android environment stability
+      if: always() && inputs.platform == 'android'
+      run: |
+        set +e
+        if [ -n "${ANDROID_LOGCAT_PID:-}" ]; then
+          kill "$ANDROID_LOGCAT_PID" 2>/dev/null || true
+          wait "$ANDROID_LOGCAT_PID" 2>/dev/null || true
+        fi
+        snapshot_status=0
+        bun tests/mobile/android-environment.ts snapshot \
+          --serial "$ANDROID_SERIAL" \
+          --toolchains tests/mobile/toolchains.json \
+          --output "$MOBILE_OUTPUT/android-environment-after.json" || snapshot_status=$?
+        check_status=1
+        if [ "$snapshot_status" -eq 0 ]; then
+          check_status=0
+          bun tests/mobile/android-environment.ts check \
+            --before "$MOBILE_OUTPUT/android-environment-before.json" \
+            --after "$MOBILE_OUTPUT/android-environment-after.json" \
+            --log "$RUNNER_TEMP/android-qualification-logcat.log" \
+            --output "$MOBILE_OUTPUT/android-environment-check.json" || check_status=$?
+        fi
+        if [ "$snapshot_status" -ne 0 ]; then exit "$snapshot_status"; fi
+        exit "$check_status"
+      shell: bash
     - name: Sanitize bounded diagnostics
       if: always()
       run: |
@@ -325,6 +366,9 @@ runs:
         if [ -f "$RUNNER_TEMP/emulator.log" ]; then
           head -c 104857600 "$RUNNER_TEMP/emulator.log" >"$MOBILE_OUTPUT/emulator.log" || true
         fi
+        if [ -f "$RUNNER_TEMP/android-qualification-logcat.log" ]; then
+          bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/android-qualification-logcat.log" "$MOBILE_OUTPUT/android-qualification-logcat.log"
+        fi
         if [ -f "$RUNNER_TEMP/xcode-version.txt" ]; then cp "$RUNNER_TEMP/xcode-version.txt" "$MOBILE_OUTPUT/xcode-version.txt"; fi
         if [ -f "$RUNNER_TEMP/ios-apps-before.txt" ]; then cp "$RUNNER_TEMP/ios-apps-before.txt" "$MOBILE_OUTPUT/ios-apps-before.txt"; fi
         if [ -f "$RUNNER_TEMP/appium-drivers.txt" ]; then cp "$RUNNER_TEMP/appium-drivers.txt" "$MOBILE_OUTPUT/appium-drivers.txt"; fi
@@ -345,6 +389,7 @@ runs:
       if: always()
       run: |
         set +e
+        if [ -n "${ANDROID_LOGCAT_PID:-}" ]; then kill "$ANDROID_LOGCAT_PID" 2>/dev/null || true; fi
         if [ -n "${APPIUM_PID:-}" ]; then kill "$APPIUM_PID" 2>/dev/null || true; fi
         if [ -x "${MOBILE_FIXTURE_BINARY:-}" ]; then pkill -TERM -f "$MOBILE_FIXTURE_BINARY" 2>/dev/null || true; fi
         if [ "$MOBILE_PLATFORM" = android ]; then
