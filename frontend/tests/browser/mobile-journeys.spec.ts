@@ -4006,6 +4006,348 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Open History app on Fedora' })).toBeVisible();
 });
 
+test('default agent view: fresh openings remain Terminal', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Default terminal',
+      agent: 'codex',
+      conversation_history_available: true,
+      agent_session_id: 'session-1',
+    }],
+  });
+  const before = await commands(page);
+  await page.getByRole('button', { name: 'Open Default terminal on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Default terminal' })).toBeVisible();
+  const openingCommands = (await commands(page)).slice(before.length);
+  expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(false);
+});
+
+test('default agent view: Conversation opens directly and persists across reload', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Default conversation',
+      agent: 'codex',
+      conversation_history_available: true,
+      agent_session_id: 'session-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const settingsViews = page.getByRole('group', { name: 'Default View' });
+  await settingsViews.getByRole('button', { name: 'Conversation' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('conversation');
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setConversationFixture(page, {
+    entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'Direct conversation answer' }],
+    total: 1,
+  });
+  const before = await commands(page);
+  await page.getByRole('button', { name: 'Open Default conversation on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('Direct conversation answer')).toBeVisible();
+  const openingCommands = (await commands(page)).slice(before.length);
+  expect(openingCommands.some((command) => ['read_pane', 'watch_pane', 'lease_pane_size'].includes(String(command.type)))).toBe(false);
+  expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(true);
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.reload();
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Default conversation',
+      agent: 'codex',
+      conversation_history_available: true,
+      agent_session_id: 'session-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Open Default conversation on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+});
+
+test('pane view override: both directions, inheritance, and explicit equal values', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      {
+        pane_id: 'w1:p1', status: 'working', project: 'Override A', agent: 'codex',
+        conversation_history_available: true, agent_session_id: 'session-a', terminal_id: 'terminal-a',
+      },
+      {
+        pane_id: 'w1:p2', status: 'working', project: 'Override B', agent: 'codex',
+        conversation_history_available: true, agent_session_id: 'session-b', terminal_id: 'terminal-b',
+      },
+    ],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setConversationFixture(page, { entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'override answer' }], total: 1 });
+
+  await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  const manage = page.getByRole('dialog', { name: 'Manage Agent' });
+  const viewSelect = manage.getByRole('combobox', { name: 'Default View' });
+  await viewSelect.selectOption('terminal');
+  await manage.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: 'Open Override B on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Terminal' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Override A' })).toBeVisible();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' }).selectOption('conversation');
+  await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: 'Open Override B on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Override B' })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' }).selectOption('terminal');
+  await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Override A' })).toBeVisible();
+});
+
+test('default agent view: metadata fallback stays silent and does not switch later', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: [] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Unavailable metadata', agent: 'unknown', agent_session_id: '' }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  const before = await commands(page);
+  await page.getByRole('button', { name: 'Open Unavailable metadata on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Unavailable metadata' })).toBeVisible();
+  const openingCommands = (await commands(page)).slice(before.length);
+  expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(false);
+  expect(await page.getByRole('alert').allTextContents()).not.toContain('unavailable transcript');
+  await server(page, 0, {
+    type: 'agent_update', pane_id: 'w1:p1', status: 'working',
+    conversation_history_available: true, updated_at: 2,
+  });
+  await page.waitForTimeout(50);
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toHaveCount(0);
+});
+
+test('default agent view: unavailable initial page replaces history without an extra entry', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Unavailable transcript', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Unavailable transcript on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  expect(page.locator('.terminal-layout')).toHaveCount(0);
+  const historyRequest = (await commands(page)).find((command) => command.type === 'get_conversation_history');
+  expect(historyRequest).toBeTruthy();
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: historyRequest!.request_id,
+    action: 'get_conversation_history',
+    ok: true,
+    phase: 'completed',
+    data: { available: false, reason: 'Native transcript unavailable' },
+  });
+  await expect(page.getByRole('main', { name: 'Terminal for Unavailable transcript' })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('conversation');
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('button', { name: 'Open Unavailable transcript on Fedora' })).toBeVisible();
+  await setAutoCommands(page, true);
+});
+
+test('default agent view: stale automatic responses cannot redirect Settings', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Stale opening', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Stale opening on Fedora' }).click();
+  const historyRequest = (await commands(page)).find((command) => command.type === 'get_conversation_history');
+  expect(historyRequest).toBeTruthy();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: historyRequest!.request_id,
+    action: 'get_conversation_history',
+    ok: true,
+    phase: 'completed',
+    data: { available: false, reason: 'Native transcript unavailable' },
+  });
+  await page.waitForTimeout(50);
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
+  await setAutoCommands(page, true);
+});
+
+test('default agent view: manual switching ignores preferences and keeps explicit unavailable history', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Manual switching', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setConversationFixture(page, { entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'manual answer' }], total: 1 });
+  await page.getByRole('button', { name: 'Open Manual switching on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Terminal view' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Manual switching' })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('conversation');
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  const historyRequest = (await commands(page)).filter((command) => command.type === 'get_conversation_history').at(-1);
+  expect(historyRequest).toBeTruthy();
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: historyRequest!.request_id,
+    action: 'get_conversation_history',
+    ok: true,
+    phase: 'completed',
+    data: { available: false, reason: 'Manual transcript unavailable' },
+  });
+  await expect(page.getByText('Manual transcript unavailable')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Terminal view' })).toBeVisible();
+  await setAutoCommands(page, true);
+});
+
+test('default agent view: empty and failed pages do not trigger fallback', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Empty transcript', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setConversationFixture(page, { entries: [], total: 0 });
+  await page.getByRole('button', { name: 'Open Empty transcript on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('No user or assistant turns are recorded for this session.')).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Empty transcript on Fedora' }).click();
+  const historyRequest = (await commands(page)).filter((command) => command.type === 'get_conversation_history').at(-1);
+  expect(historyRequest).toBeTruthy();
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: historyRequest!.request_id,
+    action: 'get_conversation_history',
+    ok: false,
+    phase: 'failed',
+    error: 'History read failed',
+  });
+  await expect(page.getByRole('alert')).toContainText('History read failed');
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Terminal view' })).toBeVisible();
+  await setAutoCommands(page, true);
+});
+
+test('pane view override: readers can change it while mutation actions stay disabled', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await page.evaluate(() => {
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        fedora: {
+          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
+          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
+        },
+      },
+    }));
+  });
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Reader preference', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Open Reader preference on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Reader preference' })).toBeVisible();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Manage Agent' });
+  await expect(dialog.getByRole('combobox', { name: 'Default View' })).toBeEnabled();
+  await expect(dialog.getByRole('button', { name: 'Rename Tab' })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Clear Agent' })).toBeDisabled();
+  const before = await commands(page);
+  await dialog.getByRole('combobox', { name: 'Default View' }).selectOption('conversation');
+  expect(await page.evaluate(() => localStorage.getItem('herdr_pane_agent_view_overrides'))).toContain('conversation');
+  expect((await commands(page)).slice(before.length).some((command) => String(command.type).startsWith('agent_'))).toBe(false);
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await expect(page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' })).toHaveValue('conversation');
+});
+
 test('shows tool-only agent turns only in full history and decodes their arguments', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);

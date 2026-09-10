@@ -7,6 +7,8 @@
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import {
+    AGENT_VIEW_LABELS,
+    AGENT_VIEWS,
     APP_ASSET_VERSION,
     APP_BUILD_ID,
     APP_VERSION,
@@ -18,6 +20,7 @@
     TERMINAL_REFRESH_LABELS,
     TERMINAL_REFRESH_OPTIONS,
     THEMES,
+    type AgentView,
     type HomeLayout,
     type InterfaceSize,
     type TerminalHistoryLines,
@@ -35,8 +38,10 @@
     stopSpeech,
   } from '$lib/speech';
   import {
+    defaultAgentView,
     homeLayout,
     interfaceSize,
+    setDefaultAgentView,
     setHomeLayout,
     setInterfaceSize,
     setTerminalHeightLease,
@@ -342,6 +347,12 @@
       permission: notificationsSupported() ? Notification.permission : 'unavailable',
     };
   });
+
+  function changeDefaultAgentView(value: AgentView): void {
+    if (setDefaultAgentView(value) === 'unavailable') {
+      relayStore.showToast('Could not save the default view on this device.', true);
+    }
+  }
 
   function updateActionLabel(action: SafeUpdateAction | null): string {
     if (action?.kind === 'reload_app') return 'Load Update';
@@ -757,6 +768,22 @@
     {/if}
   {/each}
 
+
+  <Card>
+    <h3>Agents</h3>
+    <fieldset class="choice-grid compact-grid">
+      <legend>Default View</legend>
+      {#each AGENT_VIEWS as item (item)}
+        <button
+          class:active={$defaultAgentView === item}
+          type="button"
+          aria-pressed={$defaultAgentView === item}
+          onclick={() => changeDefaultAgentView(item)}
+        >{AGENT_VIEW_LABELS[item]}</button>
+      {/each}
+    </fieldset>
+    <p class="hint">Saved on this device. Used when opening an agent unless that pane has its own setting. Conversation falls back to Terminal when a native transcript is unavailable.</p>
+  </Card>
 
   <Card>
     <h3>Appearance</h3>

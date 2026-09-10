@@ -224,6 +224,21 @@ connections can use 10,000. The "older history" notice reports when rows beyond
 the served window exist. Use **Copy** for the latest response or
 **Conversation History** for clean, searchable earlier turns.
 
+In **Settings → Agents → Default View**, choose **Terminal** or
+**Conversation** for new agent openings. Terminal is the initial default. In
+**Manage agent → Default View**, choose **Use default** or set a preference for
+that pane; the menu is available from both Terminal and Conversation. These
+preferences are stored only in this browser/app on this device and apply across
+its connected computers. A pane preference belongs to the pane, not its harness,
+and changing its session or name does not reset it. A new or replaced terminal
+inherits the global default.
+
+Preference changes affect the next opening, not the screen currently shown, and
+manual Terminal/Conversation switching does not change the saved preference.
+Unsupported agents, agents without a session, or unavailable transcripts open
+in Terminal instead. Terminal remains one tap away for approvals, questions,
+and other terminal-only controls.
+
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. It opens on the newest turn and stays there as
 turns arrive; scrolling up to read holds your position until you return to the

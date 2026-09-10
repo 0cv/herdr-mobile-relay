@@ -1,8 +1,11 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import Button from '$components/ui/Button.svelte';
+  import { agentOpeningView } from '$lib/agent-view';
   import Card from '$components/ui/Card.svelte';
   import { suggestedLaunchName } from '$lib/launch';
+  import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
   import { targetRefForAgent } from '$lib/resource-id';
   import { replaceView } from '$lib/router';
   import { relayStore } from '$lib/store';
@@ -138,7 +141,12 @@
       });
       const target = launchedAgent ? targetRefForAgent(launchedAgent) : null;
       replaceView(launchedAgent && target
-        ? { view: 'terminal', paneId: launchedAgent.pane_id, target }
+        ? agentOpeningView(
+          launchedAgent,
+          get(connections).get(launchedAgent.relay_id),
+          get(defaultAgentView),
+          get(paneAgentViewOverrides),
+        )
         : { view: 'agents' });
     } catch (caught) {
       status = (caught as Error).message;

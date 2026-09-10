@@ -13,6 +13,7 @@ import { relayStore } from '$lib/store';
 import type { RelayTransport, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
 import type { RelayConfig } from '$lib/types';
 import { appUpdateStatus, MANAGED_UPDATE_COMMAND } from '$lib/updates';
+import { defaultAgentView, paneAgentViewOverrides } from '$lib/preferences';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers) => RelayTransport;
 
@@ -65,6 +66,8 @@ describe('settings relay status', () => {
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: {} });
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
+    defaultAgentView.set('terminal');
+    paneAgentViewOverrides.set({});
     appUpdateStatus.set({
       state: 'current',
       currentVersion: APP_VERSION,
@@ -83,6 +86,8 @@ describe('settings relay status', () => {
     transportHijack.current = null;
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
+    defaultAgentView.set('terminal');
+    paneAgentViewOverrides.set({});
     vi.unstubAllGlobals();
     if (serviceWorkerDescriptor) Object.defineProperty(navigator, 'serviceWorker', serviceWorkerDescriptor);
     else Reflect.deleteProperty(navigator, 'serviceWorker');
@@ -407,6 +412,39 @@ describe('settings relay status', () => {
     await user.click(screen.getByRole('button', { name: 'Remove Fedora' }));
     await user.click(within(screen.getByRole('dialog', { name: 'Remove Fedora?' })).getByRole('button', { name: 'Remove Relay' }));
     await waitFor(() => expect(screen.queryByText('Fedora')).not.toBeInTheDocument());
+  });
+
+  it('shows and persists the global Default View choice', async () => {
+    const user = userEvent.setup();
+    const first = render(SettingsView);
+    const views = within(screen.getByRole('group', { name: 'Default View' }));
+    expect(views.getByRole('button', { name: 'Terminal' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(views.getByRole('button', { name: 'Conversation' }));
+    expect(views.getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('herdr_default_agent_view')).toBe('conversation');
+    first.unmount();
+    render(SettingsView);
+    expect(within(screen.getByRole('group', { name: 'Default View' })).getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('keeps the previous global choice when local storage rejects a save', async () => {
+    const user = userEvent.setup();
+    render(SettingsView);
+    const views = within(screen.getByRole('group', { name: 'Default View' }));
+    const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('storage full');
+    });
+    await user.click(views.getByRole('button', { name: 'Conversation' }));
+    expect(views.getByRole('button', { name: 'Terminal' })).toHaveAttribute('aria-pressed', 'true');
+    expect(views.getByRole('button', { name: 'Conversation' })).toHaveAttribute('aria-pressed', 'false');
+    setItem.mockRestore();
+  });
+
+  it('shows the local agent choice without a connected relay', () => {
+    relayStore.destroy();
+    relayStore.relayConfigs.set([]);
+    render(SettingsView);
+    expect(screen.getByRole('group', { name: 'Default View' })).toBeInTheDocument();
   });
 
   it('applies interface size from the accessible settings group', async () => {

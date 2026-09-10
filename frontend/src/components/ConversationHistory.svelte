@@ -21,9 +21,13 @@
   import { clearPromptDraft, loadPromptDraft, savePromptDraft } from '$lib/prompt-drafts';
   import { relayStore } from '$lib/store';
   import type { AttachmentBatchController, AttachmentBatchSnapshot, AttachmentRef } from '$lib/attachments';
-  import type { Agent, ConversationEntry, OmoTodoState } from '$lib/types';
+  import type { Agent, ConversationEntry, ConversationPage, OmoTodoState } from '$lib/types';
 
-  let { agent, readOnly = false }: { agent: Agent; readOnly?: boolean } = $props();
+  let {
+    agent,
+    readOnly = false,
+    onInitialPage,
+  }: { agent: Agent; readOnly?: boolean; onInitialPage?: (page: ConversationPage) => void } = $props();
 
   const connections = relayStore.connections;
 
@@ -61,6 +65,7 @@
    */
   let pinnedToBottom = $state(true);
   let mounted = false;
+  let initialLoadSettled = false;
 
   const modeEntries = $derived(mode === 'conversation' ? conversationEntries(entries) : entries);
   const inputLocked = $derived(readOnly || agentNeedsResponse(agent) || agentNeedsInspection(agent));
@@ -142,6 +147,8 @@
     try {
       const page = await relayStore.getConversationHistory(agent);
       if (!mounted) return;
+      const firstSettledLoad = !initialLoadSettled;
+      initialLoadSettled = true;
       available = page.available;
       reason = page.reason;
       hasMore = entries.length ? hasMore : page.hasMore;
@@ -151,8 +158,12 @@
       omoPlan = page.omoPlan || null;
       error = '';
       if (page.available) entries = mergeEntries(entries, page.entries);
+      if (firstSettledLoad) onInitialPage?.(page);
     } catch (failure) {
-      if (mounted) error = failure instanceof Error ? failure.message : 'Conversation history could not be loaded.';
+      if (mounted) {
+        initialLoadSettled = true;
+        error = failure instanceof Error ? failure.message : 'Conversation history could not be loaded.';
+      }
     } finally {
       if (mounted) loading = false;
     }

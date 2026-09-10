@@ -2,10 +2,17 @@ import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
 import { BrowserDeviceCredentialStore } from '$lib/device-auth';
-import { setTerminalHistoryLines, setTerminalRefreshInterval } from '$lib/preferences';
+import {
+  defaultAgentView,
+  paneAgentViewOverrides,
+  setPaneAgentView,
+  setTerminalHistoryLines,
+  setTerminalRefreshInterval,
+} from '$lib/preferences';
+import { paneViewPreferenceKey } from '$lib/agent-view';
 import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
-import type { RelayConfig, RelayWorkspace } from '$lib/types';
+import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
@@ -55,6 +62,20 @@ function exactAgentFields(paneId = 'w1:p1') {
     agent_session_id: '',
   };
 }
+function preferenceAgent(relayId: string, rawPaneId: string, terminalId: string): Agent {
+  return {
+    relay_id: relayId,
+    relay_label: relayId,
+    raw_pane_id: rawPaneId,
+    pane_id: `${relayId}::${rawPaneId}`,
+    server_session_id: 'primary',
+    terminal_id: terminalId,
+    generation: 1,
+    agent_session_id: 'session-1',
+    agent: 'codex',
+  };
+}
+
 function exactWireScope(paneId: string, relayId: string) {
   return {
     server_session_id: 'primary',
@@ -74,6 +95,8 @@ describe('relay command store', () => {
     MockWebSocket.instances = [];
     localStorage.clear();
     sessionStorage.clear();
+    defaultAgentView.set('terminal');
+    paneAgentViewOverrides.set({});
     vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
     setTerminalRefreshInterval(250);
@@ -85,6 +108,8 @@ describe('relay command store', () => {
     transportHijack.current = null;
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
+    defaultAgentView.set('terminal');
+    paneAgentViewOverrides.set({});
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -102,6 +127,44 @@ describe('relay command store', () => {
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
+  });
+
+  it('cleans pane view overrides only when a relay is explicitly removed', () => {
+    const fedoraId = get(relayStore.relayConfigs)[0].id;
+    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });
+    const macId = get(relayStore.relayConfigs).find((relay) => relay.label === 'Mac')!.id;
+    const fedoraPane = preferenceAgent(fedoraId, 'pane-1', 'terminal-1');
+    const macPane = preferenceAgent(macId, 'pane-1', 'terminal-1');
+    defaultAgentView.set('conversation');
+    setPaneAgentView(fedoraPane, 'terminal');
+    setPaneAgentView(macPane, 'conversation');
+    relayStore.disconnectRelay(fedoraId);
+    expect(get(paneAgentViewOverrides)).toEqual({
+      [paneViewPreferenceKey(fedoraPane)!]: 'terminal',
+      [paneViewPreferenceKey(macPane)!]: 'conversation',
+    });
+    relayStore.removeRelay(fedoraId);
+    expect(get(paneAgentViewOverrides)).toEqual({
+      [paneViewPreferenceKey(macPane)!]: 'conversation',
+    });
+    expect(get(defaultAgentView)).toBe('conversation');
+  });
+
+  it('does not block relay removal when pane preference cleanup fails', () => {
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pane = preferenceAgent(relayId, 'pane-1', 'terminal-1');
+    setPaneAgentView(pane, 'conversation');
+    const nativeRemove = localStorage.removeItem.bind(localStorage);
+    const remove = vi.spyOn(localStorage, 'removeItem').mockImplementation((key) => {
+      if (key === 'herdr_pane_agent_view_overrides') throw new Error('read only');
+      nativeRemove(key);
+    });
+    const toast = vi.spyOn(relayStore, 'showToast');
+    relayStore.removeRelay(relayId);
+    expect(get(relayStore.relayConfigs).some((relay) => relay.id === relayId)).toBe(false);
+    expect(get(paneAgentViewOverrides)).toEqual({ [paneViewPreferenceKey(pane)!]: 'conversation' });
+    expect(toast).toHaveBeenCalledWith('Could not clear saved pane view preferences on this device.', true);
+    remove.mockRestore();
   });
 
   it('applies live Herdr status updates without accepting stale generations', () => {

@@ -73,7 +73,11 @@ import type {
   TransportStatus,
   TransportStatusDetail,
 } from './transports';
-import { terminalHistoryLines, terminalRefreshInterval } from './preferences';
+import {
+  clearPaneAgentViewOverridesForRelay,
+  terminalHistoryLines,
+  terminalRefreshInterval,
+} from './preferences';
 import {
   clearPendingRelayUpdate,
   normalizeAppDeployment,
@@ -636,6 +640,9 @@ class RelayStore {
     this.removeWorkspacesForRelay(id);
     this.activitiesValue = this.activitiesValue.filter((activity) => activity.relay_id !== id);
     this.activities.set(this.activitiesValue);
+    if (clearPaneAgentViewOverridesForRelay(id) === 'unavailable') {
+      this.showToast('Could not clear saved pane view preferences on this device.', true);
+    }
   }
 
   connectAll(preserveAgents = false): void {
