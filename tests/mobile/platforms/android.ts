@@ -38,7 +38,12 @@ function androidShellQuote(value: string): string {
 
 const ANDROID_NATIVE_IDLE_TIMEOUT_MS = 500;
 const ANDROID_NATIVE_SELECTOR_TIMEOUT_MS = 0;
-const ANDROID_NATIVE_LOOKUP_ROUND_MS = 5_000;
+const ANDROID_NATIVE_LOOKUP_COMMAND_MS = 5_000;
+const ANDROID_PICKER_SOURCE_COMMAND_MS = 6_000;
+const ANDROID_LAUNCHER_PACKAGE = 'com.google.android.apps.nexuslauncher';
+const ANDROID_LAUNCHER_ACTIVITY = 'com.android.launcher3.dragndrop.AddItemActivity';
+const ANDROID_PICKER_PACKAGE = 'com.google.android.documentsui';
+const ANDROID_PICKER_ACTIVITY = 'com.android.documentsui.picker.PickActivity';
 const ANDROID_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const ANDROID_NATIVE_SCROLL_LIMIT = 8;
 const CHROME_WEBAPP_ACTION = 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP';
@@ -274,27 +279,8 @@ export class AndroidPlatform implements MobilePlatform {
     ], 15_000);
     await this.driver.click(confirm);
 
-    // The Android 15 launcher asks for a second confirmation when Chrome is
-    // adding a shortcut rather than installing a WebAPK.
-    const launcherConfirm = await this.driver.findAny([
-      accessibility('Add to home screen'),
-      textLocator('Add to home screen'),
-      accessibility('Add'),
-      textLocator('Add'),
-    ], 2_000).catch((error: unknown) => {
-      if (isFatalDriverError(error)) throw error;
-      return '';
-    });
-    if (launcherConfirm) {
-      await this.driver.click(launcherConfirm);
-    } else {
-      // Nexus Launcher's Android 15 confirmation is sometimes outside the
-      // UiAutomator2 window exposed to Appium. Read the device hierarchy and
-      // tap the visible button by its reported bounds instead of dismissing it
-      // with HOME.
-      const confirmed = await this.confirmLauncherShortcut();
-      if (!confirmed) throw new Error('ANDROID_LAUNCHER: confirmation control was not exposed by the automation hierarchy');
-    }
+    const confirmed = await this.confirmLauncherShortcut();
+    if (!confirmed) throw new Error('ANDROID_LAUNCHER: confirmation control was not exposed by the automation hierarchy');
     // Do not proceed merely because the launcher overlay disappeared. Chrome
     // publishes the signed ShortcutInfo asynchronously, and that record is
     // the durable install evidence when no WebAPK package or icon exists.
@@ -336,31 +322,59 @@ export class AndroidPlatform implements MobilePlatform {
     return identity;
   }
 
+  private nativeTransactionAvailable(deadline: number, timeoutMs = ANDROID_NATIVE_LOOKUP_COMMAND_MS): boolean {
+    return Math.min(deadline - Date.now(), this.budget.remainingMs) >= timeoutMs;
+  }
+
+  private async nativeConfirmationForeground(packageName: string, activity: string, deadline: number): Promise<boolean> {
+    if (!this.nativeTransactionAvailable(deadline)) return false;
+    const foreground = await this.foregroundEvidence(ANDROID_NATIVE_LOOKUP_COMMAND_MS);
+    this.diagnostics.record({ phase: 'android-native-transition', operation: 'focused-activity', detail: {
+      packageName: foreground.packageName, activity: foreground.activity,
+      focusedPackage: foreground.focusedPackage, focusedActivity: foreground.focusedActivity,
+    } });
+    return foreground.packageName === packageName && foreground.activity === activity
+      && foreground.focusedPackage === packageName && foreground.focusedActivity === activity;
+  }
+
+  private async nativeControlReady(element: string, deadline: number): Promise<boolean> {
+    for (const attribute of ['enabled', 'displayed', 'clickable']) {
+      if (!this.nativeTransactionAvailable(deadline)) return false;
+      if (await this.driver.attribute(element, attribute, ANDROID_NATIVE_LOOKUP_COMMAND_MS) !== 'true') return false;
+    }
+    if (!this.nativeTransactionAvailable(deadline)) return false;
+    const rect = await this.driver.elementRect(element, ANDROID_NATIVE_LOOKUP_COMMAND_MS);
+    if (!this.nativeTransactionAvailable(deadline)) return false;
+    const size = await this.driver.windowSize(ANDROID_NATIVE_LOOKUP_COMMAND_MS);
+    return [rect.x, rect.y, rect.width, rect.height, size.width, size.height].every(Number.isFinite)
+      && rect.x >= 0 && rect.y >= 0 && rect.width > 0 && rect.height > 0
+      && rect.x + rect.width <= size.width && rect.y + rect.height <= size.height;
+  }
+
   private async confirmLauncherShortcut(): Promise<boolean> {
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      let xml = '';
+    const deadline = Date.now() + Math.min(30_000, this.budget.remainingMs);
+    const locator = { using: 'xpath', value:
+      `//*[@resource-id='${ANDROID_LAUNCHER_PACKAGE}:id/add_item_bottom_sheet_content']`
+      + `[.//*[@resource-id='${ANDROID_LAUNCHER_PACKAGE}:id/widget_name' and @text='Herdr Relay' and @displayed='true']]`
+      + `//android.widget.Button[@package='${ANDROID_LAUNCHER_PACKAGE}' and @text='Add to home screen' and @clickable='true' and @enabled='true' and @displayed='true']`,
+    };
+    while (this.nativeTransactionAvailable(deadline)) {
       try {
-        xml = await this.driver.pageSource(Math.min(5_000, deadline - Date.now()));
-        this.diagnostics.record({ phase: 'android-certificate', operation: 'launcher-confirmation-hierarchy', detail: { source: xml.slice(-20_000) } });
+        const foreground = await this.nativeConfirmationForeground(ANDROID_LAUNCHER_PACKAGE, ANDROID_LAUNCHER_ACTIVITY, deadline);
+        if (foreground && this.nativeTransactionAvailable(deadline)) {
+          const element = await this.driver.findAnyOnce([locator], ANDROID_NATIVE_LOOKUP_COMMAND_MS);
+          if (await this.nativeControlReady(element, deadline)
+            && await this.nativeConfirmationForeground(ANDROID_LAUNCHER_PACKAGE, ANDROID_LAUNCHER_ACTIVITY, deadline)
+            && this.nativeTransactionAvailable(deadline)) {
+            await this.driver.click(element, ANDROID_NATIVE_LOOKUP_COMMAND_MS);
+            this.diagnostics.record({ phase: 'android-launcher', operation: 'confirmation-clicked' });
+            return true;
+          }
+        }
       } catch (error) {
-        if (isFatalDriverError(error)) throw error;
-        this.diagnostics.record({ phase: 'android-certificate', operation: 'launcher-confirmation-hierarchy', detail: error instanceof Error ? error.message : String(error) });
+        if (isFatalDriverError(error) || !isRetryableElementLookupError(error)) throw error;
       }
-      const nodes = xml.match(/<node\b[^>]*\/>/gu) || [];
-      for (const node of nodes) {
-        if (!/(?:add to home screen|install)/iu.test(node)) continue;
-        if (/enabled="false"|visible="false"/u.test(node)) continue;
-        const bounds = node.match(/bounds="\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]"/u);
-        if (!bounds) continue;
-        const [, left, top, right, bottom] = bounds;
-        const x = Math.round((Number(left) + Number(right)) / 2);
-        const y = Math.round((Number(top) + Number(bottom)) / 2);
-        await this.driver.mobile('tap', { x, y }, Math.min(5_000, deadline - Date.now()));
-        return true;
-      }
-      const waitMs = Math.min(250, Math.max(0, deadline - Date.now()));
-      if (waitMs > 0) await delay(waitMs);
+      if (this.nativeTransactionAvailable(deadline)) await delay(250);
     }
     return false;
   }
@@ -1051,11 +1065,7 @@ export class AndroidPlatform implements MobilePlatform {
       androidTextLocator('INSTALL ANYWAY'),
     ], 'Install anyway');
 
-    await this.clickNative([
-      accessibility('Show roots'),
-      accessibility('Open navigation drawer'),
-      accessibility('Open navigation'),
-    ], 'certificate picker navigation');
+    await this.openCertificatePicker();
     await this.clickNative([
       accessibility('Downloads'),
       androidTextLocator('Downloads'),
@@ -1067,6 +1077,44 @@ export class AndroidPlatform implements MobilePlatform {
     await delay(1_000);
     await this.verifyCertificate(remoteName, commonName);
     await command(adb, ['-s', this.serial, 'shell', 'rm', '-f', remote], 30_000);
+  }
+
+  private async openCertificatePicker(timeoutMs = 30_000): Promise<void> {
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.min(timeoutMs, this.budget.remainingMs);
+    const usableControl = { using: 'xpath', value:
+      `//*[@package='${ANDROID_PICKER_PACKAGE}' and @clickable='true' and @enabled='true' and @displayed='true']`,
+    };
+    while (this.nativeTransactionAvailable(deadline)) {
+      const foreground = await this.nativeConfirmationForeground(ANDROID_PICKER_PACKAGE, ANDROID_PICKER_ACTIVITY, deadline);
+      if (foreground && this.nativeTransactionAvailable(deadline, ANDROID_PICKER_SOURCE_COMMAND_MS)) {
+        const sourceStartedAt = Date.now();
+        const source = await this.driver.pageSource(ANDROID_PICKER_SOURCE_COMMAND_MS);
+        const sourceDurationMs = Date.now() - sourceStartedAt;
+        this.diagnostics.record({ phase: 'android-certificate', operation: 'picker-hierarchy', detail: {
+          elapsedMs: Date.now() - startedAt, sourceDurationMs,
+        } });
+        if (!this.nativeTransactionAvailable(deadline)) break;
+        const elements = await this.driver.findAll(usableControl, ANDROID_NATIVE_LOOKUP_COMMAND_MS);
+        for (const element of elements) {
+          if (!await this.nativeControlReady(element, deadline)) continue;
+          if (!await this.nativeConfirmationForeground(ANDROID_PICKER_PACKAGE, ANDROID_PICKER_ACTIVITY, deadline)) break;
+          await mkdir(this.outputDir, { recursive: true });
+          await writeBoundedText(join(this.outputDir, 'certificate-picker-ready-hierarchy.xml'), source);
+          this.diagnostics.record({ phase: 'android-certificate', operation: 'picker-ready', detail: {
+            elapsedMs: Date.now() - startedAt, sourceDurationMs,
+          } });
+          await this.clickNative([
+            accessibility('Show roots'),
+            accessibility('Open navigation drawer'),
+            accessibility('Open navigation'),
+          ], 'certificate picker navigation', deadline - Date.now());
+          return;
+        }
+      }
+      if (this.nativeTransactionAvailable(deadline)) await delay(250);
+    }
+    throw new Error('ANDROID_CERTIFICATE: focused certificate picker with usable controls was not ready within the operation budget');
   }
 
   private async waitForSettingsPage(timeoutMs: number): Promise<void> {
@@ -1143,48 +1191,40 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   private async nativeElementEnabled(element: string, deadline: number): Promise<boolean> {
-    const enabledTimeout = deadline - Date.now();
-    if (enabledTimeout < minimumDriverRequestMs) return false;
-    const enabled = await this.driver.attribute(element, 'enabled', enabledTimeout);
-    if (enabled === 'false') return false;
-    const displayedTimeout = deadline - Date.now();
-    if (displayedTimeout < minimumDriverRequestMs) return false;
-    const displayed = await this.driver.attribute(element, 'displayed', displayedTimeout);
-    return displayed !== 'false';
+    for (const attribute of ['enabled', 'displayed']) {
+      if (!this.nativeTransactionAvailable(deadline)) return false;
+      if (await this.driver.attribute(element, attribute, ANDROID_NATIVE_LOOKUP_COMMAND_MS) !== 'true') return false;
+    }
+    return true;
   }
 
   private async clickNative(locators: Locator[], description: string, timeoutMs = 30_000): Promise<void> {
     const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
     let lastError = '';
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
+    while (this.nativeTransactionAvailable(deadline)) {
       try {
-        const element = await this.findNative(locators, remaining);
-        const attributeTimeout = deadline - Date.now();
-        if (attributeTimeout < minimumDriverRequestMs) break;
+        const element = await this.findNative(locators, deadline - Date.now());
         if (!await this.nativeElementEnabled(element, deadline)) {
           lastError = `${description} is not enabled and displayed`;
           continue;
         }
-        const clickRemaining = deadline - Date.now();
-        if (clickRemaining < minimumDriverRequestMs) break;
-        await this.driver.click(element, clickRemaining);
+        if (!this.nativeTransactionAvailable(deadline)) break;
+        await this.driver.click(element, ANDROID_NATIVE_LOOKUP_COMMAND_MS);
         return;
       } catch (error) {
-        if (isFatalDriverError(error)) throw error;
+        if (isFatalDriverError(error) || !isRetryableElementLookupError(error)) throw error;
         lastError = error instanceof Error ? error.message : String(error);
       }
       const waitMs = Math.min(250, deadline - Date.now());
       if (waitMs <= 0) break;
       await delay(waitMs);
     }
-    throw new Error(`ANDROID_CERTIFICATE: ${description}: ${lastError}`);
+    throw new Error(`ANDROID_CERTIFICATE: ${description}: ${lastError || 'insufficient time for a complete native transaction'}`);
   }
 
   private async findNative(locators: Locator[], timeoutMs: number): Promise<string> {
     const deadline = Date.now() + Math.min(timeoutMs, this.budget.remainingMs);
-    let lastError = '';
+    let lastError = 'insufficient time for a complete native lookup';
     let scrolls = 0;
     let size = { width: 1_080, height: 2_400 };
     const windowTimeout = Math.min(2_000, timeoutMs, this.budget.remainingMs);
@@ -1194,14 +1234,15 @@ export class AndroidPlatform implements MobilePlatform {
         return size;
       });
     }
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      if (remaining < minimumDriverRequestMs) break;
-      try {
-        return await this.driver.findAnyOnce(locators, Math.min(ANDROID_NATIVE_LOOKUP_ROUND_MS, remaining));
-      } catch (error) {
-        if (isFatalDriverError(error)) throw error;
-        lastError = error instanceof Error ? error.message : String(error);
+    while (this.nativeTransactionAvailable(deadline)) {
+      for (const locator of locators) {
+        if (!this.nativeTransactionAvailable(deadline)) break;
+        try {
+          return await this.driver.findAnyOnce([locator], ANDROID_NATIVE_LOOKUP_COMMAND_MS);
+        } catch (error) {
+          if (isFatalDriverError(error) || !isRetryableElementLookupError(error)) throw error;
+          lastError = error instanceof Error ? error.message : String(error);
+        }
       }
       const afterLookup = deadline - Date.now();
       if (afterLookup < minimumDriverRequestMs || scrolls >= ANDROID_NATIVE_SCROLL_LIMIT) break;
@@ -1346,7 +1387,7 @@ export class AndroidPlatform implements MobilePlatform {
     throw new Error(`ANDROID_CERTIFICATE: fixture HTTPS response identity was not trusted (${lastError || 'no response observed'})`);
   }
 
-  private async foregroundEvidence(timeoutMs = 10_000, budget?: PhaseBudget): Promise<{ packageName: string; activity: string; pid: string; raw: string }> {
+  private async foregroundEvidence(timeoutMs = 10_000, budget?: PhaseBudget): Promise<{ packageName: string; activity: string; focusedPackage: string; focusedActivity: string; pid: string; raw: string }> {
     const output = await commandOutput(process.env.ADB || 'adb', ['-s', this.serial, 'shell', 'dumpsys', 'activity', 'activities'], timeoutMs, {
       budget,
       label: 'read Android foreground activity',
@@ -1359,7 +1400,12 @@ export class AndroidPlatform implements MobilePlatform {
     const pid = output.match(/(?:mResumedActivity|ResumedActivity): ActivityRecord\{[^}]+\s+pid=(\d+)/u)?.[1]
       || processLine.match(/ProcessRecord\{[^}\n]*\s(\d+):/u)?.[1]
       || '';
-    return { packageName, activity: component?.[2] || '', pid, raw: output.slice(-20_000) };
+    const focus = output.match(/mCurrentFocus=Window\{[^}\n]+\s([A-Za-z0-9_.]+)\/([A-Za-z0-9_.$]+)/u);
+    return {
+      packageName, activity: component?.[2] || '',
+      focusedPackage: focus?.[1] || '', focusedActivity: focus?.[2] || '',
+      pid, raw: output.slice(-20_000),
+    };
   }
 
   private async isInstalledTargetForeground(timeoutMs = 10_000, budget?: PhaseBudget): Promise<boolean> {

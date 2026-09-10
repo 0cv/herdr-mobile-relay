@@ -80,7 +80,7 @@ export function iosOpenURLProcessEvidence(error: unknown): Record<string, unknow
     return {
       code: error.code,
       durationMs: error.durationMs,
-      exitCode: error.exitCode,
+      normalizedExitCode: error.exitCode,
       timedOut: error.timedOut,
       signal: error.signal,
       stdout: error.stdout,
@@ -313,6 +313,7 @@ export class IOSPlatform implements MobilePlatform {
   private readonly diagnostics: DiagnosticRecorder;
   private installedBundleId = '';
   private selectedInstalledContext = '';
+  private installedBindingState: 'unselected' | 'inspecting' | 'bound' = 'unselected';
   private lastIdentity?: RuntimeIdentity;
   private lastUrl = '';
   private keyboardDraft = '';
@@ -320,6 +321,7 @@ export class IOSPlatform implements MobilePlatform {
   private lastNativeActivity = '';
   private lastNativePid = '';
   private ownershipFailure?: QualificationFatalError;
+  private navigationCommand = command;
 
   constructor(private readonly options: PlatformOptions) {
     this.udid = options.deviceId || process.env.IOS_SIMULATOR_UDID || '';
@@ -382,48 +384,108 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async openSetupURL(url: string): Promise<void> {
+    await this.captureNavigationState('before');
     const phase = this.budget.phaseView('ios-navigation', IOS_NAVIGATION_PHASE_MS);
-    let lastError: unknown;
-    let attempt = 0;
-    while (!phase.exhausted) {
-      phase.assertAvailable('open setup URL');
-      const timeoutMs = Math.min(IOS_OPENURL_COMMAND_MS, phase.remainingMs);
-      if (timeoutMs < minimumDriverRequestMs) break;
-      attempt += 1;
+    phase.assertAvailable('open setup URL');
+    const timeoutMs = Math.min(IOS_OPENURL_COMMAND_MS, phase.remainingMs);
+    if (timeoutMs < IOS_OPENURL_COMMAND_MS) throw new Error('IOS_NAVIGATION: insufficient time for a complete openurl command');
+    const startedAt = new Date().toISOString();
+    this.diagnostics.record({ phase: 'ios-navigation', operation: 'simctl openurl started', timeoutMs, detail: { attempt: 1, startedAt } });
+    try {
+      const result = await this.navigationCommand('xcrun', ['simctl', 'openurl', this.udid, url], timeoutMs, {
+        budget: phase,
+        label: 'simctl openurl setup URL',
+      });
+      this.diagnostics.record({
+        phase: 'ios-navigation', operation: 'simctl openurl succeeded', durationMs: result.durationMs, timeoutMs,
+        detail: { attempt: 1, startedAt, settledAt: new Date().toISOString(), process: { ...result, normalizedExitCode: result.code, code: undefined } },
+      });
+    } catch (error) {
+      const settledAt = new Date().toISOString();
+      const evidence = iosOpenURLProcessEvidence(error);
+      this.diagnostics.record({
+        phase: 'ios-navigation',
+        operation: 'simctl openurl failed',
+        durationMs: error instanceof CommandError ? error.durationMs : undefined,
+        timeoutMs,
+        timedOut: error instanceof CommandError ? error.timedOut : undefined,
+        signal: error instanceof CommandError ? error.signal : undefined,
+        detail: { attempt: 1, startedAt, settledAt, kind: iosOpenURLFailureKind(error), process: evidence },
+      });
       try {
-        await command('xcrun', ['simctl', 'openurl', this.udid, url], timeoutMs, {
-          budget: phase,
-          label: 'simctl openurl setup URL',
-        });
-        this.diagnostics.record({ phase: 'ios-navigation', operation: 'simctl openurl succeeded', detail: { attempt } });
-        lastError = undefined;
-        break;
-      } catch (error) {
-        lastError = error;
-        this.diagnostics.record({
-          phase: 'ios-navigation',
-          operation: 'simctl openurl failed',
-          durationMs: error instanceof CommandError ? error.durationMs : undefined,
-          timeoutMs,
-          timedOut: error instanceof CommandError ? error.timedOut : undefined,
-          signal: error instanceof CommandError ? error.signal : undefined,
-          detail: { attempt, kind: iosOpenURLFailureKind(error), process: iosOpenURLProcessEvidence(error) },
-        });
-        const kind = iosOpenURLFailureKind(error);
-        if (kind !== 'transient') break;
-        const waitMs = Math.min(1_000, Math.max(0, phase.remainingMs - minimumDriverRequestMs));
-        if (waitMs < minimumDriverRequestMs) break;
-        await delay(waitMs, phase);
+        await this.captureNavigationState('after');
+        await this.captureNavigationHostLog(startedAt, settledAt);
+      } catch (diagnosticError) {
+        this.diagnostics.record({ phase: 'ios-navigation', operation: 'openurl-diagnostics-stopped', detail: iosOpenURLProcessEvidence(diagnosticError) });
       }
-    }
-    if (lastError) {
-      const evidence = iosOpenURLProcessEvidence(lastError);
-      throw new Error(`IOS_NAVIGATION: could not open setup URL: ${JSON.stringify(evidence)}`, { cause: lastError });
+      throw new Error(`IOS_NAVIGATION: could not open setup URL: ${JSON.stringify(evidence)}`, { cause: error });
     }
     if (phase.exhausted) throw new Error('IOS_NAVIGATION: setup URL budget expired before navigation completed');
     const readinessTimeout = Math.min(IOS_SAFARI_READINESS_PHASE_MS, phase.remainingMs);
     if (readinessTimeout < minimumDriverRequestMs) throw new Error('IOS_NAVIGATION: no time remained to verify Safari fixture navigation');
     await this.waitForSafariFixturePage(url, readinessTimeout, phase);
+  }
+
+  private async navigationDiagnostic(
+    phase: PhaseBudget,
+    operation: string,
+    timeoutMs: number,
+    collect: () => Promise<unknown>,
+  ): Promise<void> {
+    if (phase.remainingMs < timeoutMs) {
+      this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, detail: { outcome: 'skipped', reason: 'insufficient diagnostic budget', remainingMs: phase.remainingMs } });
+      return;
+    }
+    const startedAt = Date.now();
+    try {
+      const result = await collect();
+      this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, durationMs: Date.now() - startedAt, detail: { outcome: 'collected', result } });
+    } catch (error) {
+      this.diagnostics.record({ phase: 'ios-navigation', operation, timeoutMs, durationMs: Date.now() - startedAt, detail: { outcome: 'failed', process: iosOpenURLProcessEvidence(error) } });
+      if (isFatalDriverError(error) || (error instanceof CommandError && error.timedOut)) throw error;
+    }
+  }
+
+  private async captureNavigationState(stage: 'before' | 'after'): Promise<void> {
+    const phase = this.budget.phaseView(`ios-${stage}-openurl`, stage === 'before' ? 10_000 : 30_000);
+    await this.navigationDiagnostic(phase, `${stage}-openurl-boot-state`, 3_000, async () => {
+      const result = await this.navigationCommand('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], 3_000, { budget: phase });
+      const listing = JSON.parse(result.stdout) as { devices: Record<string, Array<{ udid: string; state: string; isAvailable: boolean }>> };
+      const device = Object.values(listing.devices).flat().find((device) => device.udid === this.udid);
+      if (!device) throw new Error('IOS_NAVIGATION_DIAGNOSTIC: owned simulator is absent from the available device listing');
+      return device;
+    });
+    let nativeContext = false;
+    await this.navigationDiagnostic(phase, `${stage}-openurl-native-context`, 1_000, async () => {
+      await this.driver.switchContext('NATIVE_APP', 1_000);
+      nativeContext = true;
+    });
+    if (!nativeContext) return;
+    await this.navigationDiagnostic(phase, `${stage}-openurl-foreground`, 1_000, () => this.driver.activeAppInfo(1_000));
+    await this.navigationDiagnostic(phase, `${stage}-openurl-hierarchy`, 5_000, async () => {
+      const source = await this.driver.pageSource(5_000);
+      const filename = join(this.outputDir, `ios-${stage}-openurl-hierarchy.xml`);
+      await writeBoundedText(filename, source, 1024 * 1024);
+      return { filename };
+    });
+    if (stage === 'after') {
+      await this.navigationDiagnostic(phase, 'after-openurl-pages', IOS_WEBKIT_DISCOVERY_COMMAND_MS, () => this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS));
+    }
+  }
+
+  private async captureNavigationHostLog(startedAt: string, settledAt: string): Promise<void> {
+    const phase = this.budget.phaseView('ios-openurl-host-log', 6_000);
+    const start = `${startedAt.slice(0, 19).replace('T', ' ')}+0000`;
+    const end = `${new Date(Date.parse(settledAt) + 1_000).toISOString().slice(0, 19).replace('T', ' ')}+0000`;
+    await this.navigationDiagnostic(phase, 'openurl-host-log', 5_000, async () => {
+      const result = await this.navigationCommand('/usr/bin/log', [
+        'show', '--style', 'compact', '--start', start, '--end', end,
+        '--predicate', 'process == "simctl" OR process CONTAINS[c] "Simulator" OR process CONTAINS[c] "Safari" OR process CONTAINS[c] "WebKit" OR process == "lsd"',
+      ], 5_000, { budget: phase });
+      const filename = join(this.outputDir, 'ios-openurl-host.log');
+      await writeBoundedText(filename, result.stdout, 1024 * 1024);
+      return { filename, scope: 'host unified log', startedAt, settledAt, start, end, durationMs: result.durationMs };
+    });
   }
 
   private async waitForSafariFixturePage(url: string, timeoutMs: number, parent: PhaseBudget): Promise<void> {
@@ -631,7 +693,13 @@ export class IOSPlatform implements MobilePlatform {
         }
       }
       phase.assertAvailable('discover installed page metadata');
-      const contexts = await this.driver.contextMetadata(Math.max(1, phase.remainingMs));
+      if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS) {
+        lastError ||= `not enough time for WebKit discovery (${phase.remainingMs}ms remains; ${IOS_WEBKIT_DISCOVERY_COMMAND_MS}ms required)`;
+        break;
+      }
+      const contexts = await this.driver.contextMetadata(IOS_WEBKIT_DISCOVERY_COMMAND_MS);
+      phase.assertAvailable('validate installed discovery foreground');
+      await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
       let candidateError: unknown;
       if (!contexts.length) {
         lastError = 'installed page metadata is unavailable';
@@ -645,22 +713,36 @@ export class IOSPlatform implements MobilePlatform {
             context: context.id,
             detail: { bundleId: context.bundleId, url: context.url, title: context.title, raw: context.raw, rejection: rejection || undefined },
           });
+          if (context.id === 'NATIVE_APP' || isIOSSafariBrowserBundle(context.bundleId)) continue;
+          if (!isIOSSafariViewServiceBundle(context.bundleId) && context.bundleId !== this.installedBundleId) {
+            this.failOwnership('IOS_CONTEXT_OWNERSHIP', `page provider ${context.bundleId || 'unknown'} is not an installed provider`);
+          }
           if (rejection) {
-            if (this.installedBundleId && isIOSSafariViewServiceBundle(context.bundleId) && context.url && !this.isExpectedOrigin(context.url)) {
-              this.failOwnership('IOS_CONTEXT_OWNERSHIP', rejection);
+            if (this.installedBindingState === 'unselected' && !this.selectedInstalledContext
+              && isIOSSafariViewServiceBundle(context.bundleId)
+              && /^WEBVIEW_\d+\.\d+$/u.test(context.id)
+              && context.url === 'about:blank' && context.title === '') {
+              lastError = `${context.id}: initial page publication is pending`;
+              this.diagnostics.record({
+                phase: 'ios-attachment', operation: 'initial-publication-pending', context: context.id,
+                nativeProvider: this.installedBundleId, detail: { nativePid: this.lastNativePid, bundleId: context.bundleId },
+              });
+              continue;
             }
-            continue;
+            this.failOwnership('IOS_CONTEXT_OWNERSHIP', rejection);
           }
           try {
             phase.assertAvailable('validate installed page provider');
             await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
             await this.requireInstalledProviderForeground(Math.max(1, phase.remainingMs));
             await this.driver.switchContext(context.id, Math.max(1, phase.remainingMs));
+            if (this.installedBindingState !== 'bound') this.installedBindingState = 'inspecting';
             const url = await this.driver.currentUrl(Math.max(1, phase.remainingMs));
             this.lastUrl = url;
             if (!this.isExpectedOrigin(url)) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `document origin ${url} is not ${this.origin}`);
             await this.validateInstalledDocument(Math.max(1, phase.remainingMs));
             this.selectedInstalledContext = context.id;
+            this.installedBindingState = 'bound';
             return;
           } catch (error) {
             if (isFatalDriverError(error) || isQualificationFatal(error)) throw error;
@@ -673,12 +755,6 @@ export class IOSPlatform implements MobilePlatform {
         if (!lastError) lastError = `no installed page for ${this.origin}`;
       }
       if (candidateError) throw candidateError;
-      if (this.installedBundleId) {
-        phase.recovery('reactivate installed provider');
-        phase.assertAvailable('reactivate installed provider');
-        await this.driver.switchContext('NATIVE_APP', Math.max(1, phase.remainingMs));
-        await this.driver.mobile('activateApp', { bundleId: this.installedBundleId }, Math.max(1, phase.remainingMs));
-      }
       try {
         await delay(250, phase);
       } catch (error) {
@@ -960,6 +1036,8 @@ export class IOSPlatform implements MobilePlatform {
       origin: this.origin,
       installedBundleId: this.installedBundleId,
       selectedInstalledContext: this.selectedInstalledContext,
+      installedBindingState: this.installedBindingState,
+      installedDocumentBound: this.installedBindingState === 'bound',
       ownershipFailure: this.ownershipFailure?.snapshot(),
       lastUrl: this.lastUrl,
       lastIdentity: this.lastIdentity,
@@ -1189,6 +1267,10 @@ export class IOSPlatform implements MobilePlatform {
       }
       if (readyElement) return readyElement;
       if (states.length > 0 && states.every((state) => state === 'disabled' || state === 'indeterminate')) break;
+      if (scrolls >= IOS_NATIVE_SCROLL_LIMIT) {
+        lastError = `${description}: native scroll limit ${IOS_NATIVE_SCROLL_LIMIT} reached`;
+        break;
+      }
       const targetRow = actionList.targetRows[0];
       if (!targetRow) {
         lastError = `${description}: action list did not expose the requested row`;
@@ -1414,7 +1496,9 @@ export class IOSPlatform implements MobilePlatform {
     };`, [], timeoutMs);
     if (document.origin !== this.origin) this.failOwnership('IOS_CONTEXT_OWNERSHIP', `document origin ${document.origin} is not ${this.origin}`);
     if (document.standalone !== true) {
-      if (document.applicationInitialized === false) throw new Error('IOS_CONTEXT_NOT_READY: installed page has not entered standalone display mode');
+      if (this.installedBindingState !== 'bound' && !this.selectedInstalledContext && document.applicationInitialized === false) {
+        throw new Error('IOS_CONTEXT_NOT_READY: installed page has not entered standalone display mode');
+      }
       this.failOwnership('IOS_CONTEXT_OWNERSHIP', 'selected page is not standalone');
     }
   }

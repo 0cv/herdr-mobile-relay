@@ -16,7 +16,7 @@ import {
 } from '../support/artifacts';
 import { assertNoKnownSecret, redactText, sanitizeValue } from '../support/diagnostics';
 import { PhaseBudget } from '../support/budget';
-import { AppiumClient, isFatalDriverError, WebDriverError } from '../support/webdriver';
+import { AppiumClient, ElementLookupError, isFatalDriverError, WebDriverError } from '../support/webdriver';
 import { parseAndroidAvdName } from '../support/android';
 import { AndroidPlatform, androidChromeCapabilities, androidChromeShortcutArgs, androidLaunchFailureKind, androidOpenUrlArgs, hasAndroidChromeDevToolsSocket, parseAndroidChromeShortcuts } from '../platforms/android';
 import { IOSPlatform, iosInstalledContextRejection, iosNativeScrollDirection, iosNativeSwipeDirection, iosOpenURLFailureKind, isIOSSafariBrowserBundle, isIOSSafariViewServiceBundle, isIOSStaleContextError, nativeActionListEvidence } from '../platforms/ios';
@@ -47,6 +47,9 @@ import {
   QualificationFailureLatch,
   type RuntimeIdentity,
 } from '../support/oracle';
+
+import { androidTransitionTests } from './android-transitions';
+import { runIOSRegressions } from './ios';
 
 type TestOutcome = void | string;
 const tests: Array<[string, () => Promise<TestOutcome>]> = [];
@@ -1346,14 +1349,14 @@ test('native lookup wrappers preserve a fatal Appium operation and skip fallback
   let androidScrolls = 0;
   const android = new AndroidPlatform({
     origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp/herdr-mobile-ci-unit',
-    certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-native-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+    certificate: '', setupUrl: '', deviceId: 'emulator-1', budget: new PhaseBudget('android-native-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
   });
   (android as any).driver = {
     windowSize: async () => ({ width: 1_080, height: 2_400 }),
     findAnyOnce: async () => { throw fatal; },
     mobile: async () => { androidScrolls += 1; },
   };
-  await assert.rejects(() => (android as any).findNative([{ using: 'accessibility id', value: 'Missing' }], 100), (error: unknown) => error === fatal);
+  await assert.rejects(() => (android as any).findNative([{ using: 'accessibility id', value: 'Missing' }], 10_000), (error: unknown) => error === fatal);
   assert.equal(androidScrolls, 0);
 
   let iosScrolls = 0;
@@ -1382,7 +1385,7 @@ test('native lookup scrolls between single-pass locator rounds', async () => {
     findAnyOnce: async () => {
       androidLookups += 1;
       if (androidLookups > 1) return 'android-target';
-      throw new Error('element not found');
+      throw new ElementLookupError('element not found');
     },
     mobile: async () => { androidScrolls += 1; },
   };
@@ -1702,7 +1705,7 @@ test('iOS attachment selects a page without enumerating windows', async () => {
     outputDir: '/tmp/herdr-mobile-ci-unit',
     certificate: '',
     setupUrl: '',
-    budget: new PhaseBudget('ios-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+    budget: new PhaseBudget('ios-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
   (platform as any).installedBundleId = 'com.apple.webapp';
@@ -1732,7 +1735,7 @@ test('iOS attachment rejects incorrect foreground, origin, and standalone state'
       outputDir: '/tmp/herdr-mobile-ci-unit',
       certificate: '',
       setupUrl: '',
-      budget: new PhaseBudget('ios-negative-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+      budget: new PhaseBudget('ios-negative-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
     });
     const driver = platform.driver as any;
     (platform as any).installedBundleId = 'com.apple.webapp';
@@ -1754,7 +1757,7 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
     outputDir: '/tmp/herdr-mobile-ci-unit',
     certificate: '',
     setupUrl: '',
-    budget: new PhaseBudget('ios-stale-test', { timeoutMs: 1_000, recoveryLimit: 1 }),
+    budget: new PhaseBudget('ios-stale-test', { timeoutMs: 30_000, recoveryLimit: 1 }),
   });
   const driver = platform.driver as any;
   (platform as any).installedBundleId = 'com.apple.webapp';
@@ -1775,6 +1778,9 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
   assert.equal(isIOSStaleContextError(new Error('document origin mismatch')), false);
   assert.deepEqual(contexts, ['NATIVE_APP', 'WEBVIEW_OLD', 'NATIVE_APP', 'WEBVIEW_NEW']);
 });
+
+for (const [name, body] of androidTransitionTests) test(name, body);
+test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
 
 let failures = 0;
 for (const [name, body] of tests) {
