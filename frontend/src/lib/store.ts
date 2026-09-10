@@ -91,6 +91,7 @@ import type {
   AgentProfile,
   AgentInventoryStatus,
   CommandResult,
+  ConversationHistoryRequest,
   ConversationPage,
   FrontendTargetRef,
   OmoTodoState,
@@ -285,6 +286,101 @@ function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
   };
 }
 
+
+const BROWSE_CURSOR_LIMIT = 2_048;
+
+function invalidBrowse(): never {
+  throw new CommandError('Relay returned invalid conversation history');
+}
+
+function browseString(value: unknown, max: number, required = false): string {
+  if (value == null && !required) return '';
+  if (typeof value !== 'string' || value.length > max || (required && !value)) invalidBrowse();
+  return value;
+}
+
+function browseText(value: unknown, max: number): string {
+  return typeof value === 'string' ? value.slice(0, max) : '';
+}
+
+function browseIdentity(value: unknown, max: number): string {
+  return typeof value === 'string' && value.length <= max ? value : '';
+}
+
+function browseCount(value: unknown): number {
+  if (value == null) return 0;
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 0) invalidBrowse();
+  return count;
+}
+
+function browseRecord(value: unknown, required = false): Record<string, any> | null {
+  const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : null;
+  if (!record && required) invalidBrowse();
+  return record;
+}
+
+function browseBoolean(value: unknown, optional = false): boolean {
+  if (value == null && optional) return false;
+  if (typeof value !== 'boolean') invalidBrowse();
+  return value;
+}
+
+function normalizeConversationPage(value: unknown): ConversationPage {
+  const data = browseRecord(value, true)!;
+  if (typeof data.available !== 'boolean' || typeof data.has_more !== 'boolean' || !Array.isArray(data.entries) || data.entries.length > 200) invalidBrowse();
+  const entries = data.entries.flatMap((candidate: unknown) => {
+    const entry = browseRecord(candidate);
+    if (!entry || (entry.role !== 'user' && entry.role !== 'assistant')) return [];
+    const text = browseText(entry.text, 1_048_576);
+    const tools = (Array.isArray(entry.tools) ? entry.tools : []).slice(0, 128).flatMap((candidateTool: unknown) => {
+      const tool = browseRecord(candidateTool);
+      if (!tool) return [];
+      return [{
+        id: browseIdentity(tool.id, 256), name: browseText(tool.name, 160) || 'Tool',
+        input: browseText(tool.input, 1_048_576), output: browseText(tool.output, 1_048_576),
+        error: tool.error === true, truncated: tool.truncated === true,
+      }];
+    });
+    const normalized = {
+      id: browseIdentity(entry.id, 256), timestamp: browseText(entry.timestamp, 128),
+      role: entry.role, text, tools, truncated: entry.truncated === true,
+    };
+    return normalized.id && (text || tools.length) ? [normalized] : [];
+  });
+  const cursor = browseString(data.next_cursor, BROWSE_CURSOR_LIMIT);
+  const state = browseString(data.state, 32, true);
+  const mode = browseString(data.mode, 32, true);
+  if (!['ready', 'preparing', 'failed'].includes(state) || !['recent', 'snapshot', 'native'].includes(mode)
+    || (data.has_more && !cursor) || (state === 'preparing' && !cursor)) invalidBrowse();
+  const progress = data.progress == null ? undefined : (() => {
+    const raw = browseRecord(data.progress, true)!;
+    const scanned = browseCount(raw.scanned_bytes);
+    const source = browseCount(raw.source_bytes);
+    if (scanned > source) invalidBrowse();
+    return { phase: browseString(raw.phase, 32, true), scanned_bytes: scanned, source_bytes: source };
+  })();
+  const rawDiagnostics = data.diagnostics == null ? {} : browseRecord(data.diagnostics, true)!;
+  const diagnostics = {
+    oversized_records: browseCount(rawDiagnostics.oversized_records), corrupt_records: browseCount(rawDiagnostics.corrupt_records),
+    omitted_tools: browseCount(rawDiagnostics.omitted_tools), omitted_payloads: browseCount(rawDiagnostics.omitted_payloads),
+    plan_corrupt: browseBoolean(rawDiagnostics.plan_corrupt, true),
+    source_truncated: browseBoolean(rawDiagnostics.source_truncated, true),
+  };
+  const rawError = data.error == null ? null : browseRecord(data.error, true)!;
+  const error = rawError ? {
+    code: browseString(rawError.code, 64, true), message: browseString(rawError.message, 512, true),
+    retryable: browseBoolean(rawError.retryable),
+  } : undefined;
+  if (state === 'failed' && !error) invalidBrowse();
+  return {
+    available: data.available, reason: browseString(data.reason, 512), entries,
+    nextCursor: cursor, hasMore: data.has_more, total: data.total == null ? null : browseCount(data.total),
+    state: state as ConversationPage['state'], mode: mode as ConversationPage['mode'],
+    sourceRevision: browseString(data.source_revision, 256), snapshotId: browseString(data.snapshot_id, 256), progress, diagnostics, error,
+    omoPlan: normalizeOmoTodoState(data.omo_plan),
+  };
+}
 
 function normalizeAgentTargetFields(agent: Partial<Agent>): Partial<Agent> {
   const generation = Number(agent.generation);
@@ -1639,6 +1735,7 @@ class RelayStore {
     payload: Record<string, any>,
     timeoutMs = COMMAND_TIMEOUT_MS,
     allowProtocolMismatch = false,
+    signal?: AbortSignal,
   ): Promise<CommandResult> {
     const connection = this.connectionsValue.get(relayId);
     if (!connection || connection.status !== 'connected') {
@@ -1651,12 +1748,28 @@ class RelayStore {
         connection.inventory.message || 'Herdr agent inventory is not ready on this computer',
       ));
     }
+    if (signal?.aborted) {
+      const error = new CommandError('Conversation history request was cancelled.');
+      error.code = 'request_cancelled';
+      return Promise.reject(error);
+    }
     const requestId = commandRequestId();
     return new Promise((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        if (!this.pendingRequests.delete(requestId)) return;
+        cleanup();
+        const error = new CommandError('Conversation history request was cancelled.');
+        error.code = 'request_cancelled';
+        reject(error);
+      };
+      const cleanup = () => signal?.removeEventListener('abort', abort);
       const timer = setTimeout(() => {
+        cleanup();
         this.pendingRequests.delete(requestId);
         reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, timeoutMs);
+      signal?.addEventListener('abort', abort, { once: true });
       const actionId = payload.intent && typeof payload.intent === 'object'
         ? String(payload.intent.action_id || '')
         : '';
@@ -1667,6 +1780,7 @@ class RelayStore {
         resolve,
         reject,
         timer,
+        cleanup,
       });
       const command: Record<string, unknown> = {
         ...payload,
@@ -1678,6 +1792,7 @@ class RelayStore {
       }
       if (!this.sendRaw(relayId, command)) {
         clearTimeout(timer);
+        cleanup();
         this.pendingRequests.delete(requestId);
         reject(new CommandError('Could not send command to relay'));
       }
@@ -1828,14 +1943,14 @@ class RelayStore {
     return target ? { target, server_session_id: target.server_session_id } : null;
   }
 
-  sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number): Promise<CommandResult> {
+  sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number, signal?: AbortSignal): Promise<CommandResult> {
     const identity = this.agentTargetPayload(agent);
     if (!identity) return Promise.reject(new CommandError('This agent no longer has an exact terminal identity'));
     return this.sendCommand(agent.relay_id, {
       ...payload,
       pane_id: agent.raw_pane_id,
       ...identity,
-    }, timeoutMs);
+    }, timeoutMs, false, signal);
   }
 
   speakToAgent(agent: Agent, text: string, language: string): SpeechRequest {
@@ -2115,12 +2230,14 @@ class RelayStore {
     if (receipt.phase === 'prepared' || receipt.phase === 'awaiting_evidence') {
       clearTimeout(pending.timer);
       pending.timer = setTimeout(() => {
+        pending.cleanup?.();
         this.pendingRequests.delete(requestId);
         pending?.reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, ACCEPTED_COMMAND_TIMEOUT_MS);
       return;
     }
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     this.pendingRequests.delete(requestId);
     if (receipt.phase === 'confirmed') {
       pending.resolve({
@@ -2151,6 +2268,7 @@ class RelayStore {
     const apiError = parseApiError(message.error);
     if (!pending || pending.relayId !== relayId || !apiError) return;
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     this.pendingRequests.delete(requestId);
     const detail = typeof message.detail === 'string' && UTF8_ENCODER.encode(message.detail).byteLength <= 512
       ? message.detail
@@ -2168,6 +2286,7 @@ class RelayStore {
       // instead of counting it against the original send timeout.
       clearTimeout(pending.timer);
       pending.timer = setTimeout(() => {
+        pending.cleanup?.();
         this.pendingRequests.delete(result.request_id);
         pending.reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, ACCEPTED_COMMAND_TIMEOUT_MS);
@@ -2175,6 +2294,7 @@ class RelayStore {
       return;
     }
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     this.pendingRequests.delete(result.request_id);
     if (result.ok) pending.resolve(result);
     else {
@@ -2265,50 +2385,16 @@ class RelayStore {
     }
   }
 
-  async getConversationHistory(agent: Agent, before = '', limit = 80): Promise<ConversationPage> {
+  async getConversationHistory(agent: Agent, request: ConversationHistoryRequest = {}): Promise<ConversationPage> {
+    const limit = Math.max(1, Math.min(200, Math.trunc(request.limit || 80)));
+    const cursor = request.cursor || '';
     const result = await this.sendToAgent(agent, {
       type: 'get_conversation_history',
-      before,
+      cursor,
       limit,
-    }, 20_000);
-    const data = result.data || {};
-    const entries = Array.isArray(data.entries)
-      ? data.entries
-        .filter((entry: unknown): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'))
-        .map((entry) => {
-          const tools = Array.isArray(entry.tools)
-            ? entry.tools
-              .filter((tool: unknown): tool is Record<string, unknown> => Boolean(tool && typeof tool === 'object'))
-              .map((tool) => ({
-                id: String(tool.id || ''),
-                name: String(tool.name || 'Tool').slice(0, 160),
-                input: String(tool.input || ''),
-                output: String(tool.output || ''),
-                error: tool.error === true,
-                truncated: tool.truncated === true,
-              }))
-            : [];
-          return {
-            id: String(entry.id || ''),
-            timestamp: String(entry.timestamp || ''),
-            role: entry.role === 'assistant' ? 'assistant' as const : 'user' as const,
-            text: String(entry.text || ''),
-            tools,
-            truncated: entry.truncated === true,
-          };
-        })
-        .filter((entry) => entry.id && (entry.text || entry.tools.length))
-      : [];
-    return {
-      available: data.available === true,
-      reason: String(data.reason || ''),
-      entries,
-      hasMore: data.has_more === true,
-      total: Math.max(0, Number(data.total) || 0),
-      fileTruncated: data.file_truncated === true,
-      sourceCorrupt: data.source_corrupt === true,
-      omoPlan: normalizeOmoTodoState(data.omo_plan),
-    };
+      retry: request.retry,
+    }, 20_000, request.signal);
+    return normalizeConversationPage(result.data);
   }
 
   /**

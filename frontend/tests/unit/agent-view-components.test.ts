@@ -37,8 +37,6 @@ function page(overrides: Partial<ConversationPage> = {}): ConversationPage {
     entries: [],
     hasMore: false,
     total: 0,
-    fileTruncated: false,
-    sourceCorrupt: false,
     ...overrides,
   };
 }
@@ -151,7 +149,7 @@ describe('agent view controls and conversation loading hook', () => {
 
   it('does not call the hook for older pages, later polls, or initial errors', async () => {
     const callback = vi.fn();
-    const initial = page({ entries: [{ id: 'turn-1', timestamp: '2026-01-01', role: 'user', text: 'hello' }], hasMore: true, total: 1 });
+    const initial = page({ entries: [{ id: 'turn-1', timestamp: '2026-01-01', role: 'user', text: 'hello' }], nextCursor: 'cursor-1', hasMore: true, total: 1 });
     const older = page({ entries: [{ id: 'turn-0', timestamp: '2025-12-31', role: 'user', text: 'older' }] });
     const history = vi.spyOn(relayStore, 'getConversationHistory')
       .mockResolvedValueOnce(initial)
@@ -171,7 +169,130 @@ describe('agent view controls and conversation loading hook', () => {
     view.unmount();
   });
 
-  it('lets the first latest request to settle consume the fallback window', async () => {
+  it('keeps a stable snapshot visible after sending and returns explicitly to latest', async () => {
+    const user = userEvent.setup();
+    const current = agent();
+    const history = vi.spyOn(relayStore, 'getConversationHistory')
+      .mockResolvedValueOnce(page({
+        entries: [{ id: 'turn-1', timestamp: '2026-01-01', role: 'user', text: 'question' }],
+        nextCursor: 'older-cursor', hasMore: true, total: 2, state: 'ready', mode: 'recent', sourceRevision: 'source-1',
+      }))
+      .mockResolvedValueOnce(page({
+        entries: [{ id: 'turn-0', timestamp: '2025-12-31', role: 'assistant', text: 'older answer' }],
+        hasMore: false, total: 2, state: 'ready', mode: 'snapshot', snapshotId: 'snapshot-1', sourceRevision: 'source-1',
+      }))
+      .mockResolvedValueOnce(page({
+        entries: [{ id: 'turn-2', timestamp: '2026-01-01T00:01:00Z', role: 'assistant', text: 'new latest answer' }],
+        hasMore: false, total: 3, state: 'ready', mode: 'recent', sourceRevision: 'source-2',
+      }));
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result', request_id: 'prompt-1', ok: true,
+    });
+    try {
+      render(ConversationHistory, { agent: current });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Load older turns' })).toBeVisible());
+      await user.click(screen.getByRole('button', { name: 'Load older turns' }));
+      await waitFor(() => expect(screen.getByText('Viewing a stable snapshot of older history. New messages are not included; return to latest to view replies.')).toBeVisible());
+      await user.type(screen.getByRole('textbox', { name: 'Prompt' }), 'send while browsing');
+      await user.click(screen.getByRole('button', { name: 'Send prompt' }));
+      await waitFor(() => expect(screen.getByText('Prompt sent. Return to latest to view the new reply.')).toBeVisible());
+      expect(screen.getByText('older answer')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Return to latest' }));
+      await waitFor(() => expect(screen.getByText('new latest answer')).toBeInTheDocument());
+      expect(screen.queryByText('Viewing a stable snapshot of older history. New messages are not included; return to latest to view replies.')).not.toBeInTheDocument();
+      expect(send).toHaveBeenCalledWith(current, { type: 'submit_prompt', text: 'send while browsing' });
+      expect(history).toHaveBeenCalledTimes(3);
+    } finally {
+      history.mockRestore();
+      send.mockRestore();
+    }
+  });
+
+  it('preserves loaded turns for invalid cursors and reloads only after an explicit action', async () => {
+    const user = userEvent.setup();
+    const initial = page({
+      entries: [{ id: 'turn-1', timestamp: '2026-01-01', role: 'user', text: 'retained question' }],
+      nextCursor: 'stale-cursor', hasMore: true, total: 2, state: 'ready', mode: 'recent', sourceRevision: 'source-1',
+    });
+    const history = vi.spyOn(relayStore, 'getConversationHistory')
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(page({
+        state: 'failed', mode: 'recent', sourceRevision: 'source-1',
+        error: { code: 'invalid_cursor', message: 'This history cursor is invalid.', retryable: false },
+      }))
+      .mockResolvedValueOnce(page({
+        entries: [{ id: 'turn-2', timestamp: '2026-01-02', role: 'assistant', text: 'reloaded answer' }],
+        hasMore: false, total: 1, state: 'ready', mode: 'recent', sourceRevision: 'source-2',
+      }));
+    try {
+      render(ConversationHistory, { agent: agent() });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Load older turns' })).toBeVisible());
+      await user.click(screen.getByRole('button', { name: 'Load older turns' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Reload history' })).toBeVisible());
+      expect(screen.getByText('retained question')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Reload history' }));
+      await waitFor(() => expect(screen.getByText('reloaded answer')).toBeInTheDocument());
+      expect(screen.queryByRole('button', { name: 'Reload history' })).not.toBeInTheDocument();
+      expect(history).toHaveBeenCalledTimes(3);
+    } finally {
+      history.mockRestore();
+    }
+  });
+
+  it('pauses preparation while hidden work is canceled and resumes it once', async () => {
+    vi.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const history = vi.spyOn(relayStore, 'getConversationHistory')
+      .mockResolvedValueOnce(page({
+        state: 'preparing', mode: 'recent', nextCursor: 'prepare-cursor', hasMore: false, total: null,
+      }))
+      .mockResolvedValueOnce(page({
+        state: 'ready', mode: 'snapshot', snapshotId: 'snapshot-1', sourceRevision: 'source-1',
+        entries: [{ id: 'turn-0', timestamp: '2025-12-31', role: 'user', text: 'prepared question' }],
+        hasMore: false, total: 1,
+      }));
+    try {
+      render(ConversationHistory, { agent: agent() });
+      await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toBeVisible());
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.getByRole('button', { name: 'Continue' })).toBeVisible();
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(history).toHaveBeenCalledTimes(1);
+      await user.click(screen.getByRole('button', { name: 'Continue' }));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(screen.getByText('prepared question')).toBeVisible());
+    } finally {
+      history.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores an older page that settles after the pane target changes', async () => {
+    const current = agent();
+    const replacement = agent('fedora', 'pane-2', 'terminal-2');
+    let releaseOlder!: (value: ConversationPage) => void;
+    const history = vi.spyOn(relayStore, 'getConversationHistory')
+      .mockResolvedValueOnce(page({
+        entries: [{ id: 'turn-1', timestamp: '2026-01-01', role: 'user', text: 'current question' }],
+        nextCursor: 'older-cursor', hasMore: true, total: 2, state: 'ready', mode: 'recent', sourceRevision: 'source-1',
+      }))
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseOlder = resolve; }));
+    try {
+      const view = render(ConversationHistory, { agent: current });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Load older turns' })).toBeVisible());
+      await userEvent.setup().click(screen.getByRole('button', { name: 'Load older turns' }));
+      await view.rerender({ agent: replacement });
+      releaseOlder(page({ entries: [{ id: 'stale', timestamp: '2025-01-01', role: 'assistant', text: 'stale older answer' }], state: 'ready', mode: 'recent' }));
+      await waitFor(() => expect(history).toHaveBeenCalledTimes(2));
+      expect(screen.queryByText('stale older answer')).not.toBeInTheDocument();
+      view.unmount();
+    } finally {
+      history.mockRestore();
+    }
+  });
+
+  it('does not start an overlapping latest request while the current one is pending', async () => {
     vi.useFakeTimers();
     const callback = vi.fn();
     const resolves: ((value: ConversationPage) => void)[] = [];
@@ -181,12 +302,9 @@ describe('agent view controls and conversation loading hook', () => {
     render(ConversationHistory, { agent: agent(), onInitialPage: callback });
     expect(resolves).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(resolves).toHaveLength(2);
-    resolves[1](page({ available: false }));
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(callback).toHaveBeenCalledOnce();
+    expect(resolves).toHaveLength(1);
     resolves[0](page({ available: false }));
+    await Promise.resolve();
     await Promise.resolve();
     expect(callback).toHaveBeenCalledOnce();
     vi.useRealTimers();

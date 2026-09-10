@@ -95,6 +95,7 @@ type Server struct {
 	sessions         *session.Resolver
 	historyM         *history.Manager
 	conversationM    *conversation.Reader
+	conversationB    *conversation.Browser
 	profiles         *profiles.Resolver
 	webH             *web.Handler
 	herdrC           *herdr.Client
@@ -166,6 +167,15 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	}
 	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
 	conversationReader := conversation.NewReader(home)
+	var conversationBrowser *conversation.Browser
+	cacheRoot := ""
+	if strings.TrimSpace(cfg.CacheDir) != "" {
+		cacheRoot = filepath.Join(cfg.CacheDir, "conversation-history")
+	}
+	conversationBrowser, browserErr := conversation.NewBrowser(conversationReader, cacheRoot, conversation.DefaultBrowserOptions())
+	if browserErr != nil {
+		logger.Warn("interactive conversation browsing unavailable", "error", browserErr)
+	}
 	sessResolver := session.NewResolverWithReader(home, conversationReader)
 	histManager := history.NewManager(cfg.CacheDir)
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", cfg.Port)
@@ -228,6 +238,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		sessions:            sessResolver,
 		historyM:            histManager,
 		conversationM:       conversationReader,
+		conversationB:       conversationBrowser,
 		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		uploadM:             uploadManager,
@@ -507,7 +518,13 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 
 func (s *Server) Run(ctx context.Context) error {
 	if s.initErr != nil {
+		if s.conversationB != nil {
+			_ = s.conversationB.Close()
+		}
 		return s.initErr
+	}
+	if s.conversationB != nil {
+		defer s.conversationB.Close()
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -797,7 +814,20 @@ func (s *Server) Run(ctx context.Context) error {
 				break
 			}
 			generation := s.state.Generation(inbound.PaneID)
-			page, historyErr := s.conversationM.ReadFor(agent.Agent, agent.Cwd, agent.SessionID, inbound.Before, inbound.Limit)
+			browser := s.conversationB
+			if browser == nil || browser.Reader() != s.conversationM {
+				s.logger.Warn("conversation browser is unavailable", "pane_id", inbound.PaneID)
+				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
+				break
+			}
+			page, historyErr := browser.ReadPage(client.Context(), conversation.BrowseRequest{
+				Scope: conversation.BrowseScope{
+					Provider: agent.Agent, CWD: agent.Cwd, SessionID: agent.SessionID,
+					PaneID: agent.PaneID, ServerSessionID: agent.ServerSessionID,
+					TerminalID: agent.TerminalID, Generation: agent.Generation,
+				},
+				Cursor: inbound.Cursor, Limit: inbound.Limit, Retry: inbound.Retry,
+			})
 			if historyErr != nil {
 				s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
 				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)

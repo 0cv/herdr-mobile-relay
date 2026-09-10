@@ -129,6 +129,55 @@ describe('relay command store', () => {
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
   });
 
+  it('bounds conversation history payloads and requires a usable preparation cursor', async () => {
+    const agent = preferenceAgent('fedora', 'w1:p1', 'terminal-w1:p1');
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result',
+      request_id: 'history-1',
+      ok: true,
+      data: {
+        available: true,
+        state: 'ready',
+        mode: 'recent',
+        has_more: false,
+        entries: [{
+          id: 'entry-1',
+          timestamp: '2026-01-01T00:00:00Z',
+          role: 'assistant',
+          text: 'x'.repeat(1_200_000),
+          tools: [{ id: 'tool-1', name: '', input: 'i'.repeat(1_200_000), output: 'o'.repeat(1_200_000) }],
+        }],
+        diagnostics: {},
+      },
+    });
+    const result = await relayStore.getConversationHistory(agent);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].text).toHaveLength(1_048_576);
+    expect(result.entries[0].tools?.[0]).toMatchObject({ name: 'Tool', input: 'i'.repeat(1_048_576), output: 'o'.repeat(1_048_576) });
+
+    send.mockResolvedValueOnce({
+      type: 'command_result', request_id: 'history-2', ok: true,
+      data: { available: true, state: 'preparing', mode: 'recent', has_more: false, entries: [], diagnostics: {} },
+    });
+    await expect(relayStore.getConversationHistory(agent)).rejects.toThrow('Relay returned invalid conversation history');
+  });
+
+  it('aborts a conversation request without leaving a pending relay handler', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    const controller = new AbortController();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const current = preferenceAgent(relayId, 'w1:p1', 'terminal-w1:p1');
+    const pending = relayStore.getConversationHistory(current, { signal: controller.signal });
+    expect(socket.sent.some((payload) => JSON.parse(payload).type === 'get_conversation_history')).toBe(true);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'request_cancelled' });
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed', data: {} });
+    await expect(relayStore.getConversationHistory(current, { signal: AbortSignal.abort() })).rejects.toMatchObject({ code: 'request_cancelled' });
+  });
+
   it('cleans pane view overrides only when a relay is explicitly removed', () => {
     const fedoraId = get(relayStore.relayConfigs)[0].id;
     relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });

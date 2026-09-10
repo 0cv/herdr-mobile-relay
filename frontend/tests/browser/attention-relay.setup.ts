@@ -67,8 +67,15 @@ export default async function setup() {
   const scenarioPath = join(runtime, 'scenario.json');
   const operationsPath = join(runtime, 'operations.jsonl');
   const webRoot = join(runtime, 'web');
-  await Promise.all([mkdir(cache), mkdir(webRoot)]);
+  const conversationRoot = join(runtime, 'claude');
+  const conversationSession = '123e4567-e89b-12d3-a456-426614174000';
+  const conversationPath = join(conversationRoot, 'projects', '-tmp-conversation', `${conversationSession}.jsonl`);
+  await Promise.all([mkdir(cache), mkdir(webRoot), mkdir(join(conversationRoot, 'projects', '-tmp-conversation'), { recursive: true })]);
   await writeFile(join(webRoot, 'index.html'), '<html>test</html>\n');
+  await writeFile(conversationPath, [
+    JSON.stringify({ type: 'user', uuid: 'history-user-1', timestamp: '2026-09-02T10:00:00Z', message: { content: 'history question' } }),
+    JSON.stringify({ type: 'assistant', uuid: 'history-assistant-1', timestamp: '2026-09-02T10:00:01Z', message: { content: [{ type: 'text', text: 'history answer' }] } }),
+  ].join('\n') + '\n');
 
   const [
     approval,
@@ -201,6 +208,12 @@ export default async function setup() {
         agent_status: 'blocked', tab_id: 'attention-r', workspace_id: 'workspace-1',
         cwd: '/tmp/omp-partial-ask', revision: 1,
       },
+      {
+        pane_id: 'conversation-history', terminal_id: 'terminal-conversation-history', agent: 'claude', name: 'conversation-history',
+        agent_status: 'working', tab_id: 'attention-s', workspace_id: 'workspace-1',
+        cwd: '/tmp/conversation', revision: 1,
+        agent_session: { value: conversationSession, kind: 'uuid' },
+      },
     ],
     tabs: [
       { tab_id: 'tab-1', workspace_id: 'workspace-1', label: 'qoder-approval', number: 1, cwd: '/tmp/qoder-approval' },
@@ -221,6 +234,7 @@ export default async function setup() {
       { tab_id: 'attention-p', workspace_id: 'workspace-1', label: 'qoder-settings', number: 16, cwd: '/tmp/qoder-settings' },
       { tab_id: 'attention-q', workspace_id: 'workspace-1', label: 'omp-plan-approval', number: 17, cwd: '/tmp/omp-plan-approval' },
       { tab_id: 'attention-r', workspace_id: 'workspace-1', label: 'omp-partial-ask', number: 18, cwd: '/tmp/omp-partial-ask' },
+      { tab_id: 'attention-s', workspace_id: 'workspace-1', label: 'conversation-history', number: 19, cwd: '/tmp/conversation' },
     ],
     content: {
       'qoder-approval': approval,
@@ -241,6 +255,7 @@ export default async function setup() {
       'qoder-settings': qoderSettings,
       'omp-plan-approval': ompPlanApproval,
       'omp-partial-ask': ompPartialAsk,
+      'conversation-history': 'conversation history fixture',
     },
   };
   await writeFile(scenarioPath, JSON.stringify(scenario));
@@ -377,6 +392,7 @@ export default async function setup() {
       HERDR_RELAY_POLL_INTERVAL: '0.2',
       HERDR_BIN: fakeBin,
       HERDR_WEB_ROOT: webRoot,
+      HERDR_CLAUDE_CONFIG_DIRS: conversationRoot,
       HERDR_SOCKET_PATH: socketPath,
       FAKE_HERDR_SCENARIO: scenarioPath,
       FAKE_HERDR_OPERATIONS: operationsPath,

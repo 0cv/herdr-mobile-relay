@@ -216,6 +216,8 @@ type Inbound struct {
 	Direction            string          `json:"direction,omitempty"`
 	Lines                int             `json:"lines,omitempty"`
 	Before               string          `json:"before,omitempty"`
+	Cursor               string          `json:"cursor,omitempty"`
+	Retry                bool            `json:"retry,omitempty"`
 	Limit                int             `json:"limit,omitempty"`
 	Columns              int             `json:"columns,omitempty"`
 	Rows                 int             `json:"rows,omitempty"`

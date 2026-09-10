@@ -362,14 +362,52 @@ export interface OmoTodoState {
   truncated: boolean;
 }
 
+export type ConversationBrowseState = 'ready' | 'preparing' | 'failed';
+export type ConversationBrowseMode = 'recent' | 'snapshot' | 'native';
+
+export interface ConversationBrowseProgress {
+  phase: string;
+  scanned_bytes: number;
+  source_bytes: number;
+}
+
+export interface ConversationBrowseDiagnostics {
+  oversized_records: number;
+  corrupt_records: number;
+  omitted_tools?: number;
+  omitted_payloads?: number;
+  plan_corrupt?: boolean;
+  source_truncated: boolean;
+}
+
+export interface ConversationBrowseError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface ConversationHistoryRequest {
+  cursor?: string;
+  limit?: number;
+  retry?: boolean;
+  signal?: AbortSignal;
+}
+
 export interface ConversationPage {
   available: boolean;
+  reasonCode?: string;
   reason: string;
   entries: ConversationEntry[];
+  nextCursor?: string;
   hasMore: boolean;
-  total: number;
-  fileTruncated: boolean;
-  sourceCorrupt: boolean;
+  total: number | null;
+  state?: ConversationBrowseState;
+  mode?: ConversationBrowseMode;
+  sourceRevision?: string;
+  snapshotId?: string;
+  progress?: ConversationBrowseProgress;
+  diagnostics?: ConversationBrowseDiagnostics;
+  error?: ConversationBrowseError;
   omoPlan?: OmoTodoState;
 }
 

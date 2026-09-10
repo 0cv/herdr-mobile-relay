@@ -73,7 +73,9 @@ import { constants, gzipSync } from 'node:zlib';
 // reload recovery, and public release descriptor checks in 0.20.10.
 // Raised from 162 KiB for global and per-pane default-view preferences and
 // safe Conversation routing with native-transcript fallback.
-const limitKiB = 164;
+// Raised from 164 KiB for bounded history diagnostics, source-change recovery,
+// and snapshot-aware refresh handling.
+const limitKiB = 165;
 const limit = limitKiB * 1024 + 256;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
@@ -96,7 +98,7 @@ for (const relative of files) {
   const brotli = await readFile(join(root, `${relative}.br`));
   const gzip = gzipSync(source, {
     level: 9,
-    memLevel: 8,
+    memLevel: 9,
     strategy: constants.Z_DEFAULT_STRATEGY,
     windowBits: 15,
   });

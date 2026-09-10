@@ -260,7 +260,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           return;
         }
         if (message.type === 'get_conversation_history') {
-          const older = Boolean(message.before);
+          const older = Boolean(message.cursor);
           if (conversationFixture) {
             const fixture = conversationFixture;
             queueMicrotask(() => this.server({
@@ -271,10 +271,14 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
               phase: 'completed',
               data: {
                 available: true,
+                state: 'ready',
+                mode: older ? 'snapshot' : 'recent',
+                source_revision: 'fixture',
+                snapshot_id: older ? 'snapshot-1' : '',
                 entries: older ? [] : fixture.entries,
                 has_more: false,
                 total: fixture.total,
-                file_truncated: false,
+                diagnostics: { source_truncated: false, corrupt_records: 0, oversized_records: 0 },
               },
             }));
             return;
@@ -287,6 +291,11 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
             phase: 'completed',
             data: {
               available: true,
+              state: 'ready',
+              mode: older ? 'snapshot' : 'recent',
+              source_revision: 'fixture',
+              snapshot_id: older ? 'snapshot-1' : '',
+              next_cursor: older ? '' : 'cursor-1',
               entries: older
                 ? [{ id: 'turn-1', timestamp: '2026-08-12T09:00:00Z', role: 'user', text: 'first retained question' }]
                 : [
@@ -307,7 +316,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
                 ],
               has_more: !older,
               total: 4,
-              file_truncated: true,
+              diagnostics: { source_truncated: true, corrupt_records: 0, oversized_records: 0 },
             },
           }));
           return;
@@ -3884,7 +3893,7 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByText('middle retained answer')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeVisible();
   await expect(page.getByText('4 recorded messages')).toBeVisible();
-  await expect(page.getByText(/session log is larger than 16 MB/)).toBeVisible();
+  await expect(page.getByText(/log exceeds 16 MB/)).toBeVisible();
   await page.getByRole('button', { name: 'Copy History app message as Markdown' }).click();
   await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedConversation')))
     .toBe('# middle retained answer');
@@ -3977,8 +3986,8 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await page.getByRole('button', { name: 'Load older turns' }).click();
   await expect(page.getByText('first retained question')).toBeVisible();
   await expect.poll(async () => (await commands(page)).find((command) => (
-    command.type === 'get_conversation_history' && command.before === 'turn-2'
-  ))).toMatchObject({ pane_id: 'w1:p1', before: 'turn-2' });
+    command.type === 'get_conversation_history' && command.cursor === 'cursor-1'
+  ))).toMatchObject({ pane_id: 'w1:p1', cursor: 'cursor-1' });
 
   const search = page.getByRole('searchbox', { name: 'Search displayed conversation' });
   await search.fill('first retained');
@@ -4190,7 +4199,7 @@ test('default agent view: unavailable initial page replaces history without an e
     action: 'get_conversation_history',
     ok: true,
     phase: 'completed',
-    data: { available: false, reason: 'Native transcript unavailable' },
+    data: { available: false, state: 'ready', mode: 'recent', entries: [], has_more: false, total: null, diagnostics: {}, reason: 'Native transcript unavailable' },
   });
   await expect(page.getByRole('main', { name: 'Terminal for Unavailable transcript' })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('conversation');
@@ -4225,7 +4234,7 @@ test('default agent view: stale automatic responses cannot redirect Settings', a
     action: 'get_conversation_history',
     ok: true,
     phase: 'completed',
-    data: { available: false, reason: 'Native transcript unavailable' },
+    data: { available: false, state: 'ready', mode: 'recent', entries: [], has_more: false, total: null, diagnostics: {}, reason: 'Native transcript unavailable' },
   });
   await page.waitForTimeout(50);
   await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
@@ -4262,7 +4271,7 @@ test('default agent view: manual switching ignores preferences and keeps explici
     action: 'get_conversation_history',
     ok: true,
     phase: 'completed',
-    data: { available: false, reason: 'Manual transcript unavailable' },
+    data: { available: false, state: 'ready', mode: 'recent', entries: [], has_more: false, total: null, diagnostics: {}, reason: 'Manual transcript unavailable' },
   });
   await expect(page.getByText('Manual transcript unavailable')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Terminal view' })).toBeVisible();

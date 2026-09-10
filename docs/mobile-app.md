@@ -265,7 +265,50 @@ adding repeated view toggles to browser history.
 Hidden reasoning, injected system records, and sidechain turns remain excluded.
 Reads are confined to known session directories and the newest 16 MiB of very
 large logs. When that bound omits older turns, they remain in the harness log
-on the computer.
+on the computer. Use **Load older turns** to request an authenticated,
+short-lived local snapshot; preparation reports progress and never blocks the
+relay's live terminal paths. Snapshot pages remain stable while new turns are
+written, and storage, source-change, corruption, oversized-record, and
+expired-cursor states are reported without exposing transcript paths or raw
+records. Pagination uses only short-lived opaque cursors; the app never
+constructs a cursor from a displayed entry ID. OpenCode and Hermes retain their
+native database pagination semantics while binding cursors to the selected
+source identity.
+
+### Conversation history cache and limits
+
+The relay never edits a provider transcript or native database to serve this
+view. SQLite reads use read-only mode; JSONL reads use captured regular-file
+handles and reject symlink retargeting. The optional derived cache lives under
+`<cache>/conversation-history`, which is created as mode `0700`; each bbolt
+snapshot is a regular mode `0600` file. Startup removes abandoned snapshot
+files, and shutdown and expiry remove the derived index, not the source
+transcript.
+
+Default bounds are one active preparation, four queued preparations, a
+30-second client-interest lease, 15-minute snapshot expiry, and 15-minute
+cursor expiry. A snapshot is limited to 512 MiB and all snapshots together to
+1 GiB. A JSONL record is limited to 16 MiB, a recent window to 16 MiB, a page
+to 200 entries, and a response to 2 MiB. Exceeding a cache limit fails the
+preparation with a retryable capacity result; it never truncates or deletes a
+provider source. A cancelled or abandoned preparation stops at scan and index
+checkpoints.
+
+Recent pages report no total when only a bounded tail was read. Prepared and
+native pages report their visible-entry total when the source supplies one.
+`source_truncated` identifies a bounded JSONL tail, while diagnostics count
+oversized or corrupt records and tool/payload omissions. Valid entries remain
+available when a later record or an OMO plan update is invalid. A failed
+preparation retains its continuation cursor so **Retry loading** does not lose
+the already displayed recent turns.
+
+Cursors are signed, opaque, scoped to the provider, workspace, session, pane,
+server session, terminal, and target generation, and contain an expiry and
+source revision. They bind a file range digest, snapshot identity, or native
+source identity; appends are accepted only when the captured range remains
+stable. Tampering, scope changes, expiry, truncation, replacement, rewrite,
+and symlink retargeting are rejected. OpenCode and Hermes keep their native
+pagination anchors while applying the same scope and source checks.
 
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second; 250 ms is the default.

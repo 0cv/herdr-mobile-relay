@@ -760,10 +760,17 @@ describe('accessible Svelte interactions', () => {
         id: 'turn-1', timestamp: '2026-09-02T12:00:00Z',
         role: 'assistant', text: 'valid turn', tools: [],
       }],
+      nextCursor: 'cursor-1',
       hasMore: true,
       total: 2,
-      fileTruncated: false,
-      sourceCorrupt: true,
+      diagnostics: {
+        oversized_records: 0,
+        corrupt_records: 1,
+        omitted_tools: 0,
+        omitted_payloads: 0,
+        plan_corrupt: false,
+        source_truncated: false,
+      },
     }).mockResolvedValue({
       available: true,
       reason: '',
@@ -773,16 +780,14 @@ describe('accessible Svelte interactions', () => {
       }],
       hasMore: false,
       total: 2,
-      fileTruncated: false,
-      sourceCorrupt: false,
     });
     try {
       const view = render(ConversationHistory, { agent });
-      expect(await screen.findByText(/Some OpenCode records could not be decoded/)).toBeInTheDocument();
-      expect(screen.queryByText(/larger than 16 MB/)).not.toBeInTheDocument();
+      expect(await screen.findByText(/Some records could not be decoded/)).toBeInTheDocument();
+      expect(screen.queryByText(/log exceeds 16 MB/)).not.toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: 'Load older turns' }));
       await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(2));
-      expect(screen.getByText(/Some OpenCode records could not be decoded/)).toBeInTheDocument();
+      expect(screen.getByText(/Some records could not be decoded/)).toBeInTheDocument();
       view.unmount();
     } finally {
       history.mockRestore();
@@ -797,7 +802,6 @@ describe('accessible Svelte interactions', () => {
     };
     vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue({
       available: true, reason: '', entries: [], hasMore: false, total: 0,
-      fileTruncated: false, sourceCorrupt: false,
     });
     const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
       type: 'command_result', request_id: 'prompt-1', ok: true,

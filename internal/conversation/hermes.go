@@ -71,27 +71,46 @@ func (r *hermesReader) databases() ([]string, string) {
 }
 
 func (r *hermesReader) locate(cwd, sessionID string) Location {
+	location, _ := r.locateContext(context.Background(), cwd, sessionID)
+	return location
+}
+
+func (r *hermesReader) locateContext(ctx context.Context, cwd, sessionID string) (Location, string) {
 	if !safeSessionID(sessionID) {
-		return Location{}
+		return Location{}, "invalid_session"
 	}
 	databases, code := r.databases()
 	if code != "" {
-		return Location{}
+		return Location{}, code
 	}
+	firstFailure := ""
 	for _, database := range databases {
-		rows, _, queryCode := r.query(database, sessionID, "", 1)
-		if queryCode != "" || len(rows) == 0 || rows[0].SessionID != sessionID {
+		rows, _, queryCode := r.queryContext(ctx, database, sessionID, "", 1)
+		if queryCode != "" {
+			if firstFailure == "" {
+				firstFailure = queryCode
+			}
+			continue
+		}
+		if len(rows) == 0 || rows[0].SessionID != sessionID {
 			continue
 		}
 		if cwd != "" && rows[0].CWD != "" && !sameOpenCodeDirectory(cwd, rows[0].CWD) {
-			return Location{}
+			return Location{}, "invalid_session"
 		}
-		return Location{Path: database, Root: filepath.Dir(database), Title: rows[0].Title}
+		return Location{Path: database, Root: filepath.Dir(database), Title: rows[0].Title}, ""
 	}
-	return Location{}
+	if firstFailure != "" {
+		return Location{}, firstFailure
+	}
+	return Location{}, "invalid_session"
 }
 
 func (r *hermesReader) readFrom(database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
+	return r.readFromContext(context.Background(), database, sessionID, before, limit)
+}
+
+func (r *hermesReader) readFromContext(ctx context.Context, database, sessionID, before string, limit int) ([]Entry, bool, bool, hermesRow, string) {
 	if !safeSessionID(sessionID) {
 		return nil, false, false, hermesRow{}, "invalid_session"
 	}
@@ -101,7 +120,7 @@ func (r *hermesReader) readFrom(database, sessionID, before string, limit int) (
 			return nil, false, false, hermesRow{}, "invalid_cursor"
 		}
 	}
-	rows, hasMore, queryCode := r.query(database, sessionID, before, limit)
+	rows, hasMore, queryCode := r.queryContext(ctx, database, sessionID, before, limit)
 	if queryCode != "" {
 		return nil, false, false, hermesRow{}, queryCode
 	}
@@ -112,16 +131,17 @@ func (r *hermesReader) readFrom(database, sessionID, before string, limit int) (
 		return nil, false, false, hermesRow{}, "invalid_cursor"
 	}
 	entries, corrupt := parseHermesRows(rows)
-	if len(entries) == 0 && rows[0].Total > 0 && corrupt {
-		return nil, false, true, rows[0], "source_corrupt"
-	}
-	if toolCorrupt := r.attachToolResults(database, sessionID, entries); toolCorrupt {
+	if toolCorrupt := r.attachToolResultsContext(ctx, database, sessionID, entries); toolCorrupt {
 		corrupt = true
 	}
 	return entries, hasMore, corrupt, rows[0], ""
 }
 
 func (r *hermesReader) query(database, sessionID, before string, limit int) ([]hermesRow, bool, string) {
+	return r.queryContext(context.Background(), database, sessionID, before, limit)
+}
+
+func (r *hermesReader) queryContext(ctx context.Context, database, sessionID, before string, limit int) ([]hermesRow, bool, string) {
 	if limit < 1 {
 		limit = defaultPageSize
 	}
@@ -137,8 +157,6 @@ func (r *hermesReader) query(database, sessionID, before string, limit int) ([]h
 		if err != nil || cursor <= 0 {
 			return nil, false, "invalid_cursor"
 		}
-		// Resolve an old physical row, including an archived compaction
-		// generation, to its stable logical message before selecting rows.
 		cursorCTE = fmt.Sprintf(
 			"cursor AS (SELECT logical_id FROM visible WHERE id=%d AND role IN ('user','assistant') LIMIT 1)",
 			cursor,
@@ -184,9 +202,9 @@ func (r *hermesReader) query(database, sessionID, before string, limit int) ([]h
 			`WHERE s.id=CAST(X'%s' AS TEXT) ORDER BY sm.logical_id DESC;`,
 		sessionHex, limit+1, cursorFound, sessionHex,
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), hermesQueryTimeout)
+	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	command := exec.CommandContext(ctx, r.binary, "-readonly", "-batch", "-json", database, query)
+	command := exec.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
 	stdout := &boundedBuffer{remaining: maxHermesOutput}
 	var stderr boundedBuffer
 	stderr.remaining = 4096
@@ -219,11 +237,15 @@ func (r *hermesReader) query(database, sessionID, before string, limit int) ([]h
 }
 
 func (r *hermesReader) attachToolResults(database, sessionID string, entries []Entry) bool {
+	return r.attachToolResultsContext(context.Background(), database, sessionID, entries)
+}
+
+func (r *hermesReader) attachToolResultsContext(ctx context.Context, database, sessionID string, entries []Entry) bool {
 	callIDs := make(map[string]struct{})
 	for _, entry := range entries {
 		for _, tool := range entry.Tools {
-			if tool.ID != "" {
-				callIDs[tool.ID] = struct{}{}
+			if id := toolAssociationID(tool); id != "" {
+				callIDs[id] = struct{}{}
 			}
 		}
 	}
@@ -234,19 +256,26 @@ func (r *hermesReader) attachToolResults(database, sessionID string, entries []E
 	for id := range callIDs {
 		ids = append(ids, id)
 	}
-	rows, code := r.queryToolRows(database, sessionID, ids)
+	rows, code := r.queryToolRowsContext(ctx, database, sessionID, ids)
 	if code != "" {
 		return true
 	}
+	corrupt := false
 	for _, row := range rows {
-		output, truncated := clampText(sanitizeText(hermesTextHex(row.ContentHex)), maxEntryBytes)
+		row.ToolCallID = strings.TrimSpace(row.ToolCallID)
+		outputText, outputCorrupt := hermesTextHexValue(row.ContentHex)
+		if outputCorrupt {
+			corrupt = true
+			continue
+		}
+		output, truncated := clampText(sanitizeText(outputText), maxEntryBytes)
 		if output == "" {
 			continue
 		}
 		for entryIndex := range entries {
 			for toolIndex := range entries[entryIndex].Tools {
 				tool := &entries[entryIndex].Tools[toolIndex]
-				if tool.ID != row.ToolCallID {
+				if toolAssociationID(*tool) != row.ToolCallID {
 					continue
 				}
 				if tool.Output != "" && tool.Output != output {
@@ -259,10 +288,14 @@ func (r *hermesReader) attachToolResults(database, sessionID string, entries []E
 			}
 		}
 	}
-	return false
+	return corrupt
 }
 
 func (r *hermesReader) queryToolRows(database, sessionID string, callIDs []string) ([]hermesToolRow, string) {
+	return r.queryToolRowsContext(context.Background(), database, sessionID, callIDs)
+}
+
+func (r *hermesReader) queryToolRowsContext(ctx context.Context, database, sessionID string, callIDs []string) ([]hermesToolRow, string) {
 	sessionHex := hex.EncodeToString([]byte(sessionID))
 	encodedIDs := make([]string, 0, len(callIDs))
 	for _, id := range callIDs {
@@ -276,9 +309,9 @@ func (r *hermesReader) queryToolRows(database, sessionID string, callIDs []strin
 			`AND m.tool_call_id IN (%s) ORDER BY m.id;`,
 		sessionHex, strings.Join(encodedIDs, ","),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), hermesQueryTimeout)
+	queryCtx, cancel := context.WithTimeout(ctx, hermesQueryTimeout)
 	defer cancel()
-	command := exec.CommandContext(ctx, r.binary, "-readonly", "-batch", "-json", database, query)
+	command := exec.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
 	stdout := &boundedBuffer{remaining: maxHermesOutput}
 	var stderr boundedBuffer
 	stderr.remaining = 4096
@@ -305,8 +338,9 @@ func parseHermesRows(rows []hermesRow) ([]Entry, bool) {
 			continue
 		}
 		tools, toolsCorrupt := parseHermesToolCalls(row.ToolCalls)
-		corrupt = corrupt || toolsCorrupt
-		text := sanitizeText(hermesTextHex(row.ContentHex))
+		textValue, textCorrupt := hermesTextHexValue(row.ContentHex)
+		corrupt = corrupt || toolsCorrupt || textCorrupt
+		text := sanitizeText(textValue)
 		if text == "" && len(tools) == 0 {
 			continue
 		}
@@ -386,14 +420,19 @@ func hermesText(raw string) string {
 }
 
 func hermesTextHex(encoded string) string {
+	text, _ := hermesTextHexValue(encoded)
+	return text
+}
+
+func hermesTextHexValue(encoded string) (string, bool) {
 	if encoded == "" {
-		return ""
+		return "", false
 	}
 	decoded, err := hex.DecodeString(encoded)
 	if err != nil {
-		return ""
+		return "", true
 	}
-	return hermesText(string(decoded))
+	return hermesText(string(decoded)), false
 }
 
 func hermesTimestamp(value float64) string {
@@ -443,6 +482,7 @@ func (r *Reader) readHermesFor(agent, cwd, sessionID, before string, limit int) 
 	if cwd != "" && metadata.CWD != "" && !sameOpenCodeDirectory(cwd, metadata.CWD) {
 		return unavailableCode("invalid_session", "This conversation belongs to a different workspace."), nil
 	}
+	normalizeEntriesForResponse(entries)
 	return Page{
 		Available:     true,
 		Entries:       append([]Entry(nil), entries...),

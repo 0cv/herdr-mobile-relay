@@ -18,6 +18,7 @@ export default defineConfig({
   },
   projects: [
     { name: 'chromium-attention', use: { ...devices['Pixel 7'] } },
+    { name: 'webkit-attention', use: { ...devices['iPhone 15'] } },
   ],
   webServer: {
     command: `node scripts/browser-server.mjs ${JSON.stringify(webRoot)}`,
