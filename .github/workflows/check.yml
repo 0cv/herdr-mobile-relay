@@ -165,6 +165,8 @@ jobs:
 
   mobile-host-check:
     name: Mobile harness checks
+    # Temporarily disabled while mobile CI is isolated on ci-mobile.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
