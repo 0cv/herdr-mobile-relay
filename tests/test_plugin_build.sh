@@ -26,6 +26,11 @@ SETUP_RECORD="$WORK_DIR/setup-invocations"
 mkdir -p "$OLD_RELEASE/relay" "$NEW_RELEASE/relay" "$SOURCE_CONFIG/device-auth" \
     "$SOURCE_CONFIG/push" "$SOURCE_CONFIG/cloudflared" \
     "$TARGET_CONFIG/push" "$(dirname "$UNIT_FILE")" "$FAKE_BIN"
+canonical_dir() {
+    CDPATH='' cd "$1" && pwd -P
+}
+OLD_RELEASE=$(canonical_dir "$OLD_RELEASE")
+NEW_RELEASE=$(canonical_dir "$NEW_RELEASE")
 
 printf "HERDR_RELAY_TOKEN='source-token'\nHERDR_RELAY_INSTANCE_ID='source-instance'\nHERDR_RELAY_PORT='18375'\nCLOUDFLARED_CONFIG='%s/cloudflared/config.yml'\n" \
     "$SOURCE_CONFIG" > "$SOURCE_ENV"
@@ -61,9 +66,9 @@ case "$1" in
         root=$2
         release=$3
         temp="$root/.current-test"
-        rm -f "$temp"
+        rm -f "$temp" "$root/current"
         ln -s "$release" "$temp"
-        mv -Tf "$temp" "$root/current"
+        mv -f "$temp" "$root/current"
         ;;
     *) exit 1 ;;
 esac
@@ -94,9 +99,9 @@ printf '%s\n' "\${GH_TOKEN:-}" > "$TOKEN_RECORD"
 printf '%s\n' "\${HERDR_RELEASE_REPOSITORY:-}" > "$REPO_RECORD"
 [ "\${FAIL_INSTALLER:-}" != 1 ] || exit 1
 temp="\$INSTALL_ROOT/.current-install"
-rm -f "\$temp"
+rm -f "\$temp" "\$INSTALL_ROOT/current"
 ln -s "$NEW_RELEASE" "\$temp"
-mv -Tf "\$temp" "\$INSTALL_ROOT/current"
+mv -f "\$temp" "\$INSTALL_ROOT/current"
 EOF
 chmod 700 "$FAKE_INSTALLER"
 
@@ -153,6 +158,10 @@ cat > "$FAKE_BIN/sleep" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+cat > "$FAKE_BIN/uname" <<'EOF'
+#!/bin/sh
+printf 'Linux\n'
+EOF
 cat > "$FAKE_BIN/gh" <<'EOF'
 #!/bin/sh
 [ "${GH_AUTH_FAIL:-}" != 1 ] || exit 1
@@ -163,7 +172,8 @@ fi
 exit 1
 EOF
 chmod 700 "$FAKE_BIN/gh"
-chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr" "$FAKE_BIN/sleep"
+chmod 700 "$FAKE_BIN/systemctl" "$FAKE_BIN/curl" "$FAKE_BIN/herdr" \
+    "$FAKE_BIN/sleep" "$FAKE_BIN/uname"
 
 export SOURCE_CONFIG TARGET_CONFIG UNIT_FILE HEALTH_FILE TEST_VERSION RESTART_LOG
 export SETUP_RECORD
@@ -337,9 +347,9 @@ set -eu
 printf '%s\n' "\${GH_TOKEN:-}" > "$FRESH_TOKEN_RECORD"
 printf '%s\n' "\${HERDR_RELEASE_REPOSITORY:-}" > "$FRESH_REPO_RECORD"
 temp="\$INSTALL_ROOT/.current-install"
-rm -f "\$temp"
+rm -f "\$temp" "\$INSTALL_ROOT/current"
 ln -s "$FRESH_RELEASE" "\$temp"
-mv -Tf "\$temp" "\$INSTALL_ROOT/current"
+mv -f "\$temp" "\$INSTALL_ROOT/current"
 EOF
 chmod 700 "$FRESH_INSTALLER"
 rm -f "$RESTART_LOG"
