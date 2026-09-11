@@ -2,7 +2,7 @@ name: check
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, ci-mobile]
   pull_request:
 
 jobs:
@@ -165,8 +165,6 @@ jobs:
 
   mobile-host-check:
     name: Mobile harness checks
-    # Temporarily disabled while mobile CI is isolated on ci-mobile.
-    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -189,8 +187,10 @@ jobs:
   mobile:
     name: Mobile device CI
     if: >-
-      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')) ||
-      (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main')
+      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mobile')) ||
+      (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'main' ||
+        (github.event.pull_request.base.ref == 'dev' && github.event.pull_request.head.ref == 'ci-mobile' &&
+          github.event.pull_request.head.repo.full_name == github.repository)))
     needs: [release, mobile-host-check]
     uses: ./.github/workflows/mobile-ci.yml
     with:
