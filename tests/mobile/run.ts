@@ -274,7 +274,7 @@ function phonePlanContract(
   throw new Error(`PHONE_PLAN_MISSING: ${version} exposed no phone item in its update progress record`);
 }
 
-async function waitForPhoneCompletion(
+export async function waitForPhoneCompletion(
   platform: MobilePlatform,
   baseline: BundleSet['baselines'][number],
   controls: Set<string>,
@@ -285,7 +285,8 @@ async function waitForPhoneCompletion(
   let lastError = '';
   while (Date.now() < deadline) {
     try {
-      const evidence = await platform.readUpdateCompletion();
+      const evidence = await platform.readUpdateCompletion(deadline);
+      if (platform.name === 'android' && (Date.now() >= deadline || budget?.exhausted)) throw new Error('PHONE_COMPLETION_DEADLINE: late evidence refused');
       qualification.observe({ completion: evidence });
       if (!phonePlanContract(baseline, evidence, controls)) return evidence;
       assertPhoneUpdateAcknowledged(evidence);
@@ -303,7 +304,7 @@ async function waitForPhoneCompletion(
   throw new Error(`PHONE_COMPLETION_MISSING: ${lastError}`);
 }
 
-async function assertCandidateFailureObserved(
+export async function assertCandidateFailureObserved(
   platform: MobilePlatform,
   expected: BundleSet['candidate']['identity'],
   origin: string,
@@ -324,10 +325,12 @@ async function assertCandidateFailureObserved(
     qualification.observe({ fault: state });
     assertFaultActive(state, faultPath, faultKind, faultId, faultGeneration);
     try {
-      const identity = await platform.readRunningIdentity();
+      const identity = await platform.readRunningIdentity(deadline - (platform.name === 'android' ? 24_000 : 0));
+      if (platform.name === 'android' && (Date.now() >= deadline || budget?.exhausted)) throw new Error('FAILURE_OBSERVATION_DEADLINE: late identity refused');
       qualification.observe({ identity });
       assertStandaloneOwnership(identity, origin);
-      const completion = await platform.readUpdateCompletion();
+      const completion = await platform.readUpdateCompletion(deadline);
+      if (platform.name === 'android' && (Date.now() >= deadline || budget?.exhausted)) throw new Error('FAILURE_OBSERVATION_DEADLINE: late completion refused');
       qualification.observe({ identity, completion });
       if (phonePlanContract(baseline, completion, controls)) assertPhoneUpdateNotAcknowledged(completion);
       if (identity.entry !== expected.entry || identity.script !== expected.script || identity.style !== expected.style) {
@@ -363,7 +366,8 @@ async function waitForCandidate(
   let lastError = '';
   while (Date.now() < deadline) {
     try {
-      const identity = await platform.readRunningIdentity();
+      const identity = await platform.readRunningIdentity(deadline);
+      if (platform.name === 'android' && (Date.now() >= deadline || budget?.exhausted)) throw new Error('CANDIDATE_DEADLINE: late identity refused');
       qualification.observe({ identity });
       if (identity.navigationId) navigationIds.add(identity.navigationId);
       assertStandaloneOwnership(identity, origin);
@@ -762,7 +766,7 @@ async function main(): Promise<void> {
   if (result.result !== 'passed') process.exitCode = 1;
 }
 
-main().catch((error: unknown) => {
+if (import.meta.main) main().catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.stack || error.message : String(error)}\n`);
   process.exitCode = 1;
 });

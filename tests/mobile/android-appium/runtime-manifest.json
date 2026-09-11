@@ -876,5 +876,35 @@
       "lib/utils.js": "0eefb143d646471c6724d6fd60d0d5c547e564d37d216f590fcc1afb70d96356",
       "package.json": "35ed92a247abf22f1e42b9b4aa8387f991f9176e551f85d120d29b68ee36fa66"
     }
+  },
+  "ws": {
+    "name": "ws",
+    "parent": "android",
+    "condition": "require",
+    "version": "8.18.3",
+    "engines": {
+      "node": ">=10.0.0"
+    },
+    "root": "node_modules/ws",
+    "entry": "index.js",
+    "files": {
+      "wrapper.mjs": "e37bddaf6d40a3b2ee107906f792cc5117e543cba776fa25f7aeeb3908637f7c",
+      "index.js": "70a117e957f85622a6fe2be39afb9597489965fe3fe6ebefd84adb8f0d9d114a",
+      "package.json": "aaedef2a72b60db8fb36d9b46c48d44986051785a2b6450c62994603c85dd959",
+      "lib/constants.js": "7efe5c0b888e4fde8bd9076c65b81bfd0df0963810b977d890df126929bb9190",
+      "lib/websocket-server.js": "fe8a410e89325608dc94d09778a2650bf041b9b7f5dff61d5005ea111e09a508",
+      "lib/stream.js": "a56fcb6e2b152097ee820b6f5410b1f71e59819b45d08d9f8bda588fe39070ec",
+      "lib/event-target.js": "c45d3c6e12d170c860c0c3f1a050aa0f864d9806632b609a1e607d675aba128c",
+      "lib/permessage-deflate.js": "adcedcb3069b7c6db3fd6cec93699ef70bd4061126b987dd9a8f7cb16d2b7530",
+      "lib/receiver.js": "7b9f6afc1fffb5c98d768d7d3d6fc1b709f28b45c6ae2682ff255075394323d9",
+      "lib/sender.js": "a80e8688dde53d46d836a58c9d15121ee12e978b7b0f656ed818c63d20df5f94",
+      "lib/subprotocol.js": "be3f6323d6f549568577dcba9004c1479d95c65a7abb0fe0c582875b9fac0b7c",
+      "lib/limiter.js": "e0469d4b83f6ba764b15f80e1766b75c136fbff68f048f4c050f0b1c7f065f69",
+      "lib/websocket.js": "ea50fd045185975e0e572637cd96fa065a7e988a1d1c890d18002c75a8a253b9",
+      "lib/validation.js": "41ce8e83d0d434132e1704895fedb91f6703a701b42d91c80954ab29b2845593",
+      "lib/buffer-util.js": "8b0a45739132f82e25ea13163780abf547ccfe989267f3eb7abb475beec92da3",
+      "lib/extension.js": "852564f0f6b460287043803eae732666fb5610f676874354fc89f06aa4e986ed",
+      "browser.js": "010da44addea1d88b2b732540c3f1fd0cbcb28926b96623d4c64222e0ead2d0e"
+    }
   }
 }

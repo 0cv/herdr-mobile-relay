@@ -184,6 +184,21 @@ jobs:
           sudo apt-get install -y libxml2-utils
       - run: make mobile-ci-check
 
+  mobile-inspection-check:
+    name: Android installed inspection controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.12.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile --cwd tests/mobile
+      - run: bun run --cwd tests/mobile test:android-inspection
+
   mobile:
     name: Mobile device CI
     if: >-
@@ -191,7 +206,7 @@ jobs:
       (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'main' ||
         (github.event.pull_request.base.ref == 'dev' && github.event.pull_request.head.ref == 'ci-mobile' &&
           github.event.pull_request.head.repo.full_name == github.repository)))
-    needs: [release, mobile-host-check]
+    needs: [release, mobile-host-check, mobile-inspection-check]
     uses: ./.github/workflows/mobile-ci.yml
     with:
       artifact_run_id: ${{ github.run_id }}

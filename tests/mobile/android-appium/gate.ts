@@ -12,7 +12,13 @@ type RuntimePackage = {
   name: string; parent: string | null; condition: 'import' | 'require'; version: string;
   engines: Record<string, string>; root: string; entry: string; files: Record<string, string>;
 };
-type ProducerManifest = { compiler: string; files: Record<string, { before: string; after: string }> };
+type ProducerManifest = {
+  compiler: string;
+  files: Record<string, { before: string; after: string }>;
+  authored: Record<string, { source: string; sha256: string }>;
+  inputs: Record<string, string>;
+};
+const authoredFiles = ['adb-inspection.cjs', 'adb-inspection.d.cts', 'retained-inspection.cjs', 'retained-inspection.d.cts', 'target-inspection.cjs', 'target-inspection.d.cts'];
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const artifact = (name: string) => new URL(name, import.meta.url);
 const load = async <T>(name: string): Promise<T> => JSON.parse(await readFile(artifact(name), 'utf8')) as T;
@@ -27,10 +33,31 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
   assert.ok(process.execArgv.includes('--experimental-import-meta-resolve'), 'Explicit Node ESM parent resolution is required');
   assert.ok(Number(process.versions.node.split('.')[0]) >= 24, 'Use the existing Node 24+ toolchain');
   assert.ok(Number(execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.')[0]) >= 10);
+  assert.ok(!process.env.NODE_PATH, 'NODE_PATH cannot alter the installed producer resolver');
   const root = await realpath(home);
   const packages: Record<string, RuntimePackage> = { appium: await load<RuntimePackage>('appium-runtime-manifest.json'),
     ...await load<Record<string, RuntimePackage>>('runtime-manifest.json') };
   const producer = await load<ProducerManifest>('producer-manifest.json');
+  assert.deepEqual(Object.keys(producer.inputs).sort(), ['appium-runtime-manifest.json', 'declaration-map.ts', 'gate.ts', 'producer-transform.json', 'runtime-manifest.json'].sort(), 'Incomplete producer input contract');
+  for (const [file, expected] of Object.entries(producer.inputs)) {
+    assert.equal(hash(await readFile(artifact(file))), expected, `Changed producer input: ${file}`);
+  }
+  const authoredPaths = ['lib/commands/context', 'build/lib/commands/context'].flatMap(directory => authoredFiles.map(file => `${directory}/${file}`));
+  assert.deepEqual(Object.keys(producer.authored).sort(), authoredPaths.sort(), 'Incomplete authored producer contract');
+  const authoredEvidence: Record<string, string> = {};
+  for (const file of authoredPaths) {
+    const expected = producer.authored[file];
+    assert.equal(expected.source, file.split('/').at(-1), 'Incorrect authored source association');
+    assert.equal(hash(await readFile(artifact(expected.source))), expected.sha256, `Changed authored input: ${file}`);
+    const path = join(root, packages.android.root, file);
+    if (patched) {
+      assert.equal(await realpath(path), path, `Symlinked authored producer: ${file}`);
+      assert.equal(hash(await readFile(path)), expected.sha256, `Changed authored producer: ${file}`);
+      authoredEvidence[file] = expected.sha256;
+    } else {
+      await assert.rejects(readFile(path), { code: 'ENOENT' }, `Unexpected existing authored producer: ${file}`);
+    }
+  }
   const producerFiles = ['exports', 'helpers'].flatMap(name => [
     `lib/commands/context/${name}.ts`,
     ...['.js', '.js.map', '.d.ts', '.d.ts.map'].map(extension => `build/lib/commands/context/${name}${extension}`),
@@ -43,7 +70,7 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
     assert.equal(hash(await readFile(join(root, file))), hash(await readFile(artifact(file))), `Changed installation ${file}`);
   }
   const entries: Record<string, string> = {};
-  const evidence: Record<string, unknown> = { home: root, node: process.versions.node };
+  const evidence: Record<string, unknown> = { home: root, node: process.versions.node, authored: authoredEvidence, inputs: producer.inputs };
   for (const [id, expected] of Object.entries(packages)) {
     const parent = expected.parent ? entries[expected.parent] : pathToFileURL(join(root, 'package.json')).href;
     const entry = expected.condition === 'require'
@@ -69,6 +96,28 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
     }
     evidence[id] = { entry, parent, condition: expected.condition, realpath: packageRoot, version: pkg.version, ...(pkg.engines ? { engines: pkg.engines } : {}), files: observed };
   }
+  const context = new URL('./commands/context/exports.js', entries.android).href;
+  const helper = new URL('./retained-inspection.cjs', context).href;
+  if (patched) assert.equal(pathToFileURL(createRequire(helper).resolve('./adb-inspection.cjs')).href, new URL('./adb-inspection.cjs', context).href);
+  const transport = new URL('./target-inspection.cjs', context).href;
+  assert.equal(import.meta.resolve('./retained-inspection.cjs', context), helper);
+  if (patched) assert.equal(pathToFileURL(createRequire(helper).resolve('./target-inspection.cjs')).href, transport);
+  assert.equal(pathToFileURL(createRequire(transport).resolve('ws')).href, entries.ws);
+  for (const [parent, specifiers] of [
+    [helper, ['appium-android-driver', 'appium-chromedriver']],
+    [new URL('./lib/buffer-util.js', entries.ws).href, ['bufferutil']],
+    [new URL('./lib/validation.js', entries.ws).href, ['utf-8-validate']],
+  ] as const) {
+    for (const specifier of specifiers) {
+      if (specifier === 'appium-android-driver' || specifier === 'appium-chromedriver') {
+        const target = specifier === 'appium-android-driver' ? entries.android : entries.wrapper;
+        assert.equal(import.meta.resolve(specifier, parent), target, 'Changed authored declaration type resolver');
+      } else {
+        assert.throws(() => createRequire(parent).resolve(specifier), { code: 'MODULE_NOT_FOUND' }, `Unexpected optional ws resolver: ${specifier}`);
+      }
+    }
+  }
+  evidence.inspectionResolvers = {context, helper, transport, ws: entries.ws, absent: ['bufferutil', 'utf-8-validate']};
   const main = join(root, packages.appium.root, 'build/lib/main.js');
   assert.ok(packages.appium.files['build/lib/main.js'], 'Appium executable must be attested');
   const selected = JSON.parse(execFileSync(process.execPath, [main, 'driver', 'list', '--installed', '--json'], {
@@ -132,6 +181,9 @@ export async function patch(home: string): Promise<void> {
     assert.equal(hash(bytes), manifest.files[file].after, `Incorrect producer postimage: ${file}`);
   }
   for (const [file, bytes] of output) await writeFile(join(root, file), bytes);
+  for (const [file, expected] of Object.entries(manifest.authored)) {
+    await writeFile(join(root, file), await readFile(artifact(expected.source)));
+  }
   const evidence = await effectiveInstallation(home, true);
   await writeFile(join(home, 'retained-owner-integrity.json'), JSON.stringify(evidence, null, 2) + '\n');
 }

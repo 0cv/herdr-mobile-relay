@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AndroidPlatform } from '../platforms/android';
 import { AppiumClient } from '../support/webdriver';
+import { retainedFixture } from './android-retained-fixture';
 
 export async function runAndroidRetainedResponseRegressions(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'android-retained-responses-'));
@@ -21,7 +22,8 @@ export async function runAndroidRetainedResponseRegressions(): Promise<void> {
       let failed = false;
       let armed = false;
       let calls = 0;
-      let armedUrls = 0;
+      const handle = '753D4398F5ABC414D3DAABBF0B329743';
+      const startedAt = Date.now();
       let requestsAtFault = 0;
       const response = (value: unknown, status = 200) => Response.json({ value, sessionId: 'original' }, { status });
       const client = new AppiumClient('http://responses.invalid', 2_000, async (input, init) => {
@@ -29,24 +31,26 @@ export async function runAndroidRetainedResponseRegressions(): Promise<void> {
         const path = new URL(String(input)).pathname.replace('/session/original', '');
         const body = init?.body ? JSON.parse(String(init.body)) : {};
         if (path === '/session') return response({});
-        const proof = path === '/execute/sync' && body.script.includes('provider: window.matchMedia');
-        const target = operation === 'contexts' ? path === '/contexts'
-          : operation === 'handles' ? path === '/window/handles'
-            : operation === 'window' ? path === '/window' && init?.method === 'GET'
-              : operation === 'url' ? path === '/url'
-                : operation === 'proof' ? proof
-                  : operation === 'agent' ? path === '/url' && armed && ++armedUrls > 2
-                    : operation === 'dialog' ? path === '/elements'
-                      : path === '/execute/sync' && !proof && body.script !== 'mobile: getContexts';
+        const inspection = body.script === 'mobile: inspectRetainedChromeTargets';
+        const shape = ['contexts', 'handles', 'window', 'url', 'proof'].includes(operation);
+        const target = shape ? inspection
+          : operation === 'agent' ? path === '/url'
+            : operation === 'dialog' ? path === '/elements'
+              : path === '/execute/sync' && !inspection && body.script !== 'mobile: getContexts';
         if (armed && !failed && target) {
           failed = true;
           requestsAtFault = calls;
           if (fault === 'transport') throw new Error('connection refused after attachment');
           if (fault === 'http') return new Response('upstream refusal', { status: 500 });
           if (fault === 'session') return response({ error: 'invalid session id', message: 'original session disappeared' }, 500);
-          if (fault === 'missing') return Response.json({});
-          return response(fault === 'null' ? null : fault === 'object' ? {} : fault === 'number' ? 123 : fault === 'empty-array' ? [] : [null]);
+          const malformed = fault === 'missing' ? undefined : fault === 'null' ? null : fault === 'object' ? {} : fault === 'number' ? 123 : fault === 'empty-array' ? [] : [null];
+          const result = retainedFixture([handle], handle, handle, startedAt);
+          const targetObject: any = operation === 'contexts' ? result : operation === 'proof' ? result.before : result.after;
+          const key = operation === 'contexts' ? 'targets' : operation === 'handles' ? 'handles' : operation === 'window' ? 'selectedHandle' : operation === 'url' ? 'document' : 'document';
+          targetObject[key] = malformed;
+          return response(result);
         }
+        if (inspection) return response(retainedFixture([handle], handle, handle, startedAt));
         if (path === '/contexts') return response(['NATIVE_APP', 'CHROMIUM']);
         if (path === '/window/handles') return response(['installed']);
         if (path === '/window') return response('installed');
@@ -57,7 +61,8 @@ export async function runAndroidRetainedResponseRegressions(): Promise<void> {
       });
       await client.create({ capabilities: {} });
       const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://responses.invalid', outputDir: root, certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
-      Object.assign(platform, { driver: client, installedTarget: { packageName: 'com.android.chrome' } });
+      Object.assign(platform, { driver: client, installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
+        retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([handle], handle, handle, startedAt).original } });
       await platform.attachToInstalledView();
       armed = true;
       if (operation === 'agent') {

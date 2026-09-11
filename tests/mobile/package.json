@@ -12,6 +12,8 @@
     "lint": "eslint .",
     "check": "tsc --noEmit",
     "test:unit": "bun unit/run.ts",
+    "test:android-inspection": "bash unit/android-inspection-check.sh",
+    "test:android-attachment": "bun unit/android-retained-launch.ts --recorded-two-page",
     "prepare:bundle": "bun prepare.ts",
     "prepare:current": "bun prepare-current.ts",
     "test:cache-recovery": "bun integration/cache-recovery.ts",

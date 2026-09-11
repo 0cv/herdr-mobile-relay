@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AndroidPlatform } from '../platforms/android';
 import { AppiumClient } from '../support/webdriver';
+import { retainedFixture } from './android-retained-fixture';
 
 export async function runAndroidAttachmentRefusalRegressions(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), 'android-attachment-refusal-'));
@@ -18,6 +19,10 @@ export async function runAndroidAttachmentRefusalRegressions(): Promise<void> {
         let failed = false;
         let active = 0;
         let maxActive = 0;
+        const bootstrap = '2E26E8C2C4CFF68B69AA865CD8132F98';
+        const installed = '753D4398F5ABC414D3DAABBF0B329743';
+        const startedAt = Date.now();
+        let selected = bootstrap;
         const response = (value: unknown, status = 200) => new Response(JSON.stringify({ value, sessionId: 'original' }), { status });
         const client = new AppiumClient('http://attachment.invalid', 2_000, async (input, init) => {
           const path = new URL(String(input)).pathname.replace('/session/original', '');
@@ -27,14 +32,18 @@ export async function runAndroidAttachmentRefusalRegressions(): Promise<void> {
           maxActive = Math.max(maxActive, active);
           try {
             if (path === '/session') return response({});
-            const operation = path === '/execute/sync' && body.script !== 'mobile: getContexts' ? 'document' : path;
-            if (!failed && operation === failurePath) {
+            const inspection = body.script === 'mobile: inspectRetainedChromeTargets';
+            const target = failurePath === '/context' || failurePath === '/window' ? path === failurePath
+              : failurePath === 'document' ? inspection && selected === installed : inspection;
+            if (!failed && target) {
               failed = true;
               if (failureKind === 'transport') throw new Error('connection lost');
               if (failureKind === 'malformed') return new Response('{', { status: 200 });
               const error = failureKind === 'session' ? 'invalid session id' : failureKind === 'window' ? 'no such window' : 'unknown error';
               return response({ error, message: 'retained producer refused ownership' }, 500);
             }
+            if (inspection) return response(retainedFixture([bootstrap, installed], selected, installed, startedAt));
+            if (path === '/window' && init?.method === 'POST') selected = body.handle;
             if (path === '/contexts') return response(['NATIVE_APP', 'CHROMIUM', 'WEBVIEW_alternate']);
             if (path === '/window/handles') return response(['original-window']);
             if (path === '/url') return response('https://fixture.test/');
@@ -49,21 +58,22 @@ export async function runAndroidAttachmentRefusalRegressions(): Promise<void> {
         await client.create({ capabilities: {} });
         const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://attachment.invalid', outputDir: root,
           certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
-        Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome' } });
+        Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
+          retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([bootstrap, installed], bootstrap, installed, startedAt).original } });
         let first: unknown;
-        await assert.rejects(() => platform.attachToInstalledView(2_000), error => {
+        await assert.rejects(() => platform.attachToInstalledView(30_000), error => {
           first = error;
           return /ANDROID_CONTEXT_OWNERSHIP/u.test(String(error));
         });
         assert.equal(failed, true, `${failurePath}/${failureKind}`);
         const count = calls.length;
-        await assert.rejects(() => platform.attachToInstalledView(2_000), error => error === first);
+        await assert.rejects(() => platform.attachToInstalledView(30_000), error => error === first);
         await assert.rejects(() => platform.readRunningIdentity(), error => error === first);
         await assert.rejects(() => platform.launchInstalledApp(), error => error === first);
         await assert.rejects(() => platform.relaunchInstalledApp(), error => error === first);
         assert.equal(calls.length, count);
         assert.equal(calls.filter(path => path === '/session').length, 1);
-        assert.equal(calls.filter(path => path === '/contexts').length, 1);
+        assert.equal(calls.filter(path => path === '/contexts').length, 0);
         assert.equal(maxActive, 1);
         assert.equal(active, 0);
       }

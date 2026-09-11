@@ -191,6 +191,7 @@ export class AppiumClient {
   private readonly lookupHistory: WebDriverLookupEvidence[] = [];
   private firstFatal?: WebDriverFatalEvidence;
   private commandGuard?: { before: () => void; failure: (error: unknown, path: string) => void };
+  private guardedCommandActive = false;
 
   constructor(baseUrl = 'http://127.0.0.1:4723', requestTimeoutMs = 30_000, transport: FetchTransport = fetch) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
@@ -215,6 +216,11 @@ export class AppiumClient {
     };
   }
 
+  assertSessionIdentity(sessionId: string): void {
+    this.retainSessionOwner()();
+    if (sessionId !== this.sessionId) throw new Error('APPIUM_SESSION: retained response session mismatch');
+  }
+
   retainSessionOwner(): () => void {
     const owner = this.sessionOwner;
     const session = this.sessionId;
@@ -228,6 +234,7 @@ export class AppiumClient {
   }
 
   async create(options: SessionOptions): Promise<Record<string, unknown>> {
+    this.commandGuard?.before();
     if (this.unusable) {
       throw new WebDriverError({
         code: 'APPIUM_SESSION_UNUSABLE',
@@ -460,6 +467,11 @@ export class AppiumClient {
 
   async command<T = unknown>(path: string, method: string, body?: unknown, timeoutMs?: number): Promise<T> {
     this.commandGuard?.before();
+    if (this.commandGuard && this.guardedCommandActive) {
+      this.commandGuard.failure(new Error('APPIUM_SESSION: overlapping retained command'), path);
+      throw new Error('APPIUM_SESSION: overlapping retained command');
+    }
+    this.guardedCommandActive = true;
     try {
       this.assertUsable(path);
       const response = await this.request<T>(this.sessionPath(path), method, body, timeoutMs);
@@ -473,12 +485,15 @@ export class AppiumClient {
           throw new Error('APPIUM_RESPONSE: missing current owner document');
         }
       }
+      this.commandGuard?.before();
       return response.value as T;
     } catch (error) {
       if (isFatalDriverError(error)) this.recordFatal(error);
       if (error instanceof WebDriverError && error.timedOut && path !== '/status') this.unusable = true;
       this.commandGuard?.failure(error, path);
       throw error;
+    } finally {
+      this.guardedCommandActive = false;
     }
   }
 
@@ -523,6 +538,8 @@ export class AppiumClient {
     const budgetRemainingMs = enforceBudget ? this.budget?.remainingMs ?? operationTimeoutMs : operationTimeoutMs;
     const requestTimeoutMs = Math.max(1, Math.min(operationTimeoutMs, budgetRemainingMs));
     const commandPath = path.replace(/^\/session\/[^/]+(?=\/)/u, '');
+    const retainedInspection = commandPath === '/execute/sync' && body !== null && typeof body === 'object'
+      && 'script' in body && body.script === 'mobile: inspectRetainedChromeTargets';
     const allowance = driverCommandAllowance(commandPath, method, body);
     const startedAt = Date.now();
     if (enforceBudget && this.budget && requestTimeoutMs < allowance) {
@@ -568,10 +585,11 @@ export class AppiumClient {
         this.unusable = true;
         controller.abort(error);
       }
-      const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, timedOut, error instanceof Error ? error.message : String(error));
+      const detail = retainedInspection ? 'Retained inspection transport failed' : error instanceof Error ? error.message : String(error);
+      const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, timedOut, detail);
       throw new WebDriverError({
         code: timedOut ? 'APPIUM_TIMEOUT' : interrupted ? 'APPIUM_INTERRUPTED' : 'APPIUM_HTTP',
-        message: error instanceof Error ? error.message : String(error),
+        message: detail,
         path,
         method,
         durationMs: command.durationMs,
@@ -606,9 +624,8 @@ export class AppiumClient {
       });
     }
     if (!response.ok || (parsed as any).value?.error) {
-      const detail = typeof (parsed as any).value === 'object'
-        ? JSON.stringify((parsed as any).value)
-        : String((parsed as any).value || text);
+      const detail = retainedInspection ? 'Retained inspection refused'
+        : typeof (parsed as any).value === 'object' ? JSON.stringify((parsed as any).value) : String((parsed as any).value || text);
       const command = this.recordCommand(operation, path, method, startedAt, requestTimeoutMs, false, detail);
       throw new WebDriverError({
         code: 'APPIUM_COMMAND',

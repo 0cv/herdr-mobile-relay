@@ -15,12 +15,20 @@
     [
       "  this.chromedriver = chromedriver;\n  chromedriver.on(",
       "  const token = chromedriver.sessionId();\n  if (!token) throw new Error('New Chrome owner has no session token');\n  retainedChromeOwners.set(this, {owner: chromedriver, token, failed: false});\n  this.chromedriver = chromedriver;\n  chromedriver.on("
+    ],
+    [
+      "    await dismissChromeWelcome.bind(this)();\n  }\n}",
+      "    await dismissChromeWelcome.bind(this)();\n  }\n  try {\n    const {default: retainedInspection} = await import('./retained-inspection.cjs');\n    await retainedInspection.installRetainedInspection(this, chromedriver,\n      () => requireRetainedChromeOwner(this, CHROMIUM_WIN),\n      () => { retainedChromeOwners.get(this)!.failed = true; });\n  } catch (error) {\n    retainedChromeOwners.get(this)!.failed = true;\n    throw error;\n  }\n}"
     ]
   ],
   "helpers": [
     [
       "    this.log.debug('ChromeDriver is not associated with a window. Re-initializing the session.');",
       "    if (this.isChromeSession) {\n      throw new Error('Retained Chrome owner has no working window');\n    }\n    this.log.debug('ChromeDriver is not associated with a window. Re-initializing the session.');"
+    ],
+    [
+      "  cacheChromedriverCaps.bind(this)(sessionCaps, context);\n  return chromedriver;",
+      "  cacheChromedriverCaps.bind(this)(sessionCaps, context ?? (this.isChromeSession ? CHROMIUM_WIN : undefined));\n  return chromedriver;"
     ]
   ]
 }

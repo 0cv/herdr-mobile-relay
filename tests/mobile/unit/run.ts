@@ -1008,38 +1008,20 @@ test('Android Chrome DevTools readiness recognizes the published socket', async 
 });
 
 test('Android installed attachment selects the owned standalone window instead of a browser window', async () => {
-  const platform = new AndroidPlatform({
-    origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: join(tmpdir(), 'herdr-mobile-ci-unit'),
-    certificate: '', setupUrl: '', deviceId: 'emulator-5554',
-    budget: new PhaseBudget('android-attachment-test', { timeoutMs: 10_000, recoveryLimit: 1 }),
-  });
-  (platform as any).installedTarget = {
-    packageName: 'com.android.chrome', activity: 'org.chromium.chrome.browser.webapps.WebappActivity',
-    shortcut: { id: 'id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay', url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac' },
-  };
-  (platform as any).isInstalledTargetForeground = async () => true;
-  const driver = platform.driver as any;
-  let selectedWindow = '';
-  driver.contexts = async () => ['NATIVE_APP', 'CHROMIUM'];
-  driver.contextMetadataRaw = async () => [];
-  driver.switchContext = async () => undefined;
-  driver.windowHandles = async () => ['browser-window', 'installed-window'];
-  driver.switchWindow = async (handle: string) => { selectedWindow = handle; };
-  driver.currentWindow = async () => selectedWindow;
-  driver.currentUrl = async () => 'https://fixture.test/';
-  driver.execute = async () => selectedWindow === 'installed-window'
-    ? { origin: 'https://fixture.test', standalone: true, provider: 'android-standalone' }
-    : { origin: 'https://fixture.test', standalone: false, provider: 'browser' };
-  await platform.attachToInstalledView();
-  assert.equal((platform as any).selectedInstalledWindow, 'installed-window');
+  const { runAndroidRetainedLaunchRegressions } = await import('./android-retained-launch');
+  await runAndroidRetainedLaunchRegressions(['recorded-two-page']);
 });
 
 test('Android web controls use supported locators and preserve ownership failures', async () => {
+  const { retainedFixture } = await import('./android-retained-fixture');
   type ControlMode = 'settings' | 'ordinary' | 'disabled' | 'hidden' | 'none';
   const makeHarness = async (initialMode: ControlMode, timeoutMs = 30_000) => {
     const budget = new PhaseBudget(`android-web-control-${initialMode}`, { timeoutMs, recoveryLimit: 1 });
     let mode = initialMode;
-    let selected = '';
+    const handle = '753D4398F5ABC414D3DAABBF0B329743';
+    const startedAt = Date.now();
+    let failedNative = false;
+    let selected = handle;
     let attachmentChecks = 0;
     let requests = 0;
     const locators: Array<{ using: string; value: string }> = [];
@@ -1062,7 +1044,14 @@ test('Android web controls use supported locators and preserve ownership failure
       if (path.endsWith('/url')) return response('https://fixture.test/');
       if (path.endsWith('/execute/sync')) {
         if (body.script === 'mobile: getContexts') return response([]);
-        return response({ origin: 'https://fixture.test', standalone: selected === 'installed-window', provider: selected === 'installed-window' ? 'android-standalone' : 'browser' });
+        if (body.script === 'mobile: inspectRetainedChromeTargets') {
+          attachmentChecks++;
+          const result = retainedFixture([handle], selected, handle, startedAt);
+          result.original.sessionId = 'session';
+          if (failedNative) result.after.native.activity = 'com.android.launcher3.Launcher';
+          return response(result);
+        }
+        return response({ origin: 'https://fixture.test', standalone: selected === handle, provider: selected === handle ? 'android-standalone' : 'browser' });
       }
       if (path.endsWith('/element') && init?.method === 'POST') {
         const locator = { using: String(body.using || ''), value: String(body.value || '') };
@@ -1099,10 +1088,7 @@ test('Android web controls use supported locators and preserve ownership failure
       shortcut: { id: 'id', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay', url: 'https://fixture.test/', scope: 'https://fixture.test/', mac: 'mac' },
     };
     (platform as any).installedPackage = 'com.android.chrome';
-    (platform as any).foregroundEvidence = async () => {
-      attachmentChecks += 1;
-      return { packageName: 'com.android.chrome', activity: 'org.chromium.chrome.browser.webapps.WebappActivity', pid: '1', raw: '' };
-    };
+    (platform as any).retainedOwner = { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([handle], handle, handle, startedAt).original };
     return {
       platform,
       client,
@@ -1111,6 +1097,7 @@ test('Android web controls use supported locators and preserve ownership failure
       get requests() { return requests; },
       get attachmentChecks() { return attachmentChecks; },
       setMode(value: ControlMode) { mode = value; },
+      failNative() { failedNative = true; },
     };
   };
 
@@ -1124,9 +1111,7 @@ test('Android web controls use supported locators and preserve ownership failure
   assert.ok(harness.locators.some((locator) => locator.value.includes('starts-with(@aria-label')));
 
   const beforeOwnershipFailure = harness.requests;
-  (harness.platform as any).foregroundEvidence = async () => ({
-    packageName: 'com.google.android.apps.nexuslauncher', activity: 'com.android.launcher3.Launcher', pid: '2', raw: '',
-  });
+  harness.failNative();
   await assert.rejects(() => harness.platform.clickWebText('Mixed'), /ANDROID_CONTEXT_OWNERSHIP/);
   const afterOwnershipFailure = harness.requests;
   await assert.rejects(() => harness.platform.clickWebText('Mixed'), /ANDROID_CONTEXT_OWNERSHIP/);
@@ -2307,6 +2292,10 @@ test('Android CI gates both local Appium launch paths', async () => {
 test('Android retained post-attachment and response-shape refusals', async () => {
   const { runAndroidRetainedResponseRegressions } = await import('./android-retained-responses');
   await runAndroidRetainedResponseRegressions();
+});
+test('Android retained passive inspection decoder and ownership regressions', async () => {
+  const { runAndroidRetainedInspectionRegressions } = await import('./android-retained-inspection');
+  await runAndroidRetainedInspectionRegressions();
 });
 test('Android retained signed launch and explicit lifecycle regressions', async () => {
   const { runAndroidRetainedLaunchRegressions } = await import('./android-retained-launch');

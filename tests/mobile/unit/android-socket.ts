@@ -1,97 +1,69 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { AndroidPlatform, androidChromeCapabilities } from '../platforms/android';
 import { AppiumClient } from '../support/webdriver';
 import { PhaseBudget } from '../support/budget';
-import type { DiagnosticRecorder } from '../support/diagnostics';
+import { retainedFixture } from './android-retained-fixture';
 
 export async function runAndroidSocketRegressions(): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), 'android-socket-'));
-  const previousAdb = process.env.ADB;
-  const adb = join(root, 'adb');
-  const state = join(root, 'state');
-  await writeFile(adb, `#!/bin/sh\nexec /bin/cat '${state}'\n`, { mode: 0o755 });
-  process.env.ADB = adb;
-  try {
-    for (const fault of ['search', 'browser', 'other', 'origin', 'document', 'native-failure', 'missing', 'empty-valid']) {
-      const foreground = async (pid: string, pkg = 'com.android.chrome', activity = 'org.chromium.chrome.browser.webapps.WebappActivity') => {
-        await writeFile(state, `mResumedActivity: ActivityRecord{123 u0 ${pkg}/${activity} pid=${pid}}\n`);
-      };
-      await foreground('123');
-      let selected = '';
-      let broken = false;
-      const calls: string[] = [];
-      const windows: string[] = [];
-      const metadataArgs: unknown[] = [];
-      const socketMetadata = [{ proc: '@chrome_devtools_remote', webview: 'CHROMIUM', webviewName: 'CHROMIUM', info: { Browser: 'Chrome/123' }, pages: [{ id: 'page' }] }];
-      const response = (value: unknown) => new Response(JSON.stringify({ value, sessionId: 'socket-session' }));
-      const client = new AppiumClient('http://fake.test', 2_000, async (input, init) => {
-        const path = new URL(String(input)).pathname;
-        const body = init?.body ? JSON.parse(String(init.body)) : {};
-        calls.push(path);
-        if (path === '/session') return response({});
-        if (path.endsWith('/contexts')) return response(['NATIVE_APP', 'CHROMIUM']);
-        if (path.endsWith('/window/handles')) return response(['browser', 'installed', 'other-good']);
-        if (path.endsWith('/window')) {
-          if (init?.method === 'POST') { selected = body.handle; windows.push(selected); }
-          return response(selected);
-        }
-        if (path.endsWith('/url')) return response(broken && fault === 'origin' ? 'https://wrong.test/' : 'https://fixture.test/');
-        if (path.endsWith('/execute/sync')) {
-          if (body.script === 'mobile: getContexts') {
-            metadataArgs.push(body.args);
-            return response(broken && ['missing', 'empty-valid'].includes(fault) ? [] : socketMetadata);
+  for (const fault of ['search', 'browser', 'other', 'origin', 'document', 'native-failure', 'missing', 'empty-valid']) {
+    const bootstrap = '2E26E8C2C4CFF68B69AA865CD8132F98';
+    const installed = '753D4398F5ABC414D3DAABBF0B329743';
+    const startedAt = Date.now();
+    let selected = bootstrap;
+    let broken = false;
+    const calls: string[] = [];
+    const windows: string[] = [];
+    const metadataArgs: unknown[] = [];
+    const response = (value: unknown) => Response.json({ value, sessionId: 'original' });
+    const client = new AppiumClient('http://fake.test', 30_000, async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      calls.push(path);
+      if (path === '/session') return response({});
+      if (path.endsWith('/window')) {
+        if (init?.method === 'POST') { selected = body.handle; windows.push(selected); }
+        return response(selected);
+      }
+      if (path.endsWith('/execute/sync')) {
+        if (body.script === 'mobile: getContexts') { metadataArgs.push(body.args); return response([]); }
+        if (body.script === 'mobile: inspectRetainedChromeTargets') {
+          const result = retainedFixture([bootstrap, installed], selected, installed, startedAt);
+          if (broken) {
+            if (fault === 'native-failure') return Response.json({ value: { error: 'unknown error', message: 'native observation unavailable' } }, { status: 500 });
+            if (['search', 'browser', 'other'].includes(fault)) {
+              result.after.native.pid = '789';
+              result.after.native.activity = fault === 'browser' ? 'com.google.android.apps.chrome.Main' : 'other.Activity';
+            }
+            if (fault === 'origin') result.after.document.origin = 'https://wrong.test';
+            if (fault === 'document') result.after.document.standalone = false;
+            if (fault === 'missing') result.observations = [];
           }
-          return response({ origin: 'https://fixture.test', standalone: selected === 'installed' && !(broken && ['document', 'missing'].includes(fault)), provider: selected === 'browser' ? 'browser' : 'android-standalone' });
+          return response(result);
         }
-        return response(null);
-      });
-      await client.create({ capabilities: androidChromeCapabilities('emulator-5554', true) });
-      const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: root,
-        certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('socket-test', { timeoutMs: 10_000, recoveryLimit: 1 }) });
-      Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', activity: 'org.chromium.chrome.browser.webapps.WebappActivity' } });
-      const observedMetadata = () => (platform as unknown as { diagnostics: DiagnosticRecorder }).diagnostics.snapshot()
-        .filter(event => event.operation === 'context-metadata-observed');
-      await platform.attachToInstalledView(2_000);
-      assert.deepEqual(metadataArgs, [{}]);
-      assert.deepEqual(observedMetadata().map(event => event.detail), [socketMetadata]);
-      console.log(JSON.stringify({ fault, event: observedMetadata()[0] }));
-      assert.deepEqual(windows, ['browser', 'installed', 'other-good', 'installed']);
-      await foreground('123');
-      assert.equal((await platform.readRunningIdentity()).nativePid, '123');
-      broken = true;
-      if (fault === 'search') await foreground('789', 'com.google.android.googlequicksearchbox');
-      if (fault === 'browser') await foreground('789', 'com.android.chrome', 'com.google.android.apps.chrome.Main');
-      if (fault === 'other') await foreground('789', 'com.example.other');
-      if (fault === 'native-failure') await rm(state);
-      const count = calls.length;
-      const windowCount = windows.length;
-      if (fault === 'empty-valid') {
-        await platform.attachToInstalledView(2_000);
-        assert.deepEqual(observedMetadata().at(-1)?.detail, []);
-        assert.deepEqual(windows.slice(windowCount), ['installed', 'browser', 'other-good', 'installed']);
-        assert.ok(metadataArgs.every(args => JSON.stringify(args) === '{}'));
-        continue;
+        return response({ navigationId: String(startedAt - 1), origin: 'https://fixture.test', standalone: true, provider: 'android-standalone' });
       }
-      await assert.rejects(platform.attachToInstalledView(2_000), fault === 'native-failure' ? /ANDROID_CONTEXT/ : /ANDROID_CONTEXT_OWNERSHIP/);
-      if (fault === 'missing') {
-        assert.deepEqual(observedMetadata().at(-1)?.detail, []);
-        console.log(JSON.stringify({ fault, event: observedMetadata().at(-1) }));
-      }
-      assert.ok(metadataArgs.every(args => JSON.stringify(args) === '{}'));
-      if (['search', 'browser', 'other', 'native-failure'].includes(fault)) assert.equal(calls.length, count);
-      if (['search', 'browser', 'other', 'origin', 'document', 'missing'].includes(fault)) {
-        const after = calls.length;
-        await assert.rejects(platform.attachToInstalledView(2_000), /ANDROID_CONTEXT_OWNERSHIP/);
-        assert.equal(calls.length, after);
-      }
-      if (['origin', 'document', 'missing'].includes(fault)) assert.deepEqual(windows.slice(windowCount), ['installed']);
+      return response(null);
+    });
+    await client.create({ capabilities: androidChromeCapabilities('emulator-5554', true) });
+    const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://fake.test', outputDir: '/tmp',
+      certificate: '', setupUrl: '', deviceId: 'emulator-5554', budget: new PhaseBudget('socket-test', { timeoutMs: 90_000, recoveryLimit: 0 }) });
+    Object.assign(platform, { driver: client, installedPackage: 'com.android.chrome', installedTarget: { packageName: 'com.android.chrome', shortcut: { scope: 'https://fixture.test/' } },
+      retainedOwner: { driver: client, assertSession: client.retainSessionOwner(), ...retainedFixture([bootstrap, installed], bootstrap, installed, startedAt).original } });
+    await platform.attachToInstalledView();
+    assert.deepEqual(metadataArgs, []);
+    assert.deepEqual(windows, [installed]);
+    assert.equal((await platform.readRunningIdentity()).nativePid, '123');
+    broken = true;
+    const windowCount = windows.length;
+    if (fault === 'empty-valid') await platform.attachToInstalledView();
+    else {
+      await assert.rejects(platform.attachToInstalledView(), /ANDROID_CONTEXT_OWNERSHIP/u);
+      const after = calls.length;
+      await assert.rejects(platform.attachToInstalledView(), /ANDROID_CONTEXT_OWNERSHIP/u);
+      assert.equal(calls.length, after);
     }
-  } finally {
-    if (previousAdb === undefined) delete process.env.ADB;
-    else process.env.ADB = previousAdb;
-    await rm(root, { recursive: true, force: true });
+    assert.deepEqual(metadataArgs, []);
+    assert.deepEqual(windows.slice(windowCount), []);
+    console.log(`PASS retained socket ownership ${fault}`);
   }
 }
