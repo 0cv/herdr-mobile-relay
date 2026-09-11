@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
+import {gzipSync} from 'node:zlib';
+import {readFileSync} from 'node:fs';
+const disabledSelf = readFileSync(new URL('./fixtures/android/kernel-disabled-self-status.txt', import.meta.url), 'utf8');
+const disabledChrome = readFileSync(new URL('./fixtures/android/kernel-disabled-chrome-status.txt', import.meta.url), 'utf8');
 import {createServer as createNetServer} from 'node:net';
 import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
@@ -24,6 +28,7 @@ const EXPRESSION = "JSON.stringify({href:location.href,origin:location.origin,st
 const nativeActivity = 'org.chromium.chrome.browser.webapps.WebappActivity';
 async function fixture(run, initialMode = '') {
   const calls = [];
+  const initialPid = initialMode === 'disabled' ? 2863 : 5301;
   let adbFixture;
   const adbSockets = new Set();
   const adbServer = createNetServer((socket) => {
@@ -59,7 +64,7 @@ async function fixture(run, initialMode = '') {
   await new Promise(resolve => adbServer.listen(0, "127.0.0.1", resolve));
   const sockets = new Set();
   let driver;
-  const state = {selected: APP, pid: '5301', startTime: '123456', serial: 'fixture', inode: '4321', activity: nativeActivity, mode: initialMode, count: 0, pageURL: 'https://app/#settings', extras: [], onRead: undefined};
+  const state = {selected: APP, pid: String(initialPid), startTime: '123456', serial: 'fixture', inode: '4321', activity: nativeActivity, mode: initialMode, count: 0, pageURL: 'https://app/#settings', extras: [], onRead: undefined};
   const nativeCalls = [];
   const nativeSockets = new Set();
   const nativeServer = createServer((req, res) => {
@@ -144,12 +149,12 @@ async function fixture(run, initialMode = '') {
       case 'SystemInfo.getProcessInfo':
         processReads++;
         if (state.mode === 'process-final-loss' && processReads === 2) {
-          ws.send(JSON.stringify({id: message.id, result: {processInfo: [{type: 'browser', id: 5301, cpuTime: 0}]}}));
+          ws.send(JSON.stringify({id: message.id, result: {processInfo: [{type: 'browser', id: initialPid, cpuTime: 0}]}}));
           ws.close();
           return;
         }
         assert.equal(message.sessionId, undefined);
-        result = {processInfo: [{type: 'browser', id: state.mode === 'process-string' ? '5301' : state.mode === 'process-wrong' ? 999 : 5301, cpuTime: 0}]};
+        result = {processInfo: [{type: 'browser', id: state.mode === 'process-string' ? '5301' : state.mode === 'process-wrong' ? 999 : initialPid, cpuTime: 0}]};
         if (state.mode === 'process-missing') result.processInfo = [];
         if (state.mode === 'process-duplicate') result.processInfo.push({...result.processInfo[0]});
         if (state.mode === 'process-cpu') result.processInfo[0].cpuTime = -1;
@@ -191,12 +196,24 @@ async function fixture(run, initialMode = '') {
         calls.push({adb: args});
         if (state.onShell) await state.onShell(args);
         if (args[0] === 'pidof') return state.pid;
+        if (args[1] === '/proc/config.gz') {
+          if (state.mode === 'config-unreadable') throw new Error('Fixture config unreadable');
+          const configs = {'config-missing': 'CONFIG_NAMESPACES=y\n', 'config-malformed': 'CONFIG_PID_NS=n\n',
+            'config-duplicate': 'CONFIG_PID_NS=y\nCONFIG_PID_NS=y\n', 'config-conflicting': 'CONFIG_PID_NS=y\n# CONFIG_PID_NS is not set\n'};
+          return gzipSync('CONFIG_IKCONFIG=y\nCONFIG_IKCONFIG_PROC=y\n' + (configs[state.mode] ?? (['disabled', 'disabled-contradictory'].includes(state.mode) ? 'CONFIG_NAMESPACES=y\n# CONFIG_PID_NS is not set\n' : 'CONFIG_PID_NS=y\n')));
+        }
         if (args[0] === 'cat' && args[1].endsWith('/stat')) return `${state.pid} (chrome) S ${Array(18).fill('0').join(' ')} ${state.startTime} 0`;
         if (args[0] === 'dumpsys') return `mResumedActivity: ActivityRecord{a u0 com.android.chrome/${state.activity} t10 pid=${state.pid}}${state.extraActivities || ''}`;
         if (args[1] === '/proc/net/unix') return `000: 000 000 000 000 000 ${state.inode} @chrome_devtools_remote`;
-        if (args[1] === '/proc/sys/kernel/random/boot_id') return state.mode === 'boot' ? '22222222-2222-2222-2222-222222222222' : '11111111-1111-1111-1111-111111111111';
+        if (args[1] === '/proc/sys/kernel/random/boot_id') {
+          state.bootReads = (state.bootReads || 0) + 1;
+          return state.mode === 'boot' || (state.mode === 'boot-acquisition' && state.bootReads === 2) ? '22222222-2222-2222-2222-222222222222' : '11111111-1111-1111-1111-111111111111';
+        }
         if (args[1]?.endsWith('/status')) {
           const pid = args[1] === '/proc/self/status' ? String(6000 + calls.length) : state.pid;
+          if (state.mode === 'disabled') return args[1] === '/proc/self/status' ? disabledSelf : disabledChrome;
+          if (state.mode === 'pid-duplicate') return `Pid:\t${pid}\nPid:\t${pid}\nNSpid:\t${pid}\n`;
+          if (state.mode === 'namespace-same-number-nested') return `Pid:\t${pid}\nNSpid:\t${pid}\t${pid}\n`;
           if (state.mode === 'namespace-absent') return `Pid:\t${pid}\n`;
           if (state.mode === 'namespace-duplicate') return `Pid:\t${pid}\nNSpid:\t${pid}\nNSpid:\t${pid}\n`;
           return `Pid:\t${pid}\nNSpid:\t${state.mode === 'namespace-different' ? '1' : pid}${state.mode === 'namespace-nested' ? '\t1' : ''}\n`;
@@ -214,9 +231,10 @@ async function fixture(run, initialMode = '') {
     driver.uiautomator2.jwproxy.sessionId = 'native-token';
     driver.uiautomator2.jwproxy.downstreamProtocol = 'W3C';
     adbFixture = (args, options) => args[0] === 'shell' ? driver.adb.shell(args.slice(1), options) : driver.adb.adbExec(args, options);
-    if (initialMode) {
+    if (initialMode && initialMode !== 'disabled') {
       await assert.rejects(driver.startChromeSession());
       const count = calls.length;
+      state.mode = '';
       await assert.rejects(driver.startChromeSession());
       await assert.rejects(driver.executeCommand('execute', COMMAND, [{deadline: Date.now() + 8000}]));
       assert.equal(calls.length, count);
@@ -234,8 +252,8 @@ async function fixture(run, initialMode = '') {
     const inspect = async () => {
       const result = await driver.executeCommand('execute', COMMAND, [{deadline: Date.now() + 8000}]);
       validateResult(result);
-      assert.equal(result.processAssociation.before.pid, 5301);
-      assert.equal(result.processAssociation.after.pid, 5301);
+      assert.equal(result.processAssociation.before.pid, initialPid);
+      assert.equal(result.processAssociation.after.pid, initialPid);
       assert.equal(result.processAssociation.before.connectionId, result.processAssociation.after.connectionId);
       const connectionCalls = calls.filter(call => call.connectionId === connection);
       assert.equal(connectionCalls[0].method, 'SystemInfo.getProcessInfo');
@@ -259,7 +277,7 @@ async function fixture(run, initialMode = '') {
       assert.equal(calls.length, count, 'Quarantine must stop later route, health and forwarding sends');
     };
     assert.deepEqual(calls.filter(call => call.id).map(call => call.method), ['SystemInfo.getProcessInfo', 'SystemInfo.getProcessInfo']);
-    assert.equal(calls.filter(call => call.adb).length, 75);
+    assert.equal(calls.filter(call => call.adb).length, 78);
     assert.equal(calls.filter(call => call.url).length, 6);
     assert.ok(calls.every(call => !call.adb || !call.adb.includes('ls')));
     assert.ok(!calls.some(call => call.url?.includes('/window') || call.url?.includes('/execute')));
@@ -286,7 +304,7 @@ async function fixture(run, initialMode = '') {
   }
 }
 
-for (const mode of ['namespace-absent', 'namespace-duplicate', 'namespace-nested', 'namespace-different', 'process-string', 'process-wrong', 'process-missing', 'process-duplicate', 'process-cpu', 'process-protocol', 'process-final-loss', 'adb-loss', 'adb-version', 'adb-exit']) {
+for (const mode of ['boot-acquisition', 'config-unreadable', 'config-missing', 'config-malformed', 'config-duplicate', 'config-conflicting', 'disabled-contradictory', 'pid-duplicate', 'namespace-same-number-nested', 'namespace-absent', 'namespace-duplicate', 'namespace-nested', 'namespace-different', 'process-string', 'process-wrong', 'process-missing', 'process-duplicate', 'process-cpu', 'process-protocol', 'process-final-loss', 'adb-loss', 'adb-version', 'adb-exit']) {
   test(`startup association failure permanently refuses original owner: ${mode}`, () => fixture(undefined, mode));
 }
 
@@ -295,6 +313,20 @@ for (const mode of ['adb-loss', 'adb-version', 'adb-exit']) test(`actual ADB pro
   await assert.rejects(inspect());
   await refused();
 }));
+
+test('saved native disabled statuses with constructed gzip pass installed producer and contradictory later fields fail sticky', async () => fixture(async ({inspect, state, calls, refused}) => {
+  const result = await inspect();
+  assert.equal(result.original.namespace, 'kernel-pid-namespaces-disabled');
+  assert.equal(result.original.kernelCapability.mode, 'disabled');
+  assert.equal(result.original.kernelCapability.source, '/proc/config.gz');
+  assert.match(result.original.kernelCapability.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(result.before.native.kernelCapability, result.original.kernelCapability);
+  assert.equal(calls.filter(call => call.adb?.includes('/proc/config.gz')).length, 0, 'Boot-bound built-in config is acquired once, not relearned');
+  state.mode = '';
+  await assert.rejects(inspect(), /mode=disabled/);
+  state.mode = 'disabled';
+  await refused();
+}, 'disabled'));
 
 test('actual installed dispatcher: repeated bounded two-page reads and same-scope navigation', async () => fixture(async ({inspect, state, calls}) => {
   for (const path of ['#settings', '#pairing', '#complete']) {

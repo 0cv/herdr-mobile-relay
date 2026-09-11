@@ -1,9 +1,19 @@
 import type { RetainedInspectionResult } from '../android-appium/retained-inspection.cjs';
 import { nativeNamespace } from '../support/android-retained-decoder';
+import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
+import type { KernelCapability } from '../android-appium/kernel-namespace.cjs';
+
+export function kernelFixture(mode: 'enabled' | 'disabled' = 'enabled', time = 1): KernelCapability {
+  const config = Buffer.from('CONFIG_IKCONFIG=y\nCONFIG_IKCONFIG_PROC=y\n' + (mode === 'enabled' ? 'CONFIG_PID_NS=y\n' : 'CONFIG_NAMESPACES=y\n# CONFIG_PID_NS is not set\n'));
+  return {mode, source: '/proc/config.gz', sha256: createHash('sha256').update(config).digest('hex'),
+    compressedBytes: gzipSync(config).length, configBytes: config.length, compressedLimit: 262144, configLimit: 2097152,
+    bootId: '11111111-1111-1111-1111-111111111111', acquiredStartedAt: time, acquiredFinishedAt: time};
+}
 
 export function retainedFixture(handles: string[], selectedHandle: string, installed: string, startedAt: number): RetainedInspectionResult {
   const now = Date.now();
-  const identity = { pid: '123', startTime: '456', bootId: '11111111-1111-1111-1111-111111111111', namespace: nativeNamespace };
+  const identity = { pid: '123', startTime: '456', bootId: '11111111-1111-1111-1111-111111111111', namespace: nativeNamespace, kernelCapability: kernelFixture('enabled', startedAt) };
   const observations = handles.map((targetId, index) => ({ targetId, document: {
     href: 'https://fixture.test/', origin: 'https://fixture.test', standalone: targetId === installed,
     provider: targetId === installed ? 'android-standalone' as const : 'browser' as const,

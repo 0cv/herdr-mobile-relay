@@ -23,6 +23,7 @@ export function resultValidator(declaration) {
       assert.ok(accepted, `${location}: declared union mismatch`);
       return;
     }
+    if (type.flags & ts.TypeFlags.NumberLiteral) { assert.equal(value, type.value, location); return; }
     if (type.flags & ts.TypeFlags.StringLiteral) { assert.equal(value, type.value, location); return; }
     if (type.flags & ts.TypeFlags.BooleanLiteral) { assert.equal(value, type.intrinsicName === 'true', location); return; }
     if (type.flags & ts.TypeFlags.String) { assert.equal(typeof value, 'string', location); return; }

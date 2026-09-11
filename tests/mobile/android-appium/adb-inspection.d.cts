@@ -15,5 +15,6 @@ export type AdbInspectionRead =
 
 export function createAdbInspection(adb: AdbConnection, check: () => void, fail: (error: Error) => Error): {
   cancel(error: Error): void;
+  readKernelConfig(deadline: number): Promise<Buffer>;
   read(args: AdbInspectionRead, deadline: number): Promise<string>;
 };

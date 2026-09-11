@@ -1,3 +1,4 @@
+import type {KernelCapability, NativeNamespace} from './kernel-namespace.cjs';
 import type {AndroidDriver} from 'appium-android-driver';
 import type {Chromedriver} from 'appium-chromedriver';
 import type {DocumentObservation, InspectionResult, OwnerSnapshot} from './target-inspection.cjs';
@@ -9,7 +10,8 @@ export interface NativeObservation {
   pid: string;
   startTime: string;
   bootId: string;
-  namespace: 'reader-and-browser-active-in-procfs-mount-pid-namespace';
+  namespace: NativeNamespace;
+  kernelCapability: KernelCapability;
   startedAt: number;
   finishedAt: number;
   activity: string;
@@ -25,7 +27,7 @@ export interface RetainedSnapshot extends OwnerSnapshot {
 }
 export interface RetainedInspectionResult extends InspectionResult {
   phase: 'initial-browser-selected' | 'installed-selected';
-  original: {pid: string; startTime: string; bootId: string; namespace: 'reader-and-browser-active-in-procfs-mount-pid-namespace'; startedAt: number; finishedAt: number; serial: string; sessionId: string; chromeSessionId: string};
+  original: {pid: string; startTime: string; bootId: string; namespace: NativeNamespace; kernelCapability: KernelCapability; startedAt: number; finishedAt: number; serial: string; sessionId: string; chromeSessionId: string};
   before: RetainedSnapshot;
   after: RetainedSnapshot;
 }

@@ -5,16 +5,49 @@ import { join } from 'node:path';
 import { AndroidPlatform } from '../platforms/android';
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient } from '../support/webdriver';
-import { retainedFixture } from './android-retained-fixture';
+import { retainedFixture, kernelFixture } from './android-retained-fixture';
+import { gzipSync } from 'node:zlib';
+import { kernelReaderFixture } from './android-kernel-reader-fixture';
 
 export async function runAndroidRetainedLaunchRegressions(scenarios?: string[]): Promise<void> {
-  for (const scenario of scenarios ?? ['healthy', 'pid-before', 'start-before', 'selected-window-loss', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-owner', 'replaced-session', 'missing-current', 'missing-handles', 'missing-context', 'refusal', 'timeout', 'malformed', 'wrong-id', 'wrong-component', 'wrong-scope', 'wrong-mac', 'ambiguous-shortcut', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document', 'recorded-two-page']) {
+  for (const scenario of scenarios ?? ['boot', 'kernel-boot-acquisition', 'kernel-disabled', 'kernel-unreadable', 'kernel-missing', 'kernel-malformed', 'kernel-duplicate', 'kernel-conflicting', 'kernel-enabled-absent', 'kernel-disabled-fields', 'kernel-pid-duplicate', 'kernel-nspid-duplicate', 'kernel-nested', 'kernel-same-number-nested', 'healthy', 'pid-before', 'start-before', 'selected-window-loss', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-owner', 'replaced-session', 'missing-current', 'missing-handles', 'missing-context', 'refusal', 'timeout', 'malformed', 'wrong-id', 'wrong-component', 'wrong-scope', 'wrong-mac', 'ambiguous-shortcut', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document', 'recorded-two-page']) {
     const root = await mkdtemp(join(tmpdir(), 'android-retained-launch-'));
     const saved = { adb: process.env.ADB, ownership: process.env.MOBILE_DEVICE_OWNERSHIP_FILE };
     const file = join(root, 'state.json');
     const adb = join(root, 'adb');
     const shortcut = 'ShortcutInfo {id=installed-id, shortLabel=Herdr Relay, org.chromium.chrome.browser.webapp_name=Herdr Mobile Relay, org.chromium.chrome.browser.webapp_url=https://fixture.test/, org.chromium.chrome.browser.webapp_scope=https://fixture.test/, org.chromium.chrome.browser.webapp_mac=c2lnbmVk, org.chromium.chrome.browser.webapp_id=installed-id, intents=[Intent { act=com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP pkg=com.android.chrome cmp=com.android.chrome/org.chromium.chrome.browser.webapps.WebappLauncherActivity }]}';
-    await writeFile(file, JSON.stringify({ scenario, shortcut, launched: 0, calls: [], pid: '123', startTime: '456' }));
+    const initialPid = scenario === 'kernel-disabled' ? '2863' : '123';
+    await writeFile(file, JSON.stringify({ scenario, shortcut, launched: 0, calls: [], pid: initialPid, startTime: '456' }));
+    const kernel = await kernelReaderFixture(async command => {
+      const s = JSON.parse(await readFile(file, 'utf8'));
+      s.calls.push(`shell ${command}`);
+      await writeFile(file, JSON.stringify(s));
+      if (command === 'cat /proc/config.gz') {
+        if (s.scenario === 'kernel-unreadable') throw new Error('Fixture unreadable config');
+        const invalid: Record<string, string> = {'kernel-missing': 'CONFIG_NAMESPACES=y\n', 'kernel-malformed': 'CONFIG_PID_NS=n\n',
+          'kernel-duplicate': 'CONFIG_PID_NS=y\nCONFIG_PID_NS=y\n', 'kernel-conflicting': 'CONFIG_PID_NS=y\n# CONFIG_PID_NS is not set\n'};
+        return gzipSync('CONFIG_IKCONFIG=y\nCONFIG_IKCONFIG_PROC=y\n' + (invalid[s.scenario] ?? (['kernel-disabled', 'kernel-disabled-fields'].includes(s.scenario) ? 'CONFIG_NAMESPACES=y\n# CONFIG_PID_NS is not set\n' : 'CONFIG_PID_NS=y\n')));
+      }
+      if (command === 'pidof com.android.chrome') return s.launched && s.scenario === 'missing-process' ? '' : s.pid;
+      if (command.endsWith('/stat')) return `${s.pid} (chrome) ${s.launched && s.scenario === 'dead-process' ? 'Z' : 'S'} ${[...Array(18).fill('0'), s.startTime, '0'].join(' ')}`;
+      if (command === 'cat /proc/sys/kernel/random/boot_id') {
+        const changed = (s.scenario === 'boot' && s.launched) || (s.scenario === 'kernel-boot-acquisition' && s.calls.filter((call: string) => call.endsWith('/boot_id')).length === 2);
+        return changed ? '22222222-2222-2222-2222-222222222222' : '11111111-1111-1111-1111-111111111111';
+      }
+      if (command.endsWith('/status')) {
+        if (s.scenario === 'kernel-disabled') return await readFile(new URL(`./fixtures/android/kernel-disabled-${command.includes('/self/') ? 'self' : 'chrome'}-status.txt`, import.meta.url), 'utf8');
+        const pid = command.includes('/self/') ? '987' : s.pid;
+        const visible = `Pid:\t${pid}\n`;
+        const ns = `NSpid:\t${pid}\n`;
+        if (s.scenario === 'kernel-enabled-absent') return visible;
+        if (s.scenario === 'kernel-pid-duplicate') return visible + visible + ns;
+        if (s.scenario === 'kernel-nspid-duplicate') return visible + ns + ns;
+        if (s.scenario === 'kernel-nested') return visible + `NSpid:\t${pid}\t1\n`;
+        if (s.scenario === 'kernel-same-number-nested') return visible + `NSpid:\t${pid}\t${pid}\n`;
+        return visible + ns;
+      }
+      throw new Error(`Unexpected fixed reader request: ${command}`);
+    });
     await writeFile(adb, `#!${process.execPath}
 const file = ${JSON.stringify(file)};
 const s = await Bun.file(file).json();
@@ -68,7 +101,7 @@ console.log(output);
       active++;
       maxActive = Math.max(maxActive, active);
       try {
-        if (path === '/session') return response({});
+        if (path === '/session') { Object.assign(platform, {kernelReader: kernel.create()}); return response({}); }
         if (path === '/appium/settings') return response({ waitForIdleTimeout: 500, waitForSelectorTimeout: 0 });
         if (path === '/context' && !failed && ['refusal', 'timeout', 'malformed'].includes(scenario)) {
           failed = true;
@@ -91,6 +124,15 @@ console.log(output);
             assert.equal(body.args.length, 1);
             assert.ok(body.args[0].deadline - Date.now() >= 7500);
             const result = retainedFixture([bootstrap, installed], selected, installed, originalStartedAt);
+            if (scenario === 'kernel-disabled') {
+              for (const identity of [result.original, result.before.native, result.before.nativeBefore, result.after.native, result.after.nativeBefore]) {
+                identity.pid = initialPid;
+                identity.namespace = 'kernel-pid-namespaces-disabled';
+                identity.kernelCapability = kernelFixture('disabled', originalStartedAt);
+              }
+              result.processAssociation.before.pid = Number(initialPid);
+              result.processAssociation.after.pid = Number(initialPid);
+            }
             if (lostSelected) result.after.handles = [bootstrap];
             if (scenario === 'missing-context') return response({ error: 'unknown error', message: 'original context missing' }, 500);
             if (scenario === 'wrong-origin') result.observations[1].document.origin = 'https://wrong.test';
@@ -113,13 +155,25 @@ console.log(output);
     Object.assign(platform, { driver: client });
     try {
       const captureStartedAt = Date.now();
+      if (scenario.startsWith('kernel-') && scenario !== 'kernel-disabled') {
+        let first: unknown;
+        await assert.rejects(() => (platform as any).createChromeSession(false), error => { first = error; return /ANDROID_CONTEXT_OWNERSHIP/u.test(String(error)); });
+        const state = JSON.parse(await readFile(file, 'utf8'));
+        state.scenario = 'healthy';
+        await writeFile(file, JSON.stringify(state));
+        await assert.rejects(() => (platform as any).readChromeProcess(), error => error === first);
+        await assert.rejects(() => platform.launchInstalledApp(), error => error === first);
+        assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), state);
+        console.log(`PASS retained kernel acquisition ${scenario}`);
+        continue;
+      }
       await (platform as any).createChromeSession(false);
       const captureFinishedAt = Date.now();
       const processEvents = () => (platform.evidenceSnapshot().events as Array<{ operation: string; detail: Record<string, string> }>)
         .filter(event => event.operation === 'chrome-process-observed');
       assert.equal(processEvents().length, 1);
       assert.deepEqual(Object.keys(processEvents()[0].detail).sort(), ['observationFinishedAt', 'observationStartedAt', 'pid', 'startTime']);
-      assert.equal(processEvents()[0].detail.pid, '123');
+      assert.equal(processEvents()[0].detail.pid, initialPid);
       assert.equal(processEvents()[0].detail.startTime, '456');
       assert.ok(Date.parse(processEvents()[0].detail.observationStartedAt) >= captureStartedAt);
       assert.ok(Date.parse(processEvents()[0].detail.observationFinishedAt) <= captureFinishedAt);
@@ -131,7 +185,7 @@ console.log(output);
       }
       if (scenario === 'missing-owner') Object.assign(platform, { retainedOwner: undefined });
       if (scenario === 'replaced-session') await client.create({ capabilities: {} });
-      if (['healthy', 'selected-window-loss', 'recorded-two-page'].includes(scenario)) {
+      if (['kernel-disabled', 'healthy', 'selected-window-loss', 'recorded-two-page'].includes(scenario)) {
         await platform.launchInstalledApp();
         assert.equal((platform as any).selectedInstalledWindow, installed);
         if (scenario === 'recorded-two-page') {
@@ -152,9 +206,9 @@ console.log(output);
         ]);
         assert.ok(calls.some(call => call.path === '/window' && call.method === 'GET' && call.launched === 0));
         assert.ok(calls.some(call => call.path === '/url' && call.launched === 0));
-        assert.ok(native.calls.filter((call: string) => call.endsWith('/proc/123/stat')).length >= 4);
-        assert.equal(processEvents().length, native.calls.filter((call: string) => call.endsWith('/proc/123/stat')).length);
-        assert.ok(processEvents().every(event => event.detail.pid === '123' && event.detail.startTime === '456'));
+        assert.ok(native.calls.filter((call: string) => call.endsWith(`/proc/${initialPid}/stat`)).length >= 4);
+        assert.equal(processEvents().length, native.calls.filter((call: string) => call.endsWith(`/proc/${initialPid}/stat`)).length);
+        assert.ok(processEvents().every(event => event.detail.pid === initialPid && event.detail.startTime === '456'));
         assert.ok(native.calls.find((call: string) => call.includes("'am' 'start'"))?.includes("'--es' 'org.chromium.chrome.browser.webapp_mac' 'c2lnbmVk'"));
         if (scenario === 'selected-window-loss') {
           lostSelected = true;
@@ -183,7 +237,7 @@ console.log(output);
         assert.equal(calls.length, count);
         assert.equal(await readFile(file, 'utf8'), native);
         assert.deepEqual(client.snapshot().firstFatal, fatal);
-        const afterLaunch = ['pid', 'start-time', 'missing-process', 'dead-process', 'missing-context', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document'].includes(scenario);
+        const afterLaunch = ['boot', 'pid', 'start-time', 'missing-process', 'dead-process', 'missing-context', 'uncertain-launch', 'wrong-origin', 'stale-browser', 'wrong-provider', 'ambiguous-document', 'late-document'].includes(scenario);
         assert.equal(JSON.parse(native).launched, afterLaunch ? 1 : 0);
         assert.equal(calls.some(call => call.method === 'DELETE'), false);
         assert.equal(calls.filter(call => call.path === '/session').length, scenario === 'replaced-session' ? 2 : 1);
@@ -197,6 +251,7 @@ console.log(output);
       assert.equal(active, 0);
       if (saved.adb === undefined) delete process.env.ADB; else process.env.ADB = saved.adb;
       if (saved.ownership === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE; else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = saved.ownership;
+      await kernel.close();
       await rm(root, { recursive: true, force: true });
     }
   }

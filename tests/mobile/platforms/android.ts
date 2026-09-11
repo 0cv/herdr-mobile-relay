@@ -1,5 +1,7 @@
 import { X509Certificate } from 'node:crypto';
-import { decodeRetainedInspection, nativeNamespace, type RetainedNativeIdentity } from '../support/android-retained-decoder';
+import { decodeRetainedInspection, type RetainedNativeIdentity } from '../support/android-retained-decoder';
+import { createAdbInspection } from '../android-appium/adb-inspection.cjs';
+import { acquireKernelCapability, namespaceForCapability, validateNamespaceStatus, sameKernelCapability, type KernelCapability } from '../android-appium/kernel-namespace.cjs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import {
@@ -193,6 +195,8 @@ export class AndroidPlatform implements MobilePlatform {
   private installedPackage = '';
   private initialLaunchAttempted = false;
   private retainedOwner?: RetainedNativeIdentity & { driver: AppiumClient; assertSession: () => void };
+  private kernelReader?: ReturnType<typeof createAdbInspection>;
+  private kernelCapability?: KernelCapability;
   private installedTarget?: { packageName: string; activity: string; shortcut: AndroidChromeShortcut };
   private selectedInstalledWindow = '';
   private selectedInstalledWindowValid = false;
@@ -685,14 +689,14 @@ export class AndroidPlatform implements MobilePlatform {
         });
         const { original, before, after, processAssociation } = decoded.result;
         this.diagnostics.record({ phase: 'android-attachment', operation: 'bounded-retained-inspection', detail: {
-          pid: original.pid, startTime: original.startTime, bootId: original.bootId, namespace: original.namespace,
+          pid: original.pid, startTime: original.startTime, bootId: original.bootId, namespace: original.namespace, kernelCapability: original.kernelCapability,
           processAssociation: { kind: processAssociation.kind,
             before: { pid: processAssociation.before.pid, requestId: processAssociation.before.requestId, connectionId: processAssociation.before.connectionId, startedAt: processAssociation.before.startedAt, completedAt: processAssociation.before.completedAt },
             after: { pid: processAssociation.after.pid, requestId: processAssociation.after.requestId, connectionId: processAssociation.after.connectionId, startedAt: processAssociation.after.startedAt, completedAt: processAssociation.after.completedAt } },
           startedAt, deadline, original: { startedAt: original.startedAt, finishedAt: original.finishedAt },
           bounds: [before, after].map(snapshot => ({ startedAt: snapshot.startedAt, finishedAt: snapshot.finishedAt,
             native: [snapshot.nativeBefore, snapshot.native].map(native => ({ pid: native.pid, startTime: native.startTime,
-              bootId: native.bootId, namespace: native.namespace, activity: native.activity, provider: native.provider,
+              bootId: native.bootId, namespace: native.namespace, kernelCapability: native.kernelCapability, activity: native.activity, provider: native.provider,
               startedAt: native.startedAt, finishedAt: native.finishedAt })) })),
         } });
         this.lastForeground = { packageName: 'com.android.chrome', activity: after.native.activity, pid: after.native.pid };
@@ -793,6 +797,8 @@ export class AndroidPlatform implements MobilePlatform {
     this.assertOwnershipClear();
     if (!this.selectedInstalledWindow && !this.installedTarget) this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', 'explicit relaunch requires an installed lifecycle');
     this.retainedOwner = undefined;
+    this.kernelReader = undefined;
+    this.kernelCapability = undefined;
     try {
       await this.launchInstalledTarget(true);
     } catch (error) {
@@ -1029,17 +1035,37 @@ export class AndroidPlatform implements MobilePlatform {
     });
     await this.configureNativeSettings();
     const assertSession = this.driver.retainSessionOwner();
-    const process = await this.readChromeProcess();
-    assertSession();
-    this.retainedOwner = { driver: this.driver, assertSession, ...process };
+    try {
+      const process = await this.readChromeProcess();
+      assertSession();
+      this.retainedOwner = { driver: this.driver, assertSession, ...process };
+    } catch (error) { this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', String(error)); }
   }
 
   private async readChromeProcess(budget = this.budget): Promise<RetainedNativeIdentity> {
+    this.assertOwnershipClear();
     const observationStartedAt = new Date().toISOString();
-    const adb = process.env.ADB || 'adb';
-    const pid = (await commandOutput(adb, ['-s', this.serial, 'shell', 'pidof', 'com.android.chrome'], 5_000, { budget, label: 'verify original Chrome PID' })).trim();
-    if (!/^[1-9]\d*$/u.test(pid)) throw new Error('ANDROID_PROCESS: sole Chrome browser PID is unavailable');
-    const stat = await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', `/proc/${pid}/stat`], 5_000, { budget, label: 'verify original Chrome start time' });
+    const deadline = Date.now() + Math.min(5_000, budget.remainingMs);
+    const check = () => { this.assertOwnershipClear(); budget.assertAvailable('native process observation'); };
+    this.kernelReader ||= createAdbInspection({curDeviceId: this.serial, executable: {defaultArgs: ['-P', '5037', '-s', this.serial]}}, () => this.assertOwnershipClear(), error => {
+      this.ownershipFailure ||= qualificationFatal('ANDROID_CONTEXT_OWNERSHIP', error.message, 'ownership');
+      return this.ownershipFailure;
+    });
+    const shell = async (args: Parameters<NonNullable<typeof this.kernelReader>['read']>[0]) => {
+      check();
+      const value = await this.kernelReader!.read(args, deadline);
+      check();
+      return value;
+    };
+    try {
+      this.kernelCapability ||= await acquireKernelCapability(this.kernelReader, deadline, check);
+    } catch (error) {
+      this.kernelReader.cancel(error instanceof Error ? error : new Error('Kernel capability refused'));
+      this.failOwnership('ANDROID_CONTEXT_OWNERSHIP', String(error));
+    }
+    const pid = await shell(['shell', 'pidof', 'com.android.chrome']);
+    if (!/^[1-9]\d*$/u.test(pid) || Number(pid) > 2147483647) throw new Error('ANDROID_PROCESS: sole Chrome browser PID is unavailable');
+    const stat = await shell(['shell', 'cat', `/proc/${Number(pid)}/stat`]);
     const match = stat.trim().match(/^(\d+) \(.+\) ([A-Za-z]) (.+)$/u);
     const startTime = match?.[3]?.split(/\s+/u)[18] || '';
     if (match?.[1] !== pid || !/^[1-9]\d*$/u.test(startTime) || ['Z', 'X', 'x'].includes(match?.[2] || '')) {
@@ -1050,21 +1076,15 @@ export class AndroidPlatform implements MobilePlatform {
       operation: 'chrome-process-observed',
       detail: { pid, startTime, observationStartedAt, observationFinishedAt: new Date().toISOString() },
     });
-    const status = await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', `/proc/${pid}/status`], 5_000, { budget });
-    const self = await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', '/proc/self/status'], 5_000, { budget });
-    for (const [text, expected] of [[status, pid], [self, '']]) {
-      const field = (name: string): string => {
-        const lines = text.split('\n').filter(line => line.startsWith(`${name}:`));
-        if (lines.length !== 1) throw new Error('ANDROID_PROCESS: native namespace field unavailable');
-        return lines[0].slice(name.length + 1).trim();
-      };
-      const visible = field('Pid');
-      if (text.length > 65536 || !/^[1-9]\d*$/u.test(visible) || Number(visible) > 2147483647 || visible !== field('NSpid')
-        || (expected && visible !== expected)) throw new Error('ANDROID_PROCESS: native namespace unavailable');
-    }
-    const bootId = (await commandOutput(adb, ['-s', this.serial, 'shell', 'cat', '/proc/sys/kernel/random/boot_id'], 5_000, { budget })).trim();
+    if (this.retainedOwner && (pid !== this.retainedOwner.pid || startTime !== this.retainedOwner.startTime)) throw new Error('ANDROID_PROCESS: original native process changed');
+    const status = await shell(['shell', 'cat', `/proc/${Number(pid)}/status`]);
+    const self = await shell(['shell', 'cat', '/proc/self/status']);
+    validateNamespaceStatus(status, pid, this.kernelCapability);
+    validateNamespaceStatus(self, undefined, this.kernelCapability);
+    const bootId = await shell(['shell', 'cat', '/proc/sys/kernel/random/boot_id']);
     if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(bootId)) throw new Error('ANDROID_PROCESS: native boot identity unavailable');
-    return { pid, startTime, bootId, namespace: nativeNamespace };
+    if (bootId !== this.kernelCapability.bootId) throw new Error('ANDROID_PROCESS: original kernel capability boot changed');
+    return { pid, startTime, bootId, namespace: namespaceForCapability(this.kernelCapability), kernelCapability: this.kernelCapability };
   }
 
   private assertRetainedSession(): void {
@@ -1085,7 +1105,7 @@ export class AndroidPlatform implements MobilePlatform {
       owner.assertSession();
       const current = await this.readChromeProcess(budget);
       owner.assertSession();
-      if (this.retainedOwner !== owner || owner.driver !== this.driver || current.pid !== owner.pid || current.startTime !== owner.startTime || current.bootId !== owner.bootId || current.namespace !== owner.namespace) {
+      if (this.retainedOwner !== owner || owner.driver !== this.driver || current.pid !== owner.pid || current.startTime !== owner.startTime || current.bootId !== owner.bootId || current.namespace !== owner.namespace || !sameKernelCapability(current.kernelCapability, owner.kernelCapability)) {
         throw new Error('original Chrome browser process or session was replaced');
       }
     } catch (error) {

@@ -18,7 +18,7 @@ type ProducerManifest = {
   authored: Record<string, { source: string; sha256: string }>;
   inputs: Record<string, string>;
 };
-const authoredFiles = ['adb-inspection.cjs', 'adb-inspection.d.cts', 'retained-inspection.cjs', 'retained-inspection.d.cts', 'target-inspection.cjs', 'target-inspection.d.cts'];
+const authoredFiles = ['kernel-namespace.cjs', 'kernel-namespace.d.cts', 'adb-inspection.cjs', 'adb-inspection.d.cts', 'retained-inspection.cjs', 'retained-inspection.d.cts', 'target-inspection.cjs', 'target-inspection.d.cts'];
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const artifact = (name: string) => new URL(name, import.meta.url);
 const load = async <T>(name: string): Promise<T> => JSON.parse(await readFile(artifact(name), 'utf8')) as T;
@@ -99,6 +99,12 @@ async function effectiveInstallation(home: string, patched: boolean): Promise<Re
   const context = new URL('./commands/context/exports.js', entries.android).href;
   const helper = new URL('./retained-inspection.cjs', context).href;
   if (patched) assert.equal(pathToFileURL(createRequire(helper).resolve('./adb-inspection.cjs')).href, new URL('./adb-inspection.cjs', context).href);
+  if (patched) {
+    for (const directory of ['lib/commands/context', 'build/lib/commands/context']) {
+      const retained = pathToFileURL(join(root, packages.android.root, directory, 'retained-inspection.cjs'));
+      assert.equal(createRequire(retained).resolve('./kernel-namespace.cjs'), join(root, packages.android.root, directory, 'kernel-namespace.cjs'));
+    }
+  }
   const transport = new URL('./target-inspection.cjs', context).href;
   assert.equal(import.meta.resolve('./retained-inspection.cjs', context), helper);
   if (patched) assert.equal(pathToFileURL(createRequire(helper).resolve('./target-inspection.cjs')).href, transport);

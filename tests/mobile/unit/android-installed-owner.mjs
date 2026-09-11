@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {gzipSync} from 'node:zlib';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
 assert.ok(process.env.APPIUM_HOME, 'Owned installed fixture required');
@@ -25,6 +26,7 @@ const adbServer = createNetServer(socket => {
     const command = shell ? ["shell", ...service.slice(13).split(" ")] : ["forward", "--list"];
   let stdout;
   if (command[0] === 'forward') stdout = 'fixture tcp:' + port + ' localabstract:chrome_devtools_remote';
+  else if (command[2] === '/proc/config.gz') stdout = gzipSync('CONFIG_IKCONFIG=y\nCONFIG_IKCONFIG_PROC=y\nCONFIG_PID_NS=y\n');
   else if (command[1] === 'pidof') stdout = '5301';
   else if (command[2]?.endsWith('/stat')) stdout = '5301 (chrome) S ' + Array(18).fill('0').join(' ') + ' 123456 0';
   else if (command[2] === '/proc/net/unix') stdout = '0: 0 0 0 0 0 4321 @chrome_devtools_remote';

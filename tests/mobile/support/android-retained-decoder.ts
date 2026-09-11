@@ -1,9 +1,10 @@
 import type { RetainedInspectionResult, NativeObservation } from '../android-appium/retained-inspection.cjs';
 import type { DocumentObservation } from '../android-appium/target-inspection.cjs';
 import { isAndroidPersistentWebAppActivity } from './oracle';
+import { namespaceForCapability, sameKernelCapability, validKernelCapability, type KernelCapability, type NativeNamespace } from '../android-appium/kernel-namespace.cjs';
 
 export const nativeNamespace = 'reader-and-browser-active-in-procfs-mount-pid-namespace' as const;
-export interface RetainedNativeIdentity { pid: string; startTime: string; bootId: string; namespace: typeof nativeNamespace }
+export interface RetainedNativeIdentity { pid: string; startTime: string; bootId: string; namespace: NativeNamespace; kernelCapability: KernelCapability }
 
 export function decodeRetainedInspection(value: unknown, owner: RetainedNativeIdentity, bounds: {
   startedAt: number; deadline: number; finishedAt: number; serial: string; scope: string; selectedHandle: string;
@@ -34,11 +35,17 @@ export function decodeRetainedInspection(value: unknown, owner: RetainedNativeId
   require(original.pid === owner.pid && original.startTime === owner.startTime && original.bootId === owner.bootId && original.namespace === owner.namespace
     && original.serial === bounds.serial && text(original.chromeSessionId) && text(original.sessionId));
   interval(original, 1, bounds.startedAt);
+  require(validKernelCapability(owner.kernelCapability, owner.bootId, bounds.startedAt)
+    && validKernelCapability(original.kernelCapability, owner.bootId, original.finishedAt)
+    && original.startedAt <= original.kernelCapability.acquiredStartedAt
+    && sameKernelCapability(original.kernelCapability, owner.kernelCapability)
+    && original.namespace === namespaceForCapability(original.kernelCapability));
   bounds.assertSession(original.sessionId);
   require(bounds.finishedAt <= bounds.deadline);
   const native = (raw: unknown, start: number, end: number): NativeObservation => {
     const n = object(raw);
     interval(n, start, end);
+    require(validKernelCapability(n.kernelCapability, owner.bootId, n.finishedAt) && same(n.kernelCapability, original.kernelCapability));
     require(n.pid === owner.pid && n.startTime === owner.startTime && n.bootId === owner.bootId && n.namespace === owner.namespace
       && n.provider === 'android-standalone' && isAndroidPersistentWebAppActivity(n.activity));
     return n as NativeObservation;

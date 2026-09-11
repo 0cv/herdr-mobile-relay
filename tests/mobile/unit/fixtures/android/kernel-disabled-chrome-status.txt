@@ -1,0 +1,54 @@
+Name:	.android.chrome
+Umask:	0077
+State:	R (running)
+Tgid:	2863
+Ngid:	0
+Pid:	2863
+PPid:	374
+TracerPid:	0
+Uid:	10145	10145	10145	10145
+Gid:	10145	10145	10145	10145
+FDSize:	128
+Groups:	3002 3003 9997 20145 50145 
+Kthread:	0
+VmPeak:	42188488 kB
+VmSize:	34038212 kB
+VmLck:	       0 kB
+VmPin:	       0 kB
+VmHWM:	  179852 kB
+VmRSS:	  179852 kB
+RssAnon:	   61016 kB
+RssFile:	  117556 kB
+RssShmem:	    1280 kB
+VmData:	 2209800 kB
+VmStk:	    8192 kB
+VmExe:	       4 kB
+VmLib:	  267924 kB
+VmPTE:	    1304 kB
+VmSwap:	    2816 kB
+CoreDumping:	0
+THP_enabled:	1
+untag_mask:	0xffffffffffffff
+Threads:	26
+SigQ:	0/11814
+SigPnd:	0000000000000000
+ShdPnd:	0000000000000000
+SigBlk:	0000000080001204
+SigIgn:	0000000000000001
+SigCgt:	0000006e400084f8
+CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	0000000000000000
+CapAmb:	0000000000000000
+NoNewPrivs:	0
+Seccomp:	2
+Seccomp_filters:	1
+Speculation_Store_Bypass:	thread vulnerable
+SpeculationIndirectBranch:	unknown
+Cpus_allowed:	f
+Cpus_allowed_list:	0-3
+Mems_allowed:	1
+Mems_allowed_list:	0
+voluntary_ctxt_switches:	307
+nonvoluntary_ctxt_switches:	174

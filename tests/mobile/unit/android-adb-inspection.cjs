@@ -6,6 +6,8 @@ const net = require('node:net');
 const path = require('node:path');
 assert.ok(process.env.APPIUM_HOME, 'Explicit installed fixture required');
 const {createAdbInspection} = require(path.join(process.env.APPIUM_HOME, 'node_modules/appium-android-driver/build/lib/commands/context/adb-inspection.cjs'));
+const {acquireKernelCapability} = require(path.join(process.env.APPIUM_HOME, 'node_modules/appium-android-driver/build/lib/commands/context/kernel-namespace.cjs'));
+const {gzipSync} = require('node:zlib');
 const frame = (id, value) => {
   const header = Buffer.alloc(5); header[0] = id; header.writeUInt32LE(value.length, 1);
   return Buffer.concat([header, Buffer.from(value)]);
@@ -48,6 +50,56 @@ async function fixture(handler, run) {
   const sticky = async () => { const count = calls.length; await assert.rejects(read()); await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(calls.length, count); assert.ok(failed); };
   try { await run({read, client, calls, sticky, adb, refuse: () => { owned = false; }}); }
   finally { for (const timer of timers) clearTimeout(timer); for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); }
+}
+
+for (const mode of ['enabled', 'disabled', 'config-module', 'config-proc-missing', 'missing', 'malformed', 'duplicate', 'conflicting', 'unreadable', 'compressed-bound', 'output-bound', 'invalid-gzip', 'invalid-utf8', 'boot-drift', 'late-read', 'late-decompression', 'nonzero-exit', 'missing-eof', 'trailing']) {
+  test(`installed fixed binary kernel acquisition: ${mode}`, () => {
+    let boots = 0;
+    const prefix = mode === 'config-module' ? 'CONFIG_IKCONFIG=m\nCONFIG_IKCONFIG_PROC=y\n' : mode === 'config-proc-missing' ? 'CONFIG_IKCONFIG=y\n' : 'CONFIG_IKCONFIG=y\nCONFIG_IKCONFIG_PROC=y\n';
+    const config = prefix + (mode === 'disabled' ? 'CONFIG_NAMESPACES=y\n# CONFIG_PID_NS is not set\n' : mode === 'missing' ? 'CONFIG_NAMESPACES=y\n'
+      : mode === 'malformed' ? 'CONFIG_PID_NS=n\n' : mode === 'duplicate' ? 'CONFIG_PID_NS=y\nCONFIG_PID_NS=y\n'
+      : mode === 'conflicting' ? 'CONFIG_PID_NS=y\n# CONFIG_PID_NS is not set\n' : 'CONFIG_PID_NS=y\n');
+    return fixture((socket, service, later) => {
+      if (!service.startsWith('shell,')) return false;
+      if (service.endsWith('/boot_id')) {
+        const boot = ++boots === 2 && mode === 'boot-drift' ? '22222222-2222-2222-2222-222222222222' : '11111111-1111-1111-1111-111111111111';
+        socket.end(Buffer.concat([Buffer.from('OKAY'), frame(1, boot), frame(3, [0])]));
+        return true;
+      }
+      assert.equal(service, 'shell,v2,raw:cat /proc/config.gz');
+      if (mode === 'unreadable') { socket.end('FAIL0007refused'); return true; }
+      const bytes = mode === 'compressed-bound' ? Buffer.alloc(262145) : mode === 'invalid-gzip' ? Buffer.from([0, 255, 32, 10])
+        : gzipSync(mode === 'output-bound' ? Buffer.alloc(2097153, 65) : mode === 'invalid-utf8' ? Buffer.from([255, 10]) : config);
+      const response = Buffer.concat([Buffer.from('OKAY'), frame(1, bytes), frame(3, [mode === 'nonzero-exit' ? 1 : 0]), ...(mode === 'trailing' ? [Buffer.from([0])] : [])]);
+      if (mode === 'late-read') later(() => socket.end(response), 100);
+      else if (mode === 'missing-eof') socket.write(response);
+      else socket.end(response);
+      return true;
+    }, async ({client, calls, sticky}) => {
+      const acquire = async () => {
+        const clock = Date.now;
+        let checks = 0;
+        try {
+          return await acquireKernelCapability(client, Date.now() + (['late-read', 'missing-eof'].includes(mode) ? 30 : 1000), () => {
+            if (mode === 'late-decompression' && ++checks === 4) Date.now = () => clock() + 2000;
+          });
+        } catch (error) { client.cancel(error); throw error; }
+        finally { Date.now = clock; }
+      };
+      if (['enabled', 'disabled'].includes(mode)) {
+        const result = await acquire();
+        assert.equal(result.mode, mode);
+        assert.equal(result.configBytes, Buffer.byteLength(config));
+        assert.equal(result.compressedBytes, gzipSync(config).length);
+        assert.match(result.sha256, /^[0-9a-f]{64}$/);
+        assert.equal(calls.length, 9);
+        assert.equal(calls.filter(call => call === 'shell,v2,raw:cat /proc/config.gz').length, 1);
+      } else {
+        await assert.rejects(acquire());
+        await sticky();
+      }
+    });
+  });
 }
 
 test('installed fixed protocol: bounded stdout, version and original serial each read', () => fixture(() => {}, async ({read, client, calls}) => {

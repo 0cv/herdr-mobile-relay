@@ -31,7 +31,7 @@ function createAdbInspection(adb, check, fail) {
       (adb.remoteAdbHost != null && adb.remoteAdbHost !== '127.0.0.1') ||
         (adb.adbPort != null && adb.adbPort !== port) || process.env.ADB_SERVER_SOCKET || process.env.ANDROID_ADB_SERVER_ADDRESS || process.env.ANDROID_ADB_SERVER_PORT) throw new Error('Original ADB endpoint changed');
   };
-  const request = (service, shell, deadline) => new Promise((resolve, reject) => {
+  const request = (service, shell, deadline, binary = false) => new Promise((resolve, reject) => {
     let socket;
     let timer;
     let settled = false;
@@ -104,14 +104,14 @@ function createAdbInspection(adb, check, fail) {
               const body = pending.subarray(5, length + 5);
               pending = pending.subarray(length + 5);
               if (id === 1) {
-                if (stdout.length + length > 1048576) throw new Error('ADB stdout bound');
+                if (stdout.length + length > (binary ? 262144 : 1048576)) throw new Error('ADB stdout bound');
                 stdout = Buffer.concat([stdout, body]);
               } else if (id === 2) {
                 stderr += length;
                 if (stderr > 65536) throw new Error('ADB stderr bound');
               } else {
                 if (body[0] !== 0 || stderr) throw new Error('ADB shell unsuccessful completion');
-                output = new TextDecoder('utf-8', {fatal: true}).decode(stdout);
+                output = binary ? stdout : new TextDecoder('utf-8', {fatal: true}).decode(stdout);
                 stage = 'done';
               }
             }
@@ -125,6 +125,16 @@ function createAdbInspection(adb, check, fail) {
   });
   return {
     cancel,
+    async readKernelConfig(deadline) {
+      try {
+        guard();
+        if (busy || !Number.isSafeInteger(deadline) || deadline <= Date.now() || deadline - Date.now() > 30000) throw new Error('Invalid ADB read admission');
+        busy = true;
+        if (await request('host:version', false, deadline) !== '0029') throw new Error('Unsupported existing ADB server version');
+        return await request('shell,v2,raw:cat /proc/config.gz', true, deadline, true);
+      } catch (error) { cancel(error); throw fail(error); }
+      finally { busy = false; }
+    },
     async read(args, deadline) {
       try {
         guard();

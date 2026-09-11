@@ -3,6 +3,7 @@
 const {AsyncLocalStorage} = require('node:async_hooks');
 const http = require('node:http');
 const {createAdbInspection} = require('./adb-inspection.cjs');
+const {acquireKernelCapability, namespaceForCapability, validateNamespaceStatus} = require('./kernel-namespace.cjs');
 const {isAbsolute} = require('node:path');
 const {inspectTargets, associateBrowserProcess} = require('./target-inspection.cjs');
 
@@ -51,6 +52,7 @@ async function installRetainedInspection(driver, owner, requireOwner, quarantine
   let active;
   let failed;
   let original;
+  let kernelCapability;
   let association;
   let boundHandle;
   let dispatching = false;
@@ -198,6 +200,7 @@ async function installRetainedInspection(driver, owner, requireOwner, quarantine
   };
   const processIdentity = async () => {
     const startedAt = Date.now();
+    kernelCapability ||= await acquireKernelCapability(adbClient, active.deadline, check);
     const pid = (await shell(['pidof', 'com.android.chrome'])).trim();
     if (!/^[1-9]\d*$/.test(pid) || Number(pid) > 2147483647) throw new Error('Sole Chrome PID unavailable');
     if (original && original.pid !== pid) throw new Error('Original native Chrome process changed');
@@ -205,27 +208,14 @@ async function installRetainedInspection(driver, owner, requireOwner, quarantine
     const startTime = stat?.[3].split(/\s+/)[18];
     if (stat?.[1] !== pid || !/^[1-9]\d*$/.test(startTime || '') || /[ZXx]/.test(stat[2])) throw new Error('Live Chrome starttime unavailable');
     if (original && (original.pid !== pid || original.startTime !== startTime)) throw new Error('Original native Chrome process changed');
-    // Linux lists NSpid from the procfs mount's namespace to the task's active namespace.
-    // Both reads require the same trusted, stable procfs view; this is not a namespace identifier.
-    const namespaceStatus = (text, expectedPid) => {
-      if (text.length > 65536) throw new Error('Native namespace metadata bound');
-      const field = (name) => {
-        const values = text.split(/\r?\n/).filter(line => line.startsWith(`${name}:`));
-        if (values.length !== 1) throw new Error('Native namespace metadata unavailable');
-        return values[0].slice(name.length + 1).trim();
-      };
-      const visiblePid = field('Pid');
-      const namespacePid = field('NSpid');
-      if (!/^[1-9]\d*$/.test(visiblePid) || Number(visiblePid) > 2147483647 ||
-          namespacePid !== visiblePid || (expectedPid && visiblePid !== expectedPid)) throw new Error('Native PID namespace is nested, differing or unknown');
-    };
-    namespaceStatus(await shell(['cat', `/proc/${pid}/status`]), pid);
-    namespaceStatus(await shell(['cat', '/proc/self/status']));
+    validateNamespaceStatus(await shell(['cat', `/proc/${pid}/status`]), pid, kernelCapability);
+    validateNamespaceStatus(await shell(['cat', '/proc/self/status']), undefined, kernelCapability);
     const bootId = (await shell(['cat', '/proc/sys/kernel/random/boot_id'])).trim();
     if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(bootId)) throw new Error('Native boot identity unavailable');
-    const namespace = 'reader-and-browser-active-in-procfs-mount-pid-namespace';
+    if (bootId !== kernelCapability.bootId) throw new Error('Original kernel capability boot changed');
+    const namespace = namespaceForCapability(kernelCapability);
     if (original && (original.pid !== pid || original.startTime !== startTime || original.bootId !== bootId || original.namespace !== namespace)) throw new Error('Original native Chrome process changed');
-    return {pid, startTime, bootId, namespace, startedAt, finishedAt: Date.now()};
+    return {pid, startTime, bootId, namespace, kernelCapability, startedAt, finishedAt: Date.now()};
   };
   const native = async () => {
     const process = await processIdentity();
