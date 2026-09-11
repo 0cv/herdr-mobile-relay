@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCommandSubprocess(t *testing.T) {
@@ -109,13 +112,29 @@ func runCommandSubprocess(t *testing.T, args ...string) commandResult {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command(os.Args[0], "-test.run=^TestCommandSubprocess$")
-	command.Env = commandEnvironment(string(encoded))
+	root := t.TempDir()
+	for _, directory := range []string{"home", "config", "cache", "data", "runtime", "tmp", "plugin", "web", "releases"} {
+		if err := os.Mkdir(filepath.Join(root, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	herdr := filepath.Join(root, "herdr")
+	if err := os.WriteFile(herdr, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCommandSubprocess$")
+	command.Env = commandEnvironment(string(encoded), root, herdr)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	err = command.Run()
 	result := commandResult{stdout: stdout.Bytes(), stderr: stderr.Bytes()}
+	if ctx.Err() != nil {
+		t.Fatalf("command timed out: stdout = %q, stderr = %q", result.stdout, result.stderr)
+	}
 	if err == nil {
 		return result
 	}
@@ -127,19 +146,43 @@ func runCommandSubprocess(t *testing.T, args ...string) commandResult {
 	return result
 }
 
-func commandEnvironment(args string) []string {
-	existing := os.Environ()
-	environment := make([]string, 0, len(existing)+2)
-	for _, entry := range existing {
-		if strings.HasPrefix(entry, "HERDR_TEST_COMMAND_HELPER=") || strings.HasPrefix(entry, "HERDR_TEST_COMMAND_ARGS=") {
-			continue
-		}
-		environment = append(environment, entry)
-	}
-	return append(environment,
+func commandEnvironment(args, root, herdr string) []string {
+	return []string{
+		"HOME=" + filepath.Join(root, "home"),
+		"XDG_CONFIG_HOME=" + filepath.Join(root, "config"),
+		"XDG_CACHE_HOME=" + filepath.Join(root, "cache"),
+		"XDG_DATA_HOME=" + filepath.Join(root, "data"),
+		"XDG_RUNTIME_DIR=" + filepath.Join(root, "runtime"),
+		"TMPDIR=" + filepath.Join(root, "tmp"),
+		"PATH=/usr/bin:/bin",
+		"LANG=C",
+		"LC_ALL=C",
+		"HERDR_RELAY_HOST=127.0.0.1",
+		"HERDR_RELAY_PORT=1",
+		"HERDR_RELAY_PLUGIN_PORT=2",
+		"HERDR_RELAY_TOKEN=",
+		"HERDR_RELAY_INSTANCE_ID=",
+		"HERDR_RELAY_ENV=" + filepath.Join(root, "config", "relay.env"),
+		"HERDR_PLUGIN_CONFIG_DIR=" + filepath.Join(root, "plugin"),
+		"HERDR_WEB_ROOT=" + filepath.Join(root, "web"),
+		"HERDR_BIN=" + herdr,
+		"HERDR_SOCKET_PATH=" + filepath.Join(root, "runtime", "relay.sock"),
+		"HERDR_RELAY_POLL_INTERVAL=2",
+		"HERDR_RELAY_LOG_FORMAT=" + os.Getenv("HERDR_RELAY_LOG_FORMAT"),
+		"HERDR_RELAY_LOG_LEVEL=" + os.Getenv("HERDR_RELAY_LOG_LEVEL"),
+		"HERDR_RELAY_SERVICE_NAME=herdr-command-test.service",
+		"HERDR_ALLOWED_ORIGINS=",
+		"HERDR_GATEWAY_URL=",
+		"HERDR_GATEWAY_SELECTION=",
+		"HERDR_WEBRTC_UDP_PORT=0",
+		"HERDR_TRANSPORT_FORCE_RELAY=false",
+		"HERDR_REACHABILITY_PORT_MAPPING=false",
+		"HERDR_RELAY_REARM_BOOTSTRAP=false",
+		"HERDR_RELEASE_ROOT=" + filepath.Join(root, "releases"),
+		"JOURNAL_STREAM=",
 		"HERDR_TEST_COMMAND_HELPER=1",
-		"HERDR_TEST_COMMAND_ARGS="+args,
-	)
+		"HERDR_TEST_COMMAND_ARGS=" + args,
+	}
 }
 
 func decodeSingleJSONRecord(t *testing.T, data []byte) map[string]any {
