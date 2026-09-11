@@ -9,6 +9,7 @@ import {
 } from '../support/oracle';
 import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
 import { PhaseBudget } from '../support/budget';
+import { withIOSConfirmationSettings } from '../support/confirmation-settings';
 import { CommandError, command, commandOutput } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
 import {
@@ -42,6 +43,7 @@ const IOS_SAFARI_OBSERVATION_MS = 6_000;
 const IOS_INSTALLED_FOREGROUND_MS = 8_000;
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
+const IOS_CONFIRMATION_ROUND_MS = 5 * IOS_NATIVE_LOOKUP_ROUND_MS + 3 * IOS_CONFIRMATION_LOOKUP_MS;
 const IOS_NATIVE_SCROLL_COMMAND_MS = 5_000;
 const IOS_NATIVE_HIERARCHY_COMMAND_MS = 8_000;
 const IOS_NATIVE_SCROLL_LIMIT = 8;
@@ -612,16 +614,18 @@ export class IOSPlatform implements MobilePlatform {
     await this.clickNativeScrollable([
       iosActionLabelContains('Add to Home Screen'),
     ], 'Add to Home Screen', Math.min(IOS_NATIVE_ACTION_TIMEOUT_MS, phase.remainingMs));
-    const addButton = await this.waitForInstallConfirmation(phase);
-    if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
-    await this.driver.click(addButton, IOS_NATIVE_LOOKUP_ROUND_MS);
+    await withIOSConfirmationSettings(this.driver, phase, IOS_CONFIRMATION_ROUND_MS, async (confirmation) => {
+      const addButton = await this.waitForInstallConfirmation(confirmation);
+      if (confirmation.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+      await this.driver.click(addButton, IOS_NATIVE_LOOKUP_ROUND_MS);
+    });
     await delay(Math.min(1_500, phase.remainingMs), phase);
   }
 
   private async waitForInstallConfirmation(parent: PhaseBudget): Promise<string> {
-    const phase = parent.phaseView('ios-install-confirmation', 30_000);
+    const phase = parent.phaseView('ios-install-confirmation', 60_000);
     let lastState = 'missing';
-    while (phase.remainingMs >= IOS_NATIVE_LOOKUP_ROUND_MS) {
+    while (phase.remainingMs >= IOS_CONFIRMATION_ROUND_MS) {
       try {
         if (this.driver.snapshot().selectedContext !== 'NATIVE_APP') throw new Error('IOS_SHARE: Add: confirmation is not in the native context');
         const appInfo = await this.driver.activeAppInfo(IOS_NATIVE_LOOKUP_ROUND_MS);
@@ -629,23 +633,24 @@ export class IOSPlatform implements MobilePlatform {
         if (!isIOSSafariBrowserBundle(bundleId) && !isIOSSafariViewServiceBundle(bundleId)) {
           throw new Error(`IOS_SHARE: Add: Safari confirmation is not foreground (${bundleId || 'unknown'})`);
         }
-        if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
+        if (phase.remainingMs < IOS_CONFIRMATION_ROUND_MS - IOS_NATIVE_LOOKUP_ROUND_MS) break;
         const response = await this.driver.command<unknown>('/element', 'POST', accessibility('Add'), IOS_CONFIRMATION_LOOKUP_MS);
         const element = this.installConfirmationElementId(response);
-        if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
+        if (phase.remainingMs < IOS_CONFIRMATION_ROUND_MS - IOS_NATIVE_LOOKUP_ROUND_MS - IOS_CONFIRMATION_LOOKUP_MS) break;
         if (await this.installConfirmationIdentity() !== element) {
           lastState = 'confirmation identity is missing or replaced';
         } else {
-          if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
-          const state = await this.nativeControlState(element, phase);
-          if (state === 'indeterminate' && phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
+          if (phase.remainingMs < 4 * IOS_NATIVE_LOOKUP_ROUND_MS + IOS_CONFIRMATION_LOOKUP_MS) break;
+          const readiness = phase.phaseView('ios-confirmation-readiness', phase.remainingMs, IOS_CONFIRMATION_LOOKUP_MS + IOS_NATIVE_LOOKUP_ROUND_MS);
+          const state = await this.nativeControlState(element, readiness);
+          if (state === 'indeterminate' && readiness.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) break;
           if (state === 'ready') {
-            if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS) break;
+            if (phase.remainingMs < IOS_CONFIRMATION_LOOKUP_MS + IOS_NATIVE_LOOKUP_ROUND_MS) break;
             const currentElement = await this.installConfirmationIdentity();
             if (!currentElement) throw new Error('IOS_SHARE: Add: confirmation identity was replaced before click');
             if (currentElement === element) {
-              if (!phase.exhausted) return element;
-              break;
+              if (phase.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
+              return element;
             }
             lastState = 'confirmation Add control was replaced before click';
           } else {

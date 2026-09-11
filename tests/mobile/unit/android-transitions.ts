@@ -10,6 +10,7 @@ import recorded from './fixtures/android/recorded-transitions.json';
 
 const { JSDOM } = createRequire(import.meta.url)('../../../frontend/node_modules/jsdom');
 const launcherXML = await readFile(new URL('./fixtures/android/launcher-observed.xml', import.meta.url), 'utf8');
+const hypotheticalChromeXML = await readFile(new URL('./fixtures/android/chrome-confirmation-hypothetical.xml', import.meta.url), 'utf8');
 const launcherPackage = 'com.google.android.apps.nexuslauncher';
 const chromeForeground = 'ResumedActivity: ActivityRecord{recorded u0 com.android.chrome/com.google.android.apps.chrome.Main t10}\n mCurrentFocus=Window{recorded u0 com.android.chrome/com.google.android.apps.chrome.Main}';
 const settingsForeground = 'ResumedActivity: ActivityRecord{synthetic u0 com.android.settings/.Settings t9}\n mCurrentFocus=Window{synthetic u0 com.android.settings/com.android.settings.Settings}';
@@ -29,6 +30,9 @@ interface ReplayOptions {
   invalidLookup?: boolean;
   browserInstall?: boolean;
   sourceXMLs?: string[];
+  chromeXML?: string;
+  chromeRemains?: boolean;
+  replaceIdentity?: boolean;
 }
 
 async function replay(options: ReplayOptions, body: (harness: any) => Promise<void>): Promise<void> {
@@ -57,7 +61,7 @@ await Bun.write(file, JSON.stringify(state));\n`);
   const budget = new PhaseBudget('android-recorded-replay', { timeoutMs: options.budgetMs || 60_000, recoveryLimit: 0 });
   const requests: Array<{ path: string; body: any; at: number }> = [];
   const elements = new Map<string, any>();
-  const chromeControl = (text: string) => `<hierarchy><android.widget.Button package="com.android.chrome" text="${text}" content-desc="${text}" clickable="true" enabled="true" displayed="true" bounds="[0,136][400,276]"/></hierarchy>`;
+  const chromeControl = (text: string) => text === 'Add' ? options.chromeXML ?? hypotheticalChromeXML : `<hierarchy><android.widget.Button class="android.widget.Button" package="com.android.chrome" text="${text}" content-desc="${text}" clickable="true" enabled="true" displayed="true" bounds="[0,136][400,276]"/></hierarchy>`;
   let xml = options.browserInstall ? chromeControl('More options') : options.xml ?? launcherXML;
   let active = 0;
   let maxActive = 0;
@@ -112,7 +116,8 @@ await Bun.write(file, JSON.stringify(state));\n`);
           return response({ error: 'unsupported operation', message: `Unsupported locator ${payload.using}` }, 500);
         }
         const values = nodes.map((node: any) => {
-          const id = `element-${elements.size}`;
+          const existing = [...elements.entries()].find(([, previous]) => previous.outerHTML === node.outerHTML);
+          const id = existing && !options.replaceIdentity ? existing[0] : `element-${elements.size}`;
           elements.set(id, node);
           return { 'element-6066-11e4-a52e-4f735466cecf': id };
         });
@@ -132,7 +137,7 @@ await Bun.write(file, JSON.stringify(state));\n`);
         const chromeSteps = ['More options', 'Install app', 'Add'];
         if (options.browserInstall && clicks < chromeSteps.length) {
           assert.equal(label, chromeSteps[clicks]);
-          xml = clicks === 2 ? launcherXML : chromeControl(chromeSteps[clicks + 1]);
+          xml = clicks === 2 ? options.chromeRemains ? chromeControl('Add') : launcherXML : chromeControl(chromeSteps[clicks + 1]);
         } else {
           assert.ok(label === 'Add to home screen' || label === 'Open navigation');
         }
@@ -310,6 +315,88 @@ test('Android picker genuine hung hierarchy retains first failure and never navi
     assert.equal(requests.length, count);
     assert.deepEqual(client.snapshot().firstFatal, failure);
     assert.equal(requests.some((item: any) => item.body?.using === 'accessibility id'), false);
+  });
+});
+
+for (const [name, overrides] of [
+  ['wrong class', { class: 'android.widget.TextView' }],
+  ['wrong owner', { package: 'unrelated.package' }],
+  ['hidden', { displayed: 'false' }],
+  ['disabled', { enabled: 'false' }],
+  ['not clickable', { clickable: 'false' }],
+  ['missing readiness', { enabled: null }],
+] as const) {
+  test(`Android hypothetical Chrome confirmation rejects ${name} before the sole click`, async () => {
+    await replay({ browserInstall: true, foregrounds: [chromeForeground], attributeOverrides: overrides }, async ({ platform, state, root }) => {
+      await assert.rejects(() => platform.installFromBrowser(), /selected confirmation control is not a ready Chrome button/u);
+      assert.equal(state().clicks, 2);
+      assert.equal(await readFile(join(root, 'android-chrome-before-confirmation.xml'), 'utf8'), hypotheticalChromeXML);
+    });
+  });
+}
+
+for (const replaceIdentity of [false, true]) {
+  test(`Android hypothetical Chrome confirmation rejects ${replaceIdentity ? 'replaced' : 'ambiguous'} identity`, async () => {
+    const chromeXML = replaceIdentity ? hypotheticalChromeXML : hypotheticalChromeXML.replace('text="Cancel"', 'text="Install"');
+    await replay({ browserInstall: true, foregrounds: [chromeForeground], chromeXML, replaceIdentity }, async ({ platform, state }) => {
+      await assert.rejects(() => platform.installFromBrowser(), /ambiguous or replaced/u);
+      assert.equal(state().clicks, 2);
+    });
+  });
+}
+
+test('Android hypothetical Chrome confirmation refuses an incomplete whole operation', async () => {
+  await replay({ browserInstall: true, budgetMs: 44_999 }, async ({ platform, state, requests }) => {
+    await assert.rejects(() => platform.installFromBrowser(), /insufficient confirmation observation allowance/u);
+    assert.equal(state().clicks, 2);
+    assert.equal(requests.some((request: any) => request.path === '/source'), false);
+  });
+});
+
+test('Android hypothetical Chrome confirmation does not issue a doomed observation after phase-tail consumption', async () => {
+  await replay({ browserInstall: true, foregrounds: [chromeForeground], advanceMs: 10_001 }, async ({ platform, state, requests }) => {
+    await assert.rejects(() => platform.installFromBrowser(), /insufficient confirmation observation allowance/u);
+    assert.equal(state().clicks, 2);
+    assert.equal(requests.at(-1).path, '/source');
+  });
+});
+
+test('Android hypothetical Chrome confirmation hung hierarchy quarantines without a click or post-observation', async () => {
+  await replay({ browserInstall: true, hangPath: /\/source$/u }, async ({ platform, client, state, requests }) => {
+    await assert.rejects(() => platform.installFromBrowser(), /APPIUM_TIMEOUT/u);
+    assert.equal(state().clicks, 2);
+    assert.equal(requests.at(-1).path, '/source');
+    assert.equal(client.snapshot().unusable, true);
+  });
+});
+
+for (const [name, chromeXML] of [
+  ['off-screen', hypotheticalChromeXML.replace('[600,1250][950,1400]', '[600,2300][950,2500]')],
+  ['missing bounds', hypotheticalChromeXML.replace('bounds="[600,1250][950,1400]"', '')],
+] as const) {
+  test(`Android hypothetical Chrome confirmation rejects ${name} bounds`, async () => {
+    await replay({ browserInstall: true, foregrounds: [chromeForeground], chromeXML }, async ({ platform, state }) => {
+      await assert.rejects(() => platform.installFromBrowser(), /selected confirmation control is not a ready Chrome button/u);
+      assert.equal(state().clicks, 2);
+    });
+  });
+}
+
+test('Android hypothetical Chrome late click cannot authorize post-observation or another action', async () => {
+  await replay({ browserInstall: true, foregrounds: [chromeForeground], hangPath: /\/element\/element-2\/click$/u }, async ({ platform, client, requests, root }) => {
+    await assert.rejects(() => platform.installFromBrowser(), /APPIUM_TIMEOUT/u);
+    assert.equal(requests.at(-1).path, '/element/element-2/click');
+    assert.equal(requests.filter((request: any) => request.path === '/source').length, 1);
+    await assert.rejects(() => readFile(join(root, 'android-chrome-after-confirmation.xml')), /ENOENT/u);
+    assert.equal(client.snapshot().unusable, true);
+  });
+});
+
+test('Android hypothetical Chrome remaining dialog is captured but never retried or accepted as installation', async () => {
+  await replay({ browserInstall: true, chromeRemains: true, foregrounds: [chromeForeground] }, async ({ platform, state, root }) => {
+    await assert.rejects(() => platform.installFromBrowser(), /ANDROID_LAUNCHER/u);
+    assert.equal(state().clicks, 3);
+    assert.equal(await readFile(join(root, 'android-chrome-after-confirmation.xml'), 'utf8'), hypotheticalChromeXML);
   });
 });
 

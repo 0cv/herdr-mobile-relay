@@ -280,7 +280,7 @@ export class AndroidPlatform implements MobilePlatform {
       textLocator('Add'),
       textLocator('Install'),
     ], 15_000);
-    await this.driver.click(confirm);
+    await this.observeChromeConfirmation(confirm);
 
     const confirmed = await this.confirmLauncherShortcut();
     if (!confirmed) throw new Error('ANDROID_LAUNCHER: confirmation control was not exposed by the automation hierarchy');
@@ -323,6 +323,56 @@ export class AndroidPlatform implements MobilePlatform {
     const identity = await this.readRunningIdentity();
     assertStandalone(identity, origin);
     return identity;
+  }
+
+  private async observeChromeConfirmation(element: string): Promise<void> {
+    const phase = this.budget.phaseView('android-chrome-confirmation', 50_000);
+    const readMs = 2_000;
+    const hierarchyMs = 5_000;
+    const actionMs = 5_000;
+    const requiredMs = 2 * hierarchyMs + 10 * readMs + 2 * ANDROID_NATIVE_LOOKUP_COMMAND_MS + actionMs;
+    let remainingAllowance = requiredMs;
+    const observe = async <T>(allowance: number, operation: () => Promise<T>): Promise<T> => {
+      if (phase.remainingMs < remainingAllowance) throw new Error('ANDROID_CHROME: insufficient confirmation observation allowance');
+      remainingAllowance -= allowance;
+      return operation();
+    };
+    const before = await observe(hierarchyMs, () => this.driver.pageSource(hierarchyMs));
+    await writeBoundedText(join(this.outputDir, 'android-chrome-before-confirmation.xml'), before);
+    const identity: Record<string, unknown> = { element };
+    for (const attribute of ['class', 'resource-id', 'package', 'text', 'enabled', 'displayed', 'clickable']) {
+      identity[attribute] = await observe(readMs, () => this.driver.attribute(element, attribute, readMs));
+    }
+    const rect = await observe(readMs, () => this.driver.elementRect(element, readMs));
+    const size = await observe(readMs, () => this.driver.windowSize(readMs));
+    const foreground = await observe(ANDROID_NATIVE_LOOKUP_COMMAND_MS, () => this.foregroundEvidence(ANDROID_NATIVE_LOOKUP_COMMAND_MS));
+    this.diagnostics.record({ phase: 'android-chrome-confirmation', operation: 'selected-control', detail: { ...identity, rect, size, foreground } });
+    if (identity.class !== 'android.widget.Button' || identity.package !== 'com.android.chrome'
+      || !['Add', 'Install'].includes(String(identity.text))
+      || ['enabled', 'displayed', 'clickable'].some(attribute => identity[attribute] !== 'true')
+      || foreground.packageName !== 'com.android.chrome' || foreground.focusedPackage !== 'com.android.chrome'
+      || ![rect.x, rect.y, rect.width, rect.height, size.width, size.height].every(Number.isFinite)
+      || rect.x < 0 || rect.y < 0 || rect.width <= 0 || rect.height <= 0
+      || rect.x + rect.width > size.width || rect.y + rect.height > size.height) {
+      throw new Error('ANDROID_CHROME: selected confirmation control is not a ready Chrome button');
+    }
+    const matches = await observe(readMs, () => this.driver.command<unknown>('/elements', 'POST', {
+      using: 'xpath', value: "//android.widget.Button[@package='com.android.chrome' and (@text='Add' or @text='Install')]",
+    }, readMs));
+    if (!Array.isArray(matches) || matches.length !== 1
+      || matches[0]?.['element-6066-11e4-a52e-4f735466cecf'] !== element) {
+      throw new Error('ANDROID_CHROME: confirmation control is ambiguous or replaced');
+    }
+    if (phase.remainingMs < actionMs + hierarchyMs + ANDROID_NATIVE_LOOKUP_COMMAND_MS) throw new Error('ANDROID_CHROME: insufficient click and post-observation allowance');
+    await observe(actionMs, () => this.driver.click(element, actionMs));
+    const after = await observe(hierarchyMs, () => this.driver.pageSource(hierarchyMs));
+    await writeBoundedText(join(this.outputDir, 'android-chrome-after-confirmation.xml'), after);
+    const afterForeground = await observe(ANDROID_NATIVE_LOOKUP_COMMAND_MS, () => this.foregroundEvidence(ANDROID_NATIVE_LOOKUP_COMMAND_MS));
+    this.diagnostics.record({ phase: 'android-chrome-confirmation', operation: 'settled-click-observation', detail: {
+      foreground: afterForeground,
+      chromeRemainsForeground: afterForeground.packageName === 'com.android.chrome',
+      launcherForeground: afterForeground.packageName === ANDROID_LAUNCHER_PACKAGE && afterForeground.focusedPackage === ANDROID_LAUNCHER_PACKAGE,
+    } });
   }
 
   private nativeTransactionAvailable(deadline: number, timeoutMs = ANDROID_NATIVE_LOOKUP_COMMAND_MS): boolean {

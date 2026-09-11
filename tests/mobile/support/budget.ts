@@ -36,6 +36,7 @@ export interface PhaseBudgetOptions {
   timeoutMs: number;
   recoveryLimit?: number;
   parent?: PhaseBudget;
+  reserveParentMs?: number;
   now?: () => number;
 }
 
@@ -59,7 +60,9 @@ export class PhaseBudget {
     this.startedAtMs = this.clock();
     const requestedDeadline = this.startedAtMs + options.timeoutMs;
     const parent = options.parent;
-    this.deadlineMs = parent ? Math.min(requestedDeadline, parent.deadlineMs) : requestedDeadline;
+    const reserved = options.reserveParentMs ?? 0;
+    if (!Number.isFinite(reserved) || reserved < 0) throw new Error('PHASE_BUDGET: parent reserve must be nonnegative');
+    this.deadlineMs = parent ? Math.min(requestedDeadline, parent.deadlineMs - reserved) : requestedDeadline;
     this.root = parent?.root || this;
     this.recoveryLimitValue = Math.max(0, Math.floor(options.recoveryLimit ?? 2));
     if (this.root === this) return;
@@ -82,8 +85,8 @@ export class PhaseBudget {
     return this.root.recoveryLimitValue;
   }
 
-  phaseView(name: string, timeoutMs: number): PhaseBudget {
-    return new PhaseBudget(name, { timeoutMs, parent: this });
+  phaseView(name: string, timeoutMs: number, reserveParentMs = 0): PhaseBudget {
+    return new PhaseBudget(name, { timeoutMs, parent: this, reserveParentMs });
   }
 
   assertAvailable(operation: string): void {

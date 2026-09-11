@@ -52,6 +52,7 @@ import {
 import { androidTransitionTests } from './android-transitions';
 import { androidEnvironmentTests } from './android-environment';
 import { runIOSRegressions } from './ios';
+import { confirmationSettingsTests } from './confirmation-settings';
 import { scenarioRunnerTests } from './scenario-runner';
 import { webdriverInterruptionTests } from './webdriver-interruption';
 
@@ -1979,7 +1980,11 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
   let sheetOpen = false;
   let scrolls = 0;
   let shareSourceReads = 0;
-  let settings: Record<string, unknown> = {};
+  const savedConfirmationSettings = { waitForIdleTimeout: 7, animationCoolOffTimeout: 0.8 };
+  const initialSettings = { ...savedConfirmationSettings, snapshotMaxDepth: 50 };
+  let settings: Record<string, unknown> = { ...initialSettings };
+  const settingsWrites: Array<Record<string, unknown>> = [];
+  const settingsReads: Array<Record<string, unknown>> = [];
   const scrollArguments: Array<Record<string, unknown>> = [];
   const clicks: string[] = [];
   const source = () => {
@@ -1995,7 +2000,11 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     if (path === '/session') return new Response(JSON.stringify({ value: {}, sessionId: 'session' }), { status: 200 });
     if (path.endsWith('/context')) return new Response(JSON.stringify({ value: null }), { status: 200 });
     if (path.endsWith('/appium/settings')) {
-      if (init?.method === 'GET') return Response.json({ value: settings });
+      if (init?.method === 'GET') {
+        settingsReads.push({ ...settings });
+        return Response.json({ value: settings });
+      }
+      settingsWrites.push({ ...body.settings });
       settings = { ...settings, ...body.settings };
       return Response.json({ value: null });
     }
@@ -2047,6 +2056,10 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
       const id = decodeURIComponent(path.split('/element/')[1]?.split('/')[0] || '');
       clicks.push(id);
       if (id === 'share') sheetOpen = true;
+      if (id === 'add-button') {
+        assert.equal(settings.waitForIdleTimeout, 1);
+        assert.equal(settings.animationCoolOffTimeout, 0.2);
+      }
       return new Response(JSON.stringify({ value: null }), { status: 200 });
     }
     return new Response(JSON.stringify({ value: null }), { status: 200 });
@@ -2064,6 +2077,16 @@ test('iOS installation scrolls the evidenced action list before clicking ready c
     { element: 'container', direction: 'down', distance: 0.75 },
   ]);
   assert.deepEqual(clicks, ['share', 'add-home', 'add-button']);
+  const observationSettings = { defaultActiveApplication: 'auto', respectSystemAlerts: true };
+  const confirmationSettings = { waitForIdleTimeout: 1, animationCoolOffTimeout: 0.2 };
+  assert.deepEqual(settingsWrites, [observationSettings, confirmationSettings, savedConfirmationSettings]);
+  assert.deepEqual(settingsReads, [
+    { ...initialSettings, ...observationSettings },
+    { ...initialSettings, ...observationSettings },
+    { ...initialSettings, ...observationSettings, ...confirmationSettings },
+    { ...initialSettings, ...observationSettings },
+  ]);
+  assert.deepEqual(settings, { ...initialSettings, ...observationSettings });
   assert.equal(driver.snapshot().unusable, false);
 });
 
@@ -2250,6 +2273,7 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
 for (const [name, body] of androidTransitionTests) test(name, body);
 for (const [name, body] of scenarioRunnerTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
+for (const [name, body] of confirmationSettingsTests) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
 
 let failures = 0;
