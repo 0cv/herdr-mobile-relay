@@ -106,6 +106,36 @@ Full uninstall removes the service, releases, relay state, push credentials, and
 cache. It also removes the plugin registration when Herdr is reachable, and
 prints the manual command when it is not.
 
+## Relay logging
+
+The relay defaults to the `info` log level, so routine inventory diagnostics at
+`debug` are hidden. Put `HERDR_RELAY_LOG_LEVEL=debug` in the generated runtime
+environment file to diagnose a service, then restore `info` when finished.
+That file is the one named by `HERDR_RELAY_ENV` (normally managed by the
+installer); an export in a terminal does not change an already-running service.
+A custom `ExecStart=... serve` unit must set the variable through its own
+`Environment=` or `EnvironmentFile=` arrangement rather than relying on the
+plugin wrapper. For an installed unit, restart it after changing the file:
+`systemctl --user restart <your-unit>`.
+
+The installed unit is normally `herdr-mobile-relay.service`; substitute your
+own name, such as `herdr-mobile-relay-ts.service`:
+
+```bash
+journalctl --user -u <your-unit> -p warning --since '1 hour ago' --no-pager
+journalctl --user -u <your-unit> -f
+journalctl --user -u <your-unit> -o json --since '5 minutes ago' --no-pager
+```
+
+On Linux, journal-connected relay stderr receives priorities automatically when
+the unit keeps the default `SyslogLevelPrefix=yes`; terminal, file, and macOS
+logs stay unprefixed. JSON controls formatting, not verbosity or journal
+priority. The prefix sets the journal priority; slog attributes remain inside
+`MESSAGE`, not separate journal fields. `-p warning` filters records displayed
+by `journalctl`, while the log level controls records emitted and stored. `info`
+still includes warnings, so this setting does not reduce repeated outage
+warnings.
+
 ## Troubleshooting
 
 - **No setup menu:** invoke the `setup` action:

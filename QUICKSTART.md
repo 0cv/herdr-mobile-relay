@@ -113,5 +113,6 @@ changes, the full action list, teardown, and uninstall.
   choose **Check for Updates**, then **Load Update**. A separately hosted app
   must be published by its configured deployment-owner relay first.
 - **Need the stable QR again:** invoke `setup-link`.
+- **Need relay log filtering:** see [Cloudflare tunnel logging](docs/cloudflare-tunnel.md#relay-logging).
 
 [README.md](README.md) indexes the rest of the documentation.

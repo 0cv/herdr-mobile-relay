@@ -33,7 +33,7 @@ var (
 func main() {
 	exitCode, err := run(os.Args[1:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "herdr-mobile-relay: %v\n", err)
+		reportError(os.Stderr, os.Args[1:], err)
 		os.Exit(exitCode)
 	}
 }
@@ -324,14 +324,7 @@ func runServe() (int, error) {
 		return 1, err
 	}
 
-	var handler slog.Handler
-	opts := &slog.HandlerOptions{Level: slog.LevelDebug}
-	if cfg.LogFormat == "json" {
-		handler = slog.NewJSONHandler(os.Stderr, opts)
-	} else {
-		handler = slog.NewTextHandler(os.Stderr, opts)
-	}
-	logger := slog.New(handler)
+	logger := newRelayLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel, stderrIsJournal(os.Stderr))
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
