@@ -1,5 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { base64UrlEncode } from './base64url';
+import { clearConversationPreviews, clearConversationPreviewsForRelay } from './conversation-cache-control';
 import {
   AttachmentBatchController,
   type AttachmentUploadCallbacks,
@@ -361,11 +362,20 @@ function normalizeConversationPage(value: unknown): ConversationPage {
     return { phase: browseString(raw.phase, 32, true), scanned_bytes: scanned, source_bytes: source };
   })();
   const rawDiagnostics = data.diagnostics == null ? {} : browseRecord(data.diagnostics, true)!;
+  const continuationIncomplete = browseBoolean(rawDiagnostics.continuation_incomplete, true);
+  const continuationReason = rawDiagnostics.continuation_reason == null
+    ? undefined
+    : browseString(rawDiagnostics.continuation_reason, 64);
+  const continuationReasons = new Set(['missing_source', 'invalid_link', 'ambiguous_link', 'cycle', 'resolution_limit', 'partial_link']);
+  if (continuationIncomplete && (!continuationReason || !continuationReasons.has(continuationReason))) invalidBrowse();
+  if (!continuationIncomplete && continuationReason) invalidBrowse();
   const diagnostics = {
     oversized_records: browseCount(rawDiagnostics.oversized_records), corrupt_records: browseCount(rawDiagnostics.corrupt_records),
     omitted_tools: browseCount(rawDiagnostics.omitted_tools), omitted_payloads: browseCount(rawDiagnostics.omitted_payloads),
     plan_corrupt: browseBoolean(rawDiagnostics.plan_corrupt, true),
     source_truncated: browseBoolean(rawDiagnostics.source_truncated, true),
+    continuation_incomplete: continuationIncomplete,
+    continuation_reason: continuationReason,
   };
   const rawError = data.error == null ? null : browseRecord(data.error, true)!;
   const error = rawError ? {
@@ -577,6 +587,7 @@ class RelayStore {
     const invitation = quickSetupInvitation(location);
     const imported = importQuickSetup(relays, location);
     if (imported) {
+      clearChangedRelayPreviews(relays, imported);
       relays = imported;
       const relay = setup ? this.relayForSetup(relays, setup) : undefined;
       if (relay) {
@@ -650,8 +661,10 @@ class RelayStore {
   importSetupLink(locationValue: Pick<Location, 'hash' | 'protocol' | 'host' | 'pathname' | 'search'> = location, connect = true): boolean {
     const setup = quickSetupConfig(locationValue);
     const invitation = quickSetupInvitation(locationValue);
-    const imported = importQuickSetup(get(this.relayConfigs), locationValue);
+    const currentRelays = get(this.relayConfigs);
+    const imported = importQuickSetup(currentRelays, locationValue);
     if (!imported || !setup) return false;
+    clearChangedRelayPreviews(currentRelays, imported);
     const relay = this.relayForSetup(imported, setup);
     if (!relay) return false;
     // Persist the entry before deciding, so a deferred relay row exists for
@@ -689,6 +702,7 @@ class RelayStore {
     this.pendingSlashCommands.clear();
     this.pendingPaneReads.clear();
     this.paneContentFingerprints.clear();
+    clearConversationPreviews();
     this.watchedPanes.clear();
     this.paneWatchesStarted.clear();
   }
@@ -713,6 +727,7 @@ class RelayStore {
         ? normalizeRelayConfig({ ...next, id: existing.id, paired: next.paired || existing.paired })
         : relay))
       : [...relays, next];
+    if (existing && relayConnectionIdentityChanged(existing, next)) clearConversationPreviewsForRelay(existing.id);
     this.relayConfigs.set(updated);
     saveRelayConfigs(updated);
     this.connectAll();
@@ -723,6 +738,7 @@ class RelayStore {
     this.reconnectAttempts.delete(id);
     this.deferredPairingRelays.delete(id);
     this.deviceCredentials.remove(id);
+    clearConversationPreviewsForRelay(id);
     this.devicesValue.delete(id);
     this.devices.set(new Map(this.devicesValue));
     this.pushPoliciesValue.delete(id);
@@ -934,6 +950,7 @@ class RelayStore {
     // The relay refuses this device's credential. Keep it until a confirmed,
     // newer invitation replaces it: gateway close reasons are not authenticated.
     if (detail?.code === 'device_unauthorized') {
+      clearConversationPreviewsForRelay(relay.id);
       connection.authRejected = true;
       connection.closed = true;
       clearTimeout(connection.reconnectTimer ?? undefined);
@@ -1908,6 +1925,7 @@ class RelayStore {
     const current = this.deviceCredential(intent.relayId);
     if (current?.deviceId === intent.deviceId) {
       this.deviceCredentials.remove(intent.relayId);
+      clearConversationPreviewsForRelay(intent.relayId);
       this.surfacePairingRequirement(intent.relayId);
     }
     await this.refreshDevices(intent.relayId);
@@ -1916,6 +1934,7 @@ class RelayStore {
   async resetDevices(intent: ResetDevicesIntent): Promise<void> {
     await this.sendCommand(intent.relayId, { type: 'reset_devices' });
     this.deviceCredentials.remove(intent.relayId);
+    clearConversationPreviewsForRelay(intent.relayId);
     this.devicesValue.delete(intent.relayId);
     this.devices.set(new Map(this.devicesValue));
     this.surfacePairingRequirement(intent.relayId);
@@ -3021,6 +3040,24 @@ class RelayStore {
     // keepalive has to be told that a relay came up or went away.
     this.syncKeepalive();
   }
+}
+
+function clearChangedRelayPreviews(before: RelayConfig[], after: RelayConfig[]): void {
+  const previous = new Map(before.map((relay) => [relay.id, relay]));
+  for (const relay of after) {
+    const old = previous.get(relay.id);
+    if (old && relayConnectionIdentityChanged(old, relay)) clearConversationPreviewsForRelay(relay.id);
+  }
+}
+
+function relayConnectionIdentityChanged(before: RelayConfig, after: RelayConfig): boolean {
+  return before.url !== after.url
+    || before.token !== after.token
+    || before.transport !== after.transport
+    || before.gatewayUrl !== after.gatewayUrl
+    || (before.gatewayUrls || []).join('\u0000') !== (after.gatewayUrls || []).join('\u0000')
+    || before.gatewayRelayId !== after.gatewayRelayId
+    || before.rendezvousKey !== after.rendezvousKey;
 }
 
 function applyPaneDelta(previous: string, value: unknown): string | null {

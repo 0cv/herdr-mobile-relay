@@ -59,12 +59,14 @@ type BrowseProgress struct {
 }
 
 type BrowseDiagnostics struct {
-	OversizedRecords int  `json:"oversized_records"`
-	CorruptRecords   int  `json:"corrupt_records"`
-	OmittedTools     int  `json:"omitted_tools,omitempty"`
-	OmittedPayloads  int  `json:"omitted_payloads,omitempty"`
-	PlanCorrupt      bool `json:"plan_corrupt,omitempty"`
-	SourceTruncated  bool `json:"source_truncated,omitempty"`
+	OversizedRecords       int    `json:"oversized_records"`
+	CorruptRecords         int    `json:"corrupt_records"`
+	OmittedTools           int    `json:"omitted_tools,omitempty"`
+	OmittedPayloads        int    `json:"omitted_payloads,omitempty"`
+	PlanCorrupt            bool   `json:"plan_corrupt,omitempty"`
+	SourceTruncated        bool   `json:"source_truncated,omitempty"`
+	ContinuationIncomplete bool   `json:"continuation_incomplete,omitempty"`
+	ContinuationReason     string `json:"continuation_reason,omitempty"`
 }
 
 type BrowseError struct {
@@ -92,34 +94,42 @@ type BrowsePage struct {
 }
 
 type BrowserOptions struct {
-	RecentBytes        int64
-	MaxRecordBytes     int64
-	DefaultPageSize    int
-	MaxPageSize        int
-	ResponseBytes      int
-	ActiveWorkers      int
-	QueuedPreparations int
-	InterestLease      time.Duration
-	SnapshotTTL        time.Duration
-	SnapshotQuota      int64
-	AggregateQuota     int64
-	CursorTTL          time.Duration
+	RecentBytes          int64
+	MaxRecordBytes       int64
+	DefaultPageSize      int
+	MaxPageSize          int
+	ResponseBytes        int
+	ActiveWorkers        int
+	QueuedPreparations   int
+	InterestLease        time.Duration
+	SnapshotTTL          time.Duration
+	SnapshotQuota        int64
+	AggregateQuota       int64
+	CursorTTL            time.Duration
+	RecentCacheEntries   int
+	RecentCacheItemBytes int64
+	RecentCacheBytes     int64
+	RecentCacheTTL       time.Duration
 }
 
 func DefaultBrowserOptions() BrowserOptions {
 	return BrowserOptions{
-		RecentBytes:        maxConversationBytes,
-		MaxRecordBytes:     16 * 1024 * 1024,
-		DefaultPageSize:    defaultPageSize,
-		MaxPageSize:        maxPageSize,
-		ResponseBytes:      2 * 1024 * 1024,
-		ActiveWorkers:      1,
-		QueuedPreparations: 4,
-		InterestLease:      30 * time.Second,
-		SnapshotTTL:        15 * time.Minute,
-		SnapshotQuota:      512 * 1024 * 1024,
-		AggregateQuota:     1024 * 1024 * 1024,
-		CursorTTL:          15 * time.Minute,
+		RecentBytes:          maxConversationBytes,
+		MaxRecordBytes:       16 * 1024 * 1024,
+		DefaultPageSize:      defaultPageSize,
+		MaxPageSize:          maxPageSize,
+		ResponseBytes:        2 * 1024 * 1024,
+		ActiveWorkers:        1,
+		QueuedPreparations:   4,
+		InterestLease:        30 * time.Second,
+		SnapshotTTL:          15 * time.Minute,
+		SnapshotQuota:        512 * 1024 * 1024,
+		AggregateQuota:       1024 * 1024 * 1024,
+		CursorTTL:            15 * time.Minute,
+		RecentCacheEntries:   4,
+		RecentCacheItemBytes: 16 * 1024 * 1024,
+		RecentCacheBytes:     64 * 1024 * 1024,
+		RecentCacheTTL:       60 * time.Second,
 	}
 }
 
@@ -164,6 +174,18 @@ func (o BrowserOptions) normalized() BrowserOptions {
 	if o.CursorTTL < time.Second {
 		o.CursorTTL = defaults.CursorTTL
 	}
+	if o.RecentCacheEntries < 1 {
+		o.RecentCacheEntries = defaults.RecentCacheEntries
+	}
+	if o.RecentCacheItemBytes < 1 {
+		o.RecentCacheItemBytes = defaults.RecentCacheItemBytes
+	}
+	if o.RecentCacheBytes < 1 {
+		o.RecentCacheBytes = defaults.RecentCacheBytes
+	}
+	if o.RecentCacheTTL < time.Millisecond {
+		o.RecentCacheTTL = defaults.RecentCacheTTL
+	}
 	return o
 }
 
@@ -203,25 +225,30 @@ type browseJob struct {
 	snapshotID  string
 	index       *snapshotIndex
 
-	mu               sync.RWMutex
-	state            BrowseState
-	phase            string
-	scannedBytes     int64
-	sourceBytes      int64
-	diagnostics      BrowseDiagnostics
-	plan             *OMOTodoState
-	total            int
-	err              *BrowseError
-	lastInterest     time.Time
-	readers          int
-	validatedSize    int64
-	validatedModTime int64
-	sourceDigest     string
-	autoRetried      bool
-	queued           bool
-	running          bool
-	lastAccess       time.Time
-	retired          bool
+	mu                sync.RWMutex
+	state             BrowseState
+	phase             string
+	scannedBytes      int64
+	sourceBytes       int64
+	diagnostics       BrowseDiagnostics
+	plan              *OMOTodoState
+	total             int
+	err               *BrowseError
+	lastInterest      time.Time
+	readers           int
+	validatedSize     int64
+	validatedModTime  int64
+	sourceDigest      string
+	chainContextID    string
+	chainSegment      int
+	chainFooterStart  int64
+	chainFooterEnd    int64
+	chainFooterDigest string
+	autoRetried       bool
+	queued            bool
+	running           bool
+	lastAccess        time.Time
+	retired           bool
 }
 
 type Browser struct {
@@ -237,12 +264,16 @@ type Browser struct {
 	done   chan *browseJob
 	closed chan struct{}
 
-	mu      sync.Mutex
-	jobs    map[string]*browseJob
-	dedup   map[string]string
-	queue   []*browseJob
-	active  int
-	closing bool
+	mu                sync.Mutex
+	jobs              map[string]*browseJob
+	dedup             map[string]string
+	queue             []*browseJob
+	chains            map[string]*claudeChainContext
+	chainByKey        map[string]string
+	chainLineage      map[string]claudeChainLineage
+	chainReservations int
+	active            int
+	closing           bool
 
 	schedulerWG sync.WaitGroup
 	workerWG    sync.WaitGroup
@@ -250,6 +281,7 @@ type Browser struct {
 	closeOnce   sync.Once
 
 	sourceReadObserver func(int64)
+	recentCache        *recentProjectionCache
 }
 
 func NewBrowser(reader *Reader, cacheRoot string, options BrowserOptions) (*Browser, error) {
@@ -270,6 +302,9 @@ func NewBrowser(reader *Reader, cacheRoot string, options BrowserOptions) (*Brow
 		reader: reader, cacheRoot: cacheRoot, options: options, key: key, cacheErr: cacheErr,
 		ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), done: make(chan *browseJob, options.ActiveWorkers+1),
 		closed: make(chan struct{}), jobs: make(map[string]*browseJob), dedup: make(map[string]string),
+		recentCache: newRecentProjectionCache(options),
+		chains:      make(map[string]*claudeChainContext), chainByKey: make(map[string]string),
+		chainLineage: make(map[string]claudeChainLineage),
 	}
 	browser.schedulerWG.Add(1)
 	go browser.scheduler()
@@ -345,7 +380,14 @@ func (b *Browser) Close() error {
 		}
 		b.jobs = make(map[string]*browseJob)
 		b.dedup = make(map[string]string)
+		b.chains = make(map[string]*claudeChainContext)
+		b.chainByKey = make(map[string]string)
+		b.chainLineage = make(map[string]claudeChainLineage)
+		b.chainReservations = 0
 		b.mu.Unlock()
+		if b.recentCache != nil {
+			b.recentCache.clear()
+		}
 		for _, job := range jobs {
 			job.mu.Lock()
 			job.retired = true
@@ -448,6 +490,14 @@ func (b *Browser) evictExpired(now time.Time) {
 		}
 		job.mu.Unlock()
 	}
+	for id, chain := range b.chains {
+		if chain.refs == 0 && now.Sub(chain.lastAccess) >= b.options.CursorTTL {
+			delete(b.chains, id)
+			if b.chainByKey[chain.key] == id {
+				delete(b.chainByKey, chain.key)
+			}
+		}
+	}
 	b.mu.Unlock()
 	for _, item := range expired {
 		if item.sourceFile != nil {
@@ -541,6 +591,9 @@ func browseErrorFor(code, message string, retryable bool) *BrowseError {
 
 func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo bool) (BrowsePage, error) {
 	if request.Cursor == "" {
+		if !omo && isClaudeProvider(request.Scope.Provider) {
+			return b.readClaudeChainPage(ctx, request)
+		}
 		return b.readRecentFilePage(ctx, request, omo)
 	}
 	cursor, err := decodeBrowseCursor(b.key, request.Cursor, request.Scope)
@@ -555,6 +608,11 @@ func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo b
 		return b.readPreparePage(ctx, request, cursor, omo)
 	case "snapshot":
 		return b.readSnapshotCursorPage(ctx, request, cursor)
+	case "chain":
+		if !isClaudeProvider(request.Scope.Provider) {
+			return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+		}
+		return b.readClaudeChainCursorPage(ctx, request, cursor)
 	default:
 		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
 	}
@@ -754,32 +812,13 @@ func (b *Browser) readRecentFilePage(ctx context.Context, request BrowseRequest,
 		}
 		return browseFailure(true, "source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true)), nil
 	}
-	records, oversized, err := collectJSONLRecords(ctx, source.file, start, source.end, b.options.MaxRecordBytes, nil)
+	projection, err := b.projectRecentRange(ctx, request.Scope, source, start, source.end, digest, omo)
 	if err != nil {
 		return b.recordReadFailure(err), nil
 	}
-	projector := newMemoryProjector(request.Scope.Provider, source.revision)
-	diagnostics := BrowseDiagnostics{OversizedRecords: oversized, SourceTruncated: start > 0}
-	for _, record := range records {
-		result := projector.apply(record)
-		diagnostics.CorruptRecords += result.Diagnostics.CorruptRecords
-		diagnostics.OmittedTools += result.Diagnostics.OmittedTools
-		diagnostics.OmittedPayloads += result.Diagnostics.OmittedPayloads
-		diagnostics.PlanCorrupt = diagnostics.PlanCorrupt || result.Diagnostics.PlanCorrupt
-	}
-	if omo && projector.todoSeen && !projector.todoValid {
-		diagnostics.CorruptRecords++
-		diagnostics.PlanCorrupt = true
-	}
-	var plan *OMOTodoState
-	if omo && projector.plan != nil {
-		copyPlan := *projector.plan
-		copyPlan.SessionID = request.Scope.SessionID
-		copyPlan.Available = true
-		plan = &copyPlan
-	}
+	projection.Diagnostics.SourceTruncated = start > 0
 	return b.memoryPage(
-		request.Scope, source, projector.entries, diagnostics, plan,
+		request.Scope, source, projection.Entries, projection.Diagnostics, projection.Plan,
 		start, source.end, digest, source.end, true, request.Limit,
 	), nil
 }
@@ -804,7 +843,7 @@ func (b *Browser) recordReadFailure(err error) BrowsePage {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true))
 	}
-	if errors.Is(err, errJSONLSourceTruncated) {
+	if errors.Is(err, errJSONLSourceTruncated) || errors.Is(err, errRecentProjectionChanged) {
 		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
 	}
 	return browseFailure(true, "source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true))
@@ -841,32 +880,13 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 	if digest != cursor.RangeDigest {
 		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
-	records, oversized, err := collectJSONLRecords(ctx, source.file, start, end, b.options.MaxRecordBytes, nil)
+	projection, err := b.projectRecentRange(ctx, request.Scope, source, start, end, digest, omo)
 	if err != nil {
 		return b.recordReadFailure(err), nil
 	}
-	projector := newMemoryProjector(request.Scope.Provider, source.revision)
-	diagnostics := BrowseDiagnostics{OversizedRecords: oversized, SourceTruncated: start > 0}
-	for _, record := range records {
-		result := projector.apply(record)
-		diagnostics.CorruptRecords += result.Diagnostics.CorruptRecords
-		diagnostics.OmittedTools += result.Diagnostics.OmittedTools
-		diagnostics.OmittedPayloads += result.Diagnostics.OmittedPayloads
-		diagnostics.PlanCorrupt = diagnostics.PlanCorrupt || result.Diagnostics.PlanCorrupt
-	}
-	if omo && projector.todoSeen && !projector.todoValid {
-		diagnostics.CorruptRecords++
-		diagnostics.PlanCorrupt = true
-	}
-	var plan *OMOTodoState
-	if omo && projector.plan != nil {
-		copyPlan := *projector.plan
-		copyPlan.SessionID = request.Scope.SessionID
-		copyPlan.Available = true
-		plan = &copyPlan
-	}
+	projection.Diagnostics.SourceTruncated = start > 0
 	return b.memoryPage(
-		request.Scope, source, projector.entries, diagnostics, plan,
+		request.Scope, source, projection.Entries, projection.Diagnostics, projection.Plan,
 		start, end, digest, boundary, false, request.Limit,
 	), nil
 }
@@ -1154,7 +1174,7 @@ func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cu
 		}
 		return b.continueJob(ctx, request, job)
 	}
-	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, omo)
+	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, omo, "", -1)
 	if page != nil {
 		return *page, nil
 	}
@@ -1228,7 +1248,7 @@ func (b *Browser) jobMatches(job *browseJob, scope BrowseScope, source fileSourc
 		job.rangeStart == start && job.rangeEnd == end && job.boundary == boundary && job.rangeDigest == digest
 }
 
-func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, omo bool) (*browseJob, *BrowsePage) {
+func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, omo bool, chainContextID string, chainSegment int) (*browseJob, *BrowsePage) {
 	if b.cacheErr != nil {
 		page := browseFailure(true, "index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
 		return nil, &page
@@ -1238,7 +1258,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		return nil, &page
 	}
 	scopeID := browseScopeID(scope)
-	dedupKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s", scopeID, source.revision, start, end, boundary, digest)
+	dedupKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%d", scopeID, source.revision, start, end, boundary, digest, chainContextID, chainSegment)
 	b.mu.Lock()
 	if id := b.dedup[dedupKey]; id != "" {
 		job := b.jobs[id]
@@ -1285,6 +1305,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	job := &browseJob{
 		id: id, dedupKey: dedupKey, scope: scope, scopeID: scopeID, source: source,
 		boundary: boundary, rangeStart: start, rangeEnd: end, rangeDigest: digest,
+		chainContextID: chainContextID, chainSegment: chainSegment,
 		snapshotID: snapshotID, index: index, state: BrowsePreparing, phase: "queued",
 		sourceBytes: source.end, lastInterest: time.Now(), lastAccess: time.Now(),
 	}
@@ -1373,11 +1394,30 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob) bool {
 	rangeStart := job.rangeStart
 	rangeEnd := job.rangeEnd
 	rangeDigest := job.rangeDigest
+	chainContextID := job.chainContextID
+	chainLocation := job.source.location
+	chainFooterStart := job.chainFooterStart
+	chainFooterEnd := job.chainFooterEnd
+	chainFooterDigest := job.chainFooterDigest
 	job.mu.RUnlock()
 	omo := normalizedAgent(scope.Provider) == "omo" || normalizedAgent(scope.Provider) == "ohmyopencode"
-	source, code := b.sourceFor(scope, omo)
-	if code != "" {
+	var source fileSource
+	var code string
+	var err error
+	if chainContextID != "" {
+		source, err = captureFileSource(chainLocation)
+	} else {
+		source, code = b.sourceFor(scope, omo)
+	}
+	if err != nil || code != "" {
 		return false
+	}
+	if chainContextID != "" {
+		if chainFooterStart < 0 || chainFooterEnd < chainFooterStart {
+			source.close()
+			return false
+		}
+		source.end = rangeEnd
 	}
 	sourceOwned := true
 	defer func() {
@@ -1388,7 +1428,12 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob) bool {
 	if source.revision != sourceRevision || source.end < rangeEnd {
 		return false
 	}
-	if digest, err := fileRangeDigest(ctx, source.file, rangeStart, rangeEnd); err != nil || digest != rangeDigest {
+	if chainContextID != "" {
+		digest, digestErr := fileRangeDigest(ctx, source.file, chainFooterStart, chainFooterEnd)
+		if digestErr != nil || digest != chainFooterDigest {
+			return false
+		}
+	} else if digest, err := fileRangeDigest(ctx, source.file, rangeStart, rangeEnd); err != nil || digest != rangeDigest {
 		return false
 	}
 	b.mu.Lock()
@@ -1794,6 +1839,14 @@ func (b *Browser) runJob(job *browseJob) {
 	job.phase = "verifying"
 	job.mu.Unlock()
 	firstDigest := hex.EncodeToString(scanDigest.Sum(nil))
+	job.mu.RLock()
+	chainDigest := job.chainContextID != ""
+	expectedRangeDigest := job.rangeDigest
+	job.mu.RUnlock()
+	if chainDigest && expectedRangeDigest != "" && firstDigest != expectedRangeDigest {
+		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+		return
+	}
 	b.observeSourceRead(job.source.end)
 	secondDigest, digestErr := fileRangeDigestChecked(b.ctx, file, 0, job.source.end, func() error {
 		if !b.jobHasInterest(job) {
@@ -1808,6 +1861,11 @@ func (b *Browser) runJob(job *browseJob) {
 	if digestErr != nil || firstDigest != secondDigest {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
 		return
+	}
+	if chainDigest && expectedRangeDigest == "" {
+		job.mu.Lock()
+		job.rangeDigest = secondDigest
+		job.mu.Unlock()
 	}
 	if err := validateSnapshotSource(job.source); err != nil {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
@@ -1872,6 +1930,8 @@ func (b *Browser) runJob(job *browseJob) {
 	}
 	verifiedInfo, _ := file.Stat()
 	job.mu.Lock()
+	chainContextID := job.chainContextID
+	chainSegment := job.chainSegment
 	job.state = BrowseReady
 	job.phase = "ready"
 	job.diagnostics = diagnostics
@@ -1885,6 +1945,14 @@ func (b *Browser) runJob(job *browseJob) {
 	job.lastAccess = time.Now()
 	job.err = nil
 	job.mu.Unlock()
+	if chainContextID != "" {
+		b.mu.Lock()
+		if chain := b.chains[chainContextID]; chain != nil && chainSegment >= 0 && chainSegment < len(chain.chain.Segments) {
+			chain.chain.Segments[chainSegment].CapturedDigest = secondDigest
+			b.updateClaudeChainLineageEvidenceLocked(chain)
+		}
+		b.mu.Unlock()
+	}
 }
 
 func (b *Browser) jobHasInterest(job *browseJob) bool {

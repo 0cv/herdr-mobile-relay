@@ -136,6 +136,25 @@ by `journalctl`, while the log level controls records emitted and stored. `info`
 still includes warnings, so this setting does not reduce repeated outage
 warnings.
 
+Inventory polling performs its first attempt immediately and keeps the normal
+configured cadence (or the 15-second reconciliation cadence while the events
+stream is healthy). If `agent.list` or `workspace.list` fails, automatic retries
+back off exponentially from that healthy interval: each failed attempt doubles
+the next delay, up to 60 seconds (a 2-second cadence becomes 4, 8, 16, 32,
+then 60 seconds). A successful pair of required fetches resets the backoff and
+restores the normal cadence. Every failed attempt remains a
+WARN record; only the timing changes. Optional tab/pane fallback failures and a
+stale topology commit do not count as upstream outage failures.
+
+`Wake()` remains a coalesced, immediate refresh request even during backoff, so
+an explicit phone refresh, successful relay action, topology change, or UDP
+resync can cause an attempt sooner than the automatic retry. This is
+intentional; connected phones also request a refresh every 120 seconds, and
+multiple phones can interleave these automatic wakeups during an outage.
+Wakeups are not blanket-rate-limited. The separate Herdr events-stream
+reconnect loop is unchanged, so its unavailable/dropped warnings can still
+appear at their existing cadence during an outage.
+
 ## Troubleshooting
 
 - **No setup menu:** invoke the `setup` action:

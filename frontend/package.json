@@ -9,7 +9,7 @@
   "packageManager": "bun@1.4.0",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && bun scripts/compress-assets.mjs dist && bun scripts/validate-build.mjs dist",
+    "build": "vite build && bun scripts/finalize-build.mjs dist && bun scripts/compress-assets.mjs dist && bun scripts/validate-build.mjs dist",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",

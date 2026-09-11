@@ -25,6 +25,7 @@ import (
 	"github.com/0cv/herdr-mobile-relay/internal/coordinator"
 	"github.com/0cv/herdr-mobile-relay/internal/copyresponse"
 	"github.com/0cv/herdr-mobile-relay/internal/deviceauth"
+	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 	"github.com/0cv/herdr-mobile-relay/internal/panedelta"
 	"github.com/0cv/herdr-mobile-relay/internal/protocol"
 	"github.com/0cv/herdr-mobile-relay/internal/push"
@@ -481,6 +482,93 @@ func TestConversationTupleIncludesAgentCwdAndSession(t *testing.T) {
 		if sameConversationTuple(base, changed) {
 			t.Errorf("%s change was not detected", name)
 		}
+	}
+}
+
+func TestPublishCurrentInventoryRepairsReadyRecovery(t *testing.T) {
+	server := testServer()
+	t.Cleanup(func() {
+		if server.conversationB != nil {
+			_ = server.conversationB.Close()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.hub.Shutdown(ctx)
+	})
+	server.state.CommitWorkspaces([]herdr.Workspace{{ID: "workspace-1", Label: "Project"}})
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "codex", Status: "working", Project: "Project",
+	}}, server.state.RevisionCounter())
+	if err := server.publishCurrentInventory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	server.state.MarkInventoryFailure(errors.New("topology churn"))
+	if err := server.publishCurrentInventory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.committedInventoryStatus()["state"]; got != "error" {
+		t.Fatalf("degraded committed status = %v, want error", got)
+	}
+	server.state.CommitInventory(server.state.Snapshot(), server.state.RevisionCounter())
+	if err := server.publishCurrentInventory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	committed := server.committedInventorySnapshot()
+	if committed.status["state"] != "ready" || len(committed.agents) != 1 || len(committed.workspaces) != 1 {
+		t.Fatalf("recovery committed snapshot = %#v, want ready topology", committed)
+	}
+}
+
+func TestPublishCurrentInventoryCommitsEmptyReadyRecoveryWithoutClients(t *testing.T) {
+	server := testServer()
+	t.Cleanup(func() {
+		if server.conversationB != nil {
+			_ = server.conversationB.Close()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.hub.Shutdown(ctx)
+	})
+	server.state.CommitInventory(nil, server.state.RevisionCounter())
+	if err := server.publishCurrentInventory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	server.state.MarkInventoryFailure(errors.New("command failed"))
+	if err := server.publishCurrentInventory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	server.state.CommitInventory(nil, server.state.RevisionCounter())
+	if err := server.publishCurrentInventory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	committed := server.committedInventorySnapshot()
+	if committed.status["state"] != "ready" || committed.agents == nil || committed.workspaces == nil {
+		t.Fatalf("empty recovery committed snapshot = %#v", committed)
+	}
+	if len(committed.agents) != 0 || len(committed.workspaces) != 0 {
+		t.Fatalf("empty recovery retained topology: %#v", committed)
+	}
+}
+
+func TestCommittedInventorySnapshotDeepCopiesInteractionSummaries(t *testing.T) {
+	server := testServer()
+	interaction := &question.Interaction{
+		ID: "interaction-1",
+		Options: []question.Option{{
+			Index:   1,
+			Label:   "Keep",
+			Summary: []question.SummaryEntry{{Question: "Deploy?", Answer: "No"}},
+		}},
+	}
+	server.stateViewMu.Lock()
+	server.agentView = []*coordinator.AgentState{{PaneID: "pane-1", Interaction: interaction}}
+	server.stateViewMu.Unlock()
+
+	snapshot := server.committedInventorySnapshot()
+	snapshot.agents[0].Interaction.Options[0].Summary[0].Answer = "Mutated"
+	fresh := server.committedInventorySnapshot()
+	if got := fresh.agents[0].Interaction.Options[0].Summary[0].Answer; got != "No" {
+		t.Fatalf("committed interaction summary answer = %q, want No", got)
 	}
 }
 

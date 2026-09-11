@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,52 +69,95 @@ func TestPollerIntervalClampsToReconcileCeiling(t *testing.T) {
 	}
 }
 
-// An idle machine commits an identical inventory every reconcile interval;
-// re-broadcasting it hands every phone a fresh full snapshot to re-render for
-// no reason. Only a snapshot that differs from the last broadcast one may go
-// out; an explicit refresh_agents request is answered separately.
-func TestPollerSkipsUnchangedAgentBroadcasts(t *testing.T) {
+func TestPollerInventoryChangePublishesCurrentState(t *testing.T) {
 	state := testState()
 	poller := NewPoller(nil, state, time.Second, testLogger())
-	broadcasts := 0
-	poller.SetOnChange(func([]*AgentState) { broadcasts++ })
-
+	var statuses []string
+	poller.SetOnInventoryChange(func() error {
+		statuses = append(statuses, state.InventoryStatus()["state"].(string))
+		return nil
+	})
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
-	poller.notifyAgentsChanged()
-	poller.notifyAgentsChanged()
-	poller.notifyAgentsChanged()
-	if broadcasts != 1 {
-		t.Fatalf("broadcasts after identical snapshots = %d, want 1", broadcasts)
-	}
-
-	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "working"}}, state.RevisionCounter())
-	poller.notifyAgentsChanged()
-	if broadcasts != 2 {
-		t.Fatalf("broadcasts after a real change = %d, want 2", broadcasts)
+	poller.notifyInventoryChange()
+	state.MarkInventoryFailure(fmt.Errorf("temporary failure"))
+	poller.notifyInventoryChange()
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, state.RevisionCounter())
+	poller.notifyInventoryChange()
+	poller.notifyInventoryChange()
+	if got, want := fmt.Sprint(statuses), "[ready error ready ready]"; got != want {
+		t.Fatalf("publication states = %s, want %s", got, want)
 	}
 }
 
-// Workspace broadcasts read the snapshot under the ordering lock and skip a
-// byte-identical repeat, so the reconcile poll and the event stream cannot
-// publish a stale topology over a newer one or re-push what clients already
-// display.
-func TestNotifyWorkspacesChangedSkipsIdenticalTopology(t *testing.T) {
+func TestPollerInventoryPublicationSerializesOvertakingChanges(t *testing.T) {
 	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
 	poller := NewPoller(nil, state, time.Second, testLogger())
-	broadcasts := 0
-	poller.SetOnWorkspaceChange(func(workspaces []herdr.Workspace) { broadcasts++ })
-
-	state.CommitWorkspaces([]herdr.Workspace{{ID: "w1", Label: "One"}})
-	poller.notifyWorkspacesChanged()
-	poller.notifyWorkspacesChanged()
-	if broadcasts != 1 {
-		t.Fatalf("broadcasts after identical topologies = %d, want 1", broadcasts)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseFirst)
+	secondDone := make(chan struct{})
+	var mu sync.Mutex
+	var statuses []string
+	calls := 0
+	poller.SetOnInventoryChange(func() error {
+		status, _ := state.InventoryStatus()["state"].(string)
+		mu.Lock()
+		statuses = append(statuses, status)
+		calls++
+		call := calls
+		mu.Unlock()
+		if call == 1 {
+			close(entered)
+			<-release
+		} else if call == 2 {
+			close(secondDone)
+		}
+		return nil
+	})
+	go poller.notifyInventoryChange()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first inventory publication did not enter")
 	}
+	state.MarkInventoryFailure(fmt.Errorf("overtaking failure"))
+	go poller.notifyInventoryChange()
+	select {
+	case <-secondDone:
+		t.Fatal("inventory publication overtook the first callback")
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseFirst()
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second inventory publication did not complete")
+	}
+	mu.Lock()
+	got := append([]string(nil), statuses...)
+	mu.Unlock()
+	if fmt.Sprint(got) != "[ready error]" {
+		t.Fatalf("serialized publication states = %v, want [ready error]", got)
+	}
+}
 
-	state.CommitWorkspaces([]herdr.Workspace{{ID: "w1", Label: "Renamed"}})
-	poller.notifyWorkspacesChanged()
-	if broadcasts != 2 {
-		t.Fatalf("broadcasts after a real change = %d, want 2", broadcasts)
+func TestInventorySnapshotIsCoherentAndOwned(t *testing.T) {
+	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "blocked", Options: []string{"one"}}}, 0)
+	state.CommitWorkspaces([]herdr.Workspace{{ID: "w1", Label: "One", Worktree: &herdr.WorkspaceWorktree{CheckoutPath: "/work"}}})
+	snapshot := state.InventorySnapshot()
+	if len(snapshot.Agents) != 1 || len(snapshot.Agents[0].Options) != 1 {
+		t.Fatalf("snapshot agents = %#v", snapshot.Agents)
+	}
+	snapshot.Status["state"] = "error"
+	snapshot.Agents[0].Options[0] = "mutated"
+	snapshot.Workspaces[0].Worktree.CheckoutPath = "/mutated"
+	fresh := state.InventorySnapshot()
+	if fresh.Status["state"] != "ready" || fresh.Agents[0].Options[0] != "one" || fresh.Workspaces[0].Worktree.CheckoutPath != "/work" {
+		t.Fatalf("state snapshot was not independently owned: %#v", fresh)
 	}
 }
 
@@ -201,9 +245,10 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 		reconnects++
 		return reconnects == 1
 	}
-	updates := make(chan []herdr.Workspace, 8)
-	poller.SetOnWorkspaceChange(func(workspaces []herdr.Workspace) {
-		updates <- append([]herdr.Workspace(nil), workspaces...)
+	updates := make(chan InventorySnapshot, 8)
+	poller.SetOnInventoryChange(func() error {
+		updates <- state.InventorySnapshot()
+		return nil
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -213,22 +258,22 @@ func TestRunEventsRefreshesSnapshotAfterDroppedStream(t *testing.T) {
 		close(runDone)
 	}()
 
-	var final []herdr.Workspace
+	var final InventorySnapshot
 	deadline := time.NewTimer(2 * time.Second)
 	defer deadline.Stop()
-	for final == nil {
+	for final.Workspaces == nil {
 		select {
-		case workspaces := <-updates:
-			if len(workspaces) == 2 && workspaces[1].ID == "w3" {
-				final = workspaces
+		case snapshot := <-updates:
+			if len(snapshot.Workspaces) == 2 && snapshot.Workspaces[1].ID == "w3" {
+				final = snapshot
 			}
 		case <-deadline.C:
 			t.Fatal("event reconnect did not converge on the current snapshot")
 		}
 	}
 	<-runDone
-	if len(final) != 2 || final[0].ID != "w1" || final[1].ID != "w3" {
-		t.Fatalf("final workspaces = %+v, want w1 and w3", final)
+	if len(final.Workspaces) != 2 || final.Workspaces[0].ID != "w1" || final.Workspaces[1].ID != "w3" {
+		t.Fatalf("final workspaces = %+v, want w1 and w3", final.Workspaces)
 	}
 	if reconnects != 2 {
 		t.Fatalf("reconnect waits = %d, want 2", reconnects)

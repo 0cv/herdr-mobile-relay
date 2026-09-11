@@ -51,11 +51,29 @@ const assets = await readdir(join(root, 'assets'));
 const scripts = assets.filter((name) => name.endsWith('.js'));
 const workerScripts = scripts.filter((name) => /^attachment-hash\.worker-[A-Za-z0-9_-]+\.js$/.test(name));
 const applicationScripts = scripts.filter((name) => /^app-[a-f0-9]{64}\.js$/.test(name));
+const lazyScripts = scripts.filter((name) => /^[A-Za-z0-9_.-]+-[0-9]+\.js$/.test(name));
+if (lazyScripts.some((name) => !name.endsWith(`-${versions.assets}.js`))) {
+  throw new Error(`Lazy chunk names must use the current asset version ${versions.assets}`);
+}
 const styles = assets.filter((name) => name.endsWith('.css'));
 const applicationStyles = styles.filter((name) => /^app-[a-f0-9]{64}\.css$/.test(name));
-const unexpectedScripts = scripts.filter((name) => !workerScripts.includes(name) && !applicationScripts.includes(name));
+const unexpectedScripts = scripts.filter((name) => !workerScripts.includes(name)
+  && !applicationScripts.includes(name) && !lazyScripts.includes(name));
 if (applicationScripts.length !== 1 || workerScripts.length !== 1 || unexpectedScripts.length !== 0) {
   throw new Error(`Expected one content-addressed app script and one attachment hash worker; found ${scripts.join(', ')}`);
+}
+const lazyReferencePattern = /import\(\s*[`'"]\.\/([A-Za-z0-9_.-]+-[0-9]+\.js)[`'"]\s*\)/g;
+const applicationSource = await readFile(join(root, 'assets', applicationScripts[0]), 'utf8');
+const referencedLazyScripts = new Set();
+for (const match of applicationSource.matchAll(lazyReferencePattern)) {
+  const name = match[1];
+  if (!name.endsWith(`-${versions.assets}.js`) || !lazyScripts.includes(name)) {
+    throw new Error(`Application references an invalid lazy chunk: ${name}`);
+  }
+  referencedLazyScripts.add(name);
+}
+if (lazyScripts.some((name) => !referencedLazyScripts.has(name))) {
+  throw new Error(`Lazy chunks must be referenced by the application: ${lazyScripts.join(', ')}`);
 }
 if (applicationStyles.length !== 1 || styles.length !== 1) {
   throw new Error(`Expected one content-addressed app stylesheet; found ${styles.join(', ')}`);

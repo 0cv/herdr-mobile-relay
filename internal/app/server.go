@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -129,6 +130,7 @@ type Server struct {
 
 	stateViewMu   sync.RWMutex
 	agentView     []*coordinator.AgentState
+	workspaceView []herdr.Workspace
 	inventoryView map[string]any
 
 	refreshMu      sync.Mutex
@@ -212,6 +214,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 
 	speechLanguages := speech.Languages()
 	logger.Info("speech synthesis available", "languages", strings.Join(speechLanguages, ","))
+	initialInventory := state.InventorySnapshot()
 
 	return &Server{
 		cfg:                 cfg,
@@ -247,7 +250,9 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		startedAt:           time.Now(),
 		refreshClients:      make(map[string]bool),
 		paneWatches:         make(map[string]*paneWatch),
-		inventoryView:       cloneStringMap(state.InventoryStatus()),
+		agentView:           cloneAgents(initialInventory.Agents),
+		workspaceView:       cloneWorkspaces(initialInventory.Workspaces),
+		inventoryView:       cloneStringMap(initialInventory.Status),
 		historyInflight:     make(map[string]bool),
 		historyLast:         make(map[string]time.Time),
 		historyActive:       make(map[string]bool),
@@ -596,7 +601,10 @@ func (s *Server) Run(ctx context.Context) error {
 		if s.pushM != nil {
 			vapidPublicKey = s.pushM.VAPIDPublicKey()
 		}
-		inventory := s.committedInventoryStatus()
+		committed := s.committedInventorySnapshot()
+		inventory := committed.status
+		agents := committed.agents
+		workspaces := committed.workspaces
 		herdrCapabilityStatus := s.herdrC.CapabilityStatus()
 		capabilities := s.effectiveCapabilitiesFor(herdrCapabilityStatus)
 		speechStatus := s.speechStatus()
@@ -622,11 +630,11 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 		s.hub.Send(client, map[string]any{
 			"type":   "agents",
-			"agents": s.committedAgents(),
+			"agents": agents,
 		})
 		s.hub.Send(client, map[string]any{
 			"type":       "workspaces",
-			"workspaces": s.state.Workspaces(),
+			"workspaces": workspaces,
 		})
 		activities := s.recentActivities(500)
 		s.hub.Send(client, map[string]any{
@@ -1244,21 +1252,19 @@ func (s *Server) Run(ctx context.Context) error {
 				s.logger.Warn("phone app origin was not stored", "error", err)
 			}
 		case "refresh_agents":
-			inventory := s.committedInventoryStatus()
-			s.hub.Send(client, map[string]any{
-				"type":            "inventory_status",
-				"state":           inventory["state"],
-				"error_code":      inventory["error_code"],
-				"message":         inventory["message"],
-				"last_attempt_at": inventory["last_attempt_at"],
-				"last_success_at": inventory["last_success_at"],
-				"stale":           inventory["stale"],
-			})
-			s.hub.Send(client, map[string]any{"type": "agents", "agents": s.committedAgents()})
-			s.hub.Send(client, map[string]any{"type": "workspaces", "workspaces": s.state.Workspaces()})
+			// Queue the deferred refresh before waking the poller. A publication
+			// racing this handler can then drain it in the same ordered batch.
 			s.refreshMu.Lock()
 			s.refreshClients[client.ID()] = true
 			s.refreshMu.Unlock()
+			s.hub.SendBatchPrepared(client, func() []any {
+				committed := s.committedInventorySnapshot()
+				return []any{
+					inventoryStatusMessage(committed.status),
+					map[string]any{"type": "agents", "agents": committed.agents},
+					map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
+				}
+			})
 			s.poller.Wake()
 		case "webrtc_offer", "webrtc_ice", "webrtc_close":
 			s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
@@ -1331,33 +1337,8 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	s.poller.SetOnChange(func(agents []*coordinator.AgentState) {
-		s.reconcileRecoveredPush(ctx, agents)
-		s.broadcastCommitted(map[string]any{
-			"type":   "agents",
-			"agents": agents,
-		})
-		s.sendRequestedAgentRefreshes(agents)
-		active := make(map[string]bool, len(agents))
-		for _, a := range agents {
-			active[a.PaneID] = true
-		}
-		s.syncHistoryPanes(agents)
-		for _, a := range agents {
-			if isClaudeLike(a.Agent) && (a.Status == "working" || a.Status == "blocked") {
-				s.scheduleHistoryCapture(ctx, a.PaneID)
-			}
-		}
-		s.dispatcher.PruneSlots(active)
-	})
-	s.poller.SetOnWorkspaceChange(func(workspaces []herdr.Workspace) {
-		s.broadcastCommitted(map[string]any{
-			"type":       "workspaces",
-			"workspaces": workspaces,
-		})
-	})
-	s.poller.SetOnInventoryStatus(func(status map[string]any) {
-		s.broadcastCommitted(inventoryStatusMessage(status))
+	s.poller.SetOnInventoryChange(func() error {
+		return s.publishCurrentInventory(ctx)
 	})
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
@@ -2658,7 +2639,7 @@ func (s *Server) agentInfo(paneID string) (agent, cwd string) {
 	return "", ""
 }
 
-func (s *Server) sendRequestedAgentRefreshes(agents []*coordinator.AgentState) {
+func (s *Server) sendRequestedAgentRefreshes() {
 	s.refreshMu.Lock()
 	clientIDs := make([]string, 0, len(s.refreshClients))
 	for clientID := range s.refreshClients {
@@ -2667,18 +2648,14 @@ func (s *Server) sendRequestedAgentRefreshes(agents []*coordinator.AgentState) {
 	clear(s.refreshClients)
 	s.refreshMu.Unlock()
 
-	if len(clientIDs) == 0 {
-		return
-	}
-	agents = s.committedAgents()
-	status := inventoryStatusMessage(s.committedInventoryStatus())
-	snapshot := map[string]any{"type": "agents", "agents": agents}
 	for _, clientID := range clientIDs {
-		s.hub.SendByID(clientID, status)
-		s.hub.SendByID(clientID, snapshot)
-		s.hub.SendByID(clientID, map[string]any{
-			"type":       "workspaces",
-			"workspaces": s.state.Workspaces(),
+		s.hub.SendBatchPreparedByID(clientID, func() []any {
+			committed := s.committedInventorySnapshot()
+			return []any{
+				inventoryStatusMessage(committed.status),
+				map[string]any{"type": "agents", "agents": committed.agents},
+				map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
+			}
 		})
 	}
 }
@@ -3390,6 +3367,144 @@ func (s *Server) projectAgentResources(agents []*coordinator.AgentState) {
 	}
 }
 
+type committedInventory struct {
+	status     map[string]any
+	agents     []*coordinator.AgentState
+	workspaces []herdr.Workspace
+}
+
+// publishCurrentInventory is the sole authoritative inventory writer. Fresh
+// state is selected inside the Hub registration barrier, while the expensive
+// reconciliation work remains after that barrier has been released.
+func (s *Server) publishCurrentInventory(ctx context.Context) error {
+	var sideEffectAgents []*coordinator.AgentState
+	var runAgentSideEffects bool
+	batchErr := s.hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+		fresh := s.state.InventorySnapshot()
+		freshAgents := cloneAgents(fresh.Agents)
+		s.projectAgentResources(freshAgents)
+
+		s.stateViewMu.RLock()
+		previousStatus := cloneStringMap(s.inventoryView)
+		previousAgents := cloneAgents(s.agentView)
+		previousWorkspaces := cloneWorkspaces(s.workspaceView)
+		s.stateViewMu.RUnlock()
+
+		mergedAgents := mergeAgentSnapshot(previousAgents, freshAgents)
+		statusChanged := inventoryStatusChanged(previousStatus, fresh.Status)
+		readyRecovery := fresh.Status["state"] == "ready" && previousStatus["state"] != "ready"
+		agentsChanged := !agentSnapshotsEqual(previousAgents, mergedAgents)
+		workspacesChanged := !workspaceSnapshotsEqual(previousWorkspaces, fresh.Workspaces)
+		sendAgents := agentsChanged || readyRecovery
+		sendWorkspaces := workspacesChanged || readyRecovery
+		if fresh.Status["state"] == "ready" && (agentsChanged || readyRecovery) {
+			runAgentSideEffects = true
+			sideEffectAgents = cloneAgents(mergedAgents)
+		}
+
+		messages := make([]any, 0, 3)
+		if statusChanged {
+			messages = append(messages, inventoryStatusMessage(fresh.Status))
+		}
+		if sendAgents {
+			messages = append(messages, map[string]any{"type": "agents", "agents": cloneAgents(mergedAgents)})
+		}
+		if sendWorkspaces {
+			messages = append(messages, map[string]any{"type": "workspaces", "workspaces": cloneWorkspaces(fresh.Workspaces)})
+		}
+
+		commit := func() {
+			s.stateViewMu.Lock()
+			// Timestamps are metadata, not a wire-change trigger. Refreshing the
+			// cached status here still makes a later handshake authoritative.
+			s.inventoryView = cloneStringMap(fresh.Status)
+			if sendAgents {
+				s.agentView = cloneAgents(mergedAgents)
+			}
+			if sendWorkspaces {
+				s.workspaceView = cloneWorkspaces(fresh.Workspaces)
+			}
+			s.stateViewMu.Unlock()
+		}
+		return messages, commit, nil
+	})
+
+	// A pending explicit refresh is a request for completion, not a request for
+	// an agent diff. Drain it after every publication attempt, including an
+	// unchanged state and an encode failure.
+	s.sendRequestedAgentRefreshes()
+	if batchErr != nil {
+		return batchErr
+	}
+	if runAgentSideEffects {
+		s.reconcileRecoveredPush(ctx, sideEffectAgents)
+		s.syncHistoryPanes(sideEffectAgents)
+		active := make(map[string]bool, len(sideEffectAgents))
+		for _, agent := range sideEffectAgents {
+			active[agent.PaneID] = true
+			if isClaudeLike(agent.Agent) && (agent.Status == "working" || agent.Status == "blocked") {
+				s.scheduleHistoryCapture(ctx, agent.PaneID)
+			}
+		}
+		if s.dispatcher != nil {
+			s.dispatcher.PruneSlots(active)
+		}
+	}
+	return nil
+}
+
+func inventoryStatusChanged(previous, current map[string]any) bool {
+	for _, key := range []string{"state", "error_code", "message", "stale"} {
+		if previous[key] != current[key] {
+			return true
+		}
+	}
+	return false
+}
+
+func agentSnapshotsEqual(left, right []*coordinator.AgentState) bool {
+	left = cloneAgents(left)
+	right = cloneAgents(right)
+	for _, agents := range [][]*coordinator.AgentState{left, right} {
+		for _, agent := range agents {
+			agent.StateRevision = 0
+		}
+	}
+	leftData, leftErr := json.Marshal(left)
+	rightData, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftData, rightData)
+}
+
+func workspaceSnapshotsEqual(left, right []herdr.Workspace) bool {
+	leftData, leftErr := json.Marshal(left)
+	rightData, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftData, rightData)
+}
+
+func cloneWorkspaces(workspaces []herdr.Workspace) []herdr.Workspace {
+	result := make([]herdr.Workspace, len(workspaces))
+	copy(result, workspaces)
+	for index := range result {
+		if result[index].Worktree != nil {
+			worktree := *result[index].Worktree
+			result[index].Worktree = &worktree
+		}
+	}
+	return result
+}
+
+func (s *Server) committedInventorySnapshot() committedInventory {
+	s.stateViewMu.RLock()
+	result := committedInventory{
+		status:     cloneStringMap(s.inventoryView),
+		agents:     cloneAgents(s.agentView),
+		workspaces: cloneWorkspaces(s.workspaceView),
+	}
+	s.stateViewMu.RUnlock()
+	s.projectAgentResources(result.agents)
+	return result
+}
+
 func (s *Server) broadcastCommitted(message any) {
 	envelope, ok := message.(map[string]any)
 	if !ok {
@@ -3500,17 +3615,15 @@ func (s *Server) broadcastCommitted(message any) {
 }
 
 func (s *Server) committedAgents() []*coordinator.AgentState {
-	s.stateViewMu.RLock()
-	agents := cloneAgents(s.agentView)
-	s.stateViewMu.RUnlock()
-	s.projectAgentResources(agents)
-	return agents
+	return s.committedInventorySnapshot().agents
+}
+
+func (s *Server) committedWorkspaces() []herdr.Workspace {
+	return s.committedInventorySnapshot().workspaces
 }
 
 func (s *Server) committedInventoryStatus() map[string]any {
-	s.stateViewMu.RLock()
-	defer s.stateViewMu.RUnlock()
-	return cloneStringMap(s.inventoryView)
+	return s.committedInventorySnapshot().status
 }
 
 func cloneAgents(agents []*coordinator.AgentState) []*coordinator.AgentState {
@@ -3524,6 +3637,9 @@ func cloneAgents(agents []*coordinator.AgentState) []*coordinator.AgentState {
 		if agent.Interaction != nil {
 			interaction := *agent.Interaction
 			interaction.Options = append([]question.Option(nil), agent.Interaction.Options...)
+			for optionIndex := range interaction.Options {
+				interaction.Options[optionIndex].Summary = append([]question.SummaryEntry(nil), agent.Interaction.Options[optionIndex].Summary...)
+			}
 			copy.Interaction = &interaction
 		}
 		result = append(result, &copy)

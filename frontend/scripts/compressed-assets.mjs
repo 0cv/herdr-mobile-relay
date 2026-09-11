@@ -27,5 +27,8 @@ export async function releaseCompressedAssets(root) {
   const contentAddressed = assets
     .filter((name) => /^(?:app-[a-f0-9]{64}\.(?:js|css))$/.test(name))
     .map((name) => `assets/${name}`);
-  return [...new Set([...compressedAssets, entry, ...contentAddressed])];
+  const lazyScripts = assets
+    .filter((name) => /^[A-Za-z0-9_.-]+-[0-9]+\.js$/.test(name))
+    .map((name) => `assets/${name}`);
+  return [...new Set([...compressedAssets, entry, ...contentAddressed, ...lazyScripts])];
 }

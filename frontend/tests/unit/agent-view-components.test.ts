@@ -147,6 +147,26 @@ describe('agent view controls and conversation loading hook', () => {
     expect(callback).toHaveBeenCalledOnce();
   });
 
+  it('hides a leading older fragment while showing the usable latest exchange', async () => {
+    const history = vi.spyOn(relayStore, 'getConversationHistory').mockResolvedValue(page({
+      entries: [
+        { id: 'orphan', timestamp: '2026-01-01', role: 'assistant', text: 'older fragment' },
+        { id: 'latest-user', timestamp: '2026-01-01', role: 'user', text: 'latest question' },
+        { id: 'latest-answer', timestamp: '2026-01-01', role: 'assistant', text: 'latest answer' },
+      ],
+      nextCursor: 'older-cursor', hasMore: true, total: 3, state: 'ready', mode: 'recent', sourceRevision: 'source-1',
+    }));
+    const view = render(ConversationHistory, { agent: agent('fedora', 'pending-pane', 'pending-terminal') });
+    try {
+      await waitFor(() => expect(screen.getByText('latest answer')).toBeVisible());
+      expect(screen.getByText('latest question')).toBeVisible();
+      expect(screen.queryByText('older fragment')).not.toBeInTheDocument();
+    } finally {
+      view.unmount();
+      history.mockRestore();
+    }
+  });
+
   it('does not call the hook for older pages, later polls, or initial errors', async () => {
     const callback = vi.fn();
     const initial = page({ entries: [{ id: 'turn-1', timestamp: '2026-01-01', role: 'user', text: 'hello' }], nextCursor: 'cursor-1', hasMore: true, total: 1 });
@@ -277,15 +297,20 @@ describe('agent view controls and conversation loading hook', () => {
         entries: [{ id: 'turn-1', timestamp: '2026-01-01', role: 'user', text: 'current question' }],
         nextCursor: 'older-cursor', hasMore: true, total: 2, state: 'ready', mode: 'recent', sourceRevision: 'source-1',
       }))
-      .mockImplementationOnce(() => new Promise((resolve) => { releaseOlder = resolve; }));
+      .mockImplementationOnce(() => new Promise((resolve) => { releaseOlder = resolve; }))
+      .mockResolvedValueOnce(page({
+        entries: [{ id: 'replacement', timestamp: '2026-01-02', role: 'assistant', text: 'replacement answer' }],
+        state: 'ready', mode: 'recent', sourceRevision: 'source-2',
+      }));
     try {
       const view = render(ConversationHistory, { agent: current });
       await waitFor(() => expect(screen.getByRole('button', { name: 'Load older turns' })).toBeVisible());
       await userEvent.setup().click(screen.getByRole('button', { name: 'Load older turns' }));
       await view.rerender({ agent: replacement });
       releaseOlder(page({ entries: [{ id: 'stale', timestamp: '2025-01-01', role: 'assistant', text: 'stale older answer' }], state: 'ready', mode: 'recent' }));
-      await waitFor(() => expect(history).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(history).toHaveBeenCalledTimes(3));
       expect(screen.queryByText('stale older answer')).not.toBeInTheDocument();
+      await waitFor(() => expect(screen.getByText('replacement answer')).toBeInTheDocument());
       view.unmount();
     } finally {
       history.mockRestore();
@@ -304,9 +329,7 @@ describe('agent view controls and conversation loading hook', () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(resolves).toHaveLength(1);
     resolves[0](page({ available: false }));
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(callback).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce());
     vi.useRealTimers();
   });
 });

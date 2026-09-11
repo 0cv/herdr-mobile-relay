@@ -1,5 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { base64UrlDecode, base64UrlEncode } from './base64url';
+import { clearConversationPreviews } from './conversation-cache-control';
 import { DEVICE_CREDENTIAL_KEY, DEVICE_LOCK_KEY } from './config';
 import { relayStore } from './store';
 
@@ -46,6 +47,7 @@ export function initializeDeviceSecurity(): () => void {
   syncVisibility();
   relayStore.initialize(false);
   if (deviceVerificationEnabled()) {
+    clearConversationPreviews();
     securityState.update((state) => ({ ...state, locked: true, reason: 'open' }));
     void unlockWithDevice('open');
   } else relayStore.connectAll();
@@ -148,6 +150,7 @@ export function lockForDevice(reason: 'open' | 'resume' = 'resume'): void {
   // Pane traffic stops separately (TerminalView treats a locked app as not
   // visible), so nothing streams behind the unlock dialog.
   automaticUnlockPending = true;
+  clearConversationPreviews();
   securityState.update((state) => ({ ...state, locked: true, reason, status: '' }));
 }
 
@@ -179,6 +182,7 @@ function unlockAfterResume(): void {
 export async function setDeviceVerificationRequired(required: boolean): Promise<boolean> {
   if (!required) {
     automaticUnlockPending = false;
+    clearConversationPreviews();
     localStorage.removeItem(DEVICE_LOCK_KEY);
     localStorage.removeItem(DEVICE_CREDENTIAL_KEY);
     securityState.set({
@@ -219,6 +223,7 @@ export async function enrollDeviceVerification(): Promise<boolean> {
   } catch {
     localStorage.removeItem(DEVICE_LOCK_KEY);
     localStorage.removeItem(DEVICE_CREDENTIAL_KEY);
+    clearConversationPreviews();
     securityState.update((state) => ({ ...state, busy: false, hint: 'Device verification was cancelled or failed.' }));
     return false;
   }

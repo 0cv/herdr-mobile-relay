@@ -11,6 +11,9 @@ project follows [Semantic Versioning](https://semver.org/).
   authenticated cursors, progress reporting, and explicit source and storage
   diagnostics. OpenCode and Hermes keep native pagination, while all providers
   expose tool activity and bounded corruption and omission diagnostics.
+- Load conversation exchanges automatically across wire-page boundaries, keep a
+  bounded memory-only preview for warm reopens, and reuse verified recent-range
+  projections on the relay without persisting transcript data in the browser.
 
 ## [0.21.0] - 2026-09-08
 

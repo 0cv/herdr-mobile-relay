@@ -62,15 +62,17 @@ type Entry struct {
 }
 
 type Page struct {
-	Available     bool          `json:"available"`
-	ReasonCode    string        `json:"reason_code,omitempty"`
-	Reason        string        `json:"reason,omitempty"`
-	Entries       []Entry       `json:"entries"`
-	HasMore       bool          `json:"has_more"`
-	Total         int           `json:"total"`
-	FileTruncated bool          `json:"file_truncated,omitempty"`
-	SourceCorrupt bool          `json:"source_corrupt,omitempty"`
-	OMOPlan       *OMOTodoState `json:"omo_plan,omitempty"`
+	Available              bool          `json:"available"`
+	ReasonCode             string        `json:"reason_code,omitempty"`
+	Reason                 string        `json:"reason,omitempty"`
+	Entries                []Entry       `json:"entries"`
+	HasMore                bool          `json:"has_more"`
+	Total                  int           `json:"total"`
+	FileTruncated          bool          `json:"file_truncated,omitempty"`
+	SourceCorrupt          bool          `json:"source_corrupt,omitempty"`
+	ContinuationIncomplete bool          `json:"continuation_incomplete,omitempty"`
+	ContinuationReason     string        `json:"continuation_reason,omitempty"`
+	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
 }
 type Reader struct {
 	home      string
@@ -165,6 +167,9 @@ func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, er
 	location := r.Locate(agent, cwd, sessionID)
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+	}
+	if isClaudeProvider(agent) {
+		return r.readClaudeChain(cwd, sessionID, location, before, limit)
 	}
 	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {

@@ -51,7 +51,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     const commands: Record<string, unknown>[] = [];
     const socketCommands: Record<string, unknown>[][] = [];
     let nextInteraction: Record<string, unknown> | null = null;
-    let conversationFixture: { entries: unknown[]; total: number } | null = null;
+    let conversationFixture: ConversationFixture | null = null;
     let autoCommands = true;
     const uploadFiles = new Map<string, Array<{ name: string; media_type: string; bytes: number }>>();
     const uploadReceived = new Map<string, number>();
@@ -260,9 +260,14 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           return;
         }
         if (message.type === 'get_conversation_history') {
-          const older = Boolean(message.cursor);
+          const cursor = typeof message.cursor === 'string' ? message.cursor : '';
+          const older = Boolean(cursor);
           if (conversationFixture) {
             const fixture = conversationFixture;
+            const configuredPage = cursor ? fixture.pages?.[cursor] : undefined;
+            const pageEntries = configuredPage?.entries ?? (cursor ? [] : fixture.entries);
+            const pageCursor = configuredPage?.nextCursor || (!cursor ? fixture.nextCursor : '') || '';
+            const pageHasMore = configuredPage?.hasMore ?? (!cursor ? fixture.hasMore : undefined) ?? Boolean(pageCursor);
             queueMicrotask(() => this.server({
               type: 'command_result',
               action: message.type,
@@ -271,12 +276,13 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
               phase: 'completed',
               data: {
                 available: true,
-                state: 'ready',
+                state: configuredPage?.state || 'ready',
                 mode: older ? 'snapshot' : 'recent',
                 source_revision: 'fixture',
-                snapshot_id: older ? 'snapshot-1' : '',
-                entries: older ? [] : fixture.entries,
-                has_more: false,
+                snapshot_id: configuredPage?.snapshotId || (older ? 'snapshot-1' : ''),
+                next_cursor: pageCursor,
+                entries: pageEntries,
+                has_more: pageHasMore,
                 total: fixture.total,
                 diagnostics: { source_truncated: false, corrupt_records: 0, oversized_records: 0 },
               },
@@ -419,7 +425,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
       __relayServer(index: number, message: unknown) { sockets[index]?.server(message); },
       __relayClose(index: number) { sockets[index]?.serverClose(); },
       __relayNextInteraction(interaction: Record<string, unknown>) { nextInteraction = interaction; },
-      __relayConversationFixture(fixture: { entries: unknown[]; total: number } | null) {
+      __relayConversationFixture(fixture: ConversationFixture | null) {
         conversationFixture = fixture;
       },
       __relayAutoCommands(enabled: boolean) { autoCommands = enabled; },
@@ -481,6 +487,15 @@ async function setAutoCommands(page: Page, enabled: boolean) {
 interface ConversationFixture {
   entries: Record<string, unknown>[];
   total: number;
+  nextCursor?: string;
+  hasMore?: boolean;
+  pages?: Record<string, {
+    entries: Record<string, unknown>[];
+    nextCursor?: string;
+    hasMore?: boolean;
+    state?: 'ready' | 'preparing' | 'failed';
+    snapshotId?: string;
+  }>;
 }
 
 async function setConversationFixture(page: Page, fixture: ConversationFixture | null) {
@@ -3983,7 +3998,9 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByText('Command may have executed Check the terminal before sending again.')).toBeVisible();
   await setAutoCommands(page, true);
 
-  await page.getByRole('button', { name: 'Load older turns' }).click();
+  // The history controller backfills the leading prompt automatically; a
+  // manual Load older action is only a fallback when intersection observers
+  // are unavailable.
   await expect(page.getByText('first retained question')).toBeVisible();
   await expect.poll(async () => (await commands(page)).find((command) => (
     command.type === 'get_conversation_history' && command.cursor === 'cursor-1'
@@ -4224,8 +4241,8 @@ test('default agent view: stale automatic responses cannot redirect Settings', a
   await page.getByRole('button', { name: 'Back' }).click();
   await setAutoCommands(page, false);
   await page.getByRole('button', { name: 'Open Stale opening on Fedora' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'get_conversation_history')).toBeTruthy();
   const historyRequest = (await commands(page)).find((command) => command.type === 'get_conversation_history');
-  expect(historyRequest).toBeTruthy();
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
   await server(page, 0, {
@@ -4295,7 +4312,7 @@ test('default agent view: empty and failed pages do not trigger fallback', async
   await setConversationFixture(page, { entries: [], total: 0 });
   await page.getByRole('button', { name: 'Open Empty transcript on Fedora' }).click();
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
-  await expect(page.getByText('No user or assistant turns are recorded for this session.')).toBeVisible();
+  await expect(page.getByText('No conversation messages have been recorded yet.')).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
 
   await setAutoCommands(page, false);
@@ -4536,6 +4553,104 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
   await setConversationFixture(page, { entries: final, total: final.length });
   await expect(page.getByText('final streamed question')).toBeVisible();
   await expect.poll(bottomGap).toBeLessThan(2);
+});
+
+test('loads older conversation automatically when scrolled near the top', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'structured_questions', 'slash_commands', 'conversation_history'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Automatic history',
+      agent: 'codex',
+      server_session_id: 'session-1',
+      terminal_id: 'terminal-1',
+      generation: 1,
+      conversation_history_available: true,
+      agent_session_id: 'automatic-session',
+    }],
+  });
+  const latestEntries = Array.from({ length: 100 }, (_, index) => [
+    { id: `latest-user-${index}`, timestamp: `2026-08-12T09:${String(index).padStart(2, '0')}:00Z`, role: 'user', text: `latest question ${index}` },
+    { id: `latest-answer-${index}`, timestamp: `2026-08-12T09:${String(index).padStart(2, '0')}:01Z`, role: 'assistant', text: `latest answer ${index}` },
+  ]).flat();
+  const olderEntries = Array.from({ length: 12 }, (_, index) => [
+    { id: `older-user-${index}`, timestamp: `2026-08-12T08:${String(index).padStart(2, '0')}:00Z`, role: 'user', text: `older automatic question ${index}` },
+    { id: `older-answer-${index}`, timestamp: `2026-08-12T08:${String(index).padStart(2, '0')}:01Z`, role: 'assistant', text: `older automatic answer ${index}` },
+  ]).flat();
+  await setConversationFixture(page, {
+    entries: latestEntries,
+    total: latestEntries.length + olderEntries.length,
+    nextCursor: 'older-1',
+    hasMore: true,
+    pages: { 'older-1': { entries: olderEntries } },
+  });
+
+  await page.getByRole('button', { name: 'Open Automatic history on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  const list = page.locator('.conversation-list');
+  await expect(page.getByText('latest answer 99')).toBeVisible();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'get_conversation_history').length).toBe(1);
+  expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  await expect(page.getByText('older automatic answer 11')).toBeVisible();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'get_conversation_history' && command.cursor === 'older-1').length).toBe(1);
+  await expect(page.getByText('Beginning of conversation reached.')).toBeVisible();
+});
+
+test('retains a Claude continuation cursor through repeated preparation', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'conversation_history'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Claude continuation',
+      agent: 'claude',
+      conversation_history_available: true,
+      agent_session_id: 'claude-chain-session',
+    }],
+  });
+  await setConversationFixture(page, {
+    entries: [{ id: 'latest', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'latest continuation answer' }],
+    total: 2,
+    nextCursor: 'chain-prepare',
+    hasMore: true,
+    pages: {
+      'chain-prepare': {
+        entries: [], state: 'preparing', snapshotId: 'chain-snapshot', nextCursor: 'chain-ready', hasMore: true,
+      },
+      'chain-ready': {
+        entries: [{ id: 'older', timestamp: '2026-09-02T11:59:00Z', role: 'user', text: 'older continuation question' }],
+        state: 'ready', snapshotId: 'chain-snapshot', hasMore: false,
+      },
+    },
+  });
+  await page.getByRole('button', { name: 'Open Claude continuation on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  const list = page.locator('.conversation-list');
+  await expect(page.getByText('latest continuation answer')).toBeVisible();
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  await expect(page.getByText('older continuation question')).toBeVisible();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'get_conversation_history')
+    .map((command) => command.cursor || '')).toEqual(['', 'chain-prepare', 'chain-ready']);
 });
 
 test('inspects workspace files and Git changes without write controls', async ({ page }) => {

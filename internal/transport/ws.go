@@ -437,10 +437,117 @@ func (h *Hub) BroadcastPrepared(message any, prepare func()) {
 		clients = append(clients, client)
 	}
 	h.mu.RUnlock()
+	h.pushPrepared(clients, []preparedMessage{{data: data, kind: kind, replaceable: replaceable}})
+}
+
+type preparedMessage struct {
+	data        []byte
+	kind        string
+	replaceable bool
+}
+
+// BroadcastBatchPrepared selects and encodes a complete ordered batch while
+// holding the registration barrier. The commit closure therefore cannot get
+// ahead of a handshake or another prepared batch, and an encoding failure
+// leaves the caller's committed view untouched.
+func (h *Hub) BroadcastBatchPrepared(build func() (messages []any, commit func(), err error)) error {
+	if build == nil {
+		return errors.New("prepared broadcast requires a builder")
+	}
+	h.register.Lock()
+	defer h.register.Unlock()
+	messages, commit, err := build()
+	if err != nil {
+		return err
+	}
+	prepared, err := prepareMessages(messages)
+	if err != nil {
+		return err
+	}
+	if commit != nil {
+		commit()
+	}
+	h.mu.RLock()
+	clients := make([]*ClientConn, 0, len(h.clients))
+	for _, client := range h.clients {
+		clients = append(clients, client)
+	}
+	h.mu.RUnlock()
+	h.pushPrepared(clients, prepared)
+	return nil
+}
+
+// SendBatchPrepared is the per-client equivalent of BroadcastBatchPrepared.
+// The builder runs after admission is excluded, so it cannot capture a mixed
+// handshake/update tuple. The client must already be registered.
+func (h *Hub) SendBatchPrepared(client *ClientConn, build func() []any) bool {
+	if client == nil || build == nil {
+		return false
+	}
+	h.register.Lock()
+	defer h.register.Unlock()
+	messages := build()
+	prepared, err := prepareMessages(messages)
+	if err != nil {
+		return false
+	}
+	if !h.clientRegistered(client) {
+		return false
+	}
+	h.pushPrepared([]*ClientConn{client}, prepared)
+	return true
+}
+
+// SendBatchPreparedByID resolves the client and invokes its builder under the
+// same barrier. It deliberately shares the already-locked implementation with
+// SendBatchPrepared so a builder never causes a recursive registration lock.
+func (h *Hub) SendBatchPreparedByID(clientID string, build func() []any) bool {
+	if clientID == "" || build == nil {
+		return false
+	}
+	h.register.Lock()
+	defer h.register.Unlock()
+	h.mu.RLock()
+	client := h.clients[clientID]
+	h.mu.RUnlock()
+	if client == nil {
+		return false
+	}
+	messages := build()
+	prepared, err := prepareMessages(messages)
+	if err != nil {
+		return false
+	}
+	h.pushPrepared([]*ClientConn{client}, prepared)
+	return true
+}
+
+func prepareMessages(messages []any) ([]preparedMessage, error) {
+	prepared := make([]preparedMessage, 0, len(messages))
+	for _, message := range messages {
+		data, kind, replaceable, err := encodeMessage(message)
+		if err != nil {
+			return nil, err
+		}
+		prepared = append(prepared, preparedMessage{data: data, kind: kind, replaceable: replaceable})
+	}
+	return prepared, nil
+}
+
+func (h *Hub) clientRegistered(client *ClientConn) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.clients[client.id] == client && client.ctx.Err() == nil
+}
+
+func (h *Hub) pushPrepared(clients []*ClientConn, messages []preparedMessage) {
 	for _, client := range clients {
-		if !h.push(client, data, kind, replaceable) {
-			h.slowClientEvictions.Add(1)
-			h.removeClient(client)
+		for _, message := range messages {
+			if !h.push(client, message.data, message.kind, message.replaceable) {
+				h.slowClientEvictions.Add(1)
+				h.removeClient(client)
+				break
+			}
 		}
 	}
 }
