@@ -818,7 +818,7 @@ for (const state of ['valid', 'recorded-34478620554', 'recorded-34478627478']) {
     assert.deepEqual((await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile)).issues, []);
     const restart = await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile, '09-10 08:45:09.464 6538 7277 I DynamiteLoaderV2Impl: Module config changed, forcing restart due to module googlecertificates\n');
     assert.equal(restart.passed, false);
-    assert.ok(restart.issues.includes('native dependency replacement or forced restart was observed'));
+    assert.ok(restart.issues.includes('native process death, dependency configuration change or package replacement was observed'));
     if (state !== 'valid') return;
     assert.equal((await runAndroidEnvironmentFixtureSnapshot(fixture, 'changed', afterFile, afterDiagnosticsFile)).passed, true);
     const changed = await runAndroidEnvironmentFixtureCheck(fixture, beforeFile, afterFile);

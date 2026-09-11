@@ -561,6 +561,8 @@ async function confirmationReplay(name: string, options: {
   dialog?: 'different' | 'hidden' | 'unrelated-add' | 'ambiguous' | 'ambiguous-after-ready' | 'replaced' | 'replaced-after-ready';
   staleIdentityRead?: number;
   replaceReadyIdentity?: 'once' | 'always';
+  replaceFirstIdentity?: boolean;
+  oldIdentityPolicy?: boolean;
   foreground?: string;
   fault?: ConfirmationFault;
   faultAt?: ConfirmationBoundary;
@@ -630,7 +632,7 @@ async function confirmationReplay(name: string, options: {
         assert.equal(count, options.dialog === 'different' || options.dialog === 'hidden' || replaced ? 0 : 1, 'only Add in the visible expected navigation bar may match');
         if (!count) return value([]);
         if (options.dialog === 'ambiguous' || (options.dialog === 'ambiguous-after-ready' && identityReads > 1)) return value([element(`add-${lookups}`), element('other-add')]);
-        const replacedAdd = options.replaceReadyIdentity && identityReads % 2 === 0 && (options.replaceReadyIdentity === 'always' || identityReads === 2);
+        const replacedAdd = (options.replaceFirstIdentity && identityReads === 1) || (options.replaceReadyIdentity && identityReads % 2 === 0 && (options.replaceReadyIdentity === 'always' || identityReads === 2));
         return value([element(options.dialog === 'unrelated-add' ? 'expected-add' : `add-${lookups + (replacedAdd ? 1 : 0)}`)]);
       }
       assert.ok(xpathCount(source, body.value) > 0, 'real adapter selector must match recorded Share XML');
@@ -692,6 +694,10 @@ async function confirmationReplay(name: string, options: {
     }
     throw new Error(`unexpected confirmation request ${path} ${JSON.stringify(body)}`);
   }, fixture || options.latency ? undefined : () => now);
+  if (options.oldIdentityPolicy) {
+    const original = driver.command.bind(driver);
+    driver.command = (path, method, body, timeoutMs) => original(path, method, body, path === '/elements' && confirming ? 8_000 : timeoutMs);
+  }
   (platform as any).installedBundleId = '';
   let error: unknown;
   try { await platform.installFromBrowser(); } catch (caught) { error = caught; }
@@ -715,6 +721,30 @@ async function confirmationReplay(name: string, options: {
   }
   return { platform, driver, requests, error, lookups, attributes, clicks, observations, now };
 }
+
+test('confirmation cycle13 old 8s policy rejects recorded 8650ms aggregate plus synthetic 50ms overhead', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('cycle13-old-8650', { latency: { identity: 8_650 + 50 }, replaceFirstIdentity: true, oldIdentityPolicy: true });
+  assert.match(String(replay.error), /APPIUM_TIMEOUT/u);
+  assert.deepEqual(replay.clicks, ['share', 'target-1']);
+  assert.equal(replay.driver.snapshot().commands.find(entry => entry.timedOut)?.timeoutMs, 8_000);
+  const count = replay.requests.length;
+  await wait(800);
+  await assert.rejects(() => replay.driver.activeAppInfo(), /APPIUM_SESSION_UNUSABLE/u);
+  assert.equal(replay.requests.length, count);
+});
+
+test('confirmation cycle13 recorded 8650ms aggregate plus synthetic 50ms response overhead reacquires changed ID', async () => {
+  const skip = requireXmlLint();
+  if (skip) return skip;
+  const replay = await confirmationReplay('cycle13-8650', { latency: { identity: 8_650 + 50 }, replaceFirstIdentity: true });
+  assert.equal(replay.error, undefined);
+  assert.equal(replay.lookups, 2);
+  assert.deepEqual(replay.attributes, ['add-2:enabled', 'add-2:visible', 'add-2:hittable']);
+  assert.deepEqual(replay.clicks, ['share', 'target-1', 'add-2']);
+  assert.equal(replay.driver.snapshot().firstFatal, undefined);
+});
 
 for (const fixture of recordedConfirmation) {
   test(`confirmation replays recorded ${fixture.run} enabled-stale then hypothetical ready replacement`, async () => {
@@ -806,7 +836,7 @@ test('confirmation hypothetical same-dialog Add replacement reacquires a complet
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
-for (const remaining of [60_000, 62_000]) {
+for (const remaining of [68_000, 70_000]) {
   test(`confirmation hypothetical repeated same-dialog Add replacements keep the original ${remaining}ms deadline`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -815,12 +845,12 @@ for (const remaining of [60_000, 62_000]) {
       after: (boundary) => boundary === 'identity' ? 1_000 : 0,
     });
     assert.match(String(replay.error), /confirmation control was not ready.*Add control was replaced/u);
-    assert.equal(replay.lookups, remaining === 60_000 ? 4 : 5);
+    assert.equal(replay.lookups, remaining === 68_000 ? 4 : 5);
     assert.deepEqual(replay.clicks, ['share', 'target-1']);
-    assert.equal(replay.now - (120_000 - remaining), remaining === 60_000 ? 8_000 : 10_000);
+    assert.equal(replay.now - (120_000 - remaining), remaining === 68_000 ? 8_000 : 10_000);
     const commands = replay.driver.snapshot().commands;
     const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
-    assert.ok(commands.slice(targetClick + 1).every((entry) => entry.timeoutMs === (entry.path.endsWith('/appium/settings') ? 2_000 : /\/elements?$/u.test(entry.path) ? 8_000 : 5_000) && !entry.error && !entry.timedOut));
+    assert.ok(commands.slice(targetClick + 1).every((entry) => entry.timeoutMs === (entry.path.endsWith('/appium/settings') ? 2_000 : entry.path.endsWith('/elements') ? 12_000 : entry.path.endsWith('/element') ? 8_000 : 5_000) && !entry.error && !entry.timedOut));
     assert.equal(replay.driver.snapshot().unusable, false);
   });
 }
@@ -881,14 +911,14 @@ for (const boundary of ['lookup', 'identity', 'enabled', 'visible', 'hittable'] 
   test(`confirmation ${boundary} receives a complete allowance or no command at child exhaustion`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
-    const replay = await confirmationReplay(`admission-${boundary}`, { after: (current) => current === boundary ? 55_001 : 0 });
+    const replay = await confirmationReplay(`admission-${boundary}`, { after: (current) => current === boundary ? 70_001 : 0 });
     assert.match(String(replay.error), /Add: confirmation control was not ready/u);
     assert.equal(replay.clicks.length, 2);
     const commands = replay.driver.snapshot().commands;
     const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
     const confirmation = commands.slice(targetClick + 1);
     assert.ok(confirmation.every((entry) => !entry.error && !entry.timedOut));
-    assert.ok(confirmation.filter((entry) => /\/element(?:s|\/add-1\/attribute\/\w+)?$/u.test(entry.path)).every((entry) => entry.timeoutMs === (/\/elements?$/u.test(entry.path) ? 8_000 : 5_000)), 'never dispatch a shortened lookup/read');
+    assert.ok(confirmation.filter((entry) => /\/element(?:s|\/add-1\/attribute\/\w+)?$/u.test(entry.path)).every((entry) => entry.timeoutMs === (entry.path.endsWith('/elements') ? 12_000 : entry.path.endsWith('/element') ? 8_000 : 5_000)), 'never dispatch a shortened lookup/read');
     assert.equal(replay.lookups, 1);
     if (boundary === 'lookup') assert.equal(replay.observations.some((entry) => entry.boundary === 'identity'), false);
     if (boundary === 'enabled') assert.deepEqual(replay.attributes, ['add-1:enabled']);
@@ -900,14 +930,14 @@ for (const boundary of ['lookup', 'identity', 'enabled', 'visible', 'hittable'] 
 test('confirmation foreground read cannot consume the allowance of the next lookup', async () => {
   const skip = requireXmlLint();
   if (skip) return skip;
-  const replay = await confirmationReplay('foreground-admission', { after: (boundary) => boundary === 'foreground' ? 55_001 : 0 });
+  const replay = await confirmationReplay('foreground-admission', { after: (boundary) => boundary === 'foreground' ? 70_001 : 0 });
   assert.match(String(replay.error), /Add: confirmation control was not ready/u);
   assert.equal(replay.lookups, 0);
   assert.equal(replay.clicks.length, 2);
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
-for (const remaining of [4_999, 7_999, 8_000]) {
+for (const remaining of [4_999, 7_999, 8_000, 66_999]) {
   test(`confirmation parent budget ${remaining} never admits a partial tail observation`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -924,7 +954,7 @@ test('confirmation exhaustion retains the last meaningful loading observation', 
   const skip = requireXmlLint();
   if (skip) return skip;
   const replay = await confirmationReplay('last-loading-state', {
-    states: ['disabled', 'ready'], after: (boundary, lookup) => lookup === 2 && boundary === 'enabled' ? 55_001 : 0,
+    states: ['disabled', 'ready'], after: (boundary, lookup) => lookup === 2 && boundary === 'enabled' ? 70_001 : 0,
   });
   assert.match(String(replay.error), /confirmation control was not ready.*disabled/u);
   assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-2:enabled']);
@@ -937,7 +967,7 @@ test('confirmation final click requires its complete parent allowance after all 
   if (skip) return skip;
   let identityReads = 0;
   const replay = await confirmationReplay('click-admission', {
-    parentRemaining: 59_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 50_001 : 0,
+    parentRemaining: 67_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 58_001 : 0,
   });
   assert.match(String(replay.error), /insufficient time to complete confirmation click/u);
   assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);
@@ -978,7 +1008,7 @@ for (const boundary of ['lookup', 'identity'] as const) {
     assert.equal(replay.driver.snapshot().unusable, false);
     const commands = replay.driver.snapshot().commands;
     const start = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
-    assert.ok(commands.slice(start + 1).filter((entry) => /\/elements?$/u.test(entry.path)).every((entry) => entry.timeoutMs === 8_000));
+    assert.ok(commands.slice(start + 1).filter((entry) => /\/elements?$/u.test(entry.path)).every((entry) => entry.timeoutMs === (entry.path.endsWith('/elements') ? 12_000 : 8_000)));
   });
 }
 
@@ -988,7 +1018,7 @@ for (const boundary of ['lookup', 'identity'] as const) {
       const skip = requireXmlLint();
       if (skip) return skip;
       const replay = await confirmationReplay(`cycle03-late-${boundary}-${state}`, {
-        latency: { [boundary]: 8_200 }, states: [boundary === 'lookup' ? state : 'ready'], dialog: boundary === 'identity' && state === 'missing' ? 'different' : undefined,
+        latency: { [boundary]: boundary === 'identity' ? 12_200 : 8_200 }, states: [boundary === 'lookup' ? state : 'ready'], dialog: boundary === 'identity' && state === 'missing' ? 'different' : undefined,
       });
       assert.match(String(replay.error), /APPIUM_TIMEOUT/u);
       assert.equal(replay.lookups, 1);

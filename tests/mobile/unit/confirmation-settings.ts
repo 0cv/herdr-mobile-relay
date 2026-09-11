@@ -111,7 +111,7 @@ for (const boundary of [1, 2, 3, 4, 5]) {
   }]);
 }
 
-confirmationSettingsTests.push(['iOS synthetic exact whole settings transaction is admissible and reserves the absolute parent tail', async () => {
+for (const operationMs of [49_000, 57_000]) confirmationSettingsTests.push([`iOS synthetic exact ${operationMs}ms whole settings transaction is admissible and reserves the absolute parent tail`, async () => {
   let now = 0;
   let settings = { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 };
   const driver = new AppiumClient('http://settings.invalid', 30_000, async (input, init) => {
@@ -121,11 +121,11 @@ confirmationSettingsTests.push(['iOS synthetic exact whole settings transaction 
     return Response.json({ value: settings });
   });
   await driver.create({ capabilities: {} });
-  const budget = new PhaseBudget('exact-settings', { timeoutMs: 59_000, now: () => now });
+  const budget = new PhaseBudget('exact-settings', { timeoutMs: operationMs + 10_000, now: () => now });
   driver.setBudget(budget);
-  await withIOSConfirmationSettings(driver, budget, 49_000, async phase => {
-    assert.equal(phase.remainingMs, 49_000);
-    now += 49_000;
+  await withIOSConfirmationSettings(driver, budget, operationMs, async phase => {
+    assert.equal(phase.remainingMs, operationMs);
+    now += operationMs;
   });
   assert.equal(budget.remainingMs, 0);
   assert.deepEqual(settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });

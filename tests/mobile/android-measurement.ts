@@ -8,6 +8,7 @@ import { command, stopProcess } from './support/process';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
 import { requireOwnedDevice } from './support/device';
 import { isAndroidPackageProcess, isAndroidTerminationPackage } from './android-events';
+import type { AppiumClient } from './support/webdriver';
 import { AndroidTransportObservation } from './support/android-transport';
 
 export class AndroidEnvironmentMeasurement {
@@ -108,6 +109,47 @@ export class AndroidEnvironmentMeasurement {
     await androidMeasurementMarker(this.serial, `${this.id} OP_END ${operation.id} ${packageName} ${pid}`);
     operation.succeeded = true;
     await writeSanitizedJson(this.path('operations'), this.operations);
+  }
+
+  async observeBootstrapClose(driver: AppiumClient): Promise<void> {
+    const id = randomUUID();
+    const observations: Record<string, unknown> = {
+      id, measurementId: this.id, action: 'Appium session DELETE',
+      ownership: 'Driver session close requested; browser termination ownership and initiator command identity are not established',
+      qualifiesPlannedTermination: false,
+    };
+    const observe = async (boundary: 'BEGIN' | 'END') => {
+      try {
+        if (!this.active) throw new Error('measurement inactive');
+        const inventory = await command('adb', ['-s', this.serial, 'shell', 'ps', '-A', '-o', 'PID,NAME'], 2_000);
+        if (inventory.stderr.trim()) throw new Error('process inventory reported stderr');
+        observations[`${boundary}Processes`] = parseAndroidProcesses(inventory.stdout);
+        const marker = await command('adb', ['-s', this.serial, 'shell', 'log', '-p', 'i', '-t', 'HerdrMeasure',
+          `'${this.id} CLOSE_${boundary} ${id}'`], 2_000);
+        if (marker.stdout.trim() || marker.stderr.trim()) throw new Error('clock marker returned unexpected output');
+        observations[`${boundary}MarkerSettled`] = true;
+      } catch {
+        observations[`${boundary}ObservationFailed`] = true;
+      }
+    };
+    const before = driver.snapshot();
+    observations.sessionPresentBefore = Boolean(before.sessionId);
+    observations.unusableBefore = before.unusable;
+    await observe('BEGIN');
+    try {
+      await driver.close();
+      observations.closeResolved = true;
+    } finally {
+      const after = driver.snapshot();
+      observations.sessionPresentAfter = Boolean(after.sessionId);
+      observations.unusableAfter = after.unusable;
+      observations.fatalCode = after.firstFatal?.code;
+      observations.deleteCommands = after.commands.filter(entry => !before.commands.includes(entry) && entry.method === 'DELETE').map(entry => ({
+        method: entry.method, failed: Boolean(entry.error), timedOut: entry.timedOut, durationMs: entry.durationMs,
+      }));
+      await observe('END');
+      await writeSanitizedJson(this.path('bootstrap-close'), observations).catch(() => undefined);
+    }
   }
 
   private async closeCollector(): Promise<void> {

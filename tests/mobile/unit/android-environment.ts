@@ -9,6 +9,7 @@ import type { AndroidEnvironmentSnapshot, AndroidPreparation } from '../android-
 import { AndroidEnvironmentMeasurement } from '../android-measurement';
 import { AndroidPlatform } from '../platforms/android';
 import { AppiumClient } from '../support/webdriver';
+import { androidEventDetails, androidLogEvents } from '../android-events';
 
 interface Fixture {
   root: string;
@@ -41,6 +42,100 @@ function cli(fixture: Fixture, args: string[]): { passed: boolean; stderr: strin
 export function androidEnvironmentTests(harness: Harness): Test[] {
   const tests: Test[] = [];
   const test = (name: string, body: () => Promise<void>) => tests.push([`Android production CLI ${name}`, body]);
+  test('recorded isolated UID death retains reason and requesting PID without an exemption', async () => {
+    const isolated = '1789100452.864 546 1761 I ActivityManager: Killing 5328:com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0/u0a146i-9000 (adj 0): isolated not needed';
+    const stopped = '1789100452.274 546 1761 I ActivityManager: Killing 5358:com.android.chrome:privileged_process0/u0a146 (adj 0): stop com.android.chrome due to from pid 5777';
+    assert.deepEqual(androidLogEvents(`${isolated}\n${stopped}\n`), [isolated, stopped]);
+    assert.equal(androidEventDetails(isolated).uid, 'u0a146i-9000');
+    assert.equal(androidEventDetails(isolated).reason, 'isolated not needed');
+    assert.equal(androidEventDetails(isolated).kind, 'process-death');
+    assert.equal(androidEventDetails(isolated).initiatorPid, undefined);
+    assert.equal(androidEventDetails(stopped).initiatorPid, '5777');
+    assert.equal(androidEventDetails('1789100452.274 546 1761 I ChimeraCfgMgr: Updating module config: old -> new').kind, 'module-config');
+  });
+  for (const observationFails of [false, true]) for (const fails of [false, true]) test(`bootstrap close bounded observations preserve settlement and original error ${fails} observation failure ${observationFails}`, async () => {
+    const fixture = await harness.createFixture();
+    const saved = { ...process.env };
+    Object.assign(process.env, fixture.environment);
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
+    try {
+      await measurement.begin();
+      if (observationFails) await writeFile(join(fixture.fixtureDirectory, 'valid-vending.json'), JSON.stringify({ processListFail: true }));
+      let deletes = 0;
+      const driver = new AppiumClient('http://fixture.test', 1_000, async (input, init) => {
+        if (init?.method === 'DELETE') {
+          deletes++;
+          if (fails) throw new Error('synthetic close failure');
+        }
+        return Response.json({ value: new URL(String(input)).pathname === '/session' ? { sessionId: 'bootstrap' } : null });
+      });
+      await driver.create({ capabilities: {} });
+      for (let index = 0; index < 55; index++) await driver.activeAppInfo();
+      if (fails) await assert.rejects(() => measurement.observeBootstrapClose(driver), /synthetic close failure/u);
+      else await measurement.observeBootstrapClose(driver);
+      assert.equal(deletes, 1);
+      const trace = JSON.parse(await readFile(join(fixture.root, 'android-environment-bootstrap-close.json'), 'utf8'));
+      assert.equal(trace.qualifiesPlannedTermination, false);
+      assert.equal(trace.BEGINMarkerSettled, observationFails ? undefined : true);
+      assert.equal(trace.ENDMarkerSettled, observationFails ? undefined : true);
+      if (observationFails) {
+        assert.equal(trace.BEGINObservationFailed, true);
+        assert.equal(trace.ENDObservationFailed, true);
+      }
+      assert.equal(trace.sessionPresentBefore, true);
+      assert.equal(trace.sessionPresentAfter, fails);
+      assert.equal(trace.deleteCommands.length, 1);
+      assert.equal(trace.deleteCommands[0].failed, fails);
+      assert.deepEqual(JSON.parse(await readFile(join(fixture.root, 'android-environment-operations.json'), 'utf8')), []);
+    } finally {
+      await measurement.finish().catch(() => undefined);
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
+  test('bootstrap evidence survives initial installed launch and relaunch without repeated observation commands', async () => {
+    const fixture = await harness.createFixture();
+    const saved = { ...process.env };
+    Object.assign(process.env, fixture.environment);
+    const measurement = new AndroidEnvironmentMeasurement('emulator-5554', fixture.root, repositoryPath('tests/mobile/toolchains.json'));
+    try {
+      await measurement.begin();
+      let deletes = 0;
+      const driver = new AppiumClient('http://fixture.test', 1_000, async (input, init) => {
+        if (init?.method === 'DELETE') deletes++;
+        return Response.json({ value: new URL(String(input)).pathname === '/session' ? { sessionId: 'launch-fixture' } : null });
+      });
+      await driver.create({ capabilities: {} });
+      const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://fixture.test', outputDir: fixture.root, certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
+      const internals = platform as any;
+      internals.driver = driver;
+      internals.waitForChromeShortcut = async () => ({});
+      internals.shortcutEvidence = () => ({});
+      internals.recordLaunchForeground = async () => undefined;
+      internals.launchChromeShortcut = async () => undefined;
+      internals.waitForInstalledTarget = async () => undefined;
+      internals.waitForChromeDevTools = async () => undefined;
+      internals.createChromeSession = async () => driver.create({ capabilities: {} });
+      internals.attachToInstalledView = async () => undefined;
+      platform.environmentMeasurement = measurement;
+      await platform.launchInstalledApp();
+      assert.equal(deletes, 1);
+      const path = join(fixture.root, 'android-environment-bootstrap-close.json');
+      const original = await readFile(path, 'utf8');
+      const observations = async () => (await readFile(fixture.log, 'utf8')).split('\n').filter(line => line.includes('shell ps -A -o PID,NAME') || /CLOSE_(?:BEGIN|END)/u.test(line));
+      const initialCommands = await observations();
+      assert.equal(initialCommands.filter(line => /CLOSE_(?:BEGIN|END)/u.test(line)).length, 2);
+      await platform.relaunchInstalledApp();
+      assert.equal(deletes, 2);
+      assert.equal(await readFile(path, 'utf8'), original);
+      assert.deepEqual(await observations(), initialCommands);
+      assert.deepEqual(JSON.parse(await readFile(join(fixture.root, 'android-environment-operations.json'), 'utf8')), []);
+    } finally {
+      await measurement.finish().catch(() => undefined);
+      for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+      Object.assign(process.env, saved);
+    }
+  });
   const prepare = (fixture: Fixture) => cli(fixture, ['prepare', '--serial', 'emulator-5554', '--toolchains', process.env.ANDROID_ENVIRONMENT_TOOLCHAINS || repositoryPath('tests/mobile/toolchains.json'), '--output', join(fixture.root, 'preparation.json'), '--adb-timeout-ms', '1000']);
   const state = (fixture: Fixture, value: unknown) => writeFile(join(fixture.fixtureDirectory, 'valid-vending.json'), JSON.stringify(value));
   const snapshots = async (fixture: Fixture) => {
@@ -340,7 +435,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     const changed = await check(recordedStart + death + module + recordedEnd);
     assert.equal(changed.passed, false);
     assert.deepEqual(changed.report.forcedRestartEvents, [death.trimEnd(), module.trimEnd()]);
-    assert.deepEqual(changed.report.issues, ['native dependency replacement or forced restart was observed']);
+    assert.deepEqual(changed.report.issues, ['native process death, dependency configuration change or package replacement was observed']);
     const unrelated = module.replace('1427', '1486');
     assert.equal((await check(death + recordedStart + unrelated + recordedEnd)).passed, true);
     for (const log of [

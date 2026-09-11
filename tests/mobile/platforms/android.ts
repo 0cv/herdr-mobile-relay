@@ -178,6 +178,7 @@ export class AndroidPlatform implements MobilePlatform {
   private readonly budget: PhaseBudget;
   private readonly diagnostics: DiagnosticRecorder;
   private installedPackage = '';
+  private bootstrapCloseAttempted = false;
   private installedTarget?: { packageName: string; activity: string; shortcut: AndroidChromeShortcut };
   private selectedInstalledWindow = '';
   private selectedInstalledWindowValid = false;
@@ -305,7 +306,10 @@ export class AndroidPlatform implements MobilePlatform {
     };
     this.lastLaunch = { shortcut: this.shortcutEvidence(shortcut), transitions: [] };
     this.diagnostics.record({ phase: 'android-launch', operation: 'shortcut-observed', detail: this.lastLaunch.shortcut });
-    await this.driver.close();
+    const observeBootstrap = !this.bootstrapCloseAttempted && this.environmentMeasurement;
+    this.bootstrapCloseAttempted = true;
+    if (observeBootstrap) await observeBootstrap.observeBootstrapClose(this.driver);
+    else await this.driver.close();
     await this.recordLaunchForeground('before-command');
     try {
       await this.launchChromeShortcut(shortcut);

@@ -2,7 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, posix } from 'node:path';
 import { requireOwnedDevice } from './support/device';
-import { androidLogEvents, measuredAndroidEvents } from './android-events';
+import { androidEventDetails, androidLogEvents, measuredAndroidEvents } from './android-events';
 import { CommandError, command, type CommandResult } from './support/process';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
 
@@ -112,6 +112,7 @@ export interface AndroidEnvironmentCheck {
   log: string;
   issues: string[];
   forcedRestartEvents: string[];
+  nativeEvents: ReturnType<typeof androidEventDetails>[];
   passed: boolean;
   observability: string;
 }
@@ -1052,7 +1053,7 @@ async function runCheck(): Promise<void> {
     const measured = measuredAndroidEvents(log, before, after, operations);
     events = measured.events;
     issues.push(...measured.issues);
-    if (events.length) issues.push('native dependency replacement or forced restart was observed');
+    if (events.length) issues.push('native process death, dependency configuration change or package replacement was observed');
   } catch (error) {
     issues.push(`measurement evidence unavailable or invalid: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -1064,6 +1065,7 @@ async function runCheck(): Promise<void> {
     log: logFile,
     issues,
     forcedRestartEvents: events,
+    nativeEvents: events.map(androidEventDetails),
     passed: issues.length === 0,
     observability: 'PackageManager persistent dependency sections and supported PID/package-attributed native log events only; dumpsys package does not expose a complete runtime Dynamite/Chimera module inventory.',
   };

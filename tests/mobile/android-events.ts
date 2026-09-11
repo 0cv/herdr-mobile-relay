@@ -48,7 +48,7 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
       for (const [targetPid, name] of operation.eligible) known.set(targetPid, { name, until: Infinity });
     }
     if (tag === 'ActivityManager') {
-      const start = message.match(/^Start proc (\d+):([^/\s]+)\/u0[a-z0-9]+ for /u);
+      const start = message.match(/^Start proc (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)? for /u);
       if (start) {
         known.set(start[1], { name: start[2], until: Infinity });
         forcedStops.delete(start[1]);
@@ -82,7 +82,7 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
     let targetPid = '';
     let targetName = '';
     if (tag === 'ActivityManager') {
-      const death = message.match(/^(?:Process (\S+) \(pid (\d+)\) has died:|Killing (\d+):([^/\s]+)\/u0[a-z0-9]+(?:\s|:))/u);
+      const death = message.match(/^(?:Process (\S+) \(pid (\d+)\) has died:|Killing (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?:\s|:))/u);
       if (death) {
         targetPid = death[2] || death[3];
         targetName = death[1] || death[4];
@@ -97,6 +97,20 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
     known.set(targetPid, { name: targetName, until: time + 1000 });
   }
   return [...new Set(events)];
+}
+
+export function androidEventDetails(line: string): { kind: 'process-death' | 'module-config' | 'package-replacement'; line: string; pid?: string; processName?: string; uid?: string; reason?: string; initiatorPid?: string } {
+  const record = parseRecord(line);
+  const message = record?.message || '';
+  const killed = message.match(/^Killing (\d+):([^/\s]+)\/(u0[a-z0-9]+(?:-\d+)?)\s+[^:]*:\s*(.*)$/u);
+  const died = message.match(/^Process (\S+) \(pid (\d+)\) has died:\s*(.*)$/u);
+  const pid = killed?.[1] || died?.[2] || message.match(/^(?:Sending signal\. PID:|Process) (\d+)/u)?.[1];
+  if (pid) return {
+    kind: 'process-death', line, pid, processName: killed?.[2] || died?.[1], uid: killed?.[3],
+    reason: killed?.[4] || died?.[3] || message,
+    initiatorPid: message.match(/\bfrom pid (\d+)/u)?.[1],
+  };
+  return { kind: /^(?:DynamiteLoaderV2Impl|ChimeraCfgMgr)$/u.test(record?.tag || '') ? 'module-config' : 'package-replacement', line };
 }
 
 export function measuredAndroidEvents(
