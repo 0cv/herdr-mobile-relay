@@ -137,6 +137,7 @@ export function androidChromeCapabilities(serial: string, attachToRunningApp = f
   return {
     platformName: 'Android',
     browserName: 'Chrome',
+    'appium:androidDeviceSocket': 'chrome_devtools_remote',
     'appium:automationName': 'UiAutomator2',
     'appium:udid': serial,
     'appium:noReset': true,

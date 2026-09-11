@@ -920,6 +920,17 @@ for (const [name, body] of androidEnvironmentTests({
 test('Android Chrome startup only enables attach mode after explicit launch', async () => {
   const ordinary = androidChromeCapabilities('emulator-5554');
   const attached = androidChromeCapabilities('emulator-5554', true);
+  for (const capabilities of [ordinary, attached]) {
+    let sent: any;
+    const client = new AppiumClient('http://fake.test', 1_000, async (_input, init) => {
+      sent = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ value: { sessionId: 'socket-session', capabilities: {} } }));
+    });
+    await client.create({ capabilities });
+    assert.equal(sent.capabilities.alwaysMatch['appium:androidDeviceSocket'], 'chrome_devtools_remote');
+    assert.deepEqual(sent.capabilities.alwaysMatch, capabilities);
+    assert.equal('androidDeviceSocket' in sent.capabilities.alwaysMatch, false);
+  }
   assert.equal('appium:androidUseRunningApp' in ordinary, false);
   assert.equal((ordinary['goog:chromeOptions'] as Record<string, unknown>).androidUseRunningApp, undefined);
   assert.equal((attached['goog:chromeOptions'] as Record<string, unknown>).androidUseRunningApp, true);
@@ -2277,6 +2288,10 @@ for (const [name, body] of webdriverInterruptionTests) test(name, body);
 for (const [name, body] of confirmationSettingsTests) test(name, body);
 for (const [name, body] of androidTransportTests) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
+test('Android socket metadata preserves fresh native and selected document ownership', async () => {
+  const { runAndroidSocketRegressions } = await import('./android-socket');
+  await runAndroidSocketRegressions();
+});
 
 let failures = 0;
 for (const [name, body] of tests) {
