@@ -8,6 +8,7 @@ import { command, stopProcess } from './support/process';
 import { redactText, writeSanitizedJson } from './support/diagnostics';
 import { requireOwnedDevice } from './support/device';
 import { isAndroidPackageProcess, isAndroidTerminationPackage } from './android-events';
+import { AndroidTransportObservation } from './support/android-transport';
 
 export class AndroidEnvironmentMeasurement {
   readonly id = randomUUID();
@@ -19,7 +20,11 @@ export class AndroidEnvironmentMeasurement {
   private started = false;
   private readonly operations: AndroidPlannedTermination[] = [];
 
-  constructor(private readonly serial: string, private readonly outputDir: string, private readonly toolchains: string) {}
+  private readonly transport: AndroidTransportObservation;
+
+  constructor(private readonly serial: string, private readonly outputDir: string, private readonly toolchains: string) {
+    this.transport = new AndroidTransportObservation(serial, outputDir);
+  }
 
   private path(name: string): string {
     return join(this.outputDir, `android-environment-${name}.json`);
@@ -46,6 +51,7 @@ export class AndroidEnvironmentMeasurement {
     });
     this.collector.stderr!.on('data', () => { this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: log collector reported stderr'); });
     this.collector.stdout!.on('data', (chunk: Buffer) => {
+      this.transport.observe(chunk);
       this.bytes += chunk.length;
       if (this.bytes > ANDROID_LOG_LIMIT) {
         this.collectorFailure ||= new Error('ANDROID_ENVIRONMENT: measured log exceeds bound');
@@ -107,9 +113,10 @@ export class AndroidEnvironmentMeasurement {
   private async closeCollector(): Promise<void> {
     this.active = false;
     if (this.collector) await stopProcess(this.collector);
+    await this.transport.finish();
     const log = redactText(Buffer.concat(this.chunks).toString('utf8'));
     await writeFile(join(this.outputDir, 'android-qualification-logcat.log'), log, { mode: 0o600 });
-    await writeSanitizedJson(this.path('collector'), { bytes: this.bytes, failure: this.collectorFailure?.message });
+    await writeSanitizedJson(this.path('collector'), { bytes: this.bytes, failure: this.collectorFailure?.message, transportObservationFailure: this.transport.failure });
     this.chunks = [];
   }
 

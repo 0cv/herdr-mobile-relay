@@ -51,6 +51,7 @@ import {
 
 import { androidTransitionTests } from './android-transitions';
 import { androidEnvironmentTests } from './android-environment';
+import { androidTransportTests } from './android-transport';
 import { runIOSRegressions } from './ios';
 import { confirmationSettingsTests } from './confirmation-settings';
 import { scenarioRunnerTests } from './scenario-runner';
@@ -2274,6 +2275,7 @@ for (const [name, body] of androidTransitionTests) test(name, body);
 for (const [name, body] of scenarioRunnerTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
 for (const [name, body] of confirmationSettingsTests) test(name, body);
+for (const [name, body] of androidTransportTests) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
 
 let failures = 0;

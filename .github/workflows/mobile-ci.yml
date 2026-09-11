@@ -856,7 +856,7 @@ jobs:
       - name: Start Appium
         run: |
           set -euo pipefail
-          appium_args=(--address 127.0.0.1 --port 4723 --base-path /)
+          appium_args=(--address 127.0.0.1 --port 4723 --base-path / --log-timestamp)
           if [ "$MOBILE_PLATFORM" = android ]; then
             appium_args+=(--allow-insecure=uiautomator2:chromedriver_autodownload)
           fi
