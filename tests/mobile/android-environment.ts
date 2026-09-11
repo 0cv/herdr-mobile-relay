@@ -105,7 +105,7 @@ export interface AndroidPreparation {
 }
 
 export interface AndroidEnvironmentCheck {
-  schema: 1;
+  schema: 2;
   checkedAt: string;
   before: string;
   after: string;
@@ -113,6 +113,8 @@ export interface AndroidEnvironmentCheck {
   issues: string[];
   forcedRestartEvents: string[];
   nativeEvents: ReturnType<typeof androidEventDetails>[];
+  normalRetirements: ReturnType<typeof measuredAndroidEvents>['normalRetirements'];
+  eventCounts: { rawEvents: number; distinctDeathPids: number; fatalEvents: number; normalRetirementPids: number };
   passed: boolean;
   observability: string;
 }
@@ -1037,6 +1039,8 @@ async function runCheck(): Promise<void> {
   const afterFile = required('--after');
   const logFile = required('--log');
   let events: string[] = [];
+  let fatalEvents: string[] = [];
+  let normalRetirements: ReturnType<typeof measuredAndroidEvents>['normalRetirements'] = [];
   const issues: string[] = [];
   try {
     const before = await readSnapshot(beforeFile);
@@ -1052,22 +1056,31 @@ async function runCheck(): Promise<void> {
     if (!Array.isArray(operations) || operations.length > 8) throw new Error('measurement operations are malformed');
     const measured = measuredAndroidEvents(log, before, after, operations);
     events = measured.events;
+    fatalEvents = measured.fatalEvents;
+    normalRetirements = measured.normalRetirements;
     issues.push(...measured.issues);
-    if (events.length) issues.push('native process death, dependency configuration change or package replacement was observed');
+    if (fatalEvents.length) issues.push('native process death, dependency configuration change or package replacement was observed');
   } catch (error) {
     issues.push(`measurement evidence unavailable or invalid: ${error instanceof Error ? error.message : String(error)}`);
   }
   const result: AndroidEnvironmentCheck = {
-    schema: 1,
+    schema: 2,
     checkedAt: new Date().toISOString(),
     before: beforeFile,
     after: afterFile,
     log: logFile,
     issues,
-    forcedRestartEvents: events,
+    forcedRestartEvents: fatalEvents,
     nativeEvents: events.map(androidEventDetails),
+    normalRetirements,
+    eventCounts: {
+      rawEvents: events.length,
+      distinctDeathPids: new Set(events.map((line) => androidEventDetails(line).pid).filter(Boolean)).size,
+      fatalEvents: fatalEvents.length,
+      normalRetirementPids: normalRetirements.length,
+    },
     passed: issues.length === 0,
-    observability: 'PackageManager persistent dependency sections and supported PID/package-attributed native log events only; dumpsys package does not expose a complete runtime Dynamite/Chimera module inventory.',
+    observability: 'PackageManager persistent dependency sections and supported PID/package-attributed native log events only; auditSubjects describe logd reconstructed subject metadata, not authenticated producer identity; dumpsys package does not expose a complete runtime Dynamite/Chimera module inventory.',
   };
   const output = option('--output');
   if (output) await writeSanitizedJson(output, result);

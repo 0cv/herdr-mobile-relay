@@ -68,7 +68,25 @@ APKM, installs the library first, and then installs all Chrome splits. The
 hosted emulator uses the declared Google APIs image without the Play Store and
 records GMS, module, Chrome, and Trichrome identities before and after each
 Android scenario; package replacement or a forced restart fails the run as an
-environment failure. Android 15's package manager stores a static-library record
+environment failure. The owner-approved normal-retirement exception admits only
+isolated Chrome sandbox helpers with a complete in-interval fork/start identity,
+orderly Chromium child exit, and matching Zygote exit status zero. The schema-2
+check retains raw observations and numbered proof lines, reporting normal helper
+lifetimes separately from fatal events and distinguishing event counts from PID
+counts. Ordinary helper observations require both timestamp and capture-order
+lifetime bounds. Strictly parsed Android logd AVC subject records retain separate
+`auditSubjects` attribution and raw numbered lines: logd reconstructs the subject
+PID/TID and original timestamp, so publication after exit is not helper execution.
+Only the supported nonpermissive isolated-app file-denial format, corroborated
+numeric UID and unique audit serial qualify; original timestamps remain bounded,
+pre-fork publication and adverse content still reject. This textual reference
+contract is not authenticated socket provenance or runtime-image attestation.
+Missing, ambiguous, reused or contradictory identities and incomplete log
+coverage fail closed; force-stop, signals, nonzero exits, crashes and replacement
+evidence override clean-exit evidence. An `isolated not needed` reason alone is
+never sufficient. Main/privileged Chrome processes and GMS are not covered, and
+snapshot/configuration, native/document ownership and bootstrap teardown gates
+are unchanged. Android 15's package manager stores a static-library record
 as `<library-name>_<version-code>`; the snapshot reads Chrome's declared dependency,
 queries that exact record, and records its resolved package path instead of passing a
 version selector to `pm path`. The binary URLs are an APK.now mirror fallback because

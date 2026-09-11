@@ -50,6 +50,7 @@ import {
 } from '../support/oracle';
 
 import { androidTransitionTests } from './android-transitions';
+import { androidEventTests } from './android-events';
 import { androidEnvironmentTests } from './android-environment';
 import { androidTransportTests } from './android-transport';
 import { runIOSRegressions } from './ios';
@@ -2283,7 +2284,7 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
   assert.deepEqual(contexts, ['NATIVE_APP', 'WEBVIEW_OLD', 'NATIVE_APP', 'WEBVIEW_NEW']);
 });
 
-for (const [name, body] of androidTransitionTests) test(name, body);
+for (const [name, body] of [...androidTransitionTests, ...androidEventTests]) test(name, body);
 for (const [name, body] of scenarioRunnerTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);

@@ -406,6 +406,116 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.equal((await harness.snapshot(fixture, 'valid', after, join(fixture.root, 'after-diagnostics.json'))).passed, true);
     assert.equal((await harness.check(fixture, before, after)).passed, false);
   });
+  test('synthetic saved normal-helper evidence qualifies only with unchanged valid snapshots', async () => {
+    const fixture = await harness.createFixture();
+    const { before, after } = await snapshots(fixture);
+    const first = JSON.parse(await readFile(before, 'utf8')) as AndroidEnvironmentSnapshot;
+    first.measurement!.processes['100'] = 'com.android.chrome_zygote';
+    first.measurement!.processes['559'] = 'system_server';
+    await writeFile(before, JSON.stringify(first));
+    const name = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:2';
+    const record = (time: string, pid: string, tag: string, message: string) => `09-10 08:45:${time} ${pid} ${pid} I ${tag}: ${message}\n`;
+    const body = record('09.100', '100', 'Zygote', 'Forked child process 200')
+      + record('09.200', '559', 'ActivityManager', `Start proc 200:${name}/u0ai2 for  {com.android.chrome/org.chromium.content.app.SandboxedProcessService0:2}`)
+      + record('09.300', '200', 'chromium', '[INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.')
+      + record('09.400', '559', 'ActivityManager', `Killing 200:${name}/u0a145i-8998 (adj 0): isolated not needed`)
+      + record('09.500', '100', 'Zygote', 'Process 200 exited cleanly (0)');
+    const logFile = join(fixture.root, 'normal.log');
+    const operations = join(fixture.root, 'normal-operations.json');
+    const output = join(fixture.root, 'normal-check.json');
+    await writeFile(operations, '[]');
+    const check = async (log: string) => {
+      await writeFile(logFile, log);
+      const result = cli(fixture, ['check', '--before', before, '--after', after, '--log', logFile, '--operations', operations, '--output', output]);
+      return { ...result, report: JSON.parse(await readFile(output, 'utf8')) };
+    };
+    const log = marker('08.000', 'START') + body + marker('10.000', 'END');
+    const normal = await check(log);
+    assert.equal(normal.passed, true, normal.stderr);
+    assert.deepEqual(normal.report.forcedRestartEvents, []);
+    assert.equal(normal.report.nativeEvents.length, 1);
+    assert.equal(normal.report.normalRetirements.length, 1);
+    assert.deepEqual(normal.report.eventCounts, { rawEvents: 1, distinctDeathPids: 1, fatalEvents: 0, normalRetirementPids: 1 });
+    const audit = record('09.300', '200', 'ThreadPoolForeg', 'type=1400 audit(0.0:238): avc:  denied  { setattr } for  name="arbitrary.txt" dev="dm-46" ino=65621 scontext=u:r:isolated_app:s0:c512,c768 tcontext=u:object_r:app_data_file:s0:c145,c256,c512,c768 tclass=file permissive=0').replace(' I ', ' W ');
+    const uid = record('09.250', '200', 'CompatChangeReporter', 'Compat change id reported: 242716250; UID 90002; state: ENABLED');
+    const auditLog = log.replace(body, body.replace(record('09.300', '200', 'chromium', '[INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.'), uid + record('09.300', '200', 'chromium', '[INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.')) + audit);
+    const delayed = await check(auditLog);
+    assert.equal(delayed.passed, true, delayed.stderr);
+    assert.equal(delayed.report.normalRetirements[0].auditSubjects[0].attribution, 'logd-audit-subject');
+    assert.equal(delayed.report.normalRetirements[0].auditSubjects[0].line, audit.trimEnd());
+    const conflictingAudit = audit.replace('0.0:238', '0.0:239').replace('scontext=u:r:isolated_app:', 'scontext=u:r:untrusted_app:');
+    const childRecord = record('09.300', '200', 'chromium', '[INFO:child_process_service.cc(72)] ChildProcessService: Exiting child process.');
+    for (const identity of [
+      uid.replace('UID 90002', 'UID 90003'),
+      record('09.250', '200', 'cr_SplitCompatApp', 'version=1 processName=com.example isIsolatedProcess=true'),
+      record('09.250', '200', 'cr_SplitCompatApp', `version=1 processName=${name} isIsolatedProcess=false`),
+    ]) {
+      const rejected = await check(log.replace(childRecord, identity + childRecord));
+      assert.equal(rejected.passed, false, 'recovery F002 direct identity without audit');
+      assert.equal(rejected.report.normalRetirements.length, 0);
+      assert.equal(rejected.report.forcedRestartEvents.length, 1);
+      assert.equal(rejected.report.passed, false);
+    }
+    const consistentIdentity = uid + record('09.250', '200', 'cr_SplitCompatApp', `version=1 processName=${name} isIsolatedProcess=true`);
+    assert.equal((await check(log.replace(childRecord, consistentIdentity + childRecord))).passed, true);
+    const conflicting = await check(auditLog.replace(childRecord, conflictingAudit + childRecord));
+    assert.equal(conflicting.passed, false, 'recovery F001 in-lifetime conflicting subject');
+    assert.equal(conflicting.report.normalRetirements.length, 0);
+    assert.equal(conflicting.report.forcedRestartEvents.length, 1);
+    assert.equal(conflicting.report.passed, false);
+    for (const altered of [
+      auditLog.replace('200 200 W', '200 201 W'), auditLog.replace('permissive=0', 'permissive=1'),
+      auditLog.replace('UID 90002', 'UID 90003'), auditLog.replace(uid, ''),
+      auditLog.replace(audit, audit + audit), auditLog.replace('arbitrary.txt', 'fatal-signal.txt'),
+      auditLog.replace(audit, audit + record('09.300', '200', 'Other', 'unknown post-exit execution')),
+    ]) {
+      const rejected = await check(altered);
+      assert.equal(rejected.passed, false);
+      assert.equal(rejected.report.normalRetirements.length, 0);
+      assert.equal(rejected.report.forcedRestartEvents.length, 1);
+    }
+    const deathRecord = record('09.400', '559', 'ActivityManager', `Killing 200:${name}/u0a145i-8998 (adj 0): isolated not needed`);
+    for (const [finding, adverse] of [
+      ['F001 forward clock', record('09.800', '559', 'ActivityManager', 'Force stopping com.android.chrome appid=10145 user=0: from pid 50')],
+      ['F001 truncated attribution', record('09.300', '559', 'ActivityManager', 'Force stopping com.android.chrome')],
+      ['F002 reused producer', record('09.000', '42', 'ActivityManager', 'Start proc 559:com.example/u0a123 for service')],
+      ['F002 terminated ActivityManager producer', record('09.000', '42', 'Zygote', 'Process 559 exited due to signal 9 (Killed)')],
+      ['F002 terminated Zygote producer', record('09.000', '42', 'Zygote', 'Process 100 exited due to signal 9 (Killed)')],
+    ]) {
+      const altered = finding.startsWith('F002') ? log.replace(body, adverse + body) : log.replace(deathRecord, adverse + deathRecord);
+      const rejected = await check(altered);
+      assert.equal(rejected.passed, false, finding);
+      assert.equal(rejected.report.normalRetirements.length, 0, finding);
+      assert.equal(rejected.report.forcedRestartEvents.length, 1, finding);
+      assert.equal(rejected.report.passed, false, finding);
+    }
+    for (const position of ['before fork', 'after exit']) {
+      const observation = record('09.300', '200', 'Other', `unattributed lifetime ${position}`);
+      const altered = log.replace(body, position === 'before fork' ? observation + body : body + observation);
+      const rejected = await check(altered);
+      assert.equal(rejected.passed, false, `F003 ${position}`);
+      assert.equal(rejected.report.normalRetirements.length, 0, `F003 ${position}`);
+      assert.equal(rejected.report.forcedRestartEvents.length, 1, `F003 ${position}`);
+      assert.equal(rejected.report.passed, false, `F003 ${position}`);
+    }
+    for (const [time, user, position] of [['09.000', '0', 'before'], ['09.300', '1', 'during'], ['09.800', '0', 'after']]) {
+      const unrelated = record(time, '559', 'ActivityManager', `Force stopping com.android.chrome appid=10145 user=${user}: from pid 50`);
+      const altered = position === 'before' ? log.replace(body, unrelated + body)
+        : position === 'after' ? log.replace(body, body + unrelated) : log.replace(deathRecord, unrelated + deathRecord);
+      assert.equal((await check(altered)).passed, true, position);
+    }
+    const mixed = await check(log.replace(marker('10.000', 'END'), chromeDeath + marker('10.000', 'END')));
+    assert.equal(mixed.passed, false);
+    assert.equal(mixed.report.normalRetirements.length, 1);
+    assert.equal(mixed.report.forcedRestartEvents.length, 1);
+    const last = JSON.parse(await readFile(after, 'utf8')) as AndroidEnvironmentSnapshot;
+    last.packages['com.google.android.gms'].dependencyConfig.enabledComponents = ['synthetic.config.change'];
+    await writeFile(after, JSON.stringify(last));
+    const drift = await check(log);
+    assert.equal(drift.passed, false);
+    assert.equal(drift.report.normalRetirements.length, 1);
+    assert.ok(drift.report.issues.some((issue: string) => issue.includes('com.google.android.gms')));
+  });
   test('padded epoch measurement framing preserves event attribution and rejects invalid records', async () => {
     const fixture = await harness.createFixture();
     const { before, after } = await snapshots(fixture);
