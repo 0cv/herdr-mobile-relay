@@ -23,6 +23,23 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
+  journal:
+    name: Linux journald logging acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 1.27.0
+          cache: true
+      - name: Run opt-in user-journal integration test
+        env:
+          HERDR_TEST_JOURNAL: "1"
+        run: go test ./cmd/herdr-mobile-relay -run '^TestJournalIntegration$' -count=1 -v
+
   # The race detector more than doubles the Go suite, and the shell suites are
   # unrelated to it. Both used to sit behind `go test` in one serial job and
   # decided when every later job could start.
