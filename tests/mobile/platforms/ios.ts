@@ -39,7 +39,9 @@ const IOS_WEBVIEW_CONNECT_RETRIES = 1;
 const IOS_WEBKIT_DISCOVERY_COMMAND_MS = 20_000;
 const IOS_SAFARI_READINESS_PHASE_MS = 46_000;
 const IOS_NAVIGATION_PHASE_MS = 86_000;
-const IOS_SAFARI_OBSERVATION_MS = 6_000;
+const IOS_SAFARI_DISCOVERY_RESERVE_MS = 6_000;
+const IOS_SAFARI_ATTACH_COMMAND_MS = 15_000;
+const IOS_SAFARI_OBSERVATION_MS = IOS_SAFARI_ATTACH_COMMAND_MS + 2_000;
 const IOS_INSTALLED_FOREGROUND_MS = 8_000;
 const IOS_NATIVE_LOOKUP_ROUND_MS = 5_000;
 const IOS_CONFIRMATION_LOOKUP_MS = 8_000;
@@ -523,7 +525,7 @@ export class IOSPlatform implements MobilePlatform {
     let lastError = '';
     while (!phase.exhausted) {
       try {
-        if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_SAFARI_OBSERVATION_MS) {
+        if (phase.remainingMs < IOS_WEBKIT_DISCOVERY_COMMAND_MS + IOS_SAFARI_DISCOVERY_RESERVE_MS) {
           lastError = `not enough time for WebKit discovery and Safari observation (${phase.remainingMs}ms remains)`;
           break;
         }
@@ -534,7 +536,7 @@ export class IOSPlatform implements MobilePlatform {
           lastError = 'Safari did not publish a web context';
         } else {
           if (phase.remainingMs < IOS_SAFARI_OBSERVATION_MS) break;
-          await this.driver.switchContext(context.id, 4_000);
+          await this.driver.switchContext(context.id, IOS_SAFARI_ATTACH_COMMAND_MS);
           if (phase.remainingMs < 2_000) break;
           const currentUrl = await this.driver.currentUrl(1_000);
           if (this.isExpectedOrigin(currentUrl)) {

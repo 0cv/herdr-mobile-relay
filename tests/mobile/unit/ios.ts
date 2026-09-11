@@ -208,6 +208,63 @@ test('recorded 18302ms native-only discovery settles before subsequent Safari pu
   assert.ok(driver.snapshot().commands.filter((entry) => entry.path.endsWith('/execute/sync')).every((entry) => entry.timeoutMs === 20_000 && !entry.timedOut));
 });
 
+test('cold Safari attach consumes recorded backend duration plus synthetic send and full-body overhead', async () => {
+  const { platform, driver, requests, budget } = await adapter('cold-safari-attach', async ({ path, body, signal }) => {
+    if (body.script === 'mobile: getContexts') return value([{ id: 'WEBVIEW_23086.1', bundleId: 'com.apple.mobilesafari' }]);
+    if (path.endsWith('/context') && body.name !== 'NATIVE_APP') {
+      await wait(500, undefined, { signal: signal! });
+      await wait(10_927, undefined, { signal: signal! });
+      return new Response(new ReadableStream({ async start(controller) {
+        await wait(500);
+        controller.enqueue(new TextEncoder().encode('{"value":null}'));
+        controller.close();
+      } }));
+    }
+    if (path.endsWith('/context')) return value(null);
+    if (path.endsWith('/url')) return value(`${origin}/`);
+    throw new Error(`unexpected cold attach operation ${path}`);
+  });
+  await (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget);
+  const switches = driver.snapshot().commands.filter(entry => entry.path.endsWith('/context'));
+  assert.deepEqual(switches.map(entry => entry.timeoutMs), [15_000, 1_000]);
+  assert.equal(requests.filter(request => request.body.name === 'WEBVIEW_23086.1').length, 1);
+  assert.equal(driver.snapshot().unusable, false);
+});
+
+for (const mode of ['insufficient', 'interrupted', 'late'] as const) {
+  test(`cold Safari attach ${mode} preserves admission and quarantine`, async () => {
+    let now = 0;
+    let settled = false;
+    const { platform, driver, requests, budget } = await adapter(`cold-attach-${mode}`, async ({ path, body }) => {
+      if (body.script === 'mobile: getContexts') {
+        if (mode === 'insufficient') now = 30_000;
+        return value([{ id: 'WEBVIEW_23086.1', bundleId: 'com.apple.mobilesafari' }]);
+      }
+      assert.ok(path.endsWith('/context'));
+      if (mode === 'interrupted') return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('interrupted attach body')); } }));
+      await wait(15_300);
+      settled = true;
+      return value(null);
+    }, mode === 'insufficient' ? () => now : undefined);
+    await assert.rejects(() => (platform as any).waitForSafariFixturePage(`${origin}/`, 46_000, budget), mode === 'insufficient' ? /IOS_NAVIGATION/u : /APPIUM_/u);
+    const count = requests.length;
+    assert.equal(requests.filter(request => request.path.endsWith('/context')).length, mode === 'insufficient' ? 0 : 1);
+    assert.equal(requests.some(request => request.path.endsWith('/url')), false);
+    if (mode === 'insufficient') {
+      assert.equal(driver.snapshot().unusable, false);
+      return;
+    }
+    const first = driver.snapshot().firstFatal;
+    if (mode === 'late') {
+      await wait(500);
+      assert.equal(settled, true);
+    }
+    await assert.rejects(() => driver.switchContext('NATIVE_APP', 1_000), /APPIUM_SESSION_UNUSABLE/u);
+    assert.equal(requests.length, count);
+    assert.deepEqual(driver.snapshot().firstFatal, first);
+  });
+}
+
 test('bounded discovery admits initial app wait plus settled RPC and completion work', async () => {
   const { platform, driver, budget } = await adapter('discovery-envelope', async ({ path, body, signal }) => {
     if (body.script === 'mobile: getContexts') {
