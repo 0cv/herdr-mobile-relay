@@ -3,6 +3,7 @@ import { AppiumClient, isFatalDriverError } from './webdriver';
 
 export const CONFIRMATION_SETTINGS_COMMAND_MS = 2_000;
 export const CONFIRMATION_RESTORE_MS = 2 * CONFIRMATION_SETTINGS_COMMAND_MS;
+export const IOS_SESSION_SETTINGS = { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 };
 export const IOS_CONFIRMATION_SETTINGS = { waitForIdleTimeout: 1, animationCoolOffTimeout: 0.2 };
 
 function touchedSettings(value: unknown): typeof IOS_CONFIRMATION_SETTINGS {
@@ -23,6 +24,14 @@ function assertSettings(actual: unknown, expected: typeof IOS_CONFIRMATION_SETTI
   if (Object.keys(expected).some(key => observed[key as keyof typeof observed] !== expected[key as keyof typeof expected])) {
     throw new Error('IOS_CONFIRMATION_SETTINGS: settings readback mismatch');
   }
+}
+
+export async function initializeIOSConfirmationSettings(driver: AppiumClient, parent: PhaseBudget): Promise<void> {
+  if (parent.remainingMs < 2 * CONFIRMATION_SETTINGS_COMMAND_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient initialization allowance');
+  const response = await driver.updateSettings(IOS_SESSION_SETTINGS, CONFIRMATION_SETTINGS_COMMAND_MS);
+  if (response !== null) throw new Error('IOS_CONFIRMATION_SETTINGS: malformed initialization acknowledgement');
+  if (parent.remainingMs < CONFIRMATION_SETTINGS_COMMAND_MS) throw new Error('IOS_CONFIRMATION_SETTINGS: insufficient initialization readback allowance');
+  assertSettings(await driver.settings(CONFIRMATION_SETTINGS_COMMAND_MS), IOS_SESSION_SETTINGS);
 }
 
 export async function withIOSConfirmationSettings<T>(

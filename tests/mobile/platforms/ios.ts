@@ -9,7 +9,7 @@ import {
 } from '../support/oracle';
 import { DiagnosticRecorder, writeBoundedText, writeSanitizedJson } from '../support/diagnostics';
 import { PhaseBudget } from '../support/budget';
-import { withIOSConfirmationSettings } from '../support/confirmation-settings';
+import { initializeIOSConfirmationSettings, withIOSConfirmationSettings } from '../support/confirmation-settings';
 import { CommandError, command, commandOutput } from '../support/process';
 import { requireOwnedDevice } from '../support/device';
 import {
@@ -389,6 +389,7 @@ export class IOSPlatform implements MobilePlatform {
       requestTimeoutMs: 360_000,
       budget: this.budget,
     });
+    await initializeIOSConfirmationSettings(this.driver, this.budget);
   }
 
   async openSetupURL(url: string): Promise<void> {

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient } from '../support/webdriver';
-import { IOS_CONFIRMATION_SETTINGS, withIOSConfirmationSettings } from '../support/confirmation-settings';
+import initialAppiumSettings from './fixtures/ios-appium-settings.json';
+import { initializeIOSConfirmationSettings, IOS_SESSION_SETTINGS, IOS_CONFIRMATION_SETTINGS, withIOSConfirmationSettings } from '../support/confirmation-settings';
 
 export const confirmationSettingsTests: Array<[string, () => Promise<void>]> = [];
 for (const mode of ['success', 'error', 'restore-error', 'readback', 'missing', 'malformed', 'unsupported', 'tail', 'interrupted', 'late', 'restore-interrupted'] as const) {
@@ -129,3 +130,70 @@ confirmationSettingsTests.push(['iOS synthetic exact whole settings transaction 
   assert.equal(budget.remainingMs, 0);
   assert.deepEqual(settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });
 }]);
+
+for (const mode of ['success', 'missing', 'malformed', 'shadowed', 'partial-update', 'short-parent', 'short-readback', 'bad-acknowledgement', 'interrupted-update', 'interrupted-readback'] as const) {
+  confirmationSettingsTests.push([`iOS recorded omission and producer-shaped initialization ${mode}`, async () => {
+    const cache: Record<string, unknown> = { ...initialAppiumSettings };
+    const wda: Record<string, unknown> = { waitForIdleTimeout: 23, animationCoolOffTimeout: 5 };
+    const writes: unknown[] = [];
+    let requests = 0;
+    let initializing = false;
+    let now = 0;
+    const driver = new AppiumClient('http://settings.invalid', 30_000, async (input, init) => {
+      if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'settings' });
+      requests++;
+      if (initializing && ((mode === 'interrupted-update' && init?.method === 'POST') || (mode === 'interrupted-readback' && init?.method === 'GET'))) {
+        const response = new Response('');
+        response.text = async () => { throw new Error('interrupted initialization'); };
+        return response;
+      }
+      if (init?.method === 'POST') {
+        const settings = JSON.parse(String(init.body)).settings;
+        writes.push(settings);
+        for (const [key, value] of Object.entries(settings)) {
+          if (cache[key] !== undefined && cache[key] === value) continue;
+          if (mode === 'partial-update' && key === 'animationCoolOffTimeout') return Response.json({ value: { error: 'invalid argument', message: 'rejected second setting' } }, { status: 400 });
+          wda[key] = value;
+          cache[key] = value;
+        }
+        if (mode === 'short-readback') now = 78_001;
+        return Response.json({ value: mode === 'bad-acknowledgement' ? {} : null });
+      }
+      const result = { ...cache };
+      if (initializing && mode === 'missing') delete result.waitForIdleTimeout;
+      if (initializing && mode === 'malformed') result.animationCoolOffTimeout = '2';
+      if (initializing && mode === 'shadowed') result.waitForIdleTimeout = 23;
+      return Response.json({ value: result });
+    });
+    await driver.create({ capabilities: {} });
+    const parent = new PhaseBudget('owned-session-settings', { timeoutMs: 80_000, now: () => now });
+    driver.setBudget(parent);
+    assert.deepEqual(await driver.settings(), initialAppiumSettings);
+    await assert.rejects(() => withIOSConfirmationSettings(driver, parent, 49_000, async () => assert.fail('must not act before establishment')), /unsupported or malformed waitForIdleTimeout/u);
+    assert.deepEqual(writes, []);
+    initializing = true;
+    const initialization = initializeIOSConfirmationSettings(driver, mode === 'short-parent' ? new PhaseBudget('short', { timeoutMs: 3_999 }) : parent);
+    if (mode !== 'success') {
+      await assert.rejects(() => initialization);
+      assert.equal(writes.length, ['short-parent', 'interrupted-update'].includes(mode) ? 0 : 1);
+      if (mode === 'short-readback' || mode === 'bad-acknowledgement') assert.equal(requests, 3);
+      if (mode.startsWith('interrupted')) {
+        const count = requests;
+        await assert.rejects(() => driver.settings(), /APPIUM_SESSION_UNUSABLE/u);
+        assert.equal(requests, count);
+      }
+      return;
+    }
+    await initialization;
+    initializing = false;
+    assert.deepEqual(await driver.settings(), { ...initialAppiumSettings, ...IOS_SESSION_SETTINGS });
+    assert.deepEqual(wda, IOS_SESSION_SETTINGS);
+    await driver.updateSettings({ waitForIdleTimeout: 7, animationCoolOffTimeout: 0.8 });
+    await withIOSConfirmationSettings(driver, parent, 49_000, async () => {
+      assert.deepEqual(wda, IOS_CONFIRMATION_SETTINGS);
+    });
+    assert.deepEqual(wda, { waitForIdleTimeout: 7, animationCoolOffTimeout: 0.8 });
+    assert.deepEqual(await driver.settings(), { ...initialAppiumSettings, ...wda });
+    assert.deepEqual(writes, [IOS_SESSION_SETTINGS, wda, IOS_CONFIRMATION_SETTINGS, wda]);
+  }]);
+}
