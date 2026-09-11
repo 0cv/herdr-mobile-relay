@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 import { resolve } from 'node:path';
 
 const webRoot = resolve(process.env.HERDR_WEB_ROOT || 'dist');
+const webkitEndpoint = process.env.HERDR_WEBKIT_WS_ENDPOINT;
 
 export default defineConfig({
   testDir: './tests/browser',
@@ -18,7 +19,15 @@ export default defineConfig({
   },
   projects: [
     { name: 'chromium-attention', use: { ...devices['Pixel 7'] } },
-    { name: 'webkit-attention', use: { ...devices['iPhone 15'] } },
+    {
+      name: 'webkit-attention',
+      use: {
+        ...devices['iPhone 15'],
+        ...(webkitEndpoint ? {
+          connectOptions: { wsEndpoint: webkitEndpoint, exposeNetwork: '<loopback>' },
+        } : {}),
+      },
+    },
   ],
   webServer: {
     command: `node scripts/browser-server.mjs ${JSON.stringify(webRoot)}`,
