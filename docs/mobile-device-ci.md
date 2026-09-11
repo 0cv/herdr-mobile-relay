@@ -74,7 +74,19 @@ orderly Chromium child exit, and matching Zygote exit status zero. The schema-2
 check retains raw observations and numbered proof lines, reporting normal helper
 lifetimes separately from fatal events and distinguishing event counts from PID
 counts. Ordinary helper observations require both timestamp and capture-order
-lifetime bounds. Strictly parsed Android logd AVC subject records retain separate
+lifetime bounds and must fit both START/END marker bounds, including audit subject
+timestamps. Capture is monitored, receive-bounded `main`/`system` logcat, not an
+exhaustive or lossless all-producer generation-time trace. Producers sample time
+before submission; another producer's earlier/later timestamp is diagnostic
+`boundaryDiscordances`, not proof of capture loss. Original bytes and line numbers
+are retained without sorting. All captured records, including pre-START and
+post-END spill, remain available for adverse and ambiguous attribution checks;
+planned termination markers and exempted events must also fit both receive and
+timestamp bounds. Missing/duplicate markers, malformed records, reported loss and
+collector failures still reject. A paused producer can submit only after collection
+stops, and absence of loss text in these buffers cannot prove universal losslessness.
+No quiet wait or marker provides an all-producer submission barrier.
+Strictly parsed Android logd AVC subject records retain separate
 `auditSubjects` attribution and raw numbered lines: logd reconstructs the subject
 PID/TID and original timestamp, so publication after exit is not helper execution.
 Only the supported nonpermissive isolated-app file-denial format, corroborated

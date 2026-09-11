@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { measuredAndroidEvents, parseAndroidAuditSubject } from '../android-events';
-import type { AndroidEnvironmentSnapshot } from '../android-environment';
+import type { AndroidEnvironmentSnapshot, AndroidPlannedTermination } from '../android-environment';
 
 const processName = 'com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:2';
 const line = (time: number, pid: number, tag: string, message: string) => `178910637${time}.000 ${pid} ${pid} I ${tag}: ${message}\n`;
@@ -54,6 +54,158 @@ androidEventTests.push(['synthetic delayed audit retains typed subject attributi
   assert.equal(subjects[0].time, 1789106373000);
   assert.equal(log.split('\n')[subjects[0].lineNumber - 1], subjects[0].line);
   assert.equal(parseAndroidAuditSubject(audit.trimEnd())?.subjectPid, '200');
+}]);
+
+androidEventTests.push(['synthetic receive boundaries retain ordinary producer inversions diagnostically', async () => {
+  for (const timestamp of ['1789106369.984', '1789106380.016']) {
+    const ordinary = line(1, 888, 'OtherProducer', 'ordinary record').replace('1789106371.000', timestamp);
+    const log = start + ordinary + body + end;
+    const result = measure(log);
+    assert.deepEqual(result.issues, []);
+    assert.equal(result.normalRetirements.length, 1);
+    assert.deepEqual(result.boundaryDiscordances, [{ lineNumber: 2, line: ordinary.trimEnd() }]);
+    for (const proof of result.normalRetirements[0].proof) assert.equal(log.split('\n')[proof.lineNumber - 1], proof.line);
+  }
+}]);
+
+androidEventTests.push(['synthetic adverse spill cannot expire attributed deaths or hide truncated forms', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  for (const [tag, message] of [
+    ['Process', 'Sending signal. PID: 300 SIG:'],
+    ['Zygote', 'Process 300 exited due to unknown'],
+    ['ActivityManager', 'Process com.android.chrome (pid 300) has died'],
+  ]) {
+    const initial = line(1, 559, 'ActivityManager', 'Process com.android.chrome (pid 300) has died: fg TOP');
+    const spill = line(8, 559, tag, message);
+    const result = measure(start + initial + end + spill, before);
+    assert.deepEqual(result.fatalEvents, [initial.trimEnd(), spill.trimEnd()]);
+  }
+}]);
+
+const boundaryNegatives: [string, string][] = [
+  ['fork before marker time', start + body.replace('1789106371.000', '1789106369.984') + end],
+  ['exit after marker time', start + body.replace('1789106375.000', '1789106380.016') + end],
+  ['fork before START receipt', fork + start + body.replace(fork, '') + end],
+  ['exit after END receipt', start + body.replace(exit, '') + end + exit],
+  ['audit after END receipt', start + auditBody + end + audit],
+  ['audit before marker time', start + auditBody + audit.replace('1789106373.000', '1789106369.984') + end],
+  ['audit after marker time', start + auditBody + audit.replace('1789106373.000', '1789106380.016') + end],
+  ['in-time post-END signal', start + body + end + line(4, 559, 'Process', 'Sending signal. PID: 200 SIG: 9')],
+  ['out-of-time received signal', start + body + line(4, 559, 'Process', 'Sending signal. PID: 200 SIG: 9').replace('1789106374.000', '1789106369.984') + end],
+  ['unknown helper spill outside both', start + body + end + line(8, 888, 'Other', 'unknown subject 200').replace('1789106378.000', '1789106380.016')],
+  ['truncated adverse shape spill', start + body + end + line(4, 559, 'Process', 'Sending signal. PID: 200 SIG:')],
+  ['malformed spill', start + body + end + 'unparsed adverse record\n'],
+  ['pre-START malformed', 'unparsed adverse record\n' + start + body + end],
+];
+for (const [name, log] of boundaryNegatives) androidEventTests.push([`synthetic capture boundary rejects ${name}`, async () => {
+  const result = measure(log);
+  assert.equal(result.normalRetirements.length, 0);
+  assert.ok(result.fatalEvents.length > 0 || result.issues.length > 0);
+}]);
+
+androidEventTests.push(['synthetic F001 historical identity cannot erase START snapshot attribution', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  const historical = line(1, 559, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service').replace('1789106371', '1789106369');
+  const signal = line(4, 559, 'Process', 'Sending signal. PID: 300 SIG: 9');
+  for (const log of [historical + start + signal + end, historical + start + end + signal, start + historical + signal + end]) {
+    const result = measure(log, before);
+    assert.deepEqual(result.issues, []);
+    assert.deepEqual(result.fatalEvents, [signal.trimEnd()]);
+  }
+  const unrelatedSnapshot = snapshot('start', { '300': 'com.example.other' });
+  assert.deepEqual(measure(historical.replace('com.example.other', 'com.android.chrome') + signal + start + end, unrelatedSnapshot).fatalEvents, [signal.trimEnd()]);
+  const reuse = historical.replace('1789106369', '1789106372');
+  assert.deepEqual(measure(start + reuse + signal + end, before).fatalEvents, []);
+}]);
+
+androidEventTests.push(['synthetic F003 later reuse cannot exclude an earlier-timestamp adverse record', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  const reuse = line(8, 559, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service').replace('1789106378', '1789106380');
+  const signal = line(4, 559, 'Process', 'Sending signal. PID: 300 SIG: 9');
+  for (const log of [start + end + reuse + signal, start + reuse + signal + end,
+    start + reuse + reuse.replace('1789106380', '1789106373').replace('com.example.other', 'com.example.third') + signal + end,
+    start + reuse.replace('1789106380', '1789106374') + signal + end]) {
+    assert.deepEqual(measure(log, before).fatalEvents, [signal.trimEnd()]);
+  }
+  for (const adverse of [line(4, 559, 'Zygote', 'Process 300 exited cleanly (0)'),
+    line(4, 300, 'ChimeraCfgMgr', 'Updating module config: old -> new'), signal.replace('SIG: 9', 'SIG:')]) {
+    assert.deepEqual(measure(start + end + reuse + adverse, before).fatalEvents, [adverse.trimEnd()]);
+  }
+  assert.deepEqual(measure(start + reuse.replace('1789106380', '1789106372') + signal + end, before).fatalEvents, []);
+  assert.deepEqual(measure(start + end + reuse + signal + signal.replace('1789106374', '1789106381'), before).fatalEvents, [signal.trimEnd()]);
+}]);
+
+androidEventTests.push(['synthetic F004 delayed relevant identity attributes already-received adverse records', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  const reuse = line(2, 559, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service');
+  const birth = line(3, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity');
+  const signal = line(4, 300, 'Process', 'Sending signal. PID: 300 SIG: 9');
+  for (const log of [start + reuse + end + signal + birth, start + reuse + signal + birth + end,
+    start + reuse + end + signal + birth.replace('6373', '6374')]) {
+    assert.deepEqual(measure(log, before).fatalEvents, [signal.trimEnd()]);
+  }
+  for (const adverse of [line(4, 559, 'Zygote', 'Process 300 exited cleanly (0)'),
+    line(4, 300, 'ChimeraCfgMgr', 'Updating module config: old -> new'), signal.replace('SIG: 9', 'SIG:')]) {
+    assert.deepEqual(measure(start + reuse + end + adverse + birth, before).fatalEvents, [adverse.trimEnd()]);
+  }
+  assert.deepEqual(measure(start + reuse + signal + end, before).fatalEvents, []);
+  assert.deepEqual(measure(start + reuse + signal + birth.replace('6373', '6375') + end, before).fatalEvents, []);
+  const death = line(3, 559, 'ActivityManager', 'Process com.android.chrome (pid 300) has died: fg TOP');
+  assert.deepEqual(measure(start + reuse + end + signal + death, before).fatalEvents, [signal.trimEnd(), death.trimEnd()]);
+}]);
+
+androidEventTests.push(['synthetic F003 identity retirement requires ordered replacement of the identity itself', async () => {
+  const before = snapshot('start', { '300': 'com.android.chrome' });
+  const chrome = line(3, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity');
+  const unrelated = line(2, 559, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service').replace('559 559', '559 560');
+  const signal = line(4, 300, 'Process', 'Sending signal. PID: 300 SIG: 9');
+  for (const log of [start + chrome + unrelated + end + signal, start + chrome + unrelated + signal + end,
+    start + chrome + chrome.replace('6373', '6371') + unrelated + end + signal,
+    start + chrome + unrelated.replace('6372', '6373') + end + signal]) {
+    assert.deepEqual(measure(log, before).fatalEvents, [signal.trimEnd()]);
+  }
+  for (const adverse of [line(4, 559, 'Zygote', 'Process 300 exited cleanly (0)'),
+    line(4, 300, 'ChimeraCfgMgr', 'Updating module config: old -> new'), signal.replace('SIG: 9', 'SIG:')]) {
+    assert.deepEqual(measure(start + chrome + unrelated + end + adverse, before).fatalEvents, [adverse.trimEnd()]);
+  }
+  assert.deepEqual(measure(start + unrelated + signal + end, before).fatalEvents, []);
+  assert.deepEqual(measure(start + chrome.replace('6373', '6371') + unrelated + signal + end, before).fatalEvents, []);
+}]);
+
+androidEventTests.push(['synthetic explicit operations require receive and timestamp containment for markers and events', async () => {
+  const operation: AndroidPlannedTermination = {
+    id: 'stop', measurementId: 'synthetic', packageName: 'com.android.chrome', pid: '300',
+    processes: { '300': 'com.android.chrome' }, succeeded: true,
+    command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'],
+  };
+  const begin = line(2, 1, 'HerdrMeasure', 'synthetic OP_BEGIN stop com.android.chrome 300');
+  const finish = line(6, 1, 'HerdrMeasure', 'synthetic OP_END stop com.android.chrome 300');
+  const kill = line(3, 559, 'ActivityManager', 'Killing 300:com.android.chrome/u0a145 (adj 0): stop com.android.chrome due to from pid 50');
+  const signal = line(4, 100, 'Zygote', 'Process 300 exited due to signal 9 (Killed)');
+  const check = (log: string, operations = [operation]) => measuredAndroidEvents(log, snapshot('start', { '300': 'com.android.chrome' }), snapshot('end'), operations);
+  const valid = start + begin + kill + signal + finish + end;
+  assert.deepEqual(check(valid).issues, []);
+  assert.deepEqual(check(valid).fatalEvents, []);
+  for (const log of [
+    begin + start + kill + signal + finish + end,
+    start + begin + kill + signal + end + finish,
+    start + begin + kill + finish + signal + end,
+    start + begin + kill + finish + end + signal,
+    start + begin + kill + signal.replace('6374', '6369') + finish + end,
+    start + begin + finish + end + kill + signal,
+    valid.replace(begin, begin + line(8, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity')),
+    valid.replace(begin, line(4, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity') + begin),
+    valid + line(4, 559, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity'),
+    valid.replace(signal, signal.replace('due to signal 9 (Killed)', 'due to unknown')),
+    valid.replace(signal, line(4, 559, 'Process', 'Sending signal. PID: 300 SIG:')),
+    valid.replace(begin, ''),
+    valid.replace(begin, begin + begin),
+  ]) {
+    const result = check(log);
+    assert.ok(result.issues.length || result.fatalEvents.length);
+  }
+  assert.ok(check(valid, [{ ...operation, succeeded: false }]).issues.length);
+  assert.ok(check(valid, []).issues.length);
 }]);
 
 const malformedAudits = [

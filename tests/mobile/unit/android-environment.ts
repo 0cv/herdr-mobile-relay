@@ -504,6 +504,15 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
         : position === 'after' ? log.replace(body, body + unrelated) : log.replace(deathRecord, unrelated + deathRecord);
       assert.equal((await check(altered)).passed, true, position);
     }
+    const ordinaryInversion = record('07.984', '888', 'OtherProducer', 'ordinary record');
+    const inverted = await check(log.replace(body, ordinaryInversion + body));
+    assert.equal(inverted.passed, true);
+    assert.equal(inverted.report.normalRetirements.length, 1);
+    assert.equal(inverted.report.boundaryDiscordances.length, 1);
+    const spilled = await check(log + record('09.400', '559', 'Process', 'Sending signal. PID: 200 SIG: 9'));
+    assert.equal(spilled.passed, false);
+    assert.equal(spilled.report.normalRetirements.length, 0);
+    assert.equal(spilled.report.forcedRestartEvents.length, 2);
     const mixed = await check(log.replace(marker('10.000', 'END'), chromeDeath + marker('10.000', 'END')));
     assert.equal(mixed.passed, false);
     assert.equal(mixed.report.normalRetirements.length, 1);
@@ -547,7 +556,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.deepEqual(changed.report.forcedRestartEvents, [death.trimEnd(), module.trimEnd()]);
     assert.deepEqual(changed.report.issues, ['native process death, dependency configuration change or package replacement was observed']);
     const unrelated = module.replace('1427', '1486');
-    assert.equal((await check(death + recordedStart + unrelated + recordedEnd)).passed, true);
+    assert.equal((await check(death + recordedStart + unrelated + recordedEnd)).passed, false);
     for (const log of [
       recordedStart, recordedEnd, recordedStart + recordedStart + recordedEnd,
       recordedStart + recordedEnd + recordedEnd, recordedEnd + recordedStart,
@@ -606,7 +615,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
     assert.ok(check.forcedRestartEvents.some((line) => line.includes('PID: 6538 SIG: 9')));
     assert.equal(check.forcedRestartEvents.some((line) => line.includes('PID: 1486 SIG: 9')), false);
   });
-  test('missing/unreadable logs, missing/duplicate markers and setup-only events fail closed or remain outside measurement', async () => {
+  test('missing/unreadable logs, missing/duplicate markers and captured setup deaths fail closed', async () => {
     const fixture = await harness.createFixture();
     const { before, after } = await snapshots(fixture);
     const operations = join(fixture.root, 'operations.json');
@@ -619,7 +628,56 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       assert.equal(check(logFile).passed, false);
     }
     await writeFile(logFile, chromeDeath + marker('10.000', 'START') + marker('30.000', 'END'));
-    assert.equal(check(logFile).passed, true);
+    assert.equal(check(logFile).passed, false);
+  });
+  test('F001 snapshot attribution and F002 operation reuse survive discordant capture records', async () => {
+    const fixture = await harness.createFixture();
+    const { before, after } = await snapshots(fixture);
+    for (const [path, boundary] of [[before, 'start'], [after, 'end']] as const) {
+      const snapshot = JSON.parse(await readFile(path, 'utf8')) as AndroidEnvironmentSnapshot;
+      snapshot.measurement = { id: 'synthetic', boundary, processes: { '300': 'com.android.chrome' } };
+      await writeFile(path, JSON.stringify(snapshot));
+    }
+    const record = (second: number, tag: string, message: string) => `${(1789106370 + second).toFixed(3)} 559 559 I ${tag}: ${message}\n`;
+    const start = record(0, 'HerdrMeasure', 'synthetic START');
+    const end = record(9, 'HerdrMeasure', 'synthetic END');
+    const signal = record(4, 'Process', 'Sending signal. PID: 300 SIG: 9');
+    const history = record(-1, 'ActivityManager', 'Start proc 300:com.example.other/u0a200 for service');
+    const operation = { id: 'stop', measurementId: 'synthetic', packageName: 'com.android.chrome', pid: '300',
+      processes: { '300': 'com.android.chrome' }, succeeded: true,
+      command: ['shell', 'am', 'force-stop', '--user', '0', 'com.android.chrome'] };
+    const begin = record(2, 'HerdrMeasure', 'synthetic OP_BEGIN stop com.android.chrome 300');
+    const finish = record(6, 'HerdrMeasure', 'synthetic OP_END stop com.android.chrome 300');
+    const kill = record(3, 'ActivityManager', 'Killing 300:com.android.chrome/u0a145 (adj 0): stop com.android.chrome due to from pid 50');
+    const reuse = record(8, 'ActivityManager', 'Start proc 300:com.android.chrome/u0a145 for activity');
+    const cases = [
+      { name: 'F001 interior signal', log: history + start + signal + end, operations: [], fatal: 1 },
+      { name: 'F001 post-END signal', log: history + start + end + signal, operations: [], fatal: 1 },
+      { name: 'F001 delayed historical identity', log: start + history + signal + end, operations: [], fatal: 1 },
+      { name: 'unrelated in-window reuse', log: start + history.replace('1789106369', '1789106372') + signal + end, operations: [], fatal: 0 },
+      { name: 'F003 post-END reuse before delayed signal', log: start + end + history.replace('1789106369', '1789106380') + signal, operations: [], fatal: 1 },
+      { name: 'F003 interior reuse before delayed signal', log: start + history.replace('1789106369', '1789106380') + signal + end, operations: [], fatal: 1 },
+      { name: 'F004 post-END delayed relevant identity', log: start + history.replace('1789106369', '1789106372') + end + signal + reuse.replace('1789106378', '1789106373'), operations: [], fatal: 1 },
+      { name: 'F004 interior delayed relevant identity', log: start + history.replace('1789106369', '1789106372') + signal + reuse.replace('1789106378', '1789106373') + end, operations: [], fatal: 1 },
+      { name: 'F003 discordant identity retirement post-END', log: start + reuse.replace('1789106378', '1789106373') + history.replace('1789106369', '1789106372') + end + signal, operations: [], fatal: 1 },
+      { name: 'F003 discordant identity retirement interior', log: start + reuse.replace('1789106378', '1789106373') + history.replace('1789106369', '1789106372') + signal + end, operations: [], fatal: 1 },
+      { name: 'ordered Chrome to unrelated identity retirement', log: start + reuse.replace('1789106378', '1789106371') + history.replace('1789106369', '1789106372') + signal + end, operations: [], fatal: 0 },
+      { name: 'valid planned operation', log: start + begin + kill + signal + finish + end, operations: [operation], fatal: 0 },
+      { name: 'F002 discordant reuse', log: start + begin + reuse + kill + signal + finish + end, operations: [operation], fatal: 2 },
+    ];
+    for (const entry of cases) {
+      const logFile = join(fixture.root, 'boundary.log');
+      const operations = join(fixture.root, 'operations.json');
+      const output = join(fixture.root, 'check.json');
+      await writeFile(logFile, entry.log);
+      await writeFile(operations, JSON.stringify(entry.operations));
+      const result = cli(fixture, ['check', '--before', before, '--after', after, '--log', logFile, '--operations', operations, '--output', output]);
+      const report = JSON.parse(await readFile(output, 'utf8'));
+      assert.equal(result.passed, entry.fatal === 0, entry.name);
+      assert.equal(report.forcedRestartEvents.length, entry.fatal, entry.name);
+      assert.equal(report.eventCounts.fatalEvents, entry.fatal, entry.name);
+      assert.equal(report.normalRetirements.length, 0, entry.name);
+    }
   });
   test('planned termination exemption requires the actual operation, matching PID/package and time, never a release-suite label', async () => {
     const fixture = await harness.createFixture();

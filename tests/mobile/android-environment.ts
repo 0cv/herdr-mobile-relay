@@ -114,6 +114,7 @@ export interface AndroidEnvironmentCheck {
   forcedRestartEvents: string[];
   nativeEvents: ReturnType<typeof androidEventDetails>[];
   normalRetirements: ReturnType<typeof measuredAndroidEvents>['normalRetirements'];
+  boundaryDiscordances: ReturnType<typeof measuredAndroidEvents>['boundaryDiscordances'];
   eventCounts: { rawEvents: number; distinctDeathPids: number; fatalEvents: number; normalRetirementPids: number };
   passed: boolean;
   observability: string;
@@ -1042,6 +1043,7 @@ async function runCheck(): Promise<void> {
   let fatalEvents: string[] = [];
   let normalRetirements: ReturnType<typeof measuredAndroidEvents>['normalRetirements'] = [];
   const issues: string[] = [];
+  let boundaryDiscordances: ReturnType<typeof measuredAndroidEvents>['boundaryDiscordances'] = [];
   try {
     const before = await readSnapshot(beforeFile);
     const after = await readSnapshot(afterFile);
@@ -1058,6 +1060,7 @@ async function runCheck(): Promise<void> {
     events = measured.events;
     fatalEvents = measured.fatalEvents;
     normalRetirements = measured.normalRetirements;
+    boundaryDiscordances = measured.boundaryDiscordances;
     issues.push(...measured.issues);
     if (fatalEvents.length) issues.push('native process death, dependency configuration change or package replacement was observed');
   } catch (error) {
@@ -1073,6 +1076,7 @@ async function runCheck(): Promise<void> {
     forcedRestartEvents: fatalEvents,
     nativeEvents: events.map(androidEventDetails),
     normalRetirements,
+    boundaryDiscordances,
     eventCounts: {
       rawEvents: events.length,
       distinctDeathPids: new Set(events.map((line) => androidEventDetails(line).pid).filter(Boolean)).size,
@@ -1080,7 +1084,7 @@ async function runCheck(): Promise<void> {
       normalRetirementPids: normalRetirements.length,
     },
     passed: issues.length === 0,
-    observability: 'PackageManager persistent dependency sections and supported PID/package-attributed native log events only; auditSubjects describe logd reconstructed subject metadata, not authenticated producer identity; dumpsys package does not expose a complete runtime Dynamite/Chimera module inventory.',
+    observability: 'Receive-bounded main/system capture, not exhaustive or lossless all-producer generation-time coverage; observed spill is retained and positive exceptions require both receive and timestamp bounds. PackageManager persistent dependency sections and supported PID/package-attributed native log events only; auditSubjects describe logd reconstructed subject metadata, not authenticated producer identity; dumpsys package does not expose a complete runtime Dynamite/Chimera module inventory.',
   };
   const output = option('--output');
   if (output) await writeSanitizedJson(output, result);

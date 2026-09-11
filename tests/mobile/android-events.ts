@@ -23,7 +23,7 @@ const dependencies = ['com.android.chrome', 'com.google.android.gms', 'com.googl
 const dependency = (name: string) => dependencies.some((packageName) => isAndroidPackageProcess(name, packageName));
 const relevant = (name: string) => dependency(name) || isAndroidTerminationPackage(name.split(':')[0]);
 
-type PlannedInterval = Pick<AndroidPlannedTermination, 'packageName' | 'processes'> & { start: number; end: number };
+type PlannedInterval = Pick<AndroidPlannedTermination, 'packageName' | 'processes'> & { start: number; end: number; startLine: number; endLine: number };
 
 function parseRecord(line: string, index = 0): LogRecord | undefined {
   const match = line.match(/^(?:(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})|[ \t]*(\d{10}\.\d{3,6}))\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+?)\s*:\s?(.*)$/u);
@@ -33,40 +33,86 @@ function parseRecord(line: string, index = 0): LogRecord | undefined {
   return { line, lineNumber: index + 1, time, pid: match[3], tid: match[4], priority: match[5], tag: match[6].trim(), message: match[7] };
 }
 
-export function androidLogEvents(log: string, processes: Record<string, string> = {}, planned: PlannedInterval[] = []): string[] {
+export function androidLogEvents(log: string, processes: Record<string, string> = {}, planned: PlannedInterval[] = [], snapshotBoundary?: Pick<LogRecord, 'time' | 'lineNumber'>): string[] {
   const records = log.split(/\r?\n/u).map(parseRecord).filter((record): record is LogRecord => Boolean(record));
-  const known = new Map(Object.entries(processes).map(([pid, name]) => [pid, { name, until: Infinity }]));
+  const known = new Map(Object.entries(processes).map(([pid, name]) => [pid, {
+    name, time: snapshotBoundary?.time ?? -Infinity, lineNumber: snapshotBoundary?.lineNumber ?? 0,
+  }]));
+  const previousIdentities = new Map<string, { name: string; untilTime: number; untilLine: number }[]>();
+  const capturedIdentities = new Map<string, { name: string; time: number; lineNumber: number }[]>();
+  for (const record of records) {
+    if (record.tag !== 'ActivityManager') continue;
+    const start = record.message.match(/^(?:Start proc|Killing) (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?:\s|:)/u);
+    const death = record.message.match(/^Process (\S+) \(pid (\d+)\) has died(?::|\s|$)/u);
+    const pid = start?.[1] || death?.[2];
+    const name = start?.[2] || death?.[1];
+    if (!pid || !name || !relevant(name)) continue;
+    const identities = capturedIdentities.get(pid) || [];
+    identities.push({ name, time: record.time, lineNumber: record.lineNumber });
+    capturedIdentities.set(pid, identities);
+  }
+  const identity = (pid: string, record: LogRecord) => {
+    const current = known.get(pid);
+    if (current && relevant(current.name)) return current;
+    return previousIdentities.get(pid)?.find((entry) => relevant(entry.name)
+      && (record.time <= entry.untilTime || record.lineNumber <= entry.untilLine))
+      || capturedIdentities.get(pid)?.find((entry) => entry.lineNumber > record.lineNumber && entry.time <= record.time)
+      || current;
+  };
+  const remember = (pid: string, name: string, record: Pick<LogRecord, 'time' | 'lineNumber'>) => {
+    const current = known.get(pid);
+    if (current?.name === name) {
+      known.set(pid, { name, time: Math.max(current.time, record.time), lineNumber: Math.max(current.lineNumber, record.lineNumber) });
+      return;
+    }
+    if (snapshotBoundary && processes[pid]
+      && (record.lineNumber <= snapshotBoundary.lineNumber || record.time <= snapshotBoundary.time)
+      && (relevant(known.get(pid)?.name || '') || !relevant(name))) return;
+    if (current) {
+      const previous = previousIdentities.get(pid) || [];
+      const ordered = record.time > current.time && record.lineNumber > current.lineNumber;
+      previous.push({ name: current.name, untilTime: ordered ? record.time : Infinity, untilLine: ordered ? record.lineNumber : Infinity });
+      previousIdentities.set(pid, previous);
+    }
+    known.set(pid, { name, time: record.time, lineNumber: record.lineNumber });
+  };
   const events: string[] = [];
   const cleanExits: { record: LogRecord; pid: string }[] = [];
-  const intervals = planned.map((operation) => ({ ...operation, begun: false, eligible: new Map(Object.entries(operation.processes)) }));
-  const forcedStops = new Map<string, { name: string; since: number; until: number }>();
-  const exempt = (pid: string, name: string, time: number) => {
+  const intervals = planned.map((operation) => ({ ...operation, begun: false,
+    eligible: new Map(Object.entries(operation.processes).filter(([pid]) => !records.some((record) =>
+      record.tag === 'ActivityManager' && record.message.startsWith(`Start proc ${pid}:`)
+      && (record.lineNumber > operation.startLine || record.time >= operation.start)
+      && (record.lineNumber < operation.endLine || record.time <= operation.end)))),
+  }));
+  const forcedStops = new Map<string, { name: string; since: number; until: number; startLine: number; endLine: number }>();
+  const exempt = (pid: string, name: string, time: number, lineNumber: number) => {
     const stopped = forcedStops.get(pid);
-    return stopped?.name === name && time >= stopped.since && time <= stopped.until;
+    return stopped?.name === name && time >= stopped.since && time <= stopped.until && lineNumber > stopped.startLine && lineNumber < stopped.endLine;
   };
   for (const record of records) {
     const { tag, message, time, pid } = record;
     for (const operation of intervals) {
-      if (operation.begun || time < operation.start) continue;
+      if (operation.begun || time < operation.start || time > operation.end || record.lineNumber <= operation.startLine || record.lineNumber >= operation.endLine) continue;
       operation.begun = true;
-      for (const [targetPid, name] of operation.eligible) known.set(targetPid, { name, until: Infinity });
+      for (const [targetPid, name] of operation.eligible) remember(targetPid, name, { time: operation.start, lineNumber: operation.startLine });
     }
     if (tag === 'ActivityManager') {
       const start = message.match(/^Start proc (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)? for /u);
       if (start) {
-        known.set(start[1], { name: start[2], until: Infinity });
+        remember(start[1], start[2], record);
         forcedStops.delete(start[1]);
         for (const operation of intervals) if (operation.begun) operation.eligible.delete(start[1]);
       }
       const killing = message.match(/^Killing (\d+):([^/\s]+)\/u0[a-z0-9]+ .*: stop (\S+) due to from pid \d+(?: \([^)]+\))?$/u);
       if (killing) {
         const operation = intervals.find((entry) => time >= entry.start && time <= entry.end
+          && record.lineNumber > entry.startLine && record.lineNumber < entry.endLine
           && entry.packageName === killing[3] && entry.eligible.get(killing[1]) === killing[2]);
-        if (operation) forcedStops.set(killing[1], { name: killing[2], since: time, until: operation.end });
+        if (operation) forcedStops.set(killing[1], { name: killing[2], since: time, until: operation.end, startLine: operation.startLine, endLine: operation.endLine });
       }
     }
-    const source = known.get(pid);
-    const sourceRelevant = source && source.until >= time && relevant(source.name);
+    const source = identity(pid, record);
+    const sourceRelevant = source && relevant(source.name);
     const moduleChange = /^(?:DynamiteLoaderV2Impl|ChimeraCfgMgr)$/u.test(tag) && (
       /^Module config changed, forcing restart due to module \S+/u.test(message)
       || (() => {
@@ -84,25 +130,28 @@ export function androidLogEvents(log: string, processes: Record<string, string> 
       if (changed && dependency(changed[1] || changed[2] || changed[3])) events.push(record.line);
     }
     const cleanPid = tag === 'Zygote' ? message.match(/^Process (\d+) exited cleanly \(0\)$/u)?.[1] : undefined;
-    const cleanTarget = cleanPid ? known.get(cleanPid) : undefined;
-    if (cleanPid && cleanTarget && cleanTarget.until >= time && relevant(cleanTarget.name)
-      && !exempt(cleanPid, cleanTarget.name, time)) cleanExits.push({ record, pid: cleanPid });
+    const cleanTarget = cleanPid ? identity(cleanPid, record) : undefined;
+    if (cleanPid && cleanTarget && relevant(cleanTarget.name)
+      && !exempt(cleanPid, cleanTarget.name, time, record.lineNumber)) cleanExits.push({ record, pid: cleanPid });
     let targetPid = '';
     let targetName = '';
     if (tag === 'ActivityManager') {
-      const death = message.match(/^(?:Process (\S+) \(pid (\d+)\) has died:|Killing (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?:\s|:))/u);
+      const death = message.match(/^(?:Process (\S+) \(pid (\d+)\) has died(?::|\s|$)|Killing (\d+):([^/\s]+)\/u0[a-z0-9]+(?:-\d+)?(?:\s|:))/u);
       if (death) {
         targetPid = death[2] || death[3];
         targetName = death[1] || death[4];
       }
     }
-    if (tag === 'Process') targetPid = message.match(/^Sending signal\. PID: (\d+) SIG: \d+$/u)?.[1] || '';
-    if (tag === 'Zygote') targetPid = message.match(/^Process (\d+) exited (?:due to signal \d+ |cleanly \((?!0\)))/u)?.[1] || '';
-    const target = known.get(targetPid);
-    targetName ||= target && target.until >= time ? target.name : '';
+    if (tag === 'Process') targetPid = message.match(/^Sending signal\. PID: (\d+)(?:\s|$)/u)?.[1] || '';
+    if (tag === 'Zygote') targetPid = message.match(/^Process (\d+) exited(?! cleanly \(0\)$)/u)?.[1] || '';
+    const target = identity(targetPid, record);
+    targetName ||= target ? target.name : '';
     if (!targetPid || !targetName) continue;
-    if (relevant(targetName) && !exempt(targetPid, targetName, time)) events.push(record.line);
-    known.set(targetPid, { name: targetName, until: time + 1000 });
+    const completeTermination = (tag === 'Process' && /^Sending signal\. PID: \d+ SIG: \d+$/u.test(message))
+      || (tag === 'Zygote' && /^Process \d+ exited (?:due to signal \d+ \([^)]+\)|cleanly \(\d+\))$/u.test(message))
+      || (tag === 'ActivityManager' && /^(?:Killing \d+:\S+\/\S+ .*: .+|Process \S+ \(pid \d+\) has died: .+)$/u.test(message));
+    if (relevant(targetName) && (!completeTermination || !exempt(targetPid, targetName, time, record.lineNumber))) events.push(record.line);
+    if (tag === 'ActivityManager') remember(targetPid, targetName, record);
   }
   for (const { record, pid } of cleanExits) {
     if (!events.some((line) => androidEventDetails(line).pid === pid)) events.push(record.line);
@@ -114,8 +163,8 @@ export function androidEventDetails(line: string): { kind: 'process-death' | 'mo
   const record = parseRecord(line);
   const message = record?.message || '';
   const killed = message.match(/^Killing (\d+):([^/\s]+)\/(u0[a-z0-9]+(?:-\d+)?)\s+[^:]*:\s*(.*)$/u);
-  const died = message.match(/^Process (\S+) \(pid (\d+)\) has died:\s*(.*)$/u);
-  const pid = killed?.[1] || died?.[2] || message.match(/^(?:Sending signal\. PID:|Process) (\d+)/u)?.[1];
+  const died = message.match(/^Process (\S+) \(pid (\d+)\) has died(?::|\s|$)\s*(.*)$/u);
+  const pid = killed?.[1] || died?.[2] || message.match(/^(?:Sending signal\. PID:|Process|Killing) (\d+)/u)?.[1];
   if (pid) return {
     kind: 'process-death', line, pid, processName: killed?.[2] || died?.[1], uid: killed?.[3],
     reason: killed?.[4] || died?.[3] || message,
@@ -153,7 +202,7 @@ export interface AndroidNormalRetirement {
   events: string[];
 }
 
-function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>): AndroidNormalRetirement[] {
+function normalRetirements(records: LogRecord[], events: string[], processes: Record<string, string>, remaining: Record<string, string>, bounded: (record: LogRecord) => boolean): AndroidNormalRetirement[] {
   const result: AndroidNormalRetirement[] = [];
   const proof = (record: LogRecord) => ({ lineNumber: record.lineNumber, line: record.line });
   for (const birth of records) {
@@ -193,6 +242,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
       record.message.includes(`audit(0.0:${subject.serial}):`)).length !== 1))) continue;
     if (records.some((record) => record.pid === pid && record.tag === 'cr_SplitCompatApp'
       && !record.message.endsWith(` processName=${processName} isIsolatedProcess=true`))) continue;
+    if ([fork, birth, child, exit, ...records.filter((record) => record.pid === pid)].some((record) => !bounded(record))) continue;
     const auditLines = new Set(auditSubjects.map((subject) => subject.lineNumber));
     if (records.some((record) => (record.tag === 'ActivityManager'
       && [fork.pid, birth.pid].some((producerPid) => record.message.startsWith(`Start proc ${producerPid}:`)))
@@ -202,7 +252,7 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     const deaths = events.filter((line) => androidEventDetails(line).pid === pid);
     if (deaths.length !== 1) continue;
     const deathRecords = deaths.map((line) => records.find((record) => record.line === line));
-    if (deathRecords.some((record) => !record || record.lineNumber <= birth.lineNumber || record.time < birth.time || record.time > exit.time + 1000
+    if (deathRecords.some((record) => !record || !bounded(record) || record.lineNumber <= birth.lineNumber || record.time < birth.time || record.time > exit.time + 1000
       || record.tag !== 'ActivityManager' || record.pid !== birth.pid
       || (() => {
         const detail = androidEventDetails(record.line);
@@ -223,12 +273,14 @@ function normalRetirements(records: LogRecord[], events: string[], processes: Re
     }))) continue;
     const ended = Math.max(exit.time, ...deathRecords.map((record) => record!.time));
     const endedLine = Math.max(exit.lineNumber, ...deathRecords.map((record) => record!.lineNumber));
-    const adverse = records.filter((record) => record.time >= fork.time || record.lineNumber >= fork.lineNumber).some((record) => {
-      const possiblyDuringLifetime = record.time <= ended || record.lineNumber <= endedLine;
+    const adverse = records.some((record) => {
+      const possiblyDuringLifetime = (record.time >= fork.time || record.lineNumber >= fork.lineNumber)
+        && (record.time <= ended || record.lineNumber <= endedLine);
       if (possiblyDuringLifetime && record.tag === 'ActivityManager' && /^Force stopping com\.android\.chrome(?:\s|$)/u.test(record.message)
         && !/^Force stopping com\.android\.chrome appid=\d+ user=[1-9]\d*: \S.*$/u.test(record.message)) return true;
       if (possiblyDuringLifetime && /^(?:PackageManager|PackageInstaller)$/u.test(record.tag) && record.message.includes('com.android.chrome')) return true;
       const mentionsPid = new RegExp(`\\b${pid}\\b`, 'u').test(record.message);
+      if (mentionsPid && !bounded(record)) return true;
       if (record.tag === 'ActivityManager' && mentionsPid && /^(?:Killing |Process .* has died:)/u.test(record.message)
         && !deaths.includes(record.line)) return true;
       if (record.tag === 'Process' && mentionsPid && /Sending signal/u.test(record.message)) return true;
@@ -248,12 +300,13 @@ export function measuredAndroidEvents(
   before: AndroidEnvironmentSnapshot,
   after: AndroidEnvironmentSnapshot,
   operations: AndroidPlannedTermination[],
-): { events: string[]; fatalEvents: string[]; normalRetirements: AndroidNormalRetirement[]; issues: string[] } {
+): { events: string[]; fatalEvents: string[]; normalRetirements: AndroidNormalRetirement[]; issues: string[]; boundaryDiscordances: { lineNumber: number; line: string }[] } {
   const issues: string[] = [];
+  const boundaryDiscordances: { lineNumber: number; line: string }[] = [];
   const first = before.measurement;
   const last = after.measurement;
   if (!first || !last || first.boundary !== 'start' || last.boundary !== 'end' || first.id !== last.id || !/^[A-Za-z0-9-]{1,80}$/u.test(first.id)) {
-    return { events: [], fatalEvents: [], normalRetirements: [], issues: ['measurement snapshot boundaries are missing or inconsistent'] };
+    return { events: [], fatalEvents: [], normalRetirements: [], boundaryDiscordances, issues: ['measurement snapshot boundaries are missing or inconsistent'] };
   }
   if (!log.endsWith('\n') || /(?:logcat:|Unexpected EOF|dropped \d+|chatty\s*:.*expire)/iu.test(log)) issues.push('measurement log is truncated or reports lost records');
   const records = log.split(/\r?\n/u).map(parseRecord).filter((record): record is LogRecord => Boolean(record));
@@ -261,15 +314,19 @@ export function measuredAndroidEvents(
   const starts = marker('START');
   const ends = marker('END');
   if (starts.length !== 1 || ends.length !== 1 || starts[0].time >= ends[0].time || records.indexOf(starts[0]) >= records.indexOf(ends[0])) {
-    return { events: [], fatalEvents: [], normalRetirements: [], issues: [...issues, 'measurement start/end markers are missing, ambiguous or out of order'] };
+    return { events: [], fatalEvents: [], normalRetirements: [], boundaryDiscordances, issues: [...issues, 'measurement start/end markers are missing, ambiguous or out of order'] };
   }
   const rawLines = log.split(/\r?\n/u);
-  const rawInterval = rawLines.slice(rawLines.indexOf(starts[0].line), rawLines.indexOf(ends[0].line) + 1);
-  if (rawInterval.some((line) => line && !parseRecord(line) && !/^--------- (?:beginning of|switch to) (?:main|system)$/u.test(line))) {
-    issues.push('measurement interval contains malformed log records');
+  if (rawLines.some((line) => line && !parseRecord(line) && !/^--------- (?:beginning of|switch to) (?:main|system)$/u.test(line))) {
+    issues.push('measurement capture contains malformed log records');
   }
-  const interval = records.slice(records.indexOf(starts[0]), records.indexOf(ends[0]) + 1);
-  if (interval.some((record) => record.time < starts[0].time || record.time > ends[0].time)) issues.push('measurement clock moved outside its boundaries');
+  const bounded = (record: LogRecord) => record.time >= starts[0].time && record.time <= ends[0].time
+    && record.lineNumber >= starts[0].lineNumber && record.lineNumber <= ends[0].lineNumber;
+  boundaryDiscordances.push(...records.filter((record) => {
+    const received = record.lineNumber >= starts[0].lineNumber && record.lineNumber <= ends[0].lineNumber;
+    const timestamped = record.time >= starts[0].time && record.time <= ends[0].time;
+    return received !== timestamped;
+  }).map(({ lineNumber, line }) => ({ lineNumber, line })));
   const planned: PlannedInterval[] = [];
   const seen = new Set<string>();
   for (const operation of operations) {
@@ -283,21 +340,23 @@ export function measuredAndroidEvents(
         || !/^\S+$/u.test(name) || !isAndroidPackageProcess(name, operation.packageName))
       || JSON.stringify(operation.command) !== JSON.stringify(['shell', 'am', 'force-stop', '--user', '0', operation.packageName])
       || begin.length !== 1 || end.length !== 1 || begin[0].time < starts[0].time || end[0].time > ends[0].time
+      || !bounded(begin[0]) || !bounded(end[0]) || begin[0].lineNumber >= end[0].lineNumber
       || begin[0].time >= end[0].time || end[0].time - begin[0].time > 30_000) {
       issues.push('planned termination lacks a successful operation, observed process set or exact PID/package interval');
       continue;
     }
-    if (planned.some((previous) => begin[0].time <= previous.end && end[0].time >= previous.start)) {
+    if (planned.some((previous) => (begin[0].time <= previous.end && end[0].time >= previous.start)
+      || (begin[0].lineNumber <= previous.endLine && end[0].lineNumber >= previous.startLine))) {
       issues.push('planned termination intervals overlap');
       continue;
     }
     seen.add(operation.id);
-    planned.push({ packageName: operation.packageName, processes: operation.processes, start: begin[0].time, end: end[0].time });
+    planned.push({ packageName: operation.packageName, processes: operation.processes, start: begin[0].time, end: end[0].time, startLine: begin[0].lineNumber, endLine: end[0].lineNumber });
   }
-  const operationMarkers = interval.filter((record) => record.tag === 'HerdrMeasure' && record.message.startsWith(`${first.id} OP_`));
+  const operationMarkers = records.filter((record) => record.tag === 'HerdrMeasure' && record.message.startsWith(`${first.id} OP_`));
   if (operationMarkers.length !== operations.length * 2) issues.push('unrecorded or incomplete planned termination markers');
-  const events = androidLogEvents(interval.map((record) => record.line).join('\n'), first.processes, planned);
-  const retirements = issues.length ? [] : normalRetirements(interval, events, first.processes, last.processes);
+  const events = androidLogEvents(log, first.processes, planned, starts[0]);
+  const retirements = issues.length ? [] : normalRetirements(records, events, first.processes, last.processes, bounded);
   const normalEvents = new Set(retirements.flatMap((retirement) => retirement.events));
-  return { events, fatalEvents: events.filter((event) => !normalEvents.has(event)), normalRetirements: retirements, issues };
+  return { events, fatalEvents: events.filter((event) => !normalEvents.has(event)), normalRetirements: retirements, issues, boundaryDiscordances };
 }
