@@ -49,7 +49,7 @@ state.calls.push(cmd);
 if (cmd === 'dumpsys activity activities') {
   console.log(state.foregrounds[Math.min(state.count++, state.foregrounds.length - 1)]);
 } else if (cmd === 'cmd shortcut get-shortcuts --user 0 --flags 15 com.android.chrome') {
-  if (state.clicked) console.log('ShortcutInfo {id=replay-id, flags=0x28a, shortLabel=Herdr Relay, org.chromium.chrome.browser.webapp_name=Herdr Mobile Relay, org.chromium.chrome.browser.webapp_url=https://fixture.test/, org.chromium.chrome.browser.webapp_scope=https://fixture.test/, org.chromium.chrome.browser.webapp_mac=replay-signed-mac}');
+  if (state.clicked) console.log('ShortcutInfo {id=replay-id, flags=0x28a, shortLabel=Herdr Relay, org.chromium.chrome.browser.webapp_name=Herdr Mobile Relay, org.chromium.chrome.browser.webapp_url=https://fixture.test/, org.chromium.chrome.browser.webapp_scope=https://fixture.test/, org.chromium.chrome.browser.webapp_mac=cmVwbGF5, org.chromium.chrome.browser.webapp_id=replay-id, intents=[Intent { act=com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP pkg=com.android.chrome }]} ');
 } else if (cmd !== 'input keyevent KEYCODE_HOME') process.exit(3);
 await Bun.write(file, JSON.stringify(state));\n`);
   await chmod(adb, 0o700);
@@ -191,7 +191,7 @@ test('Android recorded class-tagged launcher transition uses one standard click 
     assert.equal(await platform.confirmLauncherShortcut(), true);
     assert.equal(state().clicks, 1);
     assert.ok((await adbState()).count >= recorded.launcher.precedingChromeObservations + 1);
-    assert.equal((await platform.waitForChromeShortcut(2_000)).mac, 'replay-signed-mac');
+    assert.equal((await platform.waitForChromeShortcut(2_000)).mac, 'cmVwbGF5');
     assert.ok(requests.some((item: any) => /\/element\/[^/]+\/click$/u.test(item.path)));
     assert.equal(requests.filter((item: any) => item.path === '/execute/sync').length, 0);
     assert.equal(client.snapshot().unusable, false);

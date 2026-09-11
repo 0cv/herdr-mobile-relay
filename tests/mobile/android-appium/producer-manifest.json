@@ -1,0 +1,66 @@
+{
+  "compiler": "6.0.3",
+  "method": "exact unchanged-character relocation; no declaration compiler emit claimed",
+  "files": {
+    "lib/commands/context/exports.ts": {
+      "before": "b7e79648fed5ea20bc4b156909c800c865ab8d564471e307351bf33f8f02d84e",
+      "after": "9a41ef7cf76f51f17c2f8b4f7efe3ad27becaa936d367935d8a0a0902dcc7ccd"
+    },
+    "build/lib/commands/context/exports.d.ts": {
+      "before": "c5934848eace52582caea25590a9b4ded5d490bcfb7a32bbdba6d21f7a07b899",
+      "after": "c5934848eace52582caea25590a9b4ded5d490bcfb7a32bbdba6d21f7a07b899"
+    },
+    "build/lib/commands/context/exports.d.ts.map": {
+      "before": "aecedcc9bbf6e30aeed5e38f9e6656aef8038848e4221ba602ac496f492dfc26",
+      "after": "f76102897e08de5fea58e17f0a20146bd4a89dd50e2048d9bc18c614548f08eb"
+    },
+    "build/lib/commands/context/exports.js": {
+      "before": "036e18f793b271286cd9a11f139d57e45f75463de90f9b80f7b581d261870382",
+      "after": "18d8c64419a2720da3bc2b9835d7e3f005422c42729d0f8b178fbdea7bff49d1"
+    },
+    "build/lib/commands/context/exports.js.map": {
+      "before": "1469550f39137a76c15b6e4638b06f611b49a18d8a361f1bae93922f043d83b6",
+      "after": "09ac07f4c324a7127de0ed71b96c3a1816a51b5625cf36b46bd69d52ccac181a"
+    },
+    "lib/commands/context/helpers.ts": {
+      "before": "86330af558911f7a80a1608d5dc180fe2572b30382e6269f41125ad31840b069",
+      "after": "8880757a255ee5cb646602482ac9b8727ef5b88d3b01530ab9256ed5a3c5103e"
+    },
+    "build/lib/commands/context/helpers.d.ts": {
+      "before": "bb9f014c162817fa339161417d67d59e5a97516d17b0ea8a5cda501217407b82",
+      "after": "bb9f014c162817fa339161417d67d59e5a97516d17b0ea8a5cda501217407b82"
+    },
+    "build/lib/commands/context/helpers.d.ts.map": {
+      "before": "d91c3fc73a2b934ad167af9c846b0091cd88503ce168c748cff42d7ba63effb2",
+      "after": "560705ca9a129211e599c505c51871a732cb31436104da5aa0703a0178c1ad70"
+    },
+    "build/lib/commands/context/helpers.js": {
+      "before": "4e1635e86a1ddb130d931ece4c104ae569a35992368fc93e3dc53a0907de21ff",
+      "after": "ab9628065df4cb5fa21edbea75fa715c82f784fa1e45ba2180ae50530d5c8209"
+    },
+    "build/lib/commands/context/helpers.js.map": {
+      "before": "e44f8eedcb0b935b898a8d770a73bbad631783a49a86b93a20b0aa9e636f5ef5",
+      "after": "d52dcd1a29d8dd6991ebf9c0b542b61cfaa022a74ecca8514c9359c569e5ce61"
+    }
+  },
+  "checks": {
+    "exports": {
+      "publicSurfaceIdentical": true,
+      "explicitExportReturnTypes": true,
+      "declarationBytesUnchanged": true,
+      "declarationMappedPositions": 360,
+      "runtimeMappedPositions": 2290,
+      "guardSourceAndRuntimeBytesIdentical": true,
+      "sourceMappingURLsResolve": true
+    },
+    "helpers": {
+      "publicSurfaceIdentical": true,
+      "explicitExportReturnTypes": true,
+      "declarationBytesUnchanged": true,
+      "declarationMappedPositions": 237,
+      "runtimeMappedPositions": 4285,
+      "guardSourceAndRuntimeBytesIdentical": true,
+      "sourceMappingURLsResolve": true
+    }
+  }
+}

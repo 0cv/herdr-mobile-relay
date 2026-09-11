@@ -34,14 +34,17 @@ export async function runAndroidSocketRegressions(): Promise<void> {
         if (path === '/session') return response({});
         if (path.endsWith('/contexts')) return response(['NATIVE_APP', 'CHROMIUM']);
         if (path.endsWith('/window/handles')) return response(['browser', 'installed', 'other-good']);
-        if (path.endsWith('/window')) { selected = body.handle; windows.push(selected); return response(null); }
+        if (path.endsWith('/window')) {
+          if (init?.method === 'POST') { selected = body.handle; windows.push(selected); }
+          return response(selected);
+        }
         if (path.endsWith('/url')) return response(broken && fault === 'origin' ? 'https://wrong.test/' : 'https://fixture.test/');
         if (path.endsWith('/execute/sync')) {
           if (body.script === 'mobile: getContexts') {
             metadataArgs.push(body.args);
             return response(broken && ['missing', 'empty-valid'].includes(fault) ? [] : socketMetadata);
           }
-          return response({ origin: 'https://fixture.test', standalone: selected !== 'browser' && !(broken && ['document', 'missing'].includes(fault)), provider: selected === 'browser' ? 'browser' : 'android-standalone' });
+          return response({ origin: 'https://fixture.test', standalone: selected === 'installed' && !(broken && ['document', 'missing'].includes(fault)), provider: selected === 'browser' ? 'browser' : 'android-standalone' });
         }
         return response(null);
       });
@@ -55,9 +58,9 @@ export async function runAndroidSocketRegressions(): Promise<void> {
       assert.deepEqual(metadataArgs, [{}]);
       assert.deepEqual(observedMetadata().map(event => event.detail), [socketMetadata]);
       console.log(JSON.stringify({ fault, event: observedMetadata()[0] }));
-      assert.deepEqual(windows, ['browser', 'installed']);
-      await foreground('456');
-      assert.equal((await platform.readRunningIdentity()).nativePid, '456');
+      assert.deepEqual(windows, ['browser', 'installed', 'other-good', 'installed']);
+      await foreground('123');
+      assert.equal((await platform.readRunningIdentity()).nativePid, '123');
       broken = true;
       if (fault === 'search') await foreground('789', 'com.google.android.googlequicksearchbox');
       if (fault === 'browser') await foreground('789', 'com.android.chrome', 'com.google.android.apps.chrome.Main');
@@ -66,13 +69,13 @@ export async function runAndroidSocketRegressions(): Promise<void> {
       const count = calls.length;
       const windowCount = windows.length;
       if (fault === 'empty-valid') {
-        await platform.attachToInstalledView(700);
+        await platform.attachToInstalledView(2_000);
         assert.deepEqual(observedMetadata().at(-1)?.detail, []);
-        assert.deepEqual(windows.slice(windowCount), ['installed']);
+        assert.deepEqual(windows.slice(windowCount), ['installed', 'browser', 'other-good', 'installed']);
         assert.ok(metadataArgs.every(args => JSON.stringify(args) === '{}'));
         continue;
       }
-      await assert.rejects(platform.attachToInstalledView(700), fault === 'native-failure' ? /ANDROID_CONTEXT/ : /ANDROID_CONTEXT_OWNERSHIP/);
+      await assert.rejects(platform.attachToInstalledView(2_000), fault === 'native-failure' ? /ANDROID_CONTEXT/ : /ANDROID_CONTEXT_OWNERSHIP/);
       if (fault === 'missing') {
         assert.deepEqual(observedMetadata().at(-1)?.detail, []);
         console.log(JSON.stringify({ fault, event: observedMetadata().at(-1) }));
@@ -81,7 +84,7 @@ export async function runAndroidSocketRegressions(): Promise<void> {
       if (['search', 'browser', 'other', 'native-failure'].includes(fault)) assert.equal(calls.length, count);
       if (['search', 'browser', 'other', 'origin', 'document', 'missing'].includes(fault)) {
         const after = calls.length;
-        await assert.rejects(platform.attachToInstalledView(700), /ANDROID_CONTEXT_OWNERSHIP/);
+        await assert.rejects(platform.attachToInstalledView(2_000), /ANDROID_CONTEXT_OWNERSHIP/);
         assert.equal(calls.length, after);
       }
       if (['origin', 'document', 'missing'].includes(fault)) assert.deepEqual(windows.slice(windowCount), ['installed']);

@@ -797,17 +797,14 @@ jobs:
       - name: Install pinned Appium and platform driver
         run: |
           set -euo pipefail
-          npm install --global appium@3.1.1
           if [ "$MOBILE_PLATFORM" = android ]; then
-            appium driver install uiautomator2@8.2.2
+            bash tests/mobile/android-appium/ci.sh install
           else
+            npm install --global appium@3.1.1
             appium driver install xcuitest@12.10.0
+            npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
+            appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
           fi
-          # io.appium.settings and node-devicectl resolve this package from the
-          # shared Appium home. Keep it explicit because the driver packages do
-          # not always install the transitive dependency at that level.
-          npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
-          appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
       - name: Prebuild WebDriverAgent
         if: matrix.platform == 'ios'
         run: |
@@ -860,9 +857,16 @@ jobs:
           if [ "$MOBILE_PLATFORM" = android ]; then
             appium_args+=(--allow-insecure=uiautomator2:chromedriver_autodownload)
           fi
-          appium "${appium_args[@]}" >"$RUNNER_TEMP/appium.log" 2>&1 &
-          printf 'APPIUM_PID=%s\n' "$!" >> "$GITHUB_ENV"
+          if [ "$MOBILE_PLATFORM" = android ]; then
+            bash tests/mobile/android-appium/ci.sh verify
+            bash tests/mobile/android-appium/ci.sh start "${appium_args[@]}" >"$RUNNER_TEMP/appium.log" 2>&1 &
+          else
+            appium "${appium_args[@]}" >"$RUNNER_TEMP/appium.log" 2>&1 &
+          fi
+          appium_pid="$!"
+          printf 'APPIUM_PID=%s\n' "$appium_pid" >> "$GITHUB_ENV"
           for attempt in $(seq 1 60); do
+            if [ "$MOBILE_PLATFORM" = android ]; then kill -0 "$appium_pid"; fi
             if curl --fail --silent http://127.0.0.1:4723/status >/dev/null; then exit 0; fi
             sleep 1
           done
@@ -905,6 +909,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$MOBILE_OUTPUT"
+          if [ "$MOBILE_PLATFORM" = android ]; then bash tests/mobile/android-appium/ci.sh evidence "$MOBILE_OUTPUT"; fi
           if [ -f "$RUNNER_TEMP/appium.log" ]; then
             bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
           fi

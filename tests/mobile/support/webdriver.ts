@@ -179,6 +179,7 @@ export function isCommandAdmissionError(error: unknown): boolean {
 
 export class AppiumClient {
   private sessionId = '';
+  private sessionOwner = {};
   private readonly baseUrl: string;
   private readonly requestTimeoutMs: number;
   private readonly transport: FetchTransport;
@@ -189,6 +190,7 @@ export class AppiumClient {
   private readonly history: WebDriverCommandEvidence[] = [];
   private readonly lookupHistory: WebDriverLookupEvidence[] = [];
   private firstFatal?: WebDriverFatalEvidence;
+  private commandGuard?: { before: () => void; failure: (error: unknown, path: string) => void };
 
   constructor(baseUrl = 'http://127.0.0.1:4723', requestTimeoutMs = 30_000, transport: FetchTransport = fetch) {
     this.baseUrl = baseUrl.replace(/\/$/u, '');
@@ -211,6 +213,18 @@ export class AppiumClient {
       lookups: this.lookupHistory.slice(-100),
       firstFatal: this.firstFatal,
     };
+  }
+
+  retainSessionOwner(): () => void {
+    const owner = this.sessionOwner;
+    const session = this.sessionId;
+    const assertOwner = (): void => {
+      if (!session || this.sessionId !== session || this.sessionOwner !== owner || this.unusable || this.firstFatal) {
+        throw new Error('APPIUM_SESSION: original usable session owner is unavailable');
+      }
+    };
+    assertOwner();
+    return assertOwner;
   }
 
   async create(options: SessionOptions): Promise<Record<string, unknown>> {
@@ -240,6 +254,7 @@ export class AppiumClient {
       throw error;
     }
     const value = response.value as unknown as WebDriverResponse<Record<string, unknown>>;
+    this.sessionOwner = {};
     this.sessionId = String(response.sessionId || (value as any)?.sessionId || '');
     const capabilities = (value as any)?.value || value;
     if (!this.sessionId) throw new Error('APPIUM_SESSION: server did not return a session id');
@@ -439,14 +454,30 @@ export class AppiumClient {
     return this.command('/execute/sync', 'POST', { script: `mobile: ${command}`, args }, timeoutMs);
   }
 
+  setCommandGuard(guard: { before: () => void; failure: (error: unknown, path: string) => void }): void {
+    this.commandGuard = guard;
+  }
+
   async command<T = unknown>(path: string, method: string, body?: unknown, timeoutMs?: number): Promise<T> {
-    this.assertUsable(path);
+    this.commandGuard?.before();
     try {
+      this.assertUsable(path);
       const response = await this.request<T>(this.sessionPath(path), method, body, timeoutMs);
+      if (this.commandGuard) {
+        if (!response || typeof response !== 'object' || !Object.hasOwn(response, 'value')) throw new Error('APPIUM_RESPONSE: missing command value');
+        const value = response.value;
+        if (path === '/contexts' || path === '/window/handles') {
+          if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !item)) throw new Error('APPIUM_RESPONSE: invalid owner inventory');
+        }
+        if (method === 'GET' && (path === '/window' || path === '/url') && (typeof value !== 'string' || !value)) {
+          throw new Error('APPIUM_RESPONSE: missing current owner document');
+        }
+      }
       return response.value as T;
     } catch (error) {
       if (isFatalDriverError(error)) this.recordFatal(error);
       if (error instanceof WebDriverError && error.timedOut && path !== '/status') this.unusable = true;
+      this.commandGuard?.failure(error, path);
       throw error;
     }
   }

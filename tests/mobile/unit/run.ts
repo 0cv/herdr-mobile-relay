@@ -958,7 +958,7 @@ test('Android launch failures are classified without hiding command diagnostics'
   assert.equal(androidLaunchFailureKind(new Error('command timed out')), 'timeout');
 });
 
-test('Android final launch verifies readiness only after bootstrap teardown', async () => {
+test('Android initial launch retains bootstrap and verifies readiness after signed launch', async () => {
   const platform = new AndroidPlatform({
     origin: 'https://fixture.test',
     appiumUrl: 'http://fake.test',
@@ -974,6 +974,13 @@ test('Android final launch verifies readiness only after bootstrap teardown', as
   };
   const events: string[] = [];
   const driver = platform.driver as any;
+  (platform as any).assertRetainedOwner = async () => { events.push('owner'); };
+  (platform as any).assertRetainedSession = () => undefined;
+  driver.switchContext = async (context: string) => { events.push(context); };
+  driver.currentWindow = async () => 'original';
+  driver.windowHandles = async () => ['original'];
+  driver.currentUrl = async () => 'https://fixture.test/';
+  (platform as any).recordLaunchForeground = async () => undefined;
   (platform as any).waitForChromeShortcut = async () => { events.push('shortcut'); return shortcut; };
   driver.close = async () => { events.push('close'); };
   (platform as any).launchChromeShortcut = async () => { events.push('launch'); };
@@ -992,7 +999,7 @@ test('Android final launch verifies readiness only after bootstrap teardown', as
     if (previousOwnershipFile === undefined) delete process.env.MOBILE_DEVICE_OWNERSHIP_FILE;
     else process.env.MOBILE_DEVICE_OWNERSHIP_FILE = previousOwnershipFile;
   }
-  assert.deepEqual(events, ['shortcut', 'close', 'launch', 'target', 'devtools', 'create', 'attach']);
+  assert.deepEqual(events, ['owner', 'NATIVE_APP', 'CHROMIUM', 'shortcut', 'owner', 'NATIVE_APP', 'owner', 'launch', 'target', 'devtools', 'owner', 'attach']);
 });
 
 test('Android Chrome DevTools readiness recognizes the published socket', async () => {
@@ -1018,6 +1025,7 @@ test('Android installed attachment selects the owned standalone window instead o
   driver.switchContext = async () => undefined;
   driver.windowHandles = async () => ['browser-window', 'installed-window'];
   driver.switchWindow = async (handle: string) => { selectedWindow = handle; };
+  driver.currentWindow = async () => selectedWindow;
   driver.currentUrl = async () => 'https://fixture.test/';
   driver.execute = async () => selectedWindow === 'installed-window'
     ? { origin: 'https://fixture.test', standalone: true, provider: 'android-standalone' }
@@ -1046,6 +1054,7 @@ test('Android web controls use supported locators and preserve ownership failure
       if (path === '/session') return response({});
       if (path.endsWith('/contexts')) return response(['NATIVE_APP', 'CHROMIUM']);
       if (path.endsWith('/window/handles')) return response(['installed-window']);
+      if (path.endsWith('/window') && init?.method === 'GET') return response(selected);
       if (path.endsWith('/window') && init?.method === 'POST') {
         selected = String(body.handle || '');
         return response(null);
@@ -1126,7 +1135,7 @@ test('Android web controls use supported locators and preserve ownership failure
 
   for (const mode of ['disabled', 'hidden', 'none'] as const) {
     const blocked = await makeHarness(mode, 1_200);
-    await assert.rejects(() => blocked.platform.clickWebText(mode === 'none' ? 'Missing' : mode[0].toUpperCase() + mode.slice(1)), /APPIUM_BUTTON|PHASE_BUDGET_EXHAUSTED|disabled|hidden|not found/iu);
+    await assert.rejects(() => blocked.platform.clickWebText(mode === 'none' ? 'Missing' : mode[0].toUpperCase() + mode.slice(1)), /APPIUM_BUTTON|PHASE_BUDGET_EXHAUSTED|ANDROID_CONTEXT_OWNERSHIP|disabled|hidden|not found/iu);
     assert.equal(blocked.clicks.length, 0);
   }
 
@@ -1217,7 +1226,9 @@ test('Android Chrome shortcut output preserves the signed launch fields', async 
   assert.deepEqual(shortcuts[0], {
     id: 'shortcut-id', flags: '0x28a', shortLabel: 'Herdr Relay', name: 'Herdr Mobile Relay',
     url: 'https://localhost:38289/', scope: 'https://localhost:38289/', mac: 'mac+/=',
-    source: '7', displayMode: '3', orientation: '0',
+    source: '7', displayMode: '3', orientation: '0', intentId: 'shortcut-id',
+    action: 'com.google.android.apps.chrome.webapps.WebappManager.ACTION_START_WEBAPP',
+    packageName: 'com.android.chrome', component: undefined,
   });
   const args = androidChromeShortcutArgs('emulator-5554', shortcuts[0]);
   const platform = new AndroidPlatform({
@@ -2290,6 +2301,21 @@ for (const [name, body] of webdriverInterruptionTests) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
 for (const [name, body] of androidTransportTests) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
+test('Android CI gates both local Appium launch paths', async () => {
+  await import('./android-appium-ci');
+});
+test('Android retained post-attachment and response-shape refusals', async () => {
+  const { runAndroidRetainedResponseRegressions } = await import('./android-retained-responses');
+  await runAndroidRetainedResponseRegressions();
+});
+test('Android retained signed launch and explicit lifecycle regressions', async () => {
+  const { runAndroidRetainedLaunchRegressions } = await import('./android-retained-launch');
+  await runAndroidRetainedLaunchRegressions();
+});
+test('Android attachment command refusals latch without discovery retry', async () => {
+  const { runAndroidAttachmentRefusalRegressions } = await import('./android-attachment-refusal');
+  await runAndroidAttachmentRefusalRegressions();
+});
 test('Android socket metadata preserves fresh native and selected document ownership', async () => {
   const { runAndroidSocketRegressions } = await import('./android-socket');
   await runAndroidSocketRegressions();
@@ -2297,6 +2323,7 @@ test('Android socket metadata preserves fresh native and selected document owner
 
 let failures = 0;
 for (const [name, body] of tests) {
+  if (process.env.MOBILE_UNIT_FILTER && !new RegExp(process.env.MOBILE_UNIT_FILTER, 'u').test(name)) continue;
   try {
     const outcome = await body();
     process.stdout.write(outcome ? `ok - ${name} # SKIP ${outcome}\n` : `ok - ${name}\n`);

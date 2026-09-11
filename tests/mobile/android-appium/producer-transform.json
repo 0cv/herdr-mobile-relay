@@ -1,0 +1,26 @@
+{
+  "exports": [
+    [
+      "export async function startChromedriverProxy(",
+      "const retainedChromeOwners = new WeakMap<AndroidDriver, {owner: Chromedriver; token: string; failed: boolean}>();\n\nfunction requireRetainedChromeOwner(driver: AndroidDriver, context: string): Chromedriver {\n  const expected = retainedChromeOwners.get(driver);\n  if (!expected || expected.failed || context !== CHROMIUM_WIN ||\n      driver.sessionChromedrivers[CHROMIUM_WIN] !== expected.owner ||\n      expected.owner.sessionId() !== expected.token) {\n    if (expected) expected.failed = true;\n    throw new Error('Retained Chrome owner is unavailable or changed');\n  }\n  return expected.owner;\n}\n\nexport async function startChromedriverProxy("
+    ],
+    [
+      "  let cd: Chromedriver;\n  if (this.sessionChromedrivers[context]) {",
+      "  let cd: Chromedriver;\n  if (this.isChromeSession) {\n    cd = requireRetainedChromeOwner(this, context);\n    try {\n      await setupExistingChromedriver.bind(this)(cd, context);\n    } catch (error) {\n      retainedChromeOwners.get(this)!.failed = true;\n      throw error;\n    }\n    requireRetainedChromeOwner(this, context);\n  } else if (this.sessionChromedrivers[context]) {"
+    ],
+    [
+      "  this.log.info('Starting a chrome-based browser session');",
+      "  if (retainedChromeOwners.has(this)) {\n    throw new Error('Retained Chrome owner cannot be replaced on this driver');\n  }\n  this.log.info('Starting a chrome-based browser session');"
+    ],
+    [
+      "  this.chromedriver = chromedriver;\n  chromedriver.on(",
+      "  const token = chromedriver.sessionId();\n  if (!token) throw new Error('New Chrome owner has no session token');\n  retainedChromeOwners.set(this, {owner: chromedriver, token, failed: false});\n  this.chromedriver = chromedriver;\n  chromedriver.on("
+    ]
+  ],
+  "helpers": [
+    [
+      "    this.log.debug('ChromeDriver is not associated with a window. Re-initializing the session.');",
+      "    if (this.isChromeSession) {\n      throw new Error('Retained Chrome owner has no working window');\n    }\n    this.log.debug('ChromeDriver is not associated with a window. Re-initializing the session.');"
+    ]
+  ]
+}

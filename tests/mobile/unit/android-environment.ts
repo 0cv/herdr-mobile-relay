@@ -93,7 +93,7 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       Object.assign(process.env, saved);
     }
   });
-  test('bootstrap evidence survives initial installed launch and relaunch without repeated observation commands', async () => {
+  test('retained initial launch emits no fabricated bootstrap close evidence and explicit relaunch closes', async () => {
     const fixture = await harness.createFixture();
     const saved = { ...process.env };
     Object.assign(process.env, fixture.environment);
@@ -109,6 +109,11 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       const platform = new AndroidPlatform({ origin: 'https://fixture.test', appiumUrl: 'http://fixture.test', outputDir: fixture.root, certificate: '', setupUrl: '', deviceId: 'emulator-5554' });
       const internals = platform as any;
       internals.driver = driver;
+      internals.assertRetainedOwner = async () => undefined;
+      internals.assertRetainedSession = driver.retainSessionOwner();
+      driver.currentWindow = async () => 'original';
+      driver.currentUrl = async () => 'https://fixture.test/';
+      driver.windowHandles = async () => ['original'];
       internals.waitForChromeShortcut = async () => ({});
       internals.shortcutEvidence = () => ({});
       internals.recordLaunchForeground = async () => undefined;
@@ -119,15 +124,15 @@ export function androidEnvironmentTests(harness: Harness): Test[] {
       internals.attachToInstalledView = async () => undefined;
       platform.environmentMeasurement = measurement;
       await platform.launchInstalledApp();
-      assert.equal(deletes, 1);
+      assert.equal(deletes, 0);
       const path = join(fixture.root, 'android-environment-bootstrap-close.json');
-      const original = await readFile(path, 'utf8');
+      await assert.rejects(() => readFile(path, 'utf8'), /ENOENT/u);
       const observations = async () => (await readFile(fixture.log, 'utf8')).split('\n').filter(line => line.includes('shell ps -A -o PID,NAME') || /CLOSE_(?:BEGIN|END)/u.test(line));
       const initialCommands = await observations();
-      assert.equal(initialCommands.filter(line => /CLOSE_(?:BEGIN|END)/u.test(line)).length, 2);
+      assert.equal(initialCommands.filter(line => /CLOSE_(?:BEGIN|END)/u.test(line)).length, 0);
       await platform.relaunchInstalledApp();
-      assert.equal(deletes, 2);
-      assert.equal(await readFile(path, 'utf8'), original);
+      assert.equal(deletes, 1);
+      await assert.rejects(() => readFile(path, 'utf8'), /ENOENT/u);
       assert.deepEqual(await observations(), initialCommands);
       assert.deepEqual(JSON.parse(await readFile(join(fixture.root, 'android-environment-operations.json'), 'utf8')), []);
     } finally {
