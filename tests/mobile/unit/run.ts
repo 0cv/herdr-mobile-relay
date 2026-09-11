@@ -54,6 +54,7 @@ import { androidEnvironmentTests } from './android-environment';
 import { androidTransportTests } from './android-transport';
 import { runIOSRegressions } from './ios';
 import { confirmationSettingsTests } from './confirmation-settings';
+import { initialSettingsTests } from './initial-settings';
 import { scenarioRunnerTests } from './scenario-runner';
 import { webdriverInterruptionTests } from './webdriver-interruption';
 
@@ -2285,7 +2286,7 @@ test('iOS attachment rediscoveries only a stale cached context', async () => {
 for (const [name, body] of androidTransitionTests) test(name, body);
 for (const [name, body] of scenarioRunnerTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
-for (const [name, body] of confirmationSettingsTests) test(name, body);
+for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
 for (const [name, body] of androidTransportTests) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
 test('Android socket metadata preserves fresh native and selected document ownership', async () => {

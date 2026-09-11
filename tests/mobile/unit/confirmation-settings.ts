@@ -156,7 +156,7 @@ for (const mode of ['success', 'missing', 'malformed', 'shadowed', 'partial-upda
           wda[key] = value;
           cache[key] = value;
         }
-        if (mode === 'short-readback') now = 78_001;
+        if (mode === 'short-readback') now = 75_001;
         return Response.json({ value: mode === 'bad-acknowledgement' ? {} : null });
       }
       const result = { ...cache };
@@ -172,7 +172,7 @@ for (const mode of ['success', 'missing', 'malformed', 'shadowed', 'partial-upda
     await assert.rejects(() => withIOSConfirmationSettings(driver, parent, 49_000, async () => assert.fail('must not act before establishment')), /unsupported or malformed waitForIdleTimeout/u);
     assert.deepEqual(writes, []);
     initializing = true;
-    const initialization = initializeIOSConfirmationSettings(driver, mode === 'short-parent' ? new PhaseBudget('short', { timeoutMs: 3_999 }) : parent);
+    const initialization = initializeIOSConfirmationSettings(driver, mode === 'short-parent' ? new PhaseBudget('short', { timeoutMs: 9_999 }) : parent);
     if (mode !== 'success') {
       await assert.rejects(() => initialization);
       assert.equal(writes.length, ['short-parent', 'interrupted-update'].includes(mode) ? 0 : 1);
