@@ -5,7 +5,7 @@ fixture="$(mktemp -d /tmp/herdr-inspection-check.XXXXXXXX)"
 trap 'rm -rf "$fixture"' EXIT
 printf '%s\n' 'herdr-owned-inspection-fixture' > "$fixture/.owned"
 mkdir -p "$fixture/source/tests/mobile" "$fixture/source/.github"
-cp -R "$root/tests/mobile/android-appium" "$root/tests/mobile/unit" "$fixture/source/tests/mobile/"
+cp -R "$root/tests/mobile/android-appium" "$root/tests/mobile/unit" "$root/tests/mobile/support" "$fixture/source/tests/mobile/"
 cp -R "$root/.github/workflows" "$root/.github/actions" "$fixture/source/.github/"
 ln -s "$root/tests/mobile/node_modules" "$fixture/source/tests/mobile/node_modules"
 cd "$fixture/source"
@@ -25,6 +25,7 @@ node --test tests/mobile/unit/android-target-inspection.cjs
 node --experimental-import-meta-resolve tests/mobile/unit/android-installed-owner.mjs
 node --experimental-import-meta-resolve tests/mobile/unit/android-inspection-integrity.mjs
 diff -r "$root/tests/mobile/android-appium" tests/mobile/android-appium
+diff -r "$root/tests/mobile/support" tests/mobile/support
 diff -r "$root/.github/workflows" .github/workflows
 diff -r "$root/.github/actions" .github/actions
 node --experimental-import-meta-resolve tests/mobile/android-appium/gate.ts verify "$APPIUM_HOME"

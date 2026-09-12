@@ -7,6 +7,7 @@ const disabledChrome = readFileSync(new URL('./fixtures/android/kernel-disabled-
 import {createServer as createNetServer} from 'node:net';
 import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
+import {spawnSync} from 'node:child_process';
 import {pathToFileURL, fileURLToPath} from 'node:url';
 import {resultValidator} from './android-inspection-types.mjs';
 
@@ -204,7 +205,18 @@ async function fixture(run, initialMode = '') {
         }
         if (args[0] === 'cat' && args[1].endsWith('/stat')) return `${state.pid} (chrome) S ${Array(18).fill('0').join(' ')} ${state.startTime} 0`;
         if (args[0] === 'dumpsys') return `mResumedActivity: ActivityRecord{a u0 com.android.chrome/${state.activity} t10 pid=${state.pid}}${state.extraActivities || ''}`;
-        if (args[1] === '/proc/net/unix') return `000: 000 000 000 000 000 ${state.inode} @chrome_devtools_remote`;
+        if (args[1] === '/proc/net/unix') {
+          const listening = (inode) => `0000000000000000: 00000002 00000000 00010000 0001 01 ${inode} @chrome_devtools_remote`;
+          const connected = (index = 1) => `${index.toString(16).padStart(16, '0')}: 00000001 00000000 00000000 0001 03 ${9000 + index} @chrome_devtools_remote`;
+          if (state.mode === 'socket-connected' || state.mode === 'socket-connected-drift') return [...[1, 2, 3, 4].map(connected), listening(state.inode)].join('\n');
+          if (state.mode === 'socket-connected-only') return connected();
+          if (state.mode === 'socket-duplicate-listen') return [listening(state.inode), listening('4322'), listening('4323'), listening('4324')].join('\n');
+          if (state.mode === 'socket-zero-inode') return listening('0');
+          if (state.mode === 'socket-malformed') return `0000000000000000: 00000002 00000000 00010000 0001 01 malformed @chrome_devtools_remote`;
+          if (state.mode === 'socket-wrong-type') return '0000000000000000: 00000002 00000000 00010000 0002 01 4321 @chrome_devtools_remote';
+          if (state.mode === 'socket-wrong-state') return '0000000000000000: 00000002 00000000 00010000 0001 03 4321 @chrome_devtools_remote';
+          return listening(state.inode);
+        }
         if (args[1] === '/proc/sys/kernel/random/boot_id') {
           state.bootReads = (state.bootReads || 0) + 1;
           return state.mode === 'boot' || (state.mode === 'boot-acquisition' && state.bootReads === 2) ? '22222222-2222-2222-2222-222222222222' : '11111111-1111-1111-1111-111111111111';
@@ -231,8 +243,15 @@ async function fixture(run, initialMode = '') {
     driver.uiautomator2.jwproxy.sessionId = 'native-token';
     driver.uiautomator2.jwproxy.downstreamProtocol = 'W3C';
     adbFixture = (args, options) => args[0] === 'shell' ? driver.adb.shell(args.slice(1), options) : driver.adb.adbExec(args, options);
-    if (initialMode && initialMode !== 'disabled') {
-      await assert.rejects(driver.startChromeSession());
+    if (initialMode && !['disabled', 'socket-connected'].includes(initialMode)) {
+      let firstError;
+      try { await driver.startChromeSession(); } catch (error) { firstError = error; }
+      assert.ok(firstError);
+      if (initialMode.startsWith('socket-')) {
+        assert.match(String(firstError), /Live Chrome socket unavailable/u);
+        assert.match(String(firstError), /failurePredicate/u);
+      }
+      if (run) await run({initialError: firstError});
       const count = calls.length;
       state.mode = '';
       await assert.rejects(driver.startChromeSession());
@@ -304,9 +323,38 @@ async function fixture(run, initialMode = '') {
   }
 }
 
-for (const mode of ['boot-acquisition', 'config-unreadable', 'config-missing', 'config-malformed', 'config-duplicate', 'config-conflicting', 'disabled-contradictory', 'pid-duplicate', 'namespace-same-number-nested', 'namespace-absent', 'namespace-duplicate', 'namespace-nested', 'namespace-different', 'process-string', 'process-wrong', 'process-missing', 'process-duplicate', 'process-cpu', 'process-protocol', 'process-final-loss', 'adb-loss', 'adb-version', 'adb-exit']) {
+for (const mode of ['boot-acquisition', 'config-unreadable', 'config-missing', 'config-malformed', 'config-duplicate', 'config-conflicting', 'disabled-contradictory', 'pid-duplicate', 'namespace-same-number-nested', 'namespace-absent', 'namespace-duplicate', 'namespace-nested', 'namespace-different', 'process-string', 'process-wrong', 'process-missing', 'process-duplicate', 'process-cpu', 'process-protocol', 'process-final-loss', 'adb-loss', 'adb-version', 'adb-exit', 'socket-connected-only', 'socket-duplicate-listen', 'socket-zero-inode', 'socket-malformed', 'socket-wrong-type', 'socket-wrong-state']) {
   test(`startup association failure permanently refuses original owner: ${mode}`, () => fixture(undefined, mode));
 }
+
+test('installed producer selects the LISTEN socket after four connected rows retain the same abstract name', async () => fixture(async ({inspect}) => {
+  const result = await inspect();
+  assert.equal(result.before.forward.inode, '4321');
+  assert.equal(result.after.forward.inode, '4321');
+}, 'socket-connected'));
+
+test('installed producer selected-listener facts survive four connected rows during association drift', async () => fixture(async ({inspect, state}) => {
+  await inspect();
+  state.mode = 'socket-connected-drift';
+  state.inode = '4322';
+  await assert.rejects(inspect, error => {
+    assert.match(String(error), /"failurePredicate":"browser-forward-association-drift"/u);
+    assert.match(String(error), /"inode":"4322"/u);
+    return true;
+  });
+}, 'socket-connected'));
+
+test('installed producer diagnostic survives the actual WebDriver 500-character consumer boundary', async () => fixture(async ({initialError}) => {
+  const source = new URL('../support/webdriver.ts', import.meta.url).href;
+  const script = `import {AppiumClient, WebDriverError} from ${JSON.stringify(source)};
+const client = new AppiumClient('http://fixture', 1000, async () => new Response(JSON.stringify({value: {error: 'unknown error', message: process.env.PRODUCER_ERROR}}), {status: 500}));
+try { await client.create({capabilities: {}}); process.exit(2); }
+catch (error) { if (!(error instanceof WebDriverError)) throw error; process.stdout.write(error.message); }
+`;
+  const result = spawnSync('bun', ['-e', script], {env: {...process.env, PRODUCER_ERROR: String(initialError)}, encoding: 'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /failurePredicate.*unique-listening-row-ambiguous/u);
+}, 'socket-duplicate-listen'));
 
 for (const mode of ['adb-loss', 'adb-version', 'adb-exit']) test(`actual ADB protocol failure poisons original dispatch and JWProxy: ${mode}`, async () => fixture(async ({inspect, state, refused}) => {
   state.mode = mode;

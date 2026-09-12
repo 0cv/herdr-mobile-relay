@@ -54,13 +54,14 @@ function portValue(key: string, fallback: number): number {
   return value;
 }
 
-function listeners(port: number, timeout = maxProcessCommandMs): string[] {
+function listeners(port: number, timeout = maxProcessCommandMs, observed?: (status: number | null) => void): string[] {
   if (!Number.isInteger(port) || port < 1 || port > 65535 || timeout <= 0) throw new Error('XCTEST: startup deadline');
   const result = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8', timeout, maxBuffer: 65_536 });
+  observed?.(result.status);
   if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new Error('XCTEST: startup deadline');
   if (result.error || (result.status !== 0 && result.status !== 1)) throw new Error('XCTEST: cannot inspect endpoint ownership');
   const values = [...new Set(result.stdout.trim().split(/\s+/u).filter(Boolean))];
-  if (values.some(value => !/^\d+$/u.test(value))) throw new Error('XCTEST: endpoint returned an invalid process identifier');
+  if (values.some(value => !/^[1-9]\d{0,9}$/u.test(value) || Number(value) > 2_147_483_647)) throw new Error('XCTEST: endpoint returned an invalid process identifier');
   return values;
 }
 
@@ -95,7 +96,7 @@ function commandContainsPath(command: string, path: string): boolean {
   return variants.some(variant => command.includes(variant));
 }
 
-function runnerExecutableMatches(executable: string, product: string, udid: string, deadline: number, productBinaryHash?: string): boolean {
+function runnerExecutableMatches(executable: string, product: string, udid: string, deadline: number, productBinaryHash?: string, evaluation?: RunnerMatchEvidence): boolean {
   try {
     const resolved = realpathSync(executable);
     const app = dirname(resolved);
@@ -103,13 +104,63 @@ function runnerExecutableMatches(executable: string, product: string, udid: stri
     const applicationDirectory = dirname(container);
     const expectedApplicationDirectory = `/Devices/${udid}/data/Containers/Bundle/Application`;
     const productPath = realpathSync(product);
-    return basename(app) === basename(productPath) && uuidPattern.test(basename(container))
-      && applicationDirectory.endsWith(expectedApplicationDirectory)
-      && basename(resolved) === 'WebDriverAgentRunner-Runner'
-      && run('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', join(app, 'Info.plist')], deadlineTimeout(deadline)) === runnerId
-      && binaryHash(resolved) === (productBinaryHash || binaryHash(join(productPath, 'WebDriverAgentRunner-Runner')));
+    const pathShape: RunnerPathShape = {};
+    const pathChecks: Array<[keyof RunnerPathShape, () => boolean, string]> = [
+      ['applicationNameMatches', () => basename(app) === basename(productPath), 'runner-application-name'],
+      ['containerUuid', () => uuidPattern.test(basename(container)), 'runner-container-uuid'],
+      ['simulatorPath', () => applicationDirectory.endsWith(expectedApplicationDirectory), 'runner-simulator-path'],
+      ['executableName', () => basename(resolved) === 'WebDriverAgentRunner-Runner', 'runner-executable-name'],
+    ];
+    for (const [key, check, stage] of pathChecks) {
+      pathShape[key] = check();
+      if (evaluation) evaluation.pathShape = {...pathShape};
+      if (!pathShape[key]) {
+        if (evaluation) { evaluation.failureStage = stage; evaluation.errorCategory = 'runner-path-mismatch'; }
+        return false;
+      }
+    }
+    let bundleIdentifier: string;
+    try {
+      bundleIdentifier = run('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', join(app, 'Info.plist')], deadlineTimeout(deadline));
+    } catch (error) {
+      if (evaluation) { evaluation.bundleId = {status: 'error'}; evaluation.failureStage = 'runner-bundle-id-command'; evaluation.errorCategory = 'runner-command-error'; }
+      throw error;
+    }
+    const bundleMatches = bundleIdentifier === runnerId;
+    if (evaluation) evaluation.bundleId = {status: 'evaluated', matches: bundleMatches};
+    if (!bundleMatches) {
+      if (evaluation) { evaluation.failureStage = 'runner-bundle-id'; evaluation.errorCategory = 'runner-bundle-mismatch'; }
+      return false;
+    }
+    if (evaluation) evaluation.executableHash = {status: 'not-evaluated', ...(productBinaryHash ? {expected: productBinaryHash} : {})};
+    let actualHash: string;
+    try {
+      actualHash = binaryHash(resolved);
+    } catch (error) {
+      if (evaluation) { evaluation.executableHash = {status: 'error', ...(productBinaryHash ? {expected: productBinaryHash} : {})}; evaluation.failureStage = 'runner-executable-hash-command'; evaluation.errorCategory = 'runner-command-error'; }
+      throw error;
+    }
+    let expectedHash: string;
+    try {
+      expectedHash = productBinaryHash || binaryHash(join(productPath, 'WebDriverAgentRunner-Runner'));
+    } catch (error) {
+      if (evaluation) {
+        evaluation.executableHash = {status: 'error', actual: actualHash, ...(productBinaryHash ? {expected: productBinaryHash} : {})};
+        evaluation.failureStage = 'runner-product-hash-command';
+        evaluation.errorCategory = 'runner-command-error';
+      }
+      throw error;
+    }
+    const hashMatches = actualHash === expectedHash;
+    if (evaluation) evaluation.executableHash = {status: 'evaluated', expected: expectedHash, actual: actualHash, matches: hashMatches};
+    if (!hashMatches && evaluation) { evaluation.failureStage = 'runner-executable-hash'; evaluation.errorCategory = 'runner-hash-mismatch'; }
+    return hashMatches;
   } catch (error) {
     if (error instanceof Error && error.message === 'XCTEST: startup deadline') throw error;
+    if (evaluation && !evaluation.errorCategory) {
+      evaluation.failureStage ||= 'runner-executable-observation';
+      evaluation.errorCategory = 'runner-observation-error';
+    }
     return false;
   }
 }
@@ -186,10 +237,59 @@ export function selectXctestrun(root: string, product: string, deadline = Date.n
 type RunnerIdentity = Pick<ProcessEvidence, 'pid' | 'executable' | 'birth'>;
 type ListenerEvidence = Partial<ProcessEvidence> & Pick<ProcessEvidence, 'pid' | 'executable'>;
 
+interface ListenerCommandStatus {
+  port: number;
+  status: number | null;
+}
+
+type ListenerEndpointStatus = 'not-evaluated' | 'evaluated' | 'error';
+type AssociationStatus = 'not-evaluated' | 'match' | 'mismatch';
+
+interface ListenerEndpointSnapshot {
+  status: ListenerEndpointStatus;
+  pids?: string[];
+  errorCategory?: string;
+}
+
 interface ListenerSnapshot {
-  pids: string[];
-  mjpegPids: string[];
+  wda: ListenerEndpointSnapshot;
+  mjpeg: ListenerEndpointSnapshot;
   evidence: ListenerEvidence[];
+  commands: ListenerCommandStatus[];
+}
+
+type RunnerPathShape = Partial<Record<'applicationNameMatches' | 'containerUuid' | 'simulatorPath' | 'executableName', boolean>>;
+
+interface RunnerMatchEvidence {
+  pathShape?: RunnerPathShape;
+  bundleId?: { status: 'not-evaluated' | 'evaluated' | 'error'; matches?: boolean };
+  executableHash?: { status: 'not-evaluated' | 'evaluated' | 'error'; expected?: string; actual?: string; matches?: boolean };
+  failureStage?: string;
+  errorCategory?: string;
+}
+
+type ListenerEndpointDiagnostic =
+  | { status: 'not-evaluated' }
+  | { status: 'error'; errorCategory: string }
+  | { status: 'evaluated'; count: number; pids: string[] };
+
+interface ListenerValidation {
+  checkedAt: string;
+  endpoints: {
+    wda: ListenerEndpointDiagnostic;
+    mjpeg: ListenerEndpointDiagnostic;
+  };
+  commandStatus: ListenerCommandStatus[];
+  runnerEvidencePresent: 'not-evaluated' | 'present' | 'absent';
+  runnerAssociation: AssociationStatus;
+  mjpegAssociation: AssociationStatus;
+  bundleId: { status: 'not-evaluated' | 'evaluated' | 'error'; matches?: boolean };
+  executableHash: { status: 'not-evaluated' | 'evaluated' | 'error'; expected?: string; actual?: string; matches?: boolean };
+  cachedProductExecutableHash?: string;
+  cachedProductExecutableHashAt?: string;
+  pathShape?: RunnerMatchEvidence['pathShape'];
+  failureStage: string;
+  errorCategory: string;
 }
 
 interface Owner {
@@ -201,6 +301,9 @@ interface Owner {
   receipt?: string;
   installReceipt?: string;
   listenerEvidence?: ListenerEvidence[];
+  listenerValidation?: ListenerValidation;
+  cachedProductExecutableHash?: string;
+  cachedProductExecutableHashAt?: string;
   pidBirth?: string;
   runnerBirth?: string;
   startedAt: string;
@@ -236,6 +339,49 @@ function writeOwner(root: string, owner: Owner): void {
 
 function binaryHash(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+const diagnosticPids = (values: string[]): string[] => values.slice(0, 16);
+
+function endpointDiagnostic(endpoint: ListenerEndpointSnapshot): ListenerEndpointDiagnostic {
+  if (endpoint.status === 'evaluated') {
+    const pids = endpoint.pids || [];
+    return {status: 'evaluated', count: pids.length, pids: diagnosticPids(pids)};
+  }
+  return endpoint.status === 'error'
+    ? {status: 'error', errorCategory: endpoint.errorCategory || 'command-error'}
+    : {status: 'not-evaluated'};
+}
+
+function listenerValidation(
+  snapshot: ListenerSnapshot,
+  commands: ListenerCommandStatus[],
+  runnerAssociation: ListenerValidation['runnerAssociation'],
+  mjpegAssociation: ListenerValidation['mjpegAssociation'],
+  evaluation: RunnerMatchEvidence,
+  failureStage: string,
+  errorCategory: string,
+  cachedProductExecutableHash?: string,
+  cachedProductExecutableHashAt?: string,
+): ListenerValidation {
+  const runnerPid = snapshot.wda.status === 'evaluated' ? snapshot.wda.pids?.[0] : undefined;
+  return {
+    checkedAt: new Date().toISOString(),
+    endpoints: {wda: endpointDiagnostic(snapshot.wda), mjpeg: endpointDiagnostic(snapshot.mjpeg)},
+    commandStatus: commands.slice(0, 4),
+    runnerEvidencePresent: runnerPid
+      ? snapshot.evidence.length === 0 ? 'not-evaluated' : snapshot.evidence.some(entry => entry.pid === runnerPid) ? 'present' : 'absent'
+      : 'not-evaluated',
+    runnerAssociation,
+    mjpegAssociation,
+    bundleId: evaluation.bundleId || {status: 'not-evaluated'},
+    executableHash: evaluation.executableHash || {status: 'not-evaluated'},
+    ...(cachedProductExecutableHash ? {cachedProductExecutableHash} : {}),
+    ...(cachedProductExecutableHashAt ? {cachedProductExecutableHashAt} : {}),
+    ...(evaluation.pathShape ? {pathShape: evaluation.pathShape} : {}),
+    failureStage,
+    errorCategory,
+  };
 }
 
 async function supervise(): Promise<void> {
@@ -313,9 +459,39 @@ async function supervise(): Promise<void> {
     }
     return installed;
   };
+  const listenerCommandErrorCategory = (error: unknown): string => {
+    if (error instanceof Error && error.message === 'XCTEST: startup deadline') return 'timeout';
+    if (error instanceof Error && error.message.includes('invalid process identifier')) return 'invalid-process-id';
+    return 'command-error';
+  };
+  const persistListenerCommandFailure = (snapshot: ListenerSnapshot, failureStage: string, error: unknown): void => {
+    const category = listenerCommandErrorCategory(error);
+    const diagnosticCategory = category === 'timeout' ? 'listener-command-timeout'
+      : category === 'invalid-process-id' ? 'listener-invalid-process-id' : 'listener-command-error';
+    owner.listenerValidation = listenerValidation(snapshot, snapshot.commands, 'not-evaluated', 'not-evaluated', {}, failureStage,
+      diagnosticCategory, owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt);
+    save();
+  };
   const inspectListeners = (inspectionDeadline: number): ListenerSnapshot => {
-    const pids = listeners(port, deadlineTimeout(inspectionDeadline));
-    const mjpegPids = listeners(mjpeg, deadlineTimeout(inspectionDeadline));
+    const commands: ListenerCommandStatus[] = [];
+    let wdaEndpoint: ListenerEndpointSnapshot;
+    try {
+      wdaEndpoint = {status: 'evaluated', pids: listeners(port, deadlineTimeout(inspectionDeadline), status => commands.push({port, status}))};
+    } catch (error) {
+      wdaEndpoint = {status: 'error', errorCategory: listenerCommandErrorCategory(error)};
+      persistListenerCommandFailure({wda: wdaEndpoint, mjpeg: {status: 'not-evaluated'}, evidence: [], commands}, 'wda-listener-command', error);
+      throw error;
+    }
+    let mjpegEndpoint: ListenerEndpointSnapshot;
+    try {
+      mjpegEndpoint = {status: 'evaluated', pids: listeners(mjpeg, deadlineTimeout(inspectionDeadline), status => commands.push({port: mjpeg, status}))};
+    } catch (error) {
+      mjpegEndpoint = {status: 'error', errorCategory: listenerCommandErrorCategory(error)};
+      persistListenerCommandFailure({wda: wdaEndpoint, mjpeg: mjpegEndpoint, evidence: [], commands}, 'mjpeg-listener-command', error);
+      throw error;
+    }
+    const pids = wdaEndpoint.pids || [];
+    const mjpegPids = mjpegEndpoint.pids || [];
     const evidence: ListenerEvidence[] = [];
     for (const pid of [...new Set([...pids, ...mjpegPids])]) {
       try {
@@ -324,12 +500,16 @@ async function supervise(): Promise<void> {
         evidence.push({ pid, executable: '[unavailable]' });
         owner.listenerEvidence = evidence;
         save();
-        if (error instanceof Error && error.message === 'XCTEST: startup deadline') throw error;
+        if (error instanceof Error && error.message === 'XCTEST: startup deadline') {
+          owner.listenerValidation = listenerValidation({wda: wdaEndpoint, mjpeg: mjpegEndpoint, evidence, commands}, commands, 'not-evaluated', 'not-evaluated', {}, 'listener-process-evidence', 'listener-process-timeout', owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt);
+          save();
+          throw error;
+        }
       }
     }
     owner.listenerEvidence = evidence;
     save();
-    return { pids, mjpegPids, evidence };
+    return {wda: wdaEndpoint, mjpeg: mjpegEndpoint, evidence, commands};
   };
   const listenerPids = (): string[] => [...new Set([...listeners(port), ...listeners(mjpeg)])];
   const ownedListeners = (pids: string[]): boolean => {
@@ -344,17 +524,52 @@ async function supervise(): Promise<void> {
     }
   };
   const validateListenerSnapshot = (snapshot: ListenerSnapshot, expected: RunnerIdentity | undefined, inspectionDeadline: number): RunnerIdentity => {
-    const runner = snapshot.evidence.find(entry => entry.pid === snapshot.pids[0]);
-    if (expected && (snapshot.pids.length !== 1 || !runner || runner.pid !== expected.pid || runner.executable !== expected.executable
-      || runner.birth !== expected.birth || snapshot.mjpegPids.length > 1 || snapshot.mjpegPids.some(pid => pid !== expected.pid))) {
-      throw new Error('XCTEST: managed WDA listener changed');
+    const wdaPids = snapshot.wda.status === 'evaluated' ? snapshot.wda.pids || [] : [];
+    const mjpegPids = snapshot.mjpeg.status === 'evaluated' ? snapshot.mjpeg.pids || [] : [];
+    const runner = snapshot.wda.status === 'evaluated' ? snapshot.evidence.find(entry => entry.pid === wdaPids[0]) : undefined;
+    const admittedRunner = runner as ListenerEvidence | undefined;
+    const evaluation: RunnerMatchEvidence = {};
+    let runnerAssociation: ListenerValidation['runnerAssociation'] = 'not-evaluated';
+    let mjpegAssociation: ListenerValidation['mjpegAssociation'] = 'not-evaluated';
+    const persist = (observedRunnerAssociation: ListenerValidation['runnerAssociation'], observedMjpegAssociation: ListenerValidation['mjpegAssociation'], failureStage: string, errorCategory: string): void => {
+      owner.listenerValidation = listenerValidation(snapshot, snapshot.commands, observedRunnerAssociation, observedMjpegAssociation, evaluation, failureStage, errorCategory, owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt);
+      save();
+    };
+    const record = (observedRunnerAssociation: ListenerValidation['runnerAssociation'], observedMjpegAssociation: ListenerValidation['mjpegAssociation'], failureStage: string, errorCategory: string): never => {
+      persist(observedRunnerAssociation, observedMjpegAssociation, failureStage, errorCategory);
+      throw new Error(failureStage.startsWith('managed-') ? 'XCTEST: managed WDA listener changed' : 'XCTEST: unknown WDA listener');
+    };
+    if (expected) {
+      if (wdaPids.length !== 1) record('mismatch', mjpegAssociation, 'managed-wda-pid-count', 'managed-listener-identity-mismatch');
+      if (!admittedRunner) record('mismatch', mjpegAssociation, 'managed-wda-runner-evidence', 'managed-listener-identity-mismatch');
+      if (admittedRunner!.pid !== expected.pid) record('mismatch', mjpegAssociation, 'managed-wda-pid', 'managed-listener-identity-mismatch');
+      if (admittedRunner!.executable !== expected.executable) record('mismatch', mjpegAssociation, 'managed-wda-executable', 'managed-listener-identity-mismatch');
+      if (admittedRunner!.birth !== expected.birth) record('mismatch', mjpegAssociation, 'managed-wda-birth', 'managed-listener-identity-mismatch');
+      runnerAssociation = 'match';
+      if (mjpegPids.length > 1) record(runnerAssociation, 'mismatch', 'managed-mjpeg-pid-count', 'managed-listener-identity-mismatch');
+      if (mjpegPids.some(pid => pid !== expected.pid)) record(runnerAssociation, 'mismatch', 'managed-mjpeg-pid', 'managed-listener-identity-mismatch');
+      mjpegAssociation = 'match';
     }
-    if (snapshot.pids.length !== 1 || !runner || runner.executable === '[unavailable]' || !runner.birth
-      || !runnerExecutableMatches(runner.executable, product, udid, inspectionDeadline, productBinaryHash)
-      || snapshot.mjpegPids.length > 1 || snapshot.mjpegPids.some(pid => pid !== runner.pid)) {
-      throw new Error('XCTEST: unknown WDA listener');
+    if (snapshot.wda.status !== 'evaluated' || wdaPids.length !== 1) record(expected ? 'mismatch' : 'not-evaluated', mjpegAssociation, 'wda-pid-count', 'listener-endpoint-cardinality');
+    if (!admittedRunner) record(expected ? 'mismatch' : 'not-evaluated', mjpegAssociation, 'wda-runner-evidence', 'listener-process-evidence');
+    if (admittedRunner!.executable === '[unavailable]') record(expected ? 'mismatch' : 'not-evaluated', mjpegAssociation, 'wda-executable-evidence', 'listener-process-evidence');
+    if (!admittedRunner!.birth) record(expected ? 'mismatch' : 'not-evaluated', mjpegAssociation, 'wda-birth-evidence', 'listener-process-evidence');
+    let executableMatch = false;
+    try {
+      executableMatch = runnerExecutableMatches(admittedRunner!.executable, product, udid, inspectionDeadline, productBinaryHash, evaluation);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'XCTEST: startup deadline') {
+        persist(runnerAssociation, mjpegAssociation, evaluation.failureStage || 'runner-executable-deadline', evaluation.errorCategory || 'listener-deadline');
+        throw error;
+      }
+      record(runnerAssociation, mjpegAssociation, evaluation.failureStage || 'runner-executable-observation', evaluation.errorCategory || 'runner-command-error');
     }
-    return { pid: runner.pid, executable: runner.executable, birth: runner.birth };
+    if (!executableMatch) record(runnerAssociation, mjpegAssociation, evaluation.failureStage || 'runner-executable-observation', evaluation.errorCategory || 'runner-identity-mismatch');
+    if (mjpegPids.length > 1) record(runnerAssociation, 'mismatch', 'mjpeg-pid-count', 'listener-endpoint-cardinality');
+    if (mjpegPids.some(pid => pid !== admittedRunner!.pid)) record(runnerAssociation, 'mismatch', 'mjpeg-pid-association', 'listener-endpoint-association');
+    if (mjpegAssociation === 'not-evaluated') mjpegAssociation = 'match';
+    persist(runnerAssociation, mjpegAssociation, 'validated', 'none');
+    return { pid: admittedRunner!.pid, executable: admittedRunner!.executable, birth: admittedRunner!.birth! };
   };
   const stopChild = async (): Promise<void> => {
     if (!child || childEnded) return;
@@ -385,8 +600,11 @@ async function supervise(): Promise<void> {
     if (port === mjpeg) throw new Error('XCTEST: WDA and MJPEG ports must differ');
     owner.url = `http://127.0.0.1:${port}`;
     product = realpathSync(required('IOS_WDA_PREBUILT_PATH'));
-    productBinaryHash = binaryHash(join(product, 'WebDriverAgentRunner-Runner'));
     owner.product = product;
+    productBinaryHash = binaryHash(join(product, 'WebDriverAgentRunner-Runner'));
+    owner.cachedProductExecutableHash = productBinaryHash;
+    owner.cachedProductExecutableHashAt = new Date().toISOString();
+    save();
     ownership(udid);
     if (listeners(port, Math.min(maxProcessCommandMs, remaining())).length || listeners(mjpeg, Math.min(maxProcessCommandMs, remaining())).length) {
       throw new Error('XCTEST: occupied endpoint');
@@ -437,8 +655,15 @@ async function supervise(): Promise<void> {
       remaining();
       try {
         const initial = inspectListeners(deadline);
-        if (!initial.pids.length && !initial.mjpegPids.length) {
-          if (frozenRunner) throw new Error('XCTEST: managed WDA listener changed');
+        const initialWdaPids = initial.wda.status === 'evaluated' ? initial.wda.pids || [] : [];
+        const initialMjpegPids = initial.mjpeg.status === 'evaluated' ? initial.mjpeg.pids || [] : [];
+        if (!initialWdaPids.length && !initialMjpegPids.length) {
+          if (frozenRunner) {
+            owner.listenerValidation = listenerValidation(initial, initial.commands, 'not-evaluated', 'not-evaluated', {},
+              'managed-listener-endpoints-empty', 'managed-listener-endpoint-disappearance', owner.cachedProductExecutableHash, owner.cachedProductExecutableHashAt);
+            save();
+            throw new Error('XCTEST: managed WDA listener changed');
+          }
           await sleep(Math.min(250, remaining()));
           continue;
         }

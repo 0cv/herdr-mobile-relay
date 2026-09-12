@@ -58,7 +58,7 @@ if (cmd === 'shell pidof com.android.chrome') output = s.launched && s.scenario 
 else if (cmd.startsWith('shell cat /proc/') && cmd.endsWith('/stat')) output = s.pid + ' (chrome) ' + (s.launched && s.scenario === 'dead-process' ? 'Z' : 'S') + ' ' + [...Array(18).fill('0'), s.startTime, '0'].join(' ');
 else if (cmd === 'shell cat /proc/sys/kernel/random/boot_id') output = '11111111-1111-1111-1111-111111111111';
 else if (cmd.endsWith('/status')) output = 'Pid:\\t' + (cmd.includes('/self/') ? '987' : s.pid) + '\\nNSpid:\\t' + (cmd.includes('/self/') ? '987' : s.pid);
-else if (cmd === 'shell cat /proc/net/unix') output = '@chrome_devtools_remote';
+else if (cmd === 'shell cat /proc/net/unix') output = '0000000000000000: 00000002 00000000 00010000 0001 01 4321 @chrome_devtools_remote';
 else if (cmd === 'shell dumpsys activity activities') output = 'ResumedActivity: ActivityRecord{x u0 com.android.chrome/' + (s.launched ? 'org.chromium.chrome.browser.webapps.WebappActivity' : 'com.google.android.apps.chrome.Main') + ' pid=' + s.pid + '}';
 else if (cmd.startsWith('shell cmd shortcut')) {
   output = s.shortcut;

@@ -29,7 +29,7 @@ const adbServer = createNetServer(socket => {
   else if (command[2] === '/proc/config.gz') stdout = gzipSync('CONFIG_IKCONFIG=y\nCONFIG_IKCONFIG_PROC=y\nCONFIG_PID_NS=y\n');
   else if (command[1] === 'pidof') stdout = '5301';
   else if (command[2]?.endsWith('/stat')) stdout = '5301 (chrome) S ' + Array(18).fill('0').join(' ') + ' 123456 0';
-  else if (command[2] === '/proc/net/unix') stdout = '0: 0 0 0 0 0 4321 @chrome_devtools_remote';
+  else if (command[2] === '/proc/net/unix') stdout = '0000000000000000: 00000002 00000000 00010000 0001 01 4321 @chrome_devtools_remote';
   else if (command[2]?.endsWith('/status')) stdout = 'Pid:\t5301\nNSpid:\t5301\n';
   else if (command[2] === '/proc/sys/kernel/random/boot_id') stdout = '11111111-1111-1111-1111-111111111111';
   else if (command[1] === 'dumpsys') stdout = 'mResumedActivity: ActivityRecord{a u0 com.android.chrome/com.google.android.apps.chrome.Main t1 pid=5301}';

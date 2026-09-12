@@ -106,7 +106,13 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
       const runnerTemp = join(root, 'runner-temp');
       const output = join(root, 'output');
       await Promise.all([mkdir(state, { recursive: true }), mkdir(runnerTemp, { recursive: true })]);
-      await writeFile(join(state, 'owner.json'), JSON.stringify({ ready: false, error: 'XCTEST: supervisor unfinished' }));
+      const listenerValidation = {
+        endpoints: { wda: { status: 'evaluated', count: 1, pids: ['1234'] }, mjpeg: { status: 'evaluated', count: 0, pids: [] } },
+        commandStatus: [{ port: 8100, status: 0 }], runnerEvidencePresent: 'absent', runnerAssociation: 'not-evaluated', mjpegAssociation: 'not-evaluated',
+        bundleId: { status: 'not-evaluated' }, executableHash: { status: 'not-evaluated' },
+        failureStage: 'wda-pid-count', errorCategory: 'listener-endpoint-cardinality',
+      };
+      await writeFile(join(state, 'owner.json'), JSON.stringify({ ready: false, error: 'XCTEST: supervisor unfinished', listenerValidation }));
       await writeFile(join(state, 'owner-private.json'), JSON.stringify({ ready: false, error: secret }));
       await writeFile(join(state, 'wda-preflight-private.log'), `failed launch ${secret}\n`);
       await writeFile(join(runnerTemp, 'wda-preflight.log'), `failed fallback ${secret}\n`);
@@ -123,6 +129,9 @@ export const nativeStartupTests: Array<[string, () => Promise<void>]> = [
         const owner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
         assert.equal(owner.ready, false);
         assert.equal(owner.error, 'XCTEST: supervisor unfinished');
+        assert.deepEqual(owner.listenerValidation, listenerValidation);
+        const exportedOwner = JSON.parse(await readFile(join(output, 'ios-xctest/owner.json'), 'utf8'));
+        assert.deepEqual(exportedOwner.listenerValidation, listenerValidation);
         for (const artifact of [join(output, 'ios-xctest/wda-preflight.log'), join(output, 'wda-preflight.log')]) {
           const uploaded = await readFile(artifact, 'utf8');
           assert.equal(uploaded.includes(secret), false);

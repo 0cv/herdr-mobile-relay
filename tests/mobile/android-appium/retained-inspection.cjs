@@ -9,7 +9,80 @@ const {inspectTargets, associateBrowserProcess} = require('./target-inspection.c
 
 const COMMAND = 'mobile: inspectRetainedChromeTargets';
 const SCRIPT = "return JSON.stringify({href:location.href,origin:location.origin,standalone:matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,provider:matchMedia('(display-mode: standalone)').matches || navigator.standalone === true ? 'android-standalone' : 'browser',timeOrigin:performance.timeOrigin})";
+const SOCKET_NAME = '@chrome_devtools_remote';
+const SOCKET_TABLE_LIMIT = 1048576;
+const SOCKET_ROW_LIMIT = 16384;
+const SOCKET_DIAGNOSTIC_ROW_LIMIT = 4;
+const UNIX_LISTEN_FLAGS = 0x00010000;
+const UNIX_STREAM_TYPE = 0x0001;
+const UNIX_UNCONNECTED_STATE = 0x01;
+const UNIX_ROW = /^([0-9a-fA-F]{16}):\s+([0-9a-fA-F]{8})\s+([0-9a-fA-F]{8})\s+([0-9a-fA-F]{8})\s+([0-9a-fA-F]{4})\s+([0-9a-fA-F]{2})\s+([0-9]{1,20})(?:\s+([@/][\x21-\x7e]*))?$/;
 const installed = new WeakSet();
+
+function socketDiagnostic(base, failurePredicate, selectedListener, selectedStatus = 'not-evaluated') {
+  return {
+    failurePredicate,
+    selectedListener: selectedListener ? {
+      status: 'selected', protocol: selectedListener.protocol, flags: selectedListener.flags,
+      type: selectedListener.type, state: selectedListener.state, inode: selectedListener.inode,
+      listening: selectedListener.listening,
+    } : {status: selectedStatus},
+    exactNameRows: base.exactNameRows,
+    listeningRows: base.listeningRows,
+    malformedRows: base.malformedRows,
+    tableBytes: base.tableBytes,
+    rowCount: base.rowCount,
+    socketRows: base.socketRows,
+    checkedAt: base.checkedAt,
+  };
+}
+
+function parseChromeSocketTable(value) {
+  const base = {
+    checkedAt: new Date().toISOString(), tableBytes: 0, rowCount: 0, exactNameRows: 0,
+    listeningRows: 0, malformedRows: 0, socketRows: [],
+  };
+  if (typeof value !== 'string') return {diagnostic: socketDiagnostic(base, 'socket-table-type')};
+  base.tableBytes = Buffer.byteLength(value, 'utf8');
+  if (base.tableBytes > SOCKET_TABLE_LIMIT) return {diagnostic: socketDiagnostic(base, 'socket-table-byte-bound')};
+  const rows = [];
+  for (const line of value.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || /^Num\s+RefCount\s+Protocol\s+Flags\s+Type\s+St\s+Inode(?:\s+Path)?$/u.test(trimmed)) continue;
+    if (++base.rowCount > SOCKET_ROW_LIMIT) return {diagnostic: socketDiagnostic(base, 'socket-table-row-bound')};
+    const fields = trimmed.split(/\s+/);
+    const named = fields.includes(SOCKET_NAME);
+    const match = trimmed.match(UNIX_ROW);
+    if (!match) {
+      if (named) { base.exactNameRows++; base.malformedRows++; }
+      continue;
+    }
+    if (match[8] !== SOCKET_NAME) continue;
+    base.exactNameRows++;
+    const row = {
+      protocol: match[3], flags: match[4], type: match[5], state: match[6], inode: match[7],
+      listening: parseInt(match[3], 16) === 0 && parseInt(match[4], 16) === UNIX_LISTEN_FLAGS
+        && parseInt(match[5], 16) === UNIX_STREAM_TYPE && parseInt(match[6], 16) === UNIX_UNCONNECTED_STATE,
+    };
+    if (base.socketRows.length < SOCKET_DIAGNOSTIC_ROW_LIMIT) {
+      base.socketRows.push({protocol: row.protocol, flags: row.flags, type: row.type, state: row.state, inode: row.inode, listening: row.listening});
+    }
+    if (row.listening) base.listeningRows++;
+    rows.push(row);
+  }
+  if (base.malformedRows) return {diagnostic: socketDiagnostic(base, 'malformed-exact-name-row')};
+  if (!base.exactNameRows) return {diagnostic: socketDiagnostic(base, 'exact-name-row-missing')};
+  if (base.listeningRows !== 1) {
+    return {diagnostic: socketDiagnostic(base, base.listeningRows ? 'unique-listening-row-ambiguous' : 'listening-row-missing', undefined, base.listeningRows ? 'ambiguous' : 'not-evaluated')};
+  }
+  const selected = rows.find(row => row.listening);
+  if (!selected || !/^[1-9]\d*$/.test(selected.inode)) return {diagnostic: socketDiagnostic(base, 'positive-listener-inode-missing', selected)};
+  return {row: selected, diagnostic: socketDiagnostic(base, 'none', selected)};
+}
+
+function socketUnavailable(diagnostic) {
+  return new Error(`Live Chrome socket unavailable (${JSON.stringify(diagnostic)})`);
+}
 
 async function installRetainedInspection(driver, owner, requireOwner, quarantine) {
   if (installed.has(driver)) throw new Error('Inspection guard already installed');
@@ -248,11 +321,13 @@ async function installRetainedInspection(driver, owner, requireOwner, quarantine
     const lines = (await adbRead(['forward', '--list'])).trim().split(/\r?\n/).map((line) => line.trim().split(/\s+/));
     const forwards = lines.filter((line) => line[1] === `tcp:${port}`);
     if (forwards.length !== 1 || forwards[0].length !== 3 || forwards[0][0] !== serial || forwards[0][2] !== 'localabstract:chrome_devtools_remote') throw new Error('Live owned Chrome forward changed');
-    const sockets = (await shell(['cat', '/proc/net/unix'])).split(/\r?\n/).map((line) => line.trim().split(/\s+/)).filter((line) => line[7] === '@chrome_devtools_remote');
-    if (sockets.length !== 1 || !/^[1-9]\d*$/.test(sockets[0][6])) throw new Error('Live Chrome socket unavailable');
-    const inode = sockets[0][6];
+    const socketObservation = parseChromeSocketTable(await shell(['cat', '/proc/net/unix']));
+    if (!socketObservation.row) throw socketUnavailable(socketObservation.diagnostic);
+    const inode = socketObservation.row.inode;
     const value = {serial, port, socket: 'chrome_devtools_remote', inode, browserVersion: `Chrome/${caps.browserVersion}`};
-    if (association && JSON.stringify(value) !== JSON.stringify(association)) throw new Error('Original browser/forward association changed');
+    if (association && JSON.stringify(value) !== JSON.stringify(association)) {
+      throw new Error(`Original browser/forward association changed (${JSON.stringify(socketDiagnostic(socketObservation.diagnostic, 'browser-forward-association-drift', socketObservation.row))})`);
+    }
     return value;
   };
   const version = (port) => read((timeout) => new Promise((resolve, reject) => {

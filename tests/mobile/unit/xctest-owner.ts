@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,16 +32,27 @@ const delayed=()=>{
 };
 delayed();
 if(cmd==='plutil') {
-  if(args[0]==='-extract') console.log(JSON.parse(readFileSync(args.at(-1),'utf8')).CFBundleIdentifier);
+  if(args[0]==='-extract') console.log(mode==='listener-bundle-mismatch' && args.at(-1).includes(process.env.STARTUP_TEST_RUNNER_RECEIPT) ? 'wrong.bundle' : JSON.parse(readFileSync(args.at(-1),'utf8')).CFBundleIdentifier);
   else if(args[1]==='json') console.log(readFileSync(args.at(-1),'utf8'));
 } else if(cmd==='lsof') {
   if(mode==='occupied') console.log('999999');
+  else if(existsSync(pidfile) && !args.includes('-d') && mode==='listener-invalid-pid') console.log('2147483648');
+  else if(existsSync(pidfile) && !args.includes('-d') && mode==='listener-first-failure') process.exit(2);
+  else if(existsSync(pidfile) && !args.includes('-d') && mode==='listener-second-failure' && args.includes('-iTCP:'+process.env.IOS_WDA_MJPEG_PORT)) process.exit(2);
+  else if(existsSync(pidfile) && !args.includes('-d') && mode==='listener-endpoints-disappear' && existsSync(join(root,'status-queries'))) process.exit(1);
   else if(existsSync(pidfile) && args.includes('-d')) {
     const requested=args[args.indexOf('-p')+1]||readFileSync(pidfile,'utf8');
+    if(mode==='listener-hash-after-freeze') {
+      const path=join(root,'listener-evidence-count');
+      const count=existsSync(path)?Number(readFileSync(path,'utf8')):0;
+      writeFileSync(path,String(count+1));
+      if(count>=1) writeFileSync(process.env.STARTUP_TEST_RUNNER_RECEIPT+'/WebDriverAgentRunner-Runner','different listener after freeze');
+    }
     const executable=mode==='credential'?process.env.STARTUP_TEST_RUNNER_RECEIPT+'/unexpected-listener':process.env.STARTUP_TEST_RUNNER_RECEIPT+'/WebDriverAgentRunner-Runner';
     console.log('p'+requested+'\\nftxt\\nn'+executable);
   } else if(existsSync(pidfile)) {
-    if(mode==='swap'||mode==='pid-reuse') {
+    if(mode==='listener-mjpeg-duplicate' && args.includes('-iTCP:'+process.env.IOS_WDA_MJPEG_PORT)) console.log('11111\\n22222');
+    else if(mode==='swap'||mode==='pid-reuse') {
       const path=join(root,'swap-lsof-count');
       const count=existsSync(path)?Number(readFileSync(path,'utf8')):0;
       writeFileSync(path,String(count+1));
@@ -71,6 +83,10 @@ if(cmd==='plutil') {
 } else if(cmd==='xcodebuild') {
   appendFileSync(join(root,'launches'),JSON.stringify(args)+'\\n');
   if(mode==='early') process.exit(43);
+  if(mode==='receipt-product-changed') {
+    writeFileSync(process.env.STARTUP_TEST_PRODUCT+'/WebDriverAgentRunner-Runner','changed product');
+    writeFileSync(join(root,'product-changed-at'),String(Date.now()));
+  }
   writeFileSync(pidfile,String(process.pid));
   writeFileSync(xcodePidfile,String(process.pid));
   const server=Bun.serve({hostname:'127.0.0.1',port:Number(process.env.IOS_WDA_PORT),fetch(){
@@ -87,7 +103,7 @@ if(cmd==='plutil') {
 const pause = () => new Promise(resolve => setTimeout(resolve, 25));
 
 export const xctestOwnerTests: Array<[string, () => Promise<void>]> = [];
-for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential']) {
+for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-first-failure', 'listener-second-failure', 'listener-endpoints-disappear', 'listener-hash-after-freeze']) {
   xctestOwnerTests.push([`Native startup actual XCTest supervisor ${mode}`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-test-'));
     const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
@@ -100,7 +116,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupi
     await Promise.all([mkdir(bin), mkdir(state), mkdir(join(product, 'PlugIns/WebDriverAgentRunner.xctest'), { recursive: true }), mkdir(receipt, { recursive: true }), mkdir(runnerReceipt, { recursive: true }), mkdir(join(root, 'wda'))]);
     for (const dir of [product, receipt, runnerReceipt]) {
       await writeFile(join(dir, 'Info.plist'), JSON.stringify({ CFBundleIdentifier: 'com.facebook.WebDriverAgentRunner.xctrunner' }));
-      await writeFile(join(dir, 'WebDriverAgentRunner-Runner'), 'exact built runner');
+      await writeFile(join(dir, 'WebDriverAgentRunner-Runner'), mode === 'listener-hash-mismatch' && dir === runnerReceipt ? 'different listener' : 'exact built runner');
     }
     await writeFile(join(root, 'wda/package.json'), JSON.stringify({ version: '16.12.1' }));
     await writeFile(xctestrun, JSON.stringify({ WebDriverAgentRunner: {
@@ -118,10 +134,11 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupi
     const port = (reserve.address() as AddressInfo).port;
     await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: mode,
-      STARTUP_TEST_RECEIPT: receipt, STARTUP_TEST_RUNNER_RECEIPT: runnerReceipt, STARTUP_TEST_XCTESTRUN: xctestrun, IOS_XCTEST_STATE_DIR: state,
+      STARTUP_TEST_RECEIPT: receipt, STARTUP_TEST_RUNNER_RECEIPT: runnerReceipt, STARTUP_TEST_PRODUCT: product, STARTUP_TEST_XCTESTRUN: xctestrun, IOS_XCTEST_STATE_DIR: state,
       IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '18.5', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
       IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
       MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned') };
+    const initialProductHash = createHash('sha256').update(await readFile(join(product, 'WebDriverAgentRunner-Runner'))).digest('hex');
     const deadline = Date.now() + (mode === 'invalid' || mode === 'oversized' ? 2000 : mode === 'delayed' ? 1500 : 10_000);
     await writeFile(join(state, 'deadline'), String(deadline));
     const child = spawn(process.execPath, [join(import.meta.dirname, '../support/ios-xctest.ts'), 'supervise'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -173,11 +190,41 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupi
       if (mode === 'early') assert.equal(owner.exitCode, 43);
       if (mode === 'invalid' || mode === 'oversized' || mode === 'delayed') assert.match(owner.error, /startup deadline/u);
       if (mode === 'oversized') assert.equal(owner.status?.truncated, true);
-      if (mode === 'receipt-failure' || mode === 'receipt-missing-then-valid') {
+      if (mode === 'receipt-failure' || mode === 'receipt-missing-then-valid' || mode === 'receipt-product-changed') {
         assert.ok(owner.listenerEvidence?.[0]?.birth);
         assert.ok(owner.receiptError);
-        if (mode === 'receipt-failure') assert.match(owner.receiptError, /xcrun failed/u);
-        else assert.match(owner.receiptError, /ENOENT|no such file/u);
+        if (mode === 'receipt-failure') {
+          assert.match(owner.receiptError, /xcrun failed/u);
+          assert.equal(owner.listenerValidation?.failureStage, 'validated');
+          assert.equal(owner.listenerValidation?.executableHash.status, 'evaluated');
+          assert.equal(owner.listenerValidation?.executableHash.expected, owner.cachedProductExecutableHash);
+          assert.match(owner.cachedProductExecutableHash, /^[0-9a-f]{64}$/u);
+          assert.match(owner.cachedProductExecutableHashAt, /^\d{4}-\d{2}-\d{2}T/u);
+        }
+        else if (mode === 'receipt-missing-then-valid') assert.match(owner.receiptError, /ENOENT|no such file/u);
+        else {
+          assert.match(owner.error, /registration receipt validation failed/u);
+          assert.match(owner.receiptError, /registration receipt mismatch/u);
+          const currentProductHash = createHash('sha256').update(await readFile(join(product, 'WebDriverAgentRunner-Runner'))).digest('hex');
+          assert.notEqual(currentProductHash, initialProductHash);
+          for (const installed of [receipt, runnerReceipt]) {
+            assert.equal(createHash('sha256').update(await readFile(join(installed, 'WebDriverAgentRunner-Runner'))).digest('hex'), initialProductHash);
+          }
+          assert.equal(owner.cachedProductExecutableHash, initialProductHash);
+          assert.equal(owner.listenerValidation?.cachedProductExecutableHash, initialProductHash);
+          assert.equal(owner.listenerValidation?.cachedProductExecutableHashAt, owner.cachedProductExecutableHashAt);
+          assert.ok(Date.parse(owner.cachedProductExecutableHashAt) >= Date.parse(owner.startedAt));
+          assert.ok(Date.parse(owner.cachedProductExecutableHashAt) <= Number(await readFile(join(root, 'product-changed-at'), 'utf8')));
+          assert.equal(owner.listenerValidation?.failureStage, 'validated');
+          assert.deepEqual(owner.listenerValidation?.executableHash, {status: 'evaluated', expected: initialProductHash, actual: initialProductHash, matches: true});
+          assert.equal(owner.installReceipt, await realpath(receipt));
+          assert.equal(owner.receipt, await realpath(receipt));
+          assert.equal(await readFile(join(root, 'receipt-queries'), 'utf8'), '2');
+          assert.equal(owner.runnerPid, undefined);
+          assert.equal(owner.runnerBirth, undefined);
+          assert.equal(owner.runnerExecutable, undefined);
+          assert.equal(owner.status, undefined);
+        }
         assert.equal(existsSync(join(root, 'status-queries')), false);
       }
       if (mode === 'swap' || mode === 'pid-reuse') {
@@ -191,6 +238,89 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupi
         assert.equal(publicOwner.includes('credential-token'), false);
         assert.ok(publicOwner.includes('[REDACTED]'));
         assert.ok(privateOwner.includes('credential-token'));
+      }
+      if (['listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'credential'].includes(mode)) {
+        const validation = owner.listenerValidation;
+        assert.ok(validation);
+        assert.equal(validation.endpoints.wda.status, 'evaluated');
+        assert.equal(validation.endpoints.wda.count, 1);
+        assert.ok(validation.endpoints.wda.pids.length <= 16);
+        assert.equal(validation.endpoints.mjpeg.status, 'evaluated');
+        assert.ok(validation.commandStatus.every((entry: { port: number; status: number | null }) => Number.isInteger(entry.port)));
+        assert.equal(validation.runnerEvidencePresent, 'present');
+        assert.equal(validation.runnerAssociation, 'not-evaluated');
+        assert.equal(validation.mjpegAssociation, mode === 'listener-mjpeg-duplicate' ? 'mismatch' : 'not-evaluated');
+        if (mode === 'listener-mjpeg-duplicate') {
+          assert.equal(validation.endpoints.mjpeg.count, 2);
+          assert.deepEqual(validation.endpoints.mjpeg.pids, ['11111', '22222']);
+          assert.equal(validation.failureStage, 'mjpeg-pid-count');
+          assert.equal(validation.errorCategory, 'listener-endpoint-cardinality');
+        }
+        if (mode === 'listener-bundle-mismatch') {
+          assert.equal(validation.bundleId.status, 'evaluated');
+          assert.equal(validation.bundleId.matches, false);
+          assert.equal(validation.executableHash.status, 'not-evaluated');
+          assert.equal(validation.failureStage, 'runner-bundle-id');
+        }
+        if (mode === 'listener-hash-mismatch') {
+          assert.equal(validation.bundleId.matches, true);
+          assert.equal(validation.executableHash.status, 'evaluated');
+          assert.equal(validation.executableHash.matches, false);
+          assert.match(validation.executableHash.expected, /^[0-9a-f]{64}$/u);
+          assert.match(validation.executableHash.actual, /^[0-9a-f]{64}$/u);
+          assert.equal(validation.failureStage, 'runner-executable-hash');
+        }
+        if (mode === 'credential') {
+          assert.equal(validation.pathShape.executableName, false);
+          assert.equal(validation.bundleId.status, 'not-evaluated');
+          assert.equal(validation.executableHash.status, 'not-evaluated');
+          assert.equal(validation.failureStage, 'runner-executable-name');
+        }
+      }
+      if (['listener-invalid-pid', 'listener-first-failure', 'listener-second-failure', 'listener-endpoints-disappear', 'listener-hash-after-freeze'].includes(mode)) {
+        const validation = owner.listenerValidation;
+        assert.ok(validation);
+        assert.ok(validation.commandStatus.every((entry: { port: number; status: number | null }) => Number.isInteger(entry.port)));
+        if (mode === 'listener-invalid-pid') {
+          assert.deepEqual(validation.endpoints.wda, {status: 'error', errorCategory: 'invalid-process-id'});
+          assert.deepEqual(validation.endpoints.mjpeg, {status: 'not-evaluated'});
+          assert.equal(validation.commandStatus[0].status, 0);
+          assert.equal(validation.failureStage, 'wda-listener-command');
+          assert.equal(validation.errorCategory, 'listener-invalid-process-id');
+        }
+        if (mode === 'listener-first-failure') {
+          assert.deepEqual(validation.endpoints.wda, {status: 'error', errorCategory: 'command-error'});
+          assert.deepEqual(validation.endpoints.mjpeg, {status: 'not-evaluated'});
+          assert.equal(validation.runnerEvidencePresent, 'not-evaluated');
+          assert.equal(validation.commandStatus[0].status, 2);
+          assert.equal(validation.failureStage, 'wda-listener-command');
+        }
+        if (mode === 'listener-second-failure') {
+          assert.deepEqual(validation.endpoints.wda, {status: 'evaluated', count: 1, pids: [String(owner.pid)]});
+          assert.deepEqual(validation.endpoints.mjpeg, {status: 'error', errorCategory: 'command-error'});
+          assert.equal(validation.runnerEvidencePresent, 'not-evaluated');
+          assert.equal(validation.commandStatus.at(-1).status, 2);
+          assert.equal(validation.failureStage, 'mjpeg-listener-command');
+        }
+        if (mode === 'listener-endpoints-disappear') {
+          assert.deepEqual(validation.endpoints.wda, {status: 'evaluated', count: 0, pids: []});
+          assert.deepEqual(validation.endpoints.mjpeg, {status: 'evaluated', count: 0, pids: []});
+          assert.equal(validation.runnerEvidencePresent, 'not-evaluated');
+          assert.equal(validation.runnerAssociation, 'mismatch');
+          assert.equal(validation.mjpegAssociation, 'not-evaluated');
+          assert.equal(validation.failureStage, 'managed-wda-pid-count');
+        }
+        if (mode === 'listener-hash-after-freeze') {
+          assert.equal(validation.endpoints.wda.status, 'evaluated');
+          assert.equal(validation.runnerEvidencePresent, 'present');
+          assert.equal(validation.runnerAssociation, 'match');
+          assert.equal(validation.mjpegAssociation, 'match');
+          assert.equal(validation.executableHash.status, 'evaluated');
+          assert.equal(validation.executableHash.matches, false);
+          assert.equal(validation.executableHash.expected, owner.cachedProductExecutableHash);
+          assert.notEqual(validation.executableHash.actual, validation.executableHash.expected);
+          assert.equal(validation.failureStage, 'runner-executable-hash');
+        }
       }
       if (mode === 'ready') assert.equal(owner.error, undefined);
       if (mode !== 'ownership') assert.match(await readFile(join(state, 'ios-wda-system.log'), 'utf8'), /retained simulator diagnostic/u);
