@@ -53,6 +53,8 @@ import { androidTransitionTests } from './android-transitions';
 import { androidEventTests } from './android-events';
 import { androidEnvironmentTests } from './android-environment';
 import { androidTransportTests } from './android-transport';
+import { nativeStartupTests } from './native-startup';
+import { xctestOwnerTests } from './xctest-owner';
 import { runIOSRegressions } from './ios';
 import { confirmationSettingsTests } from './confirmation-settings';
 import { initialSettingsTests } from './initial-settings';
@@ -2284,7 +2286,7 @@ for (const [name, body] of [...androidTransitionTests, ...androidEventTests]) te
 for (const [name, body] of scenarioRunnerTests) test(name, body);
 for (const [name, body] of webdriverInterruptionTests) test(name, body);
 for (const [name, body] of [...confirmationSettingsTests, ...initialSettingsTests]) test(name, body);
-for (const [name, body] of androidTransportTests) test(name, body);
+for (const [name, body] of [...androidTransportTests, ...nativeStartupTests, ...xctestOwnerTests]) test(name, body);
 test('iOS recorded publication, installation and navigation protocol regressions', runIOSRegressions);
 test('Android CI gates both local Appium launch paths', async () => {
   await import('./android-appium-ci');

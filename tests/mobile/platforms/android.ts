@@ -1,4 +1,5 @@
 import { X509Certificate } from 'node:crypto';
+import { AndroidStartupLog } from '../support/android-startup-log';
 import { decodeRetainedInspection, type RetainedNativeIdentity } from '../support/android-retained-decoder';
 import { createAdbInspection } from '../android-appium/adb-inspection.cjs';
 import { acquireKernelCapability, namespaceForCapability, validateNamespaceStatus, sameKernelCapability, type KernelCapability } from '../android-appium/kernel-namespace.cjs';
@@ -192,6 +193,7 @@ export class AndroidPlatform implements MobilePlatform {
   private readonly outputDir: string;
   private readonly budget: PhaseBudget;
   private readonly diagnostics: DiagnosticRecorder;
+  private startupLog?: AndroidStartupLog;
   private installedPackage = '';
   private initialLaunchAttempted = false;
   private retainedOwner?: RetainedNativeIdentity & { driver: AppiumClient; assertSession: () => void };
@@ -224,6 +226,10 @@ export class AndroidPlatform implements MobilePlatform {
   async startFreshDevice(): Promise<void> {
     if (!/^emulator-\d+$/.test(this.serial)) throw new Error('ANDROID_TARGET: refusing a non-emulator or ambiguous device');
     await requireOwnedDevice('android', this.serial);
+    if (this.startupLog) throw new Error('ANDROID_TARGET: startup diagnostic already owned');
+    this.startupLog = new AndroidStartupLog(this.outputDir);
+    this.startupLog.start(this.serial);
+    await this.startupLog.waitForHandshake();
     const devices = await commandOutput(process.env.ADB || 'adb', ['devices']);
     const matching = devices.split(/\r?\n/).filter((line) => line.startsWith(`${this.serial}\t`));
     if (matching.length !== 1 || !matching[0].endsWith('\tdevice')) throw new Error(`ANDROID_TARGET: ${this.serial} is not the only ready emulator`);
@@ -1023,7 +1029,17 @@ export class AndroidPlatform implements MobilePlatform {
   }
 
   async stopOwnedResources(): Promise<void> {
-    await this.driver.close();
+    let closeError: unknown;
+    try {
+      await this.driver.close();
+    } catch (error) { closeError = error; }
+    try {
+      await this.startupLog?.finish();
+    } catch (error) {
+      if (closeError) throw new AggregateError([closeError, error], 'Android session teardown and diagnostic retention failed', { cause: error });
+      throw error;
+    }
+    if (closeError) throw closeError;
   }
 
   private async createChromeSession(attachToRunningApp: boolean): Promise<void> {

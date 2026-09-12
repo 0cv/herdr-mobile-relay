@@ -340,6 +340,7 @@ export class IOSPlatform implements MobilePlatform {
   }
 
   async startFreshDevice(): Promise<void> {
+    const { managedWdaCapabilities } = await import('../support/ios-xctest');
     if (!this.udid) throw new Error('IOS_TARGET: IOS_SIMULATOR_UDID is required');
     await requireOwnedDevice('ios', this.udid);
     const available = await commandOutput('xcrun', ['simctl', 'list', 'devices', 'available']);
@@ -375,20 +376,12 @@ export class IOSPlatform implements MobilePlatform {
         // Allow Web Inspector time to publish a page after simctl openurl.
         'appium:webviewConnectTimeout': IOS_WEBVIEW_CONNECT_TIMEOUT_MS,
         'appium:webviewConnectRetries': IOS_WEBVIEW_CONNECT_RETRIES,
-        ...(process.env.IOS_WDA_PREBUILT_PATH
-          ? {
-            'appium:usePreinstalledWDA': true,
-            'appium:prebuiltWDAPath': process.env.IOS_WDA_PREBUILT_PATH,
-          }
-          : {}),
-        // A fresh hosted runner may need several minutes to build and launch WDA.
+        ...await managedWdaCapabilities(this.udid),
         'appium:showXcodeLog': true,
         'appium:wdaLaunchTimeout': 300_000,
         'appium:wdaStartupRetries': 1,
         'appium:wdaStartupRetryInterval': 10_000,
       },
-      // Keep the client request alive while Appium installs/launches the
-      // prebuilt WebDriverAgent and creates the Safari session.
       requestTimeoutMs: 360_000,
       budget: this.budget,
     });

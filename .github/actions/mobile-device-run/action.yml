@@ -36,6 +36,7 @@ runs:
         printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
         printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
         printf 'IOS_PLATFORM_VERSION=18.5\n' >> "$GITHUB_ENV"
+        printf 'IOS_XCTEST_STATE_DIR=%s\n' "$RUNNER_TEMP/herdr-xctest-owner" >> "$GITHUB_ENV"
         printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
         printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
         printf 'IOS_WDA_PREBUILT_PATH=%s/Build/Products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
@@ -230,6 +231,7 @@ runs:
         else
           npm install --global appium@3.1.1
           appium driver install xcuitest@12.10.0
+          npm install --prefix "$APPIUM_HOME/node_modules/appium-xcuitest-driver" --no-save --package-lock=false appium-webdriveragent@16.12.1
           npm install --prefix "$APPIUM_HOME" --no-save --package-lock=false @appium/logger@2.0.4
           appium driver list --installed >"$RUNNER_TEMP/appium-drivers.txt"
         fi
@@ -249,37 +251,14 @@ runs:
           COMPILER_INDEX_STORE_ENABLE=NO \
           APPIUM_XCODEBUILD_WDA_MARKER=1 \
           2>&1 | tee "$RUNNER_TEMP/wda-build.log"
-        xctestrun="$(find "$IOS_WDA_BOOTSTRAP_PATH" -maxdepth 1 -name 'WebDriverAgentRunner_*.xctestrun' -print -quit)"
-        test -n "$xctestrun"
         test -d "$IOS_WDA_PREBUILT_PATH"
         test -d "$IOS_WDA_AGENT_PATH"
       shell: bash
-    - name: Install and validate prebuilt WebDriverAgent
+    - name: Start owned managed XCTest
       if: inputs.platform == 'ios'
       run: |
         set -euo pipefail
-        dump_wda_simulator_log() {
-          xcrun simctl spawn "$IOS_SIMULATOR_UDID" log show --last 10m --style compact \
-            --predicate 'process CONTAINS[c] "WebDriverAgent" OR process == "xctest" OR eventMessage CONTAINS[c] "WebDriverAgent"' \
-            >"$RUNNER_TEMP/ios-wda-system.log" 2>&1 || true
-        }
-        wda_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$IOS_WDA_PREBUILT_PATH/Info.plist")"
-        test "$wda_bundle_id" = com.facebook.WebDriverAgentRunner.xctrunner
-        xcrun simctl install "$IOS_SIMULATOR_UDID" "$IOS_WDA_PREBUILT_PATH"
-        SIMCTL_CHILD_USE_PORT=8100 \
-        SIMCTL_CHILD_WDA_PRODUCT_BUNDLE_IDENTIFIER="$wda_bundle_id" \
-          xcrun simctl launch --terminate-running-process "$IOS_SIMULATOR_UDID" "$wda_bundle_id" \
-          >"$RUNNER_TEMP/wda-preflight.log" 2>&1
-        for attempt in $(seq 1 300); do
-          if curl --fail --silent --max-time 2 http://127.0.0.1:8100/status >"$RUNNER_TEMP/wda-status.json"; then
-            cat "$RUNNER_TEMP/wda-status.json"
-            exit 0
-          fi
-          sleep 1
-        done
-        dump_wda_simulator_log
-        tail -200 "$RUNNER_TEMP/wda-preflight.log" >&2 || true
-        exit 1
+        bun tests/mobile/support/ios-xctest.ts start
       shell: bash
     - name: Start Appium
       run: |
@@ -338,11 +317,28 @@ runs:
           --operations "$MOBILE_OUTPUT/android-environment-operations.json" \
           --output "$MOBILE_OUTPUT/android-environment-check.json"
       shell: bash
+    - name: Finalize owned XCTest diagnostics
+      if: always() && inputs.platform == 'ios'
+      run: |
+        set -euo pipefail
+        bun tests/mobile/support/ios-xctest.ts stop
+      shell: bash
     - name: Sanitize bounded diagnostics
       if: always()
       run: |
         set -euo pipefail
         mkdir -p "$MOBILE_OUTPUT"
+        if [ "$MOBILE_PLATFORM" = ios ] && [ -d "$IOS_XCTEST_STATE_DIR" ]; then
+          mkdir -p "$MOBILE_OUTPUT/ios-xctest"
+          for artifact in owner.json selected.xctestrun installed-Info.plist ios-wda-system.log wda-status.json; do
+            if [ -f "$IOS_XCTEST_STATE_DIR/$artifact" ]; then cp "$IOS_XCTEST_STATE_DIR/$artifact" "$MOBILE_OUTPUT/ios-xctest/$artifact"; fi
+          done
+          wda_log="$IOS_XCTEST_STATE_DIR/wda-preflight-private.log"
+          if [ ! -f "$wda_log" ]; then wda_log="$IOS_XCTEST_STATE_DIR/wda-preflight.log"; fi
+          if [ -f "$wda_log" ]; then
+            bun -e 'import { open, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); const handle = await open(input); try { const buffer = Buffer.alloc(104857600); const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0); const sanitized = Buffer.from(redactText(buffer.subarray(0, bytesRead).toString("utf8"))).subarray(0, 104857600); await writeFile(output, sanitized, { mode: 0o600 }); } finally { await handle.close(); }' "$wda_log" "$MOBILE_OUTPUT/ios-xctest/wda-preflight.log"
+          fi
+        fi
         if [ "$MOBILE_PLATFORM" = android ]; then bash tests/mobile/android-appium/ci.sh evidence "$MOBILE_OUTPUT"; fi
         if [ -f "$RUNNER_TEMP/appium.log" ]; then
           bun -e 'import { readFile, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); await writeFile(output, redactText(await readFile(input, "utf8")).slice(0, 104857600), { mode: 0o600 });' "$RUNNER_TEMP/appium.log" "$MOBILE_OUTPUT/appium.log"
@@ -351,7 +347,7 @@ runs:
           head -c 104857600 "$RUNNER_TEMP/wda-build.log" >"$MOBILE_OUTPUT/wda-build.log" || true
         fi
         if [ -f "$RUNNER_TEMP/wda-preflight.log" ]; then
-          head -c 104857600 "$RUNNER_TEMP/wda-preflight.log" >"$MOBILE_OUTPUT/wda-preflight.log" || true
+          bun -e 'import { open, writeFile } from "node:fs/promises"; import { redactText } from "./tests/mobile/support/diagnostics.ts"; const [input, output] = process.argv.slice(-2); const handle = await open(input); try { const buffer = Buffer.alloc(104857600); const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0); const sanitized = Buffer.from(redactText(buffer.subarray(0, bytesRead).toString("utf8"))).subarray(0, 104857600); await writeFile(output, sanitized, { mode: 0o600 }); } finally { await handle.close(); }' "$RUNNER_TEMP/wda-preflight.log" "$MOBILE_OUTPUT/wda-preflight.log"
         fi
         if [ -f "$RUNNER_TEMP/wda-status.json" ]; then cp "$RUNNER_TEMP/wda-status.json" "$MOBILE_OUTPUT/wda-status.json"; fi
         if [ -f "$RUNNER_TEMP/ios-wda-system.log" ]; then

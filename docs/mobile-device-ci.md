@@ -143,10 +143,25 @@ A manual workflow dispatch requires `artifact_run_id`, the completed successful 
 
 Each device matrix entry selects one of 0.20.8, 0.20.9, or 0.20.10 as the installed baseline. `baseline_set: latest` prepares only 0.20.10; smoke runs omit the unused synthetic bundle artifact. The controlled smoke and release suites inject one bounded corrupt candidate-script response for historical upgrades and a missing-stylesheet response for the synthetic current-code pair, prove each request was consumed and phone completion was not acknowledged, then use the shipped Try again control without reinstalling or re-pairing. It also builds two coherent temporary current-code bundles through the real frontend pipeline and runs the same fault/completion assertions against that pair. The historical 0.20.8/0.20.9 progress-format gap is reported as `HISTORICAL_PHONE_ACCOUNTING_UNAVAILABLE:<version>` rather than treated as a successful acknowledgement or a failed upgrade. After recording completion evidence, the runner closes the non-dismissible update dialog, returns from Settings to the fixture's alpha agent, and only then runs the native keyboard check. Evidence artifacts contain the mobile result, screenshots, bounded fixture/Appium logs, driver versions, and platform version records. Secrets, setup fragments, relay credentials, and control headers are redacted or deleted before upload.
 
-On hosted iOS, CI prebuilds the simulator WDA app, installs and launches it
-through `simctl`/Appium's preinstalled-WDA path, and waits for
-`http://127.0.0.1:8100/status` before creating the Safari session. This
-separates a successful Xcode build from proof that WDA is actually listening;
-bounded WDA and simulator logs are uploaded on failure.
+On hosted iOS, both CI entrypoints prebuild pinned WDA 16.12.1 and use
+`tests/mobile/support/ios-xctest.ts` to supervise one managed
+`xcodebuild test-without-building` invocation. The helper selects exactly one
+expected xctestrun and runner for the owned simulator. It records the child PID,
+registration receipts, status identity and exit status under `IOS_XCTEST_STATE_DIR`.
+Appium requires that live owner and uses its loopback `webDriverAgentUrl`; it does
+not launch another WDA. The existing 300-second startup deadline is shared with
+HTTP checks. Always-run finalization stops the owner before diagnostic upload.
+Local harness invocations also require this managed owner; the simulator/Appium
+setup above alone is not sufficient. Supply the already-built WDA product,
+bootstrap and project paths, runtime and fresh state directory before running
+`bun tests/mobile/support/ios-xctest.ts start`; finish with the matching `stop`
+command and shutdown of only the marked simulator.
+
+Android retains a separate all-buffer threadtime startup diagnostic before the
+first certificate-preparation session. It connects only to the existing local
+ADB server, uses one shell-v2 stream, and records bounded stdout/stderr, framing,
+exit and truncation state. A closed stream without an exit frame has unknown
+remote status. This preceding-window diagnostic does not replace the mandatory
+qualified environment collector or establish exhaustive coverage or cleanliness.
 
 Physical-phone signoff remains separate: verify the same old-to-candidate flow on an approved Android handset and iPhone, with production access disabled and no uploaded device state. Record OS/browser/PWA provider, standalone launch, credential reconnect, preference preservation, cold relaunch, and keyboard results alongside the emulator artifacts; never treat simulator success as physical-device coverage.
