@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,7 +20,7 @@ type socketAPIClient struct {
 	mu     sync.Mutex
 	conn   net.Conn
 	reader *bufio.Reader
-	seq    uint64
+	seq    atomic.Uint64
 }
 
 type PaneRead struct {
@@ -54,6 +56,127 @@ func (c *socketAPIClient) available(ctx context.Context) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.connect(checkCtx) == nil
+}
+
+type socketAPIEnvelope struct {
+	ID     string          `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Error  *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func (c *socketAPIClient) requestUnary(
+	ctx context.Context,
+	method string,
+	params map[string]any,
+) (json.RawMessage, bool, error) {
+	if c == nil || c.path == "" {
+		return nil, false, errors.New("Herdr socket path is unavailable")
+	}
+	requestCtx := ctx
+	cancel := func() {}
+	if _, ok := requestCtx.Deadline(); !ok {
+		requestCtx, cancel = context.WithTimeout(requestCtx, defaultTimeout)
+	}
+	defer cancel()
+
+	conn, err := (&net.Dialer{}).DialContext(requestCtx, "unix", c.path)
+	if err != nil {
+		return nil, false, fmt.Errorf("connect to Herdr socket API: %w", err)
+	}
+	stopWatch := closeOnContextDone(requestCtx, conn)
+	defer stopWatch()
+	defer conn.Close()
+	deadline, _ := requestCtx.Deadline()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, false, fmt.Errorf("set Herdr socket API deadline: %w", err)
+	}
+
+	requestID := fmt.Sprintf("mobile-relay-api-%d", c.seq.Add(1))
+	payload, err := json.Marshal(map[string]any{
+		"id": requestID, "method": method, "params": params,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("encode Herdr socket API request: %w", err)
+	}
+	payload = append(payload, '\n')
+	written, err := conn.Write(payload)
+	if err != nil {
+		return nil, written > 0, fmt.Errorf("write Herdr socket API request: %w", err)
+	}
+	line, err := readSocketAPILine(bufio.NewReaderSize(conn, socketAPIBufferBytes))
+	if err != nil {
+		return nil, true, fmt.Errorf("read Herdr socket API response: %w", err)
+	}
+	var response socketAPIEnvelope
+	if err := json.Unmarshal(line, &response); err != nil {
+		return nil, true, fmt.Errorf("decode Herdr socket API response: %w", err)
+	}
+	if response.Error != nil {
+		if response.ID != requestID && !isPreDispatchRequestError(response.ID, response.Error.Code, response.Error.Message) {
+			return nil, true, errors.New("Herdr socket API response ID mismatch")
+		}
+		return nil, true, fmt.Errorf("Herdr socket API: %w", &CLIError{
+			Code:    response.Error.Code,
+			Message: response.Error.Message,
+		})
+	}
+	if response.ID != requestID {
+		return nil, true, errors.New("Herdr socket API response ID mismatch")
+	}
+	if len(response.Result) == 0 || string(response.Result) == "null" {
+		return nil, true, errors.New("Herdr socket API response has no result")
+	}
+	return response.Result, true, nil
+}
+
+func isPreDispatchRequestError(id, code, message string) bool {
+	return id == "" && code == "invalid_request" && strings.HasPrefix(message, "invalid request:")
+}
+
+func decodeSocketResult(raw json.RawMessage, wantType string, target any) error {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return fmt.Errorf("decode Herdr socket API result: %w", err)
+	}
+	if envelope.Type != wantType {
+		return fmt.Errorf("Herdr socket API returned %q, want %q", envelope.Type, wantType)
+	}
+	if target == nil {
+		return nil
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("decode Herdr %s result: %w", wantType, err)
+	}
+	return nil
+}
+
+func (c *socketAPIClient) requestResult(
+	ctx context.Context,
+	method string,
+	params map[string]any,
+	wantType string,
+	target any,
+) error {
+	raw, wrote, err := c.requestUnary(ctx, method, params)
+	if err != nil {
+		var cliErr *CLIError
+		if errors.As(err, &cliErr) {
+			return err
+		}
+		if wrote {
+			return errors.Join(ErrDispatchedUnknown, err)
+		}
+		return errors.Join(ErrNotStarted, err)
+	}
+	if err := decodeSocketResult(raw, wantType, target); err != nil {
+		return errors.Join(ErrDispatchedUnknown, err)
+	}
+	return nil
 }
 
 func (c *socketAPIClient) readPane(
@@ -134,8 +257,7 @@ func (c *socketAPIClient) requestConnected(
 		return response, false, fmt.Errorf("set Herdr socket API deadline: %w", err)
 	}
 
-	c.seq++
-	requestID := fmt.Sprintf("mobile-relay-api-%d", c.seq)
+	requestID := fmt.Sprintf("mobile-relay-api-%d", c.seq.Add(1))
 	payload, err := json.Marshal(map[string]any{
 		"id": requestID, "method": method, "params": params,
 	})
@@ -153,14 +275,17 @@ func (c *socketAPIClient) requestConnected(
 	if err := json.Unmarshal(line, &response); err != nil {
 		return response, true, fmt.Errorf("decode Herdr socket API response: %w", err)
 	}
-	if response.ID != requestID {
-		return response, true, errors.New("Herdr socket API response ID mismatch")
-	}
 	if response.Error != nil {
+		if response.ID != requestID && !isPreDispatchRequestError(response.ID, response.Error.Code, response.Error.Message) {
+			return response, true, errors.New("Herdr socket API response ID mismatch")
+		}
 		return response, true, fmt.Errorf("Herdr socket API: %w", &CLIError{
 			Code:    response.Error.Code,
 			Message: response.Error.Message,
 		})
+	}
+	if response.ID != requestID {
+		return response, true, errors.New("Herdr socket API response ID mismatch")
 	}
 	return response, true, nil
 }

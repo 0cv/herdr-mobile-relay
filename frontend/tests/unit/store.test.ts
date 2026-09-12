@@ -2,10 +2,17 @@ import { get } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeRelayId } from '$lib/config';
 import { BrowserDeviceCredentialStore } from '$lib/device-auth';
-import { setTerminalHistoryLines, setTerminalRefreshInterval } from '$lib/preferences';
+import {
+  defaultAgentView,
+  paneAgentViewOverrides,
+  setPaneAgentView,
+  setTerminalHistoryLines,
+  setTerminalRefreshInterval,
+} from '$lib/preferences';
+import { paneViewPreferenceKey } from '$lib/agent-view';
 import { relayStore, type CommandError } from '$lib/store';
 import type { RelayTransport, TransportAuthentication, TransportHandlers, TransportStatus, TransportStatusDetail } from '$lib/transports';
-import type { RelayConfig, RelayWorkspace } from '$lib/types';
+import type { Agent, RelayConfig, RelayWorkspace } from '$lib/types';
 import { pendingRelayUpdate } from '$lib/updates';
 
 type TransportFactory = (relay: RelayConfig, handlers: TransportHandlers, authentication?: TransportAuthentication) => RelayTransport;
@@ -55,6 +62,20 @@ function exactAgentFields(paneId = 'w1:p1') {
     agent_session_id: '',
   };
 }
+function preferenceAgent(relayId: string, rawPaneId: string, terminalId: string): Agent {
+  return {
+    relay_id: relayId,
+    relay_label: relayId,
+    raw_pane_id: rawPaneId,
+    pane_id: `${relayId}::${rawPaneId}`,
+    server_session_id: 'primary',
+    terminal_id: terminalId,
+    generation: 1,
+    agent_session_id: 'session-1',
+    agent: 'codex',
+  };
+}
+
 function exactWireScope(paneId: string, relayId: string) {
   return {
     server_session_id: 'primary',
@@ -74,6 +95,8 @@ describe('relay command store', () => {
     MockWebSocket.instances = [];
     localStorage.clear();
     sessionStorage.clear();
+    defaultAgentView.set('terminal');
+    paneAgentViewOverrides.set({});
     vi.stubGlobal('WebSocket', MockWebSocket);
     relayStore.destroy();
     setTerminalRefreshInterval(250);
@@ -85,6 +108,8 @@ describe('relay command store', () => {
     transportHijack.current = null;
     relayStore.destroy();
     relayStore.relayConfigs.set([]);
+    defaultAgentView.set('terminal');
+    paneAgentViewOverrides.set({});
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -102,6 +127,155 @@ describe('relay command store', () => {
     expect(command.client_id).toBeTruthy();
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true, phase: 'confirmed' });
     await expect(pending).resolves.toMatchObject({ ok: true, phase: 'confirmed' });
+  });
+
+  it('bounds conversation history payloads and requires a usable preparation cursor', async () => {
+    const agent = preferenceAgent('fedora', 'w1:p1', 'terminal-w1:p1');
+    const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
+      type: 'command_result',
+      request_id: 'history-1',
+      ok: true,
+      data: {
+        available: true,
+        state: 'ready',
+        mode: 'recent',
+        has_more: false,
+        entries: [{
+          id: 'entry-1',
+          timestamp: '2026-01-01T00:00:00Z',
+          role: 'assistant',
+          text: 'x'.repeat(1_200_000),
+          tools: [{ id: 'tool-1', name: '', input: 'i'.repeat(1_200_000), output: 'o'.repeat(1_200_000) }],
+        }],
+        diagnostics: {},
+      },
+    });
+    const result = await relayStore.getConversationHistory(agent);
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].text).toHaveLength(1_048_576);
+    expect(result.entries[0].tools?.[0]).toMatchObject({ name: 'Tool', input: 'i'.repeat(1_048_576), output: 'o'.repeat(1_048_576) });
+
+    send.mockResolvedValueOnce({
+      type: 'command_result', request_id: 'history-2', ok: true,
+      data: { available: true, state: 'preparing', mode: 'recent', has_more: false, entries: [], diagnostics: {} },
+    });
+    await expect(relayStore.getConversationHistory(agent)).rejects.toThrow('Relay returned invalid conversation history');
+
+    send.mockResolvedValueOnce({
+      type: 'command_result', request_id: 'history-3', ok: true,
+      data: {
+        available: true, state: 'ready', mode: 'recent', has_more: false, entries: [],
+        diagnostics: { continuation_incomplete: true, continuation_reason: 'partial_link' },
+      },
+    });
+    await expect(relayStore.getConversationHistory(agent)).resolves.toMatchObject({
+      diagnostics: { continuation_incomplete: true, continuation_reason: 'partial_link' },
+    });
+  });
+
+  it('aborts a conversation request without leaving a pending relay handler', async () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({ type: 'push_config', protocol: 3, version: 'abc123', host: 'fedora', capabilities: [], agent_profiles: [] });
+    const controller = new AbortController();
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const current = preferenceAgent(relayId, 'w1:p1', 'terminal-w1:p1');
+    const pending = relayStore.getConversationHistory(current, { signal: controller.signal });
+    expect(socket.sent.some((payload) => JSON.parse(payload).type === 'get_conversation_history')).toBe(true);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'request_cancelled' });
+    const request = JSON.parse(socket.sent.at(-1)!);
+    socket.message({ type: 'command_result', request_id: request.request_id, ok: true, phase: 'completed', data: {} });
+    await expect(relayStore.getConversationHistory(current, { signal: AbortSignal.abort() })).rejects.toMatchObject({ code: 'request_cancelled' });
+  });
+
+  it('cleans pane view overrides only when a relay is explicitly removed', () => {
+    const fedoraId = get(relayStore.relayConfigs)[0].id;
+    relayStore.addRelay({ label: 'Mac', url: 'wss://mac.example', token: '' });
+    const macId = get(relayStore.relayConfigs).find((relay) => relay.label === 'Mac')!.id;
+    const fedoraPane = preferenceAgent(fedoraId, 'pane-1', 'terminal-1');
+    const macPane = preferenceAgent(macId, 'pane-1', 'terminal-1');
+    defaultAgentView.set('conversation');
+    setPaneAgentView(fedoraPane, 'terminal');
+    setPaneAgentView(macPane, 'conversation');
+    relayStore.disconnectRelay(fedoraId);
+    expect(get(paneAgentViewOverrides)).toEqual({
+      [paneViewPreferenceKey(fedoraPane)!]: 'terminal',
+      [paneViewPreferenceKey(macPane)!]: 'conversation',
+    });
+    relayStore.removeRelay(fedoraId);
+    expect(get(paneAgentViewOverrides)).toEqual({
+      [paneViewPreferenceKey(macPane)!]: 'conversation',
+    });
+    expect(get(defaultAgentView)).toBe('conversation');
+  });
+
+  it('does not block relay removal when pane preference cleanup fails', () => {
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    const pane = preferenceAgent(relayId, 'pane-1', 'terminal-1');
+    setPaneAgentView(pane, 'conversation');
+    const nativeRemove = localStorage.removeItem.bind(localStorage);
+    const remove = vi.spyOn(localStorage, 'removeItem').mockImplementation((key) => {
+      if (key === 'herdr_pane_agent_view_overrides') throw new Error('read only');
+      nativeRemove(key);
+    });
+    const toast = vi.spyOn(relayStore, 'showToast');
+    relayStore.removeRelay(relayId);
+    expect(get(relayStore.relayConfigs).some((relay) => relay.id === relayId)).toBe(false);
+    expect(get(paneAgentViewOverrides)).toEqual({ [paneViewPreferenceKey(pane)!]: 'conversation' });
+    expect(toast).toHaveBeenCalledWith('Could not clear saved pane view preferences on this device.', true);
+    remove.mockRestore();
+  });
+
+  it('applies live Herdr status updates without accepting stale generations', () => {
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.open();
+    socket.message({
+      type: 'push_config',
+      protocol: 3,
+      host: 'fedora',
+      capabilities: ['workspace_management', 'pane_realtime_delta'],
+      herdr_status: {
+        generation: 4,
+        installed_client_version: '0.9.0',
+        server_version: '0.8.0',
+        server_protocol: 1,
+        server_protocol_known: true,
+        features: {
+          'pane.read': { state: 'supported', reason: 'ping', generation: 4 },
+        },
+      },
+      agent_profiles: [],
+    });
+    const relayId = get(relayStore.relayConfigs)[0].id;
+    socket.message({
+      type: 'herdr_status',
+      status: {
+        generation: 3,
+        server_version: 'old',
+        features: {
+          'pane.read': { state: 'unsupported', reason: 'method_not_supported', generation: 3 },
+        },
+      },
+      capabilities: ['workspace_management'],
+    });
+    expect(relayStore.connection(relayId)?.herdrStatus.server_version).toBe('0.8.0');
+    expect(relayStore.connection(relayId)?.capabilities).toContain('pane_realtime_delta');
+    socket.message({
+      type: 'herdr_status',
+      status: {
+        generation: 5,
+        server_version: '0.9.0',
+        server_protocol: 2,
+        server_protocol_known: true,
+        features: {
+          'pane.read': { state: 'unsupported', reason: 'method_not_supported', generation: 5 },
+        },
+      },
+      capabilities: ['workspace_management'],
+    });
+    expect(relayStore.connection(relayId)?.herdrStatus.server_version).toBe('0.9.0');
+    expect(relayStore.connection(relayId)?.capabilities).toEqual(['workspace_management']);
   });
 
   it('stores empty workspaces and sends workspace and worktree commands', async () => {
@@ -825,6 +999,8 @@ describe('relay command store', () => {
       last_success_at: 200,
       stale: false,
     });
+    socket.message({ type: 'agents', agents: [] });
+    expect(get(relayStore.agents)).toHaveLength(0);
     const pending = relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' });
     const command = JSON.parse(socket.sent.at(-1)!);
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true });

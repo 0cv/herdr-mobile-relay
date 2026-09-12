@@ -135,6 +135,11 @@ Open **Workspaces** from the folder button in the header to:
   linked worktree;
 - close a linked-worktree workspace without deleting its checkout, or remove
   the checkout while retaining its Git branch.
+- closing a repository workspace with linked worktrees first offers **Close
+  Workspace Group**. The second dialog lists the current group and must be
+  confirmed separately; Herdr closes the group that is open when the operation
+  runs, so membership can change after confirmation. It never removes Git
+  checkouts or branches.
 
 Linked worktrees are nested below their repository workspace on both the home
 screen and the Workspaces page, drawn as a tree with connector rails that
@@ -149,6 +154,26 @@ Normal worktree removal refuses a dirty checkout. **Force Remove** is offered
 only after that refusal and requires a second confirmation because it discards
 uncommitted checkout changes. Creating a worktree uses Herdr's configured
 worktree directory; the phone cannot provide an arbitrary checkout path.
+
+The separate **Remove Worktree** action is the destructive checkout operation.
+It retains the Git branch and is subject to the dirty-checkout and force-remove
+rules above. Closing a workspace and removing its worktree are never the same
+operation.
+
+## Herdr compatibility
+
+Settings reports the installed Herdr client version separately from the running
+server version and protocol. It also reports the generation of the relay's
+stable JSON endpoint contract and the reason each feature is supported,
+unsupported, or still unknown. An endpoint generation is not a claim that all
+optional features are available.
+
+Agent, pane, workspace, and tab inventory uses Herdr's JSON operations. The
+mobile terminal remains a separate binary-stream compatibility path, so a
+server can support inventory and workspace controls while its terminal
+transport is unavailable. The event stream is subscribed before each snapshot;
+after a reconnect the relay takes a fresh snapshot rather than replaying every
+notification missed while disconnected.
 
 **Inspect Workspace** is read-only and is available only when the connected
 relay advertises workspace inspection and the agent reports a working
@@ -189,11 +214,30 @@ mostly drive full-screen TUIs from the phone. While the height is leased, the
 on-screen keyboard never shrinks it — the lease keeps the resting height and
 re-measures when the keyboard closes.
 
+Herdr 0.9.0's independent client views do not replace this option: the relay
+still reads pane snapshots and resizes the shared PTY, rather than attaching as
+a native Herdr terminal client. Clients sharing a tab still share its size.
+
 Terminal History keeps 100, 500, 1,000, or 10,000 lines in the terminal view.
 1,000 is the default and the ceiling on the gateway-relayed path; direct
 connections can use 10,000. The "older history" notice reports when rows beyond
 the served window exist. Use **Copy** for the latest response or
 **Conversation History** for clean, searchable earlier turns.
+
+In **Settings → Agents → Default View**, choose **Terminal** or
+**Conversation** for new agent openings. Terminal is the initial default. In
+**Manage agent → Default View**, choose **Use default** or set a preference for
+that pane; the menu is available from both Terminal and Conversation. These
+preferences are stored only in this browser/app on this device and apply across
+its connected computers. A pane preference belongs to the pane, not its harness,
+and changing its session or name does not reset it. A new or replaced terminal
+inherits the global default.
+
+Preference changes affect the next opening, not the screen currently shown, and
+manual Terminal/Conversation switching does not change the saved preference.
+Unsupported agents, agents without a session, or unavailable transcripts open
+in Terminal instead. Terminal remains one tap away for approvals, questions,
+and other terminal-only controls.
 
 For supported agents, the terminal header opens **Conversation History** after
 the agent reports a session. It opens on the newest turn and stays there as
@@ -219,9 +263,69 @@ attention, and the **Terminal** header button switches to the same agent without
 adding repeated view toggles to browser history.
 
 Hidden reasoning, injected system records, and sidechain turns remain excluded.
-Reads are confined to known session directories and the newest 16 MiB of very
-large logs. When that bound omits older turns, they remain in the harness log
-on the computer.
+Claude continuation links are followed within the selected project, so a stale
+anchor session can show newer continuation sessions in order. Conversation
+History requests up to 200 records at a time but loads only enough logical
+exchanges for the current view: tool-only pages and exchanges split across page
+boundaries are followed automatically. The newest usable exchange is shown on
+open, and scrolling near the top loads earlier exchanges without a normal-path
+**Load older turns** click. A small in-memory preview can appear immediately on
+a warm reopen while the current latest page is checked; it is bounded, never
+persisted by the browser, and never authorizes a cursor or proves that history
+is empty. Loading, preparation, context search, errors, and the true beginning
+of the available source have separate status messages. Search filters loaded
+content only. Older browsing keeps a fixed chain snapshot and continues across
+large parent files through the local index; a missing, invalid, ambiguous,
+cyclic, or bounded-out continuation remains readable and displays an
+incomplete-history warning. Reads are confined to known session directories and
+the newest 16 MiB of very large logs. When that bound omits older turns, they
+remain in the harness log on the computer. Preparation reports progress and
+never blocks the relay's live terminal paths. Snapshot pages remain stable while
+new turns are written, and storage, source-change, corruption, oversized-record,
+and expired-cursor states are reported without exposing transcript paths or raw
+records. Pagination uses only short-lived opaque cursors; the app never
+constructs a cursor from a displayed entry ID. OpenCode and Hermes retain their
+native database pagination semantics while binding cursors to the selected
+source identity.
+
+### Conversation history cache and limits
+
+The relay never edits a provider transcript or native database to serve this
+view. SQLite reads use read-only mode; JSONL reads use captured regular-file
+handles and reject symlink retargeting. The optional derived cache lives under
+`<cache>/conversation-history`, which is created as mode `0700`; each bbolt
+snapshot is a regular mode `0600` file. Startup removes abandoned snapshot
+files, and shutdown and expiry remove the derived index, not the source
+transcript.
+
+Default bounds are one active preparation, four queued preparations, a
+30-second client-interest lease, 15-minute snapshot expiry, and 15-minute
+cursor expiry. A snapshot is limited to 512 MiB and all snapshots together to
+1 GiB. A JSONL record is limited to 16 MiB, a recent window to 16 MiB, a page
+to 200 entries, and a response to 2 MiB. Exceeding a cache limit fails the
+preparation with a retryable capacity result; it never truncates or deletes a
+provider source. A cancelled or abandoned preparation stops at scan and index
+checkpoints.
+
+Recent pages report no total when only a bounded tail was read. Prepared and
+native pages report their visible-entry total when the source supplies one.
+`source_truncated` identifies a bounded JSONL tail, while diagnostics count
+oversized or corrupt records and tool/payload omissions. Valid entries remain
+available when a later record or an OMO plan update is invalid. A failed
+preparation retains its continuation cursor so **Retry** does not lose the
+already displayed recent turns. The relay also retains a bounded, in-memory
+recent-range projection cache (four projections, 16 MiB per item, 64 MiB total,
+and a 60-second idle expiry by default). It rechecks containment, identity, and
+the exact range digest before reusing it; the cache contains no source handles,
+cursors, or transcript files and is cleared on relay shutdown.
+
+Cursors are signed, opaque, scoped to the provider, workspace, session, pane,
+server session, terminal, and target generation, and contain an expiry and
+source revision. They bind a file range digest, snapshot identity, or native
+source identity; appends are accepted only when the captured range remains
+stable. Tampering, scope changes, expiry, truncation, replacement, rewrite,
+and symlink retargeting are rejected. OpenCode and Hermes keep their native
+pagination anchors while applying the same scope and source checks.
 
 Terminal Refresh controls how often the relay checks a visible pane: 100 ms,
 250 ms, 500 ms, or 1 second; 250 ms is the default.

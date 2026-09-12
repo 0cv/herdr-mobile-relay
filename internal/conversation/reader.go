@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -23,6 +24,11 @@ import (
 const (
 	maxConversationBytes    = 16 * 1024 * 1024
 	maxEntryBytes           = 128 * 1024
+	maxToolCount            = 128
+	maxToolIDBytes          = 256
+	maxToolNameBytes        = 160
+	maxToolInputBytes       = 1024 * 1024
+	maxToolOutputBytes      = 1024 * 1024
 	defaultPageSize         = 80
 	maxPageSize             = 200
 	locationCacheTTL        = 60 * time.Second
@@ -37,12 +43,13 @@ var (
 )
 
 type ToolActivity struct {
-	ID        string `json:"id,omitempty"`
-	Name      string `json:"name"`
-	Input     string `json:"input,omitempty"`
-	Output    string `json:"output,omitempty"`
-	Error     bool   `json:"error,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
+	ID            string `json:"id,omitempty"`
+	Name          string `json:"name"`
+	associationID string
+	Input         string `json:"input,omitempty"`
+	Output        string `json:"output,omitempty"`
+	Error         bool   `json:"error,omitempty"`
+	Truncated     bool   `json:"truncated,omitempty"`
 }
 
 type Entry struct {
@@ -55,15 +62,17 @@ type Entry struct {
 }
 
 type Page struct {
-	Available     bool          `json:"available"`
-	ReasonCode    string        `json:"reason_code,omitempty"`
-	Reason        string        `json:"reason,omitempty"`
-	Entries       []Entry       `json:"entries"`
-	HasMore       bool          `json:"has_more"`
-	Total         int           `json:"total"`
-	FileTruncated bool          `json:"file_truncated,omitempty"`
-	SourceCorrupt bool          `json:"source_corrupt,omitempty"`
-	OMOPlan       *OMOTodoState `json:"omo_plan,omitempty"`
+	Available              bool          `json:"available"`
+	ReasonCode             string        `json:"reason_code,omitempty"`
+	Reason                 string        `json:"reason,omitempty"`
+	Entries                []Entry       `json:"entries"`
+	HasMore                bool          `json:"has_more"`
+	Total                  int           `json:"total"`
+	FileTruncated          bool          `json:"file_truncated,omitempty"`
+	SourceCorrupt          bool          `json:"source_corrupt,omitempty"`
+	ContinuationIncomplete bool          `json:"continuation_incomplete,omitempty"`
+	ContinuationReason     string        `json:"continuation_reason,omitempty"`
+	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
 }
 type Reader struct {
 	home      string
@@ -158,6 +167,9 @@ func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, er
 	location := r.Locate(agent, cwd, sessionID)
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
+	}
+	if isClaudeProvider(agent) {
+		return r.readClaudeChain(cwd, sessionID, location, before, limit)
 	}
 	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
@@ -472,13 +484,23 @@ func containedRegularFile(path, root string) string {
 }
 
 func loadTail(path string, limit int64) (string, bool, error) {
-	file, err := os.Open(path)
+	file, err := openConversationSource(path)
 	if err != nil {
 		return "", false, err
 	}
 	defer file.Close()
+	return loadTailFile(file, limit)
+}
+
+func loadTailFile(file *os.File, limit int64) (string, bool, error) {
+	if file == nil {
+		return "", false, errors.New("conversation source is closed")
+	}
 	info, err := file.Stat()
-	if err != nil {
+	if err != nil || !info.Mode().IsRegular() {
+		if err == nil {
+			err = errors.New("conversation source is not a regular file")
+		}
 		return "", false, err
 	}
 	clipped := info.Size() > limit
@@ -529,7 +551,7 @@ func parseTranscript(agent, text string) []Entry {
 		}
 		calls, results := parseToolActivity(normalized, record)
 		for _, result := range results {
-			location, ok := pendingTools[result.id]
+			location, ok := pendingTools[toolAssociationKey(normalized, result.id)]
 			if !ok || location.entry >= len(entries) || location.tool >= len(entries[location.entry].Tools) {
 				continue
 			}
@@ -539,7 +561,7 @@ func parseTranscript(agent, text string) []Entry {
 			tool.Output = output
 			tool.Error = result.failed
 			tool.Truncated = tool.Truncated || truncated
-			delete(pendingTools, result.id)
+			delete(pendingTools, toolAssociationKey(normalized, result.id))
 		}
 
 		role, timestamp, body := "", stringValue(record["timestamp"]), ""
@@ -548,7 +570,7 @@ func parseTranscript(agent, text string) []Entry {
 			role, body = parseClaudeRecord(record)
 		case "codex", "openaicodex":
 			role, body = parseCodexRecord(record)
-		case "pi", "picodingagent", "omp", "ohmypi":
+		case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 			role, body = parsePiRecord(record)
 		}
 		body = sanitizeText(body)
@@ -559,14 +581,14 @@ func parseTranscript(agent, text string) []Entry {
 			continue
 		}
 		body, truncated := clampText(body, maxEntryBytes)
-		id := stableRowID(line, seenIDs)
+		entry := Entry{Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated}
+		normalizeEntryTools(&entry)
+		entry.ID = stableRowID(line, seenIDs)
 		entryIndex := len(entries)
-		entries = append(entries, Entry{
-			ID: id, Timestamp: timestamp, Role: role, Text: body, Tools: calls, Truncated: truncated,
-		})
+		entries = append(entries, entry)
 		for toolIndex := range calls {
-			if calls[toolIndex].ID != "" {
-				pendingTools[calls[toolIndex].ID] = toolLocation{entry: entryIndex, tool: toolIndex}
+			if id := toolAssociationID(calls[toolIndex]); id != "" {
+				pendingTools[toolAssociationKey(normalized, id)] = toolLocation{entry: entryIndex, tool: toolIndex}
 			}
 		}
 	}
@@ -597,19 +619,19 @@ func parseToolActivity(agent string, record map[string]any) ([]ToolActivity, []t
 			return []ToolActivity{call}, nil
 		case "functioncalloutput", "customtoolcalloutput", "localshellcalloutput":
 			return nil, []toolResult{{
-				id:     firstString(payload, "call_id", "id"),
+				id:     strings.TrimSpace(firstString(payload, "call_id", "id")),
 				output: textValue(firstValue(payload, "output", "content")),
 				failed: payload["is_error"] == true,
 			}}
 		}
-	case "pi", "picodingagent", "omp", "ohmypi":
+	case "pi", "picodingagent", "omp", "ohmypi", "omo", "ohmyopencode":
 		if stringValue(record["type"]) != "message" {
 			return nil, nil
 		}
 		message, _ := record["message"].(map[string]any)
 		if normalizedBlockType(message["role"]) == "toolresult" {
 			return nil, []toolResult{{
-				id:     firstString(message, "toolCallId", "tool_call_id", "id"),
+				id:     strings.TrimSpace(firstString(message, "toolCallId", "tool_call_id", "id")),
 				output: textValue(message["content"]),
 				failed: message["isError"] == true || message["is_error"] == true,
 			}}
@@ -637,7 +659,7 @@ func toolsFromBlocks(blocks []any) ([]ToolActivity, []toolResult) {
 			))
 		case "toolresult":
 			results = append(results, toolResult{
-				id:     firstString(block, "tool_use_id", "toolCallId", "tool_call_id", "id"),
+				id:     strings.TrimSpace(firstString(block, "tool_use_id", "toolCallId", "tool_call_id", "id")),
 				output: textValue(block["content"]),
 				failed: block["is_error"] == true || block["isError"] == true,
 			})
@@ -652,9 +674,81 @@ func newToolActivity(id, name string, input any) ToolActivity {
 	}
 	inputText := sanitizeText(textValue(input))
 	inputText, truncated := clampText(inputText, maxEntryBytes/2)
-	return ToolActivity{
+	tool := ToolActivity{
 		ID: strings.TrimSpace(id), Name: strings.TrimSpace(name), Input: inputText, Truncated: truncated,
+		associationID: strings.TrimSpace(id),
 	}
+	normalized, _ := normalizeToolActivity(tool)
+	return normalized
+}
+
+func normalizeToolID(value string) string {
+	value, _ = clampText(strings.TrimSpace(value), maxToolIDBytes)
+	return value
+}
+
+func toolAssociationID(tool ToolActivity) string {
+	if tool.associationID != "" {
+		return tool.associationID
+	}
+	return strings.TrimSpace(tool.ID)
+}
+
+func toolAssociationKey(agent, id string) string {
+	digest := sha256.Sum256([]byte(agent + "\x00" + id))
+	return hex.EncodeToString(digest[:])
+}
+
+func normalizeToolActivity(tool ToolActivity) (ToolActivity, bool) {
+	originalID, originalName := tool.ID, tool.Name
+	originalInput, originalOutput := tool.Input, tool.Output
+	originalError, originalTruncated := tool.Error, tool.Truncated
+	associationID := toolAssociationID(tool)
+	tool.associationID = associationID
+	tool.ID = normalizeToolID(associationID)
+	tool.Name, _ = clampText(strings.TrimSpace(tool.Name), maxToolNameBytes)
+	tool.Input, _ = clampText(tool.Input, maxToolInputBytes)
+	tool.Output, _ = clampText(tool.Output, maxToolOutputBytes)
+	if tool.Name == "" {
+		tool.Name = "Tool"
+	}
+	changed := tool.ID != originalID || tool.Name != originalName || tool.Input != originalInput ||
+		tool.Output != originalOutput || tool.Error != originalError || tool.Truncated != originalTruncated
+	if changed {
+		tool.Truncated = true
+	}
+	return tool, changed
+}
+
+func normalizeEntryTools(entry *Entry) (int, int) {
+	if entry == nil || len(entry.Tools) == 0 {
+		return 0, 0
+	}
+	omittedTools, omittedPayloads := 0, 0
+	if len(entry.Tools) > maxToolCount {
+		omittedTools = len(entry.Tools) - maxToolCount
+		entry.Tools = append([]ToolActivity(nil), entry.Tools[:maxToolCount]...)
+		entry.Truncated = true
+	}
+	for index, tool := range entry.Tools {
+		normalized, changed := normalizeToolActivity(tool)
+		if changed || normalized.Truncated {
+			omittedPayloads++
+			entry.Truncated = true
+		}
+		entry.Tools[index] = normalized
+	}
+	return omittedTools, omittedPayloads
+}
+
+func normalizeEntriesForResponse(entries []Entry) BrowseDiagnostics {
+	diagnostics := BrowseDiagnostics{}
+	for index := range entries {
+		tools, payloads := normalizeEntryTools(&entries[index])
+		diagnostics.OmittedTools += tools
+		diagnostics.OmittedPayloads += payloads
+	}
+	return diagnostics
 }
 
 func normalizedBlockType(value any) string {

@@ -8,8 +8,19 @@ import (
 )
 
 func TestGetInventoryParsesAgentActivitySequence(t *testing.T) {
-	bin := writeResultScript(t, `{"result":{"agents":[{"pane_id":"pane-1","agent":"codex","agent_status":"idle","state_change_seq":794,"agent_session":{"value":"session-1","kind":"id"}}]}}`)
-	client := NewClient(bin, filepath.Join(t.TempDir(), "herdr.sock"))
+	socketPath, done := startUnaryTestSocket(t, "agent.list", map[string]any{
+		"type": "agent_list",
+		"agents": []any{
+			map[string]any{
+				"pane_id":          "pane-1",
+				"agent":            "codex",
+				"agent_status":     "idle",
+				"state_change_seq": 794,
+				"agent_session":    map[string]any{"value": "session-1", "kind": "id"},
+			},
+		},
+	})
+	client := NewClient(filepath.Join(t.TempDir(), "missing-herdr"), socketPath)
 
 	inventory, err := client.GetInventory(context.Background())
 	if err != nil {
@@ -22,27 +33,31 @@ func TestGetInventoryParsesAgentActivitySequence(t *testing.T) {
 	if pane.StateChangeSeq != 794 || pane.Session != "session-1" {
 		t.Fatalf("GetInventory() pane = %#v", pane)
 	}
+	if socketErr := <-done; socketErr != nil {
+		t.Fatal(socketErr)
+	}
 }
 
-func TestGetInventoryFallsBackToPaneList(t *testing.T) {
+func TestGetInventoryUsesJSONWithoutCLIFallback(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "herdr")
-	script := `#!/bin/sh
-if [ "$1 $2" = "agent list" ]; then
-  echo "unsupported command" >&2
-  exit 1
-fi
-printf '%s\n' '{"result":{"panes":[{"pane_id":"pane-legacy","agent":"codex","agent_status":"idle"}]}}'
-`
+	script := "#!/bin/sh\nprintf '%s\\n' 'protocol_mismatch' >&2\nexit 1\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("write Herdr script: %v", err)
 	}
-	client := NewClient(bin, filepath.Join(t.TempDir(), "herdr.sock"))
+	socketPath, done := startUnaryTestSocket(t, "agent.list", map[string]any{
+		"type":   "agent_list",
+		"agents": []any{map[string]any{"pane_id": "pane-json", "agent": "codex", "agent_status": "idle"}},
+	})
+	client := NewClient(bin, socketPath)
 
 	inventory, err := client.GetInventory(context.Background())
 	if err != nil {
 		t.Fatalf("GetInventory() error = %v", err)
 	}
-	if len(inventory.Panes) != 1 || inventory.Panes[0].ID != "pane-legacy" {
-		t.Fatalf("GetInventory() = %#v, want pane-list fallback", inventory)
+	if len(inventory.Panes) != 1 || inventory.Panes[0].ID != "pane-json" {
+		t.Fatalf("GetInventory() = %#v, want JSON inventory", inventory)
+	}
+	if socketErr := <-done; socketErr != nil {
+		t.Fatal(socketErr)
 	}
 }

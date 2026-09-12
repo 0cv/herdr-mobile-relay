@@ -7,6 +7,10 @@
   import Button from '$components/ui/Button.svelte';
   import Card from '$components/ui/Card.svelte';
   import {
+    AGENT_VIEW_LABELS,
+    AGENT_VIEWS,
+    APP_ASSET_VERSION,
+    APP_BUILD_ID,
     APP_VERSION,
     canInviteFrom,
     HOME_LAYOUTS,
@@ -16,6 +20,7 @@
     TERMINAL_REFRESH_LABELS,
     TERMINAL_REFRESH_OPTIONS,
     THEMES,
+    type AgentView,
     type HomeLayout,
     type InterfaceSize,
     type TerminalHistoryLines,
@@ -33,8 +38,10 @@
     stopSpeech,
   } from '$lib/speech';
   import {
+    defaultAgentView,
     homeLayout,
     interfaceSize,
+    setDefaultAgentView,
     setHomeLayout,
     setInterfaceSize,
     setTerminalHeightLease,
@@ -85,6 +92,34 @@
     setUpdateProgressError,
   } from '$lib/updates';
   import type { AppUpdateStatus, RelayConfig, RelayConnectionView, RelaySpeechVoice } from '$lib/types';
+
+  function herdrWarnings(features: Record<string, { state: string; reason: string }> | undefined): string {
+    const labels: Record<string, string> = {
+      ordinary_json: 'Herdr API',
+      'workspace.move_block': 'Workspace group reorder',
+      'workspace.reordered': 'Workspace reorder events',
+      'pane.read': 'Terminal reads',
+      'tab.move': 'Tab reorder',
+      'client_shell.endpoint': 'Client endpoint',
+      direct_terminal: 'Direct terminal',
+    };
+    return Object.entries(features || {})
+      .filter(([, feature]) => {
+        if (feature.state === 'supported') return false;
+        // Optional features may not be probed until used, or advertised at all.
+        // Neither is evidence of a failed check or an incompatible server.
+        return feature.state !== 'unknown'
+          || !['not_checked', 'not_advertised'].includes(feature.reason);
+      })
+      .map(([name, feature]) => {
+        const label = labels[name] || name;
+        const message = feature.state === 'unsupported'
+          ? feature.reason === 'method_not_supported' ? 'Server upgrade needed' : 'Server feature unavailable'
+          : feature.reason === 'reconnect_required' ? 'Rechecking after Herdr reconnect' : 'Could not check';
+        return `${label}: ${message}`;
+      })
+      .join(' · ');
+  }
 
   const APP_DEPLOY_SETUP_COMMAND = 'herdr plugin action invoke configure-app-deploy --plugin herdr-mobile-relay.events';
 
@@ -312,6 +347,12 @@
       permission: notificationsSupported() ? Notification.permission : 'unavailable',
     };
   });
+
+  function changeDefaultAgentView(value: AgentView): void {
+    if (setDefaultAgentView(value) === 'unavailable') {
+      relayStore.showToast('Could not save the default view on this device.', true);
+    }
+  }
 
   function updateActionLabel(action: SafeUpdateAction | null): string {
     if (action?.kind === 'reload_app') return 'Load Update';
@@ -588,7 +629,12 @@
   }
 </script>
 
-<main class="page settings-page" aria-labelledby="settings-title">
+<main
+  class="page settings-page"
+  aria-labelledby="settings-title"
+  data-app-assets={APP_ASSET_VERSION}
+  data-app-build={APP_BUILD_ID}
+>
   <h2 id="settings-title">Settings</h2>
 
   <Card>
@@ -615,6 +661,8 @@
         {@const currentRelay = connection?.relay || relay}
         {@const gateways = currentRelay.gatewayUrls || []}
         {@const connectionPath = relayPathLabel(connection, currentRelay)}
+        {@const herdr = connection?.herdrStatus}
+        {@const herdrFeatureWarnings = herdrWarnings(herdr?.features)}
         <article class="relay-row">
           <span
             class={`status-dot status-${connectionStatus === 'connected' && connection?.inventory.state === 'ready' ? 'success' : connectionStatus === 'connecting' || connectionStatus === 'connected' ? 'warning' : 'danger'}`}
@@ -658,6 +706,18 @@
               </small>
             {/if}
             {#if version}<small class:warning={version.tone === 'warning'} title={version.title}>{version.label}</small>{/if}
+            <small>
+              <span>Herdr client: {herdr?.installed_client_version || 'unknown'}</span>
+              <span>
+                Herdr server: {herdr?.server_version || 'unavailable/unknown'}
+                {#if herdr?.server_protocol_known} · protocol {herdr.server_protocol}{/if}
+                {#if herdr?.endpoint_protocol_generation} · endpoint generation {herdr.endpoint_protocol_generation}{/if}
+              </span>
+            </small>
+            <small>Herdr 0.9.0 recommended.</small>
+            {#if herdrFeatureWarnings}
+              <small class="warning herdr-feature-warning" role="status">{herdrFeatureWarnings}</small>
+            {/if}
             <small class:warning={update.warning} role="status">{update.label}</small>
             {#if update.detail}<small class:warning={update.warning} title={update.detail}>{update.detail}</small>{/if}
           </div>
@@ -708,6 +768,22 @@
     {/if}
   {/each}
 
+
+  <Card>
+    <h3>Agents</h3>
+    <fieldset class="choice-grid compact-grid">
+      <legend>Default View</legend>
+      {#each AGENT_VIEWS as item (item)}
+        <button
+          class:active={$defaultAgentView === item}
+          type="button"
+          aria-pressed={$defaultAgentView === item}
+          onclick={() => changeDefaultAgentView(item)}
+        >{AGENT_VIEW_LABELS[item]}</button>
+      {/each}
+    </fieldset>
+    <p class="hint">Saved on this device. Used when opening an agent unless that pane has its own setting. Conversation falls back to Terminal when a native transcript is unavailable.</p>
+  </Card>
 
   <Card>
     <h3>Appearance</h3>

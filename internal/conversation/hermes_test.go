@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,50 @@ import (
 
 	"github.com/0cv/herdr-mobile-relay/internal/agentroots"
 )
+
+func TestBrowserUsesNativeHermesCursorPaging(t *testing.T) {
+	sqlite, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	root := t.TempDir()
+	cwd := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "20260812_100000_browser"
+	database := filepath.Join(root, "state.db")
+	messageSQL := fmt.Sprintf(`INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES
+	('%s','user','older',100,1,0),
+	('%s','assistant','newer',101,1,0);`, sessionID, sessionID)
+	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Browser", messageSQL)
+	t.Setenv(agentroots.HermesListEnv, root)
+	t.Setenv("HERMES_HOME", "")
+	reader := NewReader(t.TempDir())
+	reader.hermes.binary = sqlite
+	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer browser.Close()
+	scope := BrowseScope{Provider: "hermes", CWD: cwd, SessionID: sessionID}
+	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
+	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" {
+		t.Fatalf("Hermes latest page = %#v, err = %v", latest, err)
+	}
+	appendCommand := exec.Command(sqlite, database, fmt.Sprintf("INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','appended',102,1,0);", sessionID))
+	if output, err := appendCommand.CombinedOutput(); err != nil {
+		t.Fatalf("append Hermes database: %v: %s", err, output)
+	}
+	compactCommand := exec.Command(sqlite, database, fmt.Sprintf("UPDATE messages SET active=0,compacted=1 WHERE session_id='%s' AND content='newer'; INSERT INTO messages(session_id,role,content,timestamp,active,compacted) VALUES('%s','assistant','newer',101,1,0);", sessionID, sessionID))
+	if output, err := compactCommand.CombinedOutput(); err != nil {
+		t.Fatalf("compact Hermes database: %v: %s", err, output)
+	}
+	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
+	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" {
+		t.Fatalf("Hermes older page after append = %#v, err = %v", older, err)
+	}
+}
 
 func TestHermesReaderReadsStateDatabaseConversation(t *testing.T) {
 	sqlite, err := exec.LookPath("sqlite3")
@@ -279,6 +324,30 @@ COMMIT;`, sessionID, sessionID))
 	if !older.Available || older.ReasonCode != "" || len(older.Entries) != 1 ||
 		older.Entries[0].Text != "A" || older.Entries[0].ID != "1" || older.HasMore {
 		t.Fatalf("Hermes archived cursor page = %#v", older)
+	}
+}
+
+func TestHermesCorruptRowsStillReturnAContinuationPage(t *testing.T) {
+	sqlite, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	root := t.TempDir()
+	cwd := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "20260812_130000_corrupt"
+	database := filepath.Join(root, "state.db")
+	messageSQL := fmt.Sprintf("INSERT INTO messages(session_id,role,content,tool_calls,timestamp,active,compacted) VALUES('%s','assistant','', 'not-json',100,1,0);", sessionID)
+	createHermesTestDatabase(t, sqlite, database, sessionID, cwd, "Corrupt", messageSQL)
+	t.Setenv(agentroots.HermesListEnv, root)
+	t.Setenv("HERMES_HOME", "")
+	reader := NewReader(t.TempDir())
+	reader.hermes.binary = sqlite
+	page, err := reader.ReadFor("hermes", cwd, sessionID, "", 1)
+	if err != nil || !page.Available || !page.SourceCorrupt || len(page.Entries) != 0 {
+		t.Fatalf("corrupt Hermes page = %#v, err = %v", page, err)
 	}
 }
 

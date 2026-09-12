@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -95,6 +96,7 @@ type Server struct {
 	sessions         *session.Resolver
 	historyM         *history.Manager
 	conversationM    *conversation.Reader
+	conversationB    *conversation.Browser
 	profiles         *profiles.Resolver
 	webH             *web.Handler
 	herdrC           *herdr.Client
@@ -128,10 +130,13 @@ type Server struct {
 
 	stateViewMu   sync.RWMutex
 	agentView     []*coordinator.AgentState
+	workspaceView []herdr.Workspace
 	inventoryView map[string]any
 
 	refreshMu      sync.Mutex
 	refreshClients map[string]bool
+	// Optional deterministic publication observer; installed before serving.
+	inventoryPublicationObserver func(string)
 
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
@@ -166,6 +171,15 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 	}
 	profResolver := profiles.NewResolver(cfg.ConfigHome, herdrClient)
 	conversationReader := conversation.NewReader(home)
+	var conversationBrowser *conversation.Browser
+	cacheRoot := ""
+	if strings.TrimSpace(cfg.CacheDir) != "" {
+		cacheRoot = filepath.Join(cfg.CacheDir, "conversation-history")
+	}
+	conversationBrowser, browserErr := conversation.NewBrowser(conversationReader, cacheRoot, conversation.DefaultBrowserOptions())
+	if browserErr != nil {
+		logger.Warn("interactive conversation browsing unavailable", "error", browserErr)
+	}
 	sessResolver := session.NewResolverWithReader(home, conversationReader)
 	histManager := history.NewManager(cfg.CacheDir)
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/healthz", cfg.Port)
@@ -202,6 +216,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 
 	speechLanguages := speech.Languages()
 	logger.Info("speech synthesis available", "languages", strings.Join(speechLanguages, ","))
+	initialInventory := state.InventorySnapshot()
 
 	return &Server{
 		cfg:                 cfg,
@@ -228,6 +243,7 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		sessions:            sessResolver,
 		historyM:            histManager,
 		conversationM:       conversationReader,
+		conversationB:       conversationBrowser,
 		updateM:             relayupdate.NewManager(cfg.ReleaseRoot, cfg.RuntimeDir, cfg.HerdrBin, version, revision, healthURL),
 		appDeployM:          appdeploy.NewManager(cfg.RuntimeDir, cfg.WebRoot, version, revision),
 		uploadM:             uploadManager,
@@ -236,7 +252,9 @@ func New(cfg *config.Config, version, revision string, logger *slog.Logger) *Ser
 		startedAt:           time.Now(),
 		refreshClients:      make(map[string]bool),
 		paneWatches:         make(map[string]*paneWatch),
-		inventoryView:       cloneStringMap(state.InventoryStatus()),
+		agentView:           cloneAgents(initialInventory.Agents),
+		workspaceView:       cloneWorkspaces(initialInventory.Workspaces),
+		inventoryView:       cloneStringMap(initialInventory.Status),
 		historyInflight:     make(map[string]bool),
 		historyLast:         make(map[string]time.Time),
 		historyActive:       make(map[string]bool),
@@ -507,7 +525,13 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 
 func (s *Server) Run(ctx context.Context) error {
 	if s.initErr != nil {
+		if s.conversationB != nil {
+			_ = s.conversationB.Close()
+		}
 		return s.initErr
+	}
+	if s.conversationB != nil {
+		defer s.conversationB.Close()
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -567,83 +591,14 @@ func (s *Server) Run(ctx context.Context) error {
 	// The handshake has no "profiles loading" state. Resolve integrations
 	// before accepting the first WebSocket.
 	_ = s.profiles.Profiles()
-
-	s.hub.SetOnConnect(func(client *transport.ClientConn) {
-		vapidPublicKey := ""
-		if s.pushM != nil {
-			vapidPublicKey = s.pushM.VAPIDPublicKey()
-		}
-		inventory := s.committedInventoryStatus()
-		capabilities := append([]string(nil), protocol.Capabilities...)
-		if s.pushM != nil {
-			capabilities = append(capabilities, "typed_push", "push_policy")
-		}
-		if s.clipboardRead != nil {
-			capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
-		}
-		speechStatus := s.speechStatus()
-		speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
-		if len(speechLanguages) > 0 {
-			capabilities = append(capabilities, protocol.SpeechSynthesisCapability)
-		}
-		if speechStatus.ManagementSupported {
-			capabilities = append(capabilities, protocol.SpeechVoiceManagementCapability)
-		}
-		if s.herdrC.SupportsRealtimePane(client.Context()) {
-			capabilities = append(capabilities, "pane_realtime_delta", "tab_reorder")
-		}
-		if s.herdrC.SupportsWorkspaceMoveBlock() {
-			capabilities = append(capabilities, "workspace_reorder_block")
-		}
-		if s.appDeployM.State().Configured {
-			capabilities = append(capabilities, "app_deploy")
-		}
-		if s.hybrid.directEnabled() {
-			capabilities = append(capabilities, "webrtc_direct")
-		}
-		if s.deviceAuth != nil {
-			capabilities = append(capabilities, "device_management")
-		}
-		s.hub.Send(client, protocol.PushConfig{
-			Type:            "push_config",
-			VAPIDPublicKey:  vapidPublicKey,
-			Host:            s.hostname,
-			Home:            s.home,
-			Protocol:        protocol.Version,
-			Version:         s.version,
-			ReleaseVersion:  s.version,
-			Revision:        s.revision,
-			Update:          s.updateM.State(),
-			AppDeploy:       s.appDeployM.State(),
-			Capabilities:    capabilities,
-			SpeechLanguages: speechLanguages,
-			Inventory:       inventory,
-			AgentProfiles:   s.profiles.Profiles(),
-			Hybrid:          s.hybridDescriptor(),
-		})
-		s.hub.Send(client, map[string]any{
-			"type":   "agents",
-			"agents": s.committedAgents(),
-		})
-		s.hub.Send(client, map[string]any{
-			"type":       "workspaces",
-			"workspaces": s.state.Workspaces(),
-		})
-		activities := s.recentActivities(500)
-		s.hub.Send(client, map[string]any{
-			"type":       "activity_history",
-			"activities": activities,
-		})
-		s.hub.Send(client, map[string]any{
-			"type":            "inventory_status",
-			"state":           inventory["state"],
-			"error_code":      inventory["error_code"],
-			"message":         inventory["message"],
-			"last_attempt_at": inventory["last_attempt_at"],
-			"last_success_at": inventory["last_success_at"],
-			"stale":           inventory["stale"],
+	s.herdrC.SetCapabilityChangeCallback(func(status herdr.ServerStatus) {
+		s.hub.Broadcast(map[string]any{
+			"type":         "herdr_status",
+			"status":       herdrStatusPayload(status),
+			"capabilities": s.effectiveCapabilitiesFor(status),
 		})
 	})
+	s.hub.SetOnConnect(s.sendConnectionSnapshot)
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
 		s.stopPaneWatch(client.ID(), "")
@@ -809,25 +764,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case "pane_applied":
 			s.handlePaneApplied(client, msg)
 		case "get_conversation_history":
-			agent, exists := s.state.Agent(inbound.PaneID)
-			if !exists {
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent is unavailable", inbound.PaneID, nil)
-				break
-			}
-			generation := s.state.Generation(inbound.PaneID)
-			page, historyErr := s.conversationM.ReadFor(agent.Agent, agent.Cwd, agent.SessionID, inbound.Before, inbound.Limit)
-			if historyErr != nil {
-				s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
-				break
-			}
-			current, currentExists := s.state.Agent(inbound.PaneID)
-			if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
-				!sameConversationTuple(agent, current) {
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, page)
+			s.handleConversationHistory(client, inbound)
 		case "device_list":
 			identity, authenticated := client.Identity()
 			if s.deviceAuth == nil || !authenticated {
@@ -969,7 +906,13 @@ func (s *Server) Run(ctx context.Context) error {
 					}
 					return s.dispatcher.HandleWorkspaceReorder(handlerCtx, inbound.RequestID, inbound.WorkspaceID, inbound.InsertIndex)
 				case "workspace_close":
-					return s.dispatcher.HandleWorkspaceClose(handlerCtx, inbound.RequestID, inbound.WorkspaceID)
+					return s.dispatcher.HandleWorkspaceClose(
+						handlerCtx,
+						inbound.RequestID,
+						inbound.WorkspaceID,
+						inbound.CloseGroup,
+						inbound.ExpectedWorkspaceIDs,
+					)
 				case "worktree_list":
 					return s.dispatcher.HandleWorktreeList(handlerCtx, inbound.RequestID, inbound.WorkspaceID)
 				case "worktree_create":
@@ -1226,22 +1169,7 @@ func (s *Server) Run(ctx context.Context) error {
 				s.logger.Warn("phone app origin was not stored", "error", err)
 			}
 		case "refresh_agents":
-			inventory := s.committedInventoryStatus()
-			s.hub.Send(client, map[string]any{
-				"type":            "inventory_status",
-				"state":           inventory["state"],
-				"error_code":      inventory["error_code"],
-				"message":         inventory["message"],
-				"last_attempt_at": inventory["last_attempt_at"],
-				"last_success_at": inventory["last_success_at"],
-				"stale":           inventory["stale"],
-			})
-			s.hub.Send(client, map[string]any{"type": "agents", "agents": s.committedAgents()})
-			s.hub.Send(client, map[string]any{"type": "workspaces", "workspaces": s.state.Workspaces()})
-			s.refreshMu.Lock()
-			s.refreshClients[client.ID()] = true
-			s.refreshMu.Unlock()
-			s.poller.Wake()
+			s.requestAgentRefresh(client)
 		case "webrtc_offer", "webrtc_ice", "webrtc_close":
 			s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
 		default:
@@ -1313,34 +1241,7 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	s.poller.SetOnChange(func(agents []*coordinator.AgentState) {
-		s.reconcileRecoveredPush(ctx, agents)
-		s.broadcastCommitted(map[string]any{
-			"type":   "agents",
-			"agents": agents,
-		})
-		s.sendRequestedAgentRefreshes(agents)
-		active := make(map[string]bool, len(agents))
-		for _, a := range agents {
-			active[a.PaneID] = true
-		}
-		s.syncHistoryPanes(agents)
-		for _, a := range agents {
-			if isClaudeLike(a.Agent) && (a.Status == "working" || a.Status == "blocked") {
-				s.scheduleHistoryCapture(ctx, a.PaneID)
-			}
-		}
-		s.dispatcher.PruneSlots(active)
-	})
-	s.poller.SetOnWorkspaceChange(func(workspaces []herdr.Workspace) {
-		s.broadcastCommitted(map[string]any{
-			"type":       "workspaces",
-			"workspaces": workspaces,
-		})
-	})
-	s.poller.SetOnInventoryStatus(func(status map[string]any) {
-		s.broadcastCommitted(inventoryStatusMessage(status))
-	})
+	s.setInventoryPublisher(ctx)
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
 		for _, a := range agents {
@@ -1410,13 +1311,19 @@ func (s *Server) Run(ctx context.Context) error {
 			work()
 		}()
 	}
+	s.hybrid = s.startHybridTransport(ctx)
 	startBackground(func() { s.pushM.Run(ctx) })
 	startBackground(func() { s.poller.Run(ctx) })
+	startBackground(func() { s.herdrC.RunCapabilityRefresh(ctx, 30*time.Second) })
 	eventClient := herdr.NewEventClient(s.cfg.SocketPath)
-	// Herdr builds without workspace.move_block also reject a
-	// workspace.reordered subscription, which would fail the whole
-	// events.subscribe and degrade realtime updates to polling.
-	eventClient.SetWorkspaceReorderedProbe(s.herdrC.SupportsWorkspaceMoveBlock)
+	eventClient.SetWorkspaceReorderedCapability(
+		s.herdrC.ShouldAttemptWorkspaceReordered,
+		s.herdrC.NoteWorkspaceReorderedSupported,
+		s.herdrC.NoteWorkspaceReorderedUnsupported,
+	)
+	eventClient.SetWorkspaceReorderedReset(func() {
+		s.herdrC.InvalidateLiveCapabilities()
+	})
 	startBackground(func() { s.poller.RunEvents(ctx, eventClient) })
 	startBackground(func() { s.captureHistoryLoop(ctx) })
 	startBackground(func() { s.paneSizeM.Run(ctx) })
@@ -1435,7 +1342,6 @@ func (s *Server) Run(ctx context.Context) error {
 	startBackground(func() { s.writeSupportLoop(ctx) })
 	startBackground(func() { s.watchJobStates(ctx) })
 	startBackground(func() { s.updateCheckLoop(ctx) })
-	s.hybrid = s.startHybridTransport(ctx)
 	if s.hybrid != nil {
 		s.hybrid.run(ctx, startBackground)
 	}
@@ -1496,6 +1402,68 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = s.webH.Close()
 	}
 	return runErr
+}
+
+func (s *Server) effectiveCapabilities() []string {
+	return s.effectiveCapabilitiesFor(s.herdrC.CapabilityStatus())
+}
+
+func (s *Server) effectiveCapabilitiesFor(herdrStatus herdr.ServerStatus) []string {
+	capabilities := append([]string(nil), protocol.Capabilities...)
+	if s.pushM != nil {
+		capabilities = append(capabilities, "typed_push", "push_policy")
+	}
+	if s.clipboardRead != nil {
+		capabilities = append(capabilities, protocol.AgentResponseCopyCapability)
+	}
+	speechStatus := s.speechStatus()
+	if len(s.rememberSpeechLanguages(speechStatus.Languages)) > 0 {
+		capabilities = append(capabilities, protocol.SpeechSynthesisCapability)
+	}
+	if speechStatus.ManagementSupported {
+		capabilities = append(capabilities, protocol.SpeechVoiceManagementCapability)
+	}
+	if herdrStatus.Supports(herdr.FeaturePaneRead) {
+		capabilities = append(capabilities, "pane_realtime_delta")
+	}
+	if herdrStatus.Supports(herdr.FeatureTabMove) {
+		capabilities = append(capabilities, "tab_reorder")
+	}
+	if herdrStatus.Supports(herdr.FeatureWorkspaceMoveBlock) {
+		capabilities = append(capabilities, "workspace_reorder_block")
+	}
+	if s.appDeployM.State().Configured {
+		capabilities = append(capabilities, "app_deploy")
+	}
+	if s.hybrid != nil && s.hybrid.directEnabled() {
+		capabilities = append(capabilities, "webrtc_direct")
+	}
+	if s.deviceAuth != nil {
+		capabilities = append(capabilities, "device_management")
+	}
+	return capabilities
+}
+
+func herdrStatusPayload(status herdr.ServerStatus) protocol.HerdrStatus {
+	features := make(map[string]protocol.HerdrFeatureStatus, len(status.Features))
+	for name, feature := range status.Features {
+		features[name] = protocol.HerdrFeatureStatus{
+			State:      string(feature.State),
+			Reason:     feature.Reason,
+			Generation: feature.Generation,
+		}
+	}
+	return protocol.HerdrStatus{
+		InstalledClientVersion:     status.InstalledClientVersion,
+		ServerVersion:              status.ServerVersion,
+		ServerProtocol:             status.ServerProtocol,
+		ServerProtocolKnown:        status.ServerProtocolKnown,
+		EndpointProtocolGeneration: status.EndpointProtocolGeneration,
+		SurfaceInterest:            status.SurfaceInterest,
+		HealthCheck:                status.HealthCheck,
+		Generation:                 status.Generation,
+		Features:                   features,
+	}
 }
 
 func canonicalHTTPPath(raw string) bool {
@@ -2134,6 +2102,42 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 	}
 }
 
+func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound protocol.Inbound) {
+	action := "get_conversation_history"
+	agent, exists := s.state.Agent(inbound.PaneID)
+	if !exists {
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent is unavailable", inbound.PaneID, nil)
+		return
+	}
+	generation := s.state.Generation(inbound.PaneID)
+	browser := s.conversationB
+	if browser == nil || browser.Reader() != s.conversationM {
+		s.logger.Warn("conversation browser is unavailable", "pane_id", inbound.PaneID)
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
+		return
+	}
+	page, historyErr := browser.ReadPage(client.Context(), conversation.BrowseRequest{
+		Scope: conversation.BrowseScope{
+			Provider: agent.Agent, CWD: agent.Cwd, SessionID: agent.SessionID,
+			PaneID: agent.PaneID, ServerSessionID: agent.ServerSessionID,
+			TerminalID: agent.TerminalID, Generation: agent.Generation,
+		},
+		Cursor: inbound.Cursor, Limit: inbound.Limit, Retry: inbound.Retry,
+	})
+	if historyErr != nil {
+		s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
+		return
+	}
+	current, currentExists := s.state.Agent(inbound.PaneID)
+	if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
+		!sameConversationTuple(agent, current) {
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
+		return
+	}
+	s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, page)
+}
+
 // Conversation logs preserve the full assistant message; the terminal pane is
 // only a bounded fallback for agents without a readable transcript.
 func (s *Server) latestConversationResponse(agent, cwd, sessionID string) string {
@@ -2573,7 +2577,74 @@ func (s *Server) agentInfo(paneID string) (agent, cwd string) {
 	return "", ""
 }
 
-func (s *Server) sendRequestedAgentRefreshes(agents []*coordinator.AgentState) {
+func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
+	vapidPublicKey := ""
+	if s.pushM != nil {
+		vapidPublicKey = s.pushM.VAPIDPublicKey()
+	}
+	committed := s.committedInventorySnapshot()
+	s.observeInventoryPublication("registration")
+	inventory := committed.status
+	herdrCapabilityStatus := s.herdrC.CapabilityStatus()
+	capabilities := s.effectiveCapabilitiesFor(herdrCapabilityStatus)
+	speechStatus := s.speechStatus()
+	speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
+	herdrStatus := herdrStatusPayload(herdrCapabilityStatus)
+	s.hub.Send(client, protocol.PushConfig{
+		Type:            "push_config",
+		VAPIDPublicKey:  vapidPublicKey,
+		Host:            s.hostname,
+		Home:            s.home,
+		Protocol:        protocol.Version,
+		Version:         s.version,
+		ReleaseVersion:  s.version,
+		Revision:        s.revision,
+		Update:          s.updateM.State(),
+		AppDeploy:       s.appDeployM.State(),
+		Capabilities:    capabilities,
+		HerdrStatus:     herdrStatus,
+		SpeechLanguages: speechLanguages,
+		Inventory:       inventory,
+		AgentProfiles:   s.profiles.Profiles(),
+		Hybrid:          s.hybridDescriptor(),
+	})
+	s.hub.Send(client, map[string]any{
+		"type":   "agents",
+		"agents": committed.agents,
+	})
+	s.hub.Send(client, map[string]any{
+		"type":       "workspaces",
+		"workspaces": committed.workspaces,
+	})
+	s.hub.Send(client, map[string]any{
+		"type":       "activity_history",
+		"activities": s.recentActivities(500),
+	})
+	s.hub.Send(client, inventoryStatusMessage(inventory))
+}
+
+func (s *Server) requestAgentRefresh(client *transport.ClientConn) {
+	if client == nil {
+		return
+	}
+	// Queue the deferred refresh before waking the poller. A publication
+	// racing this handler can then drain it in the same ordered batch.
+	s.refreshMu.Lock()
+	s.refreshClients[client.ID()] = true
+	s.refreshMu.Unlock()
+	s.hub.SendBatchPrepared(client, func() []any {
+		committed := s.committedInventorySnapshot()
+		s.observeInventoryPublication("immediate")
+		return []any{
+			inventoryStatusMessage(committed.status),
+			map[string]any{"type": "agents", "agents": committed.agents},
+			map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
+		}
+	})
+	s.poller.Wake()
+}
+
+func (s *Server) sendRequestedAgentRefreshes() {
 	s.refreshMu.Lock()
 	clientIDs := make([]string, 0, len(s.refreshClients))
 	for clientID := range s.refreshClients {
@@ -2582,19 +2653,22 @@ func (s *Server) sendRequestedAgentRefreshes(agents []*coordinator.AgentState) {
 	clear(s.refreshClients)
 	s.refreshMu.Unlock()
 
-	if len(clientIDs) == 0 {
-		return
-	}
-	agents = s.committedAgents()
-	status := inventoryStatusMessage(s.committedInventoryStatus())
-	snapshot := map[string]any{"type": "agents", "agents": agents}
 	for _, clientID := range clientIDs {
-		s.hub.SendByID(clientID, status)
-		s.hub.SendByID(clientID, snapshot)
-		s.hub.SendByID(clientID, map[string]any{
-			"type":       "workspaces",
-			"workspaces": s.state.Workspaces(),
+		s.hub.SendBatchPreparedByID(clientID, func() []any {
+			committed := s.committedInventorySnapshot()
+			s.observeInventoryPublication("deferred")
+			return []any{
+				inventoryStatusMessage(committed.status),
+				map[string]any{"type": "agents", "agents": committed.agents},
+				map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
+			}
 		})
+	}
+}
+
+func (s *Server) observeInventoryPublication(phase string) {
+	if s.inventoryPublicationObserver != nil {
+		s.inventoryPublicationObserver(phase)
 	}
 }
 
@@ -3028,6 +3102,9 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	if force, ok := message["force"].(bool); ok {
 		details["force"] = force
 	}
+	if closeGroup, ok := message["close_group"].(bool); ok {
+		details["close_group"] = closeGroup
+	}
 	workspaceIDs := make([]string, 0, 8)
 	switch values := message["workspace_ids"].(type) {
 	case []any:
@@ -3052,6 +3129,9 @@ func auditWriteDetails(message map[string]any) map[string]any {
 	}
 	if len(workspaceIDs) > 0 {
 		details["workspace_ids"] = workspaceIDs
+	}
+	if expectedWorkspaceIDs := auditWorkspaceIDList(message["expected_workspace_ids"]); len(expectedWorkspaceIDs) > 0 {
+		details["expected_workspace_ids"] = expectedWorkspaceIDs
 	}
 	keys := make([]string, 0, 16)
 	switch values := message["keys"].(type) {
@@ -3102,6 +3182,31 @@ func auditWriteDetails(message map[string]any) map[string]any {
 		details["selected_indices"] = indices
 	}
 	return details
+}
+
+func auditWorkspaceIDList(value any) []string {
+	ids := make([]string, 0, 8)
+	switch values := value.(type) {
+	case []any:
+		for _, item := range values {
+			if id, ok := item.(string); ok && id != "" {
+				ids = append(ids, boundedAuditString(id, 160))
+			}
+			if len(ids) == 32 {
+				break
+			}
+		}
+	case []string:
+		for _, id := range values {
+			if id != "" {
+				ids = append(ids, boundedAuditString(id, 160))
+			}
+			if len(ids) == 32 {
+				break
+			}
+		}
+	}
+	return ids
 }
 
 func boundedAuditString(value string, limit int) string {
@@ -3274,6 +3379,157 @@ func (s *Server) projectAgentResources(agents []*coordinator.AgentState) {
 	}
 }
 
+type committedInventory struct {
+	status     map[string]any
+	agents     []*coordinator.AgentState
+	workspaces []herdr.Workspace
+}
+
+// publishCurrentInventory is the sole authoritative inventory writer. Fresh
+// state is selected inside the Hub registration barrier, while the expensive
+// reconciliation work remains after that barrier has been released.
+func (s *Server) setInventoryPublisher(ctx context.Context) {
+	if s.poller == nil {
+		return
+	}
+	s.poller.SetOnInventoryChange(func() error {
+		return s.publishCurrentInventory(ctx)
+	})
+}
+
+func (s *Server) publishCurrentInventory(ctx context.Context) error {
+	var sideEffectAgents []*coordinator.AgentState
+	var runAgentSideEffects bool
+	batchErr := s.hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+		fresh := s.state.InventorySnapshot()
+		s.observeInventoryPublication("publication")
+		freshAgents := cloneAgents(fresh.Agents)
+		s.projectAgentResources(freshAgents)
+
+		s.stateViewMu.RLock()
+		previousStatus := cloneStringMap(s.inventoryView)
+		previousAgents := cloneAgents(s.agentView)
+		previousWorkspaces := cloneWorkspaces(s.workspaceView)
+		s.stateViewMu.RUnlock()
+
+		mergedAgents := mergeAgentSnapshot(previousAgents, freshAgents)
+		statusChanged := inventoryStatusChanged(previousStatus, fresh.Status)
+		readyRecovery := fresh.Status["state"] == "ready" && previousStatus["state"] != "ready"
+		agentsChanged := !agentSnapshotsEqual(previousAgents, mergedAgents)
+		workspacesChanged := !workspaceSnapshotsEqual(previousWorkspaces, fresh.Workspaces)
+		sendAgents := agentsChanged || readyRecovery
+		sendWorkspaces := workspacesChanged || readyRecovery
+		if fresh.Status["state"] == "ready" && (agentsChanged || readyRecovery) {
+			runAgentSideEffects = true
+			sideEffectAgents = cloneAgents(mergedAgents)
+		}
+
+		messages := make([]any, 0, 3)
+		if statusChanged {
+			messages = append(messages, inventoryStatusMessage(fresh.Status))
+		}
+		if sendAgents {
+			messages = append(messages, map[string]any{"type": "agents", "agents": cloneAgents(mergedAgents)})
+		}
+		if sendWorkspaces {
+			messages = append(messages, map[string]any{"type": "workspaces", "workspaces": cloneWorkspaces(fresh.Workspaces)})
+		}
+
+		commit := func() {
+			s.stateViewMu.Lock()
+			// Timestamps are metadata, not a wire-change trigger. Refreshing the
+			// cached status here still makes a later handshake authoritative.
+			s.inventoryView = cloneStringMap(fresh.Status)
+			if sendAgents {
+				s.agentView = cloneAgents(mergedAgents)
+			}
+			if sendWorkspaces {
+				s.workspaceView = cloneWorkspaces(fresh.Workspaces)
+			}
+			s.stateViewMu.Unlock()
+		}
+		return messages, commit, nil
+	})
+
+	// A pending explicit refresh is a request for completion, not a request for
+	// an agent diff. Drain it after every publication attempt, including an
+	// unchanged state and an encode failure.
+	s.sendRequestedAgentRefreshes()
+	if batchErr != nil {
+		return batchErr
+	}
+	if runAgentSideEffects {
+		s.reconcileRecoveredPush(ctx, sideEffectAgents)
+		s.syncHistoryPanes(sideEffectAgents)
+		active := make(map[string]bool, len(sideEffectAgents))
+		for _, agent := range sideEffectAgents {
+			active[agent.PaneID] = true
+			if isClaudeLike(agent.Agent) && (agent.Status == "working" || agent.Status == "blocked") {
+				s.scheduleHistoryCapture(ctx, agent.PaneID)
+			}
+		}
+		if s.dispatcher != nil {
+			s.dispatcher.PruneSlots(active)
+		}
+	}
+	return nil
+}
+
+func inventoryStatusChanged(previous, current map[string]any) bool {
+	for _, key := range []string{"state", "error_code", "message", "stale"} {
+		if previous[key] != current[key] {
+			return true
+		}
+	}
+	return false
+}
+
+func agentSnapshotsEqual(left, right []*coordinator.AgentState) bool {
+	left = cloneAgents(left)
+	right = cloneAgents(right)
+	for _, agents := range [][]*coordinator.AgentState{left, right} {
+		for _, agent := range agents {
+			agent.StateRevision = 0
+		}
+	}
+	leftData, leftErr := json.Marshal(left)
+	rightData, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftData, rightData)
+}
+
+func workspaceSnapshotsEqual(left, right []herdr.Workspace) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	leftData, leftErr := json.Marshal(left)
+	rightData, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftData, rightData)
+}
+
+func cloneWorkspaces(workspaces []herdr.Workspace) []herdr.Workspace {
+	result := make([]herdr.Workspace, len(workspaces))
+	copy(result, workspaces)
+	for index := range result {
+		if result[index].Worktree != nil {
+			worktree := *result[index].Worktree
+			result[index].Worktree = &worktree
+		}
+	}
+	return result
+}
+
+func (s *Server) committedInventorySnapshot() committedInventory {
+	s.stateViewMu.RLock()
+	result := committedInventory{
+		status:     cloneStringMap(s.inventoryView),
+		agents:     cloneAgents(s.agentView),
+		workspaces: cloneWorkspaces(s.workspaceView),
+	}
+	s.stateViewMu.RUnlock()
+	s.projectAgentResources(result.agents)
+	return result
+}
+
 func (s *Server) broadcastCommitted(message any) {
 	envelope, ok := message.(map[string]any)
 	if !ok {
@@ -3384,17 +3640,15 @@ func (s *Server) broadcastCommitted(message any) {
 }
 
 func (s *Server) committedAgents() []*coordinator.AgentState {
-	s.stateViewMu.RLock()
-	agents := cloneAgents(s.agentView)
-	s.stateViewMu.RUnlock()
-	s.projectAgentResources(agents)
-	return agents
+	return s.committedInventorySnapshot().agents
+}
+
+func (s *Server) committedWorkspaces() []herdr.Workspace {
+	return s.committedInventorySnapshot().workspaces
 }
 
 func (s *Server) committedInventoryStatus() map[string]any {
-	s.stateViewMu.RLock()
-	defer s.stateViewMu.RUnlock()
-	return cloneStringMap(s.inventoryView)
+	return s.committedInventorySnapshot().status
 }
 
 func cloneAgents(agents []*coordinator.AgentState) []*coordinator.AgentState {
@@ -3408,6 +3662,9 @@ func cloneAgents(agents []*coordinator.AgentState) []*coordinator.AgentState {
 		if agent.Interaction != nil {
 			interaction := *agent.Interaction
 			interaction.Options = append([]question.Option(nil), agent.Interaction.Options...)
+			for optionIndex := range interaction.Options {
+				interaction.Options[optionIndex].Summary = append([]question.SummaryEntry(nil), agent.Interaction.Options[optionIndex].Summary...)
+			}
 			copy.Interaction = &interaction
 		}
 		result = append(result, &copy)

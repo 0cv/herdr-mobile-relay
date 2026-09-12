@@ -208,6 +208,7 @@ func parsePiSettings(data []byte) piSettingsValues {
 }
 
 func resolvePiSkillScope(entries []string, base, home string) piSkillScope {
+	base = canonicalPiPath(base)
 	var scope piSkillScope
 	for _, entry := range entries {
 		entry = strings.TrimSpace(entry)
@@ -225,6 +226,10 @@ func resolvePiSkillScope(entries []string, base, home string) piSkillScope {
 		}
 		if !filepath.IsAbs(expanded) {
 			expanded = filepath.Join(base, expanded)
+		} else if strings.ContainsAny(entry, "*?[]") {
+			expanded = canonicalPiPattern(expanded)
+		} else {
+			expanded = canonicalPiPath(expanded)
 		}
 		expanded = filepath.Clean(expanded)
 		if prefix != 0 || strings.ContainsAny(entry, "*?[]") {
@@ -239,6 +244,30 @@ func resolvePiSkillScope(entries []string, base, home string) piSkillScope {
 	return scope
 }
 
+func canonicalPiPath(path string) string {
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return path
+}
+
+func canonicalPiPattern(path string) string {
+	wildcard := strings.IndexAny(path, "*?[")
+	if wildcard < 0 {
+		return canonicalPiPath(path)
+	}
+	prefix := path[:wildcard]
+	suffix := path[wildcard:]
+	base := prefix
+	filenamePrefix := ""
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		base = filepath.Dir(prefix)
+		filenamePrefix = filepath.Base(prefix)
+	}
+	return filepath.Join(canonicalPiPath(base), filenamePrefix+suffix)
+}
+
 func piProjectTrusted(agentDir, cwd, defaultTrust string) bool {
 	if cwd == "" {
 		return false
@@ -251,6 +280,18 @@ func piProjectTrusted(agentDir, cwd, defaultTrust string) bool {
 			}
 		}
 	}
+	canonicalDecisions := make(map[string]*bool, len(decisions))
+	for path, decision := range decisions {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+			absolute = resolved
+		}
+		canonicalDecisions[filepath.Clean(absolute)] = decision
+	}
+	decisions = canonicalDecisions
 	current, err := filepath.Abs(cwd)
 	if err != nil {
 		return false

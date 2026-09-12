@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -71,29 +70,80 @@ func (e *CLIError) Error() string {
 	return e.Code + ": " + e.Message
 }
 
-// refusalCodes are Herdr CLI error codes returned before the command changed
-// any state. Herdr validates the request and refuses it, so no input reached
-// an agent and no target was mutated: retrying is safe, and the caller may
-// retry in place while the condition is transient.
 var refusalCodes = map[string]struct{}{
-	// The Herdr server is not accepting commands at all.
-	"server_not_running": {},
-	// The target pane is not an available shell yet. A pane created moments
-	// earlier is still running shell startup, so this clears on its own.
-	"agent_pane_busy": {},
+	"server_not_running":                     {},
+	"agent_pane_busy":                        {},
+	"protocol_mismatch":                      {},
+	"invalid_request":                        {},
+	"workspace_not_found":                    {},
+	"worktree_not_found":                     {},
+	"not_git_worktree":                       {},
+	"linked_worktree_source":                 {},
+	"workspace_group_close_required":         {},
+	"workspace_group_changed":                {},
+	"workspace_group_primary_required":       {},
+	"workspace_group_consent_invalid":        {},
+	"workspace_group_validation_unavailable": {},
+	"workspace_move_block_failed":            {},
+	"unknown_method":                         {},
+	"method_not_found":                       {},
+	"unsupported_method":                     {},
 }
 
-// IsRefused reports whether err carries a Herdr CLI error code that proves the
-// command was rejected before it changed anything. It outranks the
-// ErrDispatchedUnknown that OutcomeError.Unwrap derives from the subprocess
-// boundary alone: the subprocess ran, but Herdr answered with a refusal.
-func IsRefused(err error) bool {
+var transientRefusalCodes = map[string]struct{}{
+	"server_not_running": {},
+	"agent_pane_busy":    {},
+}
+
+func refusalCode(err error) (string, bool) {
 	var cliErr *CLIError
 	if !errors.As(err, &cliErr) || cliErr == nil {
-		return false
+		return "", false
 	}
 	_, refused := refusalCodes[cliErr.Code]
+	return cliErr.Code, refused
+}
+
+func IsRefused(err error) bool {
+	_, refused := refusalCode(err)
 	return refused
+}
+
+func IsTransientRefused(err error) bool {
+	code, refused := refusalCode(err)
+	if !refused {
+		return false
+	}
+	_, transient := transientRefusalCodes[code]
+	return transient
+}
+
+func RefusalCode(err error) string {
+	code, _ := refusalCode(err)
+	return code
+}
+
+func RefusalMessage(code string) string {
+	switch code {
+	case "server_not_running":
+		return "Herdr server is not running"
+	case "agent_pane_busy":
+		return "Agent pane is still starting"
+	case "protocol_mismatch":
+		return "Herdr server protocol is incompatible with this relay"
+	case "workspace_group_close_required":
+		return "Close the workspace group explicitly"
+	case "workspace_group_changed":
+		return "Workspace group changed; review it before closing"
+	case "workspace_group_primary_required":
+		return "Select the primary workspace to close the group"
+	case "workspace_group_consent_invalid":
+		return "Workspace group confirmation is invalid; confirm again"
+	case "workspace_group_validation_unavailable":
+		return "Current workspace membership could not be verified; try again"
+	default:
+		return "Herdr rejected the command before it was sent"
+	}
 }
 
 type cliErrorEnvelope struct {
@@ -139,21 +189,22 @@ func (b *limitedBuffer) Bytes() []byte  { return b.buf.Bytes() }
 func (b *limitedBuffer) String() string { return b.buf.String() }
 
 type Client struct {
-	bin                    string
-	socketPath             string
-	sem                    chan struct{}
-	api                    *socketAPIClient
-	workspaceMoveBlockOnce sync.Once
-	workspaceMoveBlock     bool
+	bin          string
+	socketPath   string
+	sem          chan struct{}
+	api          *socketAPIClient
+	capabilities *capabilityManager
 }
 
 func NewClient(bin, socketPath string) *Client {
-	return &Client{
+	client := &Client{
 		bin:        bin,
 		socketPath: socketPath,
 		sem:        make(chan struct{}, 8),
 		api:        newSocketAPIClient(socketPath),
 	}
+	client.capabilities = newCapabilityManager(client)
+	return client
 }
 
 type Pane struct {
@@ -319,46 +370,47 @@ type Inventory struct {
 
 func (c *Client) GetInventory(ctx context.Context) (*Inventory, error) {
 	var result struct {
-		Agents []Pane `json:"agents"`
+		Agents *[]Pane `json:"agents"`
 	}
-	if err := c.runResult(ctx, &result, "agent", "list"); err == nil {
-		for i := range result.Agents {
-			result.Agents[i].Session = result.Agents[i].SessionRaw.Value
-		}
-		return &Inventory{Panes: result.Agents}, nil
-	}
-
-	// Herdr versions predating agent-list inventory do not expose a
-	// state_change_seq. Keep pane-list compatibility; those relays simply use
-	// epoch activity timestamps and the deterministic UI fallback.
-	panes, err := c.PaneList(ctx)
-	if err != nil {
+	if err := c.api.requestResult(ctx, "agent.list", map[string]any{}, "agent_list", &result); err != nil {
 		return nil, fmt.Errorf("herdr inventory: %w", err)
 	}
-	return &Inventory{Panes: panes}, nil
+	if result.Agents == nil {
+		return nil, errors.New("herdr inventory: agent.list response has no agents")
+	}
+	for i := range *result.Agents {
+		(*result.Agents)[i].Session = (*result.Agents)[i].SessionRaw.Value
+	}
+	return &Inventory{Panes: *result.Agents}, nil
 }
 
 func (c *Client) PaneList(ctx context.Context) ([]Pane, error) {
 	var result struct {
-		Panes []Pane `json:"panes"`
+		Panes *[]Pane `json:"panes"`
 	}
-	if err := c.runResult(ctx, &result, "pane", "list"); err != nil {
+	if err := c.api.requestResult(ctx, "pane.list", map[string]any{}, "pane_list", &result); err != nil {
 		return nil, fmt.Errorf("herdr pane list: %w", err)
 	}
-	for index := range result.Panes {
-		result.Panes[index].Session = result.Panes[index].SessionRaw.Value
+	if result.Panes == nil {
+		return nil, errors.New("herdr pane list: pane.list response has no panes")
 	}
-	return result.Panes, nil
+	for index := range *result.Panes {
+		(*result.Panes)[index].Session = (*result.Panes)[index].SessionRaw.Value
+	}
+	return *result.Panes, nil
 }
 
 func (c *Client) WorkspaceList(ctx context.Context) ([]Workspace, error) {
 	var result struct {
-		Workspaces []Workspace `json:"workspaces"`
+		Workspaces *[]Workspace `json:"workspaces"`
 	}
-	if err := c.runResult(ctx, &result, "workspace", "list"); err != nil {
+	if err := c.api.requestResult(ctx, "workspace.list", map[string]any{}, "workspace_list", &result); err != nil {
 		return nil, fmt.Errorf("herdr workspace list: %w", err)
 	}
-	return result.Workspaces, nil
+	if result.Workspaces == nil {
+		return nil, errors.New("herdr workspace list: workspace.list response has no workspaces")
+	}
+	return *result.Workspaces, nil
 }
 
 func (c *Client) WorkspaceCreate(ctx context.Context, cwd, label string) (*CreateResult, error) {
@@ -402,14 +454,21 @@ func (c *Client) WorkspaceMoveBlock(
 	workspaceIDs []string,
 	beforeWorkspaceID string,
 ) error {
+	epoch := c.capabilityEpoch()
 	if err := c.api.workspaceMoveBlock(ctx, workspaceIDs, beforeWorkspaceID); err != nil {
+		c.noteSocketFeature(epoch, FeatureWorkspaceMoveBlock, err)
 		return fmt.Errorf("herdr workspace move block: %w", err)
 	}
+	c.noteFeatureSupportedAt(epoch, FeatureWorkspaceMoveBlock, "operation_succeeded")
 	return nil
 }
 
-func (c *Client) WorkspaceClose(ctx context.Context, workspaceID string) error {
-	if _, err := c.runCommand(ctx, "workspace", "close", workspaceID); err != nil {
+func (c *Client) WorkspaceClose(ctx context.Context, workspaceID string, closeGroup bool) error {
+	params := map[string]any{"workspace_id": workspaceID}
+	if closeGroup {
+		params["close_group"] = true
+	}
+	if err := c.api.requestResult(ctx, "workspace.close", params, "ok", nil); err != nil {
 		return fmt.Errorf("herdr workspace close: %w", err)
 	}
 	return nil
@@ -512,12 +571,15 @@ func (c *Client) TabCreate(ctx context.Context, workspaceID, cwd, label string) 
 
 func (c *Client) TabList(ctx context.Context) ([]Tab, error) {
 	var result struct {
-		Tabs []Tab `json:"tabs"`
+		Tabs *[]Tab `json:"tabs"`
 	}
-	if err := c.runResult(ctx, &result, "tab", "list"); err != nil {
+	if err := c.api.requestResult(ctx, "tab.list", map[string]any{}, "tab_list", &result); err != nil {
 		return nil, fmt.Errorf("herdr tab list: %w", err)
 	}
-	return result.Tabs, nil
+	if result.Tabs == nil {
+		return nil, errors.New("herdr tab list: tab.list response has no tabs")
+	}
+	return *result.Tabs, nil
 }
 
 func (c *Client) TabRename(ctx context.Context, tabID, label string) error {
@@ -528,9 +590,12 @@ func (c *Client) TabRename(ctx context.Context, tabID, label string) error {
 }
 
 func (c *Client) TabMove(ctx context.Context, tabID string, insertIndex int) error {
+	epoch := c.capabilityEpoch()
 	if err := c.api.tabMove(ctx, tabID, insertIndex); err != nil {
+		c.noteSocketFeature(epoch, FeatureTabMove, err)
 		return fmt.Errorf("herdr tab move: %w", err)
 	}
+	c.noteFeatureSupportedAt(epoch, FeatureTabMove, "operation_succeeded")
 	return nil
 }
 
@@ -585,11 +650,12 @@ func (c *Client) readPane(ctx context.Context, paneID string, lines int, format,
 	if format != "ansi" {
 		format = "text"
 	}
-	if content, err := c.api.readPane(ctx, paneID, lines, format, source); err == nil {
-		return content, nil
+	epoch := c.capabilityEpoch()
+	read, err := c.api.readPane(ctx, paneID, lines, format, source)
+	c.noteSocketFeature(epoch, FeaturePaneRead, err)
+	if err == nil {
+		return read, nil
 	}
-	// The CLI fallback prints bare text and does not expose the socket API's
-	// truncation metadata, so Truncated remains false when this path is used.
 	content, err := c.runCommand(ctx,
 		"pane", "read", paneID,
 		"--lines", strconv.Itoa(lines),
@@ -609,7 +675,9 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 	if format != "ansi" {
 		format = "text"
 	}
+	epoch := c.capabilityEpoch()
 	read, err := c.api.readPane(ctx, paneID, lines, format, "visible")
+	c.noteSocketFeature(epoch, FeaturePaneRead, err)
 	if err != nil {
 		return nil, err
 	}
@@ -617,41 +685,7 @@ func (c *Client) ProbePaneVisible(ctx context.Context, paneID string, lines int,
 }
 
 func (c *Client) SupportsRealtimePane(ctx context.Context) bool {
-	return c.api.available(ctx)
-}
-
-func (c *Client) SupportsWorkspaceMoveBlock() bool {
-	c.workspaceMoveBlockOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		out, err := c.runCommand(ctx, "api", "schema", "--json")
-		if err != nil {
-			return
-		}
-		var document struct {
-			Schemas struct {
-				Request struct {
-					OneOf []struct {
-						Properties struct {
-							Method struct {
-								Const string `json:"const"`
-							} `json:"method"`
-						} `json:"properties"`
-					} `json:"oneOf"`
-				} `json:"request"`
-			} `json:"schemas"`
-		}
-		if json.Unmarshal(out, &document) != nil {
-			return
-		}
-		for _, request := range document.Schemas.Request.OneOf {
-			if request.Properties.Method.Const == "workspace.move_block" {
-				c.workspaceMoveBlock = true
-				return
-			}
-		}
-	})
-	return c.workspaceMoveBlock
+	return c.SupportsPaneRead()
 }
 
 func (c *Client) Close() error {

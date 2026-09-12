@@ -71,9 +71,11 @@ import { constants, gzipSync } from 'node:zlib';
 // of bytes per build: a release sitting on the limit fails the next one.
 // Raised from 158 KiB for the verified phone-build acknowledgement, bounded
 // reload recovery, and public release descriptor checks in 0.20.10.
-// Add a small fixed allowance for the load-failure and hung-metadata recovery
-// guards; keep the ceiling close enough to catch accidental bootstrap growth.
-const limitKiB = 160;
+// Raised from 162 KiB for global and per-pane default-view preferences and
+// safe Conversation routing with native-transcript fallback.
+// Raised from 164 KiB for bounded history diagnostics, source-change recovery,
+// and snapshot-aware refresh handling.
+const limitKiB = 165;
 const limit = limitKiB * 1024 + 256;
 const root = resolve(process.argv[2] || 'dist');
 const assetNames = await readdir(join(root, 'assets'));
@@ -96,7 +98,7 @@ for (const relative of files) {
   const brotli = await readFile(join(root, `${relative}.br`));
   const gzip = gzipSync(source, {
     level: 9,
-    memLevel: 8,
+    memLevel: 9,
     strategy: constants.Z_DEFAULT_STRATEGY,
     windowBits: 15,
   });

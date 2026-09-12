@@ -5,7 +5,6 @@
   import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
   import AgentRail from '$components/AgentRail.svelte';
-  import ConversationHistory from '$components/ConversationHistory.svelte';
   import LaunchView from '$components/LaunchView.svelte';
   import GlobalJump from '$components/GlobalJump.svelte';
   import LockScreen from '$components/LockScreen.svelte';
@@ -17,6 +16,7 @@
   import WorkspaceManager from '$components/WorkspaceManager.svelte';
   import Button from '$components/ui/Button.svelte';
   import Toast from '$components/ui/Toast.svelte';
+  import { agentOpeningView, hasConversationHistory } from '$lib/agent-view';
   import { activityForNotification } from '$lib/activity';
   import {
     agentContextLabel,
@@ -29,8 +29,12 @@
     displayName,
     hostLabel,
   } from '$lib/agents';
-  import { APP_VERSION } from '$lib/config';
-  import { initializePreferences } from '$lib/preferences';
+  import { APP_ASSET_VERSION, APP_BUILD_ID, APP_VERSION } from '$lib/config';
+  import {
+    defaultAgentView,
+    initializePreferences,
+    paneAgentViewOverrides,
+  } from '$lib/preferences';
   import { initializeSpeech, stopSpeech } from '$lib/speech';
   import { initializePush, notificationsEnabled, pushOptedIn, showPageNotification } from '$lib/push';
   import { parsePushOpenTarget, RELAY_PROTOCOL_VERSION } from '$lib/protocol';
@@ -54,7 +58,8 @@
     relayServesCurrentOrigin,
     reloadUpdatedSameOriginApp,
   } from '$lib/updates';
-  import type { Agent, NotificationTarget } from '$lib/types';
+  import type { Agent, ConversationPage, NotificationTarget } from '$lib/types';
+  import type { ViewState } from '$lib/router';
 
   const relays = relayStore.relayConfigs;
   const connections = relayStore.connections;
@@ -79,6 +84,8 @@
   const automaticUpdateChecks = new Set<string>();
   const awaitedDeployments = new Set<string>();
   let visibilityRevision = $state(0);
+  let conversationHistoryComponent = $state<typeof import('$components/ConversationHistory.svelte')['default'] | null>(null);
+  let conversationHistoryLoadError = $state(false);
   let viewedRelayId = '';
   let viewedTargetSignature = '';
 
@@ -99,10 +106,17 @@
       .map((relay) => relay.id));
   });
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
-  const conversationHistoryAvailable = $derived(Boolean(
-    activeAgent?.conversation_history_available
-    && activeConnection?.capabilities.includes('conversation_history'),
-  ));
+  const conversationHistoryAvailable = $derived(hasConversationHistory(activeAgent, activeConnection));
+  $effect(() => {
+    if ($currentView.view !== 'history' || !activeAgent || conversationHistoryComponent) return;
+    void import('$components/ConversationHistory.svelte')
+      .then(({ default: component }) => {
+        conversationHistoryComponent = component;
+      })
+      .catch(() => {
+        conversationHistoryLoadError = true;
+      });
+  });
   const workspaceInspectionAvailable = $derived(Boolean(
     activeAgent?.cwd
     && activeConnection?.capabilities.includes('workspace_inspection'),
@@ -431,7 +445,23 @@
     if (relayStore.deviceCredential(agent.relay_id)?.role !== 'reader') {
       void relayStore.acknowledgePane(agent);
     }
-    navigate({ view: 'terminal', paneId: agent.pane_id, target: targetRefForAgent(agent) || undefined });
+    navigate(agentOpeningView(
+      agent,
+      get(connections).get(agent.relay_id),
+      get(defaultAgentView),
+      get(paneAgentViewOverrides),
+    ));
+  }
+
+  function makeInitialPageHandler(openingRoute: Extract<ViewState, { view: 'history' }>): (page: ConversationPage) => void {
+    return (page) => {
+      if (!openingRoute.fallbackToTerminalOnInitialUnavailable || page.available) return;
+      if (get(currentView) !== openingRoute) return;
+      const liveAgent = get(agents).find((candidate) => candidate.pane_id === openingRoute.paneId);
+      if (!liveAgent || !openingRoute.target) return;
+      if (!targetRefMatchesAgent(openingRoute.target, liveAgent)) return;
+      replaceView({ view: 'terminal', paneId: openingRoute.paneId, target: openingRoute.target });
+    };
   }
 
   function toggle(view: 'settings' | 'launch' | 'activity' | 'workspaces') {
@@ -534,7 +564,12 @@
 </script>
 
 <div class="app-shell">
-  <header class="app-header" class:home-header={$currentView.view === 'agents'}>
+  <header
+    class="app-header"
+    class:home-header={$currentView.view === 'agents'}
+    data-app-assets={APP_ASSET_VERSION}
+    data-app-build={APP_BUILD_ID}
+  >
     {#if $currentView.view !== 'agents'}
       <Button variant="ghost" size="icon" aria-label="Back" onclick={closeCurrentView}>
         <svg class="back-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -597,7 +632,7 @@
             <path d="M3 5.5h7l2 2h9v11H3z"></path>
           </svg>
         </Button>
-        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent || activeReadOnly} onclick={() => { manageOpen = true; }}>•••</Button>
+        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
       {:else if $currentView.view === 'history'}
         <Button
           variant="ghost"
@@ -612,6 +647,7 @@
             <path d="m7 9 3 3-3 3M12 15h5"></path>
           </svg>
         </Button>
+        <Button variant="ghost" size="icon" aria-label="Manage agent" disabled={!activeAgent} onclick={() => { manageOpen = true; }}>•••</Button>
       {:else}
         <Button variant="ghost" size="icon" aria-label="Manage workspaces" title="Manage workspaces" onclick={() => toggle('workspaces')}>
           <svg class="header-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
@@ -655,11 +691,26 @@
   {:else if $currentView.view === 'activity_detail'}
     <ActivityDetail key={$currentView.key} />
   {:else if $currentView.view === 'history' && activeAgent}
-    <!-- Keyed so a hash navigation straight to another pane's history remounts
-         the view: the reply draft, transcript, and scroll pin are all per-pane
-         state and must never carry over to a different agent. -->
-    {#key activeAgent.pane_id}
-      <ConversationHistory agent={activeAgent} readOnly={activeReadOnly} />
+    {@const openingRoute = $currentView}
+    {#key openingRoute}
+      {#if conversationHistoryComponent}
+        {@const HistoryComponent = conversationHistoryComponent}
+        <HistoryComponent
+          agent={activeAgent}
+          readOnly={activeReadOnly}
+          onInitialPage={openingRoute.fallbackToTerminalOnInitialUnavailable
+            ? makeInitialPageHandler(openingRoute)
+            : undefined}
+        />
+      {:else if conversationHistoryLoadError}
+        <main class="page terminal-loading" aria-label="Conversation history failed to load">
+          <p role="alert">Conversation history could not be loaded. Reload the app to try again.</p>
+        </main>
+      {:else}
+        <main class="page terminal-loading" aria-label="Opening conversation history">
+          <p role="status">Opening conversation history…</p>
+        </main>
+      {/if}
     {/key}
   {:else if $currentView.view === 'history'}
     <main class="page terminal-loading" aria-label="Conversation history unavailable">

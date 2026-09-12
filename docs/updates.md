@@ -15,13 +15,17 @@ verification fails.
 Phone-driven upgrades run `herdr plugin install` in a transient worker pinned
 to the release commit.
 
-## Upgrading to v0.20.11
+## Upgrading to v0.21.0
 
-Version 0.20.11 includes the verified phone-update flow from 0.20.10 and fixes
-completion when an older cached manifest bootstrap is still present. A relay deployment
-can publish the hosted app, but the update screen remains incomplete until the
-new phone bundle initializes and reports its verified build identity. Relay-only
-updates do not claim to have updated the phone.
+Version 0.21.0 adds live Herdr compatibility reporting, JSON-backed workspace
+and linked-worktree management, and verified Android/iOS installed-PWA device
+coverage. Settings distinguishes the installed Herdr client from the running
+server and reports affected feature support instead of treating one mismatch
+as a total connection failure.
+
+A relay deployment can publish the hosted app, but the update screen remains
+incomplete until the new phone bundle initializes and reports its verified build
+identity. Relay-only updates do not claim to have updated the phone.
 
 Phone acknowledgement also requires the integrity-checked stylesheet to have
 loaded. This uses the browser's stylesheet state, not a readiness flag from
@@ -129,6 +133,15 @@ background shells, or background agents keep a pane reported as working when
 terminal titles are unavailable or disabled. That accuracy flows straight to
 the phone, which keys completion notifications and history capture off those
 status transitions.
+
+## Installed-PWA upgrade coverage
+
+The installed-device suite in `docs/mobile-device-ci.md` checks the executing
+phone build, not only `/version.json`, while preserving real encrypted relay
+credentials and preferences. It uses historical old bundles, a deterministic
+HTTPS fixture, bounded asset faults, and native Home Screen relaunches. A green
+simulator run does not replace the separate physical-device and deployed-origin
+signoff for a user-facing release.
 
 ## Troubleshooting
 

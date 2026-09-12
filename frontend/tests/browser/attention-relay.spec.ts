@@ -228,3 +228,25 @@ test('drives captured attention panes through the real relay', async ({ page }) 
   await expect(page.getByRole('button', { name: 'Tab', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Enter', exact: true })).toBeVisible();
 });
+
+test('browses a full conversation through the real relay', async ({ page }) => {
+  const wsURL = process.env.HERDR_ATTENTION_WS_URL;
+  if (!wsURL) throw new Error('HERDR_ATTENTION_WS_URL is not configured');
+  await page.addInitScript(({ relayURL }) => {
+    localStorage.setItem('herdr_relays', JSON.stringify([{
+      id: 'captured-attention',
+      label: 'Captured relay',
+      url: relayURL,
+      token: 'attention-browser-test-key-32byt',
+    }]));
+    localStorage.setItem('herdr_default_agent_view', 'conversation');
+  }, { relayURL: wsURL });
+  await page.goto('/');
+
+  await page.getByRole('button', { name: 'Open conversation on Captured relay' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('history question')).toBeVisible();
+  await expect(page.getByText('history answer')).toBeVisible();
+  await page.getByRole('button', { name: 'Full history' }).click();
+  await expect(page.getByRole('button', { name: 'Full history' })).toHaveAttribute('aria-pressed', 'true');
+});

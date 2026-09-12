@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0cv/herdr-mobile-relay/internal/herdr"
 )
@@ -22,10 +23,25 @@ func TestQuestionDeadlineDuringInterKeyDelayIsDispatchedUnknown(t *testing.T) {
 		nil,
 		testLogger(),
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), questionKeyDelay/2)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := dispatcher.sendQuestionKeys(ctx, "pane-1", []string{"Down", "Enter"})
+	result := make(chan error, 1)
+	go func() {
+		result <- dispatcher.sendQuestionKeys(ctx, "pane-1", []string{"Down", "Enter"})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, readErr := os.Stat(record); readErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first key was not dispatched")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	err := <-result
 	if !errors.Is(err, herdr.ErrDispatchedUnknown) {
 		t.Fatalf("partial question input = %v, want dispatched_unknown", err)
 	}

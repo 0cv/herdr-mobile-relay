@@ -1,0 +1,28 @@
+{
+  "name": "herdr-mobile-device-ci",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "packageManager": "bun@1.4.0",
+  "engines": {
+    "bun": ">=1.4.0",
+    "node": "24.12.0"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "check": "tsc --noEmit",
+    "test:unit": "bun unit/run.ts",
+    "prepare:bundle": "bun prepare.ts",
+    "prepare:current": "bun prepare-current.ts",
+    "test:cache-recovery": "bun integration/cache-recovery.ts",
+    "run": "bun run.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.2.0",
+    "eslint": "10.8.1",
+    "globals": "17.11.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0"
+  }
+}

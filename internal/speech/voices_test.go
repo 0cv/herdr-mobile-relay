@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -136,7 +137,15 @@ func restoreCatalog(t *testing.T) {
 	})
 }
 
+func requirePublishedRuntime(t *testing.T) {
+	t.Helper()
+	if _, ok := runtimeAssets[runtime.GOOS+"/"+runtime.GOARCH]; !ok {
+		t.Skipf("no published speech runtime for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+}
+
 func TestInstallCachesTheEngineAndVoiceOnce(t *testing.T) {
+	requirePublishedRuntime(t)
 	restoreCatalog(t)
 	binDir := t.TempDir()
 	hermeticEnv(t, binDir)
@@ -287,6 +296,7 @@ func TestExtractTarGzRejectsChainedTraversal(t *testing.T) {
 }
 
 func TestBrokenCachedRuntimeIsReportedMissing(t *testing.T) {
+	requirePublishedRuntime(t)
 	restoreCatalog(t)
 	hermeticEnv(t, t.TempDir())
 	cache := t.TempDir()
@@ -307,6 +317,7 @@ func TestBrokenCachedRuntimeIsReportedMissing(t *testing.T) {
 }
 
 func TestFailedRuntimeValidationKeepsExistingEngine(t *testing.T) {
+	requirePublishedRuntime(t)
 	restoreCatalog(t)
 	hermeticEnv(t, t.TempDir())
 	cache := t.TempDir()
@@ -331,6 +342,7 @@ func TestFailedRuntimeValidationKeepsExistingEngine(t *testing.T) {
 }
 
 func TestReinstallRuntimePreservesVoices(t *testing.T) {
+	requirePublishedRuntime(t)
 	restoreCatalog(t)
 	hermeticEnv(t, t.TempDir())
 	cache := t.TempDir()
@@ -432,6 +444,7 @@ func TestInstallRejectsTamperedBytesAndUnknownLanguages(t *testing.T) {
 }
 
 func TestRunReportsAndInstallsFromTheCommandLine(t *testing.T) {
+	requirePublishedRuntime(t)
 	restoreCatalog(t)
 	binDir := t.TempDir()
 	hermeticEnv(t, binDir)

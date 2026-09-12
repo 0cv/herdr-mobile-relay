@@ -34,11 +34,29 @@ function digest(source: string | Uint8Array): { sha256: string; integrity: strin
 }
 
 function releaseBootstrap(): string {
-  return `<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n    <meta name="theme-color" content="#2e3440" />\n    <meta name="description" content="Monitor and approve Herdr agents from your phone" />\n    <meta name="apple-mobile-web-app-capable" content="yes" />\n    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />\n    <title>Herdr Mobile Relay</title>\n    <script src="/herdr-bootstrap.js"></script>\n    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />\n  </head>\n  <body><p>Loading Herdr…</p></body>\n</html>\n`;
+  return '<!doctype html><script src="/herdr-bootstrap.js"></script>\n';
 }
 
 function bootstrapScript(entryPath: string): string {
-  return `(() => {\n  const target = new URL(window.__HERDR_ENTRY__ || ${JSON.stringify(`/${entryPath}`)}, location.origin);\n  target.search = location.search;\n  target.hash = location.hash;\n  location.replace(target.href);\n})();\n`;
+  return `const e = new URL(window.__HERDR_ENTRY__ || ${JSON.stringify(`/${entryPath}`)}, location);\n  e.search = location.search;\n  e.hash = location.hash;\n  location.replace(e);\n`;
+}
+
+const releaseStyleNames = [
+  ['--primary-foreground', '--pf'], ['--terminal-link-visited', '--tlv'], ['--composer-padding-block', '--cpb'],
+  ['--terminal-content-width', '--tcw2'], ['--app-header-height', '--ah'], ['--terminal-controls-height', '--tch'],
+  ['--terminal-viewport-height', '--tvh'], ['--terminal-row-height', '--trh'], ['--terminal-line-height', '--tlh'],
+  ['--terminal-cell-gap', '--tcg'], ['--composer-max-height', '--cmh'],
+  ['--composer-min-height', '--cmin'], ['--safe-area-inset-bottom', '--sab'], ['--safe-area-inset-top', '--sat'],
+  ['--terminal-columns', '--tcols'], ['--terminal-rows', '--trows'], ['--diff-zoom', '--dz'], ['--path-depth', '--pd'],
+  ['--terminal-link', '--tl'], ['--terminal-text', '--tt'], ['--background', '--bg'], ['--foreground', '--fg'],
+  ['--card-hover', '--ch'], ['--secondary', '--s2'], ['--border', '--bd'], ['--primary', '--p'], ['--input', '--in'],
+  ['--danger', '--d'], ['--success', '--s'], ['--warning', '--w'], ['--trust', '--tr'],
+  ['--card', '--c'], ['--muted', '--m'], ['--tree-line', '--tree'],
+] as const;
+
+function compactReleaseStyleNames(source: string): string {
+  for (const [from, to] of releaseStyleNames) source = source.replaceAll(from, to);
+  return source;
 }
 
 function immutableHeaders(): string {
@@ -83,6 +101,9 @@ function stableReleaseAssets(): Plugin {
         return;
       }
 
+      appJavascript.code = compactReleaseStyleNames(appJavascript.code);
+      appStylesheet.source = compactReleaseStyleNames(appStylesheet.source as string);
+
       const whitespaceTable = '` \t\n\\r\\f\\xA0\\v\uFEFF`';
       const escapedWhitespaceTable = '" \\t\\n\\r\\f\\xA0\\v\\uFEFF"';
       appJavascript.code = appJavascript.code.replaceAll(whitespaceTable, escapedWhitespaceTable);
@@ -110,7 +131,12 @@ function stableReleaseAssets(): Plugin {
         .replaceAll('assets/app.js', appJavascript.fileName)
         .replaceAll('assets/app.css', appStylesheet.fileName)
         .replaceAll('src="manifest-loader.js"', 'src="/manifest-loader.js"')
-        .replaceAll('href="icons/', 'href="/icons/');
+        .replaceAll('href="icons/', 'href="/icons/')
+        .replace(/>\s+</g, '><')
+        .replace(/\s{2,}/g, ' ')
+        .replace(/\s+\/>/g, '/>')
+        .replace(/(\s)((?!(?:src|href|integrity)=")[A-Za-z_:][\w:.-]*)="([A-Za-z0-9_./:#?-]+)"/g, '$1$2=$3')
+        .replace(/\/>/g, '>');
       entrySource = entrySource.replace(
         new RegExp(`(<script[^>]*src=["']/?${appJavascript.fileName.replaceAll('/', '\\/')}["'][^>]*)>`),
         (match: string, prefix: string) => `${prefix} integrity="${javascriptIdentity.integrity}"${/\bcrossorigin(?:[=\s]|$)/i.test(prefix) ? '' : ' crossorigin="anonymous"'}>`,
@@ -188,6 +214,7 @@ export default defineConfig({
   },
   build: {
     cssCodeSplit: false,
+    modulePreload: { polyfill: false },
     emptyOutDir: true,
     outDir: 'dist',
     rollupOptions: {
@@ -196,11 +223,13 @@ export default defineConfig({
           const names = asset.names ?? [];
           return names.some((name) => name.endsWith('.css')) ? 'assets/app.css' : 'assets/[name][extname]';
         },
-        chunkFileNames: 'assets/[name].js',
+        // Lazy chunks inherit the release asset version so each release gets a
+        // new immutable URL without participating in the entry digest cycle.
+        chunkFileNames: `assets/[name]-${versions.assets}.js`,
         entryFileNames: 'assets/app.js',
       },
     },
-    target: 'es2022',
+    target: 'esnext',
   },
   define: {
     __APP_PROTOCOL_VERSION__: '3',

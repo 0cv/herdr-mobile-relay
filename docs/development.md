@@ -61,8 +61,72 @@ Node.js 26. `make web-deploy` then runs the public bundle verifier against
 `WEB_ORIGIN` (the Pages domain by default; override it for a custom domain).
 Packaged users need no toolchain at all.
 
+### WebKit tests on Fedora
+
+Do not install the Ubuntu-specific `libicu74` / `libjpeg-turbo8` packages or
+symlink Fedora libraries to their ABI names. The version-matched official
+Playwright container supplies WebKit and its dependencies. Podman must be
+installed once (`sudo dnf install podman`); the image is downloaded on first
+use and remains cached across runs and reboots. A Playwright version upgrade
+fetches the matching new image.
+
+Both browser test commands select the container automatically on Fedora:
+
+```bash
+make frontend-browser                    # Chromium and WebKit UI journeys
+make frontend-browser-attention-release  # Chromium and WebKit relay/attention tests
+# Focus only on the previously blocked engine:
+HERDR_WEB_ROOT=../web bun run --cwd frontend test:browser:attention --project=webkit-attention
+```
+
+The attention runner keeps Bun, Go, and the isolated relay fixture on the host.
+Only the WebKit browser runs in the container, with Playwright forwarding its
+loopback traffic to the host's test HTTP and relay WebSocket servers. The
+browser-control port is published only on `127.0.0.1`, on an automatically
+allocated port, and the runner removes its container on exit without removing
+the cached image. Test output and failure traces stay on the host. Ubuntu CI
+continues to use native browsers; `HERDR_WEBKIT_CONTAINER=1` selects Docker for
+hosts that explicitly want containerized WebKit. Directly invoking
+`playwright test --config playwright.attention.config.ts` bypasses the wrapper;
+use the package script or Make target instead.
+
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
 failure injection, and process-control traces for black-box tests.
+
+Installed-PWA device CI is documented in `docs/mobile-device-ci.md`. Its host-only
+check does not replace the real Android Home Screen or iOS Home Screen runs;
+macOS/Xcode is required for iOS, and each destructive device action requires a
+run-owned disposable emulator or simulator marker.
+
+## Herdr compatibility checks
+
+The relay's minimum supported Herdr client is 0.7.5; 0.9.0 is the recommended
+client for the full JSON inventory and workspace-management surface. The
+installed client version is only one input: startup and the refresh loop ping
+the running server and record its server version, protocol, endpoint generation,
+and individual feature evidence. A stable endpoint generation does not imply
+that every optional operation is supported.
+
+Ordinary agent, pane, workspace, and tab inventory uses JSON operations. The
+mobile terminal reads pane snapshots through `pane.read`, with a CLI fallback;
+it does not attach through Herdr's separate binary direct-terminal transport.
+Unprobed or unadvertised optional features are not compatibility failures.
+Settings warns only for unsupported features and unsuccessful checks, not
+`not_checked` or `not_advertised` evidence. Terminal-read support is checked at
+startup and after reconnects using an empty explicit pane ID: Herdr's
+`pane_not_found` refusal confirms the method without reading, scrolling, or
+resizing a live pane. Pending reconnect checks are labeled as rechecks, not
+failures. Event clients subscribe before taking a snapshot; reconnects refresh
+the snapshot and do not replay all notifications missed while disconnected.
+
+Workspace group close is a single explicit close operation over the current
+workspace membership. It closes panes but never removes Git checkouts or
+branches. Worktree removal remains a separate destructive operation with its
+own dirty-checkout confirmation.
+
+Use the fake Herdr binary or a temporary Unix socket fixture for tests. Do not
+run production Herdr commands or mutate production state while checking these
+paths.
 
 ## Phone-side crash diagnostics
 

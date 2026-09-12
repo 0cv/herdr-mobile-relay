@@ -1,5 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { base64UrlEncode } from './base64url';
+import { clearConversationPreviews, clearConversationPreviewsForRelay } from './conversation-cache-control';
 import {
   AttachmentBatchController,
   type AttachmentUploadCallbacks,
@@ -73,7 +74,11 @@ import type {
   TransportStatus,
   TransportStatusDetail,
 } from './transports';
-import { terminalHistoryLines, terminalRefreshInterval } from './preferences';
+import {
+  clearPaneAgentViewOverridesForRelay,
+  terminalHistoryLines,
+  terminalRefreshInterval,
+} from './preferences';
 import {
   clearPendingRelayUpdate,
   normalizeAppDeployment,
@@ -87,12 +92,14 @@ import type {
   AgentProfile,
   AgentInventoryStatus,
   CommandResult,
+  ConversationHistoryRequest,
   ConversationPage,
   FrontendTargetRef,
   OmoTodoState,
   DirectoryListing,
   QuestionDraft,
   QuestionInteraction,
+  HerdrStatus,
   RelayConfig,
   RelayConnectionView,
   RelaySpeechVoice,
@@ -210,6 +217,36 @@ function normalizeAgentInventory(
     stale: inventory.stale === true,
   };
 }
+function normalizeHerdrStatus(value: unknown): HerdrStatus {
+  const status = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const features: Record<string, HerdrStatus['features'][string]> = {};
+  const rawFeatures = status.features && typeof status.features === 'object' && !Array.isArray(status.features)
+    ? status.features as Record<string, unknown>
+    : {};
+  for (const [name, rawFeature] of Object.entries(rawFeatures).slice(0, 64)) {
+    if (!rawFeature || typeof rawFeature !== 'object' || Array.isArray(rawFeature)) continue;
+    const feature = rawFeature as Record<string, unknown>;
+    const state = String(feature.state || '');
+    if (!['supported', 'unsupported', 'unknown'].includes(state)) continue;
+    features[name.slice(0, 96)] = {
+      state: state as HerdrStatus['features'][string]['state'],
+      reason: String(feature.reason || '').slice(0, 160),
+    };
+  }
+  const endpoint = Number(status.endpoint_protocol_generation);
+  return {
+    installed_client_version: String(status.installed_client_version || '').slice(0, 64),
+    server_version: String(status.server_version || '').slice(0, 64),
+    server_protocol: Number.isSafeInteger(Number(status.server_protocol)) ? Number(status.server_protocol) : 0,
+    server_protocol_known: status.server_protocol_known === true,
+    endpoint_protocol_generation: Number.isSafeInteger(endpoint) && endpoint > 0 ? endpoint : null,
+    generation: Number.isSafeInteger(Number(status.generation)) ? Number(status.generation) : 0,
+    features,
+  };
+}
+
 function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const state = value as Record<string, unknown>;
@@ -250,6 +287,110 @@ function normalizeOmoTodoState(value: unknown): OmoTodoState | undefined {
   };
 }
 
+
+const BROWSE_CURSOR_LIMIT = 2_048;
+
+function invalidBrowse(): never {
+  throw new CommandError('Relay returned invalid conversation history');
+}
+
+function browseString(value: unknown, max: number, required = false): string {
+  if (value == null && !required) return '';
+  if (typeof value !== 'string' || value.length > max || (required && !value)) invalidBrowse();
+  return value;
+}
+
+function browseText(value: unknown, max: number): string {
+  return typeof value === 'string' ? value.slice(0, max) : '';
+}
+
+function browseIdentity(value: unknown, max: number): string {
+  return typeof value === 'string' && value.length <= max ? value : '';
+}
+
+function browseCount(value: unknown): number {
+  if (value == null) return 0;
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 0) invalidBrowse();
+  return count;
+}
+
+function browseRecord(value: unknown, required = false): Record<string, any> | null {
+  const record = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : null;
+  if (!record && required) invalidBrowse();
+  return record;
+}
+
+function browseBoolean(value: unknown, optional = false): boolean {
+  if (value == null && optional) return false;
+  if (typeof value !== 'boolean') invalidBrowse();
+  return value;
+}
+
+export function normalizeConversationPage(value: unknown): ConversationPage {
+  const data = browseRecord(value, true)!;
+  if (typeof data.available !== 'boolean' || typeof data.has_more !== 'boolean' || !Array.isArray(data.entries) || data.entries.length > 200) invalidBrowse();
+  const entries = data.entries.flatMap((candidate: unknown) => {
+    const entry = browseRecord(candidate);
+    if (!entry || (entry.role !== 'user' && entry.role !== 'assistant')) return [];
+    const text = browseText(entry.text, 1_048_576);
+    const tools = (Array.isArray(entry.tools) ? entry.tools : []).slice(0, 128).flatMap((candidateTool: unknown) => {
+      const tool = browseRecord(candidateTool);
+      if (!tool) return [];
+      return [{
+        id: browseIdentity(tool.id, 256), name: browseText(tool.name, 160) || 'Tool',
+        input: browseText(tool.input, 1_048_576), output: browseText(tool.output, 1_048_576),
+        error: tool.error === true, truncated: tool.truncated === true,
+      }];
+    });
+    const normalized = {
+      id: browseIdentity(entry.id, 256), timestamp: browseText(entry.timestamp, 128),
+      role: entry.role, text, tools, truncated: entry.truncated === true,
+    };
+    return normalized.id && (text || tools.length) ? [normalized] : [];
+  });
+  const cursor = browseString(data.next_cursor, BROWSE_CURSOR_LIMIT);
+  const state = browseString(data.state, 32, true);
+  const mode = browseString(data.mode, 32, true);
+  if (!['ready', 'preparing', 'failed'].includes(state) || !['recent', 'snapshot', 'native'].includes(mode)
+    || (data.has_more && !cursor) || (state === 'preparing' && !cursor)) invalidBrowse();
+  const progress = data.progress == null ? undefined : (() => {
+    const raw = browseRecord(data.progress, true)!;
+    const scanned = browseCount(raw.scanned_bytes);
+    const source = browseCount(raw.source_bytes);
+    if (scanned > source) invalidBrowse();
+    return { phase: browseString(raw.phase, 32, true), scanned_bytes: scanned, source_bytes: source };
+  })();
+  const rawDiagnostics = data.diagnostics == null ? {} : browseRecord(data.diagnostics, true)!;
+  const continuationIncomplete = browseBoolean(rawDiagnostics.continuation_incomplete, true);
+  const continuationReason = rawDiagnostics.continuation_reason == null
+    ? undefined
+    : browseString(rawDiagnostics.continuation_reason, 64);
+  const continuationReasons = new Set(['missing_source', 'invalid_link', 'ambiguous_link', 'cycle', 'resolution_limit', 'partial_link']);
+  if (continuationIncomplete && (!continuationReason || !continuationReasons.has(continuationReason))) invalidBrowse();
+  if (!continuationIncomplete && continuationReason) invalidBrowse();
+  const diagnostics = {
+    oversized_records: browseCount(rawDiagnostics.oversized_records), corrupt_records: browseCount(rawDiagnostics.corrupt_records),
+    omitted_tools: browseCount(rawDiagnostics.omitted_tools), omitted_payloads: browseCount(rawDiagnostics.omitted_payloads),
+    plan_corrupt: browseBoolean(rawDiagnostics.plan_corrupt, true),
+    source_truncated: browseBoolean(rawDiagnostics.source_truncated, true),
+    continuation_incomplete: continuationIncomplete,
+    continuation_reason: continuationReason,
+  };
+  const rawError = data.error == null ? null : browseRecord(data.error, true)!;
+  const error = rawError ? {
+    code: browseString(rawError.code, 64, true), message: browseString(rawError.message, 512, true),
+    retryable: browseBoolean(rawError.retryable),
+  } : undefined;
+  if (state === 'failed' && !error) invalidBrowse();
+  return {
+    available: data.available, reason: browseString(data.reason, 512), entries,
+    nextCursor: cursor, hasMore: data.has_more, total: data.total == null ? null : browseCount(data.total),
+    state: state as ConversationPage['state'], mode: mode as ConversationPage['mode'],
+    sourceRevision: browseString(data.source_revision, 256), snapshotId: browseString(data.snapshot_id, 256), progress, diagnostics, error,
+    omoPlan: normalizeOmoTodoState(data.omo_plan),
+  };
+}
 
 function normalizeAgentTargetFields(agent: Partial<Agent>): Partial<Agent> {
   const generation = Number(agent.generation);
@@ -446,6 +587,7 @@ class RelayStore {
     const invitation = quickSetupInvitation(location);
     const imported = importQuickSetup(relays, location);
     if (imported) {
+      clearChangedRelayPreviews(relays, imported);
       relays = imported;
       const relay = setup ? this.relayForSetup(relays, setup) : undefined;
       if (relay) {
@@ -519,8 +661,10 @@ class RelayStore {
   importSetupLink(locationValue: Pick<Location, 'hash' | 'protocol' | 'host' | 'pathname' | 'search'> = location, connect = true): boolean {
     const setup = quickSetupConfig(locationValue);
     const invitation = quickSetupInvitation(locationValue);
-    const imported = importQuickSetup(get(this.relayConfigs), locationValue);
+    const currentRelays = get(this.relayConfigs);
+    const imported = importQuickSetup(currentRelays, locationValue);
     if (!imported || !setup) return false;
+    clearChangedRelayPreviews(currentRelays, imported);
     const relay = this.relayForSetup(imported, setup);
     if (!relay) return false;
     // Persist the entry before deciding, so a deferred relay row exists for
@@ -558,6 +702,7 @@ class RelayStore {
     this.pendingSlashCommands.clear();
     this.pendingPaneReads.clear();
     this.paneContentFingerprints.clear();
+    clearConversationPreviews();
     this.watchedPanes.clear();
     this.paneWatchesStarted.clear();
   }
@@ -582,6 +727,7 @@ class RelayStore {
         ? normalizeRelayConfig({ ...next, id: existing.id, paired: next.paired || existing.paired })
         : relay))
       : [...relays, next];
+    if (existing && relayConnectionIdentityChanged(existing, next)) clearConversationPreviewsForRelay(existing.id);
     this.relayConfigs.set(updated);
     saveRelayConfigs(updated);
     this.connectAll();
@@ -592,6 +738,7 @@ class RelayStore {
     this.reconnectAttempts.delete(id);
     this.deferredPairingRelays.delete(id);
     this.deviceCredentials.remove(id);
+    clearConversationPreviewsForRelay(id);
     this.devicesValue.delete(id);
     this.devices.set(new Map(this.devicesValue));
     this.pushPoliciesValue.delete(id);
@@ -605,6 +752,9 @@ class RelayStore {
     this.removeWorkspacesForRelay(id);
     this.activitiesValue = this.activitiesValue.filter((activity) => activity.relay_id !== id);
     this.activities.set(this.activitiesValue);
+    if (clearPaneAgentViewOverridesForRelay(id) === 'unavailable') {
+      this.showToast('Could not clear saved pane view preferences on this device.', true);
+    }
   }
 
   connectAll(preserveAgents = false): void {
@@ -725,6 +875,7 @@ class RelayStore {
       inventory: normalizeAgentInventory(null),
       pushStatus: '',
       vapidPublicKey: '',
+      herdrStatus: normalizeHerdrStatus(null),
     };
   }
 
@@ -799,6 +950,7 @@ class RelayStore {
     // The relay refuses this device's credential. Keep it until a confirmed,
     // newer invitation replaces it: gateway close reasons are not authenticated.
     if (detail?.code === 'device_unauthorized') {
+      clearConversationPreviewsForRelay(relay.id);
       connection.authRejected = true;
       connection.closed = true;
       clearTimeout(connection.reconnectTimer ?? undefined);
@@ -1123,6 +1275,7 @@ class RelayStore {
       observeAppUpstreamVersion(connection.update.upstream_version);
       connection.gatewayAvailableVersion = connection.update.available_version || connection.releaseVersion;
       this.syncUpdateRestartReconnect(relayId, connection);
+      connection.herdrStatus = normalizeHerdrStatus(message.herdr_status);
       connection.appDeploy = normalizeAppDeployment(message.app_deploy);
       connection.inventory = normalizeAgentInventory(message.inventory, 'ready');
       connection.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter(Boolean) : [];
@@ -1159,6 +1312,16 @@ class RelayStore {
       if (connection.capabilities.includes('device_management')) {
         void this.refreshDevices(relayId);
       }
+      return;
+    }
+    if (message.type === 'herdr_status' && connection) {
+      const status = normalizeHerdrStatus(message.status);
+      if (status.generation <= connection.herdrStatus.generation) return;
+      connection.herdrStatus = status;
+      if (Array.isArray(message.capabilities)) {
+        connection.capabilities = message.capabilities.filter(Boolean);
+      }
+      this.emitConnections();
       return;
     }
     if (message.type === 'inventory_status' && connection) {
@@ -1589,6 +1752,7 @@ class RelayStore {
     payload: Record<string, any>,
     timeoutMs = COMMAND_TIMEOUT_MS,
     allowProtocolMismatch = false,
+    signal?: AbortSignal,
   ): Promise<CommandResult> {
     const connection = this.connectionsValue.get(relayId);
     if (!connection || connection.status !== 'connected') {
@@ -1601,12 +1765,28 @@ class RelayStore {
         connection.inventory.message || 'Herdr agent inventory is not ready on this computer',
       ));
     }
+    if (signal?.aborted) {
+      const error = new CommandError('Conversation history request was cancelled.');
+      error.code = 'request_cancelled';
+      return Promise.reject(error);
+    }
     const requestId = commandRequestId();
     return new Promise((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        if (!this.pendingRequests.delete(requestId)) return;
+        cleanup();
+        const error = new CommandError('Conversation history request was cancelled.');
+        error.code = 'request_cancelled';
+        reject(error);
+      };
+      const cleanup = () => signal?.removeEventListener('abort', abort);
       const timer = setTimeout(() => {
+        cleanup();
         this.pendingRequests.delete(requestId);
         reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, timeoutMs);
+      signal?.addEventListener('abort', abort, { once: true });
       const actionId = payload.intent && typeof payload.intent === 'object'
         ? String(payload.intent.action_id || '')
         : '';
@@ -1617,6 +1797,7 @@ class RelayStore {
         resolve,
         reject,
         timer,
+        cleanup,
       });
       const command: Record<string, unknown> = {
         ...payload,
@@ -1628,6 +1809,7 @@ class RelayStore {
       }
       if (!this.sendRaw(relayId, command)) {
         clearTimeout(timer);
+        cleanup();
         this.pendingRequests.delete(requestId);
         reject(new CommandError('Could not send command to relay'));
       }
@@ -1743,6 +1925,7 @@ class RelayStore {
     const current = this.deviceCredential(intent.relayId);
     if (current?.deviceId === intent.deviceId) {
       this.deviceCredentials.remove(intent.relayId);
+      clearConversationPreviewsForRelay(intent.relayId);
       this.surfacePairingRequirement(intent.relayId);
     }
     await this.refreshDevices(intent.relayId);
@@ -1751,6 +1934,7 @@ class RelayStore {
   async resetDevices(intent: ResetDevicesIntent): Promise<void> {
     await this.sendCommand(intent.relayId, { type: 'reset_devices' });
     this.deviceCredentials.remove(intent.relayId);
+    clearConversationPreviewsForRelay(intent.relayId);
     this.devicesValue.delete(intent.relayId);
     this.devices.set(new Map(this.devicesValue));
     this.surfacePairingRequirement(intent.relayId);
@@ -1778,14 +1962,14 @@ class RelayStore {
     return target ? { target, server_session_id: target.server_session_id } : null;
   }
 
-  sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number): Promise<CommandResult> {
+  sendToAgent(agent: Agent, payload: Record<string, any>, timeoutMs?: number, signal?: AbortSignal): Promise<CommandResult> {
     const identity = this.agentTargetPayload(agent);
     if (!identity) return Promise.reject(new CommandError('This agent no longer has an exact terminal identity'));
     return this.sendCommand(agent.relay_id, {
       ...payload,
       pane_id: agent.raw_pane_id,
       ...identity,
-    }, timeoutMs);
+    }, timeoutMs, false, signal);
   }
 
   speakToAgent(agent: Agent, text: string, language: string): SpeechRequest {
@@ -1892,11 +2076,20 @@ class RelayStore {
     return result;
   }
 
-  async closeWorkspace(workspace: RelayWorkspace): Promise<CommandResult> {
+  async closeWorkspace(
+    workspace: RelayWorkspace,
+    options: { closeGroup?: boolean; expectedWorkspaceIds?: string[] } = {},
+  ): Promise<CommandResult> {
     this.workspaceManagementAvailable(workspace.relay_id);
-    const result = await this.sendCommand(workspace.relay_id, {
-      type: 'workspace_close', workspace_id: workspace.workspace_id,
-    }, 30_000);
+    const payload: Record<string, unknown> = {
+      type: 'workspace_close',
+      workspace_id: workspace.workspace_id,
+    };
+    if (options.closeGroup === true) {
+      payload.close_group = true;
+      payload.expected_workspace_ids = options.expectedWorkspaceIds || [];
+    }
+    const result = await this.sendCommand(workspace.relay_id, payload, 30_000);
     this.requestAgents();
     return result;
   }
@@ -2056,12 +2249,14 @@ class RelayStore {
     if (receipt.phase === 'prepared' || receipt.phase === 'awaiting_evidence') {
       clearTimeout(pending.timer);
       pending.timer = setTimeout(() => {
+        pending.cleanup?.();
         this.pendingRequests.delete(requestId);
         pending?.reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, ACCEPTED_COMMAND_TIMEOUT_MS);
       return;
     }
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     this.pendingRequests.delete(requestId);
     if (receipt.phase === 'confirmed') {
       pending.resolve({
@@ -2092,6 +2287,7 @@ class RelayStore {
     const apiError = parseApiError(message.error);
     if (!pending || pending.relayId !== relayId || !apiError) return;
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     this.pendingRequests.delete(requestId);
     const detail = typeof message.detail === 'string' && UTF8_ENCODER.encode(message.detail).byteLength <= 512
       ? message.detail
@@ -2109,6 +2305,7 @@ class RelayStore {
       // instead of counting it against the original send timeout.
       clearTimeout(pending.timer);
       pending.timer = setTimeout(() => {
+        pending.cleanup?.();
         this.pendingRequests.delete(result.request_id);
         pending.reject(dispatchedUnknownError('Relay confirmation timed out'));
       }, ACCEPTED_COMMAND_TIMEOUT_MS);
@@ -2116,6 +2313,7 @@ class RelayStore {
       return;
     }
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     this.pendingRequests.delete(result.request_id);
     if (result.ok) pending.resolve(result);
     else {
@@ -2206,50 +2404,16 @@ class RelayStore {
     }
   }
 
-  async getConversationHistory(agent: Agent, before = '', limit = 80): Promise<ConversationPage> {
+  async getConversationHistory(agent: Agent, request: ConversationHistoryRequest = {}): Promise<ConversationPage> {
+    const limit = Math.max(1, Math.min(200, Math.trunc(request.limit || 80)));
+    const cursor = request.cursor || '';
     const result = await this.sendToAgent(agent, {
       type: 'get_conversation_history',
-      before,
+      cursor,
       limit,
-    }, 20_000);
-    const data = result.data || {};
-    const entries = Array.isArray(data.entries)
-      ? data.entries
-        .filter((entry: unknown): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'))
-        .map((entry) => {
-          const tools = Array.isArray(entry.tools)
-            ? entry.tools
-              .filter((tool: unknown): tool is Record<string, unknown> => Boolean(tool && typeof tool === 'object'))
-              .map((tool) => ({
-                id: String(tool.id || ''),
-                name: String(tool.name || 'Tool').slice(0, 160),
-                input: String(tool.input || ''),
-                output: String(tool.output || ''),
-                error: tool.error === true,
-                truncated: tool.truncated === true,
-              }))
-            : [];
-          return {
-            id: String(entry.id || ''),
-            timestamp: String(entry.timestamp || ''),
-            role: entry.role === 'assistant' ? 'assistant' as const : 'user' as const,
-            text: String(entry.text || ''),
-            tools,
-            truncated: entry.truncated === true,
-          };
-        })
-        .filter((entry) => entry.id && (entry.text || entry.tools.length))
-      : [];
-    return {
-      available: data.available === true,
-      reason: String(data.reason || ''),
-      entries,
-      hasMore: data.has_more === true,
-      total: Math.max(0, Number(data.total) || 0),
-      fileTruncated: data.file_truncated === true,
-      sourceCorrupt: data.source_corrupt === true,
-      omoPlan: normalizeOmoTodoState(data.omo_plan),
-    };
+      retry: request.retry,
+    }, 20_000, request.signal);
+    return normalizeConversationPage(result.data);
   }
 
   /**
@@ -2876,6 +3040,24 @@ class RelayStore {
     // keepalive has to be told that a relay came up or went away.
     this.syncKeepalive();
   }
+}
+
+function clearChangedRelayPreviews(before: RelayConfig[], after: RelayConfig[]): void {
+  const previous = new Map(before.map((relay) => [relay.id, relay]));
+  for (const relay of after) {
+    const old = previous.get(relay.id);
+    if (old && relayConnectionIdentityChanged(old, relay)) clearConversationPreviewsForRelay(relay.id);
+  }
+}
+
+function relayConnectionIdentityChanged(before: RelayConfig, after: RelayConfig): boolean {
+  return before.url !== after.url
+    || before.token !== after.token
+    || before.transport !== after.transport
+    || before.gatewayUrl !== after.gatewayUrl
+    || (before.gatewayUrls || []).join('\u0000') !== (after.gatewayUrls || []).join('\u0000')
+    || before.gatewayRelayId !== after.gatewayRelayId
+    || before.rendezvousKey !== after.rendezvousKey;
 }
 
 function applyPaneDelta(previous: string, value: unknown): string | null {

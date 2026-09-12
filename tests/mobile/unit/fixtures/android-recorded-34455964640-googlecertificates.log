@@ -1,0 +1,64 @@
+09-10 08:45:09.206  7232  7232 I ChimeraCfgMgr: No existing config, regenerating config
+09-10 08:45:09.297  7232  7232 I GmsDebugLogger: [121] advancedprotection,appfunctions,intrusiondetection,motionsicknessassist,systemserviceacl,talisman
+09-10 08:45:09.313  7232  7235 I gle.android.gms: Compiler allocated 5386KB to compile acph acht.b(acph, acph, java.util.Map, acph, acph, achp)
+09-10 08:45:09.315  7232  7232 I ChimeraCfgMgr: Updating module config: <no config> -> container:2633329260800,tflite_dynamite:2627305025100800+tflite_dynamite
+09-10 08:45:09.329  7232  7235 I gle.android.gms: Compiler allocated 4425KB to compile ackc acjg.f(int, java.util.List, java.util.List, acrr, java.lang.String, java.util.List, java.util.List, java.util.List, java.lang.String, java.util.List, java.util.List, achp)
+09-10 08:45:09.408  7232  7232 I NewModuleHelper: Sending com.google.android.chimera.IntentOperation.NEW_MODULE Container service: com.google.android.gms.chimera.GmsIntentOperationService Intents: 1,true,true
+09-10 08:45:09.409  7232  7232 I NewModuleHelper: Sending com.google.android.chimera.IntentOperation.NEW_MODULE Container service: com.google.android.gms.chimera.PersistentIntentOperationService Intents: 1,true,true
+09-10 08:45:09.411  7232  7232 I GmsDebugLogger: [46] 
+09-10 08:45:09.412  7232  7232 I GmsApplication: Updating config completed
+09-10 08:45:09.423  7232  7253 I gwnu    : (REDACTED) Unable to retrieve flag snapshot for %s, using defaults.
+09-10 08:45:09.430  7232  7253 I gwnu    : (REDACTED) Shared storage file not found for %s
+09-10 08:45:09.434  7232  7253 I gwnu    : (REDACTED) Unable to retrieve flag snapshot for %s, using defaults.
+09-10 08:45:09.436  7232  7232 D nativeloader: Load /data/app/~~dm_2yTyATmfT911VI3vDQg==/com.google.android.gms-cn63VTpa-91sm7oyqhSwLg==/base.apk!/lib/x86_64/libconscrypt_gmscore_jni.so using ns clns-9 from class loader (caller=/data/app/~~dm_2yTyATmfT911VI3vDQg==/com.google.android.gms-cn63VTpa-91sm7oyqhSwLg==/base.apk): ok
+09-10 08:45:09.436  7232  7271 I DynamiteModule: Considering local module com.google.android.gms.googlecertificates:7 and remote module com.google.android.gms.googlecertificates:0
+09-10 08:45:09.436  7232  7271 I DynamiteModule: Selected local version of com.google.android.gms.googlecertificates
+09-10 08:45:09.438  7232  7232 V NativeCrypto: Registering com/google/android/gms/org/conscrypt/NativeCrypto's 336 native methods...
+09-10 08:45:09.458  6538  6538 I Choreographer: Skipped 45 frames!  The application may be doing too much work on its main thread.
+09-10 08:45:09.461  7232  7232 I ProviderInstaller: Installed default security provider GmsCore_OpenSSL
+09-10 08:45:09.464  6538  7277 I DynamiteLoaderV2Impl: Module config changed, forcing restart due to module googlecertificates
+09-10 08:45:09.464  6538  7277 I Process : Sending signal. PID: 6538 SIG: 9
+09-10 08:45:09.464  1486  7267 I DynamiteLoaderV2Impl: Module config changed, forcing restart due to module googlecertificates
+09-10 08:45:09.464  1486  7267 I Process : Sending signal. PID: 1486 SIG: 9
+09-10 08:45:09.480  7232  7281 I GmsApplication: Registering the BackgroundBroadcastReceiverSupport receiver.
+09-10 08:45:09.492  7232  7280 I DeviceDrDatabaseHelper: Upgrade database: oldVersion=242335 newVersion=263332
+09-10 08:45:09.513  7232  7253 I gwnu    : (REDACTED) Shared storage file not found for %s
+09-10 08:45:09.515  7232  7253 I gwnu    : (REDACTED) Shared storage file not found for %s
+09-10 08:45:09.515  7232  7253 I gwnu    : (REDACTED) Unable to retrieve flag snapshot for %s, using defaults.
+09-10 08:45:09.515  7232  7253 I gwnu    : (REDACTED) Shared storage file not found for %s
+09-10 08:45:09.515  7232  7253 I gwnu    : (REDACTED) Unable to retrieve flag snapshot for %s, using defaults.
+09-10 08:45:09.524   546  1469 I ActivityManager: Process com.google.android.googlequicksearchbox:search (pid 1486) has died: cch+5 CEM 
+09-10 08:45:09.526   546  1840 I ActivityManager: Killing 3926:com.google.android.webview:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0/u0a144i0 (adj 0): isolated not needed
+09-10 08:45:09.527   546  1839 I MediaSessionStack: removeSession | record: com.google.android.googlequicksearchbox/AssistantMediaPlayer: AMP-auto-session-identifier/6 (userId=0)
+09-10 08:45:09.528   546  1839 D MediaSessionService: destroySessionLocked: record=com.google.android.googlequicksearchbox/AssistantMediaPlayer: AMP-auto-session-identifier/6 (userId=0)
+09-10 08:45:09.528   349   349 I Zygote  : Process 1486 exited due to signal 9 (Killed)
+09-10 08:45:09.530  1055  1055 I PlayerSettingsManager: getPlayerRepeatMode: no active player
+09-10 08:45:09.530  1055  1055 I PlayerSettingsManager: getPlayerShuffleMode: no active player
+09-10 08:45:09.530  1055  1055 I PlayerSettingsManager: updateRemoteDevice: STATE_REPEAT_OFF, STATE_SHUFFLE_OFF
+09-10 08:45:09.535   546   814 D ConnectivityService: releasing NetworkRequest [ REQUEST id=58, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED Uid: 10144 RequestorUid: 10144 RequestorPkg: com.google.android.googlequicksearchbox UnderlyingNetworks: Null] ] (release request)
+09-10 08:45:09.539  1333  7258 I DynamiteLoaderV2Impl: Module config changed, forcing restart due to module googlecertificates
+09-10 08:45:09.539   546   814 D ConnectivityService: releasing NetworkRequest [ REQUEST id=82, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED Uid: 10144 RequestorUid: 10144 RequestorPkg: com.google.android.googlequicksearchbox UnderlyingNetworks: Null] ] (release request)
+09-10 08:45:09.542  1333  7258 I Process : Sending signal. PID: 1333 SIG: 9
+09-10 08:45:09.544  1418  2036 I A       : processToken binder died, :search process likely died
+09-10 08:45:09.547  1055  1055 I bluetooth: system/btif/avrcp/avrcp_service.cc:590 SendPlayerSettingsChanged: {attribute=PlayerAttribute::REPEAT : value=PlayerRepeatValue::OFF}, {attribute=PlayerAttribute::SHUFFLE : value=PlayerShuffleValue::OFF}
+09-10 08:45:09.553  3153  3153 I Zygote  : Process 3926 exited due to signal 9 (Killed)
+09-10 08:45:09.555   546   567 D DisplayManagerService: Drop pending events for gone uid 99000
+09-10 08:45:09.560   546   580 I libprocessgroup: Removed cgroup /sys/fs/cgroup/uid_10144/pid_1486
+09-10 08:45:09.560   546   580 I libprocessgroup: Removed cgroup /sys/fs/cgroup/uid_99000/pid_3926
+09-10 08:45:09.577   546  1472 I ImeTracker: com.android.chrome:48ef65f6: onRequestHide at ORIGIN_SERVER reason HIDE_REMOVE_CLIENT fromUser false
+09-10 08:45:09.578   349   349 I Zygote  : Process 6538 exited due to signal 9 (Killed)
+09-10 08:45:09.579   546  1471 I WindowManager: WIN DEATH: Window{36e96a4 u0 com.android.chrome/org.chromium.chrome.browser.webapps.WebappActivity}
+09-10 08:45:09.581   546  1472 I ImeTracker: com.android.chrome:48ef65f6: onCancelled at PHASE_SERVER_SHOULD_HIDE
+09-10 08:45:09.583   546   814 D ConnectivityService: releasing NetworkRequest [ REQUEST id=177, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED Uid: 10146 RequestorUid: 10146 RequestorPkg: com.android.chrome UnderlyingNetworks: Null] ] (release request)
+09-10 08:45:09.583   546   814 D ConnectivityService: releasing NetworkRequest [ REQUEST id=180, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED Uid: 10146 RequestorUid: 10146 RequestorPkg: com.android.chrome UnderlyingNetworks: Null] ] (release request)
+09-10 08:45:09.583   546   814 D ConnectivityService: releasing NetworkRequest [ REQUEST id=183, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED Uid: 10146 RequestorUid: 10146 RequestorPkg: com.android.chrome UnderlyingNetworks: Null] ] (release request)
+09-10 08:45:09.592  5977  5977 I Zygote  : Process 6592 exited cleanly (0)
+09-10 08:45:09.609   546  1673 W ActivityManager: Slow operation: 51ms so far, now at finishAttachApplicationInner: after mServices.attachApplicationLocked
+09-10 08:45:09.612   546  1673 W ActivityManager: Slow operation: 54ms so far, now at finishAttachApplicationInner: after dispatching broadcasts
+09-10 08:45:09.613   546  1761 I ActivityManager: Process com.android.chrome (pid 6538) has died: fg  TOP 
+09-10 08:45:09.626   546   580 I libprocessgroup: Removed cgroup /sys/fs/cgroup/uid_10146/pid_6538
+09-10 08:45:09.634   546  1471 W InputManager-JNI: Input channel object '36e96a4 com.android.chrome/org.chromium.chrome.browser.webapps.WebappActivity (client)' was disposed without first being removed with the input manager!
+09-10 08:45:09.654   546  1840 W WindowManager: Cannot find window which accessibility connection is added to
+09-10 08:45:09.656   546  1761 E ProcessStats: Executing service ServiceState{4e9a12c org.chromium.content.app.SandboxedProcessService0 pkg=com.android.chrome proc=8746175} without owner
+09-10 08:45:09.659   546  1761 W ActivityManager: pid 546 system sent binder code 12 with flags 1 to frozen apps and got error -32
+09-10 08:45:09.661   546  1761 W ActivityManager: Exception when unbinding service com.android.chrome/org.chromium.content.app.SandboxedProcessService0:0

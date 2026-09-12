@@ -162,10 +162,21 @@ rewrite_service_release_paths() {
     [ -f "$service_file" ] && [ -x "$service_wrapper" ] || return 1
     case "$PLATFORM" in
         Linux)
-            sed -i "s|^ExecStart=.*|ExecStart=$service_wrapper|" "$service_file"
-            sed -i "s|^WorkingDirectory=.*|WorkingDirectory=$work_dir|" "$service_file"
-            sed -i "s|^Environment=HERDR_RELAY_ENV=.*|Environment=HERDR_RELAY_ENV=$env_file|" \
-                "$service_file"
+            local temp
+            temp="$(mktemp "${service_file}.XXXXXX")" || return 1
+            if ! sed \
+                -e "s|^ExecStart=.*|ExecStart=$service_wrapper|" \
+                -e "s|^WorkingDirectory=.*|WorkingDirectory=$work_dir|" \
+                -e "s|^Environment=HERDR_RELAY_ENV=.*|Environment=HERDR_RELAY_ENV=$env_file|" \
+                "$service_file" > "$temp"; then
+                rm -f "$temp"
+                return 1
+            fi
+            chmod --reference="$service_file" "$temp" 2>/dev/null || chmod 600 "$temp"
+            if ! mv -f "$temp" "$service_file"; then
+                rm -f "$temp"
+                return 1
+            fi
             grep -Fx "ExecStart=$service_wrapper" "$service_file" >/dev/null &&
                 grep -Fx "WorkingDirectory=$work_dir" "$service_file" >/dev/null &&
                 grep -Fx "Environment=HERDR_RELAY_ENV=$env_file" "$service_file" >/dev/null

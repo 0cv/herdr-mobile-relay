@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -64,6 +65,8 @@ type Entry struct {
 	Session   string         `json:"session,omitempty"`
 	Details   map[string]any `json:"details,omitempty"`
 }
+
+var entryIDSequence atomic.Uint64
 
 type Journal struct {
 	mu            sync.RWMutex
@@ -493,7 +496,7 @@ func (j *Journal) Recent(limit int) []Entry {
 func NewEntry(kind, status, summary, paneID, agent, project, requestID string) Entry {
 	now := time.Now().UTC()
 	return Entry{
-		ID:        fmt.Sprintf("%d-%s", now.UnixNano(), paneID),
+		ID:        fmt.Sprintf("%d-%d-%s", now.UnixNano(), entryIDSequence.Add(1), paneID),
 		Timestamp: MilliTimestamp(now.UnixMilli()),
 		Kind:      kind,
 		Status:    status,

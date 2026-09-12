@@ -113,6 +113,129 @@ func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
 	}
 }
 
+func TestEventBootstrapFallsBackFromUnsupportedOptionalSubscription(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	seenSubscriptions := make(chan []string, 2)
+	serverErr := make(chan error, 1)
+	go func() {
+		for connection := range 3 {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				serverErr <- acceptErr
+				return
+			}
+			decoder := json.NewDecoder(bufio.NewReader(conn))
+			var request struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+				Params struct {
+					Subscriptions []map[string]string `json:"subscriptions"`
+				} `json:"params"`
+			}
+			if decodeErr := decoder.Decode(&request); decodeErr != nil {
+				_ = conn.Close()
+				serverErr <- decodeErr
+				return
+			}
+			if request.Method == "events.subscribe" {
+				types := make([]string, 0, len(request.Params.Subscriptions))
+				for _, subscription := range request.Params.Subscriptions {
+					types = append(types, subscription["type"])
+				}
+				seenSubscriptions <- types
+				if connection == 0 {
+					_ = writeTestJSON(conn, map[string]any{
+						"id": "",
+						"error": map[string]any{
+							"code":    "invalid_request",
+							"message": "invalid request: unknown variant `workspace.reordered`, expected `workspace.created` or `workspace.moved`",
+						},
+					})
+				} else {
+					if err := writeTestJSON(conn, map[string]any{
+						"id":     request.ID,
+						"result": map[string]any{"type": "subscription_started"},
+					}); err != nil {
+						_ = conn.Close()
+						serverErr <- err
+						return
+					}
+					if err := writeTestJSON(conn, map[string]any{
+						"event": "pane_closed",
+						"data":  map[string]any{"type": "pane_closed", "pane_id": "pane-live"},
+					}); err != nil {
+						_ = conn.Close()
+						serverErr <- err
+						return
+					}
+				}
+			} else if request.Method == "session.snapshot" {
+				if err := writeTestJSON(conn, map[string]any{
+					"id": request.ID,
+					"result": map[string]any{
+						"type":     "session_snapshot",
+						"snapshot": map[string]any{"version": "0.9.0", "protocol": 1},
+					},
+				}); err != nil {
+					_ = conn.Close()
+					serverErr <- err
+					return
+				}
+			} else {
+				_ = conn.Close()
+				serverErr <- fmt.Errorf("unexpected method %q", request.Method)
+				return
+			}
+			_ = conn.Close()
+		}
+		serverErr <- nil
+	}()
+
+	var supported, unsupported int
+	client := NewEventClient(socketPath)
+	client.SetWorkspaceReorderedCapability(
+		func() bool { return true },
+		func() { supported++ },
+		func() { unsupported++ },
+	)
+	stream, snapshot, buffered, err := client.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	defer stream.Close()
+	if snapshot.Protocol != 1 || len(buffered) != 1 || buffered[0].Event != "pane.closed" {
+		t.Fatalf("snapshot=%+v buffered=%+v", snapshot, buffered)
+	}
+	if supported != 0 || unsupported != 1 {
+		t.Fatalf("capability callbacks supported=%d unsupported=%d", supported, unsupported)
+	}
+	first := <-seenSubscriptions
+	second := <-seenSubscriptions
+	if !containsString(first, "workspace.reordered") {
+		t.Fatalf("first subscription = %v", first)
+	}
+	if containsString(second, "workspace.reordered") {
+		t.Fatalf("fallback subscription retained optional event: %v", second)
+	}
+	if serverErr := <-serverErr; serverErr != nil {
+		t.Fatal(serverErr)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSessionCacheCoalescesTerminalLocalPaneUpdates(t *testing.T) {
 	cache := NewSessionCache(SessionSnapshot{
 		Panes: []SnapshotPane{{
@@ -350,6 +473,40 @@ func TestTopologySubscriptionsGateWorkspaceReorderedBehindProbe(t *testing.T) {
 	}
 	if !seen["workspace.moved"] || !seen["worktree.removed"] {
 		t.Fatal("gating workspace.reordered dropped unrelated subscriptions")
+	}
+}
+
+func TestTopologySubscriptionsMatchHerdr075Contract(t *testing.T) {
+	want := []string{
+		"pane.created",
+		"pane.closed",
+		"pane.updated",
+		"pane.moved",
+		"pane.exited",
+		"pane.agent_detected",
+		"tab.created",
+		"tab.closed",
+		"tab.renamed",
+		"tab.moved",
+		"workspace.created",
+		"workspace.updated",
+		"workspace.metadata_updated",
+		"workspace.closed",
+		"workspace.renamed",
+		"workspace.moved",
+		"workspace.focused",
+		"worktree.created",
+		"worktree.opened",
+		"worktree.removed",
+	}
+	got := topologySubscriptions(false)
+	if len(got) != len(want) {
+		t.Fatalf("subscription count = %d, want %d", len(got), len(want))
+	}
+	for index, subscription := range got {
+		if subscription["type"] != want[index] {
+			t.Fatalf("subscription %d = %q, want %q", index, subscription["type"], want[index])
+		}
 	}
 }
 

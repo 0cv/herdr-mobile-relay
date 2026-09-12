@@ -362,14 +362,54 @@ export interface OmoTodoState {
   truncated: boolean;
 }
 
+export type ConversationBrowseState = 'ready' | 'preparing' | 'failed';
+export type ConversationBrowseMode = 'recent' | 'snapshot' | 'native';
+
+export interface ConversationBrowseProgress {
+  phase: string;
+  scanned_bytes: number;
+  source_bytes: number;
+}
+
+export interface ConversationBrowseDiagnostics {
+  oversized_records: number;
+  corrupt_records: number;
+  omitted_tools?: number;
+  omitted_payloads?: number;
+  plan_corrupt?: boolean;
+  source_truncated: boolean;
+  continuation_incomplete?: boolean;
+  continuation_reason?: string;
+}
+
+export interface ConversationBrowseError {
+  code: string;
+  message: string;
+  retryable: boolean;
+}
+
+export interface ConversationHistoryRequest {
+  cursor?: string;
+  limit?: number;
+  retry?: boolean;
+  signal?: AbortSignal;
+}
+
 export interface ConversationPage {
   available: boolean;
+  reasonCode?: string;
   reason: string;
   entries: ConversationEntry[];
+  nextCursor?: string;
   hasMore: boolean;
-  total: number;
-  fileTruncated: boolean;
-  sourceCorrupt: boolean;
+  total: number | null;
+  state?: ConversationBrowseState;
+  mode?: ConversationBrowseMode;
+  sourceRevision?: string;
+  snapshotId?: string;
+  progress?: ConversationBrowseProgress;
+  diagnostics?: ConversationBrowseDiagnostics;
+  error?: ConversationBrowseError;
   omoPlan?: OmoTodoState;
 }
 
@@ -382,6 +422,23 @@ export interface RelaySpeechVoice {
   bytes: number;
   /** Engine that would speak this language now, empty when none can. */
   engine: string;
+}
+
+export type HerdrFeatureState = 'supported' | 'unsupported' | 'unknown';
+
+export interface HerdrFeatureStatus {
+  state: HerdrFeatureState;
+  reason: string;
+}
+
+export interface HerdrStatus {
+  installed_client_version: string;
+  server_version: string;
+  server_protocol: number;
+  server_protocol_known: boolean;
+  endpoint_protocol_generation: number | null;
+  generation: number;
+  features: Record<string, HerdrFeatureStatus>;
 }
 
 export interface RelayConnectionView {
@@ -412,6 +469,7 @@ export interface RelayConnectionView {
   appDeploy: AppDeploymentStatus;
   inventory: AgentInventoryStatus;
   capabilities: string[];
+  herdrStatus: HerdrStatus;
   /** The relay refused this device's credential; pairing again is the only fix. */
   authRejected: boolean;
   /**

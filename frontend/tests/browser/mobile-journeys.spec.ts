@@ -51,7 +51,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
     const commands: Record<string, unknown>[] = [];
     const socketCommands: Record<string, unknown>[][] = [];
     let nextInteraction: Record<string, unknown> | null = null;
-    let conversationFixture: { entries: unknown[]; total: number } | null = null;
+    let conversationFixture: ConversationFixture | null = null;
     let autoCommands = true;
     const uploadFiles = new Map<string, Array<{ name: string; media_type: string; bytes: number }>>();
     const uploadReceived = new Map<string, number>();
@@ -260,9 +260,14 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
           return;
         }
         if (message.type === 'get_conversation_history') {
-          const older = Boolean(message.before);
+          const cursor = typeof message.cursor === 'string' ? message.cursor : '';
+          const older = Boolean(cursor);
           if (conversationFixture) {
             const fixture = conversationFixture;
+            const configuredPage = cursor ? fixture.pages?.[cursor] : undefined;
+            const pageEntries = configuredPage?.entries ?? (cursor ? [] : fixture.entries);
+            const pageCursor = configuredPage?.nextCursor || (!cursor ? fixture.nextCursor : '') || '';
+            const pageHasMore = configuredPage?.hasMore ?? (!cursor ? fixture.hasMore : undefined) ?? Boolean(pageCursor);
             queueMicrotask(() => this.server({
               type: 'command_result',
               action: message.type,
@@ -271,10 +276,15 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
               phase: 'completed',
               data: {
                 available: true,
-                entries: older ? [] : fixture.entries,
-                has_more: false,
+                state: configuredPage?.state || 'ready',
+                mode: older ? 'snapshot' : 'recent',
+                source_revision: configuredPage?.sourceRevision || fixture.sourceRevision || 'fixture',
+                snapshot_id: configuredPage?.snapshotId || (older ? 'snapshot-1' : ''),
+                next_cursor: pageCursor,
+                entries: pageEntries,
+                has_more: pageHasMore,
                 total: fixture.total,
-                file_truncated: false,
+                diagnostics: configuredPage?.diagnostics || fixture.diagnostics || { source_truncated: false, corrupt_records: 0, oversized_records: 0 },
               },
             }));
             return;
@@ -287,6 +297,11 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
             phase: 'completed',
             data: {
               available: true,
+              state: 'ready',
+              mode: older ? 'snapshot' : 'recent',
+              source_revision: 'fixture',
+              snapshot_id: older ? 'snapshot-1' : '',
+              next_cursor: older ? '' : 'cursor-1',
               entries: older
                 ? [{ id: 'turn-1', timestamp: '2026-08-12T09:00:00Z', role: 'user', text: 'first retained question' }]
                 : [
@@ -307,7 +322,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
                 ],
               has_more: !older,
               total: 4,
-              file_truncated: true,
+              diagnostics: { source_truncated: true, corrupt_records: 0, oversized_records: 0 },
             },
           }));
           return;
@@ -410,7 +425,7 @@ async function boot(page: Page, relays: RelayFixture[] = [], path = '/', options
       __relayServer(index: number, message: unknown) { sockets[index]?.server(message); },
       __relayClose(index: number) { sockets[index]?.serverClose(); },
       __relayNextInteraction(interaction: Record<string, unknown>) { nextInteraction = interaction; },
-      __relayConversationFixture(fixture: { entries: unknown[]; total: number } | null) {
+      __relayConversationFixture(fixture: ConversationFixture | null) {
         conversationFixture = fixture;
       },
       __relayAutoCommands(enabled: boolean) { autoCommands = enabled; },
@@ -472,6 +487,19 @@ async function setAutoCommands(page: Page, enabled: boolean) {
 interface ConversationFixture {
   entries: Record<string, unknown>[];
   total: number;
+  nextCursor?: string;
+  hasMore?: boolean;
+  diagnostics?: Record<string, unknown>;
+  sourceRevision?: string;
+  pages?: Record<string, {
+    entries: Record<string, unknown>[];
+    nextCursor?: string;
+    hasMore?: boolean;
+    state?: 'ready' | 'preparing' | 'failed';
+    snapshotId?: string;
+    sourceRevision?: string;
+    diagnostics?: Record<string, unknown>;
+  }>;
 }
 
 async function setConversationFixture(page: Page, fixture: ConversationFixture | null) {
@@ -1091,6 +1119,56 @@ test('keeps an opened workspace expanded across tab navigation and inventory ref
   await expect(workspace.getByRole('button', { name: 'Open Mobile app on Fedora' })).toBeVisible();
 });
 
+test('rechecks Herdr terminal compatibility and wraps actual failures on mobile', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    herdr_status: {
+      server_version: '0.9.0',
+      generation: 1,
+      features: {
+        direct_terminal: { state: 'unknown', reason: 'not_checked', generation: 1 },
+        'pane.read': { state: 'unknown', reason: 'reconnect_required', generation: 1 },
+        'client_shell.endpoint': { state: 'unknown', reason: 'not_advertised', generation: 1 },
+      },
+    },
+  });
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await expect(page.getByText(/Herdr server: 0\.9\.0/)).toBeVisible();
+  await expect(page.getByText('Terminal reads: Rechecking after Herdr reconnect')).toBeVisible();
+  await expect(page.getByText(/Could not check|Server upgrade needed|Server feature unavailable/)).toHaveCount(0);
+
+  await server(page, 0, {
+    type: 'herdr_status',
+    status: {
+      server_version: '0.9.0',
+      generation: 2,
+      features: {
+        direct_terminal: { state: 'unknown', reason: 'not_checked', generation: 2 },
+        'pane.read': { state: 'unknown', reason: 'timeout', generation: 2 },
+        'workspace.move_block': { state: 'unsupported', reason: 'method_not_supported', generation: 2 },
+      },
+    },
+  });
+  const warning = page.getByRole('status').filter({ hasText: 'Terminal reads: Could not check' });
+  await expect(warning).toHaveText('Terminal reads: Could not check · Workspace group reorder: Server upgrade needed');
+  await expect(warning).toHaveCSS('white-space', 'normal');
+  expect(await warning.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+
+  await server(page, 0, {
+    type: 'herdr_status',
+    status: {
+      server_version: '0.9.0',
+      generation: 3,
+      features: {
+        'pane.read': { state: 'supported', reason: 'recognized_validation_refusal', generation: 3 },
+        'workspace.move_block': { state: 'supported', reason: 'recognized_validation_refusal', generation: 3 },
+      },
+    },
+  });
+  await expect(page.locator('.herdr-feature-warning')).toHaveCount(0);
+});
+
 test('reconnects and blocks mutations for an incompatible relay protocol', async ({ page }) => {
   await boot(page, [fedora]);
   await expect.poll(() => socketCount(page)).toBe(1);
@@ -1213,17 +1291,18 @@ test('shows inventory failure instead of zero agents and recovers without reconn
   await handshake(page, 0, {
     inventory: {
       state: 'error',
-      error_code: 'protocol_mismatch',
-      message: 'Run `herdr server live-handoff` on this computer, then refresh.',
+      error_code: 'topology_churn',
+      message: 'Agent inventory is changing too quickly to produce a stable snapshot.',
       last_attempt_at: 123,
       last_success_at: 0,
-      stale: false,
+      stale: true,
     },
   });
-  await server(page, 0, { type: 'agents', agents: [] });
+  const staleAgents = [{ pane_id: 'w1:p1', status: 'working', project: 'Existing relay', agent: 'codex' }];
+  await server(page, 0, { type: 'agents', agents: staleAgents });
 
-  await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toContainText('live-handoff');
-  await expect(page.getByText('No chat agents are running.')).toBeHidden();
+  await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toContainText('changing too quickly');
+  await expect(page.getByRole('button', { name: 'Open Existing relay on Fedora' })).toBeVisible();
   await expect(page.getByRole('img', { name: /agent inventory unavailable/ })).toBeVisible();
 
   await server(page, 0, {
@@ -1235,13 +1314,10 @@ test('shows inventory failure instead of zero agents and recovers without reconn
     last_success_at: 200,
     stale: false,
   });
-  await server(page, 0, {
-    type: 'agents',
-    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Recovered relay', agent: 'codex' }],
-  });
+  await server(page, 0, { type: 'agents', agents: staleAgents });
 
   await expect(page.getByRole('status', { name: 'Fedora agent inventory unavailable' })).toBeHidden();
-  await expect(page.getByRole('button', { name: 'Open Recovered relay on Fedora' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open Existing relay on Fedora' })).toBeVisible();
   expect(await socketCount(page)).toBe(1);
 });
 
@@ -3833,8 +3909,6 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
   await expect(page.getByText('middle retained answer')).toBeVisible();
   await expect(page.getByText('latest retained question')).toBeVisible();
-  await expect(page.getByText('4 recorded messages')).toBeVisible();
-  await expect(page.getByText(/session log is larger than 16 MB/)).toBeVisible();
   await page.getByRole('button', { name: 'Copy History app message as Markdown' }).click();
   await expect.poll(() => page.evaluate(() => Reflect.get(window, '__copiedConversation')))
     .toBe('# middle retained answer');
@@ -3924,11 +3998,13 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByText('Command may have executed Check the terminal before sending again.')).toBeVisible();
   await setAutoCommands(page, true);
 
-  await page.getByRole('button', { name: 'Load older turns' }).click();
+  // The history controller backfills the leading prompt automatically; a
+  // manual Load older action is only a fallback when intersection observers
+  // are unavailable.
   await expect(page.getByText('first retained question')).toBeVisible();
   await expect.poll(async () => (await commands(page)).find((command) => (
-    command.type === 'get_conversation_history' && command.before === 'turn-2'
-  ))).toMatchObject({ pane_id: 'w1:p1', before: 'turn-2' });
+    command.type === 'get_conversation_history' && command.cursor === 'cursor-1'
+  ))).toMatchObject({ pane_id: 'w1:p1', cursor: 'cursor-1' });
 
   const search = page.getByRole('searchbox', { name: 'Search displayed conversation' });
   await search.fill('first retained');
@@ -3954,6 +4030,348 @@ test('reads and replies from native conversation history', async ({ page }) => {
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeVisible();
   await page.getByRole('button', { name: 'Back' }).click();
   await expect(page.getByRole('button', { name: 'Open History app on Fedora' })).toBeVisible();
+});
+
+test('default agent view: fresh openings remain Terminal', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Default terminal',
+      agent: 'codex',
+      conversation_history_available: true,
+      agent_session_id: 'session-1',
+    }],
+  });
+  const before = await commands(page);
+  await page.getByRole('button', { name: 'Open Default terminal on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Default terminal' })).toBeVisible();
+  const openingCommands = (await commands(page)).slice(before.length);
+  expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(false);
+});
+
+test('default agent view: Conversation opens directly and persists across reload', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Default conversation',
+      agent: 'codex',
+      conversation_history_available: true,
+      agent_session_id: 'session-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const settingsViews = page.getByRole('group', { name: 'Default View' });
+  await settingsViews.getByRole('button', { name: 'Conversation' }).click();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('conversation');
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setConversationFixture(page, {
+    entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'Direct conversation answer' }],
+    total: 1,
+  });
+  const before = await commands(page);
+  await page.getByRole('button', { name: 'Open Default conversation on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('Direct conversation answer')).toBeVisible();
+  const openingCommands = (await commands(page)).slice(before.length);
+  expect(openingCommands.some((command) => ['read_pane', 'watch_pane', 'lease_pane_size'].includes(String(command.type)))).toBe(false);
+  expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(true);
+
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.reload();
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Default conversation',
+      agent: 'codex',
+      conversation_history_available: true,
+      agent_session_id: 'session-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Open Default conversation on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+});
+
+test('pane view override: both directions, inheritance, and explicit equal values', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [
+      {
+        pane_id: 'w1:p1', status: 'working', project: 'Override A', agent: 'codex',
+        conversation_history_available: true, agent_session_id: 'session-a', terminal_id: 'terminal-a',
+      },
+      {
+        pane_id: 'w1:p2', status: 'working', project: 'Override B', agent: 'codex',
+        conversation_history_available: true, agent_session_id: 'session-b', terminal_id: 'terminal-b',
+      },
+    ],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setConversationFixture(page, { entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'override answer' }], total: 1 });
+
+  await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  const manage = page.getByRole('dialog', { name: 'Manage Agent' });
+  const viewSelect = manage.getByRole('combobox', { name: 'Default View' });
+  await viewSelect.selectOption('terminal');
+  await manage.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: 'Open Override B on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Terminal' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Override A' })).toBeVisible();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' }).selectOption('conversation');
+  await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await page.getByRole('button', { name: 'Open Override B on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Override B' })).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' }).selectOption('terminal');
+  await page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await page.getByRole('button', { name: 'Open Override A on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Override A' })).toBeVisible();
+});
+
+test('default agent view: metadata fallback stays silent and does not switch later', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: [] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{ pane_id: 'w1:p1', status: 'working', project: 'Unavailable metadata', agent: 'unknown', agent_session_id: '' }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  const before = await commands(page);
+  await page.getByRole('button', { name: 'Open Unavailable metadata on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Unavailable metadata' })).toBeVisible();
+  const openingCommands = (await commands(page)).slice(before.length);
+  expect(openingCommands.some((command) => command.type === 'get_conversation_history')).toBe(false);
+  expect(await page.getByRole('alert').allTextContents()).not.toContain('unavailable transcript');
+  await server(page, 0, {
+    type: 'agent_update', pane_id: 'w1:p1', status: 'working',
+    conversation_history_available: true, updated_at: 2,
+  });
+  await page.waitForTimeout(50);
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toHaveCount(0);
+});
+
+test('default agent view: unavailable initial page replaces history without an extra entry', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Unavailable transcript', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Unavailable transcript on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  expect(page.locator('.terminal-layout')).toHaveCount(0);
+  const historyRequest = (await commands(page)).find((command) => command.type === 'get_conversation_history');
+  expect(historyRequest).toBeTruthy();
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: historyRequest!.request_id,
+    action: 'get_conversation_history',
+    ok: true,
+    phase: 'completed',
+    data: { available: false, state: 'ready', mode: 'recent', entries: [], has_more: false, total: null, diagnostics: {}, reason: 'Native transcript unavailable' },
+  });
+  await expect(page.getByRole('main', { name: 'Terminal for Unavailable transcript' })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('conversation');
+  await page.getByRole('button', { name: 'Back' }).click();
+  await expect(page.getByRole('button', { name: 'Open Unavailable transcript on Fedora' })).toBeVisible();
+  await setAutoCommands(page, true);
+});
+
+test('default agent view: stale automatic responses cannot redirect Settings', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Stale opening', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Stale opening on Fedora' }).click();
+  await expect.poll(async () => (await commands(page)).find((command) => command.type === 'get_conversation_history')).toBeTruthy();
+  const historyRequest = (await commands(page)).find((command) => command.type === 'get_conversation_history');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: historyRequest!.request_id,
+    action: 'get_conversation_history',
+    ok: true,
+    phase: 'completed',
+    data: { available: false, state: 'ready', mode: 'recent', entries: [], has_more: false, total: null, diagnostics: {}, reason: 'Native transcript unavailable' },
+  });
+  await page.waitForTimeout(50);
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true }).last()).toBeVisible();
+  await setAutoCommands(page, true);
+});
+
+test('default agent view: manual switching ignores preferences and keeps explicit unavailable history', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Manual switching', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setConversationFixture(page, { entries: [{ id: 'turn-1', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'manual answer' }], total: 1 });
+  await page.getByRole('button', { name: 'Open Manual switching on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Terminal view' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Manual switching' })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('herdr_default_agent_view'))).toBe('conversation');
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  const historyRequest = (await commands(page)).filter((command) => command.type === 'get_conversation_history').at(-1);
+  expect(historyRequest).toBeTruthy();
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: historyRequest!.request_id,
+    action: 'get_conversation_history',
+    ok: true,
+    phase: 'completed',
+    data: { available: false, state: 'ready', mode: 'recent', entries: [], has_more: false, total: null, diagnostics: {}, reason: 'Manual transcript unavailable' },
+  });
+  await expect(page.getByText('Manual transcript unavailable')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Terminal view' })).toBeVisible();
+  await setAutoCommands(page, true);
+});
+
+test('default agent view: empty and failed pages do not trigger fallback', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Empty transcript', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('group', { name: 'Default View' }).getByRole('button', { name: 'Conversation' }).click();
+  await page.getByRole('button', { name: 'Back' }).click();
+  await setConversationFixture(page, { entries: [], total: 0 });
+  await page.getByRole('button', { name: 'Open Empty transcript on Fedora' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByText('No conversation messages have been recorded yet.')).toBeVisible();
+  await page.getByRole('button', { name: 'Back' }).click();
+
+  await setAutoCommands(page, false);
+  await page.getByRole('button', { name: 'Open Empty transcript on Fedora' }).click();
+  const historyRequest = (await commands(page)).filter((command) => command.type === 'get_conversation_history').at(-1);
+  expect(historyRequest).toBeTruthy();
+  await server(page, 0, {
+    type: 'command_result',
+    request_id: historyRequest!.request_id,
+    action: 'get_conversation_history',
+    ok: false,
+    phase: 'failed',
+    error: 'History read failed',
+  });
+  await expect(page.getByRole('alert')).toContainText('History read failed');
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Terminal view' })).toBeVisible();
+  await setAutoCommands(page, true);
+});
+
+test('pane view override: readers can change it while mutation actions stay disabled', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await page.evaluate(() => {
+    localStorage.setItem('herdr_device_auth_v1', JSON.stringify({
+      version: 1,
+      relays: {
+        fedora: {
+          kind: 'credential', id: 'credential-reader', version: 1, secret: 'R'.repeat(43),
+          deviceId: 'device-reader', role: 'reader', locale: 'en', issuedAt: Date.now(),
+        },
+      },
+    }));
+  });
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Reader preference', agent: 'codex',
+      conversation_history_available: true, agent_session_id: 'session-1', terminal_id: 'terminal-1',
+    }],
+  });
+  await page.getByRole('button', { name: 'Open Reader preference on Fedora' }).click();
+  await expect(page.getByRole('main', { name: 'Terminal for Reader preference' })).toBeVisible();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Manage Agent' });
+  await expect(dialog.getByRole('combobox', { name: 'Default View' })).toBeEnabled();
+  await expect(dialog.getByRole('button', { name: 'Rename Tab' })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Clear Agent' })).toBeDisabled();
+  const before = await commands(page);
+  await dialog.getByRole('combobox', { name: 'Default View' }).selectOption('conversation');
+  expect(await page.evaluate(() => localStorage.getItem('herdr_pane_agent_view_overrides'))).toContain('conversation');
+  expect((await commands(page)).slice(before.length).some((command) => String(command.type).startsWith('agent_'))).toBe(false);
+  await dialog.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await expect(page.getByRole('heading', { name: 'Conversation', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Manage agent' }).click();
+  await expect(page.getByRole('dialog', { name: 'Manage Agent' }).getByRole('combobox', { name: 'Default View' })).toHaveValue('conversation');
 });
 
 test('shows tool-only agent turns only in full history and decodes their arguments', async ({ page }) => {
@@ -4135,6 +4553,230 @@ test('opens a long conversation at its newest turn and holds the pin', async ({ 
   await setConversationFixture(page, { entries: final, total: final.length });
   await expect(page.getByText('final streamed question')).toBeVisible();
   await expect.poll(bottomGap).toBeLessThan(2);
+});
+
+test('loads older conversation automatically when scrolled near the top', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'structured_questions', 'slash_commands', 'conversation_history'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Automatic history',
+      agent: 'codex',
+      server_session_id: 'session-1',
+      terminal_id: 'terminal-1',
+      generation: 1,
+      conversation_history_available: true,
+      agent_session_id: 'automatic-session',
+    }],
+  });
+  const latestEntries = Array.from({ length: 100 }, (_, index) => [
+    { id: `latest-user-${index}`, timestamp: `2026-08-12T09:${String(index).padStart(2, '0')}:00Z`, role: 'user', text: `latest question ${index}` },
+    { id: `latest-answer-${index}`, timestamp: `2026-08-12T09:${String(index).padStart(2, '0')}:01Z`, role: 'assistant', text: `latest answer ${index}` },
+  ]).flat();
+  const olderEntries = Array.from({ length: 12 }, (_, index) => [
+    { id: `older-user-${index}`, timestamp: `2026-08-12T08:${String(index).padStart(2, '0')}:00Z`, role: 'user', text: `older automatic question ${index}` },
+    { id: `older-answer-${index}`, timestamp: `2026-08-12T08:${String(index).padStart(2, '0')}:01Z`, role: 'assistant', text: `older automatic answer ${index}` },
+  ]).flat();
+  await setConversationFixture(page, {
+    entries: latestEntries,
+    total: latestEntries.length + olderEntries.length,
+    nextCursor: 'older-1',
+    hasMore: true,
+    pages: { 'older-1': { entries: olderEntries } },
+  });
+
+  await page.getByRole('button', { name: 'Open Automatic history on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  const list = page.locator('.conversation-list');
+  await expect(page.getByText('latest answer 99')).toBeVisible();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'get_conversation_history').length).toBe(1);
+  expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  await expect(page.getByText('older automatic answer 11')).toBeVisible();
+  await expect.poll(async () => (await commands(page)).filter((command) => command.type === 'get_conversation_history' && command.cursor === 'older-1').length).toBe(1);
+  await expect(page.getByText('Beginning of conversation reached.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Return to latest' })).toHaveCount(0);
+
+  const readingTop = await list.evaluate((element) => element.scrollTop);
+  await setConversationFixture(page, {
+    entries: [...latestEntries.slice(-199), {
+      id: 'live-reply', timestamp: '2026-08-12T12:00:00Z', role: 'user', text: 'live message while reading history',
+    }],
+    total: latestEntries.length + olderEntries.length + 1,
+  });
+  await expect(page.getByText('live message while reading history')).toBeAttached({ timeout: 10_000 });
+  await expect(page.getByText('older automatic question 0', { exact: true })).toBeAttached();
+  expect(await list.evaluate((element) => element.scrollTop)).toBeCloseTo(readingTop, 0);
+
+  await list.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  await expect(page.getByText('live message while reading history')).toBeVisible();
+});
+
+test('retains a Claude continuation cursor through repeated preparation', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, {
+    capabilities: ['attention_classification', 'conversation_history'],
+  });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1',
+      status: 'working',
+      project: 'Claude continuation',
+      agent: 'claude',
+      conversation_history_available: true,
+      agent_session_id: 'claude-chain-session',
+    }],
+  });
+  const segmentBEntries = Array.from({ length: 24 }, (_, index) => ({
+    id: `segment-b-${index}`,
+    timestamp: `2026-09-02T11:${String(index).padStart(2, '0')}:00Z`,
+    role: index % 2 ? 'assistant' : 'user',
+    text: `complete child history ${index}`,
+  }));
+  const segmentAEntries = Array.from({ length: 24 }, (_, index) => ({
+    id: `segment-a-${index}`,
+    timestamp: `2026-09-02T10:${String(index).padStart(2, '0')}:00Z`,
+    role: index % 2 ? 'assistant' : 'user',
+    text: `complete parent history ${index}`,
+  }));
+  await setConversationFixture(page, {
+    entries: [{ id: 'latest', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'latest continuation answer' }],
+    total: 49,
+    nextCursor: 'chain-prepare-b',
+    hasMore: true,
+    diagnostics: {
+      source_truncated: false, corrupt_records: 0, oversized_records: 0,
+      continuation_incomplete: true, continuation_reason: 'missing_source',
+    },
+    pages: {
+      'chain-prepare-b': {
+        entries: [], state: 'preparing', snapshotId: 'chain-snapshot', nextCursor: 'chain-ready-b', hasMore: true,
+      },
+      'chain-ready-b': {
+        entries: segmentBEntries,
+        state: 'ready', snapshotId: 'chain-snapshot', nextCursor: 'chain-prepare-a', hasMore: true,
+      },
+      'chain-prepare-a': {
+        entries: [], state: 'preparing', snapshotId: 'chain-snapshot', nextCursor: 'chain-ready-a', hasMore: true,
+      },
+      'chain-ready-a': {
+        entries: segmentAEntries,
+        state: 'ready', snapshotId: 'chain-snapshot', hasMore: false,
+      },
+    },
+  });
+  await page.getByRole('button', { name: 'Open Claude continuation on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await page.getByRole('button', { name: 'Full history' }).click();
+  const list = page.locator('.conversation-list');
+  await expect(page.getByText('latest continuation answer')).toBeVisible();
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  await expect(page.getByText('complete child history 0')).toHaveCount(1);
+  await expect(page.getByText('complete child history 23')).toHaveCount(1);
+  await expect(page.getByText('complete parent history 0')).toHaveCount(1);
+  await expect(page.getByText('complete parent history 23')).toHaveCount(1);
+  await expect(page.getByRole('status').filter({ hasText: 'part of that history is unavailable' })).toBeVisible();
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'get_conversation_history')
+    .map((command) => command.cursor || '')).toEqual(['', 'chain-prepare-b', 'chain-ready-b', 'chain-prepare-a', 'chain-ready-a']);
+  await setConversationFixture(page, {
+    entries: [
+      { id: 'latest', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'latest continuation answer' },
+      { id: 'recovered', timestamp: '2026-09-02T12:01:00Z', role: 'assistant', text: 'appended C answer' },
+    ],
+    total: 2,
+    diagnostics: { source_truncated: false, corrupt_records: 0, oversized_records: 0 },
+  });
+  await page.getByRole('button', { name: 'Reload history' }).click();
+  await expect(page.getByText('appended C answer')).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'part of that history is unavailable' })).toBeHidden();
+});
+
+test('accepts the first Claude continuation and rejects a replacement cursor', async ({ page }) => {
+  await boot(page, [fedora]);
+  await expect.poll(() => socketCount(page)).toBe(1);
+  await handshake(page, 0, { capabilities: ['conversation_history'] });
+  await server(page, 0, {
+    type: 'agents',
+    agents: [{
+      pane_id: 'w1:p1', status: 'working', project: 'Claude acceptance', agent: 'claude',
+      conversation_history_available: true, agent_session_id: 'claude-acceptance-session',
+    }],
+  });
+  const segmentA = Array.from({ length: 24 }, (_, index) => ({
+    id: `accept-a-${index}`,
+    timestamp: `2026-09-02T10:${String(index).padStart(2, '0')}:00Z`,
+    role: index % 2 ? 'assistant' : 'user',
+    text: `A continuation history ${index}`,
+  }));
+  const segmentB = Array.from({ length: 24 }, (_, index) => ({
+    id: `accept-b-${index}`,
+    timestamp: `2026-09-02T11:${String(index).padStart(2, '0')}:00Z`,
+    role: index % 2 ? 'assistant' : 'user',
+    text: `B continuation history ${index}`,
+  }));
+  await setConversationFixture(page, {
+    entries: segmentA,
+    total: segmentA.length,
+    sourceRevision: 'revision-a',
+    diagnostics: {
+      source_truncated: false, corrupt_records: 0, oversized_records: 0,
+      continuation_incomplete: true, continuation_reason: 'missing_source',
+    },
+  });
+  await page.getByRole('button', { name: 'Open Claude acceptance on Fedora' }).click();
+  await page.getByRole('button', { name: 'Conversation history' }).click();
+  await page.getByRole('button', { name: 'Full history' }).click();
+  await expect(page.getByText('A continuation history 23')).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'part of that history is unavailable' })).toBeVisible();
+
+  await setConversationFixture(page, {
+    entries: [...segmentA, ...segmentB],
+    total: segmentA.length + segmentB.length,
+    nextCursor: 'replacement-cursor',
+    hasMore: true,
+    sourceRevision: 'revision-a',
+    diagnostics: { source_truncated: false, corrupt_records: 0, oversized_records: 0 },
+    pages: {
+      'replacement-cursor': {
+        entries: [{ id: 'replacement', timestamp: '2026-09-02T12:00:00Z', role: 'assistant', text: 'replacement history must not enter the old lane' }],
+        sourceRevision: 'revision-replacement',
+        hasMore: false,
+      },
+    },
+  });
+  await page.getByRole('button', { name: 'Reload history' }).click();
+  await expect(page.getByText('B continuation history 23')).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: 'part of that history is unavailable' })).toBeHidden();
+
+  const list = page.locator('.conversation-list');
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
+  await expect.poll(async () => (await commands(page))
+    .filter((command) => command.type === 'get_conversation_history' && command.cursor === 'replacement-cursor').length).toBe(1);
+  await expect(page.getByRole('alert').filter({ hasText: 'The conversation source changed while history was being browsed.' })).toBeVisible();
+  await expect(page.getByText('B continuation history 23')).toBeVisible();
+  await expect(page.getByText('replacement history must not enter the old lane')).toBeHidden();
 });
 
 test('inspects workspace files and Git changes without write controls', async ({ page }) => {

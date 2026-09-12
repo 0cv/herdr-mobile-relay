@@ -5,6 +5,65 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-12
+
+### Added
+
+- Browse older file-backed conversations through bounded local snapshots with
+  authenticated cursors, progress reporting, and explicit source and storage
+  diagnostics. OpenCode and Hermes keep native pagination, while all providers
+  expose tool activity and bounded corruption and omission diagnostics.
+- Load conversation exchanges automatically across wire-page boundaries, keep a
+  bounded memory-only preview for warm reopens, and reuse verified recent-range
+  projections on the relay without persisting transcript data in the browser.
+
+- Report the installed Herdr client separately from the running server version,
+  protocol, endpoint generation, and per-feature compatibility evidence.
+- Add JSON-backed workspace and linked-worktree management, including inventory,
+  create, rename, reorder, explicit group-close confirmation, and separate
+  worktree removal.
+- Add verified Android and iOS installed-PWA device CI with exact release
+  artifacts, cache-recovery coverage, lifecycle checks, and publication gating.
+
+### Changed
+
+- Move ordinary inventory, workspace, tab, and pane-read paths onto Herdr's
+  JSON socket surface with capability refreshes after startup and reconnects,
+  while retaining safe fallbacks where supported.
+- Treat group close as one explicit operation over the currently open group;
+  stale phone confirmations are rejected before dispatch, while concurrent
+  membership changes are handled according to Herdr's current-group semantics.
+- Restrict automatic mobile CI to successful same-repository pushes on `main`
+  and configure Android Chromedriver auto-download on the Appium server.
+
+### Fixed
+
+- Follow Claude session continuations from stale session anchors, including the
+  first continuation, older pages, and later appends, without losing messages or
+  retaining warnings after a missing continuation becomes available.
+- Preserve authenticated history snapshots during concurrent appends,
+  preparation, validation, and evidence compaction, with bounded request reads
+  and retained metadata.
+- Clear recovered inventory warnings and publish coherent agent, workspace, and
+  status updates across refreshes and reconnects.
+- Keep conversation scrolling pinned to new replies when WebKit reports a layout
+  scroll before its resize notification, without interrupting readers scrolling
+  upward through history.
+- Bind delayed workspace-close errors to their originating relay and action so
+  a response cannot open or mutate a group on a different computer.
+- Stop showing unchecked optional Herdr features as compatibility failures in
+  Settings, while retaining warnings for failed checks and unsupported features.
+  Compatibility warnings now wrap instead of being cut off on narrow screens.
+- Check terminal-read support at startup and after Herdr reconnects without
+  targeting a live pane, and record successful lightweight reads, instead of
+  leaving Settings stuck on a pending terminal compatibility check.
+- Extract the phone version from the `Phone app version` label instead of
+  accidentally reporting another version shown on the Settings page.
+- Initialize hybrid transport before capability-refresh goroutines can observe
+  it.
+- Install the Android CA through the supported Pixel Settings flow and verify
+  both the user trust store and the fixture HTTPS endpoint.
+
 ## [0.20.11] - 2026-09-08
 
 ### Fixed
@@ -1430,7 +1489,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.11...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.11...v0.21.0
 [0.20.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.10...v0.20.11
 [0.20.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.9...v0.20.10
 [0.20.9]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.8...v0.20.9

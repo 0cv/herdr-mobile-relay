@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -120,6 +121,36 @@ INSERT INTO part VALUES('part-two','message-one','not-json');`, cwd)
 	}
 }
 
+func TestOpenCodeCorruptRowsStillReturnAContinuationPage(t *testing.T) {
+	sqlite, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	root := t.TempDir()
+	cwd := filepath.Join(root, "work")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(root, "opencode.db")
+	sql := fmt.Sprintf(`CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_updated INTEGER,agent TEXT);
+CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);
+CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,data TEXT);
+INSERT INTO session VALUES('ses_bad1','%s','Bad',1,'opencode');
+INSERT INTO message VALUES('m1','ses_bad1',1,'{"role":"unexpected"}');`, cwd)
+	command := exec.Command(sqlite, database)
+	command.Stdin = strings.NewReader(sql)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create corrupt OpenCode database: %v: %s", err, output)
+	}
+	t.Setenv(agentroots.OpenCodeListEnv, root)
+	reader := NewReader(t.TempDir())
+	reader.openCode.binary = sqlite
+	page, err := reader.readOpenCodeFor(cwd, "ses_bad1", "", 1)
+	if err != nil || !page.Available || !page.SourceCorrupt || len(page.Entries) != 0 {
+		t.Fatalf("corrupt OpenCode page = %#v, err = %v", page, err)
+	}
+}
+
 func TestOpenCodeDirectoryBindingResolvesSymlinks(t *testing.T) {
 	realDirectory := filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(realDirectory, 0o700); err != nil {
@@ -138,6 +169,53 @@ func TestOpenCodeDirectoryBindingResolvesSymlinks(t *testing.T) {
 	}
 	if sameOpenCodeDirectory(other, realDirectory) {
 		t.Fatal("different workspace matched OpenCode session directory")
+	}
+}
+
+func TestBrowserUsesNativeOpenCodeCursorPaging(t *testing.T) {
+	sqlite, err := exec.LookPath("sqlite3")
+	if err != nil {
+		t.Skip("sqlite3 is unavailable")
+	}
+	root := t.TempDir()
+	cwd := filepath.Join(root, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(root, "opencode.db")
+	sql := fmt.Sprintf(`CREATE TABLE session(id TEXT PRIMARY KEY,directory TEXT,title TEXT,time_updated INTEGER,agent TEXT);
+CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);
+CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,data TEXT);
+INSERT INTO session VALUES('ses_browser','%s','Browser',2,'opencode');
+INSERT INTO message VALUES('m1','ses_browser',1,'{"role":"user"}');
+INSERT INTO part VALUES('p1','m1','{"type":"text","text":"older"}');
+INSERT INTO message VALUES('m2','ses_browser',2,'{"role":"assistant"}');
+INSERT INTO part VALUES('p2','m2','{"type":"text","text":"newer"}');`, cwd)
+	command := exec.Command(sqlite, database)
+	command.Stdin = strings.NewReader(sql)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("create OpenCode database: %v: %s", err, output)
+	}
+	t.Setenv(agentroots.OpenCodeListEnv, root)
+	reader := NewReader(t.TempDir())
+	reader.openCode.binary = sqlite
+	browser, err := NewBrowser(reader, t.TempDir(), DefaultBrowserOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer browser.Close()
+	scope := BrowseScope{Provider: "opencode", CWD: cwd, SessionID: "ses_browser"}
+	latest, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 1})
+	if err != nil || latest.Mode != BrowseNative || len(latest.Entries) != 1 || !latest.HasMore || latest.NextCursor == "" || latest.Entries[0].Text != "newer" || latest.SourceRevision == "" {
+		t.Fatalf("OpenCode latest page = %#v, err = %v", latest, err)
+	}
+	appendCommand := exec.Command(sqlite, database, "INSERT INTO message VALUES('m3','ses_browser',3,'{\"role\":\"assistant\"}'); INSERT INTO part VALUES('p3','m3','{\"type\":\"text\",\"text\":\"appended\"}'); UPDATE session SET time_updated=3 WHERE id='ses_browser';")
+	if output, err := appendCommand.CombinedOutput(); err != nil {
+		t.Fatalf("append OpenCode database: %v: %s", err, output)
+	}
+	older, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Cursor: latest.NextCursor, Limit: 1})
+	if err != nil || older.Mode != BrowseNative || older.HasMore || len(older.Entries) != 1 || older.Entries[0].Text != "older" {
+		t.Fatalf("OpenCode older page after append = %#v, err = %v", older, err)
 	}
 }
 

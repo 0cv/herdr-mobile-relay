@@ -19,6 +19,8 @@ export const PUSH_FINISHED_KEY = 'herdr_push_finished';
 export const PUSH_CLIENT_KEY = 'herdr_push_client_id';
 export const PUSH_VAPID_KEY_PREFIX = 'herdr_push_vapid_key_';
 export const HANDLED_NOTIFICATION_ACTIONS_KEY = 'herdr_handled_notification_actions';
+export const DEFAULT_AGENT_VIEW_KEY = 'herdr_default_agent_view';
+export const PANE_AGENT_VIEW_OVERRIDES_KEY = 'herdr_pane_agent_view_overrides';
 
 export const APP_PROTOCOL_VERSION = __APP_PROTOCOL_VERSION__;
 export const APP_VERSION = __APP_VERSION__;
@@ -51,6 +53,12 @@ export const TERMINAL_REFRESH_OPTIONS = [100, 250, 500, 1_000] as const;
 export type TerminalRefreshInterval = (typeof TERMINAL_REFRESH_OPTIONS)[number];
 export const HOME_LAYOUTS = ['state', 'mixed'] as const;
 export type HomeLayout = (typeof HOME_LAYOUTS)[number];
+export const AGENT_VIEWS = ['terminal', 'conversation'] as const;
+export type AgentView = (typeof AGENT_VIEWS)[number];
+export const AGENT_VIEW_LABELS: Record<AgentView, string> = {
+  terminal: 'Terminal',
+  conversation: 'Conversation',
+};
 export const HOME_LAYOUT_LABELS: Record<HomeLayout, string> = {
   state: 'By State',
   mixed: 'Mixed',

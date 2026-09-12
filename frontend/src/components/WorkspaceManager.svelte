@@ -36,7 +36,13 @@
   let base = $state('');
   let worktreeLabel = $state('');
   let confirmOpen = $state(false);
-  let confirming = $state<{ kind: 'close' | 'remove'; workspace: RelayWorkspace; force: boolean } | null>(null);
+  type ConfirmingAction = {
+    kind: 'close' | 'close_group' | 'remove';
+    workspace: RelayWorkspace;
+    force: boolean;
+    workspaceIDs?: string[];
+  };
+  let confirming = $state<ConfirmingAction | null>(null);
   interface WorkspaceSlot {
     key: string;
     top: number;
@@ -124,6 +130,19 @@
     const optimistic = new Set(pending.order);
     if (current.length !== pending.order.length || current.some((id) => !optimistic.has(id))) {
       pendingWorkspaceOrder = null;
+    }
+  });
+  $effect(() => {
+    const action = confirming;
+    if (!confirmOpen || !action || action.kind !== 'close_group') return;
+    const originReady = readyRelays.some((relay) => relay.id === action.workspace.relay_id);
+    const tree = workspaceTrees.find((candidate) =>
+      candidate.workspace.workspace_id === action.workspace.workspace_id);
+    const currentIDs = tree?.workspaceIds || [];
+    if (!originReady || relayId !== action.workspace.relay_id
+      || currentIDs.join('\u0000') !== (action.workspaceIDs || []).join('\u0000')) {
+      confirmOpen = false;
+      confirming = null;
     }
   });
 
@@ -433,26 +452,89 @@
     confirmOpen = true;
   }
 
+  function beginGroupConfirm(tree: RelayWorkspaceTree) {
+    if (tree.workspace.relay_id !== relayId
+      || isReadOnly(tree.workspace.relay_id)
+      || tree.workspaceIds.length < 2) return;
+    confirming = {
+      kind: 'close_group',
+      workspace: tree.workspace,
+      force: false,
+      workspaceIDs: [...tree.workspaceIds],
+    };
+    confirmOpen = true;
+  }
+
   function cancelConfirm() {
     confirmOpen = false;
     confirming = null;
   }
 
+  function workspaceTreesForRelay(targetRelayId: string): RelayWorkspaceTree[] {
+    return relayWorkspaceTrees($workspaces.filter((workspace) => workspace.relay_id === targetRelayId));
+  }
+
+  function groupConfirmWorkspaces(): RelayWorkspace[] {
+    const targetRelayId = confirming?.workspace.relay_id;
+    if (!targetRelayId) return [];
+    return $workspaces.filter((workspace) =>
+      workspace.relay_id === targetRelayId
+      && (confirming?.workspaceIDs?.includes(workspace.workspace_id) ?? false));
+  }
+
+
   async function confirmAction() {
     if (!confirming || isReadOnly(confirming.workspace.relay_id)) return;
     const action = confirming;
+    if (action.kind === 'close_group' && (
+      relayId !== action.workspace.relay_id
+      || !readyRelays.some((relay) => relay.id === action.workspace.relay_id)
+    )) {
+      cancelConfirm();
+      return;
+    }
     busy = true;
     try {
-      if (action.kind === 'close') {
-        await relayStore.closeWorkspace(action.workspace);
-        setStatus(`Closed workspace ${action.workspace.label}.`);
+      if (action.kind === 'close' || action.kind === 'close_group') {
+        await relayStore.closeWorkspace(action.workspace, action.kind === 'close_group'
+          ? { closeGroup: true, expectedWorkspaceIds: action.workspaceIDs }
+          : undefined);
+        setStatus(`Closed workspace${action.kind === 'close_group' ? ' group' : ''} ${action.workspace.label}.`);
       } else {
         await relayStore.removeWorktree(action.workspace, action.force);
         setStatus(`Removed worktree ${action.workspace.label}.`);
       }
       cancelConfirm();
     } catch (caught) {
+      // A dismissed dialog, a changed action, or a relay switch makes this
+      // response stale. It must not mutate whichever computer is visible now.
+      if (confirming !== action || !confirmOpen) return;
       const commandError = caught as CommandError;
+      const code = commandError.data?.code;
+      if (action.kind === 'close' && code === 'workspace_group_close_required') {
+        const tree = workspaceTreesForRelay(action.workspace.relay_id).find((candidate) =>
+          candidate.workspace.relay_id === action.workspace.relay_id
+          && candidate.workspaceIds.includes(action.workspace.workspace_id));
+        if (!tree || tree.workspaceIds.length < 2) {
+          setStatus('Workspace group inventory is stale. Refresh and try again.', true);
+          cancelConfirm();
+          return;
+        }
+        if (relayId !== action.workspace.relay_id) {
+          cancelConfirm();
+          return;
+        }
+        beginGroupConfirm(tree);
+        setStatus('Review the workspace group before closing it.');
+        return;
+      }
+      if (action.kind === 'close_group' && (
+        code === 'workspace_group_changed' || code === 'workspace_group_consent_invalid'
+      )) {
+        setStatus('Workspace group changed. Review the current group before closing it.', true);
+        cancelConfirm();
+        return;
+      }
       if (action.kind === 'remove' && !action.force && commandError.data?.force_available === true) {
         confirming = { ...action, force: true };
         return;
@@ -797,18 +879,40 @@
 <AppDialog
   id="workspace-destructive-dialog"
   bind:open={confirmOpen}
-  title={confirming?.kind === 'remove'
-    ? confirming.force ? `Force remove ${confirming.workspace.label}?` : `Remove ${confirming.workspace.label}?`
-    : `Close ${confirming?.workspace.label || 'workspace'}?`}
-  description={confirming?.kind === 'remove'
-    ? confirming.force
-      ? 'The checkout has uncommitted changes. Force removal permanently discards those checkout changes; the Git branch is retained.'
-      : 'This closes the Herdr workspace and removes its linked checkout. The Git branch is retained.'
-    : 'Every pane in this workspace will close. Git checkouts are not removed.'}
+  title={confirming?.kind === 'close_group'
+    ? `Close ${confirming.workspace.label} group?`
+    : confirming?.kind === 'remove'
+      ? confirming.force ? `Force remove ${confirming.workspace.label}?` : `Remove ${confirming.workspace.label}?`
+      : `Close ${confirming?.workspace.label || 'workspace'}?`}
+  description={confirming?.kind === 'close_group'
+    ? 'All running panes in the currently open group will close. Group membership can change until the command runs. Git checkouts and branches are not removed.'
+    : confirming?.kind === 'remove'
+      ? confirming.force
+        ? 'The checkout has uncommitted changes. Force removal permanently discards those checkout changes; the Git branch is retained.'
+        : 'This closes the Herdr workspace and removes its linked checkout. The Git branch is retained.'
+      : 'Every pane in this workspace will close. Git checkouts are not removed.'}
 >
+  {#if confirming?.kind === 'close_group'}
+    <ul aria-label="Workspaces confirmed for closure">
+      {#each groupConfirmWorkspaces() as member (member.workspace_id)}
+        <li>
+          <strong>{member.label}</strong>
+          <span>{member.pane_count} {member.pane_count === 1 ? 'pane' : 'panes'}</span>
+        </li>
+      {/each}
+    </ul>
+  {/if}
   <div class="button-row">
-    <Button variant="danger" disabled={busy || !confirming || isReadOnly(confirming.workspace.relay_id)} onclick={confirmAction}>
-      {confirming?.kind === 'remove' ? confirming.force ? 'Force Remove' : 'Remove Worktree' : 'Close Workspace'}
+    <Button
+      variant="danger"
+      disabled={busy || !confirming || isReadOnly(confirming.workspace.relay_id)}
+      onclick={confirmAction}
+    >
+      {confirming?.kind === 'close_group'
+        ? 'Close Workspace Group'
+        : confirming?.kind === 'remove'
+          ? confirming.force ? 'Force Remove' : 'Remove Worktree'
+          : 'Close Workspace'}
     </Button>
     <Button variant="ghost" disabled={busy} onclick={cancelConfirm}>Cancel</Button>
   </div>

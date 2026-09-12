@@ -1,0 +1,4 @@
+09-10 14:23:43.308  1427  3582 I ChimeraCfgMgr: Updating module config: container:2423359190800 -> container:2423359190800
+09-10 14:23:43.360   912   912 I SafetyLabelChangedBroadcastReceiver: received broadcast packageName: com.android.chrome, current user: UserHandle{0}, packageChangeEvent: UPDATE, intent user: UserHandle{0}
+09-10 14:23:43.866  1073  1073 D ActivityThread: Package [com.android.chrome] reported as REPLACED, but missing application info. Assuming REMOVED.
+09-10 14:23:44.250  1427  1746 W gle.android.gms: Long monitor contention with owner [com.google.android.gms.chimera.container.intentoperation.GmsIntentOperationChimeraService-Executor] processing com.google.android.gms.chimera.container.InitConfigOperation for action com.google.android.gms.chimera.container.CONTAINER_UPDATED (2480) at void pkf.run()(:com.google.android.gms@242335041@24.23.35 (190800-646585959):73) waiters=0 in void pkf.run() for 2.918s

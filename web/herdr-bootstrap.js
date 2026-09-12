@@ -1,6 +1,4 @@
-(() => {
-  const target = new URL(window.__HERDR_ENTRY__ || "/builds/0.20.11-364-9ea2c4661fc07814/index.html", location.origin);
-  target.search = location.search;
-  target.hash = location.hash;
-  location.replace(target.href);
-})();
+const e = new URL(window.__HERDR_ENTRY__ || "/builds/0.21.0-379-d16c0c8dee2111cb/index.html", location);
+  e.search = location.search;
+  e.hash = location.hash;
+  location.replace(e);

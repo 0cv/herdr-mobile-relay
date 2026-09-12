@@ -1,0 +1,20 @@
+{
+  "launcher": {
+    "run": "34447993534",
+    "source": "failure-android-activity.log and android-launcher-observed.xml",
+    "xmlNormalization": "CRLF converted to LF and final newline added; elements and attributes unchanged",
+    "foreground": "      Intent { act=android.content.pm.action.CONFIRM_PIN_SHORTCUT flg=0x10808000 cmp=com.google.android.apps.nexuslauncher/com.android.launcher3.dragndrop.AddItemActivity (has extras) }\n  ResumedActivity: ActivityRecord{9cc60e3 u0 com.google.android.apps.nexuslauncher/com.android.launcher3.dragndrop.AddItemActivity t11}\n  mCurrentFocus=Window{ad1e97d u0 com.google.android.apps.nexuslauncher/com.android.launcher3.dragndrop.AddItemActivity}",
+    "precedingChromeObservations": 2
+  },
+  "picker": {
+    "run": "34447989084",
+    "source": "failure-android-activity.log, failure-android-logcat.log and appium.log",
+    "foreground": "      Intent { act=android.intent.action.OPEN_DOCUMENT typ=*/* cmp=com.google.android.documentsui/com.android.documentsui.picker.PickActivity (has extras) }\n  ResumedActivity: ActivityRecord{a27ca62 u0 com.google.android.documentsui/com.android.documentsui.picker.PickActivity t9}\n  mCurrentFocus=Window{ea43de2 u0 com.google.android.documentsui/com.android.documentsui.picker.PickActivity}",
+    "firstNotFoundMs": 551,
+    "secondLookupRemainingMs": 4445,
+    "delayedResponseReplayMs": 5300,
+    "openDocumentAt": "07:09:31.019",
+    "providersInitializingUntil": "07:09:34.860",
+    "readyHierarchyRecorded": false
+  }
+}

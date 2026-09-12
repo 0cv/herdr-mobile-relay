@@ -1,9 +1,7 @@
 package coordinator
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -16,31 +14,29 @@ import (
 )
 
 const (
-	idlePollInterval          = 15 * time.Second
+	idlePollInterval     = 15 * time.Second
+	maxPollRetryInterval = 60 * time.Second
+	// Even a 1ns healthy interval reaches the retry cap before 64 doublings.
+	maxPollRetryFailures      = 64
 	maxImmediateTopologyPolls = 3
 )
 
 type Poller struct {
-	client              *herdr.Client
-	state               *State
-	logger              *slog.Logger
-	interval            time.Duration
-	wakeup              chan struct{}
-	onChange            func(agents []*AgentState)
-	onWorkspaceChange   func(workspaces []herdr.Workspace)
-	onStatus            func(status map[string]any)
-	enrich              func(context.Context, []*AgentState)
-	hostname            string
-	topologyRetries     int
+	client             *herdr.Client
+	state              *State
+	logger             *slog.Logger
+	interval           time.Duration
+	wakeup             chan struct{}
+	eventReconnectWait func(context.Context) bool
+	onInventoryChange  func() error
+	enrich             func(context.Context, []*AgentState)
+	hostname           string
+	topologyRetries    int
+	// Owned by the polling goroutine; event commits must not reset it.
+	pollRetryFailures   int
 	consecutiveFailures atomic.Int32
 	eventsActive        atomic.Bool
-	// broadcastMu serializes snapshot broadcasts from the reconcile poll and
-	// the event stream, and guards the dedupe state below. Snapshots are read
-	// inside the lock so a slow commit path can never publish an older
-	// topology after a newer one already went out.
-	broadcastMu        sync.Mutex
-	lastAgentsJSON     []byte
-	lastWorkspacesJSON []byte
+	broadcastMu         sync.Mutex
 }
 
 func NewPoller(client *herdr.Client, state *State, interval time.Duration, logger *slog.Logger) *Poller {
@@ -49,29 +45,33 @@ func NewPoller(client *herdr.Client, state *State, interval time.Duration, logge
 		hostname = hostname[:idx]
 	}
 	return &Poller{
-		client:   client,
-		state:    state,
-		logger:   logger,
-		interval: interval,
-		wakeup:   make(chan struct{}, 1),
-		hostname: hostname,
+		client:             client,
+		state:              state,
+		interval:           interval,
+		wakeup:             make(chan struct{}, 1),
+		eventReconnectWait: waitForEventReconnect,
+		logger:             logger,
+		hostname:           hostname,
 	}
 }
 
-func (p *Poller) SetOnChange(fn func(agents []*AgentState)) {
-	p.onChange = fn
-}
-
-func (p *Poller) SetOnWorkspaceChange(fn func(workspaces []herdr.Workspace)) {
-	p.onWorkspaceChange = fn
-}
-
-func (p *Poller) SetOnInventoryStatus(fn func(status map[string]any)) {
-	p.onStatus = fn
+// SetOnInventoryChange installs the single current-state publication signal.
+// The callback deliberately carries no captured payload: it must select state
+// after the operation that caused the signal has completed.
+func (p *Poller) SetOnInventoryChange(fn func() error) {
+	p.onInventoryChange = fn
 }
 
 func (p *Poller) SetEnrich(fn func(context.Context, []*AgentState)) {
 	p.enrich = fn
+}
+
+// SetEventReconnectWait overrides the reconnect delay used by RunEvents. The
+// server keeps the production delay; integration fixtures use this hook to
+// exercise a dropped-stream/reconnect schedule without sleeping fifteen
+// seconds.
+func (p *Poller) SetEventReconnectWait(fn func(context.Context) bool) {
+	p.eventReconnectWait = fn
 }
 
 func (p *Poller) Wake() {
@@ -86,9 +86,15 @@ func (p *Poller) ConsecutiveFailures() int {
 }
 
 func (p *Poller) Run(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	p.poll(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 
-	timer := time.NewTimer(p.currentInterval())
+	timer := time.NewTimer(p.nextPollInterval())
 	defer timer.Stop()
 
 	for {
@@ -96,43 +102,58 @@ func (p *Poller) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-p.wakeup:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
+			stopPollTimer(timer)
+			if ctx.Err() != nil {
+				return
 			}
 			p.poll(ctx)
-			timer.Reset(p.currentInterval())
+			if ctx.Err() != nil {
+				return
+			}
+			resetPollTimer(timer, p.nextPollInterval())
 		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
 			p.poll(ctx)
-			timer.Reset(p.currentInterval())
+			if ctx.Err() != nil {
+				return
+			}
+			resetPollTimer(timer, p.nextPollInterval())
 		}
 	}
 }
 
 func (p *Poller) poll(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	token := p.state.BeginPoll()
-	previousStatus := p.state.InventoryStatus()
 
 	inv, err := p.client.GetInventory(ctx)
 	if err != nil {
-		p.consecutiveFailures.Add(1)
+		if ctx.Err() != nil {
+			return
+		}
+		p.recordPollFailure()
 		p.state.MarkInventoryFailure(err)
-		p.notifyStatusChange(previousStatus)
+		p.notifyInventoryChange()
 		p.logger.Warn("inventory poll failed", "error", err)
 		return
 	}
-	p.consecutiveFailures.Store(0)
 
 	workspaces, err := p.client.WorkspaceList(ctx)
 	if err != nil {
-		p.consecutiveFailures.Add(1)
+		if ctx.Err() != nil {
+			return
+		}
+		p.recordPollFailure()
 		p.state.MarkInventoryFailure(err)
-		p.notifyStatusChange(previousStatus)
+		p.notifyInventoryChange()
 		p.logger.Warn("workspace inventory poll failed", "error", err)
 		return
 	}
+	p.resetPollFailures()
 
 	tabs, tabErr := p.client.TabList(ctx)
 	if tabErr != nil {
@@ -149,20 +170,16 @@ func (p *Poller) poll(ctx context.Context) {
 		p.enrich(ctx, agents)
 	}
 
-	workspaceChanged, committed := p.state.CommitPoll(agents, workspaces, token)
+	_, committed := p.state.CommitPoll(agents, workspaces, token)
 	if !committed {
 		p.logger.Debug("discarded topology-stale inventory sample")
-		p.handleTopologyStale(previousStatus)
+		p.handleTopologyStale()
+		p.notifyInventoryChange()
 		return
 	}
 	p.topologyRetries = 0
-	p.notifyStatusChange(previousStatus)
+	p.notifyInventoryChange()
 	p.logger.Debug("inventory committed", "agents", len(agents), "topology", p.state.TopologyGeneration())
-
-	p.notifyAgentsChanged()
-	if workspaceChanged {
-		p.notifyWorkspacesChanged()
-	}
 }
 
 func (p *Poller) agentsFromTopology(panes []herdr.Pane, tabs []herdr.Tab) []*AgentState {
@@ -266,7 +283,7 @@ func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
 			// is back, so let it run at the configured interval again.
 			p.eventsActive.Store(false)
 			p.logger.Warn("Herdr events stream unavailable", "error", err)
-			if !waitForEventReconnect(ctx) {
+			if !p.eventReconnectWait(ctx) {
 				return
 			}
 			continue
@@ -299,7 +316,7 @@ func (p *Poller) RunEvents(ctx context.Context, events *herdr.EventClient) {
 		}
 		p.eventsActive.Store(false)
 		_ = stream.Close()
-		if !waitForEventReconnect(ctx) {
+		if !p.eventReconnectWait(ctx) {
 			return
 		}
 	}
@@ -319,73 +336,17 @@ func (p *Poller) applyTopologyEvent(ctx context.Context, cache *herdr.SessionCac
 }
 
 func (p *Poller) commitEventTopology(ctx context.Context, topology herdr.TopologySnapshot, baseRevision int64) {
-	previousStatus := p.state.InventoryStatus()
 	agents := p.agentsFromTopology(topology.Panes, topology.Tabs)
 	if p.enrich != nil {
 		p.enrich(ctx, agents)
 	}
+	// Event topology is an independent health source. It may recover the
+	// public poll-health counter, but must not erase a reconciliation retry
+	// streak while required polling fetches are failing.
 	p.consecutiveFailures.Store(0)
-	workspaceChanged := p.state.CommitTopology(agents, topology.Workspaces, baseRevision)
-	p.notifyStatusChange(previousStatus)
+	p.state.CommitTopology(agents, topology.Workspaces, baseRevision)
+	p.notifyInventoryChange()
 	p.logger.Debug("event inventory committed", "agents", len(agents), "workspaces", len(topology.Workspaces), "topology", p.state.TopologyGeneration())
-	p.notifyAgentsChanged()
-	if workspaceChanged {
-		p.notifyWorkspacesChanged()
-	}
-}
-
-// notifyAgentsChanged broadcasts the current agent snapshot unless nothing a
-// client renders has changed since the last broadcast. Both freshness sources
-// — the reconcile poll and the Herdr event stream — commit through here, so
-// an idle machine stops producing a full `agents` push every interval and
-// phones on metered or fragile links receive silence instead of a
-// re-shuffled copy of what they already display.
-//
-// StateRevision is excluded from the comparison: every commit stamps every
-// agent with the new revision counter, so including it would re-broadcast
-// identical inventories forever. A suppressed revision-only bump is safe —
-// clients only reject revisions that move backwards.
-func (p *Poller) notifyAgentsChanged() {
-	if p.onChange == nil {
-		return
-	}
-	p.broadcastMu.Lock()
-	defer p.broadcastMu.Unlock()
-	snapshot := p.state.Snapshot()
-	comparable := make([]AgentState, len(snapshot))
-	for i, agent := range snapshot {
-		comparable[i] = *agent
-		comparable[i].StateRevision = 0
-	}
-	encoded, err := json.Marshal(comparable)
-	if err == nil {
-		if bytes.Equal(encoded, p.lastAgentsJSON) {
-			return
-		}
-		p.lastAgentsJSON = encoded
-	}
-	p.onChange(snapshot)
-}
-
-// notifyWorkspacesChanged mirrors notifyAgentsChanged for workspace
-// broadcasts: the snapshot is read under broadcastMu so the poll and event
-// commits publish in commit order, and a byte-identical broadcast — both
-// sources committing the same topology back to back — is suppressed.
-func (p *Poller) notifyWorkspacesChanged() {
-	if p.onWorkspaceChange == nil {
-		return
-	}
-	p.broadcastMu.Lock()
-	defer p.broadcastMu.Unlock()
-	workspaces := p.state.Workspaces()
-	encoded, err := json.Marshal(workspaces)
-	if err == nil {
-		if bytes.Equal(encoded, p.lastWorkspacesJSON) {
-			return
-		}
-		p.lastWorkspacesJSON = encoded
-	}
-	p.onWorkspaceChange(workspaces)
 }
 
 func waitForEventReconnect(ctx context.Context) bool {
@@ -399,31 +360,54 @@ func waitForEventReconnect(ctx context.Context) bool {
 	}
 }
 
-func (p *Poller) handleTopologyStale(previousStatus map[string]any) {
+func (p *Poller) handleTopologyStale(_ ...map[string]any) {
 	p.topologyRetries++
 	if p.topologyRetries <= maxImmediateTopologyPolls {
 		p.Wake()
 		return
 	}
 	p.state.MarkTopologyDegraded()
-	p.notifyStatusChange(previousStatus)
 	p.logger.Warn("inventory topology did not stabilize", "immediate_retries", maxImmediateTopologyPolls)
 }
 
-func (p *Poller) notifyStatusChange(previous map[string]any) {
-	current := p.state.InventoryStatus()
-	if p.onStatus != nil && inventoryStatusChanged(previous, current) {
-		p.onStatus(current)
+// notifyInventoryChange serializes every publication signal. State mutations
+// happen before this method is called and the callback must capture current
+// state itself, so no State mutex is held while user code or transport runs.
+func (p *Poller) notifyInventoryChange() {
+	p.broadcastMu.Lock()
+	defer p.broadcastMu.Unlock()
+	if p.onInventoryChange == nil {
+		return
+	}
+	if err := p.onInventoryChange(); err != nil {
+		p.logger.Warn("inventory publication failed", "error", err)
 	}
 }
 
-func inventoryStatusChanged(previous, current map[string]any) bool {
-	for _, key := range []string{"state", "error_code", "message", "stale"} {
-		if previous[key] != current[key] {
-			return true
+func (p *Poller) recordPollFailure() {
+	if p.pollRetryFailures < maxPollRetryFailures {
+		p.pollRetryFailures++
+	}
+	p.consecutiveFailures.Add(1)
+}
+
+func (p *Poller) resetPollFailures() {
+	p.pollRetryFailures = 0
+	p.consecutiveFailures.Store(0)
+}
+
+func stopPollTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
 		}
 	}
-	return false
+}
+
+func resetPollTimer(timer *time.Timer, delay time.Duration) {
+	stopPollTimer(timer)
+	timer.Reset(delay)
 }
 
 // currentInterval keeps the reconcile poll slow while the event stream is
@@ -433,8 +417,30 @@ func (p *Poller) currentInterval() time.Duration {
 	if p.eventsActive.Load() {
 		return idlePollInterval
 	}
-	if p.interval <= 0 || p.interval > idlePollInterval {
+	return normalizePollInterval(p.interval)
+}
+
+func (p *Poller) nextPollInterval() time.Duration {
+	return pollRetryInterval(p.currentInterval(), p.pollRetryFailures)
+}
+
+func normalizePollInterval(interval time.Duration) time.Duration {
+	if interval <= 0 || interval > idlePollInterval {
 		return idlePollInterval
 	}
-	return p.interval
+	return interval
+}
+
+// pollRetryInterval doubles the healthy interval once for each failed required
+// poll, stopping at the outage cap. The guard before multiplication keeps the
+// calculation safe even for a very large failure streak.
+func pollRetryInterval(healthyInterval time.Duration, failures int) time.Duration {
+	interval := normalizePollInterval(healthyInterval)
+	for ; failures > 0; failures-- {
+		if interval >= maxPollRetryInterval || interval > maxPollRetryInterval/2 {
+			return maxPollRetryInterval
+		}
+		interval *= 2
+	}
+	return interval
 }

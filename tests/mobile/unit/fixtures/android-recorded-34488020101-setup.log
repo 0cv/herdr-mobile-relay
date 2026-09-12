@@ -1,0 +1,3 @@
+09-10 14:24:12.966  1199  3881 W .gms.persistent: Long monitor contention with owner [com.google.android.gms.chimera.container.intentoperation.PersistentIntentOperationChimeraService-Executor] processing com.google.android.gms.auth.proximity.exo.ExoPackageChangedIntentOperation for action android.intent.action.PACKAGE_ADDED (3649) at void pkf.run()(:com.google.android.gms@242335041@24.23.35 (190800-646585959):73) waiters=0 in void pkf.run() for 225ms
+09-10 14:24:13.378  1451  2102 I AiAiEcho: AppFetcherImplV2 updateApps package:[com.google.android.gms], userId:[0], reason:[package is updated.].
+09-10 14:24:13.563  1451  2091 I AiAiEcho: AppFetcherImplV2 updateApps package:[com.android.chrome], userId:[0], reason:[package is updated.].

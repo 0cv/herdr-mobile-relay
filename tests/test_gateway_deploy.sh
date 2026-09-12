@@ -171,9 +171,9 @@ grep -Fq 'context: ${HERDR_GATEWAY_BUILD_CONTEXT:-./gateway-source}' \
     "$BUNDLE_DIR/docker-compose.yml" || fail "compose file lost the bundled build context"
 grep -Fq 'HERDR_GATEWAY_BUILD_CONTEXT="./gateway-source"' "$BUNDLE_DIR/.env" ||
     fail ".env lost the bundled build context"
-grep -Fq 'HERDR_GATEWAY_VERSION: ${HERDR_GATEWAY_VERSION:-0.20.11}' \
+grep -Fq 'HERDR_GATEWAY_VERSION: ${HERDR_GATEWAY_VERSION:-0.21.0}' \
     "$BUNDLE_DIR/docker-compose.yml" || fail "compose file does not pass the gateway release to the build"
-grep -Fq 'HERDR_GATEWAY_VERSION=0.20.11' "$BUNDLE_DIR/.env" ||
+grep -Fq 'HERDR_GATEWAY_VERSION=0.21.0' "$BUNDLE_DIR/.env" ||
 
     fail ".env does not record the deployed gateway release"
 grep -Eq '^HERDR_GATEWAY_REVISION=[0-9a-f]{40}$' "$BUNDLE_DIR/.env" ||
@@ -295,6 +295,7 @@ export HERDR_RELAY_ENV="$WORK_DIR/relay-remembered.env"
 : > "$HERDR_RELAY_ENV"
 
 REMEMBERED_BUNDLE="$WORK_DIR/bundle-remembered"
+REMEMBERED_BUNDLE="$(cd "$(dirname "$REMEMBERED_BUNDLE")" && pwd -P)/$(basename "$REMEMBERED_BUNDLE")"
 export HERDR_GATEWAY_DEPLOY_DIR="$REMEMBERED_BUNDLE"
 export HERDR_GATEWAY_DEPLOY_SERVER="deploy@gw.example.test"
 export HERDR_GATEWAY_DEPLOY_REMOTE_DIR="/srv/herdr-gateway"

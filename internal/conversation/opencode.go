@@ -58,6 +58,7 @@ type openCodeRow struct {
 	PartData    string `json:"part_data"`
 	Total       int    `json:"message_total"`
 	CursorFound int    `json:"cursor_found"`
+	Database    string `json:"-"`
 }
 
 type boundedBuffer struct {
@@ -104,6 +105,10 @@ func (r *openCodeReader) databases() ([]string, string) {
 }
 
 func (r *openCodeReader) read(sessionID, before string, limit int) ([]Entry, bool, bool, openCodeRow, string) {
+	return r.readContext(context.Background(), sessionID, before, limit)
+}
+
+func (r *openCodeReader) readContext(ctx context.Context, sessionID, before string, limit int) ([]Entry, bool, bool, openCodeRow, string) {
 	if !validOpenCodeSessionID(sessionID) {
 		return nil, false, false, openCodeRow{}, "invalid_session"
 	}
@@ -116,7 +121,7 @@ func (r *openCodeReader) read(sessionID, before string, limit int) ([]Entry, boo
 	}
 	firstFailure := ""
 	for _, database := range databases {
-		rows, hasMore, queryCode := r.query(database, sessionID, before, limit)
+		rows, hasMore, queryCode := r.queryContext(ctx, database, sessionID, before, limit)
 		if queryCode != "" {
 			if firstFailure == "" {
 				firstFailure = queryCode
@@ -129,11 +134,10 @@ func (r *openCodeReader) read(sessionID, before string, limit int) ([]Entry, boo
 		if before != "" && rows[0].CursorFound == 0 {
 			return nil, false, false, openCodeRow{}, "invalid_cursor"
 		}
+		metadata := rows[0]
+		metadata.Database = database
 		entries, corrupt := parseOpenCodeRows(rows)
-		if corrupt && len(entries) == 0 {
-			return nil, false, true, openCodeRow{}, "source_corrupt"
-		}
-		return entries, hasMore, corrupt, rows[0], ""
+		return entries, hasMore, corrupt, metadata, ""
 	}
 	if firstFailure != "" {
 		return nil, false, false, openCodeRow{}, firstFailure
@@ -176,6 +180,10 @@ func (r *openCodeReader) storeQuery(key string, stamp openCodeFileStamp, rows []
 }
 
 func (r *openCodeReader) query(database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
+	return r.queryContext(context.Background(), database, sessionID, before, limit)
+}
+
+func (r *openCodeReader) queryContext(ctx context.Context, database, sessionID, before string, limit int) ([]openCodeRow, bool, string) {
 	stamp, stampOK := openCodeStamp(database)
 	cacheKey := fmt.Sprintf("%s\x00%s\x00%s\x00%d", database, sessionID, before, limit)
 	if stampOK {
@@ -214,9 +222,9 @@ func (r *openCodeReader) query(database, sessionID, before string, limit int) ([
 		cursorFound,
 		sessionHex,
 	)
-	ctx, cancel := context.WithTimeout(context.Background(), openCodeQueryTimeout)
+	queryCtx, cancel := context.WithTimeout(ctx, openCodeQueryTimeout)
 	defer cancel()
-	command := exec.CommandContext(ctx, r.binary, "-readonly", "-batch", "-json", database, query)
+	command := exec.CommandContext(queryCtx, r.binary, "-readonly", "-batch", "-json", database, query)
 	stdout := &boundedBuffer{remaining: maxOpenCodeOutput}
 	var stderr boundedBuffer
 	stderr.remaining = 4096
@@ -283,6 +291,7 @@ func (r *Reader) readOpenCodeFor(cwd, sessionID, before string, limit int) (Page
 	if cwd != "" && !sameOpenCodeDirectory(cwd, metadata.Directory) {
 		return unavailableCode("invalid_session", "This conversation belongs to a different workspace."), nil
 	}
+	normalizeEntriesForResponse(entries)
 	return Page{
 		Available: true, Entries: append([]Entry(nil), entries...),
 		HasMore: hasMore, Total: metadata.Total, SourceCorrupt: corrupt,
@@ -314,6 +323,10 @@ func parseOpenCodeRows(rows []openCodeRow) ([]Entry, bool) {
 	corrupt := false
 	for _, row := range rows {
 		if row.MessageID == "" {
+			continue
+		}
+		if len(row.MessageID) > 256 || strings.ContainsAny(row.MessageID, "\x00\r\n") {
+			corrupt = true
 			continue
 		}
 		index, exists := byMessage[row.MessageID]

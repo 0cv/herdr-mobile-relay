@@ -1384,7 +1384,7 @@
     }
     if (agent.conversation_history_available) {
       try {
-        const page = await relayStore.getConversationHistory(agent, '', 8);
+        const page = await relayStore.getConversationHistory(agent, { limit: 8 });
         const latest = page.entries.findLast((entry) => entry.role === 'assistant' && entry.text.trim());
         if (latest) return { text: latest.text, exact: true, failure: '' };
       } catch (error) {
