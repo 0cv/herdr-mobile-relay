@@ -135,6 +135,8 @@ type Server struct {
 
 	refreshMu      sync.Mutex
 	refreshClients map[string]bool
+	// Optional deterministic publication observer; installed before serving.
+	inventoryPublicationObserver func(string)
 
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
@@ -596,61 +598,7 @@ func (s *Server) Run(ctx context.Context) error {
 			"capabilities": s.effectiveCapabilitiesFor(status),
 		})
 	})
-	s.hub.SetOnConnect(func(client *transport.ClientConn) {
-		vapidPublicKey := ""
-		if s.pushM != nil {
-			vapidPublicKey = s.pushM.VAPIDPublicKey()
-		}
-		committed := s.committedInventorySnapshot()
-		inventory := committed.status
-		agents := committed.agents
-		workspaces := committed.workspaces
-		herdrCapabilityStatus := s.herdrC.CapabilityStatus()
-		capabilities := s.effectiveCapabilitiesFor(herdrCapabilityStatus)
-		speechStatus := s.speechStatus()
-		speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
-		herdrStatus := herdrStatusPayload(herdrCapabilityStatus)
-		s.hub.Send(client, protocol.PushConfig{
-			Type:            "push_config",
-			VAPIDPublicKey:  vapidPublicKey,
-			Host:            s.hostname,
-			Home:            s.home,
-			Protocol:        protocol.Version,
-			Version:         s.version,
-			ReleaseVersion:  s.version,
-			Revision:        s.revision,
-			Update:          s.updateM.State(),
-			AppDeploy:       s.appDeployM.State(),
-			Capabilities:    capabilities,
-			HerdrStatus:     herdrStatus,
-			SpeechLanguages: speechLanguages,
-			Inventory:       inventory,
-			AgentProfiles:   s.profiles.Profiles(),
-			Hybrid:          s.hybridDescriptor(),
-		})
-		s.hub.Send(client, map[string]any{
-			"type":   "agents",
-			"agents": agents,
-		})
-		s.hub.Send(client, map[string]any{
-			"type":       "workspaces",
-			"workspaces": workspaces,
-		})
-		activities := s.recentActivities(500)
-		s.hub.Send(client, map[string]any{
-			"type":       "activity_history",
-			"activities": activities,
-		})
-		s.hub.Send(client, map[string]any{
-			"type":            "inventory_status",
-			"state":           inventory["state"],
-			"error_code":      inventory["error_code"],
-			"message":         inventory["message"],
-			"last_attempt_at": inventory["last_attempt_at"],
-			"last_success_at": inventory["last_success_at"],
-			"stale":           inventory["stale"],
-		})
-	})
+	s.hub.SetOnConnect(s.sendConnectionSnapshot)
 
 	s.hub.SetOnDisconnect(func(client *transport.ClientConn) {
 		s.stopPaneWatch(client.ID(), "")
@@ -816,38 +764,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case "pane_applied":
 			s.handlePaneApplied(client, msg)
 		case "get_conversation_history":
-			agent, exists := s.state.Agent(inbound.PaneID)
-			if !exists {
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent is unavailable", inbound.PaneID, nil)
-				break
-			}
-			generation := s.state.Generation(inbound.PaneID)
-			browser := s.conversationB
-			if browser == nil || browser.Reader() != s.conversationM {
-				s.logger.Warn("conversation browser is unavailable", "pane_id", inbound.PaneID)
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
-				break
-			}
-			page, historyErr := browser.ReadPage(client.Context(), conversation.BrowseRequest{
-				Scope: conversation.BrowseScope{
-					Provider: agent.Agent, CWD: agent.Cwd, SessionID: agent.SessionID,
-					PaneID: agent.PaneID, ServerSessionID: agent.ServerSessionID,
-					TerminalID: agent.TerminalID, Generation: agent.Generation,
-				},
-				Cursor: inbound.Cursor, Limit: inbound.Limit, Retry: inbound.Retry,
-			})
-			if historyErr != nil {
-				s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
-				break
-			}
-			current, currentExists := s.state.Agent(inbound.PaneID)
-			if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
-				!sameConversationTuple(agent, current) {
-				s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
-				break
-			}
-			s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, page)
+			s.handleConversationHistory(client, inbound)
 		case "device_list":
 			identity, authenticated := client.Identity()
 			if s.deviceAuth == nil || !authenticated {
@@ -1252,20 +1169,7 @@ func (s *Server) Run(ctx context.Context) error {
 				s.logger.Warn("phone app origin was not stored", "error", err)
 			}
 		case "refresh_agents":
-			// Queue the deferred refresh before waking the poller. A publication
-			// racing this handler can then drain it in the same ordered batch.
-			s.refreshMu.Lock()
-			s.refreshClients[client.ID()] = true
-			s.refreshMu.Unlock()
-			s.hub.SendBatchPrepared(client, func() []any {
-				committed := s.committedInventorySnapshot()
-				return []any{
-					inventoryStatusMessage(committed.status),
-					map[string]any{"type": "agents", "agents": committed.agents},
-					map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
-				}
-			})
-			s.poller.Wake()
+			s.requestAgentRefresh(client)
 		case "webrtc_offer", "webrtc_ice", "webrtc_close":
 			s.handleWebRTCSignal(commandCtx, client, action, inbound.RequestID, msg)
 		default:
@@ -1337,9 +1241,7 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	s.poller.SetOnInventoryChange(func() error {
-		return s.publishCurrentInventory(ctx)
-	})
+	s.setInventoryPublisher(ctx)
 
 	s.poller.SetEnrich(func(ctx context.Context, agents []*coordinator.AgentState) {
 		for _, a := range agents {
@@ -2200,6 +2102,42 @@ func (s *Server) syncHistoryPanes(agents []*coordinator.AgentState) {
 	}
 }
 
+func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound protocol.Inbound) {
+	action := "get_conversation_history"
+	agent, exists := s.state.Agent(inbound.PaneID)
+	if !exists {
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent is unavailable", inbound.PaneID, nil)
+		return
+	}
+	generation := s.state.Generation(inbound.PaneID)
+	browser := s.conversationB
+	if browser == nil || browser.Reader() != s.conversationM {
+		s.logger.Warn("conversation browser is unavailable", "pane_id", inbound.PaneID)
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
+		return
+	}
+	page, historyErr := browser.ReadPage(client.Context(), conversation.BrowseRequest{
+		Scope: conversation.BrowseScope{
+			Provider: agent.Agent, CWD: agent.Cwd, SessionID: agent.SessionID,
+			PaneID: agent.PaneID, ServerSessionID: agent.ServerSessionID,
+			TerminalID: agent.TerminalID, Generation: agent.Generation,
+		},
+		Cursor: inbound.Cursor, Limit: inbound.Limit, Retry: inbound.Retry,
+	})
+	if historyErr != nil {
+		s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
+		return
+	}
+	current, currentExists := s.state.Agent(inbound.PaneID)
+	if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
+		!sameConversationTuple(agent, current) {
+		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Agent changed while conversation history was loading", inbound.PaneID, nil)
+		return
+	}
+	s.sendCommandResult(client, inbound.RequestID, action, true, "completed", "", inbound.PaneID, page)
+}
+
 // Conversation logs preserve the full assistant message; the terminal pane is
 // only a bounded fallback for agents without a readable transcript.
 func (s *Server) latestConversationResponse(agent, cwd, sessionID string) string {
@@ -2639,6 +2577,73 @@ func (s *Server) agentInfo(paneID string) (agent, cwd string) {
 	return "", ""
 }
 
+func (s *Server) sendConnectionSnapshot(client *transport.ClientConn) {
+	vapidPublicKey := ""
+	if s.pushM != nil {
+		vapidPublicKey = s.pushM.VAPIDPublicKey()
+	}
+	committed := s.committedInventorySnapshot()
+	s.observeInventoryPublication("registration")
+	inventory := committed.status
+	herdrCapabilityStatus := s.herdrC.CapabilityStatus()
+	capabilities := s.effectiveCapabilitiesFor(herdrCapabilityStatus)
+	speechStatus := s.speechStatus()
+	speechLanguages := s.rememberSpeechLanguages(speechStatus.Languages)
+	herdrStatus := herdrStatusPayload(herdrCapabilityStatus)
+	s.hub.Send(client, protocol.PushConfig{
+		Type:            "push_config",
+		VAPIDPublicKey:  vapidPublicKey,
+		Host:            s.hostname,
+		Home:            s.home,
+		Protocol:        protocol.Version,
+		Version:         s.version,
+		ReleaseVersion:  s.version,
+		Revision:        s.revision,
+		Update:          s.updateM.State(),
+		AppDeploy:       s.appDeployM.State(),
+		Capabilities:    capabilities,
+		HerdrStatus:     herdrStatus,
+		SpeechLanguages: speechLanguages,
+		Inventory:       inventory,
+		AgentProfiles:   s.profiles.Profiles(),
+		Hybrid:          s.hybridDescriptor(),
+	})
+	s.hub.Send(client, map[string]any{
+		"type":   "agents",
+		"agents": committed.agents,
+	})
+	s.hub.Send(client, map[string]any{
+		"type":       "workspaces",
+		"workspaces": committed.workspaces,
+	})
+	s.hub.Send(client, map[string]any{
+		"type":       "activity_history",
+		"activities": s.recentActivities(500),
+	})
+	s.hub.Send(client, inventoryStatusMessage(inventory))
+}
+
+func (s *Server) requestAgentRefresh(client *transport.ClientConn) {
+	if client == nil {
+		return
+	}
+	// Queue the deferred refresh before waking the poller. A publication
+	// racing this handler can then drain it in the same ordered batch.
+	s.refreshMu.Lock()
+	s.refreshClients[client.ID()] = true
+	s.refreshMu.Unlock()
+	s.hub.SendBatchPrepared(client, func() []any {
+		committed := s.committedInventorySnapshot()
+		s.observeInventoryPublication("immediate")
+		return []any{
+			inventoryStatusMessage(committed.status),
+			map[string]any{"type": "agents", "agents": committed.agents},
+			map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
+		}
+	})
+	s.poller.Wake()
+}
+
 func (s *Server) sendRequestedAgentRefreshes() {
 	s.refreshMu.Lock()
 	clientIDs := make([]string, 0, len(s.refreshClients))
@@ -2651,12 +2656,19 @@ func (s *Server) sendRequestedAgentRefreshes() {
 	for _, clientID := range clientIDs {
 		s.hub.SendBatchPreparedByID(clientID, func() []any {
 			committed := s.committedInventorySnapshot()
+			s.observeInventoryPublication("deferred")
 			return []any{
 				inventoryStatusMessage(committed.status),
 				map[string]any{"type": "agents", "agents": committed.agents},
 				map[string]any{"type": "workspaces", "workspaces": committed.workspaces},
 			}
 		})
+	}
+}
+
+func (s *Server) observeInventoryPublication(phase string) {
+	if s.inventoryPublicationObserver != nil {
+		s.inventoryPublicationObserver(phase)
 	}
 }
 
@@ -3376,11 +3388,21 @@ type committedInventory struct {
 // publishCurrentInventory is the sole authoritative inventory writer. Fresh
 // state is selected inside the Hub registration barrier, while the expensive
 // reconciliation work remains after that barrier has been released.
+func (s *Server) setInventoryPublisher(ctx context.Context) {
+	if s.poller == nil {
+		return
+	}
+	s.poller.SetOnInventoryChange(func() error {
+		return s.publishCurrentInventory(ctx)
+	})
+}
+
 func (s *Server) publishCurrentInventory(ctx context.Context) error {
 	var sideEffectAgents []*coordinator.AgentState
 	var runAgentSideEffects bool
 	batchErr := s.hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
 		fresh := s.state.InventorySnapshot()
+		s.observeInventoryPublication("publication")
 		freshAgents := cloneAgents(fresh.Agents)
 		s.projectAgentResources(freshAgents)
 
@@ -3476,6 +3498,9 @@ func agentSnapshotsEqual(left, right []*coordinator.AgentState) bool {
 }
 
 func workspaceSnapshotsEqual(left, right []herdr.Workspace) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
 	leftData, leftErr := json.Marshal(left)
 	rightData, rightErr := json.Marshal(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftData, rightData)

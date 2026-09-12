@@ -44,14 +44,10 @@
   let available = $state(true);
   let reason = $state('');
   let hasMore = $state(false);
-  let total = $state<number | null>(null);
   let nextCursor = $state('');
   let browseState = $state<ConversationPage['state']>('ready');
   let browseProgress = $state<ConversationPage['progress']>();
-  let olderBrowsing = $state(false);
-  let snapshotActive = $state(false);
   let sourceChangedNotice = $state('');
-  let snapshotSendNotice = $state('');
   let diagnostics = $state<ConversationPage['diagnostics']>();
   let omoPlan = $state<OmoTodoState | null>(null);
   let loading = $state(true);
@@ -84,6 +80,8 @@
   let pinPendingUntil = 0;
   let pinTargetTop = 0;
   let pinTargetHeight = 0;
+  let lastScrollTop = 0;
+  let lastScrollHeight = 0;
   let pinPendingTimer: ReturnType<typeof setTimeout> | undefined;
   let mounted = false;
   let controllerReady = $state(false);
@@ -257,7 +255,8 @@
     const sentinel = topSentinel;
     const searching = query.trim();
     if (!list || !sentinel || typeof IntersectionObserver === 'undefined') return;
-    const observer = new IntersectionObserver(() => {
+    const observer = new IntersectionObserver((observations) => {
+      if (!observations.some((observation) => observation.isIntersecting)) return;
       if (searching || !historyController || document.visibilityState === 'hidden' || $securityState.locked) return;
       if (pinnedToBottom) {
         if (list.scrollHeight <= list.clientHeight + 8) historyController.ensureMore();
@@ -316,6 +315,8 @@
       pinPendingUntil = 0;
     }, 250);
     element.scrollTop = element.scrollHeight;
+    lastScrollTop = element.scrollTop;
+    lastScrollHeight = element.scrollHeight;
   }
 
   function trackScroll() {
@@ -325,10 +326,18 @@
     // browser clamp scrollTop and fire a scroll event from a lower position —
     // lands exactly at the bottom and keeps the pin instead of dropping it.
     const bottomGap = listElement.scrollHeight - listElement.scrollTop - listElement.clientHeight;
+    // WebKit can report a scroll caused by growing content before delivering
+    // ResizeObserver. A larger gap alone is not reader movement: keep the pin
+    // if the viewport did not move up, even after the short pin timer expires.
+    const layoutDidNotScrollUp = wasPinned
+      && listElement.scrollHeight >= lastScrollHeight
+      && listElement.scrollTop >= lastScrollTop - 2;
+    lastScrollTop = listElement.scrollTop;
+    lastScrollHeight = listElement.scrollHeight;
     const layoutShiftFromPin = pinPendingUntil > Date.now()
       && listElement.scrollHeight >= pinTargetHeight
       && listElement.scrollTop >= pinTargetTop - 2;
-    if (layoutShiftFromPin) {
+    if (layoutShiftFromPin || layoutDidNotScrollUp) {
       pinnedToBottom = true;
       return;
     }
@@ -336,7 +345,7 @@
     pinnedToBottom = bottomGap < 48;
     if (query.trim() || !historyController || document.visibilityState === 'hidden' || $securityState.locked) return;
     const nearTop = listElement.scrollTop <= 300;
-    if (!wasPinned && nearTop) demandOlder();
+    if (!pinnedToBottom && nearTop) demandOlder();
     else if (wasPinned && nearTop && listElement.clientHeight > 0 && listElement.scrollHeight <= listElement.clientHeight + 8) {
       historyController.ensureMore();
     }
@@ -348,12 +357,9 @@
     available = next.available;
     reason = next.reason;
     hasMore = next.hasMore;
-    total = next.total;
     nextCursor = next.nextCursor;
     browseState = next.state;
     browseProgress = next.progress;
-    olderBrowsing = next.intent === 'historical';
-    snapshotActive = next.intent === 'historical' && next.mode === 'snapshot';
     diagnostics = next.diagnostics;
     omoPlan = next.omoPlan;
     previewVisible = next.preview;
@@ -375,15 +381,13 @@
     loadingOlder = next.requestPhase === 'older';
     loading = !entries.length && !previewVisible && next.requestPhase === 'initial';
 
-    const prepended = next.intent === 'historical'
-      && next.entries.length > oldEntries.length
-      && next.entries.some((entry, index) => entry.id !== oldEntries[index]?.id);
+    const prepended = oldEntries.length > 0
+      && next.entries.findIndex((entry) => entry.id === oldEntries[0].id) > 0;
     if (prepended && pendingAnchor) {
       const anchor = pendingAnchor;
       void tick().then(() => restoreScrollAnchor(anchor.anchor, anchor.top, anchor.height));
-    } else if (pendingAnchor && next.requestPhase === 'idle') {
-      pendingAnchor = null;
     }
+    if (next.requestPhase === 'idle') pendingAnchor = null;
   }
 
   function cancelHistoryRequests() {
@@ -392,16 +396,10 @@
 
   function requestLatest() {
     sourceChangedNotice = '';
-    snapshotSendNotice = '';
     historyController?.returnToLatest();
   }
 
   function reloadHistory() {
-    requestLatest();
-  }
-
-  function returnToLatest() {
-    if (!historyController || (!snapshotActive && !olderBrowsing)) return;
     requestLatest();
   }
 
@@ -422,7 +420,7 @@
   let pendingAnchor: PendingScrollAnchor | null = null;
 
   function demandOlder() {
-    if (!mounted || !historyController || !nextCursor || loadingOlder) return;
+    if (!mounted || !historyController || !nextCursor || historyBusy || error) return;
     pendingAnchor = {
       anchor: topVisibleEntry(),
       top: listElement?.scrollTop || 0,
@@ -570,7 +568,6 @@
   async function sendPrompt() {
     const submittedDraft = composer;
     const text = submittedDraft.replace(/[\r\n]+$/g, '');
-    const viewingHistorical = olderBrowsing;
     if (!text || inputLocked || sendingPrompt || uploadingAttachment) return;
     sendingPrompt = true;
     composer = '';
@@ -579,12 +576,8 @@
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
       relayStore.showToast('Prompt sent.');
       clearUploadStatus();
-      if (viewingHistorical) {
-        snapshotSendNotice = 'Prompt sent. Return to latest to view the new reply.';
-        return;
-      }
       setTimeout(() => {
-        if (!mounted || viewingHistorical) return;
+        if (!mounted) return;
         historyController?.refresh();
       }, 500);
     } catch (failure) {
@@ -728,8 +721,6 @@
   <header class="conversation-toolbar">
     <div>
       <h2 id="conversation-title">Conversation</h2>
-      {#if available && total !== null}<p>{total} recorded {total === 1 ? 'message' : 'messages'}{#if entries.length < total} · {entries.length} loaded{/if}</p>
-      {:else if available && entries.length}<p>{entries.length} loaded messages</p>{/if}
     </div>
     <div class="conversation-toolbar-actions">
       <div class="conversation-mode" role="group" aria-label="Conversation display">
@@ -762,15 +753,6 @@
         <Button variant="secondary" size="sm" onclick={reloadHistory}>Reload history</Button>
       </p>
     {/if}
-    {#if olderBrowsing}
-      <p class="conversation-warning" role="status">
-        {snapshotActive
-          ? 'Viewing a stable snapshot of older history. New messages are not included; return to latest to view replies.'
-          : 'Viewing earlier history. Return to latest to see new replies.'}
-        <Button variant="secondary" size="sm" onclick={returnToLatest}>Return to latest</Button>
-      </p>
-      {#if snapshotSendNotice}<p class="conversation-warning" role="status">{snapshotSendNotice}</p>{/if}
-    {/if}
     {#if hasMore && !sourceChangedNotice && preparationPolls < maxPreparationPolls && browseState !== 'preparing' && typeof IntersectionObserver === 'undefined'}
       <div class="conversation-older">
         <Button variant="secondary" size="sm" disabled={loadingOlder || preparationPolls >= maxPreparationPolls} onclick={loadOlder}>
@@ -793,9 +775,6 @@
         {continuationMessage()}
         <Button variant="secondary" size="sm" onclick={reloadHistory}>Reload history</Button>
       </p>
-    {/if}
-    {#if diagnostics?.source_truncated && !snapshotActive}
-      <p class="conversation-warning" role="status">This log exceeds 16 MB. The newest 16 MB are loaded; older turns remain on this computer and survive relay restarts.</p>
     {/if}
     {#if diagnostics?.oversized_records}
       <p class="conversation-warning" role="status">{diagnostics.oversized_records} oversized {diagnostics.oversized_records === 1 ? 'record was' : 'records were'} skipped from the full history.</p>

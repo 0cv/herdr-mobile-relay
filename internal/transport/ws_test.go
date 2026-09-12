@@ -475,6 +475,104 @@ func TestHubPreparedBatchesKeepCommitAndDeliveryOrderAcrossConcurrentWriters(t *
 	}
 }
 
+func TestHubPreparedBatchOrdersRegistrationAndPublication(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local sockets unavailable: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(hub.HandleWebSocket))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	connected := make(chan *ClientConn, 2)
+	var firstID string
+	hub.SetOnConnect(func(client *ClientConn) {
+		if firstID == "" {
+			firstID = client.ID()
+			connected <- client
+			return
+		}
+		connected <- client
+		hub.Send(client, map[string]any{"type": "handshake", "state": "new"})
+	})
+	dial := func() *websocket.Conn {
+		conn, _, dialErr := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		return conn
+	}
+	first := dial()
+	defer first.CloseNow()
+	<-connected
+	_ = waitForHubClient(t, hub)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	committed := make(chan struct{})
+	batchDone := make(chan error, 1)
+	go func() {
+		batchDone <- hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+			close(entered)
+			<-release
+			return []any{map[string]any{"type": "batch", "state": "old"}}, func() { close(committed) }, nil
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("batch did not acquire registration barrier")
+	}
+	second := dial()
+	defer second.CloseNow()
+	select {
+	case <-connected:
+		t.Fatal("registration overtook the prepared batch")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-committed:
+	case <-time.After(time.Second):
+		t.Fatal("batch did not commit")
+	}
+	if err := <-batchDone; err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, data, err := first.Read(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstMessage map[string]any
+	if err := json.Unmarshal(data, &firstMessage); err != nil || firstMessage["type"] != "batch" {
+		t.Fatalf("first client message = %s", data)
+	}
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("second client did not register after batch commit")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, data, err = second.Read(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondMessage map[string]any
+	if err := json.Unmarshal(data, &secondMessage); err != nil || secondMessage["type"] != "handshake" {
+		t.Fatalf("second client message = %s", data)
+	}
+	first.CloseNow()
+	second.CloseNow()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	if err := hub.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+}
+
 func TestHubPreparedBatchDoesNotCommitOnEncodingFailureAndHandlesEmptyRecipients(t *testing.T) {
 	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer func() {

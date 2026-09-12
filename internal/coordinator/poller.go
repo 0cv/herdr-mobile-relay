@@ -66,6 +66,14 @@ func (p *Poller) SetEnrich(fn func(context.Context, []*AgentState)) {
 	p.enrich = fn
 }
 
+// SetEventReconnectWait overrides the reconnect delay used by RunEvents. The
+// server keeps the production delay; integration fixtures use this hook to
+// exercise a dropped-stream/reconnect schedule without sleeping fifteen
+// seconds.
+func (p *Poller) SetEventReconnectWait(fn func(context.Context) bool) {
+	p.eventReconnectWait = fn
+}
+
 func (p *Poller) Wake() {
 	select {
 	case p.wakeup <- struct{}{}:

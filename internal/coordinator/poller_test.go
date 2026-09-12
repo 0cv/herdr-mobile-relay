@@ -89,6 +89,55 @@ func TestPollerInventoryChangePublishesCurrentState(t *testing.T) {
 	}
 }
 
+func TestPollerEventCommitPublishesRecoveryAfterPausedEnrichment(t *testing.T) {
+	state := testState()
+	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	poller.SetEnrich(func(context.Context, []*AgentState) {
+		close(entered)
+		<-release
+	})
+	var mu sync.Mutex
+	var statuses []string
+	poller.SetOnInventoryChange(func() error {
+		status, _ := state.InventoryStatus()["state"].(string)
+		mu.Lock()
+		statuses = append(statuses, status)
+		mu.Unlock()
+		return nil
+	})
+	topology := herdr.TopologySnapshot{Panes: []herdr.Pane{{ID: "pane-1", Agent: "codex", Status: "idle"}}}
+	eventDone := make(chan struct{})
+	go func() {
+		poller.commitEventTopology(context.Background(), topology, state.RevisionCounter())
+		close(eventDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("event enrichment did not pause")
+	}
+	state.MarkInventoryFailure(fmt.Errorf("event recovery schedule failure"))
+	poller.notifyInventoryChange()
+	close(release)
+	select {
+	case <-eventDone:
+	case <-time.After(time.Second):
+		t.Fatal("paused event commit did not complete")
+	}
+	mu.Lock()
+	got := append([]string(nil), statuses...)
+	mu.Unlock()
+	if fmt.Sprint(got) != "[error ready]" {
+		t.Fatalf("event recovery publications = %v, want [error ready]", got)
+	}
+	if state.InventoryStatus()["state"] != "ready" {
+		t.Fatalf("event recovery state = %#v, want ready", state.InventoryStatus())
+	}
+}
+
 func TestPollerInventoryPublicationSerializesOvertakingChanges(t *testing.T) {
 	state := testState()
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)

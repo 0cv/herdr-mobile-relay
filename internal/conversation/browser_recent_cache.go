@@ -11,22 +11,26 @@ import (
 	"time"
 )
 
-const recentProjectionSchema = 1
+const recentProjectionSchema = 2
 
 var errRecentProjectionChanged = errors.New("conversation source changed during recent projection")
 
 type recentProjectionKey struct {
-	Schema         int
-	Scope          string
-	Provider       string
-	SourcePath     string
-	SourceRoot     string
-	Revision       string
-	RangeStart     int64
-	RangeEnd       int64
-	RangeDigest    string
-	MaxRecordBytes int64
-	OMO            bool
+	Schema            int
+	Scope             string
+	Provider          string
+	SourcePath        string
+	SourceRoot        string
+	SourceIdentity    string
+	SourceModTime     int64
+	SourceChangeToken string
+	SourceSize        int64
+	Revision          string
+	RangeStart        int64
+	RangeEnd          int64
+	RangeDigest       string
+	MaxRecordBytes    int64
+	OMO               bool
 }
 
 func (key recentProjectionKey) string() string {
@@ -196,7 +200,8 @@ func cloneConversationEntry(entry Entry) Entry {
 func (b *Browser) recentProjectionKey(scope BrowseScope, source fileSource, start, end int64, digest string, omo bool) string {
 	return (recentProjectionKey{
 		Schema: recentProjectionSchema, Scope: browseScopeID(scope), Provider: normalizedAgent(scope.Provider),
-		SourcePath: source.path, SourceRoot: source.location.Root, Revision: source.revision,
+		SourcePath: source.path, SourceRoot: source.location.Root, SourceIdentity: fileIdentity(source.info),
+		SourceModTime: source.info.ModTime().UnixNano(), SourceChangeToken: fileChangeToken(source.info), SourceSize: source.info.Size(), Revision: source.revision,
 		RangeStart: start, RangeEnd: end, RangeDigest: digest, MaxRecordBytes: b.options.MaxRecordBytes, OMO: omo,
 	}).string()
 }
@@ -216,12 +221,65 @@ func (b *Browser) projectRecentRange(
 	if cached, ok := b.recentCache.get(key, time.Now()); ok {
 		return cloneRecentProjection(cached), nil
 	}
-	reader, err := NewJSONLRecordReader(ctx, source.file, start, end, b.options.MaxRecordBytes, nil)
+	projection, actualDigest, err := b.projectRecentRangeUncached(ctx, scope, source, start, end, digest, omo)
 	if err != nil {
 		return recentProjection{}, err
 	}
+	if actualDigest != digest {
+		return recentProjection{}, errRecentProjectionChanged
+	}
+	b.recentCache.put(key, projection, time.Now())
+	return cloneRecentProjection(projection), nil
+}
+
+// projectRecentRangeSingleRead is used by Claude chain reads whose request
+// budget counts physical source bytes. It hashes and projects in one JSONL
+// pass; the ordinary path above intentionally retains its cache-first fast
+// path. expectedDigest is optional for the first observation of a range.
+func (b *Browser) projectRecentRangeSingleRead(
+	ctx context.Context,
+	scope BrowseScope,
+	source fileSource,
+	start, end int64,
+	expectedDigest string,
+	omo bool,
+) (recentProjection, string, error) {
+	// An established chain range is already authenticated. Include the current
+	// source metadata in the key so an unchanged range can reuse its projection
+	// without rereading it; a metadata change naturally misses and the uncached
+	// pass below rechecks the expected digest. This is important for the shared
+	// request budget: a cache hit must not turn into a second physical read just
+	// to discover the same digest.
+	if expectedDigest != "" {
+		key := b.recentProjectionKey(scope, source, start, end, expectedDigest, omo)
+		if cached, ok := b.recentCache.get(key, time.Now()); ok {
+			return cloneRecentProjection(cached), expectedDigest, nil
+		}
+	}
+	projection, digest, err := b.projectRecentRangeUncached(ctx, scope, source, start, end, expectedDigest, omo)
+	if err != nil {
+		return recentProjection{}, "", err
+	}
+	key := b.recentProjectionKey(scope, source, start, end, digest, omo)
+	b.recentCache.put(key, projection, time.Now())
+	return cloneRecentProjection(projection), digest, nil
+}
+
+func (b *Browser) projectRecentRangeUncached(
+	ctx context.Context,
+	scope BrowseScope,
+	source fileSource,
+	start, end int64,
+	expectedDigest string,
+	omo bool,
+) (recentProjection, string, error) {
+	reader, err := NewJSONLRecordReader(ctx, source.file, start, end, b.options.MaxRecordBytes, nil)
+	if err != nil {
+		return recentProjection{}, "", err
+	}
 	rangeHash := sha256.New()
 	reader.SetDigestWriter(rangeHash)
+	reader.SetReadObserver(b.observePhysicalRead)
 	b.recentCache.recordProjection()
 	projector := newMemoryProjector(scope.Provider, source.revision)
 	projection := recentProjection{}
@@ -231,7 +289,7 @@ func (b *Browser) projectRecentRange(
 			break
 		}
 		if nextErr != nil {
-			return recentProjection{}, nextErr
+			return recentProjection{}, "", nextErr
 		}
 		if record.Oversized {
 			projection.Diagnostics.OversizedRecords++
@@ -243,8 +301,9 @@ func (b *Browser) projectRecentRange(
 		projection.Diagnostics.OmittedPayloads += result.Diagnostics.OmittedPayloads
 		projection.Diagnostics.PlanCorrupt = projection.Diagnostics.PlanCorrupt || result.Diagnostics.PlanCorrupt
 	}
-	if hex.EncodeToString(rangeHash.Sum(nil)) != digest {
-		return recentProjection{}, errRecentProjectionChanged
+	digest := hex.EncodeToString(rangeHash.Sum(nil))
+	if expectedDigest != "" && digest != expectedDigest {
+		return recentProjection{}, "", errRecentProjectionChanged
 	}
 	projection.Entries = append([]projectedEntry(nil), projector.entries...)
 	if omo && projector.todoSeen && !projector.todoValid {
@@ -256,8 +315,7 @@ func (b *Browser) projectRecentRange(
 		projection.Plan.SessionID = scope.SessionID
 		projection.Plan.Available = true
 	}
-	b.recentCache.put(key, projection, time.Now())
-	return cloneRecentProjection(projection), nil
+	return projection, digest, nil
 }
 
 func recentProjectionBytes(value recentProjection) int64 {

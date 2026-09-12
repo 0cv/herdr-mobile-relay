@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,9 +42,11 @@ type JSONLRecordReader struct {
 	position     int64
 	maxBytes     int64
 	startsInside bool
+	boundaryRead bool
 	progress     func(JSONLRecordProgress)
 	digest       io.Writer
 	checkpoint   func() error
+	readObserver func(int64)
 }
 
 func NewJSONLRecordReader(
@@ -71,26 +74,17 @@ func NewJSONLRecordReader(
 	if end > info.Size() {
 		return nil, errors.New("jsonl record range exceeds source")
 	}
-	startsInside := false
-	if start > 0 {
-		var previous [1]byte
-		if _, err := file.ReadAt(previous[:], start-1); err != nil {
-			return nil, err
-		}
-		startsInside = previous[0] != '\n'
+	r := &JSONLRecordReader{
+		ctx:      ctx,
+		file:     file,
+		start:    start,
+		end:      end,
+		position: start,
+		maxBytes: maxBytes,
+		progress: progress,
 	}
-	section := io.NewSectionReader(file, start, end-start)
-	return &JSONLRecordReader{
-		ctx:          ctx,
-		file:         file,
-		reader:       bufio.NewReaderSize(section, defaultJSONLBufferBytes),
-		start:        start,
-		end:          end,
-		position:     start,
-		maxBytes:     maxBytes,
-		startsInside: startsInside,
-		progress:     progress,
-	}, nil
+	r.reader = bufio.NewReaderSize(&jsonlSourceReader{source: io.NewSectionReader(file, start, end-start), owner: r}, defaultJSONLBufferBytes)
+	return r, nil
 }
 
 func (r *JSONLRecordReader) SetDigestWriter(output io.Writer) {
@@ -99,6 +93,13 @@ func (r *JSONLRecordReader) SetDigestWriter(output io.Writer) {
 
 func (r *JSONLRecordReader) SetCheckpoint(checkpoint func() error) {
 	r.checkpoint = checkpoint
+}
+
+// SetReadObserver measures underlying source reads, including buffered
+// read-ahead and the boundary byte (which is not part of the range digest).
+// Install it before Next. No source bytes are read by the constructor.
+func (r *JSONLRecordReader) SetReadObserver(observer func(int64)) {
+	r.readObserver = observer
 }
 
 func (r *JSONLRecordReader) check() error {
@@ -113,7 +114,40 @@ func (r *JSONLRecordReader) check() error {
 	return nil
 }
 
+type jsonlSourceReader struct {
+	source io.Reader
+	owner  *JSONLRecordReader
+}
+
+func (r *jsonlSourceReader) Read(p []byte) (int, error) {
+	if err := r.owner.check(); err != nil {
+		return 0, err
+	}
+	n, err := r.source.Read(p)
+	if n > 0 && r.owner.readObserver != nil {
+		r.owner.readObserver(int64(n))
+	}
+	return n, err
+}
+
 func (r *JSONLRecordReader) Next() (JSONLRecord, error) {
+	if err := r.check(); err != nil {
+		return JSONLRecord{}, err
+	}
+	if !r.boundaryRead {
+		r.boundaryRead = true
+		if r.start > 0 {
+			var previous [1]byte
+			n, err := r.file.ReadAt(previous[:], r.start-1)
+			if n > 0 && r.readObserver != nil {
+				r.readObserver(int64(n))
+			}
+			if err != nil {
+				return JSONLRecord{}, err
+			}
+			r.startsInside = previous[0] != '\n'
+		}
+	}
 	for {
 		if err := r.check(); err != nil {
 			return JSONLRecord{}, err
@@ -215,6 +249,94 @@ func (r *JSONLRecordReader) reportProgress() {
 		ScannedBytes: r.position - r.start,
 		SourceBytes:  r.end - r.start,
 	})
+}
+
+// collectJSONLRecordsBytes parses a single already-read range. Claude footer
+// discovery uses this form so hashing, boundary checks, and marker parsing do
+// not reread the same 64 KiB from disk three times.
+func collectJSONLRecordsBytes(ctx context.Context, data []byte, start int64, startsInside bool, maxBytes int64) ([]JSONLRecord, int, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if start < 0 || maxBytes < 1 {
+		return nil, 0, errors.New("invalid jsonl record range")
+	}
+	reader := bufio.NewReaderSize(bytes.NewReader(data), defaultJSONLBufferBytes)
+	end := start + int64(len(data))
+	position := start
+	records := make([]JSONLRecord, 0)
+	overSized := 0
+	first := true
+	for position < end {
+		if err := ctx.Err(); err != nil {
+			return nil, overSized, err
+		}
+		record := JSONLRecord{Start: position}
+		var raw []byte
+		var rawBytes int64
+		over := false
+		hadNewline := false
+		for {
+			if err := ctx.Err(); err != nil {
+				return nil, overSized, err
+			}
+			fragment, err := reader.ReadSlice('\n')
+			if len(fragment) > 0 {
+				position += int64(len(fragment))
+				content := fragment
+				if content[len(content)-1] == '\n' {
+					hadNewline = true
+					content = content[:len(content)-1]
+					if len(content) > 0 && content[len(content)-1] == '\r' {
+						content = content[:len(content)-1]
+					}
+				}
+				if !over {
+					if rawBytes+int64(len(content)) > maxBytes {
+						over = true
+						raw = nil
+					} else {
+						raw = append(raw, content...)
+						rawBytes += int64(len(content))
+					}
+				}
+			}
+			switch {
+			case err == nil:
+				break
+			case errors.Is(err, bufio.ErrBufferFull):
+				continue
+			case errors.Is(err, io.EOF):
+				break
+			default:
+				return nil, overSized, err
+			}
+			break
+		}
+		record.End = position
+		if startsInside && first {
+			first = false
+			continue
+		}
+		first = false
+		if over {
+			overSized++
+			continue
+		}
+		if strings.TrimSpace(string(raw)) == "" {
+			continue
+		}
+		record.Raw = raw
+		record.Oversized = false
+		record.Trailing = !hadNewline
+		record.Complete = hadNewline || json.Valid(raw)
+		if !record.Complete {
+			record.Trailing = true
+		}
+		record.StartsInside = startsInside && record.Start == start
+		records = append(records, record)
+	}
+	return records, overSized, nil
 }
 
 func collectJSONLRecords(

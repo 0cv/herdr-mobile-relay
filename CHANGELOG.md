@@ -5,6 +5,8 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-12
+
 ### Added
 
 - Browse older file-backed conversations through bounded local snapshots with
@@ -14,10 +16,6 @@ project follows [Semantic Versioning](https://semver.org/).
 - Load conversation exchanges automatically across wire-page boundaries, keep a
   bounded memory-only preview for warm reopens, and reuse verified recent-range
   projections on the relay without persisting transcript data in the browser.
-
-## [0.21.0] - 2026-09-08
-
-### Added
 
 - Report the installed Herdr client separately from the running server version,
   protocol, endpoint generation, and per-feature compatibility evidence.
@@ -40,6 +38,17 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Follow Claude session continuations from stale session anchors, including the
+  first continuation, older pages, and later appends, without losing messages or
+  retaining warnings after a missing continuation becomes available.
+- Preserve authenticated history snapshots during concurrent appends,
+  preparation, validation, and evidence compaction, with bounded request reads
+  and retained metadata.
+- Clear recovered inventory warnings and publish coherent agent, workspace, and
+  status updates across refreshes and reconnects.
+- Keep conversation scrolling pinned to new replies when WebKit reports a layout
+  scroll before its resize notification, without interrupting readers scrolling
+  upward through history.
 - Bind delayed workspace-close errors to their originating relay and action so
   a response cannot open or mutate a group on a different computer.
 - Stop showing unchecked optional Herdr features as compatibility failures in

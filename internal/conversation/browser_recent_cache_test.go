@@ -160,11 +160,20 @@ func TestBrowserRecentProjectionCacheReusesVerifiedRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeRewrite, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rewritten := strings.Replace(string(original), "answer", "rewrit", 1)
 	if len(rewritten) != len(string(original)) {
 		t.Fatal("test rewrite changed the source size")
 	}
 	if err := os.WriteFile(path, []byte(rewritten), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A caller may restore the modification time after an in-place rewrite.
+	// The mutation token in the cache key must still force a fresh projection.
+	if err := os.Chtimes(path, beforeRewrite.ModTime(), beforeRewrite.ModTime()); err != nil {
 		t.Fatal(err)
 	}
 	changed, err := browser.ReadPage(context.Background(), BrowseRequest{Scope: scope, Limit: 10})

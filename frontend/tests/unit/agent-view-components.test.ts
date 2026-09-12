@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ConversationHistory from '$components/ConversationHistory.svelte';
@@ -161,6 +161,8 @@ describe('agent view controls and conversation loading hook', () => {
       await waitFor(() => expect(screen.getByText('latest answer')).toBeVisible());
       expect(screen.getByText('latest question')).toBeVisible();
       expect(screen.queryByText('older fragment')).not.toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Conversation' })).toBeVisible();
+      expect(screen.queryByText(/\d+ (recorded|loaded) messages/)).not.toBeInTheDocument();
     } finally {
       view.unmount();
       history.mockRestore();
@@ -189,7 +191,7 @@ describe('agent view controls and conversation loading hook', () => {
     view.unmount();
   });
 
-  it('keeps a stable snapshot visible after sending and returns explicitly to latest', async () => {
+  it('loads older messages by scrolling and keeps receiving replies without a latest button', async () => {
     const user = userEvent.setup();
     const current = agent();
     const history = vi.spyOn(relayStore, 'getConversationHistory')
@@ -202,8 +204,11 @@ describe('agent view controls and conversation loading hook', () => {
         hasMore: false, total: 2, state: 'ready', mode: 'snapshot', snapshotId: 'snapshot-1', sourceRevision: 'source-1',
       }))
       .mockResolvedValueOnce(page({
-        entries: [{ id: 'turn-2', timestamp: '2026-01-01T00:01:00Z', role: 'assistant', text: 'new latest answer' }],
-        hasMore: false, total: 3, state: 'ready', mode: 'recent', sourceRevision: 'source-2',
+        entries: [
+          { id: 'turn-1', timestamp: '2026-01-01', role: 'user', text: 'question' },
+          { id: 'turn-2', timestamp: '2026-01-01T00:01:00Z', role: 'assistant', text: 'new latest answer' },
+        ],
+        hasMore: false, total: 3, state: 'ready', mode: 'recent', sourceRevision: 'source-1',
       }));
     const send = vi.spyOn(relayStore, 'sendToAgent').mockResolvedValue({
       type: 'command_result', request_id: 'prompt-1', ok: true,
@@ -211,15 +216,23 @@ describe('agent view controls and conversation loading hook', () => {
     try {
       render(ConversationHistory, { agent: current });
       await waitFor(() => expect(screen.getByRole('button', { name: 'Load older turns' })).toBeVisible());
-      await user.click(screen.getByRole('button', { name: 'Load older turns' }));
-      await waitFor(() => expect(screen.getByText('Viewing a stable snapshot of older history. New messages are not included; return to latest to view replies.')).toBeVisible());
+      const list = screen.getByRole('region', { name: 'Conversation with fedora project' });
+      Object.defineProperties(list, {
+        scrollHeight: { configurable: true, value: 2000 },
+        clientHeight: { configurable: true, value: 500 },
+      });
+      await waitFor(async () => {
+        list.scrollTop = 100;
+        await fireEvent.scroll(list);
+        expect(screen.getByText('older answer')).toBeVisible();
+      });
+      expect(screen.queryByRole('button', { name: 'Return to latest' })).not.toBeInTheDocument();
       await user.type(screen.getByRole('textbox', { name: 'Prompt' }), 'send while browsing');
       await user.click(screen.getByRole('button', { name: 'Send prompt' }));
-      await waitFor(() => expect(screen.getByText('Prompt sent. Return to latest to view the new reply.')).toBeVisible());
-      expect(screen.getByText('older answer')).toBeInTheDocument();
-      await user.click(screen.getByRole('button', { name: 'Return to latest' }));
       await waitFor(() => expect(screen.getByText('new latest answer')).toBeInTheDocument());
-      expect(screen.queryByText('Viewing a stable snapshot of older history. New messages are not included; return to latest to view replies.')).not.toBeInTheDocument();
+      expect(screen.getByText('older answer')).toBeInTheDocument();
+      expect(list.scrollTop).toBe(100);
+      expect(screen.queryByRole('button', { name: 'Return to latest' })).not.toBeInTheDocument();
       expect(send).toHaveBeenCalledWith(current, { type: 'submit_prompt', text: 'send while browsing' });
       expect(history).toHaveBeenCalledTimes(3);
     } finally {

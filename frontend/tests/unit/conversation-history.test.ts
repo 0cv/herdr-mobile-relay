@@ -318,6 +318,59 @@ describe('ConversationHistoryController', () => {
     expect(states.length).toBeGreaterThan(1);
   });
 
+  it('clears a recovered continuation warning on a cursorless latest refresh', async () => {
+    let calls = 0;
+    const request = vi.fn(async () => {
+      calls++;
+      if (calls === 1) return page({
+        entries: [entry('latest', 'assistant', 'latest answer')],
+        sourceRevision: 'revision-1',
+        diagnostics: { oversized_records: 0, corrupt_records: 0, source_truncated: false, continuation_incomplete: true, continuation_reason: 'missing_source' },
+      });
+      return page({
+        entries: [entry('latest', 'assistant', 'latest answer'), entry('child', 'assistant', 'child answer')],
+        sourceRevision: 'revision-1',
+        diagnostics: { oversized_records: 0, corrupt_records: 0, source_truncated: false },
+      });
+    });
+    const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {} });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.diagnostics?.continuation_incomplete).toBe(true));
+    controller.refresh();
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toContain('child'));
+    expect(controller.state.diagnostics?.continuation_incomplete).not.toBe(true);
+    expect(controller.state.diagnostics?.continuation_reason).toBeUndefined();
+  });
+
+  it('clears a live continuation warning without discarding the older cursor lane', async () => {
+    let calls = 0;
+    const request = vi.fn(async (_target: Agent, input: { cursor?: string }) => {
+      calls++;
+      if (calls === 1) return page({
+        entries: [entry('u1', 'user', 'question'), entry('a1', 'assistant', 'latest answer')],
+        sourceRevision: 'revision-1',
+        nextCursor: 'older-cursor',
+        hasMore: true,
+        diagnostics: { oversized_records: 0, corrupt_records: 0, source_truncated: false, continuation_incomplete: true, continuation_reason: 'missing_source' },
+      });
+      expect(input.cursor).toBeUndefined();
+      return page({
+        entries: [entry('u1', 'user', 'question'), entry('a1', 'assistant', 'latest answer'), entry('c1', 'assistant', 'recovered child')],
+        sourceRevision: 'revision-1',
+        diagnostics: { oversized_records: 0, corrupt_records: 0, source_truncated: false },
+      });
+    });
+    const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {} });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.diagnostics?.continuation_incomplete).toBe(true));
+    controller.refresh();
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toContain('c1'));
+    expect(controller.state.diagnostics?.continuation_incomplete).not.toBe(true);
+    expect(controller.state.diagnostics?.continuation_reason).toBeUndefined();
+    expect(controller.state.nextCursor).toBe('older-cursor');
+    expect(controller.state.hasMore).toBe(true);
+  });
+
   it('rejects a changed fresh source even when native IDs overlap', async () => {
     const requests: { cursor?: string }[] = [];
     const request = vi.fn(async (_target: Agent, input: { cursor?: string }) => {
@@ -386,6 +439,38 @@ describe('ConversationHistoryController', () => {
     expect(controller.state.latestGapOutstanding).toBe(false);
   });
 
+  it('bridges new replies after scrolling all the way to the beginning', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(page({
+        entries: [entry('question', 'user', 'question')],
+        sourceRevision: 'r1', nextCursor: 'older', hasMore: true,
+      }))
+      .mockResolvedValueOnce(page({
+        entries: [entry('first', 'user', 'first question')],
+        sourceRevision: 'r1', mode: 'snapshot', snapshotId: 'snapshot-1',
+      }))
+      .mockResolvedValueOnce(page({
+        entries: [entry('new', 'assistant', 'new answer')],
+        sourceRevision: 'r1', mode: 'recent', nextCursor: 'bridge', hasMore: true,
+      }))
+      .mockResolvedValueOnce(page({
+        entries: [entry('question', 'user', 'question'), entry('between', 'assistant', 'intermediate answer')],
+        sourceRevision: 'r1', mode: 'recent',
+      }));
+    const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {} });
+    controller.start();
+    await vi.waitFor(() => expect(controller.state.authoritative).toBe(true));
+    controller.demandOlder();
+    await vi.waitFor(() => expect(controller.state.beginningReached).toBe(true));
+    controller.refresh();
+    await vi.waitFor(() => expect(controller.state.entries.map(({ id }) => id)).toEqual(['first', 'question', 'between', 'new']));
+    expect(request.mock.calls.map(([, input]) => input.cursor)).toEqual([undefined, 'older', undefined, 'bridge']);
+    expect(controller.state.beginningReached).toBe(true);
+    expect(controller.state.nextCursor).toBe('');
+    expect(controller.state.latestGapOutstanding).toBe(false);
+    controller.cancel();
+  });
+
   it('keeps an older snapshot cursor across a compatible live refresh', async () => {
     const cursors: (string | undefined)[] = [];
     const snapshotPlan = { available: true, phases: [{ name: 'snapshot', tasks: [] }], truncated: false };
@@ -400,7 +485,7 @@ describe('ConversationHistoryController', () => {
         mode: 'recent',
       });
       if (cursors.length === 2) return page({
-        entries: [entry('older-user', 'user', 'older question'), entry('older-answer', 'assistant', 'older answer')],
+        entries: Array.from({ length: 12 }, (_, index) => entry(`older-${index}`, 'user', `older question ${index}`)),
         nextCursor: 'snapshot-cursor',
         hasMore: true,
         sourceRevision: 'revision-1',
@@ -426,8 +511,9 @@ describe('ConversationHistoryController', () => {
     const controller = new ConversationHistoryController(agent(), { request, yieldToBrowser: async () => {} });
     controller.start();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
-    controller.ensureMore();
+    controller.demandOlder();
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(controller.state.intent).toBe('historical');
     expect(controller.state.nextCursor).toBe('snapshot-cursor');
     expect(controller.state.snapshotId).toBe('snapshot-1');
 

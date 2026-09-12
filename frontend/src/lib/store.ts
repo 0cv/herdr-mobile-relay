@@ -327,7 +327,7 @@ function browseBoolean(value: unknown, optional = false): boolean {
   return value;
 }
 
-function normalizeConversationPage(value: unknown): ConversationPage {
+export function normalizeConversationPage(value: unknown): ConversationPage {
   const data = browseRecord(value, true)!;
   if (typeof data.available !== 'boolean' || typeof data.has_more !== 'boolean' || !Array.isArray(data.entries) || data.entries.length > 200) invalidBrowse();
   const entries = data.entries.flatMap((candidate: unknown) => {

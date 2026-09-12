@@ -36,6 +36,12 @@ const (
 // claudeSegment is a fixed descriptor, not an open file. CapturedEnd and the
 // footer evidence freeze a browsing context while allowing each read to reopen
 // the source with the normal containment and no-follow checks.
+type claudeRangeEvidence struct {
+	Start  int64
+	End    int64
+	Digest string
+}
+
 type claudeSegment struct {
 	SessionID    string
 	Location     Location
@@ -44,19 +50,41 @@ type claudeSegment struct {
 	// SourceModTime detects equal-length in-place rewrites without changing the
 	// normal snapshot revision semantics, which intentionally allow appends.
 	SourceModTime int64
+	// SourceChangeToken detects same-size rewrites even when a caller restores
+	// the modification time. It is derived from the filesystem change time when
+	// available and is never exposed on the wire.
+	SourceChangeToken string
 	// FileIdentity catches aliases which have different safe paths but refer to
 	// the same inode. It is private descriptor data and never crosses the wire.
 	FileIdentity string
 	// RecentDigest is populated by a browser context once it has read the
 	// selected frozen range. The resolver deliberately does not hash whole
 	// transcripts while discovering a chain.
-	RecentStart    int64
-	RecentEnd      int64
-	RecentDigest   string
-	CapturedDigest string
-	FooterStart    int64
-	FooterEnd      int64
-	FooterDigest   string
+	RecentStart  int64
+	RecentEnd    int64
+	RecentDigest string
+	// ObservedRanges retains selected ranges authenticated by a browsing
+	// context. RecentStart/RecentEnd remain the current context's projection
+	// range; this immutable ledger is what lineage validation uses when a file
+	// grows and a later resolver descriptor has no range metadata of its own.
+	ObservedRanges []claudeRangeEvidence
+	// When overlapping append ranges would exceed the retained-evidence bound,
+	// the ranges are replaced by a background-authenticated enclosing digest.
+	// A pending compaction is an obligation, not permission to admit a new
+	// lineage descriptor.
+	EvidenceCompactionPending bool
+	EvidenceCompactionStart   int64
+	EvidenceCompactionEnd     int64
+	EvidenceCompactionError   string
+	// EvidenceCompactionRanges is retained only while the enclosing digest is
+	// being authenticated. The worker checks these old digests before replacing
+	// them, so compaction cannot silently bless a rewrite that happened before
+	// the background pass began.
+	EvidenceCompactionRanges []claudeRangeEvidence
+	CapturedDigest           string
+	FooterStart              int64
+	FooterEnd                int64
+	FooterDigest             string
 }
 
 type claudeChain struct {
@@ -82,6 +110,29 @@ func isClaudeProvider(agent string) bool {
 // for descendants: root/project selection belongs to the anchor, and a new
 // global search could cross profiles or projects with duplicate session IDs.
 func resolveClaudeChain(ctx context.Context, anchor Location, anchorSessionID string) (claudeChain, error) {
+	return resolveClaudeChainWithObserver(ctx, anchor, anchorSessionID, nil)
+}
+
+func resolveClaudeChainWithObserver(ctx context.Context, anchor Location, anchorSessionID string, observe func(int64)) (claudeChain, error) {
+	var readObserver func(int64) error
+	if observe != nil {
+		readObserver = func(bytes int64) error {
+			observe(bytes)
+			return nil
+		}
+	}
+	return resolveClaudeChainWithReadObserver(ctx, anchor, anchorSessionID, readObserver)
+}
+
+func resolveClaudeChainWithReadObserver(ctx context.Context, anchor Location, anchorSessionID string, observe func(int64) error) (claudeChain, error) {
+	return resolveClaudeChainWithReadHooks(ctx, anchor, anchorSessionID, nil, observe)
+}
+
+// resolveClaudeChainWithReadHooks separates reservation from observation. A
+// foreground caller must reserve each bounded read before issuing it; an
+// observer alone would discover an over-budget ReadAt only after the kernel had
+// already returned the bytes.
+func resolveClaudeChainWithReadHooks(ctx context.Context, anchor Location, anchorSessionID string, reserve, observe func(int64) error) (claudeChain, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -102,21 +153,29 @@ func resolveClaudeChain(ctx context.Context, anchor Location, anchorSessionID st
 		if err := ctx.Err(); err != nil {
 			return chain, err
 		}
-		source, err := captureFileSource(location)
+		source, err := captureFileSourceWithHooks(location, reserve, observe)
 		if err != nil {
+			if errors.Is(err, errClaudeChainDiscoveryBudget) {
+				chain.IncompleteReason = continuationReasonLimit
+				return chain, nil
+			}
 			if len(chain.Segments) == 0 {
 				return chain, err
 			}
 			chain.IncompleteReason = continuationReasonMissingSource
 			return chain, nil
 		}
-		segment, childID, inspectReason, inspectErr := inspectClaudeSegmentFooter(ctx, source, sessionID)
+		segment, childID, inspectReason, inspectErr := inspectClaudeSegmentFooter(ctx, source, sessionID, reserve, observe)
 		identity := fileIdentity(source.info)
 		if identity == "" {
 			identity = filepath.Clean(segment.Location.Path)
 		}
 		source.close()
 		if inspectErr != nil {
+			if errors.Is(inspectErr, errClaudeChainDiscoveryBudget) {
+				chain.IncompleteReason = continuationReasonLimit
+				return chain, nil
+			}
 			if len(chain.Segments) == 0 {
 				return chain, inspectErr
 			}
@@ -169,7 +228,7 @@ func resolveClaudeChain(ctx context.Context, anchor Location, anchorSessionID st
 	return chain, nil
 }
 
-func inspectClaudeSegmentFooter(ctx context.Context, source fileSource, sessionID string) (claudeSegment, string, string, error) {
+func inspectClaudeSegmentFooter(ctx context.Context, source fileSource, sessionID string, reserve, observe func(int64) error) (claudeSegment, string, string, error) {
 	if source.file == nil || !safeSessionID(sessionID) {
 		return claudeSegment{}, "", continuationReasonMissingSource, errors.New("Claude chain source is unavailable")
 	}
@@ -178,21 +237,44 @@ func inspectClaudeSegmentFooter(ctx context.Context, source fileSource, sessionI
 	if start < 0 {
 		start = 0
 	}
-	digest, err := fileRangeDigest(ctx, source.file, start, end)
+	footer, err := readFileRangeObservedWithReserve(ctx, source.file, start, end, reserve, observe)
 	if err != nil {
 		return claudeSegment{}, "", continuationReasonMissingSource, err
 	}
+	digest := sha256.Sum256(footer)
 	segment := claudeSegment{
 		SessionID: sessionID, Location: source.location, CapturedEnd: end,
 		FileRevision: source.revision, SourceModTime: source.info.ModTime().UnixNano(),
-		FooterStart: start, FooterEnd: end, FooterDigest: digest,
+		SourceChangeToken: fileChangeToken(source.info),
+		FooterStart:       start, FooterEnd: end, FooterDigest: hex.EncodeToString(digest[:]),
 	}
-	if uninspectable, boundaryErr := claudeFooterBoundaryUninspectable(source.file, start, end, claudeContinuationFooterBytes); boundaryErr != nil {
-		return segment, "", continuationReasonMissingSource, boundaryErr
-	} else if uninspectable {
-		return segment, "", continuationReasonLimit, nil
+	startsInside := false
+	if start > 0 {
+		var previous [1]byte
+		if reserve != nil {
+			if reserveErr := reserve(1); reserveErr != nil {
+				return segment, "", continuationReasonLimit, reserveErr
+			}
+		}
+		read, readErr := source.file.ReadAt(previous[:], start-1)
+		if read > 0 {
+			if observe != nil {
+				if observeErr := observe(int64(read)); observeErr != nil {
+					return segment, "", continuationReasonMissingSource, observeErr
+				}
+			}
+			startsInside = previous[0] != '\n'
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return segment, "", continuationReasonMissingSource, readErr
+		}
 	}
-	records, oversized, err := collectJSONLRecords(ctx, source.file, start, end, claudeContinuationRecordBytes, nil)
+	if startsInside {
+		if uninspectable := claudeFooterBoundaryUninspectableBytes(footer, claudeContinuationFooterBytes); uninspectable {
+			return segment, "", continuationReasonLimit, nil
+		}
+	}
+	records, oversized, err := collectJSONLRecordsBytes(ctx, footer, start, startsInside, claudeContinuationRecordBytes)
 	if err != nil {
 		return segment, "", continuationReasonMissingSource, err
 	}
@@ -253,6 +335,59 @@ func inspectClaudeSegmentFooter(ctx context.Context, source fileSource, sessionI
 	return segment, "", "", nil
 }
 
+func readFileRangeObserved(ctx context.Context, file *os.File, start, end int64, observe func(int64) error) ([]byte, error) {
+	return readFileRangeObservedWithReserve(ctx, file, start, end, nil, observe)
+}
+
+func readFileRangeObservedWithReserve(ctx context.Context, file *os.File, start, end int64, reserve, observe func(int64) error) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if file == nil || start < 0 || end < start {
+		return nil, errors.New("invalid file range")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	length := end - start
+	if length == 0 {
+		return []byte{}, nil
+	}
+	if reserve != nil {
+		if err := reserve(length); err != nil {
+			return nil, err
+		}
+	}
+	data := make([]byte, length)
+	read, err := file.ReadAt(data, start)
+	if read > 0 && observe != nil {
+		if observeErr := observe(int64(read)); observeErr != nil {
+			return nil, observeErr
+		}
+	}
+	if err != nil {
+		if !errors.Is(err, io.EOF) || int64(read) != length {
+			return nil, err
+		}
+	}
+	if int64(read) != length {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data, nil
+}
+
+func claudeFooterBoundaryUninspectableBytes(footer []byte, maxRecordBytes int64) bool {
+	newline := bytes.IndexByte(footer, '\n')
+	if newline < 0 {
+		return true
+	}
+	lineBytes := int64(newline) + 1
+	if newline+1 >= len(footer) {
+		return true
+	}
+	return lineBytes > maxRecordBytes
+}
+
 // readCapturedSegment reads at most limit bytes ending at a descriptor's
 // captured boundary. It is used by the legacy reader and deliberately verifies
 // the descriptor before reading, so an old chain never grows into a new leaf.
@@ -311,7 +446,8 @@ func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64
 		return "", false, err
 	}
 	defer source.close()
-	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd {
+	if source.revision != segment.FileRevision || source.end < segment.CapturedEnd ||
+		source.end == segment.CapturedEnd && segment.SourceChangeToken != "" && fileChangeToken(source.info) != segment.SourceChangeToken {
 		return "", false, errors.New("Claude chain source changed")
 	}
 	end := segment.CapturedEnd
@@ -327,8 +463,12 @@ func readCapturedSegment(ctx context.Context, segment claudeSegment, limit int64
 		start = end - limit
 	}
 	data := make([]byte, end-start)
-	if _, err := source.file.ReadAt(data, start); err != nil && !errors.Is(err, io.EOF) {
+	read, err := source.file.ReadAt(data, start)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return "", false, err
+	}
+	if int64(read) != end-start {
+		return "", false, io.ErrUnexpectedEOF
 	}
 	if clipped {
 		if newline := bytes.IndexByte(data, '\n'); newline >= 0 {

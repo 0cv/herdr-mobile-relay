@@ -287,11 +287,10 @@ export class ConversationHistoryController {
 
   refresh(): void {
     if (!this.started || this.paused || !this.options.isActive() || this.stateValue.error) return;
-    if (this.stateValue.intent === 'historical') return;
     this.enqueue('refresh');
   }
 
-  /** Begin a user-driven older-history demand and freeze live refresh. */
+  /** Load an older range while retaining the independently refreshed live head. */
   demandOlder(): void {
     if (!this.started || this.paused || !this.options.isActive() || this.stateValue.error) return;
     if (this.demandRunning) {
@@ -357,7 +356,6 @@ export class ConversationHistoryController {
       available: true,
       sourceRevision: oldState.sourceRevision,
       mode: oldState.mode,
-      diagnostics: oldState.diagnostics ? { ...oldState.diagnostics } : undefined,
       omoPlan: oldState.omoPlan ? clonePlan(oldState.omoPlan) : null,
       requestPhase: this.rawEntries.length > 0 ? 'refresh' : 'initial',
     };
@@ -387,8 +385,7 @@ export class ConversationHistoryController {
     this.emit();
     if (this.cursor && this.stateValue.state === 'preparing') {
       this.enqueue(this.stateValue.intent === 'historical' ? 'older' : 'full');
-    } else if (this.stateValue.intent === 'historical' && this.cursor) this.enqueue('older');
-    else this.enqueue(this.rawEntries.length ? 'refresh' : 'initial');
+    } else this.enqueue(this.rawEntries.length ? 'refresh' : 'initial');
   }
 
   pausePreparation(): void {
@@ -552,15 +549,16 @@ export class ConversationHistoryController {
           this.pauseWithError('History loading stalled without finding more messages. Continue to retry.', true, 'stalled');
           return;
         }
-        if (!this.cursor || !this.stateValue.hasMore) {
+        const continuationCursor = demand === 'refresh' ? this.headCursor : this.cursor;
+        if (!continuationCursor || (demand !== 'refresh' && !this.stateValue.hasMore)) {
           this.finishDemand();
           return;
         }
-        if (this.seenReadyCursors.has(this.cursor)) {
+        if (this.seenReadyCursors.has(continuationCursor)) {
           this.pauseWithError('History loading stalled on a repeated cursor.', false, 'stalled');
           return;
         }
-        this.seenReadyCursors.add(this.cursor);
+        this.seenReadyCursors.add(continuationCursor);
         if (this.rawProgressDidNotAdvance()) {
           this.noRawProgressPages++;
           if (this.noRawProgressPages >= this.maxNoRawProgressPages) {
@@ -616,7 +614,7 @@ export class ConversationHistoryController {
     };
   }
 
-  private restoreOlderContinuation(value: OlderContinuation, restoreNetworkSnapshot = true, restorePlan = true): void {
+  private restoreOlderContinuation(value: OlderContinuation, restoreNetworkSnapshot = true, restorePlan = true, restoreDiagnostics = true): void {
     this.cursor = value.cursor;
     this.stateValue.nextCursor = value.nextCursor;
     this.stateValue.hasMore = value.hasMore;
@@ -624,7 +622,7 @@ export class ConversationHistoryController {
     this.stateValue.beginningReached = value.beginningReached;
     this.stateValue.mode = value.mode;
     if (restorePlan) this.stateValue.omoPlan = value.omoPlan ? clonePlan(value.omoPlan) : null;
-    this.stateValue.diagnostics = value.diagnostics ? cloneDiagnostics(value.diagnostics) : undefined;
+    if (restoreDiagnostics) this.stateValue.diagnostics = value.diagnostics ? cloneDiagnostics(value.diagnostics) : undefined;
     if (restoreNetworkSnapshot) this.networkSnapshotId = value.snapshotId;
   }
 
@@ -678,10 +676,11 @@ export class ConversationHistoryController {
     if (page.snapshotId && !preserveOlderContinuation) this.stateValue.snapshotId = page.snapshotId;
     if (isFreshHead && page.mode && page.mode !== 'snapshot' && !preserveOlderContinuation) this.stateValue.snapshotId = '';
     this.stateValue.state = pageState;
+    // A cursorless latest response is authoritative for the live head. Keep
+    // the older cursor lane separately, but do not carry its continuation
+    // warning into a successful refresh that has rediscovered the child.
     this.stateValue.diagnostics = isFreshHead
-      ? preserveOlderContinuation
-        ? mergeDiagnostics(this.stateValue.diagnostics, page.diagnostics)
-        : cloneDiagnostics(page.diagnostics)
+      ? cloneDiagnostics(page.diagnostics)
       : mergeDiagnostics(this.stateValue.diagnostics, page.diagnostics);
     if (page.omoPlan && !bridgeWasActive) this.stateValue.omoPlan = clonePlan(page.omoPlan);
 
@@ -784,7 +783,7 @@ export class ConversationHistoryController {
     if (pageState === 'preparing') {
       // Preparation pages are status, not content. An empty preparation page
       // must not erase a warm preview or replace the fresh lane with nothing.
-      if (olderContinuationBefore) this.restoreOlderContinuation(olderContinuationBefore, false);
+      if (olderContinuationBefore) this.restoreOlderContinuation(olderContinuationBefore, false, true, false);
       else {
         this.cursor = page.nextCursor || requestedCursor || this.cursor;
         this.stateValue.nextCursor = this.cursor;
@@ -874,7 +873,7 @@ export class ConversationHistoryController {
     if (preservedOlderLane && !replacedWindow) {
       // A fresh head may use a different cursor chain. Keep the accepted older
       // boundary visible and usable while that head is merged or bridged.
-      this.restoreOlderContinuation(preservedOlderLane, !this.bridgeActive, false);
+      this.restoreOlderContinuation(preservedOlderLane, !this.bridgeActive, false, false);
       if (!this.bridgeActive) this.bridgeRestore = null;
     } else {
       this.cursor = page.nextCursor || '';
