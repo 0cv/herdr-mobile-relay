@@ -137,6 +137,8 @@ type Server struct {
 	refreshClients map[string]bool
 	// Optional deterministic publication observer; installed before serving.
 	inventoryPublicationObserver func(string)
+	// Optional test hook between history loading and tuple revalidation.
+	conversationHistoryReadObserver func()
 
 	paneWatchMu sync.Mutex
 	paneWatches map[string]*paneWatch
@@ -494,7 +496,19 @@ func (s *Server) pushTargetCurrent(target protocol.TargetRef) bool {
 		agent.Generation == target.Generation
 }
 
+func projectContextForAgent(agent *coordinator.AgentState) conversation.ProjectContext {
+	if agent == nil {
+		return conversation.ProjectContext{}
+	}
+	return conversation.NormalizeProjectContext(agent.Agent, conversation.ProjectContext{
+		CWD: agent.Cwd, ForegroundCWD: agent.ForegroundCwd,
+	})
+}
+
 func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
+	if agent == nil {
+		return
+	}
 	agent.SessionName = ""
 	// Every other consumer of a pane's reported session (Reader.Read,
 	// latestConversationResponse, the activity backfill path) TrimSpaces it
@@ -515,7 +529,7 @@ func (s *Server) resolveAgentSessionName(agent *coordinator.AgentState) {
 	if sessionID == "" {
 		return
 	}
-	title := s.sessions.SessionName(agent.Agent, agent.Cwd, sessionID)
+	title := s.sessions.SessionNameWithProject(agent.Agent, projectContextForAgent(agent), sessionID)
 	if title == "" {
 		return
 	}
@@ -967,11 +981,12 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			generation := s.state.Generation(paneID)
 			agent, cwd := activeAgent.Agent, activeAgent.Cwd
+			project := projectContextForAgent(activeAgent)
 			home, _ := os.UserHomeDir()
 			profileID := s.profiles.ResolvePane(paneID, agent)
 			skillDirs, commandFormat, suppressNative := s.profiles.CommandDiscovery(profileID)
 			agentVersion := s.profiles.AgentVersion(profileID)
-			location := s.conversationM.Locate(agent, cwd, activeAgent.SessionID)
+			location := s.conversationM.LocateWithProject(agent, project, activeAgent.SessionID)
 			agentDir := locatedAgentDir(home, agent, location)
 			catalog := slashcmd.CatalogForProfileWithSuppression(
 				profileID, agent, cwd, home, skillDirs, commandFormat, agentVersion, agentDir, suppressNative,
@@ -1585,6 +1600,7 @@ func (s *Server) handleTransition(
 	var sessionID string
 	conversationAgent := agent
 	var conversationCwd string
+	conversationProject := conversation.ProjectContext{}
 	var blockedEventID string
 	var paneGeneration uint64
 	var blockedContentRevision int64
@@ -1595,6 +1611,7 @@ func (s *Server) handleTransition(
 		sessionID = agentState.SessionID
 		conversationAgent = agentState.Agent
 		conversationCwd = agentState.Cwd
+		conversationProject = projectContextForAgent(agentState)
 		blockedEventID = agentState.BlockedEventID
 		blockedContentRevision = s.state.ContentRevision(paneID)
 	}
@@ -1739,7 +1756,7 @@ func (s *Server) handleTransition(
 		return
 	}
 	eventID := fmt.Sprintf("finished-%d-%s", time.Now().UnixNano(), paneID)
-	extract := s.captureFinishedPane(ctx, paneID, conversationAgent, conversationCwd, sessionID)
+	extract := s.captureFinishedPane(ctx, paneID, conversationAgent, conversationCwd, sessionID, conversationProject)
 	currentAgent, currentExists := s.state.Agent(paneID)
 	if !transitionCurrent() || agentExists != currentExists ||
 		(agentExists && !sameConversationTuple(agentState, currentAgent)) {
@@ -2118,7 +2135,7 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 	}
 	page, historyErr := browser.ReadPage(client.Context(), conversation.BrowseRequest{
 		Scope: conversation.BrowseScope{
-			Provider: agent.Agent, CWD: agent.Cwd, SessionID: agent.SessionID,
+			Provider: agent.Agent, CWD: agent.Cwd, ForegroundCWD: agent.ForegroundCwd, SessionID: agent.SessionID,
 			PaneID: agent.PaneID, ServerSessionID: agent.ServerSessionID,
 			TerminalID: agent.TerminalID, Generation: agent.Generation,
 		},
@@ -2128,6 +2145,9 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 		s.logger.Warn("conversation history read failed", "pane_id", inbound.PaneID, "error", historyErr)
 		s.sendCommandResult(client, inbound.RequestID, action, false, "failed", "Conversation history could not be read", inbound.PaneID, nil)
 		return
+	}
+	if s.conversationHistoryReadObserver != nil {
+		s.conversationHistoryReadObserver()
 	}
 	current, currentExists := s.state.Agent(inbound.PaneID)
 	if !currentExists || s.state.Generation(inbound.PaneID) != generation ||
@@ -2139,12 +2159,18 @@ func (s *Server) handleConversationHistory(client *transport.ClientConn, inbound
 }
 
 // Conversation logs preserve the full assistant message; the terminal pane is
-// only a bounded fallback for agents without a readable transcript.
-func (s *Server) latestConversationResponse(agent, cwd, sessionID string) string {
+// only a bounded fallback for agents without a readable transcript. The
+// optional context keeps pane-only callers source compatible while live
+// completion paths pass the captured foreground hint.
+func (s *Server) latestConversationResponse(agent, cwd, sessionID string, contexts ...conversation.ProjectContext) string {
 	if s.conversationM == nil || strings.TrimSpace(sessionID) == "" || !conversation.Supported(agent) {
 		return ""
 	}
-	page, err := s.conversationM.ReadFor(agent, cwd, sessionID, "", 1)
+	project := conversation.ProjectContext{CWD: cwd}
+	if len(contexts) > 0 {
+		project = contexts[0]
+	}
+	page, err := s.conversationM.ReadWithProject(agent, project, sessionID, "", 1)
 	if err != nil || !page.Available || len(page.Entries) == 0 {
 		return ""
 	}
@@ -2155,8 +2181,8 @@ func (s *Server) latestConversationResponse(agent, cwd, sessionID string) string
 	return entry.Text
 }
 
-func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string) string {
-	if response := s.latestConversationResponse(agent, cwd, sessionID); response != "" {
+func (s *Server) captureFinishedPane(ctx context.Context, paneID, agent, cwd, sessionID string, contexts ...conversation.ProjectContext) string {
+	if response := s.latestConversationResponse(agent, cwd, sessionID, contexts...); response != "" {
 		return response
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -2182,9 +2208,14 @@ func locatedAgentDir(home, agent string, location conversation.Location) string 
 }
 
 func sameConversationTuple(left, right *coordinator.AgentState) bool {
-	return left != nil && right != nil &&
-		left.Agent == right.Agent &&
+	if left == nil || right == nil {
+		return false
+	}
+	leftProject := projectContextForAgent(left)
+	rightProject := projectContextForAgent(right)
+	return left.Agent == right.Agent &&
 		left.Cwd == right.Cwd &&
+		leftProject == rightProject &&
 		left.SessionID == right.SessionID
 }
 func isClaudeLike(agent string) bool {
@@ -3840,23 +3871,23 @@ func (s *Server) enrichActivityResponses(entries []activity.Entry) []activity.En
 		}
 		agentName := strings.TrimSpace(entry.Agent)
 		sessionID := strings.TrimSpace(entry.Session)
-		var cwd string
+		project := conversation.ProjectContext{}
 		if current := agents[entry.PaneID]; current != nil {
 			if strings.TrimSpace(current.Agent) != "" {
 				agentName = current.Agent
 			}
 			if strings.TrimSpace(current.SessionID) != "" {
 				sessionID = current.SessionID
-				cwd = current.Cwd
+				project = projectContextForAgent(current)
 			}
 		}
 		if agentName == "" || sessionID == "" || !conversation.Supported(agentName) {
 			continue
 		}
-		cacheKey := agentName + "\x00" + cwd + "\x00" + sessionID
+		cacheKey := agentName + "\x00" + project.CWD + "\x00" + project.ForegroundCWD + "\x00" + sessionID
 		page, loaded := pages[cacheKey]
 		if !loaded {
-			page, _ = s.conversationM.ReadFor(agentName, cwd, sessionID, "", 200)
+			page, _ = s.conversationM.ReadWithProject(agentName, project, sessionID, "", 200)
 			pages[cacheKey] = page
 		}
 		if response := conversationResponseAt(page.Entries, int64(entry.Timestamp)); response != "" {

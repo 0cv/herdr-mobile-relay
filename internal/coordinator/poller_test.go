@@ -89,6 +89,31 @@ func TestPollerInventoryChangePublishesCurrentState(t *testing.T) {
 	}
 }
 
+func TestAgentsFromTopologyPreservesForegroundCwd(t *testing.T) {
+	state := testState()
+	poller := NewPoller(nil, state, time.Second, testLogger())
+	pane := herdr.Pane{
+		ID: "pane-1", Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground",
+	}
+	agents := poller.agentsFromTopology([]herdr.Pane{pane}, nil)
+	if len(agents) != 1 || agents[0].Cwd != pane.Cwd || agents[0].Project != "pane" || agents[0].ForegroundCwd != pane.ForegroundCwd {
+		t.Fatalf("topology agent = %#v, want pane project/cwd=%q foreground=%q", agents, pane.Cwd, pane.ForegroundCwd)
+	}
+	state.CommitInventory(agents, state.RevisionCounter())
+	stored, ok := state.Agent("pane-1")
+	if !ok || stored.Cwd != pane.Cwd || stored.ForegroundCwd != pane.ForegroundCwd {
+		t.Fatalf("stored agent = %#v, want both directories preserved", stored)
+	}
+
+	cleared := pane
+	cleared.ForegroundCwd = ""
+	state.CommitInventory(poller.agentsFromTopology([]herdr.Pane{cleared}, nil), state.RevisionCounter())
+	stored, ok = state.Agent("pane-1")
+	if !ok || stored.ForegroundCwd != "" {
+		t.Fatalf("cleared foreground cwd = %#v, want empty", stored)
+	}
+}
+
 func TestPollerEventCommitPublishesRecoveryAfterPausedEnrichment(t *testing.T) {
 	state := testState()
 	state.CommitInventory([]*AgentState{{PaneID: "pane-1", Status: "idle"}}, 0)

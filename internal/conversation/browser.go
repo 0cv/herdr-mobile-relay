@@ -22,6 +22,7 @@ import (
 type BrowseScope struct {
 	Provider        string `json:"provider"`
 	CWD             string `json:"cwd"`
+	ForegroundCWD   string `json:"foreground_cwd,omitempty"`
 	SessionID       string `json:"session_id"`
 	PaneID          string `json:"pane_id"`
 	ServerSessionID string `json:"server_session_id"`
@@ -681,7 +682,9 @@ func (b *Browser) ReadPage(ctx context.Context, request BrowseRequest) (BrowsePa
 
 func normalizeBrowseScope(scope BrowseScope) BrowseScope {
 	scope.Provider = normalizedAgent(scope.Provider)
-	scope.CWD = strings.TrimSpace(scope.CWD)
+	project := normalizeBrowseProjectContext(scope.Provider, scope.CWD, scope.ForegroundCWD)
+	scope.CWD = project.CWD
+	scope.ForegroundCWD = project.ForegroundCWD
 	scope.SessionID = strings.TrimSpace(scope.SessionID)
 	scope.PaneID = strings.TrimSpace(scope.PaneID)
 	scope.ServerSessionID = strings.TrimSpace(scope.ServerSessionID)
@@ -753,6 +756,7 @@ func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo b
 }
 
 func (b *Browser) sourceFor(scope BrowseScope, omo bool) (fileSource, string) {
+	scope = normalizeBrowseScope(scope)
 	var location Location
 	var expectedOMO *omoIdentity
 	if omo {
@@ -763,7 +767,9 @@ func (b *Browser) sourceFor(scope BrowseScope, omo bool) (fileSource, string) {
 		location = located
 		expectedOMO = &identity
 	} else {
-		location = b.reader.Locate(scope.Provider, scope.CWD, scope.SessionID)
+		location = b.reader.LocateWithProject(scope.Provider, ProjectContext{
+			CWD: scope.CWD, ForegroundCWD: scope.ForegroundCWD,
+		}, scope.SessionID)
 		if location.Path == "" {
 			return fileSource{}, "invalid_session"
 		}
