@@ -99,7 +99,12 @@ async function installRetainedInspection(driver, owner, requireOwner, quarantine
   const originalCommand = proxy.command;
   const nativeServer = driver.uiautomator2;
   const nativeProxy = nativeServer?.jwproxy;
+  const nativeRouteReqRes = typeof nativeServer?.proxyReqRes === 'function'
+    ? nativeServer.proxyReqRes : nativeProxy?.proxyReqRes?.bind(nativeProxy);
+  const nativeRouteCommand = typeof nativeServer?.proxyCommand === 'function'
+    ? nativeServer.proxyCommand : nativeProxy?.command?.bind(nativeProxy);
   if (!nativeProxy || nativeProxy === proxy || typeof nativeProxy.sessionId !== 'string' || !nativeProxy.sessionId ||
+      typeof nativeRouteReqRes !== 'function' || typeof nativeRouteCommand !== 'function' ||
       ['command', 'proxyCommand', 'request', 'cancelActiveRequests'].some(name => typeof nativeProxy[name] !== 'function')) throw new Error('Original native transport unavailable');
   const nativeToken = nativeProxy.sessionId;
   const nativeEndpoint = JSON.stringify([nativeProxy.server, nativeProxy.port, nativeProxy.scheme, nativeProxy.base, nativeProxy.reqBasePath]);
@@ -154,8 +159,10 @@ async function installRetainedInspection(driver, owner, requireOwner, quarantine
           (guardedRequest && proxy.request !== guardedRequest) ||
           (guardedExecute && driver.execute !== guardedExecute) ||
           (guardedDispatch && driver.executeCommand !== guardedDispatch) ||
-          driver.uiautomator2 !== nativeServer || nativeServer.jwproxy !== nativeProxy || nativeProxy.sessionId !== nativeToken ||
-          nativeProxy.command !== nativeCommand || (guardedNativeProxyCommand && nativeProxy.proxyCommand !== guardedNativeProxyCommand) ||
+          driver.uiautomator2 !== nativeServer || nativeServer.jwproxy !== nativeProxy ||
+          (typeof nativeServer.proxyReqRes === 'function' && nativeServer.proxyReqRes !== nativeRouteReqRes) ||
+          (typeof nativeServer.proxyCommand === 'function' && nativeServer.proxyCommand !== nativeRouteCommand) ||
+          nativeProxy.sessionId !== nativeToken || nativeProxy.command !== nativeCommand || (guardedNativeProxyCommand && nativeProxy.proxyCommand !== guardedNativeProxyCommand) ||
           (guardedNativeRequest && nativeProxy.request !== guardedNativeRequest) ||
           JSON.stringify([nativeProxy.server, nativeProxy.port, nativeProxy.scheme, nativeProxy.base, nativeProxy.reqBasePath]) !== nativeEndpoint ||
           JSON.stringify([proxy.server, proxy.port, proxy.scheme, proxy.base, proxy.reqBasePath]) !== proxyEndpoint) {
@@ -248,15 +255,21 @@ async function installRetainedInspection(driver, owner, requireOwner, quarantine
           if (driver.curContext === name) return;
           driver._bidiProxyUrl = null;
           driver.chromedriver = name === 'CHROMIUM' ? owner : undefined;
-          driver.proxyReqRes = name === 'CHROMIUM' ? proxyReq : undefined;
-          driver.proxyCommand = name === 'CHROMIUM' ? command : undefined;
-          driver.jwpProxyActive = name === 'CHROMIUM';
+          driver.proxyReqRes = name === 'CHROMIUM' ? proxyReq : nativeRouteReqRes;
+          driver.proxyCommand = name === 'CHROMIUM' ? command : nativeRouteCommand;
+          driver.jwpProxyActive = true;
           driver.curContext = name;
           await notifyContext.call(driver);
           check();
         });
       }
-      const invoke = async () => { const result = await dispatch.apply(this, args); check(); return result; };
+      const invoke = async () => {
+        if (driver.curContext === 'NATIVE_APP' && ['proxyReqRes', 'proxyCommand'].includes(args[0]) &&
+            (driver.proxyReqRes !== nativeRouteReqRes || driver.proxyCommand !== nativeRouteCommand)) throw fail(new Error('Original native route changed'));
+        const result = await dispatch.apply(this, args);
+        check();
+        return result;
+      };
       if ((args[0] === 'execute' && args[1] === COMMAND) || args[0] === 'deleteSession') return await invoke();
       return await run(Date.now() + 30_000, invoke);
     } catch (error) { check(); throw error; }

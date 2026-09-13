@@ -71,8 +71,13 @@ async function fixture(run, initialMode = '') {
   const nativeServer = createServer((req, res) => {
     nativeCalls.push(req.url);
     const path = req.url.replace('/session/native-token', '');
-    assert.ok(['/window/current/size', '/appium/device/system_bars'].includes(path));
-    const body = JSON.stringify({value: path === '/window/current/size' ? {width: 400, height: 800} : {statusBar: 20}});
+    let value;
+    if (path === '/window/current/size') value = {width: 400, height: 800};
+    else if (path === '/appium/device/system_bars') value = {statusBar: 20};
+    else if (path === '/source') value = '<hierarchy><node/></hierarchy>';
+    else if (path === '/element/element-2/rect') value = {x: 10, y: 20, width: 100, height: 40};
+    else assert.fail(`Unexpected native WebDriver command ${req.method} ${req.url}`);
+    const body = JSON.stringify({value});
     res.on('close', () => state.onNativeClose?.());
     if (state.holdNative && path === '/window/current/size') {
       if (state.holdNative === 'body') {
@@ -507,7 +512,9 @@ test('actual setContext uses only original local routing, never stock discovery'
   state.onShell = async () => { throw new Error('Stock discovery escaped'); };
   await driver.executeCommand('setContext', 'NATIVE_APP');
   assert.equal(driver.curContext, 'NATIVE_APP');
-  assert.equal(driver.jwpProxyActive, false);
+  assert.equal(driver.jwpProxyActive, true);
+  assert.equal(driver.proxyReqRes, driver.uiautomator2.proxyReqRes);
+  assert.equal(driver.proxyCommand, driver.uiautomator2.proxyCommand);
   await driver.executeCommand('setContext', 'CHROMIUM');
   assert.equal(driver.curContext, 'CHROMIUM');
   assert.equal(driver.chromedriver, owner);
@@ -515,6 +522,28 @@ test('actual setContext uses only original local routing, never stock discovery'
   assert.equal(calls.length, 0);
   state.onShell = undefined;
   await inspect();
+}));
+
+test('actual native context routes source and rect through the original UiAutomator2 transport', async () => fixture(async ({driver, nativeCalls}) => {
+  await driver.executeCommand('setContext', 'NATIVE_APP');
+  const forward = async (originalUrl) => {
+    let status;
+    let response;
+    const res = {setHeader() {}, status(value) { status = value; return this; }, json(value) { response = value; }};
+    await driver.executeCommand('proxyReqRes', {method: 'GET', originalUrl}, res, 'outer-token');
+    assert.equal(status, 200);
+    return response.value;
+  };
+  assert.equal(await forward('/session/outer-token/source'), '<hierarchy><node/></hierarchy>');
+  assert.deepEqual(await forward('/session/outer-token/element/element-2/rect'), {x: 10, y: 20, width: 100, height: 40});
+  assert.deepEqual(nativeCalls, ['/session/native-token/source', '/session/native-token/element/element-2/rect']);
+}));
+
+test('replaced native routing is refused before source dispatch', async () => fixture(async ({driver, nativeCalls}) => {
+  await driver.executeCommand('setContext', 'NATIVE_APP');
+  driver.proxyReqRes = async () => { throw new Error('Unverified native route executed'); };
+  await assert.rejects(driver.executeCommand('proxyReqRes', {method: 'GET', originalUrl: '/session/outer-token/source'}, {}, 'outer-token'), /Original native route changed/u);
+  assert.deepEqual(nativeCalls, []);
 }));
 
 for (const mode of ['deadline', 'proxy-overlap', 'native-overlap']) test(`actual retained context transition refuses ${mode} without late sends`, async () => fixture(async ({driver, state, calls, refused}) => {

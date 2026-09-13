@@ -387,17 +387,14 @@ export class AndroidPlatform implements MobilePlatform {
   private async observeChromeConfirmation(element: string): Promise<void> {
     const phase = this.budget.phaseView('android-chrome-confirmation', 50_000);
     const readMs = 2_000;
-    const hierarchyMs = 5_000;
     const actionMs = 5_000;
-    const requiredMs = 2 * hierarchyMs + 10 * readMs + 2 * ANDROID_NATIVE_LOOKUP_COMMAND_MS + actionMs;
+    const requiredMs = 10 * readMs + 2 * ANDROID_NATIVE_LOOKUP_COMMAND_MS + actionMs;
     let remainingAllowance = requiredMs;
     const observe = async <T>(allowance: number, operation: () => Promise<T>): Promise<T> => {
       if (phase.remainingMs < remainingAllowance) throw new Error('ANDROID_CHROME: insufficient confirmation observation allowance');
       remainingAllowance -= allowance;
       return operation();
     };
-    const before = await observe(hierarchyMs, () => this.driver.pageSource(hierarchyMs));
-    await writeBoundedText(join(this.outputDir, 'android-chrome-before-confirmation.xml'), before);
     const identity: Record<string, unknown> = { element };
     for (const attribute of ['class', 'resource-id', 'package', 'text', 'enabled', 'displayed', 'clickable']) {
       identity[attribute] = await observe(readMs, () => this.driver.attribute(element, attribute, readMs));
@@ -422,10 +419,8 @@ export class AndroidPlatform implements MobilePlatform {
       || matches[0]?.['element-6066-11e4-a52e-4f735466cecf'] !== element) {
       throw new Error('ANDROID_CHROME: confirmation control is ambiguous or replaced');
     }
-    if (phase.remainingMs < actionMs + hierarchyMs + ANDROID_NATIVE_LOOKUP_COMMAND_MS) throw new Error('ANDROID_CHROME: insufficient click and post-observation allowance');
+    if (phase.remainingMs < actionMs + ANDROID_NATIVE_LOOKUP_COMMAND_MS) throw new Error('ANDROID_CHROME: insufficient click and post-observation allowance');
     await observe(actionMs, () => this.driver.click(element, actionMs));
-    const after = await observe(hierarchyMs, () => this.driver.pageSource(hierarchyMs));
-    await writeBoundedText(join(this.outputDir, 'android-chrome-after-confirmation.xml'), after);
     const afterForeground = await observe(ANDROID_NATIVE_LOOKUP_COMMAND_MS, () => this.foregroundEvidence(ANDROID_NATIVE_LOOKUP_COMMAND_MS));
     this.diagnostics.record({ phase: 'android-chrome-confirmation', operation: 'settled-click-observation', detail: {
       foreground: afterForeground,
