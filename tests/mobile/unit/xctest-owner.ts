@@ -1,104 +1,217 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, readFile, writeFile, rm, realpath, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer, type AddressInfo } from 'node:net';
+import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import { managedWdaCapabilities } from '../support/ios-xctest';
 import { IOSPlatform } from '../platforms/ios';
 
-const shim = `#!/usr/bin/env bun
-import {readFileSync,writeFileSync,appendFileSync,existsSync,unlinkSync} from 'node:fs';
-import {basename,join} from 'node:path';
-const root=process.env.STARTUP_TEST_ROOT;
-const cmd=basename(process.argv[1]);
-const args=process.argv.slice(2);
-const mode=process.env.STARTUP_TEST_MODE;
-const pidfile=join(root,'runner.pid');
-const xcodePidfile=join(root,'xcode.pid');
-const delayed=()=>{
-  if(mode!=='delayed') return;
-  if(cmd==='lsof'&&args.includes('-d')) { const end=Date.now()+600; while(Date.now()<end){}; return; }
-  if(cmd==='ps') {
-    const path=join(root,'delayed-ps-count');
-    const count=existsSync(path)?Number(readFileSync(path,'utf8')):0;
-    writeFileSync(path,String(count+1));
-    if(count===0) return;
-    const end=Date.now()+600;
-    while(Date.now()<end){}
-  }
-};
-delayed();
-if(cmd==='plutil') {
-  if(args[0]==='-extract') console.log(mode==='listener-bundle-mismatch' && args.at(-1).includes(process.env.STARTUP_TEST_RUNNER_RECEIPT) ? 'wrong.bundle' : JSON.parse(readFileSync(args.at(-1),'utf8')).CFBundleIdentifier);
-  else if(args[1]==='json') console.log(readFileSync(args.at(-1),'utf8'));
-} else if(cmd==='lsof') {
-  if(mode==='occupied') console.log('999999');
-  else if(existsSync(pidfile) && !args.includes('-d') && mode==='listener-invalid-pid') console.log('2147483648');
-  else if(existsSync(pidfile) && !args.includes('-d') && mode==='listener-first-failure') process.exit(2);
-  else if(existsSync(pidfile) && !args.includes('-d') && mode==='listener-second-failure' && args.includes('-iTCP:'+process.env.IOS_WDA_MJPEG_PORT)) process.exit(2);
-  else if(existsSync(pidfile) && !args.includes('-d') && mode==='listener-endpoints-disappear' && existsSync(join(root,'status-queries'))) process.exit(1);
-  else if(existsSync(pidfile) && args.includes('-d')) {
-    const requested=args[args.indexOf('-p')+1]||readFileSync(pidfile,'utf8');
-    if(mode==='listener-hash-after-freeze') {
-      const path=join(root,'listener-evidence-count');
-      const count=existsSync(path)?Number(readFileSync(path,'utf8')):0;
-      writeFileSync(path,String(count+1));
-      if(count>=1) writeFileSync(process.env.STARTUP_TEST_RUNNER_RECEIPT+'/WebDriverAgentRunner-Runner','different listener after freeze');
-    }
-    const executable=mode==='credential'?process.env.STARTUP_TEST_RUNNER_RECEIPT+'/unexpected-listener':process.env.STARTUP_TEST_RUNNER_RECEIPT+'/WebDriverAgentRunner-Runner';
-    console.log('p'+requested+'\\nftxt\\nn'+executable);
-  } else if(existsSync(pidfile)) {
-    if(mode==='listener-mjpeg-duplicate' && args.includes('-iTCP:'+process.env.IOS_WDA_MJPEG_PORT)) console.log('11111\\n22222');
-    else if(mode==='swap'||mode==='pid-reuse') {
-      const path=join(root,'swap-lsof-count');
-      const count=existsSync(path)?Number(readFileSync(path,'utf8')):0;
-      writeFileSync(path,String(count+1));
-      console.log(mode==='pid-reuse'?'11111':count<4?'11111':'22222');
-    } else console.log(readFileSync(pidfile,'utf8'));
-  } else process.exit(1);
-} else if(cmd==='ps') {
-  const pid=args[1];
-  const xcodePid=existsSync(xcodePidfile)?readFileSync(xcodePidfile,'utf8'):'';
-  if((mode==='swap'||mode==='pid-reuse')&&pid!==xcodePid) {
-    const generation=existsSync(join(root,'swap-lsof-count'))?Number(readFileSync(join(root,'swap-lsof-count'),'utf8')):0;
-    const reused=mode==='pid-reuse'&&generation>=5;
-    console.log(args.at(-1)==='lstart='?(reused||pid==='22222'?'birth-b':'birth-a'):'WebDriverAgentRunner-Runner '+pid);
-  } else if(args.at(-1)==='comm=') console.log(process.env.STARTUP_TEST_RECEIPT+'/WebDriverAgentRunner-Runner');
-  else if(mode==='credential') console.log('xcodebuild test-without-building -xctestrun '+process.env.STARTUP_TEST_XCTESTRUN+' -destination id='+process.env.IOS_SIMULATOR_UDID+' https://example.test/?token=credential-token');
-  else console.log('xcodebuild test-without-building -xctestrun '+process.env.STARTUP_TEST_XCTESTRUN+' -destination id='+process.env.IOS_SIMULATOR_UDID);
-} else if(cmd==='xcrun') {
-  if(args[1]==='list') console.log(process.env.IOS_SIMULATOR_UDID);
-  else if(args[1]==='get_app_container') {
-    const path=join(root,'receipt-queries');
-    const count=existsSync(path)?Number(readFileSync(path,'utf8')):0;
-    writeFileSync(path,String(count+1));
-    if(mode==='receipt-failure'&&count>=1) process.exit(77);
-    if(mode==='receipt-missing-then-valid'&&count===1) console.log(process.env.STARTUP_TEST_RUNNER_RECEIPT+'/missing-receipt');
-    else console.log(process.env.STARTUP_TEST_RECEIPT);
-  }
-  else if(args[1]==='spawn') console.log('retained simulator diagnostic');
-} else if(cmd==='xcodebuild') {
-  appendFileSync(join(root,'launches'),JSON.stringify(args)+'\\n');
-  if(mode==='early') process.exit(43);
-  if(mode==='receipt-product-changed') {
-    writeFileSync(process.env.STARTUP_TEST_PRODUCT+'/WebDriverAgentRunner-Runner','changed product');
-    writeFileSync(join(root,'product-changed-at'),String(Date.now()));
-  }
-  writeFileSync(pidfile,String(process.pid));
-  writeFileSync(xcodePidfile,String(process.pid));
-  const server=Bun.serve({hostname:'127.0.0.1',port:Number(process.env.IOS_WDA_PORT),fetch(){
-    const statusPath=join(root,'status-queries');
-    const count=existsSync(statusPath)?Number(readFileSync(statusPath,'utf8')):0;
-    writeFileSync(statusPath,String(count+1));
-    const body={value:{ready:mode!=='invalid',state:'success',build:{version:'16.12.1',productBundleIdentifier:'com.facebook.WebDriverAgentRunner'},os:{version:'18.5'}}};
-    const oversized=mode==='oversized'||(mode==='ready-then-oversized'&&count>=1);
-    return oversized?new Response(JSON.stringify(body)+' '.repeat(70000),{headers:{'content-type':'application/json'}}):Response.json(body);
-  }});
-  process.on('SIGTERM',()=>{unlinkSync(pidfile);unlinkSync(xcodePidfile);server.stop(true);process.exit(0)});
+const shim = `#!/bin/sh
+cmd=$0
+cmd=\${cmd##*/}
+root=$STARTUP_TEST_ROOT
+mode=$STARTUP_TEST_MODE
+trace=$XCTEST_COMMAND_TRACE
+if [ -n "$trace" ]; then
+  printf 'start %s %s' "$(date +%s%N)" "$cmd" >> "$trace"
+  for argument do printf ' [%s]' "$argument" >> "$trace"; done
+  printf '\\n' >> "$trace"
+  trap 'printf "end %s %s\\n" "$(date +%s%N)" "$cmd" >> "$trace"' 0
+fi
+has_arg() {
+  needle=$1
+  shift
+  for argument do
+    [ "$argument" = "$needle" ] && return 0
+  done
+  return 1
 }
+if [ "$mode" = "delayed" ]; then
+  if [ "$cmd" = "lsof" ] && has_arg -d "$@"; then
+    /bin/sleep 0.6
+  elif [ "$cmd" = "ps" ]; then
+    delayed_ps_count=0
+    [ -e "$root/delayed-ps-count" ] && delayed_ps_count=$(cat "$root/delayed-ps-count")
+    printf '%s' "$((delayed_ps_count + 1))" > "$root/delayed-ps-count"
+    if [ "$delayed_ps_count" -gt 0 ]; then
+      /bin/sleep 0.6
+    fi
+  fi
+fi
+case "$cmd" in
+plutil)
+  if [ "$1" = "-extract" ]; then
+    path=$6
+    product_info=false
+    case "$path" in
+      "$STARTUP_TEST_PRODUCT/Info.plist"|/private$STARTUP_TEST_PRODUCT/Info.plist) product_info=true ;;
+    esac
+    if [ "$mode" = "product" ] && [ "$product_info" = true ]; then
+      printf '%s\\n' wrong
+    else
+      bundle_mismatch=false
+      case "$path" in
+        "$STARTUP_TEST_RUNNER_RECEIPT"/*|/private$STARTUP_TEST_RUNNER_RECEIPT/*) bundle_mismatch=true ;;
+      esac
+      if [ "$mode" = "listener-bundle-mismatch" ] && [ "$bundle_mismatch" = true ]; then
+        printf '%s\\n' wrong.bundle
+      else
+        printf '%s\\n' com.facebook.WebDriverAgentRunner.xctrunner
+      fi
+    fi
+  elif [ "$1" = "-convert" ] && [ "$2" = "json" ]; then
+    cat "$5"
+  fi
+  ;;
+lsof)
+  if [ "$mode" = "occupied" ]; then
+    printf '%s\\n' 999999
+    exit 0
+  fi
+  if [ ! -e "$root/runner.pid" ]; then
+    exit 1
+  fi
+  if [ "$mode" = "listener-invalid-pid" ] && ! has_arg -d "$@"; then
+    printf '%s\\n' 2147483648
+    exit 0
+  fi
+  if [ "$mode" = "listener-first-failure" ] && ! has_arg -d "$@"; then
+    exit 2
+  fi
+  if [ "$mode" = "listener-second-failure" ] && ! has_arg -d "$@" && has_arg "-iTCP:$IOS_WDA_MJPEG_PORT" "$@"; then
+    exit 2
+  fi
+  if [ "$mode" = "listener-endpoints-disappear" ] && ! has_arg -d "$@" && [ -e "$root/status-queries" ]; then
+    exit 1
+  fi
+  if has_arg -d "$@"; then
+    requested=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-p" ]; then
+        requested=$2
+        break
+      fi
+      shift
+    done
+    [ -n "$requested" ] || requested=$(cat "$root/runner.pid")
+    if [ "$mode" = "listener-hash-after-freeze" ]; then
+      count=0
+      [ -e "$root/listener-evidence-count" ] && count=$(cat "$root/listener-evidence-count")
+      printf '%s' "$((count + 1))" > "$root/listener-evidence-count"
+      if [ "$count" -ge 1 ]; then
+        printf '%s' 'different listener after freeze' > "$STARTUP_TEST_RUNNER_RECEIPT/WebDriverAgentRunner-Runner"
+      fi
+    fi
+    executable=$STARTUP_TEST_RUNNER_RECEIPT/WebDriverAgentRunner-Runner
+    [ "$mode" = "credential" ] && executable=$STARTUP_TEST_RUNNER_RECEIPT/unexpected-listener
+    printf 'p%s\\nftxt\\nn%s\\n' "$requested" "$executable"
+    exit 0
+  fi
+  if [ "$mode" = "listener-mjpeg-duplicate" ] && has_arg "-iTCP:$IOS_WDA_MJPEG_PORT" "$@"; then
+    printf '11111\\n22222\\n'
+  elif [ "$mode" = "swap" ] || [ "$mode" = "pid-reuse" ]; then
+    count=0
+    [ -e "$root/swap-lsof-count" ] && count=$(cat "$root/swap-lsof-count")
+    printf '%s' "$((count + 1))" > "$root/swap-lsof-count"
+    if [ "$mode" = "pid-reuse" ] || [ "$count" -lt 4 ]; then
+      printf '%s\\n' 11111
+    else
+      printf '%s\\n' 22222
+    fi
+  else
+    printf '%s\\n' "$(cat "$root/runner.pid")"
+  fi
+  ;;
+ps)
+  pid=$2
+  format=$4
+  xcode_pid=
+  [ -e "$root/xcode.pid" ] && xcode_pid=$(cat "$root/xcode.pid")
+  if { [ "$mode" = "swap" ] || [ "$mode" = "pid-reuse" ]; } && [ "$pid" != "$xcode_pid" ]; then
+    generation=0
+    [ -e "$root/swap-lsof-count" ] && generation=$(cat "$root/swap-lsof-count")
+    reused=false
+    [ "$mode" = "pid-reuse" ] && [ "$generation" -ge 5 ] && reused=true
+    if [ "$format" = "lstart=" ]; then
+      if [ "$reused" = true ] || [ "$pid" = 22222 ]; then
+        printf '%s\\n' birth-b
+      else
+        printf '%s\\n' birth-a
+      fi
+    else
+      printf 'WebDriverAgentRunner-Runner %s\\n' "$pid"
+    fi
+  elif [ "$format" = "comm=" ]; then
+    printf '%s\\n' "$STARTUP_TEST_RECEIPT/WebDriverAgentRunner-Runner"
+  elif [ "$mode" = "credential" ]; then
+    printf 'xcodebuild test-without-building -xctestrun %s -destination id=%s https://example.test/?token=credential-token\\n' "$STARTUP_TEST_XCTESTRUN" "$IOS_SIMULATOR_UDID"
+  else
+    printf 'xcodebuild test-without-building -xctestrun %s -destination id=%s\\n' "$STARTUP_TEST_XCTESTRUN" "$IOS_SIMULATOR_UDID"
+  fi
+  ;;
+xcrun)
+  if [ "$2" = "list" ]; then
+    printf '%s\\n' "$IOS_SIMULATOR_UDID"
+  elif [ "$2" = "get_app_container" ]; then
+    count=0
+    [ -e "$root/receipt-queries" ] && count=$(cat "$root/receipt-queries")
+    printf '%s' "$((count + 1))" > "$root/receipt-queries"
+    if [ "$mode" = "receipt-failure" ] && [ "$count" -ge 1 ]; then
+      exit 77
+    elif [ "$mode" = "receipt-missing-then-valid" ] && [ "$count" -eq 1 ]; then
+      printf '%s\\n' "$STARTUP_TEST_RUNNER_RECEIPT/missing-receipt"
+    else
+      printf '%s\\n' "$STARTUP_TEST_RECEIPT"
+    fi
+  elif [ "$2" = "spawn" ]; then
+    printf '%s\\n' 'retained simulator diagnostic'
+  fi
+  ;;
+xcodebuild)
+  exec "$STARTUP_TEST_EXECUTABLE" "$STARTUP_TEST_WDA_SERVER" xcodebuild "$@"
+  ;;
+esac
+exit 0
+`;
+const wdaServer = `import { createServer } from 'node:http';
+import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const root = process.env.STARTUP_TEST_ROOT;
+const mode = process.env.STARTUP_TEST_MODE;
+const args = process.argv.slice(3);
+const runnerPid = join(root, 'runner.pid');
+const xcodePid = join(root, 'xcode.pid');
+const remove = path => { try { unlinkSync(path); } catch {} };
+appendFileSync(join(root, 'launches'), JSON.stringify(args) + '\\n');
+if (mode === 'early') process.exit(43);
+if (mode === 'receipt-product-changed') {
+  writeFileSync(join(process.env.STARTUP_TEST_PRODUCT, 'WebDriverAgentRunner-Runner'), 'changed');
+  writeFileSync(join(root, 'product-changed-at'), String(Date.now()));
+}
+writeFileSync(xcodePid, String(process.pid));
+const server = createServer((_request, response) => {
+  const statusPath = join(root, 'status-queries');
+  const count = existsSync(statusPath) ? Number(readFileSync(statusPath, 'utf8')) : 0;
+  writeFileSync(statusPath, String(count + 1));
+  const body = { value: { ready: mode !== 'invalid', state: 'success', build: { version: '16.12.1', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '18.5' } } };
+  const oversized = mode === 'oversized' || (mode === 'ready-then-oversized' && count >= 1);
+  response.setHeader('content-type', 'application/json');
+  response.end(JSON.stringify(body) + (oversized ? ' '.repeat(70000) : ''));
+});
+let stopping = false;
+const stop = () => {
+  if (stopping) return;
+  stopping = true;
+  server.closeAllConnections?.();
+  server.close(() => process.exit(0));
+};
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
+process.on('exit', () => { remove(runnerPid); remove(xcodePid); });
+server.listen(Number(process.env.IOS_WDA_PORT), '127.0.0.1', () => writeFileSync(runnerPid, String(process.pid)));
 `;
 const pause = () => new Promise(resolve => setTimeout(resolve, 25));
 
@@ -128,12 +241,19 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupi
     if (mode === 'product') await writeFile(join(product, 'Info.plist'), JSON.stringify({ CFBundleIdentifier: 'wrong' }));
     if (mode === 'credential') await writeFile(join(runnerReceipt, 'unexpected-listener'), 'unexpected listener');
     await writeFile(join(root, 'owned'), `ios:${mode === 'ownership' ? 'wrong' : udid}`);
-    for (const cmd of ['plutil', 'lsof', 'ps', 'xcrun', 'xcodebuild']) await writeFile(join(bin, cmd), shim, { mode: 0o700 });
-    const reserve = createServer();
-    await new Promise<void>(resolve => reserve.listen(0, '127.0.0.1', resolve));
+    const dispatcher = join(bin, 'xctest-command-dispatcher');
+    await writeFile(dispatcher, shim, { mode: 0o700 });
+    for (const cmd of ['plutil', 'lsof', 'ps', 'xcrun', 'xcodebuild']) await symlink(dispatcher, join(bin, cmd));
+    const wdaServerFile = join(bin, 'xctest-wda-server.ts');
+    await writeFile(wdaServerFile, wdaServer, { mode: 0o700 });
+    const reserve = createNetServer();
+    await new Promise<void>((resolve, reject) => {
+      reserve.once('error', reject);
+      reserve.listen(0, '127.0.0.1', resolve);
+    });
     const port = (reserve.address() as AddressInfo).port;
     await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: mode,
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: mode, STARTUP_TEST_EXECUTABLE: process.execPath, STARTUP_TEST_WDA_SERVER: wdaServerFile,
       STARTUP_TEST_RECEIPT: receipt, STARTUP_TEST_RUNNER_RECEIPT: runnerReceipt, STARTUP_TEST_PRODUCT: product, STARTUP_TEST_XCTESTRUN: xctestrun, IOS_XCTEST_STATE_DIR: state,
       IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '18.5', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
       IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
@@ -146,6 +266,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupi
     let errors = '';
     child.stderr.on('data', chunk => { errors += chunk.toString(); });
     let done = false;
+    let assertionsPassed = false;
     const exited = new Promise<void>(resolve => child.on('close', () => { done = true; resolve(); }));
     try {
       if (mode === 'ready' || mode === 'ready-then-oversized') {
@@ -325,8 +446,14 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'invalid', 'occupi
       if (mode === 'ready') assert.equal(owner.error, undefined);
       if (mode !== 'ownership') assert.match(await readFile(join(state, 'ios-wda-system.log'), 'utf8'), /retained simulator diagnostic/u);
       assert.equal(existsSync(join(root, 'runner.pid')), false);
+      assertionsPassed = true;
     } finally {
       if (!done) { await writeFile(join(state, 'stop'), 'failed test cleanup'); child.kill('SIGTERM'); await exited; }
+      const diagnosticRoot = process.env.XCTEST_DIAGNOSTIC_ROOT;
+      if (!assertionsPassed && diagnosticRoot) {
+        await rm(diagnosticRoot, { recursive: true, force: true });
+        await cp(root, diagnosticRoot, { recursive: true, force: true });
+      }
       await rm(root, { recursive: true, force: true });
     }
   }]);

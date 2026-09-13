@@ -160,6 +160,17 @@ describe('relay command store', () => {
       data: { available: true, state: 'preparing', mode: 'recent', has_more: false, entries: [], diagnostics: {} },
     });
     await expect(relayStore.getConversationHistory(agent)).rejects.toThrow('Relay returned invalid conversation history');
+
+    send.mockResolvedValueOnce({
+      type: 'command_result', request_id: 'history-3', ok: true,
+      data: {
+        available: true, state: 'ready', mode: 'recent', has_more: false, entries: [],
+        diagnostics: { continuation_incomplete: true, continuation_reason: 'partial_link' },
+      },
+    });
+    await expect(relayStore.getConversationHistory(agent)).resolves.toMatchObject({
+      diagnostics: { continuation_incomplete: true, continuation_reason: 'partial_link' },
+    });
   });
 
   it('aborts a conversation request without leaving a pending relay handler', async () => {
@@ -988,6 +999,8 @@ describe('relay command store', () => {
       last_success_at: 200,
       stale: false,
     });
+    socket.message({ type: 'agents', agents: [] });
+    expect(get(relayStore.agents)).toHaveLength(0);
     const pending = relayStore.sendCommand(relayId, { type: 'agent_stop', pane_id: 'w1:p1' });
     const command = JSON.parse(socket.sent.at(-1)!);
     socket.message({ type: 'command_result', request_id: command.request_id, ok: true });

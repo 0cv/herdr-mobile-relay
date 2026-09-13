@@ -156,6 +156,7 @@ frontend-check:
 	bun build frontend/public/sw.js --outfile=/dev/null
 	bun build frontend/public/notification-icons.js --outfile=/dev/null
 	bash -n frontend/scripts/run-browser-tests.sh
+	bash -n frontend/scripts/run-attention-tests.sh
 
 frontend-browser:
 	frontend/scripts/run-browser-tests.sh dist

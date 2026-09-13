@@ -378,6 +378,8 @@ export interface ConversationBrowseDiagnostics {
   omitted_payloads?: number;
   plan_corrupt?: boolean;
   source_truncated: boolean;
+  continuation_incomplete?: boolean;
+  continuation_reason?: string;
 }
 
 export interface ConversationBrowseError {

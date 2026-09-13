@@ -11,11 +11,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	relayrelease "github.com/0cv/herdr-mobile-relay/internal/release"
 )
+
+var lazyAssetReferencePattern = regexp.MustCompile("import\\(\\s*[`\\\"']\\./([A-Za-z0-9_.-]+-[0-9]+\\.js)[`\\\"']\\s*\\)")
 
 var allowedAssets = map[string]bool{
 	"index.html":            true,
@@ -40,9 +43,11 @@ type Handler struct {
 	bundleVersion    string
 	bundleRevision   string
 	bundleBuild      string
+	bundleAssets     int
 	entryPath        string
 	descriptorLoaded bool
 	webFiles         map[string]bool
+	lazyAssets       map[string]bool
 }
 
 func NewHandler(webRoot string) (*Handler, error) {
@@ -50,7 +55,7 @@ func NewHandler(webRoot string) (*Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open web root %s: %w", webRoot, err)
 	}
-	handler := &Handler{root: root, files: root.FS(), webFiles: make(map[string]bool)}
+	handler := &Handler{root: root, files: root.FS(), webFiles: make(map[string]bool), lazyAssets: make(map[string]bool)}
 	handler.loadIdentity()
 	if err := handler.loadWebDescriptor(); err != nil {
 		_ = root.Close()
@@ -171,13 +176,44 @@ func (h *Handler) isAllowedAsset(asset string) bool {
 		}
 		return true
 	}
-	return isAttachmentHashWorker(asset) ||
+	return h.isVersionedLazyAsset(asset) ||
+		isAttachmentHashWorker(asset) ||
 		strings.HasPrefix(asset, "icons/") ||
 		strings.HasPrefix(asset, "fonts/")
 }
 
 func (h *Handler) immutableAsset(asset string) bool {
-	return h.webFiles[asset]
+	return h.webFiles[asset] || h.isVersionedLazyAsset(asset)
+}
+
+// Lazy chunks are not entry assets, so they are not repeated in the small
+// release descriptor file map. Only chunks referenced by the verified
+// application module, with the exact release asset version, are executable.
+func (h *Handler) isVersionedLazyAsset(asset string) bool {
+	return h.descriptorLoaded && h.lazyAssets[asset]
+}
+
+func (h *Handler) loadLazyAssets(scriptPath string) {
+	source, err := fs.ReadFile(h.files, scriptPath)
+	if err != nil {
+		return
+	}
+	for _, match := range lazyAssetReferencePattern.FindAllSubmatch(source, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		name := string(match[1])
+		stem := strings.TrimSuffix(name, ".js")
+		dash := strings.LastIndexByte(stem, '-')
+		if dash <= 0 || dash == len(stem)-1 {
+			continue
+		}
+		version, err := strconv.Atoi(stem[dash+1:])
+		if err != nil || version != h.bundleAssets {
+			continue
+		}
+		h.lazyAssets["assets/"+name] = true
+	}
 }
 
 func isAttachmentHashWorker(asset string) bool {
@@ -318,10 +354,12 @@ func (h *Handler) loadWebDescriptor() error {
 		return err
 	}
 	h.entryPath = strings.TrimPrefix(descriptor.Entry, "/")
+	h.bundleAssets = descriptor.Assets
 	for _, file := range descriptor.Files {
 		h.webFiles[file.Path] = true
 	}
 	h.descriptorLoaded = true
+	h.loadLazyAssets(descriptor.Files["javascript"].Path)
 	if h.bundleBuild == "" {
 		h.bundleBuild = descriptor.Build
 	}

@@ -263,13 +263,26 @@ attention, and the **Terminal** header button switches to the same agent without
 adding repeated view toggles to browser history.
 
 Hidden reasoning, injected system records, and sidechain turns remain excluded.
-Reads are confined to known session directories and the newest 16 MiB of very
-large logs. When that bound omits older turns, they remain in the harness log
-on the computer. Use **Load older turns** to request an authenticated,
-short-lived local snapshot; preparation reports progress and never blocks the
-relay's live terminal paths. Snapshot pages remain stable while new turns are
-written, and storage, source-change, corruption, oversized-record, and
-expired-cursor states are reported without exposing transcript paths or raw
+Claude continuation links are followed within the selected project, so a stale
+anchor session can show newer continuation sessions in order. Conversation
+History requests up to 200 records at a time but loads only enough logical
+exchanges for the current view: tool-only pages and exchanges split across page
+boundaries are followed automatically. The newest usable exchange is shown on
+open, and scrolling near the top loads earlier exchanges without a normal-path
+**Load older turns** click. A small in-memory preview can appear immediately on
+a warm reopen while the current latest page is checked; it is bounded, never
+persisted by the browser, and never authorizes a cursor or proves that history
+is empty. Loading, preparation, context search, errors, and the true beginning
+of the available source have separate status messages. Search filters loaded
+content only. Older browsing keeps a fixed chain snapshot and continues across
+large parent files through the local index; a missing, invalid, ambiguous,
+cyclic, or bounded-out continuation remains readable and displays an
+incomplete-history warning. Reads are confined to known session directories and
+the newest 16 MiB of very large logs. When that bound omits older turns, they
+remain in the harness log on the computer. Preparation reports progress and
+never blocks the relay's live terminal paths. Snapshot pages remain stable while
+new turns are written, and storage, source-change, corruption, oversized-record,
+and expired-cursor states are reported without exposing transcript paths or raw
 records. Pagination uses only short-lived opaque cursors; the app never
 constructs a cursor from a displayed entry ID. OpenCode and Hermes retain their
 native database pagination semantics while binding cursors to the selected
@@ -299,8 +312,12 @@ native pages report their visible-entry total when the source supplies one.
 `source_truncated` identifies a bounded JSONL tail, while diagnostics count
 oversized or corrupt records and tool/payload omissions. Valid entries remain
 available when a later record or an OMO plan update is invalid. A failed
-preparation retains its continuation cursor so **Retry loading** does not lose
-the already displayed recent turns.
+preparation retains its continuation cursor so **Retry** does not lose the
+already displayed recent turns. The relay also retains a bounded, in-memory
+recent-range projection cache (four projections, 16 MiB per item, 64 MiB total,
+and a 60-second idle expiry by default). It rechecks containment, identity, and
+the exact range digest before reusing it; the cache contains no source handles,
+cursors, or transcript files and is cleared on relay shutdown.
 
 Cursors are signed, opaque, scoped to the provider, workspace, session, pane,
 server session, terminal, and target generation, and contain an expiry and

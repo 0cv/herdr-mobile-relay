@@ -1,8 +1,9 @@
+import { strict as assert } from 'node:assert';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { chromium, type Browser } from '../../../frontend/node_modules/playwright';
-import { type BundleSet } from '../support/artifacts';
+import { chromium, type Browser, type Page } from '../../../frontend/node_modules/playwright';
+import { fileSha256, type BundleSet } from '../support/artifacts';
 import { command, startCommand, stopProcess } from '../support/process';
 import { repositoryPath, repositoryRoot } from '../support/paths';
 
@@ -26,6 +27,35 @@ function required(name: string): string {
 
 async function readJson<T>(filename: string): Promise<T> {
   return JSON.parse(await readFile(filename, 'utf8')) as T;
+}
+
+async function lazyAsset(root: string, script: string): Promise<string> {
+  const source = await readFile(join(root, script.replace(/^\//u, '')), 'utf8');
+  const match = source.match(/import\(\s*[`'"]\.\/([A-Za-z0-9_.-]+-[0-9]+\.js)[`'"]\s*\)/);
+  if (!match) throw new Error(`CACHE_RECOVERY: application script has no lazy asset: ${script}`);
+  return `/assets/${match[1]}`;
+}
+
+interface BrowserAssetObservation {
+  ok: boolean;
+  status: number;
+  cacheControl: string;
+  sha256: string;
+}
+
+async function observeBrowserAsset(page: Page, assetPath: string, loadModule = false): Promise<BrowserAssetObservation> {
+  return page.evaluate(async ({ assetPath: path, loadModule: shouldLoadModule }) => {
+    const response = await fetch(path, { cache: 'force-cache' });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    if (shouldLoadModule) await import(path);
+    return {
+      ok: response.ok,
+      status: response.status,
+      cacheControl: response.headers.get('cache-control') || '',
+      sha256: [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join(''),
+    };
+  }, { assetPath, loadModule });
 }
 
 async function waitForInfo(filename: string): Promise<FixtureInfo> {
@@ -118,6 +148,20 @@ async function main(): Promise<void> {
     const page = await context.newPage();
     await page.goto(info.app_url, { waitUntil: 'networkidle' });
     await page.waitForFunction(() => Boolean(document.querySelector('#app')?.childNodes.length));
+    const baselineLazyPath = await lazyAsset(baseline.root, baseline.identity.script);
+    const candidateLazyPath = await lazyAsset(bundleSet.candidate.root, bundleSet.candidate.identity.script);
+    if (baselineLazyPath === candidateLazyPath) throw new Error(`CACHE_RECOVERY: synthetic lazy asset URL was reused: ${baselineLazyPath}`);
+    const baselineLazyHash = await fileSha256(join(baseline.root, baselineLazyPath.slice(1)));
+    const candidateLazyHash = await fileSha256(join(bundleSet.candidate.root, candidateLazyPath.slice(1)));
+    if (baselineLazyHash === candidateLazyHash) throw new Error('CACHE_RECOVERY: synthetic lazy asset bytes were not distinct');
+    const warmedBaseline = await observeBrowserAsset(page, baselineLazyPath, true);
+    assert.equal(warmedBaseline.ok, true);
+    assert.equal(warmedBaseline.status, 200);
+    assert.equal(warmedBaseline.cacheControl, 'public, max-age=31536000, immutable');
+    assert.equal(warmedBaseline.sha256, baselineLazyHash);
+    const warmedState = await control(info, '/state');
+    const warmedBaselineRequests = warmedState.requests.filter((request: { release: string; path: string }) => request.release === 'old' && request.path === baselineLazyPath).length;
+    if (warmedBaselineRequests < 1) throw new Error(`CACHE_RECOVERY: baseline lazy asset was not requested: ${baselineLazyPath}`);
     await page.goto(info.setup_urls[0], { waitUntil: 'domcontentloaded' });
     await page.locator('button.agent-open[aria-label="Open mobile-ci on alpha"]').waitFor({ timeout: 30_000 });
     await page.evaluate(({ version, assets, build }) => {
@@ -168,6 +212,22 @@ async function main(): Promise<void> {
         && document.documentElement.dataset.herdrCssReady === '1'
         && Boolean(document.querySelector('#app')?.childNodes.length);
     }, undefined, { timeout: 30_000 });
+    const loadedCandidate = await observeBrowserAsset(page, candidateLazyPath, true);
+    if (!loadedCandidate.ok) {
+      const state = await control(info, '/state');
+      throw new Error(`CACHE_RECOVERY: candidate lazy asset response ${JSON.stringify({ loadedCandidate, activeRelease: state.active_release, requests: state.requests.slice(-8) })}`);
+    }
+    assert.equal(loadedCandidate.ok, true, JSON.stringify(loadedCandidate));
+    assert.equal(loadedCandidate.status, 200, JSON.stringify(loadedCandidate));
+    assert.equal(loadedCandidate.cacheControl, 'public, max-age=31536000, immutable');
+    assert.equal(loadedCandidate.sha256, candidateLazyHash);
+    const upgradedState = await control(info, '/state');
+    const upgradedBaselineRequests = upgradedState.requests.filter((request: { release: string; path: string }) => request.release === 'old' && request.path === baselineLazyPath).length;
+    const candidateRequests = upgradedState.requests.filter((request: { release: string; path: string }) => request.release === 'candidate' && request.path === candidateLazyPath).length;
+    if (upgradedBaselineRequests !== warmedBaselineRequests) {
+      throw new Error(`CACHE_RECOVERY: warmed baseline lazy asset was requested again after activation: ${baselineLazyPath}`);
+    }
+    if (candidateRequests < 1) throw new Error(`CACHE_RECOVERY: candidate lazy asset was not requested after activation: ${candidateLazyPath}`);
     const targetRuntime = await page.evaluate(() => ({
       pathname: location.pathname,
       script: document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/app"]')?.src || '',

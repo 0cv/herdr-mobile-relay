@@ -5,7 +5,6 @@
   import ActivityView from '$components/ActivityView.svelte';
   import AgentList from '$components/AgentList.svelte';
   import AgentRail from '$components/AgentRail.svelte';
-  import ConversationHistory from '$components/ConversationHistory.svelte';
   import LaunchView from '$components/LaunchView.svelte';
   import GlobalJump from '$components/GlobalJump.svelte';
   import LockScreen from '$components/LockScreen.svelte';
@@ -85,6 +84,8 @@
   const automaticUpdateChecks = new Set<string>();
   const awaitedDeployments = new Set<string>();
   let visibilityRevision = $state(0);
+  let conversationHistoryComponent = $state<typeof import('$components/ConversationHistory.svelte')['default'] | null>(null);
+  let conversationHistoryLoadError = $state(false);
   let viewedRelayId = '';
   let viewedTargetSignature = '';
 
@@ -106,6 +107,16 @@
   });
   const activeConnection = $derived(activeAgent ? $connections.get(activeAgent.relay_id) : null);
   const conversationHistoryAvailable = $derived(hasConversationHistory(activeAgent, activeConnection));
+  $effect(() => {
+    if ($currentView.view !== 'history' || !activeAgent || conversationHistoryComponent) return;
+    void import('$components/ConversationHistory.svelte')
+      .then(({ default: component }) => {
+        conversationHistoryComponent = component;
+      })
+      .catch(() => {
+        conversationHistoryLoadError = true;
+      });
+  });
   const workspaceInspectionAvailable = $derived(Boolean(
     activeAgent?.cwd
     && activeConnection?.capabilities.includes('workspace_inspection'),
@@ -682,13 +693,24 @@
   {:else if $currentView.view === 'history' && activeAgent}
     {@const openingRoute = $currentView}
     {#key openingRoute}
-      <ConversationHistory
-        agent={activeAgent}
-        readOnly={activeReadOnly}
-        onInitialPage={openingRoute.fallbackToTerminalOnInitialUnavailable
-          ? makeInitialPageHandler(openingRoute)
-          : undefined}
-      />
+      {#if conversationHistoryComponent}
+        {@const HistoryComponent = conversationHistoryComponent}
+        <HistoryComponent
+          agent={activeAgent}
+          readOnly={activeReadOnly}
+          onInitialPage={openingRoute.fallbackToTerminalOnInitialUnavailable
+            ? makeInitialPageHandler(openingRoute)
+            : undefined}
+        />
+      {:else if conversationHistoryLoadError}
+        <main class="page terminal-loading" aria-label="Conversation history failed to load">
+          <p role="alert">Conversation history could not be loaded. Reload the app to try again.</p>
+        </main>
+      {:else}
+        <main class="page terminal-loading" aria-label="Opening conversation history">
+          <p role="status">Opening conversation history…</p>
+        </main>
+      {/if}
     {/key}
   {:else if $currentView.view === 'history'}
     <main class="page terminal-loading" aria-label="Conversation history unavailable">

@@ -102,6 +102,15 @@ type PollToken struct {
 	TopologyGeneration int64
 }
 
+// InventorySnapshot is a coherent copy of the public inventory. Agents,
+// workspaces, and readiness are captured while holding the same State lock so
+// callers never publish a tuple assembled from different commits.
+type InventorySnapshot struct {
+	Status     map[string]any
+	Agents     []*AgentState
+	Workspaces []herdr.Workspace
+}
+
 func NewState(logger *slog.Logger) *State {
 	return &State{
 		agents:        make(map[string]*AgentState),
@@ -232,6 +241,10 @@ func (s *State) MarkTopologyDegraded() {
 func (s *State) InventoryStatus() map[string]any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.inventoryStatusLocked()
+}
+
+func (s *State) inventoryStatusLocked() map[string]any {
 	state := "starting"
 	if s.inventoryReady {
 		state = "ready"
@@ -252,6 +265,19 @@ func (s *State) InventoryStatus() map[string]any {
 		"last_attempt_at": lastAttempt,
 		"last_success_at": lastSuccess,
 		"stale":           state != "ready" && !s.lastSuccessAt.IsZero(),
+	}
+}
+
+// InventorySnapshot returns one independently owned view of the inventory.
+// Keep the lock-held helpers private: calling the public getters while the
+// read lock is held would attempt to acquire the same RWMutex recursively.
+func (s *State) InventorySnapshot() InventorySnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return InventorySnapshot{
+		Status:     s.inventoryStatusLocked(),
+		Agents:     s.snapshotLocked(),
+		Workspaces: cloneWorkspaces(s.workspaces),
 	}
 }
 
@@ -967,10 +993,13 @@ func (s *State) DisplayedStatus(paneID string) string {
 func (s *State) Snapshot() []*AgentState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.snapshotLocked()
+}
 
+func (s *State) snapshotLocked() []*AgentState {
 	result := make([]*AgentState, 0, len(s.agents))
 	for _, a := range s.agents {
-		cp := *a
+		cp := cloneAgentState(a)
 		cp.StateRevision = s.revision[cp.PaneID]
 		cp.Generation = s.generation[cp.PaneID]
 		if doneStatuses[cp.Status] && s.ackDone[cp.PaneID] {
@@ -979,7 +1008,7 @@ func (s *State) Snapshot() []*AgentState {
 		if cp.Status == "idle" && s.unseenDone[cp.PaneID] {
 			cp.Status = "done"
 		}
-		result = append(result, &cp)
+		result = append(result, cp)
 	}
 	// s.agents is a map; without an explicit order every snapshot serializes
 	// differently, which defeats broadcast dedupe and hands clients a
@@ -1016,6 +1045,23 @@ func (s *State) Workspaces() []herdr.Workspace {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneWorkspaces(s.workspaces)
+}
+
+func cloneAgentState(agent *AgentState) *AgentState {
+	if agent == nil {
+		return nil
+	}
+	copy := *agent
+	copy.Options = append([]string(nil), agent.Options...)
+	if agent.Interaction != nil {
+		interaction := *agent.Interaction
+		interaction.Options = append([]question.Option(nil), agent.Interaction.Options...)
+		for index := range interaction.Options {
+			interaction.Options[index].Summary = append([]question.SummaryEntry(nil), interaction.Options[index].Summary...)
+		}
+		copy.Interaction = &interaction
+	}
+	return &copy
 }
 
 func (s *State) Workspace(workspaceID string) (herdr.Workspace, bool) {
@@ -1077,10 +1123,10 @@ func (s *State) Agent(paneID string) (*AgentState, bool) {
 	if !ok {
 		return nil, false
 	}
-	copy := *agent
+	copy := cloneAgentState(agent)
 	copy.StateRevision = s.revision[paneID]
 	copy.Generation = s.generation[paneID]
-	return &copy, true
+	return copy, true
 }
 
 func (s *State) TopologyGeneration() int64 {

@@ -1,7 +1,7 @@
 package conversation
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
@@ -59,12 +59,14 @@ type BrowseProgress struct {
 }
 
 type BrowseDiagnostics struct {
-	OversizedRecords int  `json:"oversized_records"`
-	CorruptRecords   int  `json:"corrupt_records"`
-	OmittedTools     int  `json:"omitted_tools,omitempty"`
-	OmittedPayloads  int  `json:"omitted_payloads,omitempty"`
-	PlanCorrupt      bool `json:"plan_corrupt,omitempty"`
-	SourceTruncated  bool `json:"source_truncated,omitempty"`
+	OversizedRecords       int    `json:"oversized_records"`
+	CorruptRecords         int    `json:"corrupt_records"`
+	OmittedTools           int    `json:"omitted_tools,omitempty"`
+	OmittedPayloads        int    `json:"omitted_payloads,omitempty"`
+	PlanCorrupt            bool   `json:"plan_corrupt,omitempty"`
+	SourceTruncated        bool   `json:"source_truncated,omitempty"`
+	ContinuationIncomplete bool   `json:"continuation_incomplete,omitempty"`
+	ContinuationReason     string `json:"continuation_reason,omitempty"`
 }
 
 type BrowseError struct {
@@ -92,34 +94,42 @@ type BrowsePage struct {
 }
 
 type BrowserOptions struct {
-	RecentBytes        int64
-	MaxRecordBytes     int64
-	DefaultPageSize    int
-	MaxPageSize        int
-	ResponseBytes      int
-	ActiveWorkers      int
-	QueuedPreparations int
-	InterestLease      time.Duration
-	SnapshotTTL        time.Duration
-	SnapshotQuota      int64
-	AggregateQuota     int64
-	CursorTTL          time.Duration
+	RecentBytes          int64
+	MaxRecordBytes       int64
+	DefaultPageSize      int
+	MaxPageSize          int
+	ResponseBytes        int
+	ActiveWorkers        int
+	QueuedPreparations   int
+	InterestLease        time.Duration
+	SnapshotTTL          time.Duration
+	SnapshotQuota        int64
+	AggregateQuota       int64
+	CursorTTL            time.Duration
+	RecentCacheEntries   int
+	RecentCacheItemBytes int64
+	RecentCacheBytes     int64
+	RecentCacheTTL       time.Duration
 }
 
 func DefaultBrowserOptions() BrowserOptions {
 	return BrowserOptions{
-		RecentBytes:        maxConversationBytes,
-		MaxRecordBytes:     16 * 1024 * 1024,
-		DefaultPageSize:    defaultPageSize,
-		MaxPageSize:        maxPageSize,
-		ResponseBytes:      2 * 1024 * 1024,
-		ActiveWorkers:      1,
-		QueuedPreparations: 4,
-		InterestLease:      30 * time.Second,
-		SnapshotTTL:        15 * time.Minute,
-		SnapshotQuota:      512 * 1024 * 1024,
-		AggregateQuota:     1024 * 1024 * 1024,
-		CursorTTL:          15 * time.Minute,
+		RecentBytes:          maxConversationBytes,
+		MaxRecordBytes:       16 * 1024 * 1024,
+		DefaultPageSize:      defaultPageSize,
+		MaxPageSize:          maxPageSize,
+		ResponseBytes:        2 * 1024 * 1024,
+		ActiveWorkers:        1,
+		QueuedPreparations:   4,
+		InterestLease:        30 * time.Second,
+		SnapshotTTL:          15 * time.Minute,
+		SnapshotQuota:        512 * 1024 * 1024,
+		AggregateQuota:       1024 * 1024 * 1024,
+		CursorTTL:            15 * time.Minute,
+		RecentCacheEntries:   4,
+		RecentCacheItemBytes: 16 * 1024 * 1024,
+		RecentCacheBytes:     64 * 1024 * 1024,
+		RecentCacheTTL:       60 * time.Second,
 	}
 }
 
@@ -164,6 +174,18 @@ func (o BrowserOptions) normalized() BrowserOptions {
 	if o.CursorTTL < time.Second {
 		o.CursorTTL = defaults.CursorTTL
 	}
+	if o.RecentCacheEntries < 1 {
+		o.RecentCacheEntries = defaults.RecentCacheEntries
+	}
+	if o.RecentCacheItemBytes < 1 {
+		o.RecentCacheItemBytes = defaults.RecentCacheItemBytes
+	}
+	if o.RecentCacheBytes < 1 {
+		o.RecentCacheBytes = defaults.RecentCacheBytes
+	}
+	if o.RecentCacheTTL < time.Millisecond {
+		o.RecentCacheTTL = defaults.RecentCacheTTL
+	}
 	return o
 }
 
@@ -203,25 +225,36 @@ type browseJob struct {
 	snapshotID  string
 	index       *snapshotIndex
 
-	mu               sync.RWMutex
-	state            BrowseState
-	phase            string
-	scannedBytes     int64
-	sourceBytes      int64
-	diagnostics      BrowseDiagnostics
-	plan             *OMOTodoState
-	total            int
-	err              *BrowseError
-	lastInterest     time.Time
-	readers          int
-	validatedSize    int64
-	validatedModTime int64
-	sourceDigest     string
-	autoRetried      bool
-	queued           bool
-	running          bool
-	lastAccess       time.Time
-	retired          bool
+	mu                     sync.RWMutex
+	state                  BrowseState
+	phase                  string
+	scannedBytes           int64
+	sourceBytes            int64
+	diagnostics            BrowseDiagnostics
+	plan                   *OMOTodoState
+	total                  int
+	err                    *BrowseError
+	lastInterest           time.Time
+	readers                int
+	validatedSize          int64
+	validatedModTime       int64
+	validatedChangeToken   string
+	sourceDigest           string
+	chainContextID         string
+	chainSegment           int
+	chainFooterStart       int64
+	chainFooterEnd         int64
+	chainFooterDigest      string
+	chainObservedRanges    []claudeRangeEvidence
+	chainValidationKey     string
+	chainValidationRunning bool
+	chainValidationErr     error
+	chainValidationDone    bool
+	autoRetried            bool
+	queued                 bool
+	running                bool
+	lastAccess             time.Time
+	retired                bool
 }
 
 type Browser struct {
@@ -237,19 +270,42 @@ type Browser struct {
 	done   chan *browseJob
 	closed chan struct{}
 
-	mu      sync.Mutex
-	jobs    map[string]*browseJob
-	dedup   map[string]string
-	queue   []*browseJob
-	active  int
-	closing bool
+	mu                    sync.Mutex
+	jobs                  map[string]*browseJob
+	dedup                 map[string]string
+	queue                 []*browseJob
+	chains                map[string]*claudeChainContext
+	chainByKey            map[string]string
+	chainLineage          map[string]claudeChainLineage
+	chainLineageIdentity  map[string]claudeChainLineageIdentity
+	chainValidations      map[string]*claudeChainValidation
+	chainCompactions      map[string]*claudeChainEvidenceCompaction
+	chainValidationActive int
+	chainCompactionActive int
+	chainReservations     int
+	active                int
+	closing               bool
 
-	schedulerWG sync.WaitGroup
-	workerWG    sync.WaitGroup
-	readWG      sync.WaitGroup
-	closeOnce   sync.Once
+	schedulerWG  sync.WaitGroup
+	workerWG     sync.WaitGroup
+	readWG       sync.WaitGroup
+	validationWG sync.WaitGroup
+	closeOnce    sync.Once
 
-	sourceReadObserver func(int64)
+	sourceReadObserver               func(int64)
+	recentReadObserver               func(int64)
+	physicalReadObserver             func(int64)
+	foregroundReadObserver           func(int64)
+	backgroundReadObserver           func(int64)
+	chainQueueAdmissionObserver      func(*browseJob)
+	validationReadObserver           func(int64)
+	discoveryReadObserver            func(int64)
+	chainPreparationObserver         func()
+	chainCompactionObserver          func()
+	chainContextAdmissionObserver    func(claudeChain, bool)
+	chainWorkerCaptureObserver       func([]claudeRangeEvidence)
+	chainWorkerBeforeCaptureObserver func()
+	recentCache                      *recentProjectionCache
 }
 
 func NewBrowser(reader *Reader, cacheRoot string, options BrowserOptions) (*Browser, error) {
@@ -270,6 +326,10 @@ func NewBrowser(reader *Reader, cacheRoot string, options BrowserOptions) (*Brow
 		reader: reader, cacheRoot: cacheRoot, options: options, key: key, cacheErr: cacheErr,
 		ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), done: make(chan *browseJob, options.ActiveWorkers+1),
 		closed: make(chan struct{}), jobs: make(map[string]*browseJob), dedup: make(map[string]string),
+		recentCache: newRecentProjectionCache(options),
+		chains:      make(map[string]*claudeChainContext), chainByKey: make(map[string]string),
+		chainLineage: make(map[string]claudeChainLineage), chainLineageIdentity: make(map[string]claudeChainLineageIdentity),
+		chainValidations: make(map[string]*claudeChainValidation), chainCompactions: make(map[string]*claudeChainEvidenceCompaction),
 	}
 	browser.schedulerWG.Add(1)
 	go browser.scheduler()
@@ -338,6 +398,7 @@ func (b *Browser) Close() error {
 		b.schedulerWG.Wait()
 		b.workerWG.Wait()
 		b.readWG.Wait()
+		b.validationWG.Wait()
 		b.mu.Lock()
 		jobs := make([]*browseJob, 0, len(b.jobs))
 		for _, job := range b.jobs {
@@ -345,7 +406,19 @@ func (b *Browser) Close() error {
 		}
 		b.jobs = make(map[string]*browseJob)
 		b.dedup = make(map[string]string)
+		b.chains = make(map[string]*claudeChainContext)
+		b.chainByKey = make(map[string]string)
+		b.chainLineage = make(map[string]claudeChainLineage)
+		b.chainLineageIdentity = make(map[string]claudeChainLineageIdentity)
+		b.chainValidations = make(map[string]*claudeChainValidation)
+		b.chainCompactions = make(map[string]*claudeChainEvidenceCompaction)
+		b.chainValidationActive = 0
+		b.chainCompactionActive = 0
+		b.chainReservations = 0
 		b.mu.Unlock()
+		if b.recentCache != nil {
+			b.recentCache.clear()
+		}
 		for _, job := range jobs {
 			job.mu.Lock()
 			job.retired = true
@@ -428,6 +501,93 @@ func (b *Browser) observeSourceRead(bytes int64) {
 	}
 }
 
+func (b *Browser) observeRecentRead(bytes int64) {
+	if b.recentReadObserver != nil {
+		b.recentReadObserver(bytes)
+	}
+}
+
+func (b *Browser) observePhysicalRead(bytes int64) {
+	b.observeForegroundRead(bytes)
+	if b.physicalReadObserver != nil {
+		b.physicalReadObserver(bytes)
+	}
+}
+
+func (b *Browser) observeDiscoveryRead(bytes int64) {
+	b.observeForegroundRead(bytes)
+	if b.discoveryReadObserver != nil {
+		b.discoveryReadObserver(bytes)
+	}
+}
+
+// observeRangeRead accounts a source range consumed by browser validation.
+// The dedicated validation hook makes the physical validation pass visible
+// without charging it to the recent-projection budget hook. Validation is
+// deliberately accounted separately from recent-page admission; it is owned
+// by the bounded validation scheduler below.
+func (b *Browser) observeRangeRead(bytes int64) {
+	if bytes <= 0 {
+		return
+	}
+	b.observeSourceRead(bytes)
+}
+
+// observeValidationPhysicalRead is called by the bounded digest pass for the
+// bytes actually returned by the file reader. Keep the legacy source-range
+// accounting above separate: it describes the logical obligation, while this
+// hook lets tests and diagnostics measure physical validation I/O.
+func (b *Browser) observeValidationPhysicalRead(bytes int64) {
+	b.observeForegroundRead(bytes)
+	if bytes <= 0 {
+		return
+	}
+	if b.validationReadObserver != nil {
+		b.validationReadObserver(bytes)
+	}
+}
+
+func (b *Browser) observeForegroundRead(bytes int64) {
+	if bytes > 0 && b.foregroundReadObserver != nil {
+		b.foregroundReadObserver(bytes)
+	}
+}
+
+func (b *Browser) observeBackgroundRead(bytes int64) error {
+	if bytes > 0 {
+		if b.backgroundReadObserver != nil {
+			b.backgroundReadObserver(bytes)
+		}
+		if b.validationReadObserver != nil {
+			b.validationReadObserver(bytes)
+		}
+	}
+	return nil
+}
+
+func (b *Browser) observeValidationRead(bytes int64) error {
+	b.observeValidationPhysicalRead(bytes)
+	return nil
+}
+
+func (b *Browser) observeChainPreparationScan() {
+	if b.chainPreparationObserver != nil {
+		b.chainPreparationObserver()
+	}
+}
+
+func (b *Browser) observeChainCompactionPhase() {
+	if b.chainCompactionObserver != nil {
+		b.chainCompactionObserver()
+	}
+}
+
+func (b *Browser) observeChainWorkerCapture(evidence []claudeRangeEvidence) {
+	if b.chainWorkerCaptureObserver != nil {
+		b.chainWorkerCaptureObserver(append([]claudeRangeEvidence(nil), evidence...))
+	}
+}
+
 func (b *Browser) evictExpired(now time.Time) {
 	var expired []expiredJob
 	b.mu.Lock()
@@ -447,6 +607,30 @@ func (b *Browser) evictExpired(now time.Time) {
 			expired = append(expired, expiredJob{index: index, sourceFile: sourceFile})
 		}
 		job.mu.Unlock()
+	}
+	for id, chain := range b.chains {
+		if chain.refs == 0 && now.Sub(chain.lastAccess) >= b.options.CursorTTL {
+			delete(b.chains, id)
+			if b.chainByKey[chain.key] == id {
+				delete(b.chainByKey, chain.key)
+			}
+		}
+	}
+	for scopeID, lineage := range b.chainLineage {
+		if now.Sub(lineage.lastAccess) >= b.options.CursorTTL {
+			delete(b.chainLineage, scopeID)
+			delete(b.chainLineageIdentity, scopeID)
+			for key, task := range b.chainCompactions {
+				if task.scopeID == scopeID {
+					delete(b.chainCompactions, key)
+				}
+			}
+		}
+	}
+	for scopeID, identity := range b.chainLineageIdentity {
+		if _, retained := b.chainLineage[scopeID]; !retained && now.Sub(identity.lastAccess) >= b.options.CursorTTL {
+			delete(b.chainLineageIdentity, scopeID)
+		}
 	}
 	b.mu.Unlock()
 	for _, item := range expired {
@@ -541,6 +725,9 @@ func browseErrorFor(code, message string, retryable bool) *BrowseError {
 
 func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo bool) (BrowsePage, error) {
 	if request.Cursor == "" {
+		if !omo && isClaudeProvider(request.Scope.Provider) {
+			return b.readClaudeChainPage(ctx, request)
+		}
 		return b.readRecentFilePage(ctx, request, omo)
 	}
 	cursor, err := decodeBrowseCursor(b.key, request.Cursor, request.Scope)
@@ -555,6 +742,11 @@ func (b *Browser) readFilePage(ctx context.Context, request BrowseRequest, omo b
 		return b.readPreparePage(ctx, request, cursor, omo)
 	case "snapshot":
 		return b.readSnapshotCursorPage(ctx, request, cursor)
+	case "chain":
+		if !isClaudeProvider(request.Scope.Provider) {
+			return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
+		}
+		return b.readClaudeChainCursorPage(ctx, request, cursor)
 	default:
 		return browseFailure(true, "invalid_cursor", "This history cursor is invalid for the requested conversation.", browseErrorFor("invalid_cursor", "This history cursor is invalid for the requested conversation.", false)), nil
 	}
@@ -588,14 +780,27 @@ func (b *Browser) sourceFor(scope BrowseScope, omo bool) (fileSource, string) {
 }
 
 func captureFileSource(location Location) (fileSource, error) {
-	if location.Path == "" || location.Root == "" {
-		return fileSource{}, errors.New("conversation source is not contained")
-	}
-	resolved := containedRegularFile(location.Path, location.Root)
-	if resolved == "" || filepath.Clean(resolved) != filepath.Clean(location.Path) {
-		return fileSource{}, errors.New("conversation source is not contained")
-	}
-	file, err := openConversationSource(location.Path)
+	return captureFileSourceWithObserver(location, nil)
+}
+
+// captureFileSourceWithObserver is the same containment-checked source open,
+// with an optional accounting hook for the bounded identity-anchor read. The
+// hook is called with bytes actually returned by the source read.
+func captureFileSourceWithObserver(location Location, observe func(int64) error) (fileSource, error) {
+	return captureFileSourceWithHooks(location, nil, observe)
+}
+
+// captureFileSourceWithReserve lets bounded foreground callers reserve the
+// requested anchor before ReadAt. A post-read observer still receives the
+// actual bytes; reserving first prevents a large filesystem read from
+// overshooting the remaining request allowance before the callback can reject
+// it.
+func captureFileSourceWithReserve(location Location, reserve func(int64) error, observe func(int64) error) (fileSource, error) {
+	return captureFileSourceWithHooks(location, reserve, observe)
+}
+
+func captureFileSourceWithHooks(location Location, reserve func(int64) error, observe func(int64) error) (fileSource, error) {
+	file, info, err := openContainedConversationFile(location)
 	if err != nil {
 		return fileSource{}, err
 	}
@@ -605,22 +810,7 @@ func captureFileSource(location Location) (fileSource, error) {
 			_ = file.Close()
 		}
 	}()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		if err == nil {
-			err = errors.New("conversation source is not a regular file")
-		}
-		return fileSource{}, err
-	}
-	resolvedAgain, err := filepath.EvalSymlinks(location.Path)
-	if err != nil || filepath.Clean(resolvedAgain) != filepath.Clean(location.Path) || containedRegularFile(location.Path, location.Root) != location.Path {
-		return fileSource{}, errors.New("conversation source changed while opening")
-	}
-	pathInfo, err := os.Stat(location.Path)
-	if err != nil || !pathInfo.Mode().IsRegular() || !os.SameFile(info, pathInfo) {
-		return fileSource{}, errors.New("conversation source changed while opening")
-	}
-	revision, err := fileRevision(file, info)
+	revision, err := fileRevisionWithReservation(file, info, reserve, observe)
 	if err != nil {
 		return fileSource{}, err
 	}
@@ -628,7 +818,58 @@ func captureFileSource(location Location) (fileSource, error) {
 	return fileSource{location: location, path: location.Path, file: file, info: info, end: info.Size(), revision: revision}, nil
 }
 
+// openContainedConversationFile performs the same no-follow, regular-file,
+// containment, and identity checks as a source capture without reading any
+// transcript bytes. Completed background validation uses it to recheck the
+// descriptor metadata cheaply before trusting a cached result; charging a
+// second 64 KiB first-record read there would make an aggregate validation
+// request unable to authenticate several segments in one pass.
+func openContainedConversationFile(location Location) (*os.File, os.FileInfo, error) {
+	if location.Path == "" || location.Root == "" {
+		return nil, nil, errors.New("conversation source is not contained")
+	}
+	resolved := containedRegularFile(location.Path, location.Root)
+	if resolved == "" || filepath.Clean(resolved) != filepath.Clean(location.Path) {
+		return nil, nil, errors.New("conversation source is not contained")
+	}
+	file, err := openConversationSource(location.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	closeFile := true
+	defer func() {
+		if closeFile {
+			_ = file.Close()
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		if err == nil {
+			err = errors.New("conversation source is not a regular file")
+		}
+		return nil, nil, err
+	}
+	resolvedAgain, err := filepath.EvalSymlinks(location.Path)
+	if err != nil || filepath.Clean(resolvedAgain) != filepath.Clean(location.Path) || containedRegularFile(location.Path, location.Root) != location.Path {
+		return nil, nil, errors.New("conversation source changed while opening")
+	}
+	pathInfo, err := os.Stat(location.Path)
+	if err != nil || !pathInfo.Mode().IsRegular() || !os.SameFile(info, pathInfo) {
+		return nil, nil, errors.New("conversation source changed while opening")
+	}
+	closeFile = false
+	return file, info, nil
+}
+
 func fileRevision(file *os.File, info os.FileInfo) (string, error) {
+	return fileRevisionWithObserver(file, info, nil)
+}
+
+func fileRevisionWithObserver(file *os.File, info os.FileInfo, observe func(int64) error) (string, error) {
+	return fileRevisionWithReservation(file, info, nil, observe)
+}
+
+func fileRevisionWithReservation(file *os.File, info os.FileInfo, reserve func(int64) error, observe func(int64) error) (string, error) {
 	const anchorBytes = int64(64 * 1024)
 	digest := sha256.New()
 	sectionSize := info.Size()
@@ -636,12 +877,31 @@ func fileRevision(file *os.File, info os.FileInfo) (string, error) {
 		sectionSize = anchorBytes
 	}
 	if sectionSize > 0 {
-		firstRecord, err := bufio.NewReader(io.NewSectionReader(file, 0, sectionSize)).ReadBytes('\n')
-		if len(firstRecord) > 0 {
+		// ReadAt makes the accounting reflect the physical bounded anchor read,
+		// rather than the amount of the first line retained by bufio.ReadBytes.
+		// Reserve the requested read before issuing it so a foreground budget
+		// cannot be exceeded by a filesystem chunk returned before observation.
+		if reserve != nil {
+			if err := reserve(sectionSize); err != nil {
+				return "", err
+			}
+		}
+		anchor := make([]byte, sectionSize)
+		read, readErr := file.ReadAt(anchor, 0)
+		if read > 0 {
+			if observe != nil {
+				if err := observe(int64(read)); err != nil {
+					return "", err
+				}
+			}
+			firstRecord := anchor[:read]
+			if newline := bytes.IndexByte(firstRecord, '\n'); newline >= 0 {
+				firstRecord = firstRecord[:newline+1]
+			}
 			_, _ = digest.Write(firstRecord)
 		}
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", err
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return "", readErr
 		}
 	}
 	result := sha256.New()
@@ -672,11 +932,39 @@ func fileIdentity(info os.FileInfo) string {
 	return strings.Join(parts, ",")
 }
 
+// fileChangeToken is a mutation token in addition to ModTime. On Unix the
+// change time changes for an in-place rewrite even when a caller restores the
+// modification time; unlike atime, it is not updated by a normal read. The
+// fallback keeps the check useful on platforms whose FileInfo does not expose
+// a change-time field.
+func fileChangeToken(info os.FileInfo) string {
+	if info == nil {
+		return ""
+	}
+	value := reflect.ValueOf(info.Sys())
+	if value.IsValid() && value.Kind() == reflect.Pointer && !value.IsNil() {
+		value = value.Elem()
+	}
+	if value.IsValid() && value.Kind() == reflect.Struct {
+		for _, name := range []string{"Ctim", "Ctimespec", "ChangeTime", "CTime"} {
+			field := value.FieldByName(name)
+			if field.IsValid() && field.CanInterface() {
+				return name + "=" + fmt.Sprint(field.Interface())
+			}
+		}
+	}
+	return fmt.Sprintf("mtime=%d", info.ModTime().UnixNano())
+}
+
 func writeFileRange(ctx context.Context, file *os.File, start, end int64, output io.Writer) error {
 	return writeFileRangeChecked(ctx, file, start, end, output, nil)
 }
 
 func writeFileRangeChecked(ctx context.Context, file *os.File, start, end int64, output io.Writer, checkpoint func() error) error {
+	return writeFileRangeObserved(ctx, file, start, end, output, checkpoint, nil)
+}
+
+func writeFileRangeObserved(ctx context.Context, file *os.File, start, end int64, output io.Writer, checkpoint func() error, observe func(int64) error) error {
 	if start < 0 || end < start {
 		return errors.New("invalid file range")
 	}
@@ -697,6 +985,11 @@ func writeFileRangeChecked(ctx context.Context, file *os.File, start, end int64,
 		}
 		read, err := section.Read(buffer[:want])
 		if read > 0 {
+			if observe != nil {
+				if observeErr := observe(int64(read)); observeErr != nil {
+					return observeErr
+				}
+			}
 			if _, writeErr := output.Write(buffer[:read]); writeErr != nil {
 				return writeErr
 			}
@@ -720,6 +1013,10 @@ func fileRangeDigest(ctx context.Context, file *os.File, start, end int64) (stri
 }
 
 func fileRangeDigestChecked(ctx context.Context, file *os.File, start, end int64, checkpoint func() error) (string, error) {
+	return fileRangeDigestObserved(ctx, file, start, end, checkpoint, nil)
+}
+
+func fileRangeDigestObserved(ctx context.Context, file *os.File, start, end int64, checkpoint func() error, observe func(int64) error) (string, error) {
 	if file == nil {
 		return "", errors.New("conversation source is closed")
 	}
@@ -731,7 +1028,7 @@ func fileRangeDigestChecked(ctx context.Context, file *os.File, start, end int64
 		return "", err
 	}
 	digest := sha256.New()
-	if err := writeFileRangeChecked(ctx, file, start, end, digest, checkpoint); err != nil {
+	if err := writeFileRangeObserved(ctx, file, start, end, digest, checkpoint, observe); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
@@ -754,32 +1051,13 @@ func (b *Browser) readRecentFilePage(ctx context.Context, request BrowseRequest,
 		}
 		return browseFailure(true, "source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true)), nil
 	}
-	records, oversized, err := collectJSONLRecords(ctx, source.file, start, source.end, b.options.MaxRecordBytes, nil)
+	projection, err := b.projectRecentRange(ctx, request.Scope, source, start, source.end, digest, omo)
 	if err != nil {
 		return b.recordReadFailure(err), nil
 	}
-	projector := newMemoryProjector(request.Scope.Provider, source.revision)
-	diagnostics := BrowseDiagnostics{OversizedRecords: oversized, SourceTruncated: start > 0}
-	for _, record := range records {
-		result := projector.apply(record)
-		diagnostics.CorruptRecords += result.Diagnostics.CorruptRecords
-		diagnostics.OmittedTools += result.Diagnostics.OmittedTools
-		diagnostics.OmittedPayloads += result.Diagnostics.OmittedPayloads
-		diagnostics.PlanCorrupt = diagnostics.PlanCorrupt || result.Diagnostics.PlanCorrupt
-	}
-	if omo && projector.todoSeen && !projector.todoValid {
-		diagnostics.CorruptRecords++
-		diagnostics.PlanCorrupt = true
-	}
-	var plan *OMOTodoState
-	if omo && projector.plan != nil {
-		copyPlan := *projector.plan
-		copyPlan.SessionID = request.Scope.SessionID
-		copyPlan.Available = true
-		plan = &copyPlan
-	}
+	projection.Diagnostics.SourceTruncated = start > 0
 	return b.memoryPage(
-		request.Scope, source, projector.entries, diagnostics, plan,
+		request.Scope, source, projection.Entries, projection.Diagnostics, projection.Plan,
 		start, source.end, digest, source.end, true, request.Limit,
 	), nil
 }
@@ -804,7 +1082,7 @@ func (b *Browser) recordReadFailure(err error) BrowsePage {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return browseFailure(true, "request_cancelled", "History request was cancelled.", browseErrorFor("request_cancelled", "History request was cancelled.", true))
 	}
-	if errors.Is(err, errJSONLSourceTruncated) {
+	if errors.Is(err, errJSONLSourceTruncated) || errors.Is(err, errRecentProjectionChanged) {
 		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false))
 	}
 	return browseFailure(true, "source_unavailable", "The conversation source could not be read.", browseErrorFor("source_unavailable", "The conversation source could not be read.", true))
@@ -841,32 +1119,13 @@ func (b *Browser) readRecentCursorPage(ctx context.Context, request BrowseReques
 	if digest != cursor.RangeDigest {
 		return browseFailure(true, "source_changed", "The conversation source changed while history was being browsed.", browseErrorFor("source_changed", "The conversation source changed while history was being browsed.", false)), nil
 	}
-	records, oversized, err := collectJSONLRecords(ctx, source.file, start, end, b.options.MaxRecordBytes, nil)
+	projection, err := b.projectRecentRange(ctx, request.Scope, source, start, end, digest, omo)
 	if err != nil {
 		return b.recordReadFailure(err), nil
 	}
-	projector := newMemoryProjector(request.Scope.Provider, source.revision)
-	diagnostics := BrowseDiagnostics{OversizedRecords: oversized, SourceTruncated: start > 0}
-	for _, record := range records {
-		result := projector.apply(record)
-		diagnostics.CorruptRecords += result.Diagnostics.CorruptRecords
-		diagnostics.OmittedTools += result.Diagnostics.OmittedTools
-		diagnostics.OmittedPayloads += result.Diagnostics.OmittedPayloads
-		diagnostics.PlanCorrupt = diagnostics.PlanCorrupt || result.Diagnostics.PlanCorrupt
-	}
-	if omo && projector.todoSeen && !projector.todoValid {
-		diagnostics.CorruptRecords++
-		diagnostics.PlanCorrupt = true
-	}
-	var plan *OMOTodoState
-	if omo && projector.plan != nil {
-		copyPlan := *projector.plan
-		copyPlan.SessionID = request.Scope.SessionID
-		copyPlan.Available = true
-		plan = &copyPlan
-	}
+	projection.Diagnostics.SourceTruncated = start > 0
 	return b.memoryPage(
-		request.Scope, source, projector.entries, diagnostics, plan,
+		request.Scope, source, projection.Entries, projection.Diagnostics, projection.Plan,
 		start, end, digest, boundary, false, request.Limit,
 	), nil
 }
@@ -1154,7 +1413,7 @@ func (b *Browser) readPreparePage(ctx context.Context, request BrowseRequest, cu
 		}
 		return b.continueJob(ctx, request, job)
 	}
-	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, omo)
+	job, page := b.createJob(request.Scope, source, start, end, boundary, cursor.RangeDigest, omo, "", -1)
 	if page != nil {
 		return *page, nil
 	}
@@ -1228,7 +1487,14 @@ func (b *Browser) jobMatches(job *browseJob, scope BrowseScope, source fileSourc
 		job.rangeStart == start && job.rangeEnd == end && job.boundary == boundary && job.rangeDigest == digest
 }
 
-func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, omo bool) (*browseJob, *BrowsePage) {
+type claudeChainJobBinding struct {
+	footerStart    int64
+	footerEnd      int64
+	footerDigest   string
+	observedRanges []claudeRangeEvidence
+}
+
+func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, boundary int64, digest string, omo bool, chainContextID string, chainSegment int, bindings ...claudeChainJobBinding) (*browseJob, *BrowsePage) {
 	if b.cacheErr != nil {
 		page := browseFailure(true, "index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
 		return nil, &page
@@ -1238,7 +1504,7 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		return nil, &page
 	}
 	scopeID := browseScopeID(scope)
-	dedupKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s", scopeID, source.revision, start, end, boundary, digest)
+	dedupKey := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%d", scopeID, source.revision, start, end, boundary, digest, chainContextID, chainSegment)
 	b.mu.Lock()
 	if id := b.dedup[dedupKey]; id != "" {
 		job := b.jobs[id]
@@ -1282,9 +1548,17 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 		page := browseFailure(true, "index_storage_unavailable", "Older history cannot be prepared on this computer right now.", browseErrorFor("index_storage_unavailable", "Older history cannot be prepared on this computer right now.", true))
 		return nil, &page
 	}
+	var binding claudeChainJobBinding
+	if len(bindings) > 0 {
+		binding = bindings[0]
+		binding.observedRanges = append([]claudeRangeEvidence(nil), binding.observedRanges...)
+	}
 	job := &browseJob{
 		id: id, dedupKey: dedupKey, scope: scope, scopeID: scopeID, source: source,
 		boundary: boundary, rangeStart: start, rangeEnd: end, rangeDigest: digest,
+		chainContextID: chainContextID, chainSegment: chainSegment,
+		chainFooterStart: binding.footerStart, chainFooterEnd: binding.footerEnd,
+		chainFooterDigest: binding.footerDigest, chainObservedRanges: binding.observedRanges,
 		snapshotID: snapshotID, index: index, state: BrowsePreparing, phase: "queued",
 		sourceBytes: source.end, lastInterest: time.Now(), lastAccess: time.Now(),
 	}
@@ -1305,6 +1579,9 @@ func (b *Browser) createJob(scope BrowseScope, source fileSource, start, end, bo
 	b.queue = append(b.queue, job)
 	b.mu.Unlock()
 	b.signalWake()
+	if chainContextID != "" && b.chainQueueAdmissionObserver != nil {
+		b.chainQueueAdmissionObserver(job)
+	}
 	return job, nil
 }
 
@@ -1363,9 +1640,13 @@ func (b *Browser) continueJob(ctx context.Context, request BrowseRequest, job *b
 	return b.readSnapshotPage(ctx, request.Scope, request.Limit, job)
 }
 
-func (b *Browser) retryJob(ctx context.Context, job *browseJob) bool {
+func (b *Browser) retryJob(ctx context.Context, job *browseJob, foreground ...*claudeChainForegroundBudget) bool {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	var foregroundBudget *claudeChainForegroundBudget
+	if len(foreground) > 0 {
+		foregroundBudget = foreground[0]
 	}
 	job.mu.RLock()
 	scope := job.scope
@@ -1373,11 +1654,30 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob) bool {
 	rangeStart := job.rangeStart
 	rangeEnd := job.rangeEnd
 	rangeDigest := job.rangeDigest
+	chainContextID := job.chainContextID
+	chainLocation := job.source.location
+	chainFooterStart := job.chainFooterStart
+	chainFooterEnd := job.chainFooterEnd
+	chainFooterDigest := job.chainFooterDigest
 	job.mu.RUnlock()
 	omo := normalizedAgent(scope.Provider) == "omo" || normalizedAgent(scope.Provider) == "ohmyopencode"
-	source, code := b.sourceFor(scope, omo)
-	if code != "" {
+	var source fileSource
+	var code string
+	var err error
+	if chainContextID != "" {
+		source, err = b.captureClaudeChainSource(chainLocation, foregroundBudget)
+	} else {
+		source, code = b.sourceFor(scope, omo)
+	}
+	if err != nil || code != "" {
 		return false
+	}
+	if chainContextID != "" {
+		if chainFooterStart < 0 || chainFooterEnd < chainFooterStart {
+			source.close()
+			return false
+		}
+		source.end = rangeEnd
 	}
 	sourceOwned := true
 	defer func() {
@@ -1388,7 +1688,12 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob) bool {
 	if source.revision != sourceRevision || source.end < rangeEnd {
 		return false
 	}
-	if digest, err := fileRangeDigest(ctx, source.file, rangeStart, rangeEnd); err != nil || digest != rangeDigest {
+	if chainContextID != "" {
+		digest, digestErr := b.digestClaudeChainValidationRange(ctx, source.file, chainFooterStart, chainFooterEnd, foregroundBudget)
+		if digestErr != nil || digest != chainFooterDigest {
+			return false
+		}
+	} else if digest, err := fileRangeDigest(ctx, source.file, rangeStart, rangeEnd); err != nil || digest != rangeDigest {
 		return false
 	}
 	b.mu.Lock()
@@ -1435,6 +1740,11 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob) bool {
 	job.sourceDigest = ""
 	job.validatedSize = 0
 	job.validatedModTime = 0
+	job.validatedChangeToken = ""
+	job.chainValidationKey = ""
+	job.chainValidationRunning = false
+	job.chainValidationErr = nil
+	job.chainValidationDone = false
 	job.err = nil
 	job.queued = true
 	job.lastInterest = time.Now()
@@ -1449,6 +1759,9 @@ func (b *Browser) retryJob(ctx context.Context, job *browseJob) bool {
 		_ = oldIndex.remove()
 	}
 	b.signalWake()
+	if job.chainContextID != "" && b.chainQueueAdmissionObserver != nil {
+		b.chainQueueAdmissionObserver(job)
+	}
 	return true
 }
 
@@ -1601,7 +1914,8 @@ func validateSnapshotSource(source fileSource) error {
 		}
 		return err
 	}
-	if !os.SameFile(source.info, info) || info.Size() < source.end {
+	if !os.SameFile(source.info, info) || info.Size() < source.end ||
+		info.Size() == source.end && fileChangeToken(source.info) != "" && fileChangeToken(info) != fileChangeToken(source.info) {
 		return errors.New("conversation source changed")
 	}
 	pathInfo, err := os.Stat(source.path)
@@ -1615,7 +1929,136 @@ func validateSnapshotSource(source fileSource) error {
 	return nil
 }
 
-func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, source fileSource) error {
+func (b *Browser) ensureClaudeChainJobValidation(job *browseJob, source fileSource, expectedDigest string) error {
+	if job == nil || source.file == nil || expectedDigest == "" {
+		return errors.New("conversation snapshot has no source digest")
+	}
+	currentInfo, err := source.file.Stat()
+	if err != nil {
+		return err
+	}
+	job.mu.RLock()
+	chainSegment := job.chainSegment
+	chainFooterStart := job.chainFooterStart
+	chainFooterEnd := job.chainFooterEnd
+	chainFooterDigest := job.chainFooterDigest
+	chainEvidence := append([]claudeRangeEvidence(nil), job.chainObservedRanges...)
+	job.mu.RUnlock()
+	candidate := claudeSegment{
+		SessionID: source.location.Path, Location: source.location,
+		CapturedEnd: source.end, FileRevision: source.revision,
+		SourceModTime: source.info.ModTime().UnixNano(), SourceChangeToken: fileChangeToken(source.info),
+		FileIdentity: fileIdentity(source.info),
+		FooterStart:  chainFooterStart, FooterEnd: chainFooterEnd, FooterDigest: chainFooterDigest,
+	}
+	key := fmt.Sprintf("%s:%d:%d:%s:%d:%s", claudeChainValidationKey(candidate, chainEvidence),
+		currentInfo.Size(), currentInfo.ModTime().UnixNano(), fileChangeToken(currentInfo), chainSegment, expectedDigest)
+	job.mu.Lock()
+	if job.chainValidationKey == key {
+		if job.chainValidationRunning {
+			job.mu.Unlock()
+			return errClaudeChainValidationPending
+		}
+		if job.chainValidationDone {
+			err := job.chainValidationErr
+			job.mu.Unlock()
+			if errors.Is(err, errClaudeChainValidationStale) {
+				return errClaudeChainValidationPending
+			}
+			return err
+		}
+	}
+	job.chainValidationKey = key
+	job.chainValidationRunning = true
+	job.chainValidationDone = false
+	job.chainValidationErr = nil
+	job.mu.Unlock()
+
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		job.mu.Lock()
+		job.chainValidationKey = ""
+		job.chainValidationRunning = false
+		job.chainValidationDone = false
+		job.chainValidationErr = errors.New("conversation browser is closed")
+		job.mu.Unlock()
+		return errors.New("conversation browser is closed")
+	}
+	if b.chainValidationActive >= maxClaudeChainValidationTasks {
+		b.mu.Unlock()
+		job.mu.Lock()
+		job.chainValidationKey = ""
+		job.chainValidationRunning = false
+		job.chainValidationDone = false
+		job.mu.Unlock()
+		return errClaudeChainValidationPending
+	}
+	b.chainValidationActive++
+	b.validationWG.Add(1)
+	b.mu.Unlock()
+	location := source.location
+	capturedEnd := source.end
+	expectedSize := currentInfo.Size()
+	expectedModTime := currentInfo.ModTime().UnixNano()
+	expectedChangeToken := fileChangeToken(currentInfo)
+	expectedIdentity := fileIdentity(source.info)
+	go func() {
+		defer b.validationWG.Done()
+		validationErr := error(nil)
+		validated, err := captureFileSourceWithObserver(location, b.observeBackgroundRead)
+		if err != nil {
+			validationErr = err
+		} else {
+			defer validated.close()
+			if expectedIdentity != "" && fileIdentity(validated.info) != expectedIdentity || validated.end < capturedEnd ||
+				expectedChangeToken != "" && validated.end == capturedEnd && fileChangeToken(validated.info) != expectedChangeToken {
+				validationErr = errors.New("conversation source changed")
+			} else {
+				b.observeRangeRead(capturedEnd)
+				var digest string
+				digest, validationErr = fileRangeDigestObserved(b.ctx, validated.file, 0, capturedEnd, nil, b.observeBackgroundRead)
+				if validationErr == nil && digest != expectedDigest {
+					validationErr = errors.New("conversation source changed")
+				}
+				if validationErr == nil {
+					latest, statErr := validated.file.Stat()
+					switch {
+					case statErr != nil || latest.Size() < expectedSize || latest.Size() < capturedEnd:
+						validationErr = errors.New("conversation source changed")
+					case latest.Size() > expectedSize:
+						// The source advanced after this candidate was captured. Do
+						// not admit the result; the next request has a new key.
+						validationErr = errClaudeChainValidationStale
+					case latest.Size() == expectedSize &&
+						(latest.ModTime().UnixNano() != expectedModTime ||
+							expectedChangeToken != "" && fileChangeToken(latest) != expectedChangeToken):
+						validationErr = errors.New("conversation source changed")
+					}
+				}
+			}
+		}
+		job.mu.Lock()
+		if job.chainValidationKey == key {
+			job.chainValidationRunning = false
+			job.chainValidationDone = true
+			job.chainValidationErr = validationErr
+		}
+		job.mu.Unlock()
+		b.mu.Lock()
+		if b.chainValidationActive > 0 {
+			b.chainValidationActive--
+		}
+		b.mu.Unlock()
+	}()
+	return errClaudeChainValidationPending
+}
+
+func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, source fileSource, foreground ...*claudeChainForegroundBudget) error {
+	var foregroundBudget *claudeChainForegroundBudget
+	if len(foreground) > 0 {
+		foregroundBudget = foreground[0]
+	}
 	if err := validateSnapshotSource(source); err != nil {
 		return err
 	}
@@ -1629,17 +2072,54 @@ func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, sourc
 	job.mu.RLock()
 	validatedSize := job.validatedSize
 	validatedModTime := job.validatedModTime
+	validatedChangeToken := job.validatedChangeToken
 	expectedDigest := job.sourceDigest
+	chainContextID := job.chainContextID
+	chainFooterStart := job.chainFooterStart
+	chainFooterEnd := job.chainFooterEnd
+	chainFooterDigest := job.chainFooterDigest
 	job.mu.RUnlock()
 	modTime := info.ModTime().UnixNano()
+	changeToken := fileChangeToken(info)
 	if expectedDigest == "" {
 		return errors.New("conversation snapshot has no source digest")
 	}
-	currentRevision, err := fileRevision(source.file, info)
+	currentRevision, err := fileRevisionWithReservation(source.file, info, reserveClaudeChainPhysical(foregroundBudget), b.observeValidationRead)
+	if errors.Is(err, errClaudeChainForegroundBudget) {
+		return errClaudeChainValidationPending
+	}
 	if err != nil || currentRevision != source.revision {
 		return errors.New("conversation source changed")
 	}
-	if info.Size() == validatedSize && modTime == validatedModTime {
+	if info.Size() == validatedSize && modTime == validatedModTime &&
+		(validatedChangeToken == "" || changeToken == validatedChangeToken) {
+		return nil
+	}
+	if chainContextID != "" && info.Size() >= source.end {
+		// Footer validation gives a cheap early rejection. If the source metadata
+		// changed, the worker-owned captured digest must also authenticate the
+		// entire frozen range. Large ranges are checked by a cancellable browser
+		// validation task rather than by this request goroutine.
+		if chainFooterStart < 0 || chainFooterEnd < chainFooterStart || chainFooterEnd > source.end {
+			return errors.New("conversation source changed")
+		}
+		if chainFooterDigest != "" {
+			digest, digestErr := b.digestClaudeChainValidationRange(ctx, source.file, chainFooterStart, chainFooterEnd, foregroundBudget)
+			if errors.Is(digestErr, errClaudeChainForegroundBudget) {
+				return errClaudeChainValidationPending
+			}
+			if digestErr != nil || digest != chainFooterDigest {
+				return errors.New("conversation source changed")
+			}
+		}
+		if validationErr := b.ensureClaudeChainJobValidation(job, source, expectedDigest); validationErr != nil {
+			return validationErr
+		}
+		job.mu.Lock()
+		job.validatedSize = info.Size()
+		job.validatedModTime = modTime
+		job.validatedChangeToken = changeToken
+		job.mu.Unlock()
 		return nil
 	}
 	if info.Size() > validatedSize && info.Size() >= source.end {
@@ -1649,8 +2129,14 @@ func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, sourc
 		job.mu.Unlock()
 		return nil
 	}
-	b.observeSourceRead(source.end)
-	digest, err := fileRangeDigest(ctx, source.file, 0, source.end)
+	if foregroundBudget != nil && !foregroundBudget.takeValidation(source.end) {
+		return errClaudeChainValidationPending
+	}
+	b.observeRangeRead(source.end)
+	digest, err := fileRangeDigestObserved(ctx, source.file, 0, source.end, nil, func(bytes int64) error {
+		b.observeValidationPhysicalRead(bytes)
+		return nil
+	})
 	if err != nil {
 		return err
 	}
@@ -1660,6 +2146,7 @@ func (b *Browser) validateSnapshotJob(ctx context.Context, job *browseJob, sourc
 	job.mu.Lock()
 	job.validatedSize = info.Size()
 	job.validatedModTime = modTime
+	job.validatedChangeToken = changeToken
 	job.mu.Unlock()
 	return nil
 }
@@ -1687,24 +2174,50 @@ func (b *Browser) runJob(job *browseJob) {
 			b.failJob(job, "index_failed", "History preparation failed on this computer.", true)
 		}
 	}()
+	if job.chainContextID != "" && b.chainWorkerBeforeCaptureObserver != nil {
+		b.chainWorkerBeforeCaptureObserver()
+	}
 	job.mu.Lock()
 	job.phase = "scanning"
 	job.scannedBytes = 0
 	job.sourceBytes = job.source.end
 	file := job.source.file
+	chainContextID := job.chainContextID
+	chainEvidence := append([]claudeRangeEvidence(nil), job.chainObservedRanges...)
+	chainIdentity := fileIdentity(job.source.info)
+	sourceChangeToken := fileChangeToken(job.source.info)
 	job.mu.Unlock()
+	if chainContextID != "" {
+		b.observeChainWorkerCapture(chainEvidence)
+	}
 	if file == nil {
 		b.failJob(job, "source_unavailable", "The conversation source became unavailable.", true)
 		return
 	}
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || !os.SameFile(job.source.info, info) || info.Size() < job.source.end {
+	if err != nil || !info.Mode().IsRegular() || !os.SameFile(job.source.info, info) || info.Size() < job.source.end ||
+		info.Size() == job.source.end && sourceChangeToken != "" && fileChangeToken(info) != sourceChangeToken {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
 		return
 	}
 	if resolved, resolveErr := filepath.EvalSymlinks(job.source.path); resolveErr != nil || filepath.Clean(resolved) != filepath.Clean(job.source.path) || containedRegularFile(job.source.path, job.source.location.Root) != job.source.path {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
 		return
+	}
+	if chainContextID != "" {
+		if err := b.validateClaudeChainJobEvidence(file, job.source.end, chainIdentity, chainEvidence); err != nil {
+			if errors.Is(err, context.Canceled) {
+				b.failJob(job, "request_cancelled", "History preparation was cancelled.", true)
+			} else {
+				b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+			}
+			return
+		}
+		// Keep the evidence fence immediately adjacent to the indexing pass. A
+		// valid range may be rewritten after the admission read and before the
+		// scan establishes a new full digest; without this second check the
+		// rewritten bytes could be published as the old cursor's snapshot.
+		b.observeChainPreparationScan()
 	}
 	scanDigest := sha256.New()
 	records, err := NewJSONLRecordReader(b.ctx, file, 0, job.source.end, b.options.MaxRecordBytes, func(progress JSONLRecordProgress) {
@@ -1718,6 +2231,7 @@ func (b *Browser) runJob(job *browseJob) {
 		return
 	}
 	records.SetDigestWriter(scanDigest)
+	records.SetReadObserver(func(bytes int64) { _ = b.observeBackgroundRead(bytes) })
 	records.SetCheckpoint(func() error {
 		if !b.jobHasInterest(job) {
 			return errJSONLCheckpoint
@@ -1794,13 +2308,21 @@ func (b *Browser) runJob(job *browseJob) {
 	job.phase = "verifying"
 	job.mu.Unlock()
 	firstDigest := hex.EncodeToString(scanDigest.Sum(nil))
+	job.mu.RLock()
+	chainDigest := job.chainContextID != ""
+	expectedRangeDigest := job.rangeDigest
+	job.mu.RUnlock()
+	if chainDigest && expectedRangeDigest != "" && firstDigest != expectedRangeDigest {
+		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+		return
+	}
 	b.observeSourceRead(job.source.end)
-	secondDigest, digestErr := fileRangeDigestChecked(b.ctx, file, 0, job.source.end, func() error {
+	secondDigest, digestErr := fileRangeDigestObserved(b.ctx, file, 0, job.source.end, func() error {
 		if !b.jobHasInterest(job) {
 			return errJSONLCheckpoint
 		}
 		return nil
-	})
+	}, b.observeBackgroundRead)
 	if errors.Is(digestErr, errJSONLCheckpoint) {
 		b.failJob(job, "index_failed", "History preparation paused because no client is waiting for it.", true)
 		return
@@ -1808,6 +2330,21 @@ func (b *Browser) runJob(job *browseJob) {
 	if digestErr != nil || firstDigest != secondDigest {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
 		return
+	}
+	if chainDigest {
+		if err := b.validateClaudeChainJobEvidence(file, job.source.end, chainIdentity, chainEvidence); err != nil {
+			if errors.Is(err, context.Canceled) {
+				b.failJob(job, "request_cancelled", "History preparation was cancelled.", true)
+			} else {
+				b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
+			}
+			return
+		}
+	}
+	if chainDigest && expectedRangeDigest == "" {
+		job.mu.Lock()
+		job.rangeDigest = secondDigest
+		job.mu.Unlock()
 	}
 	if err := validateSnapshotSource(job.source); err != nil {
 		b.failJob(job, "source_changed", "The conversation source changed while it was being prepared.", false)
@@ -1872,6 +2409,8 @@ func (b *Browser) runJob(job *browseJob) {
 	}
 	verifiedInfo, _ := file.Stat()
 	job.mu.Lock()
+	chainContextID = job.chainContextID
+	chainSegment := job.chainSegment
 	job.state = BrowseReady
 	job.phase = "ready"
 	job.diagnostics = diagnostics
@@ -1881,10 +2420,19 @@ func (b *Browser) runJob(job *browseJob) {
 	if verifiedInfo != nil {
 		job.validatedSize = verifiedInfo.Size()
 		job.validatedModTime = verifiedInfo.ModTime().UnixNano()
+		job.validatedChangeToken = fileChangeToken(verifiedInfo)
 	}
 	job.lastAccess = time.Now()
 	job.err = nil
 	job.mu.Unlock()
+	if chainContextID != "" {
+		b.mu.Lock()
+		if chain := b.chains[chainContextID]; chain != nil && chainSegment >= 0 && chainSegment < len(chain.chain.Segments) {
+			chain.chain.Segments[chainSegment].CapturedDigest = secondDigest
+			b.updateClaudeChainLineageEvidenceLocked(chain)
+		}
+		b.mu.Unlock()
+	}
 }
 
 func (b *Browser) jobHasInterest(job *browseJob) bool {

@@ -25,6 +25,9 @@ type browseCursor struct {
 	Revision     string `json:"revision"`
 	SnapshotID   string `json:"snapshot_id,omitempty"`
 	JobID        string `json:"job_id,omitempty"`
+	ChainID      string `json:"chain_id,omitempty"`
+	Segment      *int   `json:"segment,omitempty"`
+	ChainOffset  bool   `json:"chain_offset,omitempty"`
 	Boundary     string `json:"boundary,omitempty"`
 	RangeStart   string `json:"range_start,omitempty"`
 	RangeEnd     string `json:"range_end,omitempty"`
@@ -114,7 +117,18 @@ func decodeBrowseCursor(key [32]byte, token string, scope BrowseScope) (browseCu
 	}
 	if !validBrowseCursorText(cursor.Mode, 32) || !validBrowseCursorText(cursor.Revision, 128) ||
 		!validBrowseCursorText(cursor.SnapshotID, 128) || !validBrowseCursorText(cursor.JobID, 128) ||
-		!validBrowseCursorText(cursor.RangeDigest, 128) || !validBrowseCursorText(cursor.NativeBefore, 256) {
+		!validBrowseCursorText(cursor.ChainID, 128) || !validBrowseCursorText(cursor.RangeDigest, 128) ||
+		!validBrowseCursorText(cursor.NativeBefore, 256) {
+		return browseCursor{}, errBrowseCursorInvalid
+	}
+	if (cursor.ChainID == "") != (cursor.Segment == nil) || cursor.Segment != nil && (*cursor.Segment < 0 || *cursor.Segment >= claudeContinuationMaxSegments) || cursor.ChainOffset && cursor.ChainID == "" {
+		return browseCursor{}, errBrowseCursorInvalid
+	}
+	if cursor.Mode == "chain" {
+		if cursor.ChainID == "" || cursor.Segment == nil || cursor.SnapshotID == "" || cursor.JobID != "" {
+			return browseCursor{}, errBrowseCursorInvalid
+		}
+	} else if cursor.ChainID != "" || cursor.Segment != nil || cursor.ChainOffset {
 		return browseCursor{}, errBrowseCursorInvalid
 	}
 	for _, value := range []string{cursor.Boundary, cursor.RangeStart, cursor.RangeEnd} {

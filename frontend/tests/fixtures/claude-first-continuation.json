@@ -1,0 +1,172 @@
+{
+  "bridgeB": {
+    "available": true,
+    "entries": [
+      {
+        "id": "6c2269684dac96adf0324d1451bf7ce1",
+        "role": "user",
+        "text": "A latest question"
+      },
+      {
+        "id": "879cc2856e8cd544638077a9ae0991c3",
+        "role": "assistant",
+        "text": "A latest answer"
+      }
+    ],
+    "next_cursor": "hb1.eyJ2IjoxLCJtb2RlIjoiY2hhaW4iLCJzY29wZSI6IjUyM2I2NjcxZGZiM2ZjMTkxZWUyMTZhNjI5YzNkM2NkMjRhOTZhMWQwMTljNzk3NjhmNmJhN2VlMTYyMDQwOGIiLCJyZXZpc2lvbiI6IjU2MDYxY2NhNTczZThjMTQzYmQ5ZDRkNjRhMDVmYzVmOTRhMjEyYzg0NmVmYTZlNjgzNWVmNDkzOTExZTFjOTgiLCJzbmFwc2hvdF9pZCI6ImE3ODA5ZmQ3MTcyN2Y1N2FkN2U1NDhlYWE0NmNhMTJkIiwiY2hhaW5faWQiOiIyYTY3YThhNmYwYjhmZmI2NTYwNDk3YjU1NDBmNmI1MCIsInNlZ21lbnQiOjAsImNoYWluX29mZnNldCI6dHJ1ZSwiYm91bmRhcnkiOiIxNDUiLCJleHBpcmVzX2F0IjoxNzg5MTkxNzEwfQ.gYjmzhyExYXw-Qwldm6GfKXkRIlYN7I7RVTDgpFDyV8",
+    "has_more": true,
+    "state": "ready",
+    "mode": "snapshot",
+    "source_revision": "56061cca573e8c143bd9d4d64a05fc5f94a212c846efa6e6835ef493911e1c98",
+    "snapshot_id": "a7809fd71727f57ad7e548eaa46ca12d",
+    "total": null,
+    "diagnostics": {
+      "oversized_records": 0,
+      "corrupt_records": 0
+    }
+  },
+  "bridgeC": {
+    "available": true,
+    "entries": [
+      {
+        "id": "e21eb1668baf-47baf70d7bfa20fce928dd4c585793b5",
+        "role": "user",
+        "text": "B question"
+      },
+      {
+        "id": "e21eb1668baf-9cdb51cddfaefaeaf5909627395a1e27",
+        "role": "assistant",
+        "text": "B answer"
+      }
+    ],
+    "next_cursor": "hb1.eyJ2IjoxLCJtb2RlIjoiY2hhaW4iLCJzY29wZSI6IjUyM2I2NjcxZGZiM2ZjMTkxZWUyMTZhNjI5YzNkM2NkMjRhOTZhMWQwMTljNzk3NjhmNmJhN2VlMTYyMDQwOGIiLCJyZXZpc2lvbiI6IjU2MDYxY2NhNTczZThjMTQzYmQ5ZDRkNjRhMDVmYzVmOTRhMjEyYzg0NmVmYTZlNjgzNWVmNDkzOTExZTFjOTgiLCJzbmFwc2hvdF9pZCI6IjkyNzg3OGViOWMwZmYyYTg3OTc3M2UwODUzNzNlNzc5IiwiY2hhaW5faWQiOiI3OWVkNmI0OTZhZWUzNDU5ZmQzMTAwZGYxM2QwOWVhNSIsInNlZ21lbnQiOjAsImNoYWluX29mZnNldCI6dHJ1ZSwiYm91bmRhcnkiOiI0MjkiLCJleHBpcmVzX2F0IjoxNzg5MTkxNzEwfQ.S7dj_YAHn99l4XlG5_WyAzWH1TNdX__PXO3o6W2kzKA",
+    "has_more": true,
+    "state": "ready",
+    "mode": "snapshot",
+    "source_revision": "56061cca573e8c143bd9d4d64a05fc5f94a212c846efa6e6835ef493911e1c98",
+    "snapshot_id": "927878eb9c0ff2a879773e085373e779",
+    "total": null,
+    "diagnostics": {
+      "oversized_records": 0,
+      "corrupt_records": 0
+    }
+  },
+  "initial": {
+    "available": true,
+    "entries": [
+      {
+        "id": "6c2269684dac96adf0324d1451bf7ce1",
+        "role": "user",
+        "text": "A latest question"
+      },
+      {
+        "id": "879cc2856e8cd544638077a9ae0991c3",
+        "role": "assistant",
+        "text": "A latest answer"
+      }
+    ],
+    "next_cursor": "hb1.eyJ2IjoxLCJtb2RlIjoicmVjZW50Iiwic2NvcGUiOiI1MjNiNjY3MWRmYjNmYzE5MWVlMjE2YTYyOWMzZDNjZDI0YTk2YTFkMDE5Yzc5NzY4ZjZiYTdlZTE2MjA0MDhiIiwicmV2aXNpb24iOiI1NjA2MWNjYTU3M2U4YzE0M2JkOWQ0ZDY0YTA1ZmM1Zjk0YTIxMmM4NDZlZmE2ZTY4MzVlZjQ5MzkxMWUxYzk4IiwiYm91bmRhcnkiOiIxNDUiLCJyYW5nZV9zdGFydCI6IjAiLCJyYW5nZV9lbmQiOiIyOTIiLCJyYW5nZV9kaWdlc3QiOiJiMGE0NTAzYWQxYzRjZDdjZjc0MGI5YjY4MmQ0NTM4N2E4NTZhMjZkNzcyZTRjM2UxMTIxMGJkZjFmMjFjYjFlIiwiZXhwaXJlc19hdCI6MTc4OTE5MTcxMH0.gR3vtl3CRh1H10zOy3tf48kHEaEM3SqFc1iJw9L01r8",
+    "has_more": true,
+    "state": "ready",
+    "mode": "recent",
+    "source_revision": "56061cca573e8c143bd9d4d64a05fc5f94a212c846efa6e6835ef493911e1c98",
+    "total": 4,
+    "diagnostics": {
+      "oversized_records": 0,
+      "corrupt_records": 0
+    }
+  },
+  "latestB": {
+    "available": true,
+    "entries": [
+      {
+        "id": "e21eb1668baf-47baf70d7bfa20fce928dd4c585793b5",
+        "role": "user",
+        "text": "B question"
+      },
+      {
+        "id": "e21eb1668baf-9cdb51cddfaefaeaf5909627395a1e27",
+        "role": "assistant",
+        "text": "B answer"
+      }
+    ],
+    "next_cursor": "hb1.eyJ2IjoxLCJtb2RlIjoiY2hhaW4iLCJzY29wZSI6IjUyM2I2NjcxZGZiM2ZjMTkxZWUyMTZhNjI5YzNkM2NkMjRhOTZhMWQwMTljNzk3NjhmNmJhN2VlMTYyMDQwOGIiLCJyZXZpc2lvbiI6IjU2MDYxY2NhNTczZThjMTQzYmQ5ZDRkNjRhMDVmYzVmOTRhMjEyYzg0NmVmYTZlNjgzNWVmNDkzOTExZTFjOTgiLCJzbmFwc2hvdF9pZCI6ImE3ODA5ZmQ3MTcyN2Y1N2FkN2U1NDhlYWE0NmNhMTJkIiwiY2hhaW5faWQiOiIyYTY3YThhNmYwYjhmZmI2NTYwNDk3YjU1NDBmNmI1MCIsInNlZ21lbnQiOjAsImNoYWluX29mZnNldCI6dHJ1ZSwiYm91bmRhcnkiOiI0MjkiLCJleHBpcmVzX2F0IjoxNzg5MTkxNzEwfQ.pjAHZ5ONGsEOHU9YSkFaSOOOVnRL4aklCZ_bs1De4ag",
+    "has_more": true,
+    "state": "ready",
+    "mode": "recent",
+    "source_revision": "56061cca573e8c143bd9d4d64a05fc5f94a212c846efa6e6835ef493911e1c98",
+    "total": null,
+    "diagnostics": {
+      "oversized_records": 0,
+      "corrupt_records": 0
+    }
+  },
+  "latestC": {
+    "available": true,
+    "entries": [
+      {
+        "id": "168cc0427ddd-715a2ac4cec395e296bfd93961788d45",
+        "role": "user",
+        "text": "C question"
+      },
+      {
+        "id": "168cc0427ddd-649d1e17467b689700cf7cff2d3ac9c2",
+        "role": "assistant",
+        "text": "C answer"
+      }
+    ],
+    "next_cursor": "hb1.eyJ2IjoxLCJtb2RlIjoiY2hhaW4iLCJzY29wZSI6IjUyM2I2NjcxZGZiM2ZjMTkxZWUyMTZhNjI5YzNkM2NkMjRhOTZhMWQwMTljNzk3NjhmNmJhN2VlMTYyMDQwOGIiLCJyZXZpc2lvbiI6IjU2MDYxY2NhNTczZThjMTQzYmQ5ZDRkNjRhMDVmYzVmOTRhMjEyYzg0NmVmYTZlNjgzNWVmNDkzOTExZTFjOTgiLCJzbmFwc2hvdF9pZCI6IjkyNzg3OGViOWMwZmYyYTg3OTc3M2UwODUzNzNlNzc5IiwiY2hhaW5faWQiOiI3OWVkNmI0OTZhZWUzNDU5ZmQzMTAwZGYxM2QwOWVhNSIsInNlZ21lbnQiOjEsImNoYWluX29mZnNldCI6dHJ1ZSwiYm91bmRhcnkiOiIyNzAiLCJleHBpcmVzX2F0IjoxNzg5MTkxNzEwfQ.vpYmbF2JLEPdDIjc0_3K7cEfohoPdAUsSbmbTsmc5TA",
+    "has_more": true,
+    "state": "ready",
+    "mode": "recent",
+    "source_revision": "56061cca573e8c143bd9d4d64a05fc5f94a212c846efa6e6835ef493911e1c98",
+    "total": null,
+    "diagnostics": {
+      "oversized_records": 0,
+      "corrupt_records": 0
+    }
+  },
+  "olderA": {
+    "available": true,
+    "entries": [
+      {
+        "id": "379c122f12904243ebdc8dacf4cb210c",
+        "role": "user",
+        "text": "A older question"
+      },
+      {
+        "id": "609a37c80be2b2140dfaf6faebb0bf7a",
+        "role": "assistant",
+        "text": "A older answer"
+      }
+    ],
+    "has_more": false,
+    "state": "ready",
+    "mode": "recent",
+    "source_revision": "56061cca573e8c143bd9d4d64a05fc5f94a212c846efa6e6835ef493911e1c98",
+    "total": 4,
+    "diagnostics": {
+      "oversized_records": 0,
+      "corrupt_records": 0
+    }
+  },
+  "replacement": {
+    "available": true,
+    "reason_code": "source_changed",
+    "reason": "The conversation source changed while history was being browsed.",
+    "entries": [],
+    "has_more": false,
+    "state": "failed",
+    "mode": "recent",
+    "total": null,
+    "diagnostics": {
+      "oversized_records": 0,
+      "corrupt_records": 0
+    },
+    "error": {
+      "code": "source_changed",
+      "message": "The conversation source changed while history was being browsed.",
+      "retryable": false
+    }
+  }
+}

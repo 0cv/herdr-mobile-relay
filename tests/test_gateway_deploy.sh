@@ -295,6 +295,7 @@ export HERDR_RELAY_ENV="$WORK_DIR/relay-remembered.env"
 : > "$HERDR_RELAY_ENV"
 
 REMEMBERED_BUNDLE="$WORK_DIR/bundle-remembered"
+REMEMBERED_BUNDLE="$(cd "$(dirname "$REMEMBERED_BUNDLE")" && pwd -P)/$(basename "$REMEMBERED_BUNDLE")"
 export HERDR_GATEWAY_DEPLOY_DIR="$REMEMBERED_BUNDLE"
 export HERDR_GATEWAY_DEPLOY_SERVER="deploy@gw.example.test"
 export HERDR_GATEWAY_DEPLOY_REMOTE_DIR="/srv/herdr-gateway"

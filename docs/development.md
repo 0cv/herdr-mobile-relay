@@ -61,6 +61,35 @@ Node.js 26. `make web-deploy` then runs the public bundle verifier against
 `WEB_ORIGIN` (the Pages domain by default; override it for a custom domain).
 Packaged users need no toolchain at all.
 
+### WebKit tests on Fedora
+
+Do not install the Ubuntu-specific `libicu74` / `libjpeg-turbo8` packages or
+symlink Fedora libraries to their ABI names. The version-matched official
+Playwright container supplies WebKit and its dependencies. Podman must be
+installed once (`sudo dnf install podman`); the image is downloaded on first
+use and remains cached across runs and reboots. A Playwright version upgrade
+fetches the matching new image.
+
+Both browser test commands select the container automatically on Fedora:
+
+```bash
+make frontend-browser                    # Chromium and WebKit UI journeys
+make frontend-browser-attention-release  # Chromium and WebKit relay/attention tests
+# Focus only on the previously blocked engine:
+HERDR_WEB_ROOT=../web bun run --cwd frontend test:browser:attention --project=webkit-attention
+```
+
+The attention runner keeps Bun, Go, and the isolated relay fixture on the host.
+Only the WebKit browser runs in the container, with Playwright forwarding its
+loopback traffic to the host's test HTTP and relay WebSocket servers. The
+browser-control port is published only on `127.0.0.1`, on an automatically
+allocated port, and the runner removes its container on exit without removing
+the cached image. Test output and failure traces stay on the host. Ubuntu CI
+continues to use native browsers; `HERDR_WEBKIT_CONTAINER=1` selects Docker for
+hosts that explicitly want containerized WebKit. Directly invoking
+`playwright test --config playwright.attention.config.ts` bypasses the wrapper;
+use the package script or Make target instead.
+
 The test-only `cmd/fake-herdr` binary provides deterministic Herdr CLI behavior,
 failure injection, and process-control traces for black-box tests.
 

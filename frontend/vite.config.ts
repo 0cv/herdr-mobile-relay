@@ -223,7 +223,9 @@ export default defineConfig({
           const names = asset.names ?? [];
           return names.some((name) => name.endsWith('.css')) ? 'assets/app.css' : 'assets/[name][extname]';
         },
-        chunkFileNames: 'assets/[name].js',
+        // Lazy chunks inherit the release asset version so each release gets a
+        // new immutable URL without participating in the entry digest cycle.
+        chunkFileNames: `assets/[name]-${versions.assets}.js`,
         entryFileNames: 'assets/app.js',
       },
     },

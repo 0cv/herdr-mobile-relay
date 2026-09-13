@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,36 @@ func (w *recordingWriter) Write(data []byte) (int, error) {
 }
 
 func (w *recordingWriter) snapshot() [][]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	result := make([][]byte, len(w.writes))
+	for i := range w.writes {
+		result[i] = append([]byte(nil), w.writes[i]...)
+	}
+	return result
+}
+
+type overlapDetectingWriter struct {
+	active  atomic.Int32
+	overlap atomic.Bool
+	mu      sync.Mutex
+	writes  [][]byte
+}
+
+func (w *overlapDetectingWriter) Write(data []byte) (int, error) {
+	if w.active.Add(1) > 1 {
+		w.overlap.Store(true)
+	}
+	defer w.active.Add(-1)
+	time.Sleep(time.Millisecond)
+
+	w.mu.Lock()
+	w.writes = append(w.writes, append([]byte(nil), data...))
+	w.mu.Unlock()
+	return len(data), nil
+}
+
+func (w *overlapDetectingWriter) snapshot() [][]byte {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	result := make([][]byte, len(w.writes))
@@ -172,31 +203,53 @@ func TestJournalHandlerWithAttrsAndGroups(t *testing.T) {
 	sibling := parent.WithGroup("other")
 
 	slog.New(parent).Info("parent", "value", "one")
-	slog.New(child).Info("child", "value", "two")
+	slog.New(child).Debug("child", "value", "two")
 	slog.New(sibling).Warn("sibling", "value", "three")
 
 	writes := writer.snapshot()
 	if len(writes) != 3 {
 		t.Fatalf("writes = %d, want 3", len(writes))
 	}
+	expected := []struct {
+		prefix string
+		level  string
+		msg    string
+	}{
+		{prefix: "<6>", level: "INFO", msg: "parent"},
+		{prefix: "<7>", level: "DEBUG", msg: "child"},
+		{prefix: "<4>", level: "WARN", msg: "sibling"},
+	}
 	var parentRecord, childRecord, siblingRecord map[string]any
 	for i, target := range []*map[string]any{&parentRecord, &childRecord, &siblingRecord} {
+		if !bytes.HasPrefix(writes[i], []byte(expected[i].prefix)) {
+			t.Errorf("write %d = %q, want prefix %q", i, writes[i], expected[i].prefix)
+		}
+		if bytes.Count(writes[i], []byte{'\n'}) != 1 {
+			t.Errorf("write %d = %q, want one complete record", i, writes[i])
+		}
 		if err := json.Unmarshal(writes[i][3:], target); err != nil {
 			t.Fatalf("record %d = %q: %v", i, writes[i], err)
+		}
+		if (*target)["level"] != expected[i].level || (*target)["msg"] != expected[i].msg {
+			t.Errorf("record %d = %#v, want level %s and message %s", i, *target, expected[i].level, expected[i].msg)
 		}
 	}
 	if parentRecord["host"] != nil || parentRecord["value"] != "one" {
 		t.Errorf("parent record = %#v", parentRecord)
 	}
-	if childRecord["host"] != "a" || childRecord["request"] == nil {
+	if childRecord["host"] != "a" || childRecord["request"] == nil || childRecord["other"] != nil {
 		t.Fatalf("child record = %#v", childRecord)
 	}
 	request, ok := childRecord["request"].(map[string]any)
 	if !ok || request["id"] != "b" || request["value"] != "two" {
 		t.Errorf("child request = %#v", childRecord["request"])
 	}
-	if siblingRecord["other"] == nil || siblingRecord["value"] != nil {
-		t.Errorf("sibling record = %#v", siblingRecord)
+	if siblingRecord["host"] != nil || siblingRecord["request"] != nil || siblingRecord["value"] != nil {
+		t.Errorf("sibling record leaked parent or child fields = %#v", siblingRecord)
+	}
+	other, ok := siblingRecord["other"].(map[string]any)
+	if !ok || other["value"] != "three" {
+		t.Errorf("sibling group = %#v", siblingRecord["other"])
 	}
 }
 
@@ -223,31 +276,125 @@ func TestJournalHandlerContract(t *testing.T) {
 }
 
 func TestJournalHandlerWritesAreSerialized(t *testing.T) {
-	writer := &recordingWriter{}
+	writer := &overlapDetectingWriter{}
 	logger := newRelayLogger(writer, "json", slog.LevelDebug, true)
+	logger.Info("parent", "root", "yes")
+	child := logger.With("scope", "child").WithGroup("request")
+	sibling := logger.WithGroup("other")
 	const count = 200
+	type expectedRecord struct {
+		message string
+		prefix  string
+		group   string
+		child   bool
+	}
+	expected := make(map[int]expectedRecord, count)
 	var wait sync.WaitGroup
 	for i := 0; i < count; i++ {
+		var event expectedRecord
+		switch i % 3 {
+		case 0:
+			event = expectedRecord{message: "child-debug", prefix: "<7>", group: "request", child: true}
+		case 1:
+			event = expectedRecord{message: "child-warn", prefix: "<4>", group: "request", child: true}
+		default:
+			event = expectedRecord{message: "sibling-error", prefix: "<3>", group: "other"}
+		}
+		expected[i] = event
 		wait.Add(1)
-		go func(index int) {
+		go func(index int, event expectedRecord) {
 			defer wait.Done()
-			logger.With("index", index).Warn("warning")
-		}(i)
+			switch event.message {
+			case "child-debug":
+				child.Debug(event.message, "index", index)
+			case "child-warn":
+				child.Warn(event.message, "index", index)
+			default:
+				sibling.Error(event.message, "index", index)
+			}
+		}(i, event)
 	}
 	wait.Wait()
 
-	writes := writer.snapshot()
-	if len(writes) != count {
-		t.Fatalf("writes = %d, want %d", len(writes), count)
+	if writer.overlap.Load() {
+		t.Fatal("concurrent handler writes overlapped")
 	}
-	for _, write := range writes {
-		if !bytes.HasPrefix(write, []byte("<4>")) || !bytes.HasSuffix(write, []byte{'\n'}) {
-			t.Fatalf("incomplete write = %q", write)
+	writes := writer.snapshot()
+	if len(writes) != count+1 {
+		t.Fatalf("writes = %d, want %d", len(writes), count+1)
+	}
+	if !bytes.HasPrefix(writes[0], []byte("<6>")) || bytes.Count(writes[0], []byte{'\n'}) != 1 {
+		t.Fatalf("parent write = %q, want one complete INFO record", writes[0])
+	}
+	var parentRecord map[string]any
+	if err := json.Unmarshal(writes[0][3:], &parentRecord); err != nil {
+		t.Fatalf("parent write = %q: %v", writes[0], err)
+	}
+	if parentRecord["msg"] != "parent" || parentRecord["root"] != "yes" {
+		t.Fatalf("parent record = %#v", parentRecord)
+	}
+
+	seen := make(map[int]bool, count)
+	for _, write := range writes[1:] {
+		if bytes.Count(write, []byte{'\n'}) != 1 {
+			t.Fatalf("write = %q, want one complete record", write)
 		}
 		var record map[string]any
 		if err := json.Unmarshal(write[3:], &record); err != nil {
 			t.Fatalf("write = %q: %v", write, err)
 		}
+		groupName := ""
+		var indexValue float64
+		for _, candidate := range []string{"request", "other"} {
+			group, ok := record[candidate].(map[string]any)
+			if !ok {
+				continue
+			}
+			value, ok := group["index"].(float64)
+			if !ok {
+				continue
+			}
+			if groupName != "" {
+				t.Fatalf("record = %#v, has more than one indexed group", record)
+			}
+			groupName = candidate
+			indexValue = value
+		}
+		if groupName == "" || indexValue != float64(int(indexValue)) {
+			t.Fatalf("record = %#v, missing integer index in a group", record)
+		}
+		index := int(indexValue)
+		event, ok := expected[index]
+		if !ok || seen[index] {
+			t.Fatalf("record = %#v, unexpected or duplicate index", record)
+		}
+		seen[index] = true
+		if !bytes.HasPrefix(write, []byte(event.prefix)) {
+			t.Errorf("record %d = %q, want prefix %q", index, write, event.prefix)
+		}
+		if record["msg"] != event.message {
+			t.Errorf("record %d = %#v, want message %q", index, record, event.message)
+		}
+		if groupName != event.group {
+			t.Errorf("record %d group = %q, want %q", index, groupName, event.group)
+		}
+		group, ok := record[event.group].(map[string]any)
+		if !ok || group["index"] != indexValue {
+			t.Errorf("record %d group = %#v, want index %d", index, record[event.group], index)
+		}
+		if record["index"] != nil {
+			t.Errorf("record %d leaked index outside group: %#v", index, record)
+		}
+		if event.child {
+			if record["scope"] != "child" || record["other"] != nil {
+				t.Errorf("child record %d = %#v", index, record)
+			}
+		} else if record["scope"] != nil || record["request"] != nil {
+			t.Errorf("sibling record %d leaked child fields: %#v", index, record)
+		}
+	}
+	if len(seen) != count {
+		t.Fatalf("seen records = %d, want %d", len(seen), count)
 	}
 }
 
@@ -355,33 +502,77 @@ func TestReportErrorIgnoresInvalidLogLevel(t *testing.T) {
 }
 
 func TestJournalLoggerLevelThresholds(t *testing.T) {
+	events := []struct {
+		level  slog.Level
+		msg    string
+		prefix string
+	}{
+		{level: slog.LevelDebug, msg: "debug", prefix: "<7>"},
+		{level: slog.LevelInfo, msg: "info", prefix: "<6>"},
+		{level: slog.LevelWarn, msg: "warn", prefix: "<4>"},
+		{level: slog.LevelError, msg: "error", prefix: "<3>"},
+	}
 	for _, format := range []string{"text", "json"} {
-		for _, test := range []struct {
-			minimum  slog.Level
-			prefixes []string
-		}{
-			{minimum: slog.LevelDebug, prefixes: []string{"<7>", "<6>", "<4>", "<3>"}},
-			{minimum: slog.LevelInfo, prefixes: []string{"<6>", "<4>", "<3>"}},
-			{minimum: slog.LevelWarn, prefixes: []string{"<4>", "<3>"}},
-			{minimum: slog.LevelError, prefixes: []string{"<3>"}},
-		} {
-			t.Run(format+"/"+test.minimum.String(), func(t *testing.T) {
-				writer := &recordingWriter{}
-				logger := newRelayLogger(writer, format, test.minimum, true)
-				logger.Debug("debug")
-				logger.Info("info")
-				logger.Warn("warn")
-				logger.Error("error")
-				writes := writer.snapshot()
-				if len(writes) != len(test.prefixes) {
-					t.Fatalf("writes = %d, want %d", len(writes), len(test.prefixes))
-				}
-				for i, prefix := range test.prefixes {
-					if !bytes.HasPrefix(writes[i], []byte(prefix)) {
-						t.Errorf("write %d = %q, want prefix %q", i, writes[i], prefix)
+		for _, journal := range []bool{false, true} {
+			for _, minimum := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+				t.Run(format+"/journal="+strconv.FormatBool(journal)+"/"+minimum.String(), func(t *testing.T) {
+					writer := &recordingWriter{}
+					logger := newRelayLogger(writer, format, minimum, journal)
+					for _, event := range events {
+						switch event.level {
+						case slog.LevelDebug:
+							logger.Debug(event.msg)
+						case slog.LevelInfo:
+							logger.Info(event.msg)
+						case slog.LevelWarn:
+							logger.Warn(event.msg)
+						case slog.LevelError:
+							logger.Error(event.msg)
+						}
 					}
-				}
-			})
+					writes := writer.snapshot()
+					var expected []struct {
+						msg    string
+						prefix string
+					}
+					for _, event := range events {
+						if event.level >= minimum {
+							expected = append(expected, struct {
+								msg    string
+								prefix string
+							}{msg: event.msg, prefix: event.prefix})
+						}
+					}
+					if len(writes) != len(expected) {
+						t.Fatalf("writes = %d, want %d", len(writes), len(expected))
+					}
+					for i, event := range expected {
+						write := writes[i]
+						if journal {
+							if !bytes.HasPrefix(write, []byte(event.prefix)) {
+								t.Errorf("write %d = %q, want prefix %q", i, write, event.prefix)
+							}
+							write = write[3:]
+						} else if bytes.HasPrefix(write, []byte("<")) {
+							t.Errorf("non-journal write %d = %q has a journal prefix", i, write)
+						}
+						if bytes.Count(write, []byte{'\n'}) != 1 {
+							t.Errorf("write %d = %q, want one complete record", i, write)
+						}
+						if format == "json" {
+							var record map[string]any
+							if err := json.Unmarshal(write, &record); err != nil {
+								t.Fatalf("write %d = %q: %v", i, write, err)
+							}
+							if record["msg"] != event.msg {
+								t.Errorf("write %d message = %#v, want %q", i, record["msg"], event.msg)
+							}
+						} else if !bytes.Contains(write, []byte("msg="+event.msg)) {
+							t.Errorf("write %d = %q, want message %q", i, write, event.msg)
+						}
+					}
+				})
+			}
 		}
 	}
 }

@@ -7,6 +7,15 @@
   import { agentNeedsInspection, agentNeedsResponse, displayName } from '$lib/agents';
   import { conversationEntries } from '$lib/conversation';
   import {
+    ConversationHistoryController,
+    type ConversationHistoryControllerState,
+    HISTORY_MAX_PREPARATION_POLLS,
+  } from '$lib/conversation-history';
+  import {
+    getConversationPreview,
+    putConversationPreview,
+  } from '$lib/conversation-cache';
+  import {
     armSpeechKeepalive,
     releaseSpeechKeepalive,
     speakViaRelay,
@@ -35,21 +44,17 @@
   let available = $state(true);
   let reason = $state('');
   let hasMore = $state(false);
-  let total = $state<number | null>(null);
   let nextCursor = $state('');
   let browseState = $state<ConversationPage['state']>('ready');
   let browseProgress = $state<ConversationPage['progress']>();
-  let sourceRevision = $state('');
-  let snapshotId = $state('');
-  let olderBrowsing = $state(false);
-  let snapshotActive = $state(false);
   let sourceChangedNotice = $state('');
-  let snapshotSendNotice = $state('');
   let diagnostics = $state<ConversationPage['diagnostics']>();
   let omoPlan = $state<OmoTodoState | null>(null);
   let loading = $state(true);
   let loadingOlder = $state(false);
   let error = $state('');
+  let errorCode = $state('');
+  let errorRetryable = $state(false);
   let query = $state('');
   let mode = $state<'conversation' | 'activity'>('conversation');
   let listElement = $state<HTMLElement>(null!);
@@ -72,20 +77,38 @@
    * away from the bottom releases it.
    */
   let pinnedToBottom = $state(true);
+  let pinPendingUntil = 0;
+  let pinTargetTop = 0;
+  let pinTargetHeight = 0;
+  let lastScrollTop = 0;
+  let lastScrollHeight = 0;
+  let pinPendingTimer: ReturnType<typeof setTimeout> | undefined;
   let mounted = false;
-  let initialLoadSettled = false;
-  let latestRequestToken = 0;
-  let olderRequestToken = 0;
+  let controllerReady = $state(false);
+  let historyController: ConversationHistoryController | null = null;
+  let previewVisible = $state(false);
+  let previewHistorical = $state(false);
+  let authoritative = $state(false);
+  let contextSearching = $state(false);
+  let pendingPrefix = $state<ConversationEntry[]>([]);
+  let beginningReached = $state(false);
+  let pausedReason = $state('');
+  let latestGapOutstanding = $state(false);
   let preparationPolls = $state(0);
+  let requestPhase = $state<'idle' | 'initial' | 'refresh' | 'older' | 'preparing'>('initial');
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
-  let latestController: AbortController | undefined;
-  let olderController: AbortController | undefined;
+  let topSentinel = $state<HTMLElement>(null!);
   const refreshIntervalMs = 5_000;
-  const preparationIntervalMs = 1_000;
-  const maxPreparationPolls = 30;
+  const maxPreparationPolls = HISTORY_MAX_PREPARATION_POLLS;
 
   const agentName = $derived(displayName(agent));
-  const modeEntries = $derived(mode === 'conversation' ? conversationEntries(entries) : entries);
+  const modeEntries = $derived.by(() => {
+    if (mode !== 'conversation') return entries;
+    const compact = conversationEntries(entries);
+    if (!pendingPrefix.length) return compact;
+    const pendingIds = new Set(pendingPrefix.map((entry) => entry.id));
+    return compact.filter((entry) => !pendingIds.has(entry.id));
+  });
   const inputLocked = $derived(readOnly || agentNeedsResponse(agent) || agentNeedsInspection(agent));
   const inputPlaceholder = $derived(readOnly
     ? 'Reader access is read only'
@@ -99,26 +122,75 @@
     if (!needle) return modeEntries;
     return modeEntries.filter((entry) => `${entry.text} ${(entry.tools || []).map((tool) => `${tool.name} ${tool.input || ''} ${tool.output || ''}`).join(' ')}`.toLocaleLowerCase().includes(needle));
   });
+  const historyBusy = $derived(requestPhase !== 'idle');
+  const historyStatusText = $derived.by(() => {
+    if (pausedReason) return pausedReason;
+    if (latestGapOutstanding) return 'Checking for new messages…';
+    if (requestPhase === 'preparing') return 'Loading conversation context…';
+    if (contextSearching) return 'Loading conversation context…';
+    if (previewVisible && !authoritative) return 'Checking for new messages…';
+    if (requestPhase === 'older') return 'Loading earlier messages…';
+    if (requestPhase === 'initial' && !entries.length) return 'Loading conversation…';
+    if (beginningReached && entries.length) {
+      return diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records
+        ? 'Beginning of available history reached.'
+        : 'Beginning of conversation reached.';
+    }
+    if (authoritative && !entries.length
+      && (diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records || diagnostics?.continuation_incomplete)) {
+      return 'No readable conversation messages are available in the loaded history.';
+    }
+    if (authoritative && entries.length && !modeEntries.length && mode === 'conversation') {
+      return 'No user prompts or agent answers are recorded in the available history.';
+    }
+    return '';
+  });
+  const emptyHistoryText = $derived.by(() => {
+    if (historyBusy || contextSearching || error || !authoritative) return '';
+    if (!available) return reason || 'Conversation history is unavailable.';
+    if (entries.length && mode === 'conversation' && !modeEntries.length) {
+      return 'No user prompts or agent answers are recorded in the available history.';
+    }
+    if (!entries.length) {
+      return diagnostics?.source_truncated || diagnostics?.oversized_records || diagnostics?.corrupt_records || diagnostics?.continuation_incomplete
+        ? 'No readable conversation messages are available in the loaded history.'
+        : 'No conversation messages have been recorded yet.';
+    }
+    return '';
+  });
 
   onMount(() => {
     mode = localStorage.getItem('herdr-conversation-view') === 'activity' ? 'activity' : 'conversation';
     mounted = true;
-    void loadLatest();
+    historyController = new ConversationHistoryController(agent, {
+      request: (target, request) => relayStore.getConversationHistory(target, request),
+      onState: applyHistoryState,
+      onInitialPage: (page) => onInitialPage?.(page),
+      getPreview: (identity) => getConversationPreview(identity),
+      putPreview: (preview) => putConversationPreview(preview),
+      isActive: () => mounted
+        && document.visibilityState !== 'hidden'
+        && !$securityState.locked
+        && navigator.onLine !== false,
+    });
+    controllerReady = true;
+    historyController.start();
     refreshTimer = setInterval(() => {
-      if (snapshotActive || sourceChangedNotice || browseState === 'failed' || preparationPolls >= maxPreparationPolls) return;
-      if (document.visibilityState === 'hidden' || $securityState.locked) return;
-      void loadLatest();
+      historyController?.refresh();
     }, refreshIntervalMs);
-    const resumePreparation = () => {
-      if (browseState === 'preparing' && !$securityState.locked) void loadLatest();
+    const syncHistoryVisibility = () => {
+      if (document.visibilityState === 'hidden' || $securityState.locked) historyController?.pause();
+      else historyController?.resume();
     };
-    document.addEventListener('visibilitychange', resumePreparation);
+    document.addEventListener('visibilitychange', syncHistoryVisibility);
     return () => {
       mounted = false;
+      controllerReady = false;
       if (refreshTimer) clearInterval(refreshTimer);
       refreshTimer = undefined;
-      document.removeEventListener('visibilitychange', resumePreparation);
-      cancelHistoryRequests();
+      document.removeEventListener('visibilitychange', syncHistoryVisibility);
+      historyController?.cancel();
+      historyController = null;
     };
   });
 
@@ -137,7 +209,7 @@
     const stream = streamElement;
     if (!element || !stream || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => {
-      if (pinnedToBottom) element.scrollTop = element.scrollHeight;
+      if (pinnedToBottom) pinListToBottom(element);
     });
     // The stream grows with the turns; the scroller's own box changes with the
     // on-screen keyboard and rotation, which moves the end away as well.
@@ -153,11 +225,77 @@
     });
   });
 
+  // A streamed turn can be committed after the resize notification that
+  // pinned the previous stream. Two animation frames provide a portable
+  // post-layout correction for engines that deliver that notification early.
   $effect(() => {
-    if (!mounted || snapshotActive || browseState !== 'preparing' || !nextCursor
-      || preparationPolls >= maxPreparationPolls || document.visibilityState === 'hidden' || $securityState.locked) return;
-    const timer = setTimeout(() => void loadLatest(), preparationIntervalMs);
+    const count = entries.length;
+    const list = listElement;
+    if (!list || !mounted || !pinnedToBottom || query.trim()) return;
+    void count;
+    let firstFrame = 0;
+    let secondFrame = 0;
+    const pin = (force = false) => {
+      if (pinnedToBottom && list === listElement && (force || pinPendingUntil > Date.now())) pinListToBottom(list);
+    };
+    firstFrame = requestAnimationFrame(() => {
+      pin(true);
+      secondFrame = requestAnimationFrame(() => pin());
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      if (secondFrame) cancelAnimationFrame(secondFrame);
+    };
+  });
+
+  // The loader lives inside the scroll box. A positive top margin makes the
+  // sentinel a prefetch target rather than a button-sized layout item.
+  $effect(() => {
+    const list = listElement;
+    const sentinel = topSentinel;
+    const searching = query.trim();
+    if (!list || !sentinel || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver((observations) => {
+      if (!observations.some((observation) => observation.isIntersecting)) return;
+      if (searching || !historyController || document.visibilityState === 'hidden' || $securityState.locked) return;
+      if (pinnedToBottom) {
+        if (list.scrollHeight <= list.clientHeight + 8) historyController.ensureMore();
+        return;
+      }
+      demandOlder();
+    }, { root: list, rootMargin: '300px 0px 0px 0px', threshold: 0 });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  });
+
+  // IntersectionObserver does not fire usefully for an empty or underfilled
+  // list in every mobile engine. Recheck after layout; the fallback remains a
+  // distance test in trackScroll when an observer is unavailable.
+  $effect(() => {
+    const count = entries.length;
+    const list = listElement;
+    if (!list || !mounted || query.trim() || list.clientHeight <= 0) return;
+    void count;
+    const timer = setTimeout(() => {
+      if (list.scrollHeight <= list.clientHeight + 8 && pinnedToBottom) historyController?.ensureMore();
+    }, 0);
     return () => clearTimeout(timer);
+  });
+
+  // Agent inventory updates replace the Agent object frequently. The
+  // controller compares only the exact conversation target, so status/title
+  // churn cannot discard a response that belongs to this conversation.
+  $effect(() => {
+    const currentAgent = agent;
+    if (!controllerReady || !historyController) return;
+    historyController.setAgent(currentAgent);
+  });
+
+  $effect(() => {
+    const locked = $securityState.locked;
+    if (!controllerReady || !historyController) return;
+    if (locked || document.visibilityState === 'hidden') historyController.pause();
+    else historyController.resume();
   });
 
   // The same per-agent draft store TerminalView uses, so a reply drafted here
@@ -166,226 +304,134 @@
     savePromptDraft(agent, composer);
   });
 
+  function pinListToBottom(element: HTMLElement): void {
+    if (element !== listElement) return;
+    pinTargetHeight = element.scrollHeight;
+    pinTargetTop = Math.max(0, element.scrollHeight - element.clientHeight);
+    pinPendingUntil = Date.now() + 250;
+    if (pinPendingTimer) clearTimeout(pinPendingTimer);
+    pinPendingTimer = setTimeout(() => {
+      pinPendingTimer = undefined;
+      pinPendingUntil = 0;
+    }, 250);
+    element.scrollTop = element.scrollHeight;
+    lastScrollTop = element.scrollTop;
+    lastScrollHeight = element.scrollHeight;
+  }
+
   function trackScroll() {
     if (!listElement) return;
+    const wasPinned = pinnedToBottom;
     // Re-measured on every scroll, so a content shrink — which makes the
     // browser clamp scrollTop and fire a scroll event from a lower position —
     // lands exactly at the bottom and keeps the pin instead of dropping it.
-    pinnedToBottom = listElement.scrollHeight
-      - listElement.scrollTop
-      - listElement.clientHeight < 48;
+    const bottomGap = listElement.scrollHeight - listElement.scrollTop - listElement.clientHeight;
+    // WebKit can report a scroll caused by growing content before delivering
+    // ResizeObserver. A larger gap alone is not reader movement: keep the pin
+    // if the viewport did not move up, even after the short pin timer expires.
+    const layoutDidNotScrollUp = wasPinned
+      && listElement.scrollHeight >= lastScrollHeight
+      && listElement.scrollTop >= lastScrollTop - 2;
+    lastScrollTop = listElement.scrollTop;
+    lastScrollHeight = listElement.scrollHeight;
+    const layoutShiftFromPin = pinPendingUntil > Date.now()
+      && listElement.scrollHeight >= pinTargetHeight
+      && listElement.scrollTop >= pinTargetTop - 2;
+    if (layoutShiftFromPin || layoutDidNotScrollUp) {
+      pinnedToBottom = true;
+      return;
+    }
+    pinPendingUntil = 0;
+    pinnedToBottom = bottomGap < 48;
+    if (query.trim() || !historyController || document.visibilityState === 'hidden' || $securityState.locked) return;
+    const nearTop = listElement.scrollTop <= 300;
+    if (!pinnedToBottom && nearTop) demandOlder();
+    else if (wasPinned && nearTop && listElement.clientHeight > 0 && listElement.scrollHeight <= listElement.clientHeight + 8) {
+      historyController.ensureMore();
+    }
   }
 
-  function requestWasCancelled(failure: unknown): boolean {
-    return typeof failure === 'object' && failure !== null && 'code' in failure && failure.code === 'request_cancelled';
+  function applyHistoryState(next: ConversationHistoryControllerState): void {
+    const oldEntries = entries;
+    entries = next.entries;
+    available = next.available;
+    reason = next.reason;
+    hasMore = next.hasMore;
+    nextCursor = next.nextCursor;
+    browseState = next.state;
+    browseProgress = next.progress;
+    diagnostics = next.diagnostics;
+    omoPlan = next.omoPlan;
+    previewVisible = next.preview;
+    previewHistorical = next.previewHistorical;
+    authoritative = next.authoritative;
+    contextSearching = next.contextSearching;
+    pendingPrefix = next.pendingPrefix;
+    beginningReached = next.beginningReached;
+    pausedReason = next.pausedReason;
+    latestGapOutstanding = next.latestGapOutstanding;
+    requestPhase = next.requestPhase;
+    preparationPolls = next.preparationPolls;
+    error = next.error?.message || '';
+    errorCode = next.errorCode;
+    errorRetryable = next.errorRetryable;
+    sourceChangedNotice = next.error && ['source_changed', 'invalid_cursor', 'cursor_expired'].includes(next.error.code)
+      ? next.error.message
+      : '';
+    loadingOlder = next.requestPhase === 'older';
+    loading = !entries.length && !previewVisible && next.requestPhase === 'initial';
+
+    const prepended = oldEntries.length > 0
+      && next.entries.findIndex((entry) => entry.id === oldEntries[0].id) > 0;
+    if (prepended && pendingAnchor) {
+      const anchor = pendingAnchor;
+      void tick().then(() => restoreScrollAnchor(anchor.anchor, anchor.top, anchor.height));
+    }
+    if (next.requestPhase === 'idle') pendingAnchor = null;
   }
 
   function cancelHistoryRequests() {
-    latestRequestToken++;
-    olderRequestToken++;
-    loadingOlder = false;
-    latestController?.abort();
-    olderController?.abort();
-    latestController = undefined;
-    olderController = undefined;
-  }
-
-  function clearHistoryForReload(message: string) {
-    cancelHistoryRequests();
-    browseState = 'failed';
-    loading = false;
-    error = message;
-    sourceChangedNotice = message;
+    historyController?.cancel();
   }
 
   function requestLatest() {
-    cancelHistoryRequests();
     sourceChangedNotice = '';
-    sourceRevision = '';
-    snapshotId = '';
-    snapshotActive = false;
-    snapshotSendNotice = '';
-    olderBrowsing = false;
-    nextCursor = '';
-    hasMore = false;
-    total = null;
-    omoPlan = null;
-    browseState = 'ready';
-    browseProgress = undefined;
-    preparationPolls = 0;
-    entries = [];
-    error = '';
-    loading = true;
-    void loadLatest();
+    historyController?.returnToLatest();
   }
 
   function reloadHistory() {
     requestLatest();
   }
 
-  function returnToLatest() {
-    if (!snapshotActive || loading) return;
-    requestLatest();
-  }
-
-  function browseTarget(): string {
-    return JSON.stringify(agent);
-  }
-
-  function historyPageMismatch(page: ConversationPage): string {
-    const code = page.error?.code;
-    if (['source_changed', 'invalid_cursor', 'cursor_expired'].includes(code || '')) return page.error?.message || '';
-    if (sourceRevision && page.sourceRevision && page.sourceRevision !== sourceRevision) return 'The conversation source changed while history was being browsed.';
-    if (snapshotId && page.mode === 'snapshot' && page.snapshotId !== snapshotId) return 'The conversation snapshot changed while history was being browsed.';
-    return '';
-  }
-
   function continuePreparation() {
-    if (!nextCursor || snapshotActive || browseState !== 'preparing' && preparationPolls < maxPreparationPolls) return;
-    preparationPolls = 0;
-    browseState = 'preparing';
+    historyController?.continuePreparation();
+  }
+
+  function recoverHistory() {
+    if (errorCode === 'preparation_stalled') historyController?.continuePreparation();
+    else historyController?.retry();
   }
 
   function cancelPreparation() {
-    if (!nextCursor || browseState !== 'preparing') return;
-    cancelHistoryRequests();
-    preparationPolls = maxPreparationPolls;
-    browseState = 'ready';
-    browseProgress = undefined;
-    error = '';
+    historyController?.pausePreparation();
   }
 
-  function mergeDiagnostics(next: ConversationPage['diagnostics']) {
-    if (!next) return;
-    diagnostics = {
-      oversized_records: Math.max(diagnostics?.oversized_records || 0, next.oversized_records || 0),
-      corrupt_records: Math.max(diagnostics?.corrupt_records || 0, next.corrupt_records || 0),
-      omitted_tools: Math.max(diagnostics?.omitted_tools || 0, next.omitted_tools || 0),
-      omitted_payloads: Math.max(diagnostics?.omitted_payloads || 0, next.omitted_payloads || 0),
-      plan_corrupt: Boolean(diagnostics?.plan_corrupt || next.plan_corrupt),
-      source_truncated: Boolean(diagnostics?.source_truncated || next.source_truncated),
+  type PendingScrollAnchor = { anchor: ScrollAnchor | null; top: number; height: number };
+  let pendingAnchor: PendingScrollAnchor | null = null;
+
+  function demandOlder() {
+    if (!mounted || !historyController || !nextCursor || historyBusy || error) return;
+    pendingAnchor = {
+      anchor: topVisibleEntry(),
+      top: listElement?.scrollTop || 0,
+      height: listElement?.scrollHeight || 0,
     };
-  }
-
-  async function loadLatest() {
-    if (!mounted || (snapshotActive && initialLoadSettled) || sourceChangedNotice || latestController) return;
-    const statusCursor = (browseState === 'preparing' || browseState === 'failed') ? nextCursor : '';
-    const target = browseTarget();
-    const requestToken = ++latestRequestToken;
-    const controller = new AbortController();
-    latestController = controller;
-    if (statusCursor) preparationPolls++;
-    try {
-      const page = await relayStore.getConversationHistory(agent, {
-        ...(statusCursor ? { cursor: statusCursor } : {}),
-        signal: controller.signal,
-      });
-      if (!mounted || requestToken !== latestRequestToken || target !== browseTarget()) return;
-      const firstSettledLoad = !initialLoadSettled;
-      const wasSnapshot = snapshotActive;
-      const wasOlderBrowsing = olderBrowsing;
-      const snapshot = page.mode === 'snapshot';
-      initialLoadSettled = true;
-      const mismatch = historyPageMismatch(page);
-      if (mismatch) {
-        clearHistoryForReload(mismatch);
-        return;
-      }
-      available = page.available || entries.length > 0;
-      reason = page.reason || reason;
-      sourceRevision = page.sourceRevision || sourceRevision;
-      if (!wasSnapshot || snapshot) total = page.total;
-      browseProgress = page.progress;
-      browseState = page.state || 'ready';
-      if (browseState !== 'preparing') preparationPolls = 0;
-      mergeDiagnostics(page.diagnostics);
-      if (snapshot) omoPlan = page.omoPlan || omoPlan;
-      else if (!wasOlderBrowsing) omoPlan = page.omoPlan || null;
-      error = page.error?.message || (browseState === 'failed' ? page.reason : '');
-      if (page.available) {
-        entries = snapshot ? mergeEntries(page.entries, entries) : mergeEntries(entries, page.entries);
-        if (snapshot) {
-          snapshotActive = true;
-          snapshotId = page.snapshotId || snapshotId;
-          nextCursor = page.nextCursor || statusCursor;
-          hasMore = page.hasMore || Boolean(nextCursor);
-        } else if (!wasOlderBrowsing) {
-          nextCursor = page.nextCursor || (browseState === 'failed' ? statusCursor : '');
-          hasMore = page.hasMore || Boolean(nextCursor);
-        }
-      } else if (!entries.length || !statusCursor) {
-        nextCursor = '';
-        hasMore = false;
-      }
-      if (firstSettledLoad) onInitialPage?.(page);
-    } catch (failure) {
-      if (mounted && requestToken === latestRequestToken && !requestWasCancelled(failure)) {
-        initialLoadSettled = true;
-        browseState = 'failed';
-        error = failure instanceof Error ? failure.message : 'Conversation history could not be loaded.';
-        if (nextCursor) hasMore = true;
-      }
-    } finally {
-      if (latestController === controller) latestController = undefined;
-      if (mounted && requestToken === latestRequestToken) loading = false;
-    }
-  }
-
-  async function loadOlder() {
-    if (!mounted || !nextCursor || loadingOlder) return;
-    const requestedCursor = nextCursor;
-    const target = browseTarget();
-    const requestToken = ++olderRequestToken;
-    const controller = new AbortController();
-    olderController = controller;
-    olderBrowsing = true;
-    loadingOlder = true;
     pinnedToBottom = false;
-    const previousHeight = listElement?.scrollHeight || 0;
-    const previousTop = listElement?.scrollTop || 0;
-    const anchor = topVisibleEntry();
-    try {
-      const page = await relayStore.getConversationHistory(agent, {
-        cursor: requestedCursor,
-        retry: browseState === 'failed',
-        signal: controller.signal,
-      });
-      if (!mounted || requestToken !== olderRequestToken || target !== browseTarget()) return;
-      const mismatch = historyPageMismatch(page);
-      if (mismatch) {
-        clearHistoryForReload(mismatch);
-        return;
-      }
-      const failed = page.state === 'failed' || page.error || !page.available;
-      browseState = page.state || (failed ? 'failed' : 'ready');
-      browseProgress = page.progress;
-      sourceRevision = page.sourceRevision || sourceRevision;
-      mergeDiagnostics(page.diagnostics);
-      if (page.omoPlan) omoPlan = page.omoPlan;
-      if (page.total !== null) total = page.total;
-      error = page.error?.message || (failed ? page.reason : '');
-      const retainedCursor = page.nextCursor || requestedCursor;
-      nextCursor = failed ? retainedCursor : page.nextCursor || '';
-      hasMore = failed ? page.hasMore || Boolean(retainedCursor) : page.hasMore;
-      preparationPolls = 0;
-      if (page.mode === 'snapshot') {
-        snapshotActive = true;
-        snapshotId = page.snapshotId || snapshotId;
-      }
-      if (page.available) entries = mergeEntries(page.entries, entries);
-      await tick();
-      restoreScrollAnchor(anchor, previousTop, previousHeight);
-    } catch (failure) {
-      if (mounted && requestToken === olderRequestToken && !requestWasCancelled(failure)) {
-        browseState = 'failed';
-        error = failure instanceof Error ? failure.message : 'Older turns could not be loaded.';
-        nextCursor = requestedCursor;
-        hasMore = true;
-      }
-    } finally {
-      if (olderController === controller) olderController = undefined;
-      if (mounted && requestToken === olderRequestToken) loadingOlder = false;
-    }
+    historyController.demandOlder();
+  }
+
+  function loadOlder() {
+    demandOlder();
   }
   function toggleSpeech(text: string): void {
     if ($speechState === 'speaking') {
@@ -440,13 +486,23 @@
     listElement.scrollTop = previousTop + listElement.scrollHeight - previousHeight;
   }
 
-  function mergeEntries(first: ConversationEntry[], second: ConversationEntry[]): ConversationEntry[] {
-    return [...new Map([...first, ...second].map((entry) => [entry.id, entry])).values()];
+  function continuationMessage(): string {
+    switch (diagnostics?.continuation_reason) {
+      case 'resolution_limit':
+        return 'This conversation may continue, but its continuation chain could not be fully checked. Reload to try again.';
+      case 'invalid_link':
+      case 'ambiguous_link':
+      case 'cycle':
+      case 'missing_source':
+      default:
+        return 'This conversation continues in another session, but part of that history is unavailable. Reload to try again.';
+    }
   }
 
   function setMode(next: 'conversation' | 'activity') {
     mode = next;
     localStorage.setItem('herdr-conversation-view', next);
+    historyController?.setMode(next);
   }
 
   function formatTimestamp(value: string): string {
@@ -512,7 +568,6 @@
   async function sendPrompt() {
     const submittedDraft = composer;
     const text = submittedDraft.replace(/[\r\n]+$/g, '');
-    const viewingSnapshot = snapshotActive;
     if (!text || inputLocked || sendingPrompt || uploadingAttachment) return;
     sendingPrompt = true;
     composer = '';
@@ -521,22 +576,9 @@
       await relayStore.sendToAgent(agent, { type: 'submit_prompt', text });
       relayStore.showToast('Prompt sent.');
       clearUploadStatus();
-      if (viewingSnapshot) {
-        snapshotSendNotice = 'Prompt sent. Return to latest to view the new reply.';
-        return;
-      }
       setTimeout(() => {
         if (!mounted) return;
-        cancelHistoryRequests();
-        snapshotActive = false;
-        olderBrowsing = false;
-        nextCursor = '';
-        hasMore = false;
-        omoPlan = null;
-        browseState = 'ready';
-        browseProgress = undefined;
-        preparationPolls = 0;
-        void loadLatest();
+        historyController?.refresh();
       }, 500);
     } catch (failure) {
       const dispatchedUnknown = typeof failure === 'object'
@@ -658,6 +700,7 @@
   }
 
   onDestroy(() => {
+    if (pinPendingTimer) clearTimeout(pinPendingTimer);
     attachmentUnsubscribe?.();
     void attachmentController?.cancel();
     cancelHistoryRequests();
@@ -678,8 +721,6 @@
   <header class="conversation-toolbar">
     <div>
       <h2 id="conversation-title">Conversation</h2>
-      {#if available && total !== null}<p>{total} recorded {total === 1 ? 'message' : 'messages'}{#if entries.length < total} · {entries.length} loaded{/if}</p>
-      {:else if available && entries.length}<p>{entries.length} loaded messages</p>{/if}
     </div>
     <div class="conversation-toolbar-actions">
       <div class="conversation-mode" role="group" aria-label="Conversation display">
@@ -697,12 +738,13 @@
   {#if readOnly}
     <p class="conversation-warning" role="status">Reader access is read only. Use a controller device to reply.</p>
   {/if}
+  {#if previewVisible && previewHistorical && !authoritative}
+    <p class="conversation-warning" role="status">Saved history is shown while current messages are checked.</p>
+  {/if}
 
-  {#if loading}
-    <div class="empty-state" role="status">Loading conversation…</div>
-  {:else if error && !entries.length && browseState !== 'failed'}
-    <div class="empty-state" role="alert">{error}</div>
-  {:else if !available}
+  {#if loading && !entries.length}
+    <div class="empty-state" role="status" aria-live="polite">{historyStatusText || 'Loading conversation…'}</div>
+  {:else if !available && !entries.length && authoritative}
     <div class="empty-state" role="status">{reason || 'Conversation history is unavailable.'}</div>
   {:else}
     {#if sourceChangedNotice}
@@ -711,21 +753,14 @@
         <Button variant="secondary" size="sm" onclick={reloadHistory}>Reload history</Button>
       </p>
     {/if}
-    {#if snapshotActive}
-      <p class="conversation-warning" role="status">
-        Viewing a stable snapshot of older history. New messages are not included; return to latest to view replies.
-        <Button variant="secondary" size="sm" disabled={loading} onclick={returnToLatest}>Return to latest</Button>
-      </p>
-      {#if snapshotSendNotice}<p class="conversation-warning" role="status">{snapshotSendNotice}</p>{/if}
-    {/if}
-    {#if hasMore && !sourceChangedNotice && preparationPolls < maxPreparationPolls && browseState !== 'preparing'}
+    {#if hasMore && !sourceChangedNotice && preparationPolls < maxPreparationPolls && browseState !== 'preparing' && typeof IntersectionObserver === 'undefined'}
       <div class="conversation-older">
         <Button variant="secondary" size="sm" disabled={loadingOlder || preparationPolls >= maxPreparationPolls} onclick={loadOlder}>
           {loadingOlder ? 'Loading…' : browseState === 'failed' ? 'Retry loading' : 'Load older turns'}
         </Button>
       </div>
     {/if}
-    {#if nextCursor && (preparationPolls >= maxPreparationPolls || browseState === 'preparing') && !snapshotActive}
+    {#if nextCursor && (preparationPolls >= maxPreparationPolls || browseState === 'preparing')}
       <p class="conversation-warning" role="status">
         {#if preparationPolls >= maxPreparationPolls}
           Preparation is paused. <Button variant="secondary" size="sm" onclick={continuePreparation}>Continue</Button>
@@ -735,8 +770,11 @@
         {/if}
       </p>
     {/if}
-    {#if diagnostics?.source_truncated && !snapshotActive}
-      <p class="conversation-warning" role="status">This log exceeds 16 MB. The newest 16 MB are loaded; older turns remain on this computer and survive relay restarts.</p>
+    {#if diagnostics?.continuation_incomplete}
+      <p class="conversation-warning error" role="status">
+        {continuationMessage()}
+        <Button variant="secondary" size="sm" onclick={reloadHistory}>Reload history</Button>
+      </p>
     {/if}
     {#if diagnostics?.oversized_records}
       <p class="conversation-warning" role="status">{diagnostics.oversized_records} oversized {diagnostics.oversized_records === 1 ? 'record was' : 'records were'} skipped from the full history.</p>
@@ -747,18 +785,17 @@
     {#if diagnostics?.corrupt_records || diagnostics?.plan_corrupt}
       <p class="conversation-warning error" role="status">Some records could not be decoded. Valid turns are shown, but the source may be damaged.</p>
     {/if}
-    {#if error}<p class="conversation-warning error" role="alert">{error}</p>{/if}
+    {#if error && !sourceChangedNotice}
+      <p class="conversation-warning error" role="alert">
+        {error}
+        {#if errorRetryable}<Button variant="secondary" size="sm" onclick={recoverHistory}>{['work_deadline', 'work_limit', 'stalled', 'preparation_stalled'].includes(errorCode) ? 'Continue' : 'Retry'}</Button>{/if}
+      </p>
+    {/if}
     {#if omoPlan}<OmoPlan plan={omoPlan} />{/if}
-    {#if !entries.length}
-      <div class="empty-state" role="status">
-        {#if hasMore}No turns are in the newest part of this session. Load older turns to browse the rest.
-        {:else}No user or assistant turns are recorded for this session.{/if}
-      </div>
+    {#if emptyHistoryText}
+      <div class="empty-state" role="status">{emptyHistoryText}</div>
     {/if}
-    {#if entries.length && !modeEntries.length}
-      <div class="empty-state" role="status">No user prompts or agent answers are recorded for this session.</div>
-    {/if}
-    {#if query.trim() && !visibleEntries.length}
+    {#if query.trim() && !visibleEntries.length && entries.length}
       <div class="empty-state" role="status">No loaded turns match “{query.trim()}”.</div>
     {/if}
     <section
@@ -766,8 +803,12 @@
       bind:this={listElement}
       onscroll={trackScroll}
       aria-label={`Conversation with ${agentName}`}
-      aria-live="polite"
+      aria-busy={historyBusy}
     >
+      <p class="conversation-history-status" role="status" aria-live="polite" aria-hidden={!historyStatusText}>
+        {historyStatusText || '\u00a0'}
+      </p>
+      <div class="conversation-history-sentinel" bind:this={topSentinel} aria-hidden="true"></div>
       <div class="conversation-stream" bind:this={streamElement}>
         {#each visibleEntries as entry (entry.id)}
           {@const code = fencedCodeText(entry.text)}

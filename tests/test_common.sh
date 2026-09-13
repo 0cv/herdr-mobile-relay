@@ -37,7 +37,8 @@ PACKAGED_BINARY="$(
     HERDR_RELAY_BIN="$DEV_RELAY_BIN" \
         bash -c '. "$1"; relay_binary' _ "$PACKAGED_RELEASE/relay/common.sh"
 )"
-test "$PACKAGED_BINARY" = "$PACKAGED_RELEASE/herdr-mobile-relay"
+PACKAGED_RELEASE_REAL="$(cd "$PACKAGED_RELEASE" && pwd -P)"
+test "$PACKAGED_BINARY" = "$PACKAGED_RELEASE_REAL/herdr-mobile-relay"
 
 # A plugin checkout installs the release of the repository it was cloned from,
 # in whichever URL form git recorded, and nothing else may pass for one.
@@ -436,7 +437,27 @@ chmod 700 "$FAKE_PLIST_BUDDY"
 export PLIST_LOG
 HERDR_PLIST_BUDDY="$FAKE_PLIST_BUDDY"
 export HERDR_PLIST_BUDDY
-touch "$WORK_DIR/service.plist"
+cat > "$WORK_DIR/service.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.herdr-mobile-relay.service</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>$WORK_DIR/releases/current</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HERDR_RELAY_ENV</key>
+        <string>$WORK_DIR/config/relay.env</string>
+    </dict>
+</dict>
+</plist>
+EOF
 update_launchd_release_paths "$WORK_DIR/service.plist" \
     "$WORK_DIR/releases/current/relay/herdr-mobile-relay-service.sh" \
     "$WORK_DIR/releases/current" \
@@ -476,6 +497,16 @@ printf 'sleep %s\n' "$*" >> "$LAUNCHCTL_LOG"
 EOF
 chmod 700 "$FAKE_LAUNCHCTL_DIR/launchctl" "$FAKE_LAUNCHCTL_DIR/sleep"
 export LAUNCHCTL_LOG LAUNCHCTL_STATE LAUNCHCTL_UNLOAD_PENDING
+if command -v plutil >/dev/null 2>&1; then
+    INVALID_PLIST="$WORK_DIR/invalid.plist"
+    printf '%s\n' '<plist><dict><key>broken</dict></plist>' > "$INVALID_PLIST"
+    if PATH="$FAKE_LAUNCHCTL_DIR:$PATH" reload_launchd_service_definition \
+        "$INVALID_PLIST" "com.herdr-mobile-relay.service"; then
+        echo "invalid plist was accepted" >&2
+        exit 1
+    fi
+    test ! -s "$LAUNCHCTL_LOG"
+fi
 PATH="$FAKE_LAUNCHCTL_DIR:$PATH" reload_launchd_service_definition \
     "$WORK_DIR/service.plist" "com.herdr-mobile-relay.service"
 LAUNCHD_DOMAIN="gui/$(id -u)"
@@ -901,6 +932,14 @@ case "$*" in
         ;;
 esac
 EOF
+cat > "$START_BIN_DIR/launchctl" <<'EOF'
+#!/bin/sh
+case "$1" in
+    print) exit 0 ;;
+    kickstart) printf 'restarted\n' > "$START_SERVICE_LOG" ;;
+    *) exit 1 ;;
+esac
+EOF
 cat > "$START_BIN_DIR/curl" <<'EOF'
 #!/bin/sh
 printf '%s\n' '{"status":"ok","instance":"start-instance","version":"9.9.9","protocol":2}'
@@ -915,7 +954,7 @@ printf '%s\n' "$*" >> "$START_RELAY_LOG"
 exit 1
 EOF
 chmod 700 "$START_SCRIPT_DIR/setup-link.sh" "$START_BIN_DIR/systemctl" \
-    "$START_BIN_DIR/curl" "$START_BIN_DIR/herdr" "$START_BIN_DIR/relay-bin"
+    "$START_BIN_DIR/launchctl" "$START_BIN_DIR/curl" "$START_BIN_DIR/herdr" "$START_BIN_DIR/relay-bin"
 export START_SERVICE_LOG START_RELAY_LOG
 START_OUTPUT="$(
     HOME="$START_HOME" \
@@ -1171,6 +1210,7 @@ case "$*" in
             *) exit 6 ;;
         esac
         ;;
+    *"relay-fedora.unreachable.test"*) exit 6 ;;
 esac
 printf '{"status":"ok","instance":"same","version":"9.9.9","protocol":2}\n'
 EOF

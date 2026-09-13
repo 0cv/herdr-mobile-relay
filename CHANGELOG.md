@@ -5,16 +5,17 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-12
+
 ### Added
 
 - Browse older file-backed conversations through bounded local snapshots with
   authenticated cursors, progress reporting, and explicit source and storage
   diagnostics. OpenCode and Hermes keep native pagination, while all providers
   expose tool activity and bounded corruption and omission diagnostics.
-
-## [0.21.0] - 2026-09-08
-
-### Added
+- Load conversation exchanges automatically across wire-page boundaries, keep a
+  bounded memory-only preview for warm reopens, and reuse verified recent-range
+  projections on the relay without persisting transcript data in the browser.
 
 - Report the installed Herdr client separately from the running server version,
   protocol, endpoint generation, and per-feature compatibility evidence.
@@ -26,6 +27,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Temporarily disable experimental installed-device CI for automatic checks and
+  release publication while it is repaired on `ci-mobile`. Browser checks and
+  native release-bundle verification remain required.
 - Move ordinary inventory, workspace, tab, and pane-read paths onto Herdr's
   JSON socket surface with capability refreshes after startup and reconnects,
   while retaining safe fallbacks where supported.
@@ -37,6 +41,17 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Follow Claude session continuations from stale session anchors, including the
+  first continuation, older pages, and later appends, without losing messages or
+  retaining warnings after a missing continuation becomes available.
+- Preserve authenticated history snapshots during concurrent appends,
+  preparation, validation, and evidence compaction, with bounded request reads
+  and retained metadata.
+- Clear recovered inventory warnings and publish coherent agent, workspace, and
+  status updates across refreshes and reconnects.
+- Keep conversation scrolling pinned to new replies when WebKit reports a layout
+  scroll before its resize notification, without interrupting readers scrolling
+  upward through history.
 - Bind delayed workspace-close errors to their originating relay and action so
   a response cannot open or mutate a group on a different computer.
 - Stop showing unchecked optional Herdr features as compatibility failures in

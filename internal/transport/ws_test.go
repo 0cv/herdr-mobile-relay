@@ -2,9 +2,11 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -305,5 +307,296 @@ func TestHubNegotiatesNoContextTakeoverCompression(t *testing.T) {
 	defer cancel()
 	if err := hub.Shutdown(ctx); err != nil {
 		t.Fatalf("shutdown compressed hub: %v", err)
+	}
+}
+
+func waitForHubClient(t *testing.T, hub *Hub) *ClientConn {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		hub.mu.RLock()
+		for _, client := range hub.clients {
+			hub.mu.RUnlock()
+			return client
+		}
+		hub.mu.RUnlock()
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("websocket client was not registered")
+	return nil
+}
+
+func TestHubPreparedBatchCommitsAndDeliversInOrder(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local sockets unavailable: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(hub.HandleWebSocket))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	client := waitForHubClient(t, hub)
+	committed := false
+	if err := hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+		return []any{
+			map[string]any{"type": "inventory_status", "state": "ready"},
+			map[string]any{"type": "agents", "agents": []any{}},
+			map[string]any{"type": "workspaces", "workspaces": []any{}},
+		}, func() { committed = true }, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !committed {
+		t.Fatal("prepared batch did not commit")
+	}
+	for index, want := range []string{"inventory_status", "agents", "workspaces"} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, data, readErr := conn.Read(ctx)
+		cancel()
+		if readErr != nil {
+			t.Fatalf("read batch item %d: %v", index, readErr)
+		}
+		var message map[string]any
+		if err := json.Unmarshal(data, &message); err != nil {
+			t.Fatal(err)
+		}
+		if message["type"] != want {
+			t.Fatalf("batch item %d = %#v, want type %q", index, message, want)
+		}
+	}
+	if !hub.clientRegistered(client) {
+		t.Fatal("client was not retained after prepared broadcast")
+	}
+	if !hub.SendBatchPrepared(client, func() []any {
+		return []any{map[string]any{"type": "refresh", "state": "ready"}}
+	}) {
+		t.Fatal("prepared per-client send was rejected")
+	}
+	if !hub.SendBatchPreparedByID(client.ID(), func() []any {
+		return []any{map[string]any{"type": "refresh", "state": "ready"}}
+	}) {
+		t.Fatal("prepared per-ID send was rejected")
+	}
+	for range 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, data, readErr := conn.Read(ctx)
+		cancel()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var message map[string]any
+		if err := json.Unmarshal(data, &message); err != nil || message["type"] != "refresh" {
+			t.Fatalf("prepared per-client message = %s", data)
+		}
+	}
+	conn.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := hub.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHubPreparedBatchesKeepCommitAndDeliveryOrderAcrossConcurrentWriters(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local sockets unavailable: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(hub.HandleWebSocket))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	waitForHubClient(t, hub)
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirstNow := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	t.Cleanup(releaseFirstNow)
+	secondEntered := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		results <- hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+			close(firstEntered)
+			<-releaseFirst
+			return []any{map[string]any{"type": "batch", "id": "first"}}, func() {}, nil
+		})
+	}()
+	select {
+	case <-firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first prepared batch did not enter")
+	}
+	go func() {
+		results <- hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+			close(secondEntered)
+			return []any{map[string]any{"type": "batch", "id": "second"}}, func() {}, nil
+		})
+	}()
+	select {
+	case <-secondEntered:
+		t.Fatal("second prepared batch overtook the registration barrier")
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseFirstNow()
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, want := range []string{"first", "second"} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, data, readErr := conn.Read(ctx)
+		cancel()
+		if readErr != nil {
+			t.Fatalf("read concurrent batch %d: %v", index, readErr)
+		}
+		var message map[string]any
+		if err := json.Unmarshal(data, &message); err != nil || message["id"] != want {
+			t.Fatalf("concurrent batch %d = %s, want %q", index, data, want)
+		}
+	}
+	conn.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := hub.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHubPreparedBatchOrdersRegistrationAndPublication(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local sockets unavailable: %v", err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(hub.HandleWebSocket))
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	connected := make(chan *ClientConn, 2)
+	var firstID string
+	hub.SetOnConnect(func(client *ClientConn) {
+		if firstID == "" {
+			firstID = client.ID()
+			connected <- client
+			return
+		}
+		connected <- client
+		hub.Send(client, map[string]any{"type": "handshake", "state": "new"})
+	})
+	dial := func() *websocket.Conn {
+		conn, _, dialErr := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+		if dialErr != nil {
+			t.Fatal(dialErr)
+		}
+		return conn
+	}
+	first := dial()
+	defer first.CloseNow()
+	<-connected
+	_ = waitForHubClient(t, hub)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	committed := make(chan struct{})
+	batchDone := make(chan error, 1)
+	go func() {
+		batchDone <- hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+			close(entered)
+			<-release
+			return []any{map[string]any{"type": "batch", "state": "old"}}, func() { close(committed) }, nil
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("batch did not acquire registration barrier")
+	}
+	second := dial()
+	defer second.CloseNow()
+	select {
+	case <-connected:
+		t.Fatal("registration overtook the prepared batch")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-committed:
+	case <-time.After(time.Second):
+		t.Fatal("batch did not commit")
+	}
+	if err := <-batchDone; err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_, data, err := first.Read(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstMessage map[string]any
+	if err := json.Unmarshal(data, &firstMessage); err != nil || firstMessage["type"] != "batch" {
+		t.Fatalf("first client message = %s", data)
+	}
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("second client did not register after batch commit")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, data, err = second.Read(ctx)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondMessage map[string]any
+	if err := json.Unmarshal(data, &secondMessage); err != nil || secondMessage["type"] != "handshake" {
+		t.Fatalf("second client message = %s", data)
+	}
+	first.CloseNow()
+	second.CloseNow()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	if err := hub.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+}
+
+func TestHubPreparedBatchDoesNotCommitOnEncodingFailureAndHandlesEmptyRecipients(t *testing.T) {
+	hub := NewHub(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := hub.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	}()
+	commits := 0
+	if err := hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+		return nil, func() { commits++ }, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if commits != 1 {
+		t.Fatalf("empty-recipient batch commits = %d, want 1", commits)
+	}
+	if err := hub.BroadcastBatchPrepared(func() ([]any, func(), error) {
+		return []any{map[string]any{"bad": math.NaN()}}, func() { commits++ }, nil
+	}); err == nil {
+		t.Fatal("unsupported JSON value was accepted")
+	}
+	if commits != 1 {
+		t.Fatalf("failed batch advanced commit count to %d", commits)
 	}
 }
