@@ -1440,17 +1440,17 @@ func TestProductionEventInventoryRecoveryDrainsRefreshAcrossReconnect(t *testing
 		}
 	}
 	latest.CloseNow()
-	cancel()
-	select {
-	case <-pollDone:
-	case <-time.After(time.Second):
-		t.Fatal("production poller did not stop")
-	}
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if serveErr := <-serverDone; serveErr != nil {
 		t.Fatal(serveErr)
+	}
+	cancel()
+	select {
+	case <-pollDone:
+	case <-time.After(time.Second):
+		t.Fatal("production poller did not stop")
 	}
 }
 
