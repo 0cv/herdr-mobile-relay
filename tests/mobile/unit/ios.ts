@@ -530,7 +530,7 @@ for (const mode of ['success', 'disabled', 'dismissed', 'limit', 'eighth', 'late
       assert.equal(scrolls, 1);
       assert.equal(confirmationLookups, (confirmationProfiles[mode]?.length ?? 0) + 1);
     } else if (mode.startsWith('add-')) {
-      await assert.rejects(() => platform.installFromBrowser(), mode === 'add-hung' ? /APPIUM_TIMEOUT/u : mode === 'add-budget' ? /insufficient whole transaction allowance/u : /Add: confirmation control was not ready/u);
+      await assert.rejects(() => platform.installFromBrowser(), mode === 'add-hung' ? /APPIUM_TIMEOUT/u : /confirmation control was not ready/u);
       assert.deepEqual(clicks, ['share', 'target-1']);
       if (mode === 'add-budget') assert.equal(confirmationLookups, 0, 'do not dispatch a partial confirmation lookup');
       if (mode === 'add-hung') {
@@ -636,7 +636,9 @@ async function confirmationReplay(name: string, options: {
         return value([element(options.dialog === 'unrelated-add' ? 'expected-add' : `add-${lookups + (replacedAdd ? 1 : 0)}`)]);
       }
       assert.ok(xpathCount(source, body.value) > 0, 'real adapter selector must match recorded Share XML');
-      return value([element(`${body.value.includes('Add to Home Screen') ? 'target' : 'container'}-${scrolls}`)]);
+      const target = body.value.includes('Add to Home Screen');
+      if (target && options.parentRemaining !== undefined && !confirming) now = 120_000 - options.parentRemaining;
+      return value([element(`${target ? 'target' : 'container'}-${scrolls}`)]);
     }
     if (path.endsWith('/element')) {
       if (body.value === 'ShareButton') return value(element('share'));
@@ -684,7 +686,6 @@ async function confirmationReplay(name: string, options: {
       if (id.startsWith('target-')) {
         assert.equal(scrolls, 1);
         confirming = true;
-        if (options.parentRemaining !== undefined) now = 120_000 - options.parentRemaining;
       }
       if (id.startsWith('add-')) {
         advance('click');
@@ -710,9 +711,14 @@ async function confirmationReplay(name: string, options: {
   assert.equal(platform.evidenceSnapshot().installedDocumentBound, false);
   assert.equal(requests.filter((request) => request.path.endsWith('/context')).length, 1, 'no context reset during reacquisition');
   assert.equal(requests.some((request) => /activateApp|pressButton/u.test(request.body.script || '') || request.path.endsWith('/url')), false, 'never restart installation or navigation');
-  assert.deepEqual(clicks.slice(0, 2), ['share', 'target-1']);
+  const targetClickIndex = requests.findIndex((request) => request.path.endsWith('/element/target-1/click'));
+  if (targetClickIndex >= 0) assert.deepEqual(clicks.slice(0, 2), ['share', 'target-1']);
+  else assert.deepEqual(clicks, ['share']);
   assert.ok(clicks.length <= 3, 'final Add must be dispatched at most once');
   const settingsWrites = requests.filter(request => request.path.endsWith('/appium/settings') && 'waitForIdleTimeout' in (request.body.settings || {}));
+  if (settingsWrites.length && targetClickIndex >= 0) {
+    assert.ok(requests.indexOf(settingsWrites[0]) < targetClickIndex, 'confirmation settings must be established before the activity click');
+  }
   if (!error) assert.equal(settingsWrites.length, 2, 'a successful confirmation must apply and restore the scoped backend policy');
   if (settingsWrites.length) {
     assert.deepEqual(settingsWrites[0].body.settings, { waitForIdleTimeout: 1, animationCoolOffTimeout: 0.2 });
@@ -836,7 +842,7 @@ test('confirmation hypothetical same-dialog Add replacement reacquires a complet
   assert.equal(replay.driver.snapshot().unusable, false);
 });
 
-for (const remaining of [68_000, 70_000]) {
+for (const remaining of [74_000, 76_000]) {
   test(`confirmation hypothetical repeated same-dialog Add replacements keep the original ${remaining}ms deadline`, async () => {
     const skip = requireXmlLint();
     if (skip) return skip;
@@ -845,9 +851,9 @@ for (const remaining of [68_000, 70_000]) {
       after: (boundary) => boundary === 'identity' ? 1_000 : 0,
     });
     assert.match(String(replay.error), /confirmation control was not ready.*Add control was replaced/u);
-    assert.equal(replay.lookups, remaining === 68_000 ? 4 : 5);
+    assert.equal(replay.lookups, remaining === 74_000 ? 7 : 8);
     assert.deepEqual(replay.clicks, ['share', 'target-1']);
-    assert.equal(replay.now - (120_000 - remaining), remaining === 68_000 ? 8_000 : 10_000);
+    assert.equal(replay.now - (120_000 - remaining), remaining === 74_000 ? 14_000 : 16_000);
     const commands = replay.driver.snapshot().commands;
     const targetClick = commands.findIndex((entry) => entry.path.endsWith('/target-1/click'));
     assert.ok(commands.slice(targetClick + 1).every((entry) => entry.timeoutMs === (entry.path.endsWith('/appium/settings') ? 2_000 : entry.path.endsWith('/elements') ? 12_000 : entry.path.endsWith('/element') ? 8_000 : 5_000) && !entry.error && !entry.timedOut));
@@ -942,10 +948,10 @@ for (const remaining of [4_999, 7_999, 8_000, 66_999]) {
     const skip = requireXmlLint();
     if (skip) return skip;
     const replay = await confirmationReplay(`parent-${remaining}`, { parentRemaining: remaining, after: (boundary) => boundary === 'lookup' ? 1_001 : 0 });
-    assert.match(String(replay.error), /insufficient whole transaction allowance/u);
+    assert.match(String(replay.error), /insufficient (?:whole transaction allowance|time to complete native scroll and hierarchy verification)/u);
     assert.equal(replay.lookups, 0);
     assert.deepEqual(replay.attributes, []);
-    assert.equal(replay.clicks.length, 2);
+    assert.equal(replay.clicks.length, 1);
     assert.equal(replay.driver.snapshot().unusable, false);
   });
 }
@@ -967,7 +973,7 @@ test('confirmation final click requires its complete parent allowance after all 
   if (skip) return skip;
   let identityReads = 0;
   const replay = await confirmationReplay('click-admission', {
-    parentRemaining: 67_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 58_001 : 0,
+    parentRemaining: 74_000, after: (boundary) => boundary === 'identity' && ++identityReads === 2 ? 65_001 : 0,
   });
   assert.match(String(replay.error), /insufficient time to complete confirmation click/u);
   assert.deepEqual(replay.attributes, ['add-1:enabled', 'add-1:visible', 'add-1:hittable']);

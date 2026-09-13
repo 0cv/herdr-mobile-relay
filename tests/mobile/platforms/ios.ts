@@ -608,10 +608,12 @@ export class IOSPlatform implements MobilePlatform {
         y: Math.round(bounds.y + bounds.height / 2),
       }, IOS_NATIVE_SCROLL_COMMAND_MS);
     }
-    await this.clickNativeScrollable([
+    const addToHomeScreen = await this.findNativeScrollable([
       iosActionLabelContains('Add to Home Screen'),
     ], 'Add to Home Screen', Math.min(IOS_NATIVE_ACTION_TIMEOUT_MS, phase.remainingMs));
-    await withIOSConfirmationSettings(this.driver, phase, IOS_CONFIRMATION_ROUND_MS, async (confirmation) => {
+    await withIOSConfirmationSettings(this.driver, phase, IOS_NATIVE_SCROLL_COMMAND_MS + IOS_CONFIRMATION_ROUND_MS, async (confirmation) => {
+      if (confirmation.remainingMs < IOS_NATIVE_SCROLL_COMMAND_MS) throw new Error('IOS_SHARE: Add: insufficient time to click Add to Home Screen');
+      await this.driver.click(addToHomeScreen, IOS_NATIVE_SCROLL_COMMAND_MS);
       const addButton = await this.waitForInstallConfirmation(confirmation);
       if (confirmation.remainingMs < IOS_NATIVE_LOOKUP_ROUND_MS) throw new Error('IOS_SHARE: Add: insufficient time to complete confirmation click');
       await this.driver.click(addButton, IOS_NATIVE_LOOKUP_ROUND_MS);

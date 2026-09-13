@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { PhaseBudget } from '../support/budget';
 import { AppiumClient } from '../support/webdriver';
 import initialAppiumSettings from './fixtures/ios-appium-settings.json';
-import { initializeIOSConfirmationSettings, IOS_SESSION_SETTINGS, IOS_CONFIRMATION_SETTINGS, withIOSConfirmationSettings } from '../support/confirmation-settings';
+import { CONFIRMATION_RESTORE_MS, CONFIRMATION_SETTINGS_COMMAND_MS, initializeIOSConfirmationSettings, IOS_SESSION_SETTINGS, IOS_CONFIRMATION_SETTINGS, withIOSConfirmationSettings } from '../support/confirmation-settings';
 
 export const confirmationSettingsTests: Array<[string, () => Promise<void>]> = [];
 for (const mode of ['success', 'error', 'restore-error', 'readback', 'missing', 'malformed', 'unsupported', 'tail', 'interrupted', 'late', 'restore-interrupted'] as const) {
@@ -52,7 +52,7 @@ for (const mode of ['success', 'error', 'restore-error', 'readback', 'missing', 
     let error: unknown;
     try {
       await withIOSConfirmationSettings(driver, budget, 49_000, async phase => {
-        assert.equal(Date.parse(budget.snapshot().deadline) - Date.parse(phase.snapshot().deadline), 4_000);
+        assert.equal(Date.parse(budget.snapshot().deadline) - Date.parse(phase.snapshot().deadline), CONFIRMATION_RESTORE_MS);
         assert.deepEqual(settings, { ...saved, ...IOS_CONFIRMATION_SETTINGS });
         if (mode === 'error' || mode === 'restore-error' || mode === 'restore-interrupted') throw cause;
         await driver.command('/element/confirmed/click', 'POST', {}, mode === 'late' ? 1_000 : 2_000);
@@ -116,12 +116,12 @@ for (const operationMs of [49_000, 57_000]) confirmationSettingsTests.push([`iOS
   let settings = { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 };
   const driver = new AppiumClient('http://settings.invalid', 30_000, async (input, init) => {
     if (new URL(String(input)).pathname === '/session') return Response.json({ value: {}, sessionId: 'settings' });
-    now += 2_000;
+    now += CONFIRMATION_SETTINGS_COMMAND_MS;
     if (init?.method === 'POST') settings = JSON.parse(String(init.body)).settings;
     return Response.json({ value: settings });
   });
   await driver.create({ capabilities: {} });
-  const budget = new PhaseBudget('exact-settings', { timeoutMs: operationMs + 10_000, now: () => now });
+  const budget = new PhaseBudget('exact-settings', { timeoutMs: operationMs + 5 * CONFIRMATION_SETTINGS_COMMAND_MS, now: () => now });
   driver.setBudget(budget);
   await withIOSConfirmationSettings(driver, budget, operationMs, async phase => {
     assert.equal(phase.remainingMs, operationMs);
@@ -129,6 +129,36 @@ for (const operationMs of [49_000, 57_000]) confirmationSettingsTests.push([`iOS
   });
   assert.equal(budget.remainingMs, 0);
   assert.deepEqual(settings, { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 });
+}]);
+
+confirmationSettingsTests.push(['iOS recorded 3312ms settings update remains outside the original command allowance', async () => {
+  let updates = 0;
+  let settings: Record<string, unknown> = { waitForIdleTimeout: 10, animationCoolOffTimeout: 2 };
+  const driver = new AppiumClient('http://settings.invalid', 30_000, async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/session') return Response.json({ value: {}, sessionId: 'settings' });
+    if (path.endsWith('/appium/settings')) {
+      if (init?.method === 'POST') {
+        updates++;
+        settings = { ...settings, ...JSON.parse(String(init.body)).settings };
+        if (updates === 1) await new Promise<void>(resolve => setTimeout(resolve, 3_312));
+        return Response.json({ value: null });
+      }
+      return Response.json({ value: settings });
+    }
+    return Response.json({ value: null });
+  });
+  await driver.create({ capabilities: {} });
+  const budget = new PhaseBudget('recorded-settings-delay', { timeoutMs: 30_000 });
+  driver.setBudget(budget);
+  await assert.rejects(() => withIOSConfirmationSettings(driver, budget, 1_000, async () => {
+    assert.fail('the delayed settings response must not authorize the operation');
+  }), /APPIUM_TIMEOUT/u);
+  assert.equal(updates, 1);
+  assert.equal(driver.snapshot().unusable, true);
+  const update = driver.snapshot().commands.find(command => command.method === 'POST' && command.path.endsWith('/appium/settings'));
+  assert.equal(update?.timeoutMs, CONFIRMATION_SETTINGS_COMMAND_MS);
+  assert.equal(update?.timedOut, true);
 }]);
 
 for (const mode of ['success', 'missing', 'malformed', 'shadowed', 'partial-update', 'short-parent', 'short-readback', 'bad-acknowledgement', 'interrupted-update', 'interrupted-readback'] as const) {
