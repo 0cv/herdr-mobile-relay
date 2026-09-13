@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -127,6 +128,39 @@ func TestTitleAndTranscriptAgreeForTheHomeDefault(t *testing.T) {
 	}
 	if title == "" || !page.Available {
 		t.Fatalf("INVARIANT BROKEN: title=%q available=%v reason=%q", title, page.Available, page.Reason)
+	}
+}
+
+func TestTitleAndTranscriptFollowForegroundProjectContext(t *testing.T) {
+	clearAgentEnv(t)
+	home := t.TempDir()
+	const cwd = "/work/pane"
+	const foreground = "/work/foreground"
+	panePath := filepath.Join(home, ".claude", "projects", "-work-pane", invariantSession+".jsonl")
+	foregroundPath := filepath.Join(home, ".claude", "projects", "-work-foreground", invariantSession+".jsonl")
+	writeClaudeTranscriptAnswering(t, panePath, "Pane Title", "pane answer")
+	writeClaudeTranscriptAnswering(t, foregroundPath, "Foreground Title", "foreground answer")
+
+	reader := conversation.NewReader(home)
+	resolver := session.NewResolverWithReader(home, reader)
+	project := conversation.ProjectContext{CWD: cwd, ForegroundCWD: foreground}
+	title := resolver.SessionNameWithProject("claudecode", project, invariantSession)
+	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer browser.Close()
+	page, err := browser.ReadPage(context.Background(), conversation.BrowseRequest{
+		Scope: conversation.BrowseScope{
+			Provider: "claudecode", CWD: cwd, ForegroundCWD: foreground, SessionID: invariantSession,
+		},
+		Limit: 80,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "Foreground Title" || !page.Available || len(page.Entries) != 2 || page.Entries[1].Text != "foreground answer" {
+		t.Fatalf("foreground invariant = title=%q page=%#v", title, page)
 	}
 }
 

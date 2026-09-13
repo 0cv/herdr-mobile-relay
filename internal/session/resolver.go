@@ -50,13 +50,22 @@ func (r *Resolver) piRoots() []string     { return agentroots.Pi(r.home) }
 func (r *Resolver) ompRoots() []string    { return agentroots.OMP(r.home) }
 
 func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
+	return r.SessionNameWithProject(agent, conversation.ProjectContext{CWD: cwd}, sessionID)
+}
+
+// SessionNameWithProject resolves a title through the same directory-aware
+// location as conversation history. The normalized project context is part of
+// the title cache identity, so a foreground-only change cannot reuse a title
+// from another project copy.
+func (r *Resolver) SessionNameWithProject(agent string, project conversation.ProjectContext, sessionID string) string {
+	project = conversation.NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return ""
 	}
 	agentLower := strings.ToLower(strings.TrimSpace(agent))
-	key := agentLower + "|" + cwd + "|" + sessionID
-	location := r.reader.Locate(agent, cwd, sessionID)
+	key := sessionCacheKey(agentLower, project, sessionID)
+	location := r.reader.LocateWithProject(agent, project, sessionID)
 	if location.Path == "" {
 		return ""
 	}
@@ -86,6 +95,14 @@ func (r *Resolver) SessionName(agent, cwd, sessionID string) string {
 	r.cache[key] = cacheEntry{name: name, location: location, expires: now.Add(cacheTTL)}
 	r.mu.Unlock()
 	return name
+}
+
+func sessionCacheKey(agent string, project conversation.ProjectContext, sessionID string) string {
+	if project.ForegroundCWD == "" {
+		// Preserve the pane-only key for existing callers and cache tests.
+		return agent + "|" + project.CWD + "|" + sessionID
+	}
+	return agent + "|" + project.CWD + "|" + project.ForegroundCWD + "|" + sessionID
 }
 
 func isOMPSessionAgent(agent string) bool {

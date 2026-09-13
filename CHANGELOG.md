@@ -5,6 +5,15 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-09-13
+
+### Fixed
+
+- Find Claude Code conversation history, session titles, and completion
+  responses when an agent runs from Herdr's `foreground_cwd` instead of the
+  pane's original `cwd`, including Git worktrees, while preserving transcript
+  root, project, cursor, and continuation isolation.
+
 ## [0.21.0] - 2026-09-12
 
 ### Added
@@ -1492,7 +1501,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.11...v0.21.0
 [0.20.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.10...v0.20.11
 [0.20.10]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.9...v0.20.10

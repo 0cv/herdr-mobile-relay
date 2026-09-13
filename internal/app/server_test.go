@@ -411,21 +411,26 @@ func TestCaptureFinishedPanePrefersConversationResponse(t *testing.T) {
 func TestCaptureFinishedPaneUsesOriginalConversationCwd(t *testing.T) {
 	home := t.TempDir()
 	const sessionID = "123e4567-e89b-12d3-a456-426614174321"
+	oldCWD := "/work/old-pane"
+	oldForeground := "/work/old-foreground"
+	newCWD := "/work/new-pane"
+	newForeground := "/work/new-foreground"
 	writeClaudeTranscriptAnswering(t,
-		filepath.Join(home, ".claude", "projects", "-work-old", sessionID+".jsonl"),
+		filepath.Join(home, ".claude", "projects", "-work-old-foreground", sessionID+".jsonl"),
 		"Old work", "answer from original cwd")
 	writeClaudeTranscriptAnswering(t,
-		filepath.Join(home, ".claude", "projects", "-work-new", sessionID+".jsonl"),
+		filepath.Join(home, ".claude", "projects", "-work-new-foreground", sessionID+".jsonl"),
 		"New work", "answer from current cwd")
 
 	s := testServer()
 	s.conversationM = conversation.NewReader(home)
 	s.state.CommitInventory([]*coordinator.AgentState{{
-		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new", SessionID: sessionID,
+		PaneID: "pane-1", Agent: "claude", Cwd: newCWD, ForegroundCwd: newForeground, SessionID: sessionID,
 	}}, s.state.RevisionCounter())
 
-	if got := s.captureFinishedPane(context.Background(), "pane-1", "claude", "/work/old", sessionID); got != "answer from original cwd" {
-		t.Fatalf("captured response = %q, want the transcript bound to the completion's original cwd", got)
+	if got := s.captureFinishedPane(context.Background(), "pane-1", "claude", oldCWD, sessionID,
+		conversation.ProjectContext{CWD: oldCWD, ForegroundCWD: oldForeground}); got != "answer from original cwd" {
+		t.Fatalf("captured response = %q, want the transcript bound to the completion's original project", got)
 	}
 }
 
@@ -439,7 +444,7 @@ func TestActivityBackfillKeepsHistoricalSessionCwdEmpty(t *testing.T) {
 	s := testServer()
 	s.conversationM = conversation.NewReader(home)
 	s.state.CommitInventory([]*coordinator.AgentState{{
-		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new",
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/new", ForegroundCwd: "/work/unrelated",
 	}}, s.state.RevisionCounter())
 	s.activityView = []activity.Entry{{
 		ID:        "historical-finished",
@@ -454,6 +459,31 @@ func TestActivityBackfillKeepsHistoricalSessionCwdEmpty(t *testing.T) {
 	backfilled := s.recentActivities(1)
 	if len(backfilled) != 1 || backfilled[0].Extract != "historical answer" {
 		t.Fatalf("historical activity = %#v, want response located without current pane cwd", backfilled)
+	}
+}
+
+func TestActivityBackfillUsesLiveForegroundProject(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174398"
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-pane", sessionID+".jsonl"),
+		"Pane copy", "pane answer")
+	writeClaudeTranscriptAnswering(t,
+		filepath.Join(home, ".claude", "projects", "-work-foreground", sessionID+".jsonl"),
+		"Foreground copy", "foreground answer")
+
+	s := testServer()
+	s.conversationM = conversation.NewReader(home)
+	s.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground", SessionID: sessionID,
+	}}, s.state.RevisionCounter())
+	s.activityView = []activity.Entry{{
+		ID: "live-finished", Kind: "finished", Status: "completed", Agent: "claude", PaneID: "pane-1", Session: sessionID,
+	}}
+
+	backfilled := s.recentActivities(1)
+	if len(backfilled) != 1 || backfilled[0].Extract != "foreground answer" {
+		t.Fatalf("live foreground activity = %#v, want foreground response", backfilled)
 	}
 }
 
@@ -479,11 +509,29 @@ func TestLocatedAgentDirUsesTranscriptInsteadOfRawSessionID(t *testing.T) {
 	}
 }
 
+func TestForegroundClaudeTranscriptUsesConfiguredRoot(t *testing.T) {
+	home := t.TempDir()
+	profile := t.TempDir()
+	t.Setenv(agentroots.ClaudeListEnv, profile)
+	const sessionID = "123e4567-e89b-12d3-a456-426614174322"
+	path := filepath.Join(profile, "projects", "-work-foreground", sessionID+".jsonl")
+	writeInvariantRows(t, path,
+		map[string]any{"type": "assistant", "message": map[string]any{"content": "question"}})
+
+	reader := conversation.NewReader(home)
+	location := reader.LocateWithProject("claude", conversation.ProjectContext{
+		CWD: "/work/pane", ForegroundCWD: "/work/foreground",
+	}, sessionID)
+	if location.Path != path || location.Root != filepath.Join(profile, "projects") {
+		t.Fatalf("location = %#v, want foreground profile transcript %q in configured root", location, path)
+	}
+}
+
 func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 	home := t.TempDir()
 	anchor := "123e4567-e89b-12d3-a456-426614174000"
 	child := "123e4567-e89b-12d3-a456-426614174001"
-	root := filepath.Join(home, ".claude", "projects", "-work")
+	root := filepath.Join(home, ".claude", "projects", "-work-foreground")
 	writeInvariantRows(t, filepath.Join(root, anchor+".jsonl"),
 		map[string]any{"type": "assistant", "uuid": "a1", "message": map[string]any{"content": "parent response"}},
 		map[string]any{"type": "continued-in", "sessionId": anchor, "continuedInSessionId": child},
@@ -503,7 +551,7 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 	server.conversationM = reader
 	server.conversationB = browser
 	server.state.CommitInventory([]*coordinator.AgentState{{
-		PaneID: "pane-1", Agent: "claude", Cwd: "/work", SessionID: anchor,
+		PaneID: "pane-1", Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground", SessionID: anchor,
 		TerminalID: "terminal-1", ServerSessionID: "primary", Status: "working",
 	}}, server.state.RevisionCounter())
 	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
@@ -547,13 +595,131 @@ func TestConversationHistoryCommandFollowsClaudeContinuation(t *testing.T) {
 			Entries []struct {
 				Text string `json:"text"`
 			} `json:"entries"`
+			NextCursor string `json:"next_cursor"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &response); err != nil {
 		t.Fatal(err)
 	}
-	if !response.OK || len(response.Data.Entries) != 1 || response.Data.Entries[0].Text != "new child response" {
+	if !response.OK || len(response.Data.Entries) != 1 || response.Data.Entries[0].Text != "new child response" || response.Data.NextCursor == "" {
 		t.Fatalf("history command response = %s", data)
+	}
+
+	olderPayload, err := json.Marshal(map[string]any{
+		"type": "get_conversation_history", "request_id": "history-2", "pane_id": "pane-1",
+		"cursor": response.Data.NextCursor, "limit": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, olderPayload); err != nil {
+		t.Fatal(err)
+	}
+	if _, data, err = conn.Read(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var older struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Entries []struct {
+				Text string `json:"text"`
+			} `json:"entries"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &older); err != nil {
+		t.Fatal(err)
+	}
+	if !older.OK || len(older.Data.Entries) != 1 || older.Data.Entries[0].Text != "parent response" {
+		t.Fatalf("older history command response = %s", data)
+	}
+}
+
+func TestConversationHistoryRejectsForegroundChangeDuringRead(t *testing.T) {
+	home := t.TempDir()
+	const sessionID = "123e4567-e89b-12d3-a456-426614174323"
+	oldCWD := "/work/pane"
+	oldForeground := "/work/foreground"
+	newForeground := "/work/other-foreground"
+	writeInvariantRows(t, filepath.Join(home, ".claude", "projects", "-work-foreground", sessionID+".jsonl"),
+		map[string]any{"type": "assistant", "uuid": "answer", "message": map[string]any{"content": "foreground answer"}})
+
+	server := testServer()
+	if server.conversationB != nil {
+		_ = server.conversationB.Close()
+	}
+	reader := conversation.NewReader(home)
+	browser, err := conversation.NewBrowser(reader, t.TempDir(), conversation.DefaultBrowserOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.conversationM = reader
+	server.conversationB = browser
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: oldCWD, ForegroundCwd: oldForeground, SessionID: sessionID,
+		TerminalID: "terminal-1", ServerSessionID: "primary", Status: "working",
+	}}, server.state.RevisionCounter())
+
+	readEntered := make(chan struct{})
+	releaseRead := make(chan struct{})
+	server.conversationHistoryReadObserver = func() {
+		close(readEntered)
+		<-releaseRead
+	}
+	server.hub.SetHandler(func(client *transport.ClientConn, message map[string]any, admitted func()) {
+		defer admitted()
+		inbound, decodeErr := protocol.DecodeMap(message)
+		if decodeErr != nil {
+			t.Errorf("decode history command: %v", decodeErr)
+			return
+		}
+		server.handleConversationHistory(client, inbound)
+	})
+	httpServer := httptest.NewServer(http.HandlerFunc(server.hub.HandleWebSocket))
+	defer httpServer.Close()
+	defer func() {
+		server.hub.Shutdown(context.Background())
+		browser.Close()
+	}()
+	conn, _, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(httpServer.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	payload, err := json.Marshal(map[string]any{
+		"type": "get_conversation_history", "request_id": "history-stale", "pane_id": "pane-1", "limit": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-readEntered:
+	case <-ctx.Done():
+		t.Fatal("history read did not reach the deterministic barrier")
+	}
+
+	server.state.CommitInventory([]*coordinator.AgentState{{
+		PaneID: "pane-1", Agent: "claude", Cwd: oldCWD, ForegroundCwd: newForeground, SessionID: sessionID,
+		TerminalID: "terminal-1", ServerSessionID: "primary", Status: "working",
+	}}, server.state.RevisionCounter())
+	close(releaseRead)
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || response.Error != "Agent changed while conversation history was loading" {
+		t.Fatalf("stale history response = %s", data)
 	}
 }
 
@@ -595,15 +761,31 @@ func TestCaptureFinishedPaneFollowsClaudeContinuation(t *testing.T) {
 	}
 }
 
+func TestForegroundCwdIsNotSerializedInAgentPayload(t *testing.T) {
+	agent := &coordinator.AgentState{Agent: "claude", Cwd: "/work/pane", ForegroundCwd: "/work/foreground"}
+	data, err := json.Marshal(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["cwd"] != agent.Cwd || strings.Contains(string(data), "foreground_cwd") || strings.Contains(string(data), agent.ForegroundCwd) {
+		t.Fatalf("serialized agent payload = %s, want pane cwd only", data)
+	}
+}
+
 func TestConversationTupleIncludesAgentCwdAndSession(t *testing.T) {
 	base := &coordinator.AgentState{Agent: "claude", Cwd: "/work", SessionID: "session"}
 	if !sameConversationTuple(base, &coordinator.AgentState{Agent: "claude", Cwd: "/work", SessionID: "session"}) {
 		t.Fatal("identical conversation tuples did not match")
 	}
 	for name, changed := range map[string]*coordinator.AgentState{
-		"agent":   {Agent: "qoder", Cwd: "/work", SessionID: "session"},
-		"cwd":     {Agent: "claude", Cwd: "/other", SessionID: "session"},
-		"session": {Agent: "claude", Cwd: "/work", SessionID: "other"},
+		"agent":      {Agent: "qoder", Cwd: "/work", SessionID: "session"},
+		"cwd":        {Agent: "claude", Cwd: "/other", SessionID: "session"},
+		"foreground": {Agent: "claude", Cwd: "/work", ForegroundCwd: "/work/tree", SessionID: "session"},
+		"session":    {Agent: "claude", Cwd: "/work", SessionID: "other"},
 	} {
 		if sameConversationTuple(base, changed) {
 			t.Errorf("%s change was not detected", name)

@@ -64,7 +64,9 @@ type claudeChainContext struct {
 }
 
 func (b *Browser) readClaudeChainPage(ctx context.Context, request BrowseRequest) (BrowsePage, error) {
-	anchor := b.reader.Locate(request.Scope.Provider, request.Scope.CWD, request.Scope.SessionID)
+	anchor := b.reader.LocateWithProject(request.Scope.Provider, ProjectContext{
+		CWD: request.Scope.CWD, ForegroundCWD: request.Scope.ForegroundCWD,
+	}, request.Scope.SessionID)
 	if anchor.Path == "" {
 		return browseUnavailable("invalid_session", "No conversation log is available for this session."), nil
 	}

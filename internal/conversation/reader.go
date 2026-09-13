@@ -74,11 +74,18 @@ type Page struct {
 	ContinuationReason     string        `json:"continuation_reason,omitempty"`
 	OMOPlan                *OMOTodoState `json:"omo_plan,omitempty"`
 }
+type locationKey struct {
+	Agent         string
+	CWD           string
+	ForegroundCWD string
+	SessionID     string
+}
+
 type Reader struct {
 	home      string
 	mu        sync.Mutex
-	locations map[string]locationCacheEntry
-	locating  map[string]chan struct{}
+	locations map[locationKey]locationCacheEntry
+	locating  map[locationKey]chan struct{}
 	omoCache  map[string]omoCacheEntry
 	openCode  *openCodeReader
 	hermes    *hermesReader
@@ -102,8 +109,8 @@ type Location struct {
 // the conversation and session packages makes their root selection identical.
 func NewReader(home string) *Reader {
 	return &Reader{
-		home: home, locations: make(map[string]locationCacheEntry),
-		locating: make(map[string]chan struct{}), omoCache: make(map[string]omoCacheEntry),
+		home: home, locations: make(map[locationKey]locationCacheEntry),
+		locating: make(map[locationKey]chan struct{}), omoCache: make(map[string]omoCacheEntry),
 		openCode: newOpenCodeReader(home), hermes: newHermesReader(home),
 	}
 }
@@ -138,24 +145,34 @@ func normalizedAgent(agent string) string {
 // Read resolves a conversation without project context. It is used for
 // historical activity where the pane cwd is no longer available.
 func (r *Reader) Read(agent, sessionID, before string, limit int) (Page, error) {
-	return r.read(agent, "", sessionID, before, limit)
+	return r.ReadWithProject(agent, ProjectContext{}, sessionID, before, limit)
 }
 
 // ReadFor resolves a pane conversation using the same cwd-aware locator as the
 // session-title resolver.
 func (r *Reader) ReadFor(agent, cwd, sessionID, before string, limit int) (Page, error) {
-	return r.read(agent, cwd, sessionID, before, limit)
+	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
 }
 
+// read preserves the old package-local helper shape for tests and legacy
+// callers; public callers should use Read or ReadFor.
 func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, error) {
+	return r.ReadWithProject(agent, ProjectContext{CWD: cwd}, sessionID, before, limit)
+}
+
+// ReadWithProject resolves a conversation with the pane and, for Claude Code,
+// foreground directory hints. Once the anchor is located, Claude continuation
+// descendants stay in that anchor's project and root.
+func (r *Reader) ReadWithProject(agent string, project ProjectContext, sessionID, before string, limit int) (Page, error) {
+	project = NormalizeProjectContext(agent, project)
 	if isHermesAgent(agent) {
-		return r.readHermesFor(agent, cwd, sessionID, before, limit)
+		return r.readHermesFor(agent, project.CWD, sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "opencode" {
-		return r.readOpenCodeFor(cwd, sessionID, before, limit)
+		return r.readOpenCodeFor(project.CWD, sessionID, before, limit)
 	}
 	if normalizedAgent(agent) == "omo" || normalizedAgent(agent) == "ohmyopencode" {
-		return r.readOMO(cwd, sessionID, before, limit)
+		return r.readOMO(project.CWD, sessionID, before, limit)
 	}
 	if !Supported(agent) {
 		return unavailableCode("invalid_provider", "Conversation history is not available for this agent."), nil
@@ -164,12 +181,12 @@ func (r *Reader) read(agent, cwd, sessionID, before string, limit int) (Page, er
 	if sessionID == "" {
 		return unavailableCode("invalid_session", "This agent has not reported a conversation session yet."), nil
 	}
-	location := r.Locate(agent, cwd, sessionID)
+	location := r.LocateWithProject(agent, project, sessionID)
 	if location.Path == "" {
 		return unavailableCode("invalid_session", "No conversation log is available for this session."), nil
 	}
 	if isClaudeProvider(agent) {
-		return r.readClaudeChain(cwd, sessionID, location, before, limit)
+		return r.readClaudeChain(project.CWD, sessionID, location, before, limit)
 	}
 	text, clipped, err := loadTail(location.Path, maxConversationBytes)
 	if err != nil {
@@ -213,16 +230,25 @@ func unavailableCode(code, reason string) Page {
 }
 
 // Locate returns the exact contained transcript selected for agent, cwd and
-// sessionID. Root order is authoritative; within Claude/Qoder roots cwd selects
-// the project directory when it is known. Cached tuple locations are returned
+// sessionID. Root order is authoritative; within Claude roots the foreground
+// directory is tried before the pane cwd. Cached tuple locations are returned
 // before any filesystem walk, keeping title and history on the same copy.
 func (r *Reader) Locate(agent, cwd, sessionID string) Location {
+	return r.LocateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
+}
+
+// LocateWithProject returns the exact contained transcript selected for the
+// supplied project context. The effective foreground hint is part of the
+// cache and single-flight keys, so changing it cannot reuse an old hit or
+// miss.
+func (r *Reader) LocateWithProject(agent string, project ProjectContext, sessionID string) Location {
+	project = NormalizeProjectContext(agent, project)
 	sessionID = strings.TrimSpace(sessionID)
 	agentKey := normalizedAgent(agent)
 	if isHermesAgent(agent) {
 		agentKey = "hermes"
 	}
-	key := agentKey + "\x00" + cwd + "\x00" + sessionID
+	key := locationKey{Agent: agentKey, CWD: project.CWD, ForegroundCWD: project.ForegroundCWD, SessionID: sessionID}
 	for {
 		now := time.Now()
 		r.mu.Lock()
@@ -240,7 +266,7 @@ func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 		break
 	}
 
-	location := r.locate(agent, cwd, sessionID)
+	location := r.locateWithProject(agent, project, sessionID)
 	ttl := locationCacheTTL
 	if location.Path == "" {
 		ttl = locationMissTTL
@@ -265,18 +291,27 @@ func (r *Reader) Locate(agent, cwd, sessionID string) Location {
 	return location
 }
 
+// locate preserves the old package-local helper shape for tests and legacy
+// callers; public callers should use Locate or LocateWithProject.
 func (r *Reader) locate(agent, cwd, sessionID string) Location {
+	return r.locateWithProject(agent, ProjectContext{CWD: cwd}, sessionID)
+}
+
+func (r *Reader) locateWithProject(agent string, project ProjectContext, sessionID string) Location {
+	project = NormalizeProjectContext(agent, project)
 	switch normalizedAgent(agent) {
 	case "claude", "claudecode":
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSession(r.claudeRoots(), cwd, sessionID+".jsonl", claudeProjectNonAlphanumeric.ReplaceAllString(cwd, "-"))
+		return findProjectSessionWithProject(r.claudeRoots(), project, sessionID+".jsonl", func(cwd string) string {
+			return claudeProjectNonAlphanumeric.ReplaceAllString(cwd, "-")
+		})
 	case "qoder", "qodercli":
 		if !safeSessionID(sessionID) {
 			return Location{}
 		}
-		return findProjectSession(r.qoderRoots(), cwd, sessionID+".jsonl", "")
+		return findProjectSessionWithProject(r.qoderRoots(), project, sessionID+".jsonl", func(string) string { return "" })
 	case "codex", "openaicodex":
 		if !canonicalSessionID.MatchString(sessionID) {
 			return Location{}
@@ -287,7 +322,7 @@ func (r *Reader) locate(agent, cwd, sessionID string) Location {
 	case "omp", "ohmypi":
 		return resolvePathOrSession(r.ompRoots(), sessionID, "_")
 	case "hermes", "hermesagent":
-		return r.hermes.locate(cwd, sessionID)
+		return r.hermes.locate(project.CWD, sessionID)
 	default:
 		return Location{}
 	}
@@ -319,14 +354,54 @@ func isDir(path string) bool {
 }
 
 func findProjectSession(roots []string, cwd, filename, preferredProjectName string) Location {
+	return findProjectSessionWithProject(roots, ProjectContext{CWD: cwd}, filename, func(string) string {
+		return preferredProjectName
+	})
+}
+
+// findProjectSessionWithProject keeps roots as the outer loop. Within one root
+// the more specific foreground directory is tried before the pane cwd, and an
+// unknown-cwd scan is used only when neither known directory is available.
+func findProjectSessionWithProject(roots []string, project ProjectContext, filename string, preferredProjectName func(string) string) Location {
+	candidates := projectDirectoriesForContext(project)
 	for _, root := range roots {
-		for _, projectDir := range projectDirectories(root, cwd, preferredProjectName) {
-			if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
-				return Location{Path: path, Root: root}
+		seen := make(map[string]bool)
+		for _, cwd := range candidates {
+			preferred := ""
+			if preferredProjectName != nil {
+				preferred = preferredProjectName(cwd)
+			}
+			for _, projectDir := range projectDirectories(root, cwd, preferred) {
+				projectDir = filepath.Clean(projectDir)
+				if seen[projectDir] {
+					continue
+				}
+				seen[projectDir] = true
+				if path := containedRegularFile(filepath.Join(projectDir, filename), root); path != "" {
+					return Location{Path: path, Root: root}
+				}
 			}
 		}
 	}
 	return Location{}
+}
+
+func projectDirectoriesForContext(project ProjectContext) []string {
+	candidates := make([]string, 0, 2)
+	if project.ForegroundCWD != "" {
+		candidates = append(candidates, project.ForegroundCWD)
+	}
+	if strings.TrimSpace(project.CWD) != "" {
+		if len(candidates) == 0 || candidates[0] != project.CWD {
+			candidates = append(candidates, project.CWD)
+		}
+	}
+	if len(candidates) == 0 {
+		// An empty cwd has historical meaning: enumerate every project in the
+		// root. It is deliberately not combined with a valid foreground hint.
+		return []string{""}
+	}
+	return candidates
 }
 
 func projectDirectories(root, cwd, preferredProjectName string) []string {
