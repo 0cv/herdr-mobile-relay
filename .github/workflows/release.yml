@@ -111,6 +111,8 @@ jobs:
             "${target%_*}/${target#*_}"
 
   mobile:
+    # Temporarily disabled while the installed-device harness is fixed on ci-mobile.
+    if: ${{ false }}
     needs: build
     uses: ./.github/workflows/mobile-ci.yml
     with:
@@ -126,7 +128,9 @@ jobs:
       contents: read
 
   publish:
-    needs: [verify, build, native-smoke, mobile]
+    # Do not depend on the disabled mobile job: a skipped dependency skips
+    # publication too. Restore this dependency when mobile CI is re-enabled.
+    needs: [verify, build, native-smoke]
     runs-on: ubuntu-latest
     permissions:
       actions: read

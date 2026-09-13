@@ -27,6 +27,9 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Temporarily disable experimental installed-device CI for automatic checks and
+  release publication while it is repaired on `ci-mobile`. Browser checks and
+  native release-bundle verification remain required.
 - Move ordinary inventory, workspace, tab, and pane-read paths onto Herdr's
   JSON socket surface with capability refreshes after startup and reconnects,
   while retaining safe fallbacks where supported.

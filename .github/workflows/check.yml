@@ -188,9 +188,8 @@ jobs:
 
   mobile:
     name: Mobile device CI
-    if: >-
-      (github.event_name == 'push' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')) ||
-      (github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main')
+    # Temporarily disabled alongside mobile-host-check and the release caller.
+    if: ${{ false }}
     needs: [release, mobile-host-check]
     uses: ./.github/workflows/mobile-ci.yml
     with:
