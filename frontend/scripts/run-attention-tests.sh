@@ -9,12 +9,12 @@ cd "$FRONTEND_DIR"
 # needs the Ubuntu browser ABI; Playwright forwards its loopback connections
 # back to the host, including the fixture's dynamically allocated relay port.
 CONTAINER_RUNTIME=""
-CONTAINER_ARGS=()
 if [ "${HERDR_WEBKIT_CONTAINER:-}" = 1 ]; then
     CONTAINER_RUNTIME="docker"
+    CONTAINER_RUN=("$CONTAINER_RUNTIME" run --rm -d)
 elif grep -Eq '^ID=("?fedora"?)$' /etc/os-release 2>/dev/null; then
     CONTAINER_RUNTIME="podman"
-    CONTAINER_ARGS+=(--security-opt label=disable)
+    CONTAINER_RUN=("$CONTAINER_RUNTIME" run --rm -d --security-opt label=disable)
 else
     exec bun x playwright test --config playwright.attention.config.ts "$@"
 fi
@@ -44,8 +44,7 @@ trap 'exit 143' TERM
 # runs/reboots. Do not install Ubuntu packages into the Fedora host or fetch
 # an unpinned Playwright CLI inside the container.
 echo "Running attention tests with containerized WebKit and the host relay fixture."
-CONTAINER_ID="$("$CONTAINER_RUNTIME" run --rm -d \
-    "${CONTAINER_ARGS[@]}" \
+CONTAINER_ID="$("${CONTAINER_RUN[@]}" \
     -p 127.0.0.1::3000 \
     -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     -v "$FRONTEND_DIR:/work/frontend:ro" \
