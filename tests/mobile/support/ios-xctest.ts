@@ -716,7 +716,10 @@ function boundedCausalCommand(command: CommandDiagnostic, sanitized: boolean): C
   };
 }
 
-function boundedStatus(status: StatusResponse): StatusResponse {
+const boundedStatusMarker = Symbol('boundedStatus');
+type BoundedStatus = StatusResponse & { readonly [boundedStatusMarker]: true };
+
+function boundedStatus(status: StatusResponse): BoundedStatus {
   const body = status.body as { value?: unknown } | null;
   const value = body?.value as {
     ready?: unknown;
@@ -732,7 +735,7 @@ function boundedStatus(status: StatusResponse): StatusResponse {
   const osVersion = typeof value?.os?.version === 'string' && /^\d+(?:\.\d+){1,3}$/u.test(value.os.version)
     ? value.os.version
     : 'unrecognized';
-  return {
+  const bounded: StatusResponse = {
     statusCode: status.statusCode,
     ...(status.bytes !== undefined ? {bytes: status.bytes} : {}),
     ...(status.truncated ? {truncated: true} : {}),
@@ -751,6 +754,13 @@ function boundedStatus(status: StatusResponse): StatusResponse {
       ...(status.truncated ? {bodyTruncated: true} : {}),
     },
   };
+  Object.defineProperty(bounded, boundedStatusMarker, {value: true});
+  return bounded as BoundedStatus;
+}
+
+function isBoundedStatus(status: StatusResponse): status is BoundedStatus {
+  return typeof status === 'object' && status !== null
+    && (status as Partial<BoundedStatus>)[boundedStatusMarker] === true;
 }
 
 function safeXctestrunEvidence(data: unknown): string {
@@ -807,12 +817,13 @@ function boundedOwnerValue(value: Owner, sanitized: boolean): Owner {
         commands: value.diagnostics.commands.map(command => boundedCausalCommand(command, sanitized)),
       },
     } : {}),
-    ...(value.status ? {status: boundedStatus(value.status)} : {}),
+    ...(value.status ? {status: isBoundedStatus(value.status) ? value.status : boundedStatus(value.status)} : {}),
   };
 }
 
 function ownerContent(owner: Owner, sanitized: boolean): string {
-  const value = boundedOwnerValue((sanitized ? sanitizeOwnerValue(sanitizeValue(owner)) : owner) as Owner, sanitized);
+  const bounded = boundedOwnerValue(owner, sanitized);
+  const value = (sanitized ? sanitizeOwnerValue(sanitizeValue(bounded)) : bounded) as Owner;
   const serialize = (entry: Owner): string => `${JSON.stringify(entry, null, 2)}\n`;
   const content = serialize(value);
   if (Buffer.byteLength(content) <= maxOwnerBytes) return content;
@@ -833,6 +844,12 @@ function writeOwner(root: string, owner: Owner): void {
   const next = join(root, 'owner.next.json');
   writeFileSync(next, ownerContent(owner, true), { mode: 0o600 });
   renameSync(next, join(root, 'owner.json'));
+}
+
+function writeStatusEvidence(root: string, status: BoundedStatus): void {
+  const next = join(root, 'wda-status.next.json');
+  writeFileSync(next, `${JSON.stringify({checkedAt: new Date().toISOString(), ...status}, null, 2)}\n`, { mode: 0o600 });
+  renameSync(next, join(root, 'wda-status.json'));
 }
 
 function binaryHash(path: string): string {
@@ -988,12 +1005,14 @@ async function supervise(): Promise<void> {
   const snapshotCommandIds = (snapshot: ListenerSnapshot): number[] => snapshot.commandStart === undefined
     ? snapshot.commandIds || []
     : diagnostics.commandIdsFrom(snapshot.commandStart);
-  const save = (): void => {
+  const save = (): boolean => {
     try {
       writeOwner(root, owner);
+      return true;
     } catch {
       rememberFailure({message: 'XCTEST: owner evidence write failed', phase: 'supervisor', stage: 'owner-evidence-write', category: 'owner-evidence-write'});
       stop = true;
+      return false;
     }
   };
   const remaining = (): number => {
@@ -1507,15 +1526,16 @@ async function supervise(): Promise<void> {
             truncated: Boolean(status.truncated),
             frozenOwner: Boolean(frozenRunner),
           });
-          owner.status = boundedStatus(status);
+          const bounded = boundedStatus(status);
+          owner.status = bounded;
+          if (!save()) throw new Error('XCTEST: owner evidence write failed');
           try {
-            writeFileSync(join(root, 'wda-status.json'), `${JSON.stringify({checkedAt: new Date().toISOString(), ...boundedStatus(status)}, null, 2)}\n`, { mode: 0o600 });
+            writeStatusEvidence(root, bounded);
           } catch {
             const statusError = new Error('XCTEST: WDA status evidence write failed');
             rememberFailure({error: statusError, phase: 'status', stage: 'status-evidence-write', category: 'status-evidence-write', frozenOwner: Boolean(frozenRunner)});
             throw statusError;
           }
-          save();
         } catch (error) {
           diagnostics.lifecycle('status-error', {
             phase: 'status',

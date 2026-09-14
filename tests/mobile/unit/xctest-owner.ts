@@ -443,6 +443,26 @@ const assertSanitizedExports = async (root: string, state: string, forbidden: st
   }
 };
 
+const assertReadyStatus = (candidate: unknown): void => {
+  assert.ok(candidate && typeof candidate === 'object');
+  const status = candidate as { statusCode?: number; bytes?: number; body?: Record<string, unknown> };
+  assert.equal(status.statusCode, 200);
+  assert.ok(Number.isInteger(status.bytes));
+  assert.deepEqual(status.body, {
+    classification: 'wda-status',
+    ready: true,
+    state: 'success',
+    buildVersion: '16.12.1',
+    productBundleIdentifier: 'com.facebook.WebDriverAgentRunner',
+    osVersion: '18.6',
+    payload: 'suppressed',
+    diagnostic: 'suppressed',
+    diagnosticBytes: status.bytes,
+    diagnosticTruncated: false,
+    bodyBytes: status.bytes,
+  });
+};
+
 export const xctestOwnerTests: Array<[string, () => Promise<void>]> = [];
 for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-endpoints-disappear', 'listener-hash-after-freeze']) {
   xctestOwnerTests.push([`Native startup actual XCTest supervisor ${mode}`, async () => {
@@ -553,6 +573,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
         const forbidden = ['status-opaque-secret', 'status-password-sentinel', 'https://status.private.example'];
         while (!done && Date.now() < deadline && !existsSync(join(state, 'wda-status.json'))) await pause();
         const unfinishedOwner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8')) as { status?: { statusCode?: number; bytes?: number; body?: Record<string, unknown> } };
+        const unfinishedPrivateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8')) as { status?: { statusCode?: number; bytes?: number; body?: Record<string, unknown> } };
         const unfinishedStatus = JSON.parse(await readFile(join(state, 'wda-status.json'), 'utf8')) as { statusCode?: number; bytes?: number; body?: Record<string, unknown> };
         const assertAllowlistedStatus = (evidence: { statusCode?: number; bytes?: number; body?: Record<string, unknown> }): void => {
           assert.equal(evidence.statusCode, 200);
@@ -571,7 +592,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
             bodyBytes: evidence.bytes,
           });
         };
-        for (const evidence of [unfinishedOwner.status, unfinishedStatus]) {
+        for (const evidence of [unfinishedOwner.status, unfinishedPrivateOwner.status, unfinishedStatus]) {
           assertAllowlistedStatus(evidence || {});
           assert.equal(JSON.stringify(evidence).includes('status-opaque-secret'), false);
           assert.equal(JSON.stringify(evidence).includes('status-password-sentinel'), false);
@@ -622,6 +643,11 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
         }
         const owner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
         assert.ok(owner.ready, errors || owner.error);
+        if (mode === 'ready') {
+          const privateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8'));
+          const standaloneStatus = JSON.parse(await readFile(join(state, 'wda-status.json'), 'utf8'));
+          for (const status of [owner.status, privateOwner.status, standaloneStatus]) assertReadyStatus(status);
+        }
         const previous = { ...process.env };
         Object.assign(process.env, env);
         try {
@@ -652,6 +678,11 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
       assert.equal(owner.ready, false);
       assert.ok(Buffer.byteLength(await readFile(join(state, 'owner.json'), 'utf8')) <= 1048576);
       assert.ok(Buffer.byteLength(await readFile(join(state, 'owner-private.json'), 'utf8')) <= 1048576);
+      if (mode === 'ready') {
+        const privateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8'));
+        const standaloneStatus = JSON.parse(await readFile(join(state, 'wda-status.json'), 'utf8'));
+        for (const status of [owner.status, privateOwner.status, standaloneStatus]) assertReadyStatus(status);
+      }
       assert.equal(owner.diagnostics?.schema, 1);
       assert.equal(owner.diagnostics?.clock?.kind, 'process-relative-monotonic');
       assert.ok(owner.diagnostics?.commands.length <= 128);
@@ -735,6 +766,9 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
         assert.equal(afterStatusListener.stderr.suppressed, true);
       }
       if (mode === 'status-evidence-disappear') {
+        const privateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8'));
+        assertReadyStatus(owner.status);
+        assertReadyStatus(privateOwner.status);
         assert.equal(owner.firstFailure.stage, 'status-evidence-write');
         assert.match(owner.firstFailure.message, /WDA status evidence write failed/u);
         assert.equal(owner.listenerValidation.failureStage, 'managed-wda-pid-count');
@@ -939,6 +973,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
       }
       if (mode === 'status-forged-markers') {
         const forbidden = ['status-opaque-secret', 'status-password-sentinel', 'https://status.private.example'];
+        const finalPrivateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8')) as { status?: { statusCode?: number; bytes?: number; body?: Record<string, unknown> } };
         const finalStatus = JSON.parse(await readFile(join(state, 'wda-status.json'), 'utf8')) as { statusCode?: number; bytes?: number; body?: Record<string, unknown> };
         assert.deepEqual(owner.status?.body, {
           classification: 'unrecognized',
@@ -966,6 +1001,12 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
           diagnosticTruncated: false,
           bodyBytes: finalStatus.bytes,
         });
+        assert.equal(finalPrivateOwner.status?.statusCode, owner.status?.statusCode);
+        assert.equal(finalPrivateOwner.status?.bytes, owner.status?.bytes);
+        assert.deepEqual(finalPrivateOwner.status?.body, owner.status?.body);
+        assert.equal(JSON.stringify(finalPrivateOwner.status).includes('status-opaque-secret'), false);
+        assert.equal(JSON.stringify(finalPrivateOwner.status).includes('status-password-sentinel'), false);
+        assert.equal(JSON.stringify(finalPrivateOwner.status).includes('status.private.example'), false);
         assert.equal(JSON.stringify(owner.status).includes('status-opaque-secret'), false);
         assert.equal(JSON.stringify(owner.status).includes('status-password-sentinel'), false);
         assert.equal(JSON.stringify(owner.status).includes('status.private.example'), false);
@@ -1011,6 +1052,197 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
     }
   }]);
 }
+
+xctestOwnerTests.push(['Native startup status publication ordering is deterministic against the legacy source', async () => {
+  const sourcePath = join(import.meta.dirname, '../support/ios-xctest.ts');
+  const source = await readFile(sourcePath, 'utf8');
+  const currentStatusBlock = [
+    '          const bounded = boundedStatus(status);',
+    '          owner.status = bounded;',
+    "          if (!save()) throw new Error('XCTEST: owner evidence write failed');",
+    '          try {',
+    '            writeStatusEvidence(root, bounded);',
+    '          } catch {',
+    "            const statusError = new Error('XCTEST: WDA status evidence write failed');",
+    "            rememberFailure({error: statusError, phase: 'status', stage: 'status-evidence-write', category: 'status-evidence-write', frozenOwner: Boolean(frozenRunner)});",
+    '            throw statusError;',
+    '          }',
+  ].join('\n');
+  assert.equal(source.includes(currentStatusBlock), true);
+  const legacyStatusBlock = [
+    '          const bounded = boundedStatus(status);',
+    '          owner.status = bounded;',
+    '          try {',
+    "            writeFileSync(join(root, 'wda-status.json'), JSON.stringify({checkedAt: new Date().toISOString(), ...bounded}) + '\\n', { mode: 0o600 });",
+    "            writeFileSync(join(root, 'legacy-status-published'), '');",
+    "            while (!stop && Date.now() < deadline && !existsSync(join(root, 'legacy-continue'))) await sleep(1);",
+    "            if (stop) throw new Error('XCTEST: publication ordering barrier cancelled');",
+    "            if (Date.now() >= deadline) throw new Error('XCTEST: publication ordering barrier deadline');",
+    '          } catch {',
+    "            const statusError = new Error('XCTEST: WDA status evidence write failed');",
+    "            rememberFailure({error: statusError, phase: 'status', stage: 'status-evidence-write', category: 'status-evidence-write', frozenOwner: Boolean(frozenRunner)});",
+    '            throw statusError;',
+    '          }',
+    '          save();',
+  ].join('\n');
+  const legacySource = source.replace(currentStatusBlock, legacyStatusBlock);
+  const candidateStatusBlock = currentStatusBlock.replace(
+    "          if (!save()) throw new Error('XCTEST: owner evidence write failed');",
+    "          if (!save()) throw new Error('XCTEST: owner evidence write failed');\n          writeFileSync(join(root, 'candidate-owner-saved'), '');\n          while (!stop && Date.now() < deadline && !existsSync(join(root, 'candidate-continue'))) await sleep(1);\n          if (stop) throw new Error('XCTEST: publication ordering barrier cancelled');\n          if (Date.now() >= deadline) throw new Error('XCTEST: publication ordering barrier deadline');",
+  );
+  const candidateSource = source.replace(currentStatusBlock, candidateStatusBlock);
+  assert.notEqual(legacySource, source);
+  assert.notEqual(candidateSource, source);
+
+  const assertForgedStatus = (value: unknown): void => {
+    assert.ok(value && typeof value === 'object');
+    const status = value as { statusCode?: number; bytes?: number; body?: Record<string, unknown> };
+    assert.equal(status.statusCode, 200);
+    assert.ok(Number.isInteger(status.bytes));
+    assert.deepEqual(status.body, {
+      classification: 'unrecognized',
+      ready: 'not-evaluated',
+      state: 'unrecognized',
+      buildVersion: 'unrecognized',
+      productBundleIdentifier: 'unrecognized',
+      osVersion: 'unrecognized',
+      payload: 'suppressed',
+      diagnostic: 'suppressed',
+      diagnosticBytes: status.bytes,
+      diagnosticTruncated: false,
+      bodyBytes: status.bytes,
+    });
+    const serialized = JSON.stringify(value);
+    for (const forbidden of ['status-opaque-secret', 'status-password-sentinel', 'https://status.private.example']) assert.equal(serialized.includes(forbidden), false);
+  };
+
+  const runVariant = async (label: 'legacy' | 'candidate', variantSource: string, legacyOrdering: boolean, forceAssertionFailure = false): Promise<void> => {
+    const root = await mkdtemp(join(tmpdir(), `herdr-xctest-publication-${label}-`));
+    const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
+    const product = join(root, 'products/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app');
+    const receipt = join(root, `Devices/${udid}/data/Containers/Bundle/Application/10C0E9C0-50FD-4C3E-AC55-AC1158A00568/WebDriverAgentRunner-Runner.app`);
+    const runnerReceipt = join(root, `Devices/${udid}/data/Containers/Bundle/Application/1C1FB5F7-2D0E-49AC-BE09-62816F229E5C/WebDriverAgentRunner-Runner.app`);
+    const state = join(root, 'state');
+    const bin = join(root, 'bin');
+    const support = join(root, 'support');
+    const xctestrun = join(root, 'products/WebDriverAgentRunner_test.xctestrun');
+    let child: ReturnType<typeof spawn> | undefined;
+    let done = false;
+    let exited: Promise<void> | undefined;
+    let errors = '';
+    const waitForExit = async (timeoutMs: number): Promise<boolean> => {
+      if (!exited || done) return true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timed = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+      const settled = await Promise.race([exited.then(() => true), timed]);
+      if (timer) clearTimeout(timer);
+      return settled;
+    };
+    try {
+      await Promise.all([
+        mkdir(bin),
+        mkdir(state),
+        mkdir(support),
+        mkdir(join(product, 'PlugIns/WebDriverAgentRunner.xctest'), { recursive: true }),
+        mkdir(receipt, { recursive: true }),
+        mkdir(runnerReceipt, { recursive: true }),
+        mkdir(join(root, 'wda')),
+      ]);
+      for (const dir of [product, receipt, runnerReceipt]) {
+        await writeFile(join(dir, 'Info.plist'), JSON.stringify({ CFBundleIdentifier: 'com.facebook.WebDriverAgentRunner.xctrunner' }));
+        await writeFile(join(dir, 'WebDriverAgentRunner-Runner'), 'exact built runner');
+      }
+      await writeFile(join(root, 'wda/package.json'), JSON.stringify({ version: '16.12.1' }));
+      await writeFile(xctestrun, JSON.stringify({ WebDriverAgentRunner: {
+        TestHostBundleIdentifier: 'com.facebook.WebDriverAgentRunner.xctrunner',
+        TestBundlePath: '__TESTHOST__/PlugIns/WebDriverAgentRunner.xctest',
+        TestHostPath: '__TESTROOT__/Debug-iphonesimulator/WebDriverAgentRunner-Runner.app',
+      } }));
+      await writeFile(join(root, 'owned'), `ios:${udid}`);
+      await writeFile(join(support, 'diagnostics.ts'), await readFile(join(import.meta.dirname, '../support/diagnostics.ts')));
+      const variantPath = join(support, `${label}.ts`);
+      await writeFile(variantPath, variantSource);
+      const dispatcher = join(bin, 'xctest-command-dispatcher');
+      await writeFile(dispatcher, shim, { mode: 0o700 });
+      for (const cmd of ['plutil', 'lsof', 'ps', 'xcrun', 'xcodebuild']) await symlink(dispatcher, join(bin, cmd));
+      const wdaServerFile = join(bin, 'xctest-wda-server.ts');
+      await writeFile(wdaServerFile, wdaServer);
+      const reserve = createNetServer();
+      await new Promise<void>((resolve, reject) => {
+        reserve.once('error', reject);
+        reserve.listen(0, '127.0.0.1', resolve);
+      });
+      const port = (reserve.address() as AddressInfo).port;
+      await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
+      const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: 'status-forged-markers', STARTUP_TEST_EXECUTABLE: process.execPath, STARTUP_TEST_WDA_SERVER: wdaServerFile,
+        STARTUP_TEST_RECEIPT: receipt, STARTUP_TEST_RUNNER_RECEIPT: runnerReceipt, STARTUP_TEST_PRODUCT: product, STARTUP_TEST_XCTESTRUN: xctestrun, IOS_XCTEST_STATE_DIR: state,
+        IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '18.6', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
+        IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
+        MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned') };
+      const deadline = Date.now() + 10_000;
+      await writeFile(join(state, 'deadline'), String(deadline));
+      child = spawn(process.execPath, [variantPath, 'supervise'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+      if (!child.stderr) throw new Error('publication ordering fixture did not provide stderr');
+      child.stderr.on('data', chunk => { errors += chunk.toString(); });
+      exited = new Promise<void>(resolve => child?.on('close', () => { done = true; resolve(); }));
+      const waitFor = async (path: string): Promise<void> => {
+        while (!done && Date.now() < deadline && !existsSync(path)) await pause();
+        assert.equal(existsSync(path), true, `${label} barrier was not reached: ${errors}`);
+      };
+      const statusPath = join(state, 'wda-status.json');
+      const ownerPath = join(state, 'owner.json');
+      const privateOwnerPath = join(state, 'owner-private.json');
+      if (legacyOrdering) {
+        await waitFor(join(state, 'legacy-status-published'));
+        const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { status?: unknown };
+        const privateOwner = JSON.parse(await readFile(privateOwnerPath, 'utf8')) as { status?: unknown };
+        assert.equal(owner.status, undefined);
+        assert.equal(privateOwner.status, undefined);
+        assertForgedStatus(JSON.parse(await readFile(statusPath, 'utf8')));
+        if (forceAssertionFailure) assert.equal(existsSync(statusPath), false);
+        await writeFile(join(state, 'legacy-continue'), 'continue');
+      } else {
+        await waitFor(join(state, 'candidate-owner-saved'));
+        const owner = JSON.parse(await readFile(ownerPath, 'utf8')) as { status?: unknown };
+        const privateOwner = JSON.parse(await readFile(privateOwnerPath, 'utf8')) as { status?: unknown };
+        assertForgedStatus(owner.status);
+        assertForgedStatus(privateOwner.status);
+        assert.equal(existsSync(statusPath), false);
+        if (forceAssertionFailure) assert.equal(existsSync(statusPath), true);
+        await writeFile(join(state, 'candidate-continue'), 'continue');
+        await waitFor(statusPath);
+        assertForgedStatus(JSON.parse(await readFile(statusPath, 'utf8')));
+      }
+      await writeFile(join(state, 'stop'), 'publication ordering fixture finalization');
+      await Promise.race([exited, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} supervisor deadline: ${errors}`)), 15_000))]);
+      const finalOwner = JSON.parse(await readFile(ownerPath, 'utf8')) as { status?: unknown };
+      const finalPrivateOwner = JSON.parse(await readFile(privateOwnerPath, 'utf8')) as { status?: unknown };
+      assertForgedStatus(finalOwner.status);
+      assertForgedStatus(finalPrivateOwner.status);
+      assertForgedStatus(JSON.parse(await readFile(statusPath, 'utf8')));
+    } finally {
+      if (child && !done) {
+        await writeFile(join(state, `${label}-continue`), 'failed publication ordering fixture cleanup');
+        await writeFile(join(state, 'stop'), 'failed publication ordering fixture cleanup');
+        child.kill('SIGTERM');
+        if (!await waitForExit(2_000)) {
+          child.kill('SIGKILL');
+          assert.equal(await waitForExit(2_000), true, `${label} supervisor did not settle after forced cleanup`);
+        }
+      }
+      if (child) {
+        assert.equal(existsSync(join(root, 'runner.pid')), false, `${label} WDA runner remained after cleanup`);
+        assert.equal(existsSync(join(root, 'xcode.pid')), false, `${label} WDA subprocess remained after cleanup`);
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  };
+
+  await runVariant('legacy', legacySource, true);
+  await runVariant('candidate', candidateSource, false);
+  await assert.rejects(() => runVariant('legacy', legacySource, true, true), /true !== false/u);
+  await assert.rejects(() => runVariant('candidate', candidateSource, false, true), /false !== true/u);
+}]);
 
 const runStopCli = (env: NodeJS.ProcessEnv): Promise<{ code: number | null; stderr: string }> => new Promise(resolve => {
   const child = spawn(process.execPath, [join(import.meta.dirname, '../support/ios-xctest.ts'), 'stop'], { env, stdio: ['ignore', 'ignore', 'pipe'] });

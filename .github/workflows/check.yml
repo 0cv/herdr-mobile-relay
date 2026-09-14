@@ -178,11 +178,37 @@ jobs:
         with:
           go-version: 1.27.0
           cache: true
+      - run: make mobile-ci-common-check
+
+  mobile-unit-check-am:
+    name: Mobile unit checks (A-M and non-letters)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
       - name: Install required XML test tools
         run: |
           sudo apt-get update
           sudo apt-get install -y libxml2-utils
-      - run: make mobile-ci-check
+      - run: make mobile-unit-check MOBILE_UNIT_FILTER='^(?:[A-Ma-m]|[^A-Za-z]|$)'
+
+  mobile-unit-check-nz:
+    name: Mobile unit checks (N-Z)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Install required XML test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2-utils
+      - run: make mobile-unit-check MOBILE_UNIT_FILTER='^[N-Zn-z]'
 
   mobile-inspection-check:
     name: Android installed inspection controls
@@ -206,7 +232,7 @@ jobs:
       (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'main' ||
         (github.event.pull_request.base.ref == 'dev' && github.event.pull_request.head.ref == 'ci-mobile' &&
           github.event.pull_request.head.repo.full_name == github.repository)))
-    needs: [release, mobile-host-check, mobile-inspection-check]
+    needs: [release, mobile-host-check, mobile-inspection-check, mobile-unit-check-am, mobile-unit-check-nz]
     uses: ./.github/workflows/mobile-ci.yml
     with:
       artifact_run_id: ${{ github.run_id }}
