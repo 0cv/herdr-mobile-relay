@@ -269,7 +269,7 @@ const server = createServer((_request, response) => {
   writeFileSync(statusPath, String(count + 1));
   const body = mode === 'status-forged-markers'
     ? { payload: 'forged-status-payload', classification: 'forged-status-classification', note: 'status-opaque-secret', PASSWORD: 'status-password-sentinel', PRIVATE_URL: 'https://status.private.example/internal' }
-    : { value: { ready: mode !== 'invalid', state: 'success', build: { version: '16.12.1', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '18.5' } } };
+    : { value: { ready: mode !== 'invalid', state: 'success', build: { version: '16.12.1', productBundleIdentifier: 'com.facebook.WebDriverAgentRunner' }, os: { version: '18.6' } } };
   const oversized = mode === 'oversized' || (mode === 'ready-then-oversized' && count >= 1);
   const responseBody = mode === 'status-noisy-first-failure' ? '\\0'.repeat(64000) : JSON.stringify(body) + (oversized ? ' '.repeat(70000) : '');
   response.setHeader('content-type', 'application/json');
@@ -523,7 +523,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
     await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, STARTUP_TEST_ROOT: root, STARTUP_TEST_MODE: mode, STARTUP_TEST_EXECUTABLE: process.execPath, STARTUP_TEST_WDA_SERVER: wdaServerFile,
       STARTUP_TEST_RECEIPT: receipt, STARTUP_TEST_RUNNER_RECEIPT: runnerReceipt, STARTUP_TEST_PRODUCT: product, STARTUP_TEST_XCTESTRUN: xctestrun, IOS_XCTEST_STATE_DIR: state,
-      IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '18.5', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
+      IOS_SIMULATOR_UDID: udid, IOS_PLATFORM_VERSION: '18.6', IOS_WDA_PORT: String(port), IOS_WDA_MJPEG_PORT: String(port === 65535 ? port - 1 : port + 1),
       IOS_WDA_PREBUILT_PATH: product, IOS_WDA_BOOTSTRAP_PATH: join(root, 'products'), IOS_WDA_AGENT_PATH: join(root, 'wda/WebDriverAgent.xcodeproj'),
       MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned'),
       ...(mode === 'stream-finalization-failure' ? { STARTUP_TEST_LOG_FINALIZATION_TARGET: join(root, 'blocked-log-target') } : {}) };
@@ -634,6 +634,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
             platform.driver.create = async options => {
               sessions++;
               assert.equal(options.capabilities['appium:webDriverAgentUrl'], `http://127.0.0.1:${port}`);
+              assert.equal(options.capabilities['appium:platformVersion'], '18.6');
               assert.equal(options.capabilities['appium:usePreinstalledWDA'], undefined);
               assert.equal(options.capabilities['appium:prebuiltWDAPath'], undefined);
               throw new Error('session request captured');

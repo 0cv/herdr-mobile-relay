@@ -604,7 +604,7 @@ jobs:
           printf 'MOBILE_FIXTURE_BINARY=%s\n' "$RUNNER_TEMP/herdr-mobile-fixture" >> "$GITHUB_ENV"
           printf 'APPIUM_HOME=%s\n' "$RUNNER_TEMP/herdr-appium-home" >> "$GITHUB_ENV"
           printf 'MOBILE_DEVICE_OWNERSHIP_FILE=%s\n' "$RUNNER_TEMP/herdr-mobile-device-owned" >> "$GITHUB_ENV"
-          printf 'IOS_PLATFORM_VERSION=18.5\n' >> "$GITHUB_ENV"
+          printf 'IOS_PLATFORM_VERSION=18.6\n' >> "$GITHUB_ENV"
           printf 'IOS_XCTEST_STATE_DIR=%s\n' "$RUNNER_TEMP/herdr-xctest-owner" >> "$GITHUB_ENV"
           printf 'IOS_WDA_DERIVED_DATA_PATH=%s\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
           printf 'IOS_WDA_BOOTSTRAP_PATH=%s/Build/Products\n' "$RUNNER_TEMP/herdr-wda-derived-data" >> "$GITHUB_ENV"
@@ -776,9 +776,30 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.4.app
           xcodebuild -version | tee "$RUNNER_TEMP/xcode-version.txt"
           defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool NO
-          runtime="$(xcrun simctl list runtimes | grep -E '^iOS 18\.5 ' | grep -v unavailable | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+' | head -n1)"
-          device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 16 \(/ { print $2; exit }')"
+          runtime_inventory="$RUNNER_TEMP/ios-runtime-inventory.txt"
+          runtime_selection="$RUNNER_TEMP/ios-runtime-selection.txt"
+          if ! xcrun simctl list runtimes | tee "$runtime_inventory" >/dev/null; then
+            {
+              printf 'expected_platform_version=%s\n' "$IOS_PLATFORM_VERSION"
+              printf 'inventory_command=failed\n'
+            } >"$runtime_selection"
+            exit 1
+          fi
+          runtime_line="$(awk '$0 ~ /^iOS 18\.6 \(/ && $0 !~ /unavailable/ { print; exit }' "$runtime_inventory")"
+          runtime="$(printf '%s\n' "$runtime_line" | sed -nE 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+).*/\1/p')"
+          runtime_version="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS ([0-9]+\.[0-9]+) \(.*/\1/p')"
+          runtime_build="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS [0-9]+\.[0-9]+ \([^)]* - ([^)]+)\) - .*/\1/p')"
+          {
+            printf 'expected_platform_version=%s\n' "$IOS_PLATFORM_VERSION"
+            printf 'inventory_line=%s\n' "$runtime_line"
+            printf 'selected_identifier=%s\n' "$runtime"
+            printf 'selected_version=%s\n' "$runtime_version"
+            printf 'selected_build=%s\n' "$runtime_build"
+          } >"$runtime_selection"
+          test "$runtime_version" = "$IOS_PLATFORM_VERSION"
           test -n "$runtime"
+          test -n "$runtime_build"
+          device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 16 \(/ { print $2; exit }')"
           test -n "$device_type"
           device_name="herdr-mobile-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           udid="$(xcrun simctl create "$device_name" "$device_type" "$runtime")"
@@ -923,6 +944,9 @@ jobs:
           fi
           if [ -f "$RUNNER_TEMP/xcode-version.txt" ]; then cp "$RUNNER_TEMP/xcode-version.txt" "$MOBILE_OUTPUT/xcode-version.txt"; fi
           if [ -f "$RUNNER_TEMP/ios-apps-before.txt" ]; then cp "$RUNNER_TEMP/ios-apps-before.txt" "$MOBILE_OUTPUT/ios-apps-before.txt"; fi
+          for artifact in ios-runtime-inventory.txt ios-runtime-selection.txt; do
+            if [ -f "$RUNNER_TEMP/$artifact" ]; then cp "$RUNNER_TEMP/$artifact" "$MOBILE_OUTPUT/$artifact"; fi
+          done
           if [ -f "$RUNNER_TEMP/appium-drivers.txt" ]; then cp "$RUNNER_TEMP/appium-drivers.txt" "$MOBILE_OUTPUT/appium-drivers.txt"; fi
           if [ -f "$RUNNER_TEMP/android-chrome-version.txt" ]; then cp "$RUNNER_TEMP/android-chrome-version.txt" "$MOBILE_OUTPUT/android-chrome-version.txt"; fi
           if [ -f "$MOBILE_OUTPUT/mobile-result.json" ]; then

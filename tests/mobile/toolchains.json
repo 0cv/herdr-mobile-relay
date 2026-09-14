@@ -36,7 +36,7 @@
   "ios": {
     "runner": "macos-15",
     "xcode": "/Applications/Xcode_16.4.app",
-    "runtime": "iOS 18.5",
+    "runtime": "iOS 18.6",
     "deviceType": "iPhone 16",
     "installationProvider": "Home Screen web app",
     "contextRequirement": "an inspectable installed-app web context with the expected origin"

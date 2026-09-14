@@ -105,11 +105,26 @@ version selector to `pm path`. The binary URLs are an APK.now mirror fallback be
 APKMirror is Cloudflare blocked; replace them only with another source carrying
 the same hashes and signing certificates.
 
-For iOS, select the Xcode/runtime declared in `toolchains.json`, create one disposable iPhone 16 simulator, and record its ownership marker. The adapter does not erase an already booted simulator; the owner creates a fresh simulator instead:
+For iOS, select the Xcode/runtime declared in `toolchains.json`, create one disposable iPhone 16 simulator, and record its ownership marker. The simulator runtime is iOS 18.6; WDA still builds with the iPhoneSimulator 18.5 SDK and `IPHONEOS_DEPLOYMENT_TARGET=18.5`. The adapter does not erase an already booted simulator; the owner creates a fresh simulator instead. The hosted entrypoints retain the complete runtime inventory and the selected inventory line, identifier, version, and build as `ios-runtime-inventory.txt` and `ios-runtime-selection.txt` in uploaded output, even when later provisioning or WDA steps fail:
 
 ```sh
 sudo xcode-select -s /Applications/Xcode_16.4.app
-runtime="$(xcrun simctl list runtimes | grep -E '^iOS 18\\.5 ' | grep -v unavailable | grep -oE 'com\\.apple\\.CoreSimulator\\.SimRuntime\\.[^ ]+' | head -n1)"
+export IOS_PLATFORM_VERSION=18.6
+runtime_inventory="$PWD/run-artifacts/ios-runtime-inventory.txt"
+runtime_selection="$PWD/run-artifacts/ios-runtime-selection.txt"
+if ! xcrun simctl list runtimes | tee "$runtime_inventory" >/dev/null; then
+  printf 'expected_platform_version=%s\ninventory_command=failed\n' "$IOS_PLATFORM_VERSION" > "$runtime_selection"
+  exit 1
+fi
+runtime_line="$(awk '$0 ~ /^iOS 18\.6 \(/ && $0 !~ /unavailable/ { print; exit }' "$runtime_inventory")"
+runtime="$(printf '%s\n' "$runtime_line" | sed -nE 's/.* - (com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+).*/\1/p')"
+runtime_version="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS ([0-9]+\.[0-9]+) \(.*/\1/p')"
+runtime_build="$(printf '%s\n' "$runtime_line" | sed -nE 's/^iOS [0-9]+\.[0-9]+ \([^)]* - ([^)]+)\) - .*/\1/p')"
+printf 'expected_platform_version=%s\ninventory_line=%s\nselected_identifier=%s\nselected_version=%s\nselected_build=%s\n' \
+  "$IOS_PLATFORM_VERSION" "$runtime_line" "$runtime" "$runtime_version" "$runtime_build" > "$runtime_selection"
+test "$runtime_version" = "$IOS_PLATFORM_VERSION"
+test -n "$runtime"
+test -n "$runtime_build"
 device_type="$(xcrun simctl list devicetypes | awk -F'[()]' '/iPhone 16 \\(/ { print $2; exit }')"
 export IOS_SIMULATOR_UDID="$(xcrun simctl create herdr-mobile-ci "$device_type" "$runtime")"
 export MOBILE_DEVICE_OWNERSHIP_FILE="$PWD/run-artifacts/ios-owned"
