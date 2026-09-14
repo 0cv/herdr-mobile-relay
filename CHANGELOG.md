@@ -5,6 +5,14 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-09-14
+
+### Fixed
+
+- Select curated natural macOS voices for English, French, German, Spanish,
+  and Chinese instead of whichever voice happens to appear first in the system
+  listing.
+
 ## [0.21.1] - 2026-09-13
 
 ### Fixed
@@ -1501,7 +1509,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - Release pane-size leases when their WebSocket owner disappears, preventing a
   laptop terminal from remaining narrowed.
 
-[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.1...HEAD
+[Unreleased]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.2...HEAD
+[0.21.2]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.1...v0.21.2
 [0.21.1]: https://github.com/0cv/herdr-mobile-relay/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.11...v0.21.0
 [0.20.11]: https://github.com/0cv/herdr-mobile-relay/compare/v0.20.10...v0.20.11
