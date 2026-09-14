@@ -48,9 +48,14 @@ plutil)
   if [ "$1" = "-extract" ]; then
     path=$6
     product_info=false
+    receipt_info=false
     case "$path" in
       "$STARTUP_TEST_PRODUCT/Info.plist"|/private$STARTUP_TEST_PRODUCT/Info.plist) product_info=true ;;
+      "$STARTUP_TEST_RECEIPT/Info.plist"|/private$STARTUP_TEST_RECEIPT/Info.plist) receipt_info=true ;;
     esac
+    if [ "$mode" = "listener-initial-race-receipt-command-error" ] && [ "$receipt_info" = true ] && [ -e "$root/receipt-queries" ] && [ "$(cat "$root/receipt-queries")" -ge 2 ]; then
+      exit 78
+    fi
     if [ "$mode" = "product" ] && [ "$product_info" = true ]; then
       printf '%s\\n' wrong
     else
@@ -99,6 +104,18 @@ lsof)
   if [ "$mode" = "occupied" ]; then
     printf '%s\\n' 999999
     exit 0
+  fi
+  if { [ "$mode" = "listener-initial-race" ] || [ "$mode" = "listener-initial-race-birth" ] || [ "$mode" = "listener-initial-race-executable" ] || [ "$mode" = "listener-initial-race-hash" ] || [ "$mode" = "listener-initial-race-product" ] || [ "$mode" = "listener-initial-race-receipt" ] || [ "$mode" = "listener-initial-race-command-error" ] || [ "$mode" = "listener-initial-race-budget" ]; } && ! has_arg -d "$@" && ([ -e "$root/stop" ] || grep -q 'initialCandidateDiagnostic' "$root/state/owner.json" 2>/dev/null); then
+    printf '%s\\n' "$(cat "$root/runner.pid")"
+    exit 0
+  fi
+  if { [ "$mode" = "listener-initial-race" ] || [ "$mode" = "listener-initial-race-birth" ] || [ "$mode" = "listener-initial-race-executable" ] || [ "$mode" = "listener-initial-race-hash" ] || [ "$mode" = "listener-initial-race-product" ] || [ "$mode" = "listener-initial-race-receipt" ] || [ "$mode" = "listener-initial-race-receipt-command-error" ] || [ "$mode" = "listener-initial-race-receipt-hash-error" ] || [ "$mode" = "listener-initial-race-command-error" ] || [ "$mode" = "listener-initial-race-command-error-late" ] || [ "$mode" = "listener-initial-race-budget" ] || [ "$mode" = "listener-initial-race-hash-budget" ] || [ "$mode" = "listener-initial-race-cleanup-identity" ]; } && ! has_arg -d "$@" && grep -q '"stage": "wda-pid-count"' "$root/state/owner.json" 2>/dev/null; then
+    [ "$mode" = "listener-initial-race-cleanup-identity" ] && touch "$root/cleanup-boundary"
+    printf '%s\\n' "$(cat "$root/runner.pid")"
+    exit 0
+  fi
+  if { [ "$mode" = "listener-initial-race" ] || [ "$mode" = "listener-initial-race-birth" ] || [ "$mode" = "listener-initial-race-executable" ] || [ "$mode" = "listener-initial-race-hash" ] || [ "$mode" = "listener-initial-race-product" ] || [ "$mode" = "listener-initial-race-receipt" ] || [ "$mode" = "listener-initial-race-receipt-command-error" ] || [ "$mode" = "listener-initial-race-receipt-hash-error" ] || [ "$mode" = "listener-initial-race-command-error" ] || [ "$mode" = "listener-initial-race-budget" ] || [ "$mode" = "listener-initial-race-cleanup-identity" ] || [ "$mode" = "listener-initial-race-command-error-late" ] || [ "$mode" = "listener-initial-race-hash-budget" ]; } && ! has_arg -d "$@" && ! [ -e "$root/stop" ] && has_arg "-iTCP:$IOS_WDA_PORT" "$@"; then
+    exit 1
   fi
   if [ "$mode" = "listener-status-one-stderr" ] && ! has_arg -d "$@" && has_arg "-iTCP:$IOS_WDA_PORT" "$@"; then
     printf '%s\\n' 'status one diagnostic' >&2
@@ -149,6 +166,27 @@ lsof)
       shift
     done
     [ -n "$requested" ] || requested=$(cat "$root/runner.pid" 2>/dev/null || cat "$root/xcode.pid")
+    if { [ "$mode" = "listener-initial-race-birth" ] || [ "$mode" = "listener-initial-race-executable" ] || [ "$mode" = "listener-initial-race-hash" ] || [ "$mode" = "listener-initial-race-command-error" ] || [ "$mode" = "listener-initial-race-budget" ] || [ "$mode" = "listener-initial-race-cleanup-identity" ] || [ "$mode" = "listener-initial-race-command-error-late" ] || [ "$mode" = "listener-initial-race-hash-budget" ]; }; then
+      race_inspection_count=0
+      [ -e "$root/race-inspection-count" ] && race_inspection_count=$(cat "$root/race-inspection-count")
+      printf '%s' "$((race_inspection_count + 1))" > "$root/race-inspection-count"
+      if [ "$mode" = "listener-initial-race-birth" ] && [ "$race_inspection_count" -eq 0 ]; then
+        touch "$root/initial-inspection"
+      fi
+      if [ "$mode" = "listener-initial-race-command-error" ] && [ "$race_inspection_count" -ge 1 ]; then
+        exit 23
+      fi
+      if [ "$mode" = "listener-initial-race-budget" ] && [ "$race_inspection_count" -ge 1 ]; then
+        /bin/sleep 2
+      fi
+      if [ "$mode" = "listener-initial-race-hash" ] && [ "$race_inspection_count" -ge 1 ]; then
+        printf '%s' 'different diagnostic listener' > "$STARTUP_TEST_RUNNER_RECEIPT/WebDriverAgentRunner-Runner"
+      fi
+      if [ "$mode" = "listener-initial-race-hash-budget" ] && [ "$race_inspection_count" -ge 1 ]; then
+        rm -f "$STARTUP_TEST_RUNNER_RECEIPT/WebDriverAgentRunner-Runner"
+        mkfifo "$STARTUP_TEST_RUNNER_RECEIPT/WebDriverAgentRunner-Runner"
+      fi
+    fi
     if [ "$mode" = "status-noisy-first-failure" ] && [ -e "$root/status-queries" ]; then
       dd if=/dev/zero bs=4096 count=1 1>&2 2>/dev/null
     fi
@@ -162,6 +200,12 @@ lsof)
     fi
     executable=$STARTUP_TEST_RUNNER_RECEIPT/WebDriverAgentRunner-Runner
     { [ "$mode" = "credential" ] || [ "$mode" = "credential-binary" ] || [ "$mode" = "credential-binary-failure" ]; } && executable=$STARTUP_TEST_RUNNER_RECEIPT/unexpected-listener
+    if [ "$mode" = "listener-initial-race-executable" ] && [ "\${race_inspection_count:-0}" -ge 1 ]; then
+      executable=$STARTUP_TEST_RUNNER_RECEIPT/unexpected-listener
+    fi
+    if [ "$mode" = "listener-initial-race-cleanup-identity" ] && [ -e "$root/cleanup-boundary" ]; then
+      executable=$STARTUP_TEST_RUNNER_RECEIPT/unexpected-listener
+    fi
     printf 'p%s\\nftxt\\nn%s\\n' "$requested" "$executable"
     exit 0
   fi
@@ -188,7 +232,23 @@ ps)
   fi
   xcode_pid=
   [ -e "$root/xcode.pid" ] && xcode_pid=$(cat "$root/xcode.pid")
-  if { [ "$mode" = "swap" ] || [ "$mode" = "pid-reuse" ]; } && [ "$pid" != "$xcode_pid" ]; then
+  if [ "$mode" = "listener-initial-race-birth" ] && [ "$format" = "lstart=" ]; then
+    if [ ! -e "$root/initial-inspection" ]; then
+      printf '%s\\n' child-birth
+    elif [ ! -e "$root/race-birth-observed" ]; then
+      touch "$root/race-birth-observed"
+      printf '%s\\n' birth-a
+    else
+      printf '%s\\n' birth-b
+    fi
+  elif [ "$mode" = "listener-initial-race-cleanup-identity" ] && [ "$format" = "lstart=" ]; then
+    if [ -e "$root/cleanup-boundary" ]; then printf '%s\\n' birth-b; else printf '%s\\n' birth-a; fi
+  elif [ "$mode" = "listener-initial-race-command-error-late" ] && [ "$format" = "command=" ]; then
+    race_inspection_count=0
+    [ -e "$root/race-inspection-count" ] && race_inspection_count=$(cat "$root/race-inspection-count")
+    if [ "$race_inspection_count" -ge 2 ]; then exit 23; fi
+    printf 'xcodebuild test-without-building -xctestrun %s -destination id=%s\\n' "$STARTUP_TEST_XCTESTRUN" "$IOS_SIMULATOR_UDID"
+  elif { [ "$mode" = "swap" ] || [ "$mode" = "pid-reuse" ]; } && [ "$pid" != "$xcode_pid" ]; then
     generation=0
     [ -e "$root/swap-lsof-count" ] && generation=$(cat "$root/swap-lsof-count")
     reused=false
@@ -221,6 +281,11 @@ xcrun)
       exit 77
     elif [ "$mode" = "receipt-missing-then-valid" ] && [ "$count" -eq 1 ]; then
       printf '%s\\n' "$STARTUP_TEST_RUNNER_RECEIPT/missing-receipt"
+    elif [ "$mode" = "listener-initial-race-receipt" ] && [ "$count" -ge 1 ]; then
+      printf '%s\\n' "$STARTUP_TEST_RUNNER_RECEIPT"
+    elif [ "$mode" = "listener-initial-race-receipt-hash-error" ] && [ "$count" -ge 1 ]; then
+      rm -f "$STARTUP_TEST_PRODUCT/WebDriverAgentRunner-Runner"
+      printf '%s\\n' "$STARTUP_TEST_RECEIPT"
     else
       printf '%s\\n' "$STARTUP_TEST_RECEIPT"
     fi
@@ -253,7 +318,7 @@ if (mode === 'exit-before-close') {
   spawn(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], { stdio: ['ignore', 'inherit', 'inherit'] });
   process.exit(44);
 }
-if (mode === 'receipt-product-changed') {
+if (mode === 'receipt-product-changed' || mode === 'listener-initial-race-product') {
   writeFileSync(join(process.env.STARTUP_TEST_PRODUCT, 'WebDriverAgentRunner-Runner'), 'changed');
   writeFileSync(join(root, 'product-changed-at'), String(Date.now()));
 }
@@ -463,8 +528,10 @@ const assertReadyStatus = (candidate: unknown): void => {
   });
 };
 
+const initialRaceModes = ['listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity'];
+
 export const xctestOwnerTests: Array<[string, () => Promise<void>]> = [];
-for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-endpoints-disappear', 'listener-hash-after-freeze']) {
+for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close', 'invalid', 'occupied', 'ownership', 'ambiguous', 'product', 'receipt-failure', 'receipt-missing-then-valid', 'receipt-product-changed', 'swap', 'pid-reuse', 'oversized', 'delayed', 'credential', 'credential-binary', 'credential-binary-failure', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'stream-finalization-failure', 'output-below', 'output-equal', 'output-above', 'output-combined', 'output-shrinking', 'output-expanding', 'noisy-cleanup', 'status-noisy-first-failure', 'status-forged-markers', 'status-evidence-disappear', 'listener-mjpeg-duplicate', 'listener-bundle-mismatch', 'listener-hash-mismatch', 'listener-invalid-pid', 'listener-first-failure', 'listener-status-one-stderr', 'listener-second-failure', 'listener-endpoints-disappear', 'listener-hash-after-freeze', 'listener-initial-race', 'listener-initial-race-birth', 'listener-initial-race-executable', 'listener-initial-race-hash', 'listener-initial-race-product', 'listener-initial-race-receipt', 'listener-initial-race-receipt-command-error', 'listener-initial-race-receipt-hash-error', 'listener-initial-race-command-error', 'listener-initial-race-command-error-late', 'listener-initial-race-budget', 'listener-initial-race-hash-budget', 'listener-initial-race-cleanup-identity']) {
   xctestOwnerTests.push([`Native startup actual XCTest supervisor ${mode}`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'herdr-xctest-test-'));
     const udid = '82342155-D8BD-4C4D-BD5E-1EDCDF9CFB40';
@@ -527,7 +594,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
     if (mode === 'stream-finalization-failure') await mkdir(join(root, 'blocked-log-target'));
     if (mode === 'ambiguous') await writeFile(join(root, 'products/WebDriverAgentRunner_second.xctestrun'), await readFile(xctestrun));
     if (mode === 'product') await writeFile(join(product, 'Info.plist'), JSON.stringify({ CFBundleIdentifier: 'wrong' }));
-    if (mode === 'credential' || mode === 'credential-binary' || mode === 'credential-binary-failure') await writeFile(join(runnerReceipt, 'unexpected-listener'), 'unexpected listener');
+    if (mode === 'credential' || mode === 'credential-binary' || mode === 'credential-binary-failure' || mode === 'listener-initial-race-executable' || mode === 'listener-initial-race-cleanup-identity') await writeFile(join(runnerReceipt, 'unexpected-listener'), 'unexpected listener');
     await writeFile(join(root, 'owned'), `ios:${mode === 'ownership' ? 'wrong' : udid}`);
     const dispatcher = join(bin, 'xctest-command-dispatcher');
     await writeFile(dispatcher, shim, { mode: 0o700 });
@@ -548,7 +615,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
       MOBILE_DEVICE_OWNERSHIP_FILE: join(root, 'owned'),
       ...(mode === 'stream-finalization-failure' ? { STARTUP_TEST_LOG_FINALIZATION_TARGET: join(root, 'blocked-log-target') } : {}) };
     const initialProductHash = createHash('sha256').update(await readFile(join(product, 'WebDriverAgentRunner-Runner'))).digest('hex');
-    const deadline = Date.now() + (mode === 'invalid' || mode === 'oversized' ? 2000 : mode === 'delayed' ? 1500 : 10_000);
+    const deadline = Date.now() + (mode === 'invalid' || mode === 'oversized' ? 2000 : mode === 'delayed' || mode === 'listener-initial-race-budget' || mode === 'listener-initial-race-hash-budget' ? 1500 : 10_000);
     await writeFile(join(state, 'deadline'), String(deadline));
     const child = spawn(process.execPath, [join(import.meta.dirname, '../support/ios-xctest.ts'), 'supervise'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
     const supervisorStarted = Date.now();
@@ -556,6 +623,7 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
     child.stderr.on('data', chunk => { errors += chunk.toString(); });
     let done = false;
     let assertionsPassed = false;
+    let initialRaceFirstFailure: unknown;
     const exited = new Promise<void>(resolve => child.on('close', () => { done = true; resolve(); }));
     try {
       const credentialMode = ['credential', 'credential-binary', 'credential-binary-failure'].includes(mode);
@@ -635,6 +703,41 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
         }
         if (mode === 'output-above' || mode === 'output-combined') await writeFile(join(root, 'output-continue'), 'cross raw boundary');
         else if (!ownerOutput.endedAt) await writeFile(join(state, 'stop'), 'output boundary fixture finalization');
+      }
+      if (initialRaceModes.includes(mode)) {
+        const evidenceDeadline = Date.now() + 15_000;
+        while (Date.now() < evidenceDeadline) {
+          if (existsSync(join(state, 'owner.json'))) {
+            const current = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
+            if (current.firstFailure && current.initialCandidateDiagnostic) break;
+          }
+          await pause();
+        }
+        const raceOwner = JSON.parse(await readFile(join(state, 'owner.json'), 'utf8'));
+        const racePrivateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8'));
+        assert.equal(raceOwner.firstFailure.stage, 'wda-pid-count');
+        assert.equal(raceOwner.firstFailure.phase, 'initial');
+        assert.equal(raceOwner.firstFailure.frozenOwner, false);
+        assert.equal(raceOwner.initialCandidateDiagnostic.phase, 'initial-diagnostic');
+        assert.equal(raceOwner.initialCandidateDiagnostic.schema, 1);
+        assert.match(raceOwner.initialCandidateDiagnostic.candidatePid, /^[1-9]\d{0,9}$/u);
+        for (const candidate of [raceOwner, racePrivateOwner]) {
+          const text = JSON.stringify(candidate.initialCandidateDiagnostic);
+          assert.equal(text.includes('http://'), false);
+          assert.equal(text.includes('/tmp/'), false);
+          assert.equal(text.includes('/private/'), false);
+          assert.ok(Buffer.byteLength(JSON.stringify(candidate)) <= 1_048_576);
+        }
+        if (mode === 'listener-initial-race') await assertSanitizedExports(root, state, [], ['owner.json']);
+        assert.equal(raceOwner.ready, false);
+        assert.equal(raceOwner.runnerPid, undefined);
+        assert.equal(raceOwner.runnerBirth, undefined);
+        assert.equal(raceOwner.runnerExecutable, undefined);
+        assert.equal(raceOwner.status, undefined);
+        assert.equal(existsSync(join(state, 'wda-status.json')), false);
+        assert.equal(existsSync(join(root, 'status-queries')), false);
+        initialRaceFirstFailure = JSON.parse(JSON.stringify(raceOwner.firstFailure));
+        if (!raceOwner.endedAt) await writeFile(join(state, 'stop'), 'initial race diagnostic finalization');
       }
       if (mode === 'ready' || mode === 'ready-then-oversized') {
         while (Date.now() < deadline && !done) {
@@ -718,6 +821,125 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
       assert.ok(cleanupEntry && endedEntry && cleanupEntry.id < endedEntry.id);
       if (!['ready', 'ready-then-oversized', 'stream-framing', 'stream-framing-reversed', 'stream-utf8', 'stream-eof', 'output-below', 'output-equal', 'output-shrinking', 'output-expanding'].includes(mode)) assert.ok(owner.firstFailure);
       if (owner.firstFailure) assert.ok(Array.isArray(owner.firstFailure.causalCommands));
+      if (initialRaceModes.includes(mode)) {
+        assert.deepEqual(owner.firstFailure, initialRaceFirstFailure);
+        const diagnostic = owner.initialCandidateDiagnostic;
+        const cleanup = owner.cleanupListenerObservation;
+        const finalPrivateOwner = JSON.parse(await readFile(join(state, 'owner-private.json'), 'utf8'));
+        const finalDiagnosticText = JSON.stringify(finalPrivateOwner.initialCandidateDiagnostic);
+        assert.equal(finalDiagnosticText.includes('http://'), false);
+        assert.equal(finalDiagnosticText.includes('/tmp/'), false);
+        assert.equal(finalDiagnosticText.includes('/private/'), false);
+        if (mode === 'listener-initial-race') await assertSanitizedExports(root, state, [], ['owner.json']);
+        assert.ok(diagnostic);
+        assert.ok(cleanup);
+        assert.ok(diagnostic.startedAtMonotonicMs >= cleanup.monotonicMs);
+        assert.equal(diagnostic.candidatePid, owner.listenerEvidence.find((entry: {pid: string}) => entry.pid === diagnostic.candidatePid)?.pid);
+        assert.equal(owner.firstFailure.predicate.listenerValidation.endpoints.wda.count, 0);
+        assert.equal(owner.firstFailure.predicate.listenerValidation.endpoints.mjpeg.count, 1);
+        assert.deepEqual(cleanup.endpoints.wda.observation, {status: 'evaluated', count: 1, pids: [diagnostic.candidatePid]});
+        assert.deepEqual(cleanup.endpoints.mjpeg.observation, {status: 'evaluated', count: 1, pids: [diagnostic.candidatePid]});
+        assert.equal(diagnostic.cleanup.status, 'evaluated');
+        assert.deepEqual(diagnostic.cleanup.wda, {status: 'evaluated', matches: true});
+        assert.deepEqual(diagnostic.cleanup.mjpeg, {status: 'evaluated', matches: true});
+        assert.deepEqual(cleanup.commandIds, [cleanup.endpoints.wda.commandId, cleanup.endpoints.mjpeg.commandId]);
+        assert.ok(cleanup.commandIds.every((id: number) => owner.diagnostics.commands.some((command: {id: number; phase: string; operation: string}) => command.id === id && command.phase === 'cleanup' && command.operation === 'inspect-listener')));
+        assert.ok(Buffer.byteLength(await readFile(join(state, 'owner.json'), 'utf8')) <= 1048576);
+        assert.ok(Buffer.byteLength(await readFile(join(state, 'owner-private.json'), 'utf8')) <= 1048576);
+        assert.equal(JSON.stringify(diagnostic).includes('http://'), false);
+        assert.equal(JSON.stringify(diagnostic).includes('/tmp/'), false);
+        const evaluatedChecks = [
+          diagnostic.initial.status,
+          diagnostic.current.status,
+          diagnostic.comparisons.pid.status,
+          diagnostic.comparisons.birth.status,
+          diagnostic.comparisons.executable.status,
+          diagnostic.comparisons.pathShape.applicationNameMatches.status,
+          diagnostic.comparisons.pathShape.containerUuid.status,
+          diagnostic.comparisons.pathShape.simulatorPath.status,
+          diagnostic.comparisons.pathShape.executableName.status,
+          diagnostic.comparisons.runnerBundleId.status,
+          diagnostic.comparisons.runnerExecutableHash.status,
+          diagnostic.comparisons.productExecutableHash.status,
+          diagnostic.comparisons.refreshedReceipt.status,
+          diagnostic.comparisons.refreshedReceipt.sameAsInstallReceipt.status,
+          diagnostic.comparisons.refreshedReceipt.applicationPath.status,
+          diagnostic.comparisons.refreshedReceipt.bundleId.status,
+          diagnostic.comparisons.refreshedReceipt.executableHash.status,
+          diagnostic.cleanup.status,
+          diagnostic.cleanup.wda.status,
+          diagnostic.cleanup.mjpeg.status,
+        ];
+        if (mode === 'listener-initial-race') for (const status of evaluatedChecks) assert.equal(status, 'evaluated');
+        if (mode === 'listener-initial-race-birth') assert.equal(diagnostic.comparisons.birth.status, 'rejected');
+        if (mode === 'listener-initial-race-executable') {
+          assert.equal(diagnostic.comparisons.executable.status, 'rejected');
+          assert.equal(diagnostic.comparisons.pathShape.executableName.status, 'rejected');
+        }
+        if (mode === 'listener-initial-race-hash') {
+          assert.equal(diagnostic.comparisons.runnerExecutableHash.status, 'rejected');
+          assert.equal(diagnostic.comparisons.runnerExecutableHash.matches, false);
+        }
+        if (mode === 'listener-initial-race-product') {
+          assert.equal(diagnostic.comparisons.productExecutableHash.status, 'rejected');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.status, 'rejected');
+        }
+        if (mode === 'listener-initial-race-receipt') {
+          assert.equal(diagnostic.comparisons.refreshedReceipt.sameAsInstallReceipt.status, 'rejected');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.status, 'evaluated');
+        }
+        if (mode === 'listener-initial-race-receipt-command-error') {
+          assert.equal(diagnostic.comparisons.refreshedReceipt.applicationPath.status, 'evaluated');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.bundleId.status, 'rejected');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.executableHash.status, 'not-evaluated');
+        }
+        if (mode === 'listener-initial-race-receipt-hash-error') {
+          assert.equal(diagnostic.comparisons.refreshedReceipt.applicationPath.status, 'evaluated');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.bundleId.status, 'evaluated');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.executableHash.status, 'evaluated');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.status, 'rejected');
+        }
+        if (mode === 'listener-initial-race-command-error') {
+          assert.equal(diagnostic.current.status, 'rejected');
+          assert.equal(diagnostic.current.category, 'process-evidence-command-error');
+          assert.equal(diagnostic.current.executable.status, 'not-evaluated');
+          assert.equal(diagnostic.comparisons.pid.status, 'not-evaluated');
+          assert.equal(diagnostic.comparisons.birth.status, 'not-evaluated');
+          assert.equal(diagnostic.comparisons.executable.status, 'not-evaluated');
+          assert.equal(diagnostic.comparisons.pathShape.applicationNameMatches.status, 'not-evaluated');
+        }
+        if (mode === 'listener-initial-race-command-error-late') {
+          assert.equal(diagnostic.current.status, 'rejected');
+          assert.equal(diagnostic.current.executable.status, 'evaluated');
+          assert.equal(diagnostic.comparisons.executable.status, 'evaluated');
+          assert.equal(diagnostic.comparisons.birth.status, 'not-evaluated');
+        }
+        if (mode === 'listener-initial-race-budget') {
+          assert.equal(diagnostic.current.status, 'budget-exhausted');
+          assert.equal(diagnostic.comparisons.pathShape.applicationNameMatches.status, 'budget-exhausted');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.status, 'budget-exhausted');
+        }
+        if (mode === 'listener-initial-race-hash-budget') {
+          assert.equal(diagnostic.comparisons.runnerExecutableHash.status, 'rejected');
+          assert.equal(diagnostic.comparisons.runnerExecutableHash.category, 'runner-command-error');
+          assert.equal(diagnostic.comparisons.productExecutableHash.status, 'budget-exhausted');
+          assert.equal(diagnostic.comparisons.refreshedReceipt.status, 'budget-exhausted');
+        }
+        if (mode === 'listener-initial-race-cleanup-identity') {
+          assert.equal(diagnostic.cleanup.wda.matches, true);
+          assert.equal(diagnostic.cleanup.mjpeg.matches, true);
+          assert.equal(diagnostic.comparisons.birth.status, 'rejected');
+          assert.equal(diagnostic.comparisons.executable.status, 'rejected');
+          assert.equal(diagnostic.comparisons.pathShape.executableName.status, 'rejected');
+        }
+        if (mode === 'listener-initial-race-hash-budget') {
+          assert.ok(owner.diagnostics.lifecycle.some((event: {event: string}) => event.event === 'child-stop-finished'));
+          assert.equal(owner.diagnostics.lifecycle.some((event: {event: string}) => event.event === 'owned-listener-termination-requested'), false);
+        }
+        assert.equal(owner.receipt, await realpath(receipt));
+        assert.equal(owner.installReceipt, await realpath(receipt));
+        assert.equal(await readFile(join(root, 'receipt-queries'), 'utf8'), mode === 'listener-initial-race-budget' || mode === 'listener-initial-race-hash-budget' ? '1' : '2');
+      }
       if (mode === 'exit-before-close') {
         const childExit = lifecycle.find((event: { event: string }) => event.event === 'child-exit');
         const childClose = lifecycle.find((event: { event: string }) => event.event === 'child-close');
@@ -882,6 +1104,9 @@ for (const mode of ['ready', 'ready-then-oversized', 'early', 'exit-before-close
           assert.deepEqual(validation.endpoints.mjpeg.pids, ['11111', '22222']);
           assert.equal(validation.failureStage, 'mjpeg-pid-count');
           assert.equal(validation.errorCategory, 'listener-endpoint-cardinality');
+          assert.deepEqual(owner.cleanupListenerObservation.endpoints.wda.observation, {status: 'evaluated', count: 1, pids: [String(owner.pid)]});
+          assert.deepEqual(owner.cleanupListenerObservation.endpoints.mjpeg.observation, {status: 'evaluated', count: 2, pids: ['11111', '22222']});
+          assert.equal(owner.cleanupListenerObservation.endpoints.wda.commandId !== owner.cleanupListenerObservation.endpoints.mjpeg.commandId, true);
         }
         if (mode === 'listener-bundle-mismatch') {
           assert.equal(validation.bundleId.status, 'evaluated');

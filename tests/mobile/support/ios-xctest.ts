@@ -15,6 +15,7 @@ const startupOutputMarker = '[startup output suppressed]\n';
 const maxStatusBytes = 65_536;
 const maxProcessCommandMs = 2_000;
 const maxRunnerCleanupMs = 10_000;
+const maxPreFreezeDiagnosticMs = 8_000;
 const maxOwnerBytes = 1_048_576;
 const maxDiagnosticCommands = 128;
 const maxDiagnosticInspections = 8;
@@ -375,6 +376,23 @@ interface ProcessEvidence {
   birth: string;
 }
 
+interface PartialProcessEvidence {
+  pid: string;
+  executable?: string;
+  birth?: string;
+}
+
+interface ReceiptSnapshot {
+  path: string;
+  applicationPathMatches: boolean;
+  bundleIdentifierMatches?: boolean;
+  installedExecutableHash?: string;
+  productExecutableHash?: string;
+  executableHashMatches?: boolean;
+  failureStage?: 'bundle-id' | 'installed-hash' | 'product-hash';
+  failureCategory?: 'command-error' | 'timeout';
+}
+
 function processEvidence(pid: string, deadline: number, context?: DiagnosticContext): ProcessEvidence {
   const processContext = context ? {...context, source: diagnosticSource, pid} : undefined;
   const executable = processExecutable(pid, deadline, processContext);
@@ -395,6 +413,25 @@ function processEvidence(pid: string, deadline: number, context?: DiagnosticCont
   };
 }
 
+function diagnosticProcessEvidence(pid: string, deadline: number, context?: DiagnosticContext): {evidence: PartialProcessEvidence; error?: unknown} {
+  const processContext = context ? {...context, source: diagnosticSource, pid} : undefined;
+  const evidence: PartialProcessEvidence = {pid};
+  try {
+    evidence.executable = processExecutable(pid, deadline, processContext);
+    run('ps', ['-p', pid, '-o', 'command='], deadlineTimeout(deadline), processContext ? {
+      ...processContext,
+      operation: 'inspect-process-command',
+    } : undefined);
+    evidence.birth = run('ps', ['-p', pid, '-o', 'lstart='], deadlineTimeout(deadline), processContext ? {
+      ...processContext,
+      operation: 'inspect-process-birth',
+    } : undefined);
+    return {evidence};
+  } catch (error) {
+    return {evidence, error};
+  }
+}
+
 function safeProcessBirth(value: string, sanitized: boolean): string {
   if (!sanitized) return value;
   const trimmed = value.trim();
@@ -411,8 +448,9 @@ function commandContainsPath(command: string, path: string): boolean {
   return variants.some(variant => command.includes(variant));
 }
 
-function runnerExecutableMatches(executable: string, product: string, udid: string, deadline: number, productBinaryHash?: string, evaluation?: RunnerMatchEvidence, context?: DiagnosticContext): boolean {
+function runnerExecutableMatches(executable: string, product: string, udid: string, deadline: number, productBinaryHash?: string, evaluation?: RunnerMatchEvidence, context?: DiagnosticContext, boundedHash = false): boolean {
   try {
+    const hash = (path: string): string => boundedHash ? boundedBinaryHash(path, deadline, context) : binaryHash(path);
     const resolved = realpathSync(executable);
     const app = dirname(resolved);
     const container = dirname(app);
@@ -454,14 +492,14 @@ function runnerExecutableMatches(executable: string, product: string, udid: stri
     if (evaluation) evaluation.executableHash = {status: 'not-evaluated', ...(productBinaryHash ? {expected: productBinaryHash} : {})};
     let actualHash: string;
     try {
-      actualHash = binaryHash(resolved);
+      actualHash = hash(resolved);
     } catch (error) {
       if (evaluation) { evaluation.executableHash = {status: 'error', ...(productBinaryHash ? {expected: productBinaryHash} : {})}; evaluation.failureStage = 'runner-executable-hash-command'; evaluation.errorCategory = 'runner-command-error'; }
       throw error;
     }
     let expectedHash: string;
     try {
-      expectedHash = productBinaryHash || binaryHash(join(productPath, 'WebDriverAgentRunner-Runner'));
+      expectedHash = productBinaryHash || hash(join(productPath, 'WebDriverAgentRunner-Runner'));
     } catch (error) {
       if (evaluation) {
         evaluation.executableHash = {status: 'error', actual: actualHash, ...(productBinaryHash ? {expected: productBinaryHash} : {})};
@@ -570,6 +608,22 @@ interface ListenerCommandStatus {
   status: number | null;
 }
 
+interface CleanupListenerSnapshot {
+  wda: ListenerEndpointSnapshot;
+  mjpeg: ListenerEndpointSnapshot;
+}
+
+interface CleanupListenerObservation {
+  phase: 'cleanup';
+  checkedAt: string;
+  monotonicMs: number;
+  endpoints: {
+    wda: {observation: ListenerEndpointDiagnostic; commandId?: number};
+    mjpeg: {observation: ListenerEndpointDiagnostic; commandId?: number};
+  };
+  commandIds: number[];
+}
+
 type ListenerEndpointStatus = 'not-evaluated' | 'evaluated' | 'error';
 type AssociationStatus = 'not-evaluated' | 'match' | 'mismatch';
 
@@ -597,6 +651,65 @@ interface RunnerMatchEvidence {
   executableHash?: { status: 'not-evaluated' | 'evaluated' | 'error'; expected?: string; actual?: string; matches?: boolean };
   failureStage?: string;
   errorCategory?: string;
+}
+
+type DiagnosticCheckStatus = 'evaluated' | 'rejected' | 'not-evaluated' | 'budget-exhausted';
+
+interface DiagnosticCheck {
+  status: DiagnosticCheckStatus;
+  matches?: boolean;
+  category?: string;
+}
+
+interface DiagnosticHashCheck extends DiagnosticCheck {
+  expected?: string;
+  actual?: string;
+}
+
+type DiagnosticPathShape = {
+  [key in 'applicationNameMatches' | 'containerUuid' | 'simulatorPath' | 'executableName']: DiagnosticCheck;
+};
+
+interface InitialCandidateDiagnostic {
+  schema: 1;
+  phase: 'initial-diagnostic';
+  candidatePid: string;
+  initial: {
+    status: DiagnosticCheckStatus;
+    birth?: string;
+    executable: DiagnosticCheck;
+  };
+  current: {
+    status: DiagnosticCheckStatus;
+    category?: string;
+    birth?: string;
+    executable: DiagnosticCheck;
+  };
+  comparisons: {
+    pid: DiagnosticCheck;
+    birth: DiagnosticCheck;
+    executable: DiagnosticCheck;
+    pathShape: DiagnosticPathShape;
+    runnerBundleId: DiagnosticCheck;
+    runnerExecutableHash: DiagnosticHashCheck;
+    productExecutableHash: DiagnosticHashCheck;
+    refreshedReceipt: {
+      status: DiagnosticCheckStatus;
+      category?: string;
+      sameAsInstallReceipt: DiagnosticCheck;
+      applicationPath: DiagnosticCheck;
+      bundleId: DiagnosticCheck;
+      executableHash: DiagnosticHashCheck;
+    };
+  };
+  cleanup: {
+    status: DiagnosticCheckStatus;
+    wda: DiagnosticCheck;
+    mjpeg: DiagnosticCheck;
+  };
+  startedAtMonotonicMs: number;
+  endedAtMonotonicMs: number;
+  budgetMs: number;
 }
 
 type ListenerEndpointDiagnostic =
@@ -643,6 +756,8 @@ interface FirstFailure {
 
 interface Owner {
   udid: string;
+  cleanupListenerObservation?: CleanupListenerObservation;
+  initialCandidateDiagnostic?: InitialCandidateDiagnostic;
   pid?: number;
   command?: string[];
   runnerPid?: string;
@@ -856,6 +971,13 @@ function binaryHash(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+function boundedBinaryHash(path: string, deadline: number, context?: DiagnosticContext): string {
+  const script = "const{createHash}=require('node:crypto');const{readFileSync}=require('node:fs');process.stdout.write(createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));";
+  const hash = run(process.execPath, ['-e', script, path], deadlineTimeout(deadline), context);
+  if (!/^[0-9a-f]{64}$/u.test(hash)) throw new Error('XCTEST: binary hash is unavailable');
+  return hash;
+}
+
 const diagnosticPids = (values: string[]): string[] => values.slice(0, 16);
 
 function endpointDiagnostic(endpoint: ListenerEndpointSnapshot): ListenerEndpointDiagnostic {
@@ -899,6 +1021,47 @@ function listenerValidation(
   };
 }
 
+function diagnosticCheck(value: boolean | undefined, budgetExhausted = false, category?: string): DiagnosticCheck {
+  if (value === undefined) return {status: budgetExhausted ? 'budget-exhausted' : 'not-evaluated'};
+  return value
+    ? {status: 'evaluated', matches: true}
+    : {status: 'rejected', matches: false, ...(category ? {category} : {})};
+}
+
+function diagnosticHashCheck(
+  value: RunnerMatchEvidence['executableHash'] | undefined,
+  budgetExhausted = false,
+): DiagnosticHashCheck {
+  if (!value) return {status: budgetExhausted ? 'budget-exhausted' : 'not-evaluated'};
+  if (value.status === 'error') return {
+    status: 'rejected',
+    category: 'runner-command-error',
+    ...(value.expected ? {expected: value.expected} : {}),
+    ...(value.actual ? {actual: value.actual} : {}),
+  };
+  if (value.status === 'not-evaluated') return {
+    status: budgetExhausted ? 'budget-exhausted' : 'not-evaluated',
+    ...(value.expected ? {expected: value.expected} : {}),
+  };
+  return {
+    status: value.matches ? 'evaluated' : 'rejected',
+    ...(value.matches !== undefined ? {matches: value.matches} : {}),
+    ...(value.matches === false ? {category: 'runner-hash-mismatch'} : {}),
+    ...(value.expected ? {expected: value.expected} : {}),
+    ...(value.actual ? {actual: value.actual} : {}),
+  };
+}
+
+function diagnosticPathShape(evaluation: RunnerMatchEvidence, budgetExhausted = false): DiagnosticPathShape {
+  const path = evaluation.pathShape;
+  return {
+    applicationNameMatches: diagnosticCheck(path?.applicationNameMatches, budgetExhausted, 'runner-path-mismatch'),
+    containerUuid: diagnosticCheck(path?.containerUuid, budgetExhausted, 'runner-path-mismatch'),
+    simulatorPath: diagnosticCheck(path?.simulatorPath, budgetExhausted, 'runner-path-mismatch'),
+    executableName: diagnosticCheck(path?.executableName, budgetExhausted, 'runner-path-mismatch'),
+  };
+}
+
 type StartupOutputStream = 'stdout' | 'stderr';
 
 interface StartupOutputState {
@@ -932,6 +1095,8 @@ async function supervise(): Promise<void> {
   let exited: Promise<void> | undefined;
   let childEnded = false;
   let frozenRunner: RunnerIdentity | undefined;
+  let initialCandidateSnapshot: ListenerSnapshot | undefined;
+  let cleanupListenerSnapshot: CleanupListenerSnapshot | undefined;
   const commandContext = (phase: string, operation: string, extra: Partial<Pick<DiagnosticContext, 'endpoint' | 'port' | 'pid' | 'frozenOwner'>> = {}): DiagnosticContext => ({
     recorder: diagnostics,
     phase,
@@ -1153,21 +1318,75 @@ async function supervise(): Promise<void> {
       return plistEvidence('binary', 'conversion-failed', 'not-evaluated');
     }
   };
-  const receipt = (phase: string): string => {
-    const installed = realpathSync(run('xcrun', ['simctl', 'get_app_container', udid, runnerId, 'app'], Math.min(10_000, remaining()), commandContext(phase, 'read-install-receipt', {endpoint: 'wda', port})));
-    owner.receipt = installed;
-    writeFileSync(join(root, 'installed-Info.plist'), installedInfoEvidence(join(installed, 'Info.plist'), phase), { mode: 0o600 });
+  const observeReceipt = (phase: string, persist: boolean, receiptDeadline: number, diagnostic = false, boundedHash = false): ReceiptSnapshot => {
+    const installed = realpathSync(run('xcrun', ['simctl', 'get_app_container', udid, runnerId, 'app'], Math.min(10_000, deadlineTimeout(receiptDeadline)), commandContext(phase, 'read-install-receipt', {endpoint: 'wda', port})));
+    if (persist) {
+      owner.receipt = installed;
+      writeFileSync(join(root, 'installed-Info.plist'), installedInfoEvidence(join(installed, 'Info.plist'), phase), { mode: 0o600 });
+    }
     const applicationDirectory = dirname(dirname(installed));
     const expectedApplicationDirectory = `/Devices/${udid}/data/Containers/Bundle/Application`;
-    if (!uuidPattern.test(basename(dirname(installed))) || basename(installed) !== basename(product)
-      || !applicationDirectory.endsWith(expectedApplicationDirectory)) {
+    const applicationPathMatches = uuidPattern.test(basename(dirname(installed))) && basename(installed) === basename(product)
+      && applicationDirectory.endsWith(expectedApplicationDirectory);
+    if (!applicationPathMatches) return {path: installed, applicationPathMatches};
+    let bundleIdentifierMatches: boolean;
+    try {
+      bundleIdentifierMatches = run('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', join(installed, 'Info.plist')], Math.min(10_000, deadlineTimeout(receiptDeadline)), commandContext(phase, 'validate-install-receipt-bundle', {endpoint: 'wda', port})) === runnerId;
+    } catch (error) {
+      if (!diagnostic) throw error;
+      return {
+        path: installed,
+        applicationPathMatches,
+        failureStage: 'bundle-id',
+        failureCategory: error instanceof Error && error.message === 'XCTEST: startup deadline' ? 'timeout' : 'command-error',
+      };
+    }
+    if (!bundleIdentifierMatches) return {path: installed, applicationPathMatches, bundleIdentifierMatches};
+    const hash = (path: string, operation: string): string => boundedHash
+      ? boundedBinaryHash(path, receiptDeadline, commandContext(phase, operation, {endpoint: 'wda', port}))
+      : binaryHash(path);
+    let installedExecutableHash: string;
+    try {
+      installedExecutableHash = hash(join(installed, 'WebDriverAgentRunner-Runner'), 'hash-install-receipt');
+    } catch (error) {
+      if (!diagnostic) throw error;
+      return {
+        path: installed,
+        applicationPathMatches,
+        bundleIdentifierMatches,
+        failureStage: 'installed-hash',
+        failureCategory: error instanceof Error && error.message === 'XCTEST: startup deadline' ? 'timeout' : 'command-error',
+      };
+    }
+    let productExecutableHash: string;
+    try {
+      productExecutableHash = hash(join(product, 'WebDriverAgentRunner-Runner'), 'hash-product');
+    } catch (error) {
+      if (!diagnostic) throw error;
+      return {
+        path: installed,
+        applicationPathMatches,
+        bundleIdentifierMatches,
+        installedExecutableHash,
+        failureStage: 'product-hash',
+        failureCategory: error instanceof Error && error.message === 'XCTEST: startup deadline' ? 'timeout' : 'command-error',
+      };
+    }
+    return {
+      path: installed,
+      applicationPathMatches,
+      bundleIdentifierMatches,
+      installedExecutableHash,
+      productExecutableHash,
+      executableHashMatches: installedExecutableHash === productExecutableHash,
+    };
+  };
+  const receipt = (phase: string): string => {
+    const observed = observeReceipt(phase, true, deadline);
+    if (!observed.applicationPathMatches || observed.bundleIdentifierMatches !== true || observed.executableHashMatches !== true) {
       throw new Error('XCTEST: registration receipt mismatch');
     }
-    if (run('plutil', ['-extract', 'CFBundleIdentifier', 'raw', '-o', '-', join(installed, 'Info.plist')], Math.min(10_000, remaining()), commandContext(phase, 'validate-install-receipt-bundle', {endpoint: 'wda', port})) !== runnerId
-      || binaryHash(join(installed, 'WebDriverAgentRunner-Runner')) !== binaryHash(join(product, 'WebDriverAgentRunner-Runner'))) {
-      throw new Error('XCTEST: registration receipt mismatch');
-    }
-    return installed;
+    return observed.path;
   };
   const listenerCommandErrorCategory = (error: unknown): string => {
     if (error instanceof Error && error.message === 'XCTEST: startup deadline') return 'timeout';
@@ -1263,10 +1482,62 @@ async function supervise(): Promise<void> {
         [...new Set([...(wdaEndpoint.pids || []), ...(mjpegEndpoint.pids || [])])], failure);
     }
   };
-  const listenerPids = (phase = 'cleanup'): string[] => [...new Set([
-    ...listeners(port, maxProcessCommandMs, undefined, commandContext(phase, 'inspect-listener', {endpoint: 'wda', port, frozenOwner: Boolean(frozenRunner)})),
-    ...listeners(mjpeg, maxProcessCommandMs, undefined, commandContext(phase, 'inspect-listener', {endpoint: 'mjpeg', port: mjpeg, frozenOwner: Boolean(frozenRunner)})),
-  ])];
+  const retainCleanupListenerObservation = (
+    wda: ListenerEndpointSnapshot,
+    wdaCommandId: number | undefined,
+    mjpeg: ListenerEndpointSnapshot,
+    mjpegCommandId: number | undefined,
+    commandIds: number[],
+  ): void => {
+    if (owner.cleanupListenerObservation) return;
+    cleanupListenerSnapshot = {wda, mjpeg};
+    owner.cleanupListenerObservation = {
+      phase: 'cleanup',
+      checkedAt: new Date().toISOString(),
+      monotonicMs: Number(diagnostics.now().toFixed(3)),
+      endpoints: {
+        wda: {observation: endpointDiagnostic(wda), ...(wdaCommandId !== undefined ? {commandId: wdaCommandId} : {})},
+        mjpeg: {observation: endpointDiagnostic(mjpeg), ...(mjpegCommandId !== undefined ? {commandId: mjpegCommandId} : {})},
+      },
+      commandIds: [...new Set(commandIds)].slice(0, 4),
+    };
+    save();
+  };
+  const listenerPids = (phase = 'cleanup'): string[] => {
+    const query = (endpoint: 'wda' | 'mjpeg', listenerPort: number): {
+      snapshot: ListenerEndpointSnapshot;
+      commandId?: number;
+      error?: unknown;
+    } => {
+      const commandStart = diagnostics.checkpoint();
+      try {
+        const pids = listeners(listenerPort, maxProcessCommandMs, undefined, commandContext(phase, 'inspect-listener', {
+          endpoint, port: listenerPort, frozenOwner: Boolean(frozenRunner),
+        }));
+        return {snapshot: {status: 'evaluated', pids}, commandId: diagnostics.commandIdsFrom(commandStart).at(-1)};
+      } catch (error) {
+        return {
+          snapshot: {status: 'error', errorCategory: listenerCommandErrorCategory(error)},
+          commandId: diagnostics.commandIdsFrom(commandStart).at(-1),
+          error,
+        };
+      }
+    };
+    const wda = query('wda', port);
+    if (wda.error) {
+      const commandIds = [wda.commandId].filter((id): id is number => id !== undefined);
+      retainCleanupListenerObservation(wda.snapshot, wda.commandId, {status: 'not-evaluated'}, undefined, commandIds);
+      throw wda.error;
+    }
+    const mjpegResult = query('mjpeg', mjpeg);
+    const commandIds = [wda.commandId, mjpegResult.commandId].filter((id): id is number => id !== undefined);
+    if (mjpegResult.error) {
+      retainCleanupListenerObservation(wda.snapshot, wda.commandId, mjpegResult.snapshot, mjpegResult.commandId, commandIds);
+      throw mjpegResult.error;
+    }
+    retainCleanupListenerObservation(wda.snapshot, wda.commandId, mjpegResult.snapshot, mjpegResult.commandId, commandIds);
+    return [...new Set([...(wda.snapshot.pids || []), ...(mjpegResult.snapshot.pids || [])])];
+  };
   const ownedListeners = (pids: string[], phase = 'cleanup'): boolean => {
     if (!owner.runnerPid || !owner.runnerBirth || !owner.runnerExecutable || pids.length === 0 || pids.some(pid => pid !== owner.runnerPid)) return false;
     try {
@@ -1343,6 +1614,196 @@ async function supervise(): Promise<void> {
     if (mjpegAssociation === 'not-evaluated') mjpegAssociation = 'match';
     persist(runnerAssociation, mjpegAssociation, 'validated', 'none');
     return { pid: admittedRunner!.pid, executable: admittedRunner!.executable, birth: admittedRunner!.birth! };
+  };
+  const recordInitialCandidateDiagnostic = (snapshot: ListenerSnapshot, cleanupSnapshot?: CleanupListenerSnapshot): void => {
+    if (owner.initialCandidateDiagnostic || frozenRunner || snapshot.wda.status !== 'evaluated' || snapshot.mjpeg.status !== 'evaluated') return;
+    const wdaPids = snapshot.wda.pids || [];
+    const mjpegPids = snapshot.mjpeg.pids || [];
+    if (wdaPids.length !== 0 || mjpegPids.length !== 1) return;
+    const candidatePid = mjpegPids[0];
+    if (!candidatePid) return;
+    const cleanupCheck = (endpoint: ListenerEndpointSnapshot | undefined): DiagnosticCheck => {
+      if (!endpoint) return {status: 'not-evaluated'};
+      if (endpoint.status === 'evaluated') return diagnosticCheck((endpoint.pids || []).includes(candidatePid), false, 'cleanup-candidate-association');
+      if (endpoint.status === 'error') return {status: 'rejected', category: 'cleanup-command-error'};
+      return {status: 'not-evaluated'};
+    };
+    const cleanupWda = cleanupCheck(cleanupSnapshot?.wda);
+    const cleanupMjpeg = cleanupCheck(cleanupSnapshot?.mjpeg);
+    const cleanup = {
+      status: !cleanupSnapshot ? 'not-evaluated' as DiagnosticCheckStatus
+        : cleanupSnapshot.wda.status === 'error' || cleanupSnapshot.mjpeg.status === 'error' ? 'rejected' as DiagnosticCheckStatus
+          : cleanupSnapshot.wda.status === 'evaluated' && cleanupSnapshot.mjpeg.status === 'evaluated' ? 'evaluated' as DiagnosticCheckStatus
+            : 'not-evaluated' as DiagnosticCheckStatus,
+      wda: cleanupWda,
+      mjpeg: cleanupMjpeg,
+    };
+    const startedAtMonotonicMs = Number(diagnostics.now().toFixed(3));
+    const budgetMs = Math.max(0, Math.min(maxPreFreezeDiagnosticMs, deadline - Date.now()));
+    const diagnosticDeadline = Date.now() + budgetMs;
+    const budgetExhausted = (): boolean => Date.now() >= diagnosticDeadline || Date.now() >= deadline;
+    const exhausted = (error: unknown): boolean => budgetExhausted()
+      || error instanceof Error && error.message === 'XCTEST: startup deadline';
+    const unavailable = (isExhausted: boolean): DiagnosticCheck => ({status: isExhausted ? 'budget-exhausted' : 'not-evaluated'});
+    const initialEvidence = snapshot.evidence.find(entry => entry.pid === candidatePid);
+    const initialExecutableAvailable = Boolean(initialEvidence?.executable && initialEvidence.executable !== '[unavailable]');
+    const initialBirthAvailable = Boolean(initialEvidence?.birth);
+    const initialStatus: DiagnosticCheckStatus = initialEvidence && initialExecutableAvailable && initialBirthAvailable
+      ? 'evaluated' : 'not-evaluated';
+    const initial = {
+      status: initialStatus,
+      ...(initialEvidence?.birth ? {birth: safeProcessBirth(initialEvidence.birth, true)} : {}),
+      executable: diagnosticCheck(initialExecutableAvailable ? true : undefined, false, 'process-executable-unavailable'),
+    };
+    let currentEvidence: PartialProcessEvidence | undefined;
+    let currentError: unknown;
+    if (!budgetExhausted()) {
+      const observation = diagnosticProcessEvidence(candidatePid, diagnosticDeadline, commandContext('initial-diagnostic', 'inspect-candidate-process', {
+        endpoint: 'mjpeg', port: mjpeg, pid: candidatePid, frozenOwner: false,
+      }));
+      currentError = observation.error;
+      if (observation.evidence.executable || observation.evidence.birth) currentEvidence = observation.evidence;
+    }
+    const currentBudgetExhausted = currentError ? exhausted(currentError) : budgetExhausted();
+    const currentExecutableAvailable = Boolean(currentEvidence?.executable);
+    const currentBirthAvailable = Boolean(currentEvidence?.birth);
+    const current: InitialCandidateDiagnostic['current'] = {
+      status: currentEvidence && currentExecutableAvailable && currentBirthAvailable
+        ? 'evaluated'
+        : currentBudgetExhausted ? 'budget-exhausted'
+          : currentError ? 'rejected' : 'not-evaluated',
+      ...(currentError && !currentBudgetExhausted ? {category: 'process-evidence-command-error'} : {}),
+      ...(currentEvidence?.birth ? {birth: safeProcessBirth(currentEvidence.birth, true)} : {}),
+      executable: currentExecutableAvailable
+        ? diagnosticCheck(true)
+        : unavailable(currentBudgetExhausted),
+    };
+    const comparisons: InitialCandidateDiagnostic['comparisons'] = {
+      pid: currentEvidence
+        ? {status: 'evaluated', matches: currentEvidence.pid === candidatePid}
+        : unavailable(currentBudgetExhausted),
+      birth: initialEvidence?.birth && currentEvidence?.birth
+        ? diagnosticCheck(initialEvidence.birth === currentEvidence.birth, false, 'runner-birth-mismatch')
+        : unavailable(currentBudgetExhausted),
+      executable: initialExecutableAvailable && currentExecutableAvailable && initialEvidence?.executable && currentEvidence
+        ? diagnosticCheck(initialEvidence.executable === currentEvidence.executable, false, 'runner-executable-changed')
+        : unavailable(currentBudgetExhausted),
+      pathShape: diagnosticPathShape({}, currentBudgetExhausted),
+      runnerBundleId: {status: currentBudgetExhausted ? 'budget-exhausted' : 'not-evaluated'},
+      runnerExecutableHash: diagnosticHashCheck(undefined, currentBudgetExhausted),
+      productExecutableHash: diagnosticHashCheck(undefined, currentBudgetExhausted),
+      refreshedReceipt: {
+        status: currentBudgetExhausted ? 'budget-exhausted' : 'not-evaluated',
+        sameAsInstallReceipt: unavailable(currentBudgetExhausted),
+        applicationPath: unavailable(currentBudgetExhausted),
+        bundleId: unavailable(currentBudgetExhausted),
+        executableHash: diagnosticHashCheck(undefined, currentBudgetExhausted),
+      },
+    };
+    let runnerEvaluation: RunnerMatchEvidence = {};
+    let runnerBudgetExhausted = currentBudgetExhausted;
+    if (currentEvidence?.executable && !budgetExhausted()) {
+      runnerEvaluation = {};
+      try {
+        runnerExecutableMatches(currentEvidence.executable, product, udid, diagnosticDeadline, productBinaryHash, runnerEvaluation, commandContext('initial-diagnostic', 'validate-candidate-identity', {
+          endpoint: 'mjpeg', port: mjpeg, pid: candidatePid, frozenOwner: false,
+        }), true);
+      } catch (error) {
+        runnerBudgetExhausted = exhausted(error);
+      }
+    }
+    comparisons.pathShape = diagnosticPathShape(runnerEvaluation, runnerBudgetExhausted);
+    const bundleEvaluation = runnerEvaluation.bundleId;
+    comparisons.runnerBundleId = bundleEvaluation?.status === 'error'
+      ? {status: 'rejected', category: 'runner-command-error'}
+      : diagnosticCheck(bundleEvaluation?.matches, runnerBudgetExhausted, 'runner-bundle-mismatch');
+    comparisons.runnerExecutableHash = diagnosticHashCheck(runnerEvaluation.executableHash, runnerBudgetExhausted);
+    if (!runnerBudgetExhausted && !budgetExhausted()) {
+      try {
+        const currentProductHash = boundedBinaryHash(join(product, 'WebDriverAgentRunner-Runner'), diagnosticDeadline,
+          commandContext('initial-diagnostic', 'hash-product', {endpoint: 'wda', port}));
+        comparisons.productExecutableHash = {
+          ...diagnosticCheck(currentProductHash === productBinaryHash, false, 'product-hash-changed'),
+          expected: productBinaryHash,
+          actual: currentProductHash,
+        };
+      } catch (error) {
+        const productBudgetExhausted = exhausted(error);
+        comparisons.productExecutableHash = {
+          status: productBudgetExhausted ? 'budget-exhausted' : 'rejected',
+          ...(productBudgetExhausted ? {} : {category: 'product-hash-unavailable'}),
+          expected: productBinaryHash,
+        };
+      }
+    } else {
+      comparisons.productExecutableHash = diagnosticHashCheck(undefined, runnerBudgetExhausted || budgetExhausted());
+      comparisons.productExecutableHash.expected = productBinaryHash;
+    }
+    if (!budgetExhausted()) {
+      try {
+        const refreshed = observeReceipt('initial-diagnostic', false, diagnosticDeadline, true, true);
+        const receiptBudgetExhausted = refreshed.failureCategory === 'timeout' || budgetExhausted();
+        const sameAsInstallReceipt = owner.installReceipt
+          ? diagnosticCheck(refreshed.path === owner.installReceipt, false, 'receipt-changed')
+          : unavailable(receiptBudgetExhausted);
+        const bundleId = refreshed.bundleIdentifierMatches !== undefined
+          ? diagnosticCheck(refreshed.bundleIdentifierMatches, false, 'receipt-bundle-mismatch')
+          : refreshed.failureStage === 'bundle-id'
+            ? {status: receiptBudgetExhausted ? 'budget-exhausted' : 'rejected', ...(receiptBudgetExhausted ? {} : {category: 'receipt-command-error'})} as DiagnosticCheck
+            : unavailable(receiptBudgetExhausted);
+        const receiptHash = refreshed.installedExecutableHash
+          ? {
+              ...diagnosticCheck(refreshed.installedExecutableHash === productBinaryHash, false, 'receipt-runner-hash-mismatch'),
+              expected: productBinaryHash,
+              actual: refreshed.installedExecutableHash,
+            }
+          : refreshed.failureStage === 'installed-hash'
+            ? {status: receiptBudgetExhausted ? 'budget-exhausted' : 'rejected', ...(receiptBudgetExhausted ? {} : {category: 'receipt-command-error'})} as DiagnosticHashCheck
+            : diagnosticHashCheck(undefined, receiptBudgetExhausted);
+        comparisons.refreshedReceipt = {
+          status: receiptBudgetExhausted ? 'budget-exhausted'
+            : refreshed.applicationPathMatches && refreshed.bundleIdentifierMatches === true && refreshed.executableHashMatches === true ? 'evaluated' : 'rejected',
+          ...(refreshed.failureStage ? {category: receiptBudgetExhausted ? 'receipt-timeout' : 'receipt-command-error'} : {}),
+          sameAsInstallReceipt,
+          applicationPath: diagnosticCheck(refreshed.applicationPathMatches, false, 'receipt-path-mismatch'),
+          bundleId,
+          executableHash: receiptHash,
+        };
+      } catch (error) {
+        const receiptBudgetExhausted = exhausted(error);
+        comparisons.refreshedReceipt = {
+          status: receiptBudgetExhausted ? 'budget-exhausted' : 'rejected',
+          category: receiptBudgetExhausted ? 'receipt-timeout' : 'receipt-command-error',
+          sameAsInstallReceipt: unavailable(receiptBudgetExhausted),
+          applicationPath: unavailable(receiptBudgetExhausted),
+          bundleId: unavailable(receiptBudgetExhausted),
+          executableHash: diagnosticHashCheck(undefined, receiptBudgetExhausted),
+        };
+      }
+    } else {
+      comparisons.refreshedReceipt = {
+        status: 'budget-exhausted',
+        category: 'receipt-timeout',
+        sameAsInstallReceipt: unavailable(true),
+        applicationPath: unavailable(true),
+        bundleId: unavailable(true),
+        executableHash: diagnosticHashCheck(undefined, true),
+      };
+    }
+    const endedAtMonotonicMs = Number(diagnostics.now().toFixed(3));
+    owner.initialCandidateDiagnostic = {
+      schema: 1,
+      phase: 'initial-diagnostic',
+      candidatePid,
+      initial,
+      current,
+      comparisons,
+      cleanup,
+      startedAtMonotonicMs,
+      endedAtMonotonicMs,
+      budgetMs,
+    };
+    save();
   };
   const stopChild = async (): Promise<void> => {
     if (!child || childEnded) {
@@ -1480,7 +1941,13 @@ async function supervise(): Promise<void> {
           await sleep(Math.min(250, remaining()));
           continue;
         }
-        let candidate = validateListenerSnapshot(initial, frozenRunner, deadline, 'initial');
+        let candidate: RunnerIdentity;
+        try {
+          candidate = validateListenerSnapshot(initial, frozenRunner, deadline, 'initial');
+        } catch (error) {
+          initialCandidateSnapshot = initial;
+          throw error;
+        }
         if (!frozenRunner) {
           try {
             owner.receipt = receipt('after-initial');
@@ -1584,13 +2051,20 @@ async function supervise(): Promise<void> {
     diagnostics.lifecycle('owner-ready-cleared', {phase: 'cleanup', frozenOwner: Boolean(frozenRunner)});
     save();
     let ownedListenerObserved = false;
+    let cleanupDiagnosticAttempted = false;
     try {
       ownership(udid);
       const pids = listenerPids('cleanup');
+      if (initialCandidateSnapshot && cleanupListenerSnapshot) {
+        cleanupDiagnosticAttempted = true;
+        recordInitialCandidateDiagnostic(initialCandidateSnapshot, cleanupListenerSnapshot);
+      }
       diagnostics.lifecycle('cleanup-listeners-observed', {
         phase: 'cleanup',
         pids: pids.slice(0, 16),
         count: pids.length,
+        endpoints: owner.cleanupListenerObservation?.endpoints,
+        commandIds: owner.cleanupListenerObservation?.commandIds,
         frozenOwner: Boolean(frozenRunner),
       });
       if (pids.length) {
@@ -1606,6 +2080,9 @@ async function supervise(): Promise<void> {
         }
       }
     } catch (error) {
+      if (!cleanupDiagnosticAttempted && initialCandidateSnapshot && cleanupListenerSnapshot) {
+        recordInitialCandidateDiagnostic(initialCandidateSnapshot, cleanupListenerSnapshot);
+      }
       rememberFailure({error, phase: 'cleanup', stage: 'cleanup-listener', category: 'cleanup-listener-error', frozenOwner: Boolean(frozenRunner)});
     }
     try { await stopChild(); }
