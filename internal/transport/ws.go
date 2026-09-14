@@ -570,6 +570,9 @@ func encodeMessage(message any) ([]byte, string, bool, error) {
 	if err != nil {
 		return nil, "", false, err
 	}
+	if len(data) > clientOutboundMaxBytes {
+		return data, "", false, nil
+	}
 	kind := messageType(data)
 	replaceable := kind == "agents" || kind == "inventory_status" || kind == "update_status" ||
 		kind == "app_deploy_status" || kind == "herdr_status"

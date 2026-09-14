@@ -81,6 +81,9 @@ func TestSendBufferByteOverflowEvicts(t *testing.T) {
 	if buf.Push(big) {
 		t.Fatal("single message exceeding byte budget was accepted, want rejection")
 	}
+	if buf.PushTyped(big, "activity_history", false) {
+		t.Fatal("typed message exceeding byte budget was accepted, want rejection")
+	}
 	if buf.Len() != 0 {
 		t.Fatalf("len = %d, want 0 (nothing enqueued)", buf.Len())
 	}

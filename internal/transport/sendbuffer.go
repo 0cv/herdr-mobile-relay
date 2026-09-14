@@ -41,6 +41,9 @@ func newSendBuffer(maxItems, maxBytes int) *sendBuffer {
 }
 
 func (b *sendBuffer) Push(data []byte) bool {
+	if len(data) > b.maxBytes {
+		return false
+	}
 	return b.PushTyped(data, messageType(data), false)
 }
 
@@ -54,22 +57,25 @@ func (b *sendBuffer) pushTyped(data []byte, kind string, replaceable bool) pushR
 	if b.closed {
 		return pushRejected
 	}
-	copyData := append([]byte(nil), data...)
+	if len(data) > b.maxBytes {
+		return pushRejected
+	}
 	if replaceable && len(b.items) > 0 {
 		tail := &b.items[len(b.items)-1]
 		if tail.replaceable && tail.messageType == kind {
-			nextBytes := b.bytes - len(tail.data) + len(copyData)
+			nextBytes := b.bytes - len(tail.data) + len(data)
 			if nextBytes > b.maxBytes {
 				return pushRejected
 			}
 			b.bytes = nextBytes
-			tail.data = copyData
+			tail.data = append([]byte(nil), data...)
 			return pushCoalesced
 		}
 	}
-	if len(b.items) >= b.maxItems || b.bytes+len(copyData) > b.maxBytes {
+	if len(b.items) >= b.maxItems || b.bytes+len(data) > b.maxBytes {
 		return pushRejected
 	}
+	copyData := append([]byte(nil), data...)
 	b.items = append(b.items, bufferedMessage{data: copyData, messageType: kind, replaceable: replaceable})
 	b.bytes += len(copyData)
 	b.ready.Signal()

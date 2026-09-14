@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -122,6 +123,7 @@ type TopologySnapshot struct {
 
 type EventClient struct {
 	path                          string
+	dialContext                   func(context.Context, string, string) (net.Conn, error)
 	supportsWorkspaceReordered    func() bool
 	workspaceReorderedSupported   func()
 	workspaceReorderedUnsupported func()
@@ -129,7 +131,17 @@ type EventClient struct {
 }
 
 func NewEventClient(path string) *EventClient {
-	return &EventClient{path: path}
+	return &EventClient{
+		path:        path,
+		dialContext: (&net.Dialer{}).DialContext,
+	}
+}
+
+func (c *EventClient) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if c.dialContext != nil {
+		return c.dialContext(ctx, network, address)
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, address)
 }
 
 func (c *EventClient) SetWorkspaceReorderedProbe(probe func() bool) {
@@ -217,7 +229,7 @@ func (c *EventClient) subscribeWith(ctx context.Context, includeWorkspaceReorder
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(requestCtx, "unix", c.path)
+	conn, err := c.dial(requestCtx, "unix", c.path)
 	if err != nil {
 		return nil, fmt.Errorf("connect to Herdr events socket: %w", err)
 	}
@@ -289,7 +301,7 @@ func (c *EventClient) subscribeWith(ctx context.Context, includeWorkspaceReorder
 		return nil, fmt.Errorf("clear Herdr events socket deadline: %w", err)
 	}
 	stream := &EventStream{conn: conn, queue: newEventQueue()}
-	go stream.readLoop(reader)
+	stream.startReader(reader)
 	return stream, nil
 }
 
@@ -303,7 +315,7 @@ func (c *EventClient) snapshot(ctx context.Context) (SessionSnapshot, error) {
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(requestCtx, "unix", c.path)
+	conn, err := c.dial(requestCtx, "unix", c.path)
 	if err != nil {
 		return SessionSnapshot{}, fmt.Errorf("connect to Herdr snapshot socket: %w", err)
 	}
@@ -391,14 +403,19 @@ func topologySubscriptions(includeWorkspaceReordered bool) []map[string]string {
 // must run before the request context is cancelled.
 func closeOnContextDone(ctx context.Context, conn net.Conn) func() {
 	done := make(chan struct{})
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()
 		case <-done:
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		<-stopped
+	}
 }
 
 func setSocketDeadline(conn net.Conn, ctx context.Context) error {
@@ -448,23 +465,48 @@ func (s *EventStream) drain() []Event {
 	return s.queue.drain()
 }
 
+func (s *EventStream) readBuffered(reader *bufio.Reader) bool {
+	for reader.Buffered() > 0 {
+		buffered, err := reader.Peek(reader.Buffered())
+		if err != nil || bytes.IndexByte(buffered, '\n') < 0 {
+			return true
+		}
+		if !s.readLine(reader) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *EventStream) startReader(reader *bufio.Reader) bool {
+	if !s.readBuffered(reader) {
+		return false
+	}
+	go s.readLoop(reader)
+	return true
+}
+
+func (s *EventStream) readLine(reader *bufio.Reader) bool {
+	line, err := readSocketAPILine(reader)
+	if err != nil {
+		s.queue.close(err)
+		return false
+	}
+	var event Event
+	if err := json.Unmarshal(line, &event); err != nil {
+		s.queue.close(fmt.Errorf("decode Herdr event: %w", err))
+		return false
+	}
+	if event.Event == "" {
+		s.queue.close(errors.New("Herdr event has no event kind"))
+		return false
+	}
+	s.queue.push(event)
+	return true
+}
+
 func (s *EventStream) readLoop(reader *bufio.Reader) {
-	for {
-		line, err := readSocketAPILine(reader)
-		if err != nil {
-			s.queue.close(err)
-			return
-		}
-		var event Event
-		if err := json.Unmarshal(line, &event); err != nil {
-			s.queue.close(fmt.Errorf("decode Herdr event: %w", err))
-			return
-		}
-		if event.Event == "" {
-			s.queue.close(errors.New("Herdr event has no event kind"))
-			return
-		}
-		s.queue.push(event)
+	for s.readLine(reader) {
 	}
 }
 

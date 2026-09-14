@@ -5,95 +5,61 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer listener.Close()
-
-	serverErr := make(chan error, 1)
-	go func() {
-		for range 2 {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				serverErr <- acceptErr
-				return
-			}
-			decoder := json.NewDecoder(bufio.NewReader(conn))
-			var request struct {
-				ID     string `json:"id"`
-				Method string `json:"method"`
-			}
-			if decodeErr := decoder.Decode(&request); decodeErr != nil {
-				_ = conn.Close()
-				serverErr <- decodeErr
-				return
-			}
-			switch request.Method {
-			case "events.subscribe":
-				if err := writeTestJSON(conn, map[string]any{
-					"id":     request.ID,
-					"result": map[string]any{"type": "subscription_started"},
-				}); err != nil {
-					_ = conn.Close()
-					serverErr <- err
-					return
-				}
-				if err := writeTestJSON(conn, map[string]any{
-					"event": "pane_closed",
-					"data":  map[string]any{"type": "pane_closed", "pane_id": "pane-1", "workspace_id": "workspace-1"},
-				}); err != nil {
-					_ = conn.Close()
-					serverErr <- err
-					return
-				}
-			case "session.snapshot":
-				if err := writeTestJSON(conn, map[string]any{
-					"id": request.ID,
-					"result": map[string]any{
-						"type": "session_snapshot",
-						"snapshot": map[string]any{
-							"version":  "0.8.0",
-							"protocol": 19,
-							"tabs": []any{
-								map[string]any{"tab_id": "tab-1", "workspace_id": "workspace-1", "number": 1, "label": "main"},
-							},
-							"panes": []any{
-								map[string]any{"pane_id": "pane-1", "terminal_id": "term-1", "workspace_id": "workspace-1", "tab_id": "tab-1", "agent_status": "working", "revision": 1},
-							},
-							"agents": []any{
-								map[string]any{"pane_id": "pane-1", "terminal_id": "term-1", "workspace_id": "workspace-1", "tab_id": "tab-1", "agent": "codex", "agent_status": "working", "name": "project", "revision": 1, "state_change_seq": 2},
-							},
-						},
-					},
-				}); err != nil {
-					_ = conn.Close()
-					serverErr <- err
-					return
-				}
-			default:
-				_ = conn.Close()
-				serverErr <- fmt.Errorf("unexpected method %q", request.Method)
-				return
-			}
-			_ = conn.Close()
-		}
-		serverErr <- nil
-	}()
-
-	client := NewEventClient(socketPath)
+	releaseLive := make(chan struct{})
+	var releaseLiveOnce sync.Once
+	releaseLiveNow := func() { releaseLiveOnce.Do(func() { close(releaseLive) }) }
+	t.Cleanup(releaseLiveNow)
+	eventConn := newControlledEventConn(
+		testJSONBatch(t,
+			map[string]any{
+				"id":     eventSubscriptionRequestID,
+				"result": map[string]any{"type": "subscription_started"},
+			},
+			map[string]any{
+				"event": "pane_closed",
+				"data":  map[string]any{"type": "pane_closed", "pane_id": "pane-1", "workspace_id": "workspace-1"},
+			},
+		),
+		testJSONBatch(t, map[string]any{
+			"event": "pane_created",
+			"data":  map[string]any{"type": "pane_created", "pane_id": "pane-live"},
+		}),
+		releaseLive,
+	)
+	snapshotConn := newControlledEventConn(testJSONBatch(t, map[string]any{
+		"id": "mobile-relay-snapshot",
+		"result": map[string]any{
+			"type": "session_snapshot",
+			"snapshot": map[string]any{
+				"version":  "0.8.0",
+				"protocol": 19,
+				"tabs": []any{
+					map[string]any{"tab_id": "tab-1", "workspace_id": "workspace-1", "number": 1, "label": "main"},
+				},
+				"panes": []any{
+					map[string]any{"pane_id": "pane-1", "terminal_id": "term-1", "workspace_id": "workspace-1", "tab_id": "tab-1", "agent_status": "working", "revision": 1},
+				},
+				"agents": []any{
+					map[string]any{"pane_id": "pane-1", "terminal_id": "term-1", "workspace_id": "workspace-1", "tab_id": "tab-1", "agent": "codex", "agent_status": "working", "name": "project", "revision": 1, "state_change_seq": 2},
+				},
+			},
+		},
+	}), nil, nil)
+	client := newControlledEventClient(eventConn, snapshotConn)
 	stream, snapshot, buffered, err := client.Bootstrap(context.Background())
 	if err != nil {
 		t.Fatalf("Bootstrap() error = %v", err)
 	}
-	defer stream.Close()
 	if snapshot.Protocol != 19 || len(snapshot.Agents) != 1 {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
@@ -108,96 +74,179 @@ func TestEventClientBootstrapsWithBufferedEvents(t *testing.T) {
 	if got := len(cache.Snapshot().Panes); got != 0 {
 		t.Fatalf("cached panes = %d, want 0 after pane.closed", got)
 	}
-	if serverErr := <-serverErr; serverErr != nil {
-		t.Fatal(serverErr)
+	releaseLiveNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	live, err := stream.Next(ctx)
+	cancel()
+	if err != nil || live.Event != "pane.created" {
+		t.Fatalf("live event = %#v, err=%v, want one pane.created", live, err)
+	}
+	select {
+	case <-eventConn.eofRead:
+	case <-time.After(time.Second):
+		t.Fatal("event reader did not observe EOF")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, err = stream.Next(ctx)
+	cancel()
+	if err == nil {
+		t.Fatal("live event was delivered more than once")
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("close stream: %v", err)
+	}
+}
+
+func TestEventStreamPrefetchesBufferedLinesAndReadsLaterEvents(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	reader := bufio.NewReader(client)
+	stream := &EventStream{conn: client, queue: newEventQueue()}
+	initial := []byte(
+		`{"id":"mobile-relay-events","result":{"type":"subscription_started"}}` + "\n" +
+			`{"event":"pane_closed","data":{"pane_id":"buffered"}}` + "\n" +
+			`{"event":"pane_created","data":{"pane_id":"live"`,
+	)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := server.Write(initial)
+		writeDone <- err
+	}()
+	if _, err := readSocketAPILine(reader); err != nil {
+		t.Fatalf("read subscription response: %v", err)
+	}
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("write preloaded stream: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("preloaded stream write did not finish")
+	}
+
+	if !stream.readBuffered(reader) {
+		t.Fatal("buffered event read failed")
+	}
+	buffered := stream.drain()
+	if len(buffered) != 1 || buffered[0].Event != "pane.closed" {
+		t.Fatalf("prefetched events = %#v", buffered)
+	}
+	if reader.Buffered() == 0 {
+		t.Fatal("prefetch consumed an incomplete live event")
+	}
+
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		stream.readLoop(reader)
+	}()
+	writeDone = make(chan error, 1)
+	go func() {
+		_, err := server.Write([]byte("}}\n"))
+		writeDone <- err
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	live, err := stream.Next(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("read live event: %v", err)
+	}
+	if live.Event != "pane.created" {
+		t.Fatalf("live event = %#v, want pane.created", live)
+	}
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("write live event: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("live event write did not finish")
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("close stream: %v", err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, err = stream.Next(ctx)
+	cancel()
+	if err == nil {
+		t.Fatal("live event was delivered more than once")
+	}
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("event reader did not stop after close")
+	}
+}
+
+func TestEventStreamStopsAfterBufferedDecodeError(t *testing.T) {
+	source := &countingEventReader{data: []byte(
+		`{"event":"pane_closed","data":{"pane_id":"before"}}` + "\n" +
+			`{"event":` + "\n",
+	)}
+	reader := bufio.NewReader(source)
+	if _, err := reader.Peek(1); err != nil {
+		t.Fatalf("prime reader: %v", err)
+	}
+	stream := &EventStream{queue: newEventQueue()}
+	if stream.startReader(reader) {
+		t.Fatal("reader started after buffered decode failure")
+	}
+	before, err := stream.Next(context.Background())
+	if err != nil {
+		t.Fatalf("read event before decode failure: %v", err)
+	}
+	if before.Event != "pane.closed" {
+		t.Fatalf("event before decode failure = %#v", before)
+	}
+	_, err = stream.Next(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "decode Herdr event") {
+		t.Fatalf("terminal stream error = %v, want decode error", err)
+	}
+	if source.reads != 1 {
+		t.Fatalf("reader reads = %d, want 1 with no read after terminal error", source.reads)
 	}
 }
 
 func TestEventBootstrapFallsBackFromUnsupportedOptionalSubscription(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "herdr.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer listener.Close()
-	seenSubscriptions := make(chan []string, 2)
-	serverErr := make(chan error, 1)
-	go func() {
-		for connection := range 3 {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				serverErr <- acceptErr
-				return
-			}
-			decoder := json.NewDecoder(bufio.NewReader(conn))
-			var request struct {
-				ID     string `json:"id"`
-				Method string `json:"method"`
-				Params struct {
-					Subscriptions []map[string]string `json:"subscriptions"`
-				} `json:"params"`
-			}
-			if decodeErr := decoder.Decode(&request); decodeErr != nil {
-				_ = conn.Close()
-				serverErr <- decodeErr
-				return
-			}
-			if request.Method == "events.subscribe" {
-				types := make([]string, 0, len(request.Params.Subscriptions))
-				for _, subscription := range request.Params.Subscriptions {
-					types = append(types, subscription["type"])
-				}
-				seenSubscriptions <- types
-				if connection == 0 {
-					_ = writeTestJSON(conn, map[string]any{
-						"id": "",
-						"error": map[string]any{
-							"code":    "invalid_request",
-							"message": "invalid request: unknown variant `workspace.reordered`, expected `workspace.created` or `workspace.moved`",
-						},
-					})
-				} else {
-					if err := writeTestJSON(conn, map[string]any{
-						"id":     request.ID,
-						"result": map[string]any{"type": "subscription_started"},
-					}); err != nil {
-						_ = conn.Close()
-						serverErr <- err
-						return
-					}
-					if err := writeTestJSON(conn, map[string]any{
-						"event": "pane_closed",
-						"data":  map[string]any{"type": "pane_closed", "pane_id": "pane-live"},
-					}); err != nil {
-						_ = conn.Close()
-						serverErr <- err
-						return
-					}
-				}
-			} else if request.Method == "session.snapshot" {
-				if err := writeTestJSON(conn, map[string]any{
-					"id": request.ID,
-					"result": map[string]any{
-						"type":     "session_snapshot",
-						"snapshot": map[string]any{"version": "0.9.0", "protocol": 1},
-					},
-				}); err != nil {
-					_ = conn.Close()
-					serverErr <- err
-					return
-				}
-			} else {
-				_ = conn.Close()
-				serverErr <- fmt.Errorf("unexpected method %q", request.Method)
-				return
-			}
-			_ = conn.Close()
-		}
-		serverErr <- nil
-	}()
-
+	releaseLive := make(chan struct{})
+	var releaseLiveOnce sync.Once
+	releaseLiveNow := func() { releaseLiveOnce.Do(func() { close(releaseLive) }) }
+	t.Cleanup(releaseLiveNow)
+	firstConn := newControlledEventConn(testJSONBatch(t, map[string]any{
+		"id": "",
+		"error": map[string]any{
+			"code":    "invalid_request",
+			"message": "invalid request: unknown variant `workspace.reordered`, expected `workspace.created` or `workspace.moved`",
+		},
+	}), nil, nil)
+	eventConn := newControlledEventConn(
+		testJSONBatch(t,
+			map[string]any{
+				"id":     eventSubscriptionRequestID,
+				"result": map[string]any{"type": "subscription_started"},
+			},
+			map[string]any{
+				"event": "pane_closed",
+				"data":  map[string]any{"type": "pane_closed", "pane_id": "pane-live"},
+			},
+		),
+		testJSONBatch(t, map[string]any{
+			"event": "pane_created",
+			"data":  map[string]any{"type": "pane_created", "pane_id": "pane-fallback-live"},
+		}),
+		releaseLive,
+	)
+	snapshotConn := newControlledEventConn(testJSONBatch(t, map[string]any{
+		"id": "mobile-relay-snapshot",
+		"result": map[string]any{
+			"type":     "session_snapshot",
+			"snapshot": map[string]any{"version": "0.9.0", "protocol": 1},
+		},
+	}), nil, nil)
+	client := newControlledEventClient(firstConn, eventConn, snapshotConn)
 	var supported, unsupported int
-	client := NewEventClient(socketPath)
 	client.SetWorkspaceReorderedCapability(
 		func() bool { return true },
 		func() { supported++ },
@@ -207,23 +256,40 @@ func TestEventBootstrapFallsBackFromUnsupportedOptionalSubscription(t *testing.T
 	if err != nil {
 		t.Fatalf("Bootstrap() error = %v", err)
 	}
-	defer stream.Close()
 	if snapshot.Protocol != 1 || len(buffered) != 1 || buffered[0].Event != "pane.closed" {
 		t.Fatalf("snapshot=%+v buffered=%+v", snapshot, buffered)
+	}
+	releaseLiveNow()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	live, err := stream.Next(ctx)
+	cancel()
+	if err != nil || live.Event != "pane.created" {
+		t.Fatalf("fallback live event = %#v, err=%v, want one pane.created", live, err)
+	}
+	select {
+	case <-eventConn.eofRead:
+	case <-time.After(time.Second):
+		t.Fatal("fallback event reader did not observe EOF")
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	_, err = stream.Next(ctx)
+	cancel()
+	if err == nil {
+		t.Fatal("fallback live event was delivered more than once")
 	}
 	if supported != 0 || unsupported != 1 {
 		t.Fatalf("capability callbacks supported=%d unsupported=%d", supported, unsupported)
 	}
-	first := <-seenSubscriptions
-	second := <-seenSubscriptions
+	first := controlledSubscriptionTypes(t, firstConn)
+	second := controlledSubscriptionTypes(t, eventConn)
 	if !containsString(first, "workspace.reordered") {
 		t.Fatalf("first subscription = %v", first)
 	}
 	if containsString(second, "workspace.reordered") {
 		t.Fatalf("fallback subscription retained optional event: %v", second)
 	}
-	if serverErr := <-serverErr; serverErr != nil {
-		t.Fatal(serverErr)
+	if err := stream.Close(); err != nil {
+		t.Fatalf("close fallback stream: %v", err)
 	}
 }
 
@@ -608,12 +674,182 @@ func TestSessionCacheSnapshotDerivesCountsFromTabAndPaneEvents(t *testing.T) {
 	}
 }
 
+type countingEventReader struct {
+	data  []byte
+	reads int
+}
+
+func (r *countingEventReader) Read(data []byte) (int, error) {
+	r.reads++
+	if r.reads > 1 {
+		return 0, fmt.Errorf("read after terminal event error")
+	}
+	return copy(data, r.data), nil
+}
+
+type controlledEventConn struct {
+	mu       sync.Mutex
+	initial  []byte
+	live     []byte
+	release  <-chan struct{}
+	closed   chan struct{}
+	closeOne sync.Once
+	liveRead chan struct{}
+	eofRead  chan struct{}
+	liveSent bool
+	eofSent  bool
+	writes   [][]byte
+}
+
+func newControlledEventConn(initial, live []byte, release <-chan struct{}) *controlledEventConn {
+	return &controlledEventConn{
+		initial:  append([]byte(nil), initial...),
+		live:     append([]byte(nil), live...),
+		release:  release,
+		closed:   make(chan struct{}),
+		liveRead: make(chan struct{}),
+		eofRead:  make(chan struct{}),
+	}
+}
+
+func (c *controlledEventConn) Read(data []byte) (int, error) {
+	c.mu.Lock()
+	select {
+	case <-c.closed:
+		c.mu.Unlock()
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	if len(c.initial) > 0 {
+		n := copy(data, c.initial)
+		c.initial = c.initial[n:]
+		c.mu.Unlock()
+		return n, nil
+	}
+	if !c.liveSent && len(c.live) > 0 {
+		c.liveSent = true
+		live := append([]byte(nil), c.live...)
+		release := c.release
+		closed := c.closed
+		liveRead := c.liveRead
+		c.mu.Unlock()
+		if release != nil {
+			select {
+			case <-release:
+			case <-closed:
+				return 0, io.ErrClosedPipe
+			}
+		}
+		close(liveRead)
+		return copy(data, live), nil
+	}
+	if !c.eofSent {
+		c.eofSent = true
+		eofRead := c.eofRead
+		c.mu.Unlock()
+		close(eofRead)
+		return 0, io.EOF
+	}
+	c.mu.Unlock()
+	return 0, io.EOF
+}
+
+func (c *controlledEventConn) Write(data []byte) (int, error) {
+	c.mu.Lock()
+	c.writes = append(c.writes, append([]byte(nil), data...))
+	c.mu.Unlock()
+	return len(data), nil
+}
+
+func (c *controlledEventConn) Close() error {
+	c.closeOne.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *controlledEventConn) LocalAddr() net.Addr              { return controlledEventAddr("local") }
+func (c *controlledEventConn) RemoteAddr() net.Addr             { return controlledEventAddr("remote") }
+func (c *controlledEventConn) SetDeadline(time.Time) error      { return nil }
+func (c *controlledEventConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *controlledEventConn) SetWriteDeadline(time.Time) error { return nil }
+
+type controlledEventAddr string
+
+func (a controlledEventAddr) Network() string { return "controlled" }
+func (a controlledEventAddr) String() string  { return string(a) }
+
+func newControlledEventClient(conns ...*controlledEventConn) *EventClient {
+	client := NewEventClient("controlled")
+	var mu sync.Mutex
+	next := 0
+	client.dialContext = func(context.Context, string, string) (net.Conn, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if next >= len(conns) {
+			return nil, fmt.Errorf("controlled dialer exhausted")
+		}
+		conn := conns[next]
+		next++
+		return conn, nil
+	}
+	return client
+}
+
+func controlledSubscriptionTypes(t *testing.T, conn *controlledEventConn) []string {
+	t.Helper()
+	conn.mu.Lock()
+	if len(conn.writes) != 1 {
+		writes := len(conn.writes)
+		conn.mu.Unlock()
+		t.Fatalf("subscription writes = %d, want 1", writes)
+	}
+	request := append([]byte(nil), conn.writes[0]...)
+	conn.mu.Unlock()
+	var decoded struct {
+		Params struct {
+			Subscriptions []map[string]string `json:"subscriptions"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(request, &decoded); err != nil {
+		t.Fatalf("decode subscription request: %v", err)
+	}
+	types := make([]string, 0, len(decoded.Params.Subscriptions))
+	for _, subscription := range decoded.Params.Subscriptions {
+		types = append(types, subscription["type"])
+	}
+	return types
+}
+
+func testJSONBatch(t *testing.T, values ...any) []byte {
+	t.Helper()
+	payload, err := marshalTestJSONBatch(values...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
 func writeTestJSON(conn net.Conn, value any) error {
-	payload, err := json.Marshal(value)
+	return writeTestJSONBatch(conn, value)
+}
+
+func writeTestJSONBatch(conn net.Conn, values ...any) error {
+	payload, err := marshalTestJSONBatch(values...)
 	if err != nil {
 		return err
 	}
-	payload = append(payload, '\n')
 	_, err = conn.Write(payload)
 	return err
+}
+
+func marshalTestJSONBatch(values ...any) ([]byte, error) {
+	payload := make([]byte, 0)
+	for _, value := range values {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		payload = append(payload, encoded...)
+		payload = append(payload, '\n')
+	}
+	return payload, nil
 }
